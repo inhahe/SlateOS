@@ -1479,6 +1479,38 @@
 ##                    /var/cache, the trash bin, crash dumps, …) and report each
 ##                    real file via add_item — wire when a filesystem-walk backend
 ##                    exists. Until then it correctly reports nothing reclaimable.
+##   - gamemode (2026-06-11): AUDITED — LEGITIMATE settings module, config
+##                    defaults LEFT ALONE; only made self_test residue-free (the
+##                    logrotate/sysmaint precedent). Gaming performance / game-mode
+##                    optimizer, surfaced via /proc/gamemode (game_count /
+##                    total_activations / active / ops) and the `gamemode` (alias
+##                    `gmode`) kshell command. init_defaults seeds only
+##                    CONFIGURATION — the default optimization set (suppress
+##                    notifications, boost performance, disable screensaver, defer
+##                    updates, pause background tasks), auto_detect=true,
+##                    show_fps_overlay=false, capture_hotkey="F12" — with NO
+##                    fabricated games, sessions or activation counts (games empty,
+##                    sessions empty, total_activations 0), so /proc/gamemode
+##                    honestly reports "0 games, 0 activations, inactive". Config
+##                    defaults deliberately KEPT (settings, like a shipped default
+##                    game-mode profile). The PROBLEM was the self_test: it
+##                    registered a game, ran an activate/deactivate session and
+##                    flipped show_fps_overlay/auto_detect, and never cleared STATE,
+##                    so the kshell `gamemode test` subcommand (line 43087) would
+##                    leak a fabricated game (game_count=1) + 1 activation + a
+##                    session + mutated config into the live /proc/gamemode.
+##                    Rebuilt self_test residue-free (clears STATE at start AND
+##                    restores clean defaults at end) with EXACT assertions (clean
+##                    defaults 0/0/inactive, register gives id 1, activate →
+##                    Active, double-activate rejected, deactivate → Inactive, 1
+##                    closed session, final 1 game / 1 activation / inactive). Wired
+##                    into the boot self-test path so the exact assertions are
+##                    exercised (safe now that it is residue-free). /proc/gamemode
+##                    56 bytes (0 games, 0 activations — truthful). No PROPER FIX
+##                    DEFERRED: activate/deactivate already track real session
+##                    durations via HPET; auto-detection from running game
+##                    processes is the only future wiring (it reads real registered
+##                    games, no fabrication).
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -1498,7 +1530,7 @@
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or
 ##     real topology (LEAVE ALONE). Verify each is a statistics module fabricating
 ##     observed numbers surfaced via /proc before emptying it. Next candidate:
-##     gamemode. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
+##     usagetime. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its
 ##     self_test residue-free. ipcns + ioport fixed 2026-06-11: emptied fictional
@@ -1515,9 +1547,11 @@
 ##     logrotate audited 2026-06-11: LEGITIMATE settings module — default
 ##     rotation rules left alone, only made self_test residue-free. diskclean
 ##     fixed 2026-06-11: fabrication was in scan() not init_defaults — scan()
-##     now honestly finds nothing, added add_item primitive + summarize.)
+##     now honestly finds nothing, added add_item primitive + summarize.
+##     gamemode audited 2026-06-11: LEGITIMATE settings module — config defaults
+##     left alone, only made self_test residue-free.)
 ##     Remaining flagged
-##     names incl.: gamemode, usagetime, screentime,
+##     names incl.: usagetime, screentime,
 ##     startupopt, eyeprotect, fnotify, memlayout. SETTINGS-looking names in that
 ##     set (eyeprotect, gamemode, startupopt, screentime, usagetime) likely seed
 ##     legitimate config — audit carefully, do not blind-empty. memlayout was

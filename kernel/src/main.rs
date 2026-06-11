@@ -1911,6 +1911,18 @@ extern "C" fn kernel_main() -> ! {
     // self_test exercises the honest empty scan plus the real add_item/summarize/
     // estimate/clean primitives with exact assertions and clears STATE afterward.
     fs::diskclean::self_test();
+    // Game-mode self-test.  Like logrotate, gamemode is a legitimate SETTINGS
+    // module: its init_defaults seeds only configuration (the default
+    // optimization set, auto_detect flag and F12 capture hotkey) with NO
+    // fabricated games, sessions or activation counts, so /proc/gamemode
+    // honestly reports 0 games / 0 activations at boot.  The self_test, however,
+    // registers a game, runs an activate/deactivate session and flips config
+    // toggles, so it is made residue-free (clears STATE and restores the clean
+    // default config at the end) to ensure the kshell `gamemode test` subcommand
+    // cannot leak those fixtures into the live /proc/gamemode table.  Wired here
+    // so its exact assertions (game id, session/activation totals) are exercised
+    // at boot now that it is safe.
+    fs::gamemode::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

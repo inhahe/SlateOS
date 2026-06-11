@@ -322,14 +322,26 @@ pub fn stats() -> (usize, u64, bool, u64) {
 
 pub fn self_test() {
     crate::serial_println!("gamemode::self_test() — running tests...");
+    // Start from a clean, freshly-defaulted state so the assertions below are
+    // exact and the registered game / session / activation fixtures this test
+    // creates do not leak into the live /proc/gamemode table afterward (the
+    // kshell `gamemode test` subcommand calls this directly).
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Initially inactive.
+    // 1: Initially inactive, with the default config and NO games/sessions —
+    //    init_defaults seeds only configuration (default optimizations,
+    //    auto_detect, F12 capture hotkey), never fabricated games or sessions.
     assert_eq!(current_state(), GameModeState::Inactive);
-    crate::serial_println!("  [1/8] initial inactive: OK");
+    assert_eq!(list_games().len(), 0);
+    assert_eq!(list_sessions(10).len(), 0);
+    let (g0, a0, act0, _) = stats();
+    assert_eq!((g0, a0, act0), (0, 0, false));
+    crate::serial_println!("  [1/8] clean defaults: OK");
 
-    // 2: Register game.
+    // 2: Register game — first game gets id 1.
     let gid = register_game("Test Game", "testgame.exe").expect("register");
+    assert_eq!(gid, 1);
     assert_eq!(list_games().len(), 1);
     crate::serial_println!("  [2/8] register game: OK");
 
@@ -338,9 +350,8 @@ pub fn self_test() {
     assert_eq!(current_state(), GameModeState::Active);
     crate::serial_println!("  [3/8] activate: OK");
 
-    // 4: Double activate rejected.
-    let result = activate(gid);
-    assert!(result.is_err());
+    // 4: Double activate rejected (already Active).
+    assert!(activate(gid).is_err());
     crate::serial_println!("  [4/8] double activate: OK");
 
     // 5: Deactivate.
@@ -348,25 +359,28 @@ pub fn self_test() {
     assert_eq!(current_state(), GameModeState::Inactive);
     crate::serial_println!("  [5/8] deactivate: OK");
 
-    // 6: Session recorded.
+    // 6: Session recorded and closed (one session for the activated game, with
+    //    a non-zero end timestamp set by deactivate).
     let sessions = list_sessions(10);
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].game_id, gid);
     assert!(sessions[0].ended_ns > 0);
     crate::serial_println!("  [6/8] session recorded: OK");
 
-    // 7: FPS overlay toggle.
+    // 7: Config toggles take effect.
     set_fps_overlay(true).expect("fps");
     set_auto_detect(false).expect("auto");
     crate::serial_println!("  [7/8] settings: OK");
 
-    // 8: Stats.
+    // 8: Stats — exactly 1 game, 1 activation, not active.
     let (games, acts, active, ops) = stats();
-    assert_eq!(games, 1);
-    assert_eq!(acts, 1);
-    assert!(!active);
+    assert_eq!((games, acts, active), (1, 1, false));
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 
+    // Restore the clean default config/state so no test fixtures (registered
+    // game, session, flipped fps/auto_detect) leak into the live module.
+    *STATE.lock() = None;
+    init_defaults();
     crate::serial_println!("gamemode::self_test() — all 8 tests passed");
 }

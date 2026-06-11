@@ -121,25 +121,54 @@ fn reason_index(r: MigReason) -> usize {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** migration-statistics table.
+///
+/// Seeds NO per-CPU rows, NO task rows, and zero totals.  Real migration
+/// accounting is wired through [`register_cpu`] (one zero-counter row per
+/// online CPU, populated by the scheduler at bring-up), [`register_task`], and
+/// [`record`]; until those are called the tables are genuinely empty, so the
+/// `/proc/migstat` file and the `migstat` kshell command report zeros rather
+/// than fabricated numbers — the kernel's hard "never invent data in procfs"
+/// rule.
+///
+/// NOTE: this previously seeded four fictional per-CPU rows (cpu0..3 with
+/// migrations_in/out 300_000–500_000, numa_crosses 8_000–12_000) and two
+/// fictional tasks (pid 1 "init" migrations 1000; pid 100 "shell" migrations
+/// 50_000) plus invented aggregate totals (total_migrations 1_600_000,
+/// total_numa_crosses 39_000, and pre-filled reason_counts), which
+/// `/proc/migstat` then displayed as if they were real scheduler migration
+/// measurements.  That demo data was removed; the self-test now builds its own
+/// fixtures explicitly via the real API (see [`self_test`]).  The scheduler is
+/// expected to call [`register_cpu`] per online CPU and [`record`] on every
+/// task migration.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        cpus: alloc::vec![
-            CpuMigStats { cpu_id: 0, migrations_in: 500_000, migrations_out: 450_000, numa_crosses: 10_000 },
-            CpuMigStats { cpu_id: 1, migrations_in: 450_000, migrations_out: 500_000, numa_crosses: 12_000 },
-            CpuMigStats { cpu_id: 2, migrations_in: 300_000, migrations_out: 350_000, numa_crosses: 8_000 },
-            CpuMigStats { cpu_id: 3, migrations_in: 350_000, migrations_out: 300_000, numa_crosses: 9_000 },
-        ],
-        tasks: alloc::vec![
-            TaskMigInfo { pid: 1, name: String::from("init"), migrations: 1000, numa_crosses: 50, last_cpu: 0 },
-            TaskMigInfo { pid: 100, name: String::from("shell"), migrations: 50_000, numa_crosses: 2000, last_cpu: 1 },
-        ],
-        total_migrations: 1_600_000,
-        total_numa_crosses: 39_000,
-        reason_counts: [800_000, 200_000, 5_000, 400_000, 150_000, 45_000],
+        cpus: Vec::new(),
+        tasks: Vec::new(),
+        total_migrations: 0,
+        total_numa_crosses: 0,
+        reason_counts: [0; 6],
         ops: 0,
     });
+}
+
+/// Register a CPU for migration tracking.
+///
+/// The scheduler calls this once per online CPU at bring-up so the per-CPU
+/// migration table reflects the real topology with zeroed counters.  Without a
+/// registered row, [`record`] silently skips the per-CPU update for that CPU id
+/// (the task-level and aggregate counters still advance).
+pub fn register_cpu(cpu_id: u32) -> KernelResult<()> {
+    with_state(|state| {
+        if state.cpus.iter().any(|c| c.cpu_id == cpu_id) { return Err(KernelError::AlreadyExists); }
+        if state.cpus.len() >= MAX_CPUS { return Err(KernelError::ResourceExhausted); }
+        state.cpus.push(CpuMigStats {
+            cpu_id, migrations_in: 0, migrations_out: 0, numa_crosses: 0,
+        });
+        Ok(())
+    })
 }
 
 /// Record a task migration.
@@ -222,55 +251,86 @@ pub fn stats() -> (usize, usize, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("migstat::self_test() — running tests...");
+    // Begin from a clean, EMPTY table and build every fixture via the real
+    // API, so the test exercises genuine accounting paths and never relies on
+    // fabricated seed data (which /proc/migstat must never surface).
+    // Resetting first clears any residue from a prior `migstat test` run so the
+    // totals asserted below are exact.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(per_cpu().len(), 4);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty after init — no fabricated CPUs, tasks, or totals.
+    assert_eq!(per_cpu().len(), 0);
+    assert_eq!(hot_tasks(10).len(), 0);
+    let (c0, t0, m0, n0, _o0) = stats();
+    assert_eq!((c0, t0, m0, n0), (0, 0, 0, 0));
+    crate::serial_println!("  [1/8] empty init: OK");
 
-    // 2: Register task.
+    // 2: Register CPUs (zeroed) and a task; duplicates fail.
+    register_cpu(0).expect("cpu0");
+    register_cpu(1).expect("cpu1");
+    register_cpu(2).expect("cpu2");
+    assert!(register_cpu(0).is_err());
     register_task(200, "test_task", 0).expect("register");
     assert!(register_task(200, "dup", 0).is_err());
+    assert_eq!(per_cpu().len(), 3);
     crate::serial_println!("  [2/8] register: OK");
 
-    // 3: Record migration.
+    // 3: Record migration (exact, from zero).
     record(200, 0, 1, MigReason::LoadBalance, false).expect("migrate");
-    let t = hot_tasks(10).iter().find(|t| t.pid == 200).cloned().unwrap();
+    let t = hot_tasks(10).iter().find(|t| t.pid == 200).cloned().expect("task");
     assert_eq!(t.migrations, 1);
     assert_eq!(t.last_cpu, 1);
     crate::serial_println!("  [3/8] migration: OK");
 
-    // 4: NUMA crossing.
+    // 4: NUMA crossing bumps the task's numa counter exactly.
     record(200, 1, 2, MigReason::WakeAffine, true).expect("numa");
-    let t = hot_tasks(10).iter().find(|t| t.pid == 200).cloned().unwrap();
+    let t = hot_tasks(10).iter().find(|t| t.pid == 200).cloned().expect("task");
     assert_eq!(t.numa_crosses, 1);
+    assert_eq!(t.migrations, 2);
     crate::serial_println!("  [4/8] numa cross: OK");
 
-    // 5: Per-CPU stats.
-    let cpus = per_cpu();
-    assert!(cpus[0].migrations_out > 450_000);
-    assert!(cpus[1].migrations_in > 450_000);
+    // 5: Per-CPU counters reflect exactly the two migrations above.
+    //    Migration 1: out cpu0, in cpu1. Migration 2: out cpu1 (numa), in cpu2.
+    let cpu0 = per_cpu().iter().find(|c| c.cpu_id == 0).cloned().expect("cpu0");
+    let cpu1 = per_cpu().iter().find(|c| c.cpu_id == 1).cloned().expect("cpu1");
+    let cpu2 = per_cpu().iter().find(|c| c.cpu_id == 2).cloned().expect("cpu2");
+    assert_eq!(cpu0.migrations_out, 1);
+    assert_eq!(cpu1.migrations_in, 1);
+    assert_eq!(cpu1.migrations_out, 1);
+    assert_eq!(cpu1.numa_crosses, 1);
+    assert_eq!(cpu2.migrations_in, 1);
     crate::serial_println!("  [5/8] per cpu: OK");
 
-    // 6: Reason stats.
+    // 6: Reason breakdown reflects exactly one LoadBalance + one WakeAffine.
     let reasons = reason_stats();
-    assert!(reasons[0].1 > 800_000); // LoadBalance.
+    assert_eq!(reasons[0].1, 1); // LoadBalance
+    assert_eq!(reasons[3].1, 1); // WakeAffine
+    assert_eq!(reasons[1].1, 0); // AffinityChange untouched
     crate::serial_println!("  [6/8] reasons: OK");
 
-    // 7: Hot tasks.
+    // 7: Hot tasks sorted by migration count; a second task ranks below.
+    register_task(201, "quiet_task", 3).expect("register2");
     let top = hot_tasks(2);
-    assert!(top.len() >= 2);
+    assert_eq!(top.len(), 2);
+    assert_eq!(top[0].pid, 200); // 2 migrations
     assert!(top[0].migrations >= top[1].migrations);
     crate::serial_println!("  [7/8] hot tasks: OK");
 
-    // 8: Stats.
+    // 8: Aggregate totals equal the exact sums of the operations above.
     let (cpus, tasks, migs, numa, ops) = stats();
-    assert_eq!(cpus, 4);
-    assert!(tasks >= 3);
-    assert!(migs > 1_600_000);
-    assert!(numa > 39_000);
+    assert_eq!(cpus, 3);
+    assert_eq!(tasks, 2); // pid 200 + pid 201
+    assert_eq!(migs, 2); // two record() calls
+    assert_eq!(numa, 1); // one numa crossing
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Leave NO residue: a diagnostic self-test must not populate the live
+    // /proc/migstat table with its fixtures.  Reset to the uninitialised state
+    // so production reads report an empty table until the scheduler wires real
+    // accounting.
+    *STATE.lock() = None;
 
     crate::serial_println!("migstat::self_test() — all 8 tests passed");
 }

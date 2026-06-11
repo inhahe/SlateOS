@@ -282,20 +282,24 @@
 ##                    total_proc_samples 12_000_000. Real API register_iface/
 ##                    record_rtt/record_processing already present; fix emptied
 ##                    init_defaults and rebuilt self_test, wired into boot.)
+##   - migstat.rs    (fixed 2026-06-11; was: fake per-CPU migration counts
+##                    cpu0..3 migrations_in 500_000 etc.; fake tasks pid 1
+##                    "init"/pid 100 "shell"; aggregate total_migrations
+##                    1_600_000, total_numa_crosses 39_000, reason_counts seeded.
+##                    Added register_cpu(cpu_id) so the scheduler can register
+##                    online CPUs with ZERO counters; emptied init_defaults and
+##                    rebuilt self_test with exact per-CPU/reason assertions,
+##                    wired into boot. Resolves the per-CPU zero-row judgment:
+##                    the right answer is a real registration API, not seeded
+##                    rows — same pattern applies to rcustat/tlbstat below.)
 ## Confirmed STILL FABRICATING (audited 2026-06-11, NOT yet fixed):
-##   - migstat.rs    (fake per-CPU migration counts cpu0..3 migrations_in
-##                    500_000 etc.; fake tasks pid 1 "init"/pid 100 "shell";
-##                    aggregate total_migrations 1_600_000, total_numa_crosses
-##                    39_000, reason_counts seeded. Verify real API then fix
-##                    next, same recipe: empty init_defaults, rebuild self_test.)
 ##   - rcustat.rs    (per-CPU: fake callbacks_invoked 1000+, quiescent_states
-##                    50000+, current_gp_id 100, total_callbacks 6000. NOTE:
-##                    per-CPU rows MAY legitimately be created at boot but with
-##                    ZERO counters — judgment call: empty, or register per-CPU
-##                    zero rows via a real API.)
+##                    50000+, current_gp_id 100, total_callbacks 6000. Apply the
+##                    migstat pattern: add register_cpu(cpu_id) for zero-counter
+##                    per-CPU rows, empty init_defaults, rebuild self_test.)
 ##   - tlbstat.rs    (per-CPU: fake hits 5_000_000+, misses 50_000+, shootdowns,
-##                    walk_cycles; aggregate total_hits 26_000_000. Same per-CPU
-##                    zero-row judgment as rcustat.)
+##                    walk_cycles; aggregate total_hits 26_000_000. Same migstat
+##                    register_cpu pattern.)
 ## EXPOSURE: main.rs does NOT mass-invoke these init_defaults() at boot, so the
 ## fabricated data is LATENT — it only becomes live in /proc once someone runs
 ## the module's `<name> test` kshell subcommand (whose old self_test called

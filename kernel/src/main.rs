@@ -1145,6 +1145,13 @@ extern "C" fn kernel_main() -> ! {
     // gives the module automated coverage it previously lacked (it was only
     // reachable via the `netlat test` kshell subcommand).
     fs::netlat::self_test();
+    // migstat backs /proc/migstat (per-CPU/per-task scheduler migration stats);
+    // like its siblings the self-test now builds fixtures via the real
+    // register_cpu/register_task/record API and resets the table afterward
+    // (leaving no fabricated rows), so it is safe at boot and gives the module
+    // automated coverage it previously lacked (it was only reachable via the
+    // `migstat test` kshell subcommand).
+    fs::migstat::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

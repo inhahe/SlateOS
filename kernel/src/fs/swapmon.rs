@@ -1,36 +1,53 @@
-//! Swap Monitor — swap space usage monitoring.
+//! Swap Monitor — swap space usage reporting.
 //!
-//! Tracks swap device/file usage, swap-in/out rates, and per-process
-//! swap consumption for memory pressure analysis.
+//! Reports swap device/file usage and swap-in activity by reading the
+//! **real** swap subsystem (`crate::mm::swap`) and the page-fault counters
+//! (`crate::mm::fault`).  It does NOT maintain its own swap state — there is
+//! exactly one source of truth for swap (`mm::swap`), and `/proc/swapmon` plus
+//! the `swapmon` kshell command are thin read-through views over it.
 //!
 //! ## Architecture
 //!
 //! ```text
-//! Swap monitoring
-//!   → swapmon::usage() → current swap utilization
-//!   → swapmon::swap_rate() → swap in/out rates
-//!   → swapmon::per_process() → per-process swap usage
-//!   → swapmon::history() → usage over time
+//! Swap reporting (read-through; no local state)
+//!   → swapmon::total_usage()  → mm::swap::summary()        (total/used bytes)
+//!   → swapmon::list_devices() → mm::swap::list_devices()   (real devices)
+//!   → swapmon::stats()        → mm::swap::device_count()
+//!                               + mm::fault::fault_stats().swap_in
 //!
 //! Integration:
-//!   → swapcfg (swap configuration)
-//!   → memdiag (memory diagnostics)
-//!   → perfmon (performance monitor)
-//!   → sysresource (system resources)
+//!   → mm::swap   (the real swap subsystem — slots, devices, capacity)
+//!   → mm::fault  (swap-in page-fault counter)
+//!   → swapcfg    (swap configuration)
+//!   → memdiag    (memory diagnostics)
 //! ```
+//!
+//! ## Why this is a read-through, not a tracker
+//!
+//! This module previously kept its own `State` with a fabricated default swap
+//! device (a fictional 4 GiB `/dev/sda2` partition seeded ~500 MiB used) plus
+//! invented swap-in/out rate counters, and `/proc/swapmon` and the `swapmon`
+//! kshell command displayed those phantom numbers as if they were real swap
+//! usage — a violation of the kernel's hard "never invent data in procfs" rule.
+//! None of its mutation APIs (`add_device`, `record_swap_in/out`,
+//! `update_process`, `take_snapshot`, …) had a single real caller; they only
+//! existed to be exercised by the self-test against fabricated fixtures.
+//!
+//! Meanwhile the kernel already has a real swap subsystem (`crate::mm::swap`,
+//! which also backs `/proc/swaps`).  The proper fix is therefore to delete the
+//! parallel fabricated store entirely and report the real subsystem's state.
 
 #![allow(dead_code)]
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
-use spin::Mutex;
-
-use crate::error::{KernelError, KernelResult};
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
+
+/// Bytes per swap slot (1 slot = 1 frame = 16 KiB, see `mm::frame::FRAME_SIZE`).
+const SLOT_BYTES: u64 = 16 * 1024;
 
 /// Swap device type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,7 +69,7 @@ impl SwapType {
     }
 }
 
-/// A swap device/file entry.
+/// A swap device/file entry (a read-through view of `mm::swap`).
 #[derive(Debug, Clone)]
 pub struct SwapDevice {
     pub id: u32,
@@ -70,12 +87,20 @@ impl SwapDevice {
     }
 
     pub fn usage_pct(&self) -> u32 {
-        if self.total_bytes == 0 { 0 }
-        else { (self.used_bytes * 100 / self.total_bytes) as u32 }
+        if self.total_bytes == 0 {
+            0
+        } else {
+            // saturating: total_bytes != 0 here, and the ratio is <= 100.
+            (self.used_bytes.saturating_mul(100) / self.total_bytes) as u32
+        }
     }
 }
 
 /// Per-process swap usage.
+///
+/// Retained for API/type stability.  There is no per-process swap-residency
+/// accounting in the pager yet, so [`list_processes`] always reports an empty
+/// list rather than fabricating per-process figures.
 #[derive(Debug, Clone)]
 pub struct ProcessSwap {
     pub pid: u32,
@@ -83,7 +108,10 @@ pub struct ProcessSwap {
     pub swap_bytes: u64,
 }
 
-/// Swap usage snapshot (for history).
+/// Swap usage snapshot.
+///
+/// Retained for API/type stability.  No historical sampler is wired, so
+/// [`history`] always reports an empty list rather than fabricating samples.
 #[derive(Debug, Clone)]
 pub struct SwapSnapshot {
     pub timestamp_ns: u64,
@@ -94,206 +122,76 @@ pub struct SwapSnapshot {
 }
 
 // ---------------------------------------------------------------------------
-// State
+// Public API (read-through over the real swap subsystem)
 // ---------------------------------------------------------------------------
 
-const MAX_DEVICES: usize = 16;
-const MAX_PROCESSES: usize = 200;
-const MAX_HISTORY: usize = 500;
+/// No-op: this module holds no state of its own.
+///
+/// Kept so existing call sites (the `swapmon` kshell command) compile
+/// unchanged; all reporting reads `crate::mm::swap` live.
+pub fn init_defaults() {}
 
-struct State {
-    devices: Vec<SwapDevice>,
-    processes: Vec<ProcessSwap>,
-    snapshots: Vec<SwapSnapshot>,
-    next_id: u32,
-    total_swap_in: u64,
-    total_swap_out: u64,
-    total_swap_in_bytes: u64,
-    total_swap_out_bytes: u64,
-    ops: u64,
-}
-
-static STATE: Mutex<Option<State>> = Mutex::new(None);
-static OPS: AtomicU64 = AtomicU64::new(0);
-
-fn with_state<F, R>(f: F) -> KernelResult<R>
-where
-    F: FnOnce(&mut State) -> KernelResult<R>,
-{
-    let mut guard = STATE.lock();
-    let state = guard.as_mut().ok_or(KernelError::NotSupported)?;
-    state.ops += 1;
-    OPS.store(state.ops, Ordering::Relaxed);
-    f(state)
-}
-
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
-pub fn init_defaults() {
-    let mut guard = STATE.lock();
-    if guard.is_some() { return; }
-    *guard = Some(State {
-        devices: alloc::vec![
-            SwapDevice {
-                id: 1, path: String::from("/dev/sda2"),
-                swap_type: SwapType::Partition,
-                total_bytes: 4_294_967_296, // 4 GiB
-                used_bytes: 524_288_000,   // ~500 MiB
-                priority: -1, enabled: true,
-            },
-        ],
-        processes: Vec::new(),
-        snapshots: Vec::new(),
-        next_id: 2,
-        total_swap_in: 0,
-        total_swap_out: 0,
-        total_swap_in_bytes: 0,
-        total_swap_out_bytes: 0,
-        ops: 0,
-    });
-}
-
-/// Add a swap device.
-pub fn add_device(path: &str, swap_type: SwapType, total_bytes: u64, priority: i32) -> KernelResult<u32> {
-    with_state(|state| {
-        if state.devices.len() >= MAX_DEVICES {
-            return Err(KernelError::ResourceExhausted);
-        }
-        if state.devices.iter().any(|d| d.path == path) {
-            return Err(KernelError::AlreadyExists);
-        }
-        let id = state.next_id;
-        state.next_id += 1;
-        state.devices.push(SwapDevice {
-            id, path: String::from(path), swap_type, total_bytes,
-            used_bytes: 0, priority, enabled: true,
-        });
-        Ok(id)
-    })
-}
-
-/// Remove a swap device.
-pub fn remove_device(id: u32) -> KernelResult<()> {
-    with_state(|state| {
-        let before = state.devices.len();
-        state.devices.retain(|d| d.id != id);
-        if state.devices.len() == before { return Err(KernelError::NotFound); }
-        Ok(())
-    })
-}
-
-/// Enable/disable a swap device.
-pub fn set_enabled(id: u32, enabled: bool) -> KernelResult<()> {
-    with_state(|state| {
-        let dev = state.devices.iter_mut().find(|d| d.id == id)
-            .ok_or(KernelError::NotFound)?;
-        dev.enabled = enabled;
-        if !enabled { dev.used_bytes = 0; }
-        Ok(())
-    })
-}
-
-/// Record a swap-in event.
-pub fn record_swap_in(bytes: u64) -> KernelResult<()> {
-    with_state(|state| {
-        state.total_swap_in += 1;
-        state.total_swap_in_bytes += bytes;
-        // Decrease usage on the first enabled device.
-        if let Some(dev) = state.devices.iter_mut().find(|d| d.enabled) {
-            dev.used_bytes = dev.used_bytes.saturating_sub(bytes);
-        }
-        Ok(())
-    })
-}
-
-/// Record a swap-out event.
-pub fn record_swap_out(bytes: u64) -> KernelResult<()> {
-    with_state(|state| {
-        state.total_swap_out += 1;
-        state.total_swap_out_bytes += bytes;
-        // Increase usage on the first enabled device with space.
-        if let Some(dev) = state.devices.iter_mut().find(|d| d.enabled && d.free_bytes() >= bytes) {
-            dev.used_bytes += bytes;
-        }
-        Ok(())
-    })
-}
-
-/// Update per-process swap usage.
-pub fn update_process(pid: u32, name: &str, swap_bytes: u64) -> KernelResult<()> {
-    with_state(|state| {
-        if let Some(proc) = state.processes.iter_mut().find(|p| p.pid == pid) {
-            proc.swap_bytes = swap_bytes;
-            if swap_bytes == 0 {
-                state.processes.retain(|p| p.pid != pid);
-            }
-        } else if swap_bytes > 0 {
-            if state.processes.len() >= MAX_PROCESSES {
-                return Err(KernelError::ResourceExhausted);
-            }
-            state.processes.push(ProcessSwap {
-                pid, name: String::from(name), swap_bytes,
-            });
-        }
-        Ok(())
-    })
-}
-
-/// Take a usage snapshot.
-pub fn take_snapshot() -> KernelResult<()> {
-    with_state(|state| {
-        let now = crate::hpet::elapsed_ns();
-        let total: u64 = state.devices.iter().filter(|d| d.enabled).map(|d| d.total_bytes).sum();
-        let used: u64 = state.devices.iter().filter(|d| d.enabled).map(|d| d.used_bytes).sum();
-        if state.snapshots.len() >= MAX_HISTORY {
-            state.snapshots.remove(0);
-        }
-        state.snapshots.push(SwapSnapshot {
-            timestamp_ns: now, total_bytes: total, used_bytes: used,
-            swap_in_rate: state.total_swap_in, swap_out_rate: state.total_swap_out,
-        });
-        Ok(())
-    })
-}
-
-/// Get overall swap usage.
+/// Overall swap usage `(total_bytes, used_bytes)` from the real subsystem.
 pub fn total_usage() -> (u64, u64) {
-    STATE.lock().as_ref().map_or((0, 0), |s| {
-        let total: u64 = s.devices.iter().filter(|d| d.enabled).map(|d| d.total_bytes).sum();
-        let used: u64 = s.devices.iter().filter(|d| d.enabled).map(|d| d.used_bytes).sum();
-        (total, used)
-    })
+    let (total, used, _devices) = crate::mm::swap::summary();
+    (total as u64, used as u64)
 }
 
-/// List swap devices.
+/// List swap devices, mapping the real `mm::swap` devices into the reporting
+/// view.  IDs are 1-based positional indices (the real subsystem keys devices
+/// by name, not numeric id).
 pub fn list_devices() -> Vec<SwapDevice> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.devices.clone())
+    crate::mm::swap::list_devices()
+        .into_iter()
+        .enumerate()
+        .map(|(i, info)| {
+            let swap_type = match info.device_type {
+                "memory" => SwapType::Zram,
+                // "disk" and any future backend → Partition (closest match for
+                // a block-backed swap area).
+                _ => SwapType::Partition,
+            };
+            SwapDevice {
+                id: (i as u32).saturating_add(1),
+                path: info.name,
+                swap_type,
+                total_bytes: (info.total_slots as u64).saturating_mul(SLOT_BYTES),
+                used_bytes: (info.used_slots as u64).saturating_mul(SLOT_BYTES),
+                priority: info.priority,
+                // mm::swap only tracks active devices; an entry's presence means
+                // it is in service.
+                enabled: true,
+            }
+        })
+        .collect()
 }
 
-/// List per-process swap, sorted by usage.
+/// Per-process swap usage — empty until the pager tracks swap residency per
+/// address space (no fabrication).
 pub fn list_processes() -> Vec<ProcessSwap> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| {
-        let mut procs = s.processes.clone();
-        procs.sort_by_key(|e| core::cmp::Reverse(e.swap_bytes));
-        procs
-    })
+    Vec::new()
 }
 
-/// Get snapshots.
+/// Historical usage snapshots — empty until a sampler is wired (no fabrication).
 pub fn history() -> Vec<SwapSnapshot> {
-    STATE.lock().as_ref().map_or(Vec::new(), |s| s.snapshots.clone())
+    Vec::new()
 }
 
-/// Statistics: (device_count, process_count, total_swap_in, total_swap_out, total_in_bytes, total_out_bytes, ops).
+/// Statistics:
+/// `(device_count, process_count, total_swap_in, total_swap_out,
+///   total_in_bytes, total_out_bytes, ops)`.
+///
+/// `total_swap_in` is the real count of swap-in page faults
+/// (`mm::fault::fault_stats().swap_in`); `total_in_bytes` is derived from it
+/// (each swap-in restores exactly one 16 KiB page).  `process_count`,
+/// `total_swap_out`, `total_out_bytes`, and `ops` are reported as `0` because
+/// the real swap subsystem does not yet track those — honest zeros rather than
+/// invented figures.
 pub fn stats() -> (usize, usize, u64, u64, u64, u64, u64) {
-    let guard = STATE.lock();
-    match guard.as_ref() {
-        Some(s) => (s.devices.len(), s.processes.len(), s.total_swap_in, s.total_swap_out,
-                     s.total_swap_in_bytes, s.total_swap_out_bytes, s.ops),
-        None => (0, 0, 0, 0, 0, 0, 0),
-    }
+    let device_count = crate::mm::swap::device_count();
+    let swap_in = crate::mm::fault::fault_stats().swap_in;
+    let in_bytes = swap_in.saturating_mul(SLOT_BYTES);
+    (device_count, 0, swap_in, 0, in_bytes, 0, 0)
 }
 
 // ---------------------------------------------------------------------------
@@ -302,61 +200,47 @@ pub fn stats() -> (usize, usize, u64, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("swapmon::self_test() — running tests...");
-    init_defaults();
 
-    // 1: Default device.
-    assert_eq!(list_devices().len(), 1);
+    // This module is a pure read-through with no state of its own, so there is
+    // nothing to seed and nothing to leak.  The tests assert that the reporting
+    // views are exactly consistent with the real swap subsystem rather than
+    // checking fabricated fixtures.
+
+    // 1: device list length matches the real device count.
+    let devs = list_devices();
+    let real_count = crate::mm::swap::device_count();
+    assert_eq!(devs.len(), real_count);
+    crate::serial_println!("  [1/5] device list matches mm::swap: OK");
+
+    // 2: total_usage matches mm::swap::summary().
     let (total, used) = total_usage();
-    assert!(total > 0);
-    assert!(used > 0);
-    crate::serial_println!("  [1/8] defaults: OK");
+    let (real_total, real_used, _d) = crate::mm::swap::summary();
+    assert_eq!(total, real_total as u64);
+    assert_eq!(used, real_used as u64);
+    assert!(used <= total);
+    crate::serial_println!("  [2/5] total_usage matches summary: OK");
 
-    // 2: Add device.
-    let id = add_device("/swapfile", SwapType::File, 2_000_000_000, -2).expect("add");
-    assert_eq!(list_devices().len(), 2);
-    crate::serial_println!("  [2/8] add device: OK");
+    // 3: each reported device is internally consistent (used <= total, pct sane).
+    for d in &devs {
+        assert!(d.used_bytes <= d.total_bytes);
+        assert!(d.usage_pct() <= 100);
+        assert_eq!(d.free_bytes(), d.total_bytes.saturating_sub(d.used_bytes));
+    }
+    crate::serial_println!("  [3/5] per-device consistency: OK");
 
-    // 3: Swap out.
-    record_swap_out(4096).expect("swap_out");
-    let dev = list_devices().iter().find(|d| d.id == 1).cloned().expect("dev1");
-    assert!(dev.used_bytes > 524_288_000);
-    crate::serial_println!("  [3/8] swap out: OK");
+    // 4: no fabricated per-process or historical data.
+    assert!(list_processes().is_empty());
+    assert!(history().is_empty());
+    crate::serial_println!("  [4/5] no fabricated process/history rows: OK");
 
-    // 4: Swap in.
-    record_swap_in(4096).expect("swap_in");
-    crate::serial_println!("  [4/8] swap in: OK");
-
-    // 5: Per-process.
-    update_process(100, "firefox", 50_000_000).expect("proc");
-    update_process(200, "vscode", 30_000_000).expect("proc2");
-    let procs = list_processes();
-    assert_eq!(procs.len(), 2);
-    assert_eq!(procs[0].pid, 100); // Sorted by usage, firefox first.
-    crate::serial_println!("  [5/8] per-process: OK");
-
-    // 6: Snapshot.
-    take_snapshot().expect("snapshot");
-    assert_eq!(history().len(), 1);
-    crate::serial_println!("  [6/8] snapshot: OK");
-
-    // 7: Disable/remove.
-    set_enabled(id, false).expect("disable");
-    let dev = list_devices().iter().find(|d| d.id == id).cloned().expect("dev2");
-    assert!(!dev.enabled);
-    remove_device(id).expect("remove");
-    assert_eq!(list_devices().len(), 1);
-    crate::serial_println!("  [7/8] disable/remove: OK");
-
-    // 8: Stats.
+    // 5: stats are consistent with the real sources.
     let (dev_count, proc_count, swap_in, swap_out, in_bytes, out_bytes, ops) = stats();
-    assert_eq!(dev_count, 1);
-    assert_eq!(proc_count, 2);
-    assert!(swap_in >= 1);
-    assert!(swap_out >= 1);
-    assert!(in_bytes > 0);
-    assert!(out_bytes > 0);
-    assert!(ops > 0);
-    crate::serial_println!("  [8/8] stats: OK");
+    assert_eq!(dev_count, real_count);
+    assert_eq!(proc_count, 0);
+    assert_eq!(swap_in, crate::mm::fault::fault_stats().swap_in);
+    assert_eq!(in_bytes, swap_in.saturating_mul(SLOT_BYTES));
+    assert_eq!((swap_out, out_bytes, ops), (0, 0, 0));
+    crate::serial_println!("  [5/5] stats match mm::swap + mm::fault: OK");
 
-    crate::serial_println!("swapmon::self_test() — all 8 tests passed");
+    crate::serial_println!("swapmon::self_test() — all 5 tests passed");
 }

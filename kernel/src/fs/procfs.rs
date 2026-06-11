@@ -8896,6 +8896,11 @@ fn gen_swapmon() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     out.push_str("=== Swap Monitor ===\n");
+    // swapmon is a read-through over the real swap subsystem (crate::mm::swap)
+    // and the swap-in page-fault counter (crate::mm::fault); it no longer keeps
+    // a fabricated parallel device table.  processes_swapped / total_swap_out /
+    // swap_out_bytes / ops are honest zeros — the real subsystem does not yet
+    // track those (see swapmon::stats).
     let (dev_count, proc_count, swap_in, swap_out, in_bytes, out_bytes, ops) = crate::fs::swapmon::stats();
     let (total, used) = crate::fs::swapmon::total_usage();
     out.push_str(&format!("device_count: {}\n", dev_count));

@@ -2014,6 +2014,17 @@ extern "C" fn kernel_main() -> ! {
     // and resets to empty afterward so no test connections leak into
     // /proc/netmon.
     fs::netmon::self_test();
+    // swapmon backs /proc/swapmon and the `swapmon` kshell command.  Its
+    // init_defaults() previously seeded a FABRICATED default swap device (a
+    // fictional 4 GiB /dev/sda2 partition shown ~500 MiB used) plus invented
+    // swap-in/out rate counters, which the kshell command and /proc/swapmon
+    // displayed as if they were real swap usage — and none of its mutation APIs
+    // had a single real caller.  Meanwhile the kernel already has a real swap
+    // subsystem (crate::mm::swap, which also backs /proc/swaps).  swapmon is now
+    // a pure read-through over mm::swap + mm::fault with no state of its own, so
+    // this self_test asserts the reporting views are exactly consistent with the
+    // real subsystem (no fabricated fixtures, nothing to leak).
+    fs::swapmon::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

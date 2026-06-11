@@ -1724,6 +1724,33 @@
 ##                    add_connection on socket open, record_traffic as bytes flow, and
 ##                    close_connection on teardown — wire when socket lifecycle hooks
 ##                    exist.
+##   - swapmon (2026-06-11): FIXED — PROPER FIX (read-through over the real swap
+##                    subsystem; deleted the fabricated parallel store). Swap usage
+##                    reporter surfaced via /proc/swapmon and the `swapmon` kshell
+##                    command. init_defaults() FABRICATED a default swap device — a
+##                    fictional 4 GiB /dev/sda2 partition seeded ~500 MiB used — plus
+##                    invented swap-in/out rate counters, which the kshell command
+##                    (calls init_defaults() on show/devices/processes) and
+##                    /proc/swapmon displayed as if they were real swap usage. NONE of
+##                    its mutation APIs (add_device, remove_device, set_enabled,
+##                    record_swap_in/out, update_process, take_snapshot) had a single
+##                    real caller — they existed only to be exercised by the self_test
+##                    against fabricated fixtures. Meanwhile the kernel already has a
+##                    REAL swap subsystem (crate::mm::swap, which also backs
+##                    /proc/swaps). Fixed: deleted swapmon's entire State/Mutex and all
+##                    write APIs; total_usage() now reads mm::swap::summary(),
+##                    list_devices() maps mm::swap::list_devices() (slots×16 KiB →
+##                    bytes), stats() reads mm::swap::device_count() +
+##                    mm::fault::fault_stats().swap_in (in_bytes derived: 1 swap-in =
+##                    one 16 KiB page; process_count / swap_out / out_bytes / ops are
+##                    honest zeros — not tracked by the real subsystem yet).
+##                    list_processes()/history() return empty (no per-process swap
+##                    accounting / no sampler — no fabrication). init_defaults() is now
+##                    a documented no-op. Rewrote self_test (5 tests) to assert the
+##                    read-through views are EXACTLY consistent with mm::swap +
+##                    mm::fault (no fixtures, nothing to leak) and WIRED it into the
+##                    boot self-test path (it had never been wired before). /proc/swapmon
+##                    171 bytes (real, empty in QEMU — no swap configured). No deferral.
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -1737,7 +1764,7 @@
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
 ##     + netfilter + mempress + devfreq + memcg + cgmem + vmzone + vmballoon
-##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport + hwrng + certmgr + authbroker + secmod + binfmt + recoverypart + diskclean + fnotify + memlayout + irqbalance + netmon (just fixed) were forty-seven. Next ticks: work through the
+##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport + hwrng + certmgr + authbroker + secmod + binfmt + recoverypart + diskclean + fnotify + memlayout + irqbalance + netmon + swapmon (just fixed) were forty-eight. Next ticks: work through the
 ##     remaining candidates ONE PER TICK, auditing each before acting. The
 ##     52-file list includes both STATISTICS modules (fix: empty / zero-counters)
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or

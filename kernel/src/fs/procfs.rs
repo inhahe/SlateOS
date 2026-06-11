@@ -1791,6 +1791,81 @@ fn gen_thread_status(proc_id: u64, tid: u64) -> KernelResult<Vec<u8>> {
     Ok(build_pid_status(task, proc_id))
 }
 
+/// Format a CPU affinity mask as Linux's `/proc/<pid>/status` `Cpus_allowed:`
+/// hex bitmap.  Matches the kernel's `%*pb` (`bitmap_string`) output exactly:
+/// the bitmap is sized to `ncpus`, printed in comma-separated 32-bit groups
+/// most-significant-first; the top (possibly partial) group is zero-padded to
+/// `ceil(top_bits / 4)` hex digits and every lower group to 8.  Examples:
+/// `(0xff, 8) -> "ff"`, `(1, 12) -> "001"`, `(u64::MAX, 64) ->
+/// "ffffffff,ffffffff"`, `(all_40, 40) -> "ff,ffffffff"`.  Pure (no locks),
+/// so it is unit-tested directly with synthetic masks in `self_test`.
+fn format_cpus_allowed(mask: u64, ncpus: usize) -> String {
+    use core::fmt::Write as _;
+    // Our mask is a u64, so cap the width at 64; size to at least one bit
+    // because Linux always emits a group (nr_cpu_ids >= 1).
+    let nbits = ncpus.clamp(1, 64);
+    // Drop any stray bits beyond the sized width, as the kernel does.
+    let mask = if nbits >= 64 {
+        mask
+    } else {
+        mask & (1u64 << nbits).wrapping_sub(1)
+    };
+    // Bits in the most-significant chunk: nbits mod 32, or a full 32 when
+    // nbits is a positive multiple of 32.
+    let top_bits = match nbits % 32 {
+        0 => 32,
+        r => r,
+    };
+    let top_width = top_bits.div_ceil(4);
+    let nchunks = nbits.div_ceil(32); // 1 or 2 for a u64 mask
+    let mut s = String::new();
+    let mut chunk = nchunks;
+    let mut first = true;
+    while chunk > 0 {
+        chunk = chunk.saturating_sub(1);
+        let shift = (chunk.saturating_mul(32)) as u32;
+        let group = ((mask >> shift) & 0xffff_ffff) as u32;
+        let width = if first { top_width } else { 8 };
+        let _ = write!(s, "{group:0width$x}");
+        if chunk > 0 {
+            s.push(',');
+        }
+        first = false;
+    }
+    s
+}
+
+/// Format a CPU affinity mask as Linux's `Cpus_allowed_list:` range list, e.g.
+/// `(0xff, 8) -> "0-7"`, `(0b1101, 8) -> "0,2-3"`, `(1, 8) -> "0"`,
+/// `(0, 8) -> ""`.  Pure; unit-tested in `self_test`.
+fn format_cpus_allowed_list(mask: u64, ncpus: usize) -> String {
+    use core::fmt::Write as _;
+    let nbits = ncpus.clamp(0, 64);
+    let mut s = String::new();
+    let mut cpu = 0usize;
+    let mut first = true;
+    while cpu < nbits {
+        if (mask >> cpu) & 1 == 1 {
+            let start = cpu;
+            // Extend the run while the next bit is also set and in range.
+            while cpu.saturating_add(1) < nbits && (mask >> cpu.saturating_add(1)) & 1 == 1 {
+                cpu = cpu.saturating_add(1);
+            }
+            if !first {
+                s.push(',');
+            }
+            first = false;
+            if start == cpu {
+                let _ = write!(s, "{start}");
+            } else {
+                let _ = write!(s, "{start}-{cpu}");
+            }
+        }
+        cpu = cpu.saturating_add(1);
+    }
+    s
+}
+
 /// Build a Linux `/proc/<pid>/status` body.
 ///
 /// Thread-specific fields come from `task` (Name, State, Pid = `task.id`,
@@ -1899,6 +1974,26 @@ fn build_pid_status(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     // filter maps to 2 and its absence to 0.  seccomp-aware tools read this.
     let seccomp = if crate::scfilter::has_filter(proc_id) { 2 } else { 0 };
     let _ = writeln!(s, "Seccomp:\t{seccomp}");
+    // Cpus_allowed / Cpus_allowed_list: the task's CPU affinity, sized to the
+    // online CPU count.  Affinity is a per-thread property in Linux, so this
+    // keys off `task.id` (the thread id), not `proc_id`.  taskset, numactl and
+    // htop read these.  A task absent from the scheduler snapshot (e.g. a bare
+    // task) has no stored mask; default to "all online CPUs allowed", which is
+    // a freshly-created task's affinity.
+    let ncpus = crate::smp::cpu_count();
+    let affinity = crate::sched::get_cpu_affinity(task.id).unwrap_or_else(|| {
+        if ncpus >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << ncpus).wrapping_sub(1)
+        }
+    });
+    let _ = writeln!(s, "Cpus_allowed:\t{}", format_cpus_allowed(affinity, ncpus));
+    let _ = writeln!(
+        s,
+        "Cpus_allowed_list:\t{}",
+        format_cpus_allowed_list(affinity, ncpus)
+    );
     // Context switches: the native scheduler tracks a single schedule count,
     // not Linux's voluntary/nonvoluntary split.  A preemptive round-robin
     // scheduler drives almost all switches as involuntary preemptions, so the
@@ -12201,6 +12296,67 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[procfs]   build_pid_status: NoNewPrivs/Seccomp present and ordered OK");
+
+        // Cpus_allowed/Cpus_allowed_list lines must be present and ordered
+        // after Seccomp, before the ctxt-switch lines.
+        if !stext.contains("\nCpus_allowed:\t") || !stext.contains("\nCpus_allowed_list:\t") {
+            serial_println!("[procfs]   FAIL: status missing Cpus_allowed lines");
+            return Err(KernelError::InternalError);
+        }
+        let p_seccomp = stext.find("\nSeccomp:\t");
+        let p_cpus = stext.find("\nCpus_allowed:\t");
+        let p_vctx2 = stext.find("\nvoluntary_ctxt_switches:\t");
+        if !(p_seccomp < p_cpus && p_cpus < p_vctx2) {
+            serial_println!(
+                "[procfs]   FAIL: status order Seccomp<Cpus_allowed<voluntary_ctxt_switches violated"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[procfs]   build_pid_status: Cpus_allowed present and ordered OK");
+    }
+
+    // --- Cpus_allowed bitmap/list formatter unit tests (deterministic) ---
+    // Exact Linux %*pb (bitmap_string) expectations across chunk boundaries.
+    {
+        let hex_cases: [(u64, usize, &str); 9] = [
+            (0xff, 8, "ff"),
+            (1, 8, "01"),
+            (0xfff, 12, "fff"),
+            (1, 12, "001"),
+            (0xffff_ffff, 32, "ffffffff"),
+            (1, 32, "00000001"),
+            (u64::MAX, 64, "ffffffff,ffffffff"),
+            (1, 64, "00000000,00000001"),
+            (0xff_ffff_ffff, 40, "ff,ffffffff"),
+        ];
+        for (mask, ncpus, want) in hex_cases {
+            let got = format_cpus_allowed(mask, ncpus);
+            if got != want {
+                serial_println!(
+                    "[procfs]   FAIL: format_cpus_allowed({mask:#x}, {ncpus}) = {:?}, want {:?}",
+                    got, want
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        let list_cases: [(u64, usize, &str); 5] = [
+            (0xff, 8, "0-7"),
+            (0b1101, 8, "0,2-3"),
+            (1, 8, "0"),
+            (0, 8, ""),
+            (0b1010_0001, 8, "0,5,7"),
+        ];
+        for (mask, ncpus, want) in list_cases {
+            let got = format_cpus_allowed_list(mask, ncpus);
+            if got != want {
+                serial_println!(
+                    "[procfs]   FAIL: format_cpus_allowed_list({mask:#x}, {ncpus}) = {:?}, want {:?}",
+                    got, want
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        serial_println!("[procfs]   format_cpus_allowed/list: all bitmap cases OK");
     }
 
     // --- Per-PID directory tests ---

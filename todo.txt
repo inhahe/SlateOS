@@ -6,22 +6,21 @@
 ## [60, 3600], so 60 is the fastest the loop can fire).  Do NOT
 ## pad above 60 unless something specifically requires waiting.
 
-## FOLLOW-UP (2026-06-11): /proc/<pid>/status Cpus_allowed + Cpus_allowed_list
-## We DO have genuine backing — sched::get_cpu_affinity(task.id) returns the
-## per-thread u64 affinity mask (affinity is a thread property in Linux, so
-## key off task.id, not proc_id).  Deferred because correct Linux formatting
-## is fiddly and a half-correct version would MISLEAD parsers:
-##   - Cpus_allowed: bitmap printed in comma-separated 32-bit groups, sized to
-##     the ONLINE cpu count (an 8-CPU box prints "ff", NOT "ffffffff,ffffffff").
-##     Needs an nr_online_cpus accessor to size the field; printing the raw
-##     64-bit mask always would be wrong on smaller machines.
-##   - Cpus_allowed_list: range-compressed form, e.g. "0-3,5,7-8".
-## Proper fix: add a mask->grouped-hex formatter and a mask->range-list
-## formatter (both pure, unit-testable with synthetic masks + a CPU count),
-## query online cpu count, emit both lines after Seccomp (Linux field order),
-## and self-test several masks/counts (full, single-cpu, sparse, >32 cpus).
-## Low value relative to risk (most affinity tools use sched_getaffinity(2),
-## not /proc parsing), hence deferred rather than shipped half-right.
+## DONE (2026-06-11): /proc/<pid>/status Cpus_allowed + Cpus_allowed_list
+## Implemented properly (the deferral risk was mitigated by writing the
+## formatting as PURE, unit-tested functions matching Linux %*pb exactly).
+## - format_cpus_allowed(mask, ncpus): comma-separated 32-bit hex groups,
+##   most-significant first, top (partial) group zero-padded to ceil(bits/4)
+##   digits and lower groups to 8, sized to smp::cpu_count().  Verified against
+##   Linux examples: (0xff,8)->"ff", (1,12)->"001", (u64::MAX,64)->
+##   "ffffffff,ffffffff", (all_40,40)->"ff,ffffffff", etc.
+## - format_cpus_allowed_list(mask, ncpus): range-compressed list, e.g.
+##   (0b1101,8)->"0,2-3", (0,8)->"".
+## Affinity is a thread property -> keyed off task.id via
+## sched::get_cpu_affinity (build_pid_status in kernel\src\fs\procfs.rs).
+## Both lines emitted after Seccomp in Linux field order.  9 hex + 5 list
+## deterministic self-tests, plus an integration ordering assertion.  Boot
+## test PASSED; serial shows "format_cpus_allowed/list: all bitmap cases OK".
 
 ## DONE (2026-06-11): /proc/<pid>/status now reports NoNewPrivs and Seccomp
 ## Linux always prints `NoNewPrivs:` (PR_SET_NO_NEW_PRIVS state) and

@@ -515,11 +515,24 @@
 ##                    exact assertions incl. burst_events bumping exactly once when
 ##                    the bucket drains to 0 and refill capping at burst_size,
 ##                    wired into boot.)
+##   - rqstat.rs     (fixed 2026-06-11; was: four fake per-CPU runqueue rows
+##                    cpu0..3 (cpu0 depth 3 / max 32 / 50M enqueues / 49,999,997
+##                    dequeues / 100k pulls / 80k pushes / 500s wait; cpu1 45M
+##                    enqueues; cpu2 30M; cpu3 25M) plus invented aggregates
+##                    total_enqueues 150M / total_dequeues 149,999,993 /
+##                    total_balances 740k, shown via /proc/rqstat as real
+##                    scheduler runqueue pressure. Record functions returned
+##                    NotFound for unknown CPUs and there was no register API, so
+##                    added register_cpu(cpu_id) (zeroed counters, AlreadyExists/
+##                    ResourceExhausted checks); emptied init_defaults and rebuilt
+##                    self_test with exact assertions incl. max_depth high-water
+##                    tracking, saturating dequeue underflow guard, and exact
+##                    aggregate totals, wired into boot.)
 ## Confirmed STILL FABRICATING (audited 2026-06-11, NOT yet fixed):
 ##   - (none currently confirmed — next tick: audit the remaining seeded
 ##     *stat siblings to find the next fabricator. Candidates flagged as SEEDED
-##     by grep (init_defaults with alloc::vec!/String::from/push): rqstat,
-##     schedlat, ttystat, zramstat. NOTE: some may be SETTINGS modules
+##     by grep (init_defaults with alloc::vec!/String::from/push): schedlat,
+##     ttystat, zramstat. NOTE: some may be SETTINGS modules
 ##     seeding legitimate config defaults — verify each is a STATISTICS module
 ##     seeding fake OBSERVATIONS before emptying it.)
 ## After dmastat, continue auditing the remaining *stat/*latency/*stats siblings.

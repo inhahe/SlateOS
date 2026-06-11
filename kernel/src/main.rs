@@ -1319,6 +1319,15 @@ extern "C" fn kernel_main() -> ! {
     // coverage it previously lacked (it was only reachable via the `ratestat
     // test` kshell subcommand).
     fs::ratestat::self_test();
+    // rqstat backs /proc/rqstat (per-CPU runqueue depth/wait/load-balance stats);
+    // record functions return NotFound for unknown CPUs and there was no register
+    // API, so added register_cpu(cpu_id) (zeroed counters) — the proper fix is to
+    // register real topology rather than seed fake rows. The self-test now builds
+    // fixtures via register_cpu/enqueue/dequeue/record_balance/record_wait and
+    // resets the table afterward (leaving no fabricated rows), so it is safe at
+    // boot and gives the module automated coverage it previously lacked (it was
+    // only reachable via the `rqstat test` kshell subcommand).
+    fs::rqstat::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

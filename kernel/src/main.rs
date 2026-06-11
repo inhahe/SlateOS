@@ -1242,6 +1242,13 @@ extern "C" fn kernel_main() -> ! {
     // automated coverage it previously lacked (it was only reachable via the
     // `compstat test` kshell subcommand).
     fs::compstat::self_test();
+    // dmastat backs /proc/dmastat (per-device DMA mappings, transfers, IOMMU
+    // faults); like its siblings the self-test now builds fixtures via the real
+    // register_device/record_map/record_unmap/record_transfer/record_fault API
+    // and resets the table afterward (leaving no fabricated rows), so it is safe
+    // at boot and gives the module automated coverage it previously lacked (it
+    // was only reachable via the `dmastat test` kshell subcommand).
+    fs::dmastat::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

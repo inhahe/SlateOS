@@ -398,15 +398,24 @@
 ##                    init_defaults and rebuilt self_test with exact assertions
 ##                    (incl. exact 66% success rate, exact migration/stall
 ##                    totals), wired into boot.)
+##   - dmastat.rs    (fixed 2026-06-11; was: three fake devices "nvme0" (maps
+##                    500000 / 2GB mapped / 100GB transferred), "eth0" (maps
+##                    200000 / 512MB / 20GB), "gpu0" (maps 100000 / 4GB / 40GB /
+##                    1 fault); aggregates total_maps 800000, total_unmaps
+##                    793500, total_bytes 171_798_691_840, total_faults 1.
+##                    Already had a full register_device/record_map/record_unmap/
+##                    record_transfer/record_fault API; just emptied
+##                    init_defaults and rebuilt self_test with exact assertions,
+##                    wired into boot.)
 ## Confirmed STILL FABRICATING (audited 2026-06-11, NOT yet fixed):
 ##   - (none currently confirmed — next tick: audit the remaining seeded
 ##     *stat siblings to find the next fabricator. Candidates flagged as SEEDED
-##     by grep (init_defaults with alloc::vec!/String::from/push): dmastat,
-##     inodestat, ksmstat, mmapstat, pagestat, pidstat, pmcstat, powerstat,
-##     procstat, ratestat, rqstat, schedlat, ttystat, zramstat. NOTE: some may
-##     be SETTINGS modules seeding legitimate config defaults — verify each is a
-##     STATISTICS module seeding fake OBSERVATIONS before emptying it.)
-## After compstat, continue auditing the remaining *stat/*latency/*stats siblings.
+##     by grep (init_defaults with alloc::vec!/String::from/push): inodestat,
+##     ksmstat, mmapstat, pagestat, pidstat, pmcstat, powerstat, procstat,
+##     ratestat, rqstat, schedlat, ttystat, zramstat. NOTE: some may be SETTINGS
+##     modules seeding legitimate config defaults — verify each is a STATISTICS
+##     module seeding fake OBSERVATIONS before emptying it.)
+## After dmastat, continue auditing the remaining *stat/*latency/*stats siblings.
 ## EXPOSURE: main.rs does NOT mass-invoke these init_defaults() at boot, so the
 ## fabricated data is LATENT — it only becomes live in /proc once someone runs
 ## the module's `<name> test` kshell subcommand (whose old self_test called

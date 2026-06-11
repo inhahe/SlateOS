@@ -1376,6 +1376,17 @@ extern "C" fn kernel_main() -> ! {
     // automated coverage it previously lacked (it was only reachable via the
     // `swapact test` kshell subcommand).
     fs::swapact::self_test();
+    // writeback backs /proc/writeback (per-device dirty/writeback/written page
+    // counts + flusher-thread state). Record functions returned NotFound for
+    // unknown devices and there was no register API, so added register_device(dev)
+    // (creates a zeroed device row + an idle flusher thread, monotonic id). The
+    // real default dirty threshold (DEFAULT_DIRTY_THRESHOLD_PCT) is kept as a
+    // legitimate config default. The self-test now builds fixtures via
+    // register_device/record_dirty/record_written/start_flush with exact
+    // assertions and resets the table afterward (leaving no fabricated rows), so
+    // it is safe at boot and gives the module automated coverage it previously
+    // lacked (it was only reachable via the `writeback test` kshell subcommand).
+    fs::writeback::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

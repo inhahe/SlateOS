@@ -588,16 +588,32 @@
 ##                    emptied init_defaults and rebuilt self_test with exact page/
 ##                    latency assertions incl. swap-in underflow guard and used_pages
 ##                    clamped to total on swap-out, wired into boot.)
+##   - writeback.rs  (fixed 2026-06-11; was: two fake devices "sda" (5000 dirty /
+##                    10M written pages / ~41GB written / 50k flushes) and
+##                    "nvme0n1" (2000 dirty / 50M written / ~205GB / 100k flushes)
+##                    plus matching fake flusher threads (10M/50M pages_written)
+##                    and invented aggregates total_dirty 7000 / total_written 60M
+##                    / total_flushes 150k, shown via /proc/writeback and the
+##                    device_stats/flusher_stats views as real writeback traffic.
+##                    Record functions returned NotFound for unknown devices and
+##                    there was no register API, so added register_device(dev)
+##                    (creates a zeroed device row + idle flusher thread with a
+##                    monotonic id, AlreadyExists/ResourceExhausted checks). The
+##                    real default dirty threshold (20%) was KEPT as a named const
+##                    DEFAULT_DIRTY_THRESHOLD_PCT (legitimate config, tunable via
+##                    set_threshold). Emptied init_defaults and rebuilt self_test
+##                    with exact assertions incl. writeback_pages = dirty/2 on
+##                    flush and threshold clamp to 100, wired into boot.)
 ## Confirmed STILL FABRICATING (audited 2026-06-11, NOT yet fixed):
 ##   - (none currently confirmed. Broadened the SEEDED-module grep on 2026-06-11
 ##     to `fn init_defaults` bodies containing a large numeric literal
-##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact (just fixed)
-##     were two. Next ticks: work through the remaining candidates ONE PER TICK,
-##     auditing each before acting. The 52-file list includes both STATISTICS
-##     modules (fix: empty / zero-counters) AND SETTINGS or structural modules that
-##     seed LEGITIMATE config defaults or real topology (LEAVE ALONE). Verify each
-##     is a statistics module fabricating observed numbers surfaced via /proc
-##     before emptying it. Remaining flagged names incl.: writeback, blkqueue,
+##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback
+##     (just fixed) were three. Next ticks: work through the remaining candidates
+##     ONE PER TICK, auditing each before acting. The 52-file list includes both
+##     STATISTICS modules (fix: empty / zero-counters) AND SETTINGS or structural
+##     modules that seed LEGITIMATE config defaults or real topology (LEAVE ALONE).
+##     Verify each is a statistics module fabricating observed numbers surfaced via
+##     /proc before emptying it. Remaining flagged names incl.: blkqueue,
 ##     netqueue, pagecache, taskio, netspeed, diskhealth, netdev, netfilter,
 ##     mempress, devfreq, memcg, cgmem, vmzone, vmballoon, softirq, timerq,
 ##     schedclass, schedwait, kthread, kstack, kprobes, ftrace, sockbuf, msivec,

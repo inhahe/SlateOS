@@ -1187,6 +1187,14 @@ extern "C" fn kernel_main() -> ! {
     // boot and gives the module automated coverage it previously lacked (it was
     // only reachable via the `cpustat test` kshell subcommand).
     fs::cpustat::self_test();
+    // irqstat backs /proc/irqstat (per-IRQ-line counts + per-CPU interrupt
+    // totals and ISR latency); like its siblings the self-test now builds
+    // fixtures via the real register_irq/register_cpu/record/record_latency/
+    // mark_spurious API and resets the table afterward (leaving no fabricated
+    // rows), so it is safe at boot and gives the module automated coverage it
+    // previously lacked (it was only reachable via the `irqstat test` kshell
+    // subcommand).
+    fs::irqstat::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

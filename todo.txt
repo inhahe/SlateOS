@@ -328,11 +328,21 @@
 ##                    register_cpu(cpu_id) for zeroed per-CPU rows; emptied
 ##                    init_defaults and rebuilt self_test with exact assertions
 ##                    (incl. exact 50% util), wired into boot.)
+##   - irqstat.rs    (fixed 2026-06-11; was: fake IRQ lines 0/1/14/19/23
+##                    HPET/i8042/ahci0/eth0/xhci0 count up to 10M; fake per-CPU
+##                    rows cpu0..3; aggregate total_irqs 12_650_000. The IRQ-line
+##                    table already had register_irq; added register_cpu(cpu_id)
+##                    for zeroed per-CPU rows; emptied init_defaults and rebuilt
+##                    self_test with exact assertions, wired into boot. Also
+##                    fixed two real bugs found while here: (a) record_latency
+##                    EWMA cold-start bias — first sample now seeds the average
+##                    exactly instead of blending against 0; (b) record() was
+##                    bumping the IRQ-line count BEFORE the CPU lookup, so a
+##                    record for an unknown CPU partially applied before failing
+##                    — now validates the CPU is registered first.)
 ## Confirmed STILL FABRICATING (audited 2026-06-11, NOT yet fixed):
-##   - irqstat.rs    (fake IRQ lines 0/1/14/19/23 HPET/i8042/ahci0/eth0/xhci0
-##                    count up to 10M; fake per-CPU rows; aggregate total_irqs
-##                    12_650_000. Two tables: IRQ lines likely have a register-
-##                    style API (verify); per-CPU rows need register_cpu.)
+##   - (none currently confirmed — next tick: audit the remaining
+##     *stat/*latency/*stats siblings to find the next fabricator.)
 ## After irqstat, continue auditing the remaining *stat/*latency/*stats siblings.
 ## EXPOSURE: main.rs does NOT mass-invoke these init_defaults() at boot, so the
 ## fabricated data is LATENT — it only becomes live in /proc once someone runs

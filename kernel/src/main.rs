@@ -1566,6 +1566,18 @@ extern "C" fn kernel_main() -> ! {
     // its fixtures via the real API with exact assertions and resets the tables
     // afterward, so it is safe at boot.
     fs::schedclass::self_test();
+    // schedwait backs /proc/schedwait (scheduler-wait diagnostics: per-reason
+    // wait counts/total-ns/max-ns across runqueue/iowait/lock/sleep/ipc/pgfault
+    // plus a six-bucket latency histogram and global wait totals).  Its
+    // init_defaults() previously seeded fabricated activity — per-reason counts
+    // of 50M/10M/5M/20M/3M/2M waits, hundreds of billions of ns per reason, a
+    // populated histogram, and global totals of 90M waits over 920s; that demo
+    // data was removed.  The six reason slots and six histogram buckets are a
+    // fixed structure so they are kept ZEROED, and counters advance only on real
+    // record_wait calls.  The residue-free self_test builds its fixtures via the
+    // real API with exact assertions (including exact histogram-bucket placement)
+    // and resets the tables afterward, so it is safe at boot.
+    fs::schedwait::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

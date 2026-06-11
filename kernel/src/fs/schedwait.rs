@@ -113,16 +113,31 @@ fn bucket_index(ns: u64) -> usize {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise the scheduler-wait statistics state.
+///
+/// Starts with all per-reason counts, totals, maxima, histogram buckets,
+/// and global totals at zero. The six wait-reason slots (runqueue, iowait,
+/// lock, sleep, ipc, pgfault) and the six latency-histogram buckets are a
+/// fixed structure, so they are always present — but zeroed. The
+/// `/proc/schedwait` generator and the `schedwait` kshell command surface
+/// this breakdown as if it reflects real observed task waits, so seeding it
+/// with invented counts/latencies would be fabricated procfs data. The
+/// counters advance only through real [`record_wait`] calls.
+///
+/// (Previously this seeded fabricated activity — per-reason counts of
+/// 50M/10M/5M/20M/3M/2M waits, total wait time in the hundreds of billions
+/// of nanoseconds per reason, a populated latency histogram, and global
+/// totals of 90M waits over 920s of wait time.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        counts: [50_000_000, 10_000_000, 5_000_000, 20_000_000, 3_000_000, 2_000_000],
-        total_ns: [100_000_000_000, 500_000_000_000, 50_000_000_000, 200_000_000_000, 30_000_000_000, 40_000_000_000],
-        max_ns: [100_000, 50_000_000, 10_000_000, 1_000_000_000, 5_000_000, 20_000_000],
-        histogram: [10_000_000, 30_000_000, 25_000_000, 15_000_000, 8_000_000, 2_000_000],
-        total_waits: 90_000_000,
-        total_wait_ns: 920_000_000_000,
+        counts: [0; REASON_COUNT],
+        total_ns: [0; REASON_COUNT],
+        max_ns: [0; REASON_COUNT],
+        histogram: [0; BUCKET_COUNT],
+        total_waits: 0,
+        total_wait_ns: 0,
         ops: 0,
     });
 }
@@ -181,54 +196,72 @@ pub fn stats() -> (u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("schedwait::self_test() — running tests...");
+    // Start from a clean, empty state so the assertions below are exact and
+    // no fixtures leak into the live wait statistics afterwards.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(per_reason().len(), 6);
-    crate::serial_println!("  [1/8] defaults: OK");
-
-    // 2: Record runqueue wait.
-    record_wait(WaitReason::Runqueue, 500).expect("rq");
+    // 1: Empty defaults — six zeroed reason rows, zeroed histogram, zero totals.
     let reasons = per_reason();
-    assert_eq!(reasons[0].1, 50_000_001); // count
+    assert_eq!(reasons.len(), 6);
+    for (_, count, total, max) in &reasons {
+        assert_eq!((*count, *total, *max), (0, 0, 0));
+    }
+    let (_, hist) = histogram();
+    assert_eq!(hist, [0; BUCKET_COUNT]);
+    let (waits0, ns0, _) = stats();
+    assert_eq!((waits0, ns0), (0, 0));
+    crate::serial_println!("  [1/8] empty defaults: OK");
+
+    // 2: Record a runqueue wait (500ns → <1us bucket).
+    record_wait(WaitReason::Runqueue, 500).expect("rq");
+    let r = per_reason();
+    assert_eq!((r[0].1, r[0].2, r[0].3), (1, 500, 500)); // count, total_ns, max_ns
+    assert_eq!(histogram().1[0], 1); // <1us
     crate::serial_println!("  [2/8] runqueue wait: OK");
 
-    // 3: Record IO wait.
+    // 3: Record an I/O wait (5ms → <10ms bucket).
     record_wait(WaitReason::IoWait, 5_000_000).expect("io");
-    let reasons = per_reason();
-    assert_eq!(reasons[1].1, 10_000_001);
+    let r = per_reason();
+    assert_eq!((r[1].1, r[1].2, r[1].3), (1, 5_000_000, 5_000_000));
+    assert_eq!(histogram().1[4], 1); // <10ms
     crate::serial_println!("  [3/8] io wait: OK");
 
-    // 4: Max tracking.
+    // 4: Max tracking — a larger runqueue wait raises the max (200us → <1ms).
     record_wait(WaitReason::Runqueue, 200_000).expect("rq2");
-    let reasons = per_reason();
-    assert_eq!(reasons[0].3, 200_000); // max updated
+    let r = per_reason();
+    assert_eq!(r[0].1, 2);             // two runqueue waits
+    assert_eq!(r[0].2, 200_500);       // 500 + 200_000
+    assert_eq!(r[0].3, 200_000);       // max raised
+    assert_eq!(histogram().1[3], 1);   // <1ms
     crate::serial_println!("  [4/8] max tracking: OK");
 
-    // 5: Histogram.
+    // 5: Histogram structure — six buckets, exact placements so far.
     let (labels, counts) = histogram();
     assert_eq!(labels.len(), 6);
-    assert!(counts[0] > 10_000_000); // <1us bucket
+    assert_eq!(counts, [1, 0, 0, 1, 1, 0]);
     crate::serial_println!("  [5/8] histogram: OK");
 
-    // 6: Multiple reasons.
+    // 6: Multiple reasons (lock 10us → <100us, ipc 1us → <10us).
     record_wait(WaitReason::LockWait, 10_000).expect("lock");
     record_wait(WaitReason::IpcWait, 1000).expect("ipc");
-    let reasons = per_reason();
-    assert_eq!(reasons[2].1, 5_000_001); // lock
-    assert_eq!(reasons[4].1, 3_000_001); // ipc
+    let r = per_reason();
+    assert_eq!(r[2].1, 1); // lock
+    assert_eq!(r[4].1, 1); // ipc
+    assert_eq!(histogram().1, [1, 1, 1, 1, 1, 0]);
     crate::serial_println!("  [6/8] multi reason: OK");
 
-    // 7: Total accumulation.
+    // 7: Global totals reflect exactly the five recorded waits.
     let (waits, ns, _) = stats();
-    assert!(waits > 90_000_000);
-    assert!(ns > 920_000_000_000);
+    assert_eq!(waits, 5);
+    assert_eq!(ns, 500 + 5_000_000 + 200_000 + 10_000 + 1000);
     crate::serial_println!("  [7/8] totals: OK");
 
-    // 8: Stats ops.
-    let (_, _, ops) = stats();
-    assert!(ops > 0);
+    // 8: Stats ops advanced.
+    assert!(stats().2 > 0);
     crate::serial_println!("  [8/8] stats: OK");
 
+    // Leave no residue in the live state.
+    *STATE.lock() = None;
     crate::serial_println!("schedwait::self_test() — all 8 tests passed");
 }

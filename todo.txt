@@ -6,6 +6,18 @@
 ## [60, 3600], so 60 is the fastest the loop can fire).  Do NOT
 ## pad above 60 unless something specifically requires waiting.
 
+## DONE (2026-06-10): /proc/<pid>/stat comm (field 2) now truncated to 15 bytes
+## gen_pid_comm correctly capped /proc/<pid>/comm to TASK_COMM_LEN-1 (15
+## bytes), but build_pid_stat emitted the FULL untruncated task name (up to
+## 32 bytes) in stat field 2.  So /proc/<pid>/comm and /proc/<pid>/stat
+## field 2 disagreed for names >15 chars, and strict parsers that split on
+## the last ')' and size buffers to TASK_COMM_LEN could overflow.  Fixed by
+## factoring the char-boundary-safe truncation into a shared helper
+## comm_truncate() (kernel\src\fs\procfs.rs) used by BOTH gen_pid_comm and
+## build_pid_stat.  Added a synthetic self-test (20-byte name) asserting the
+## stat comm field == the 15-byte truncation == comm_truncate output.
+## Boot test PASSED; serial shows "comm truncated to 15 bytes OK".
+
 ## DONE (2026-06-10): /proc/<pid>/stat processor (field 39) is now real
 ## Field 39 (processor — the CPU a task last ran on) was hardcoded 0.
 ## top -1 and htop's "P" column read it.  We already snapshot last_cpu on

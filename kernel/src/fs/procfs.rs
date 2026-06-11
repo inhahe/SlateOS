@@ -2008,6 +2008,28 @@ fn gen_thread_stat(proc_id: u64, tid: u64) -> KernelResult<Vec<u8>> {
     Ok(build_pid_stat(task, proc_id))
 }
 
+/// Length of Linux's `comm` field minus the trailing NUL: `TASK_COMM_LEN - 1`.
+/// `comm` is a fixed 16-byte field in the kernel, so the visible name is at
+/// most 15 bytes.  Both `/proc/<pid>/comm` and the `(comm)` token in
+/// `/proc/<pid>/stat` (field 2) must obey this limit, or strict parsers that
+/// size their buffers to `TASK_COMM_LEN` overflow and the two files disagree.
+const TASK_COMM_LEN_MINUS_1: usize = 15;
+
+/// Truncate a task name to Linux's `comm` length (`TASK_COMM_LEN - 1` = 15
+/// bytes), cutting on a UTF-8 char boundary so a multibyte sequence is never
+/// split.  Shared by `gen_pid_comm` and `build_pid_stat` so the two
+/// procfs surfaces always agree on the truncated name.
+fn comm_truncate(name: &str) -> &str {
+    if name.len() <= TASK_COMM_LEN_MINUS_1 {
+        return name;
+    }
+    let mut end = TASK_COMM_LEN_MINUS_1;
+    while end > 0 && !name.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    name.get(..end).unwrap_or("")
+}
+
 /// Build a Linux 52-field stat line.
 ///
 /// Thread-specific fields come from `task` (field 1 = `task.id`, plus comm,
@@ -2019,8 +2041,12 @@ fn gen_thread_stat(proc_id: u64, tid: u64) -> KernelResult<Vec<u8>> {
 fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     use crate::sched::task::TaskState;
 
-    let name = core::str::from_utf8(task.name.get(..task.name_len).unwrap_or(&[]))
+    // Field 2 (`comm`) must match `/proc/<pid>/comm` exactly, including the
+    // 15-byte truncation — otherwise parsers that split on the last `)` and
+    // size buffers to TASK_COMM_LEN disagree between the two files.
+    let full_name = core::str::from_utf8(task.name.get(..task.name_len).unwrap_or(&[]))
         .unwrap_or("???");
+    let name = comm_truncate(full_name);
 
     let state_char = match task.state {
         TaskState::Running => 'R',
@@ -2601,19 +2627,10 @@ fn gen_pid_comm(task_id: u64) -> KernelResult<Vec<u8>> {
         return Err(KernelError::NotFound);
     };
 
-    // Linux truncates `comm` to TASK_COMM_LEN - 1 = 15 bytes.  Truncate
-    // on a char boundary so we never split a multibyte sequence (our
-    // task names are typically ASCII, but be defensive).
-    const TASK_COMM_LEN_MINUS_1: usize = 15;
-    let truncated = if name.len() > TASK_COMM_LEN_MINUS_1 {
-        let mut end = TASK_COMM_LEN_MINUS_1;
-        while end > 0 && !name.is_char_boundary(end) {
-            end = end.saturating_sub(1);
-        }
-        name.get(..end).unwrap_or("")
-    } else {
-        name.as_str()
-    };
+    // Linux truncates `comm` to TASK_COMM_LEN - 1 = 15 bytes.  Use the
+    // shared helper so `/proc/<pid>/comm` and `/proc/<pid>/stat` field 2
+    // truncate identically (char-boundary safe).
+    let truncated = comm_truncate(&name);
 
     let mut data = truncated.as_bytes().to_vec();
     data.push(b'\n');
@@ -12062,6 +12079,59 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[procfs]   build_pid_stat: synthetic starttime+processor OK");
+    }
+
+    // --- comm truncation consistency (stat field 2 vs comm) ---
+    // A name longer than TASK_COMM_LEN-1 (15) must be truncated identically in
+    // build_pid_stat's `(comm)` token and in gen_pid_comm.  Drive both with a
+    // 20-byte name and confirm they agree, and that the result is exactly 15
+    // bytes, so strict parsers sizing buffers to TASK_COMM_LEN never overflow.
+    {
+        // Helper assertion first: comm_truncate caps at 15 on a boundary.
+        let long = "0123456789abcdefghij"; // 20 ASCII bytes
+        let cut = comm_truncate(long);
+        if cut.len() != 15 || cut != "0123456789abcde" {
+            serial_println!(
+                "[procfs]   FAIL: comm_truncate(\"{long}\") = {:?} (len {}), want \"0123456789abcde\"",
+                cut, cut.len()
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        let mut name = [0u8; 32];
+        name[..20].copy_from_slice(long.as_bytes());
+        let synth = crate::sched::TaskInfo {
+            id: 4243,
+            name,
+            name_len: 20,
+            state: crate::sched::task::TaskState::Ready,
+            priority: 20,
+            total_ticks: 0,
+            total_cycles: 0,
+            schedule_count: 0,
+            start_tick: 0,
+            last_cpu: 0,
+            cpu_quota_pct: 0,
+            throttled: false,
+            total_wait_ticks: 0,
+            max_wait_ticks: 0,
+            stack_used: None,
+            stack_pct: None,
+        };
+        let data = build_pid_stat(&synth, 999_999);
+        let text = core::str::from_utf8(&data).unwrap_or("");
+        // comm is the token between the first '(' and the last ')'.
+        let open = text.find('(').map_or(0, |i| i.saturating_add(1));
+        let close = text.rfind(')').unwrap_or(open);
+        let comm = text.get(open..close).unwrap_or("");
+        if comm != cut {
+            serial_println!(
+                "[procfs]   FAIL: stat comm field = {:?}, want truncated {:?}",
+                comm, cut
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[procfs]   build_pid_stat: comm truncated to 15 bytes OK");
     }
 
     // --- Per-PID directory tests ---

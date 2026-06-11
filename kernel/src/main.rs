@@ -1180,6 +1180,13 @@ extern "C" fn kernel_main() -> ! {
     // automated coverage it previously lacked (it was only reachable via the
     // `numastat test` kshell subcommand).
     fs::numastat::self_test();
+    // cpustat backs /proc/cpustat (per-CPU user/system/idle/irq time breakdown);
+    // like its siblings the self-test now builds fixtures via the real
+    // register_cpu/record_time/record_context_switch/record_interrupt API and
+    // resets the table afterward (leaving no fabricated rows), so it is safe at
+    // boot and gives the module automated coverage it previously lacked (it was
+    // only reachable via the `cpustat test` kshell subcommand).
+    fs::cpustat::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

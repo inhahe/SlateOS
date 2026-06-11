@@ -229,6 +229,39 @@
 ## ld.so/WINE read /proc/self/auxv at startup.  Deferred because it
 ## touches the process-launch critical path (risky to land unattended).
 ##
+## SYSTEMIC FINDING (2026-06-11): fabricated demo data in fs:: diagnostic
+## modules' init_defaults() — a whole FAMILY, not isolated incidents.
+## ~250 modules under kernel/src/fs/ define an init_defaults().  Many of the
+## *statistics* ones (as opposed to *settings* ones) seed FABRICATED OBSERVED
+## numbers — fake disks/sockets/tasks with invented byte/IO/latency counts —
+## which their /proc/<name> generator and `<name>` kshell command would then
+## surface AS IF REAL.  This violates the hard "never invent data in procfs"
+## rule.  Two confirmed + FIXED so far by rebuilding init_defaults() empty,
+## adding a real registration API where missing, and rewriting self_test() to
+## build fixtures via the real API and reset to None afterward (no residue),
+## then wiring the now-residue-free self_test into boot for coverage:
+##   - taskstats.rs  (fixed; was: pid 1/100 with read_bytes 1_073_741_824 etc.)
+##   - iolatency.rs  (fixed 2026-06-11; was: sda/nvme0n1, total_ios 37_000_000,
+##                    total_slow 302000, fabricated histograms)
+## Confirmed STILL FABRICATING (audited, not yet fixed):
+##   - netsock.rs    (fake sockets: pid 100 → 93.184.216.34:443 ESTABLISHED with
+##                    rx_bytes 50_000_000, retransmits 25; total_opened 5000,
+##                    total_rx 500_000_000 — all invented)
+## EXPOSURE: main.rs does NOT mass-invoke these init_defaults() at boot, so the
+## fabricated data is LATENT — it only becomes live in /proc once someone runs
+## the module's `<name> test` kshell subcommand (whose old self_test called
+## init_defaults() and left the fake rows resident).  That is exactly the
+## taskstats pre-fix situation.  So this is not currently corrupting a running
+## system, but it is a loaded footgun across the whole family.
+## PLAN: fix at most ONE module per autonomous tick, each with a full
+## build + boot-test cycle exactly as taskstats/iolatency were done.  Do NOT
+## blind-sweep hundreds of modules unattended (high blast radius, and each
+## needs a per-module judgment: a *settings* module seeding real default
+## config values is LEGITIMATE and must be left alone — only *statistics*
+## modules seeding fake observations are bugs).  Next candidates to audit:
+## netsock (confirmed, do first), then sweep the other *stat/*latency/*stats
+## siblings (slabstat, futexstat, pipestat, epollstat, aiostat, netlat, …).
+##
 ## DONE (2026-06-10): /proc/<pid>/task/<tid>/ thread directory
 ## Nested-dir support is implemented (kernel/src/fs/procfs.rs):
 ## ProcPath::PidTaskDir/PidTaskTidDir/PidTaskFile variants, classify_path

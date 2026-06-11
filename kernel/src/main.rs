@@ -1095,6 +1095,12 @@ extern "C" fn kernel_main() -> ! {
     // module automated coverage it otherwise lacks (it was previously only
     // reachable via the `taskstats test` kshell subcommand).
     fs::taskstats::self_test();
+    // iolatency backs /proc/iolatency; like taskstats its self-test now builds
+    // fixtures via the real register_device/record API and resets the table
+    // afterward (leaving no fabricated devices), so it is safe at boot and
+    // gives the module automated coverage it previously lacked (it was only
+    // reachable via the `iolatency test` kshell subcommand).
+    fs::iolatency::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

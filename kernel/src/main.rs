@@ -2095,6 +2095,20 @@ extern "C" fn kernel_main() -> ! {
     // end-reset) builds its own fixtures via the real API with exact assertions
     // and resets STATE afterward so nothing leaks into /proc/vmfrag.
     fs::vmfrag::self_test();
+    // ipclog is the kernel-side IPC message log behind /proc/ipclog and the
+    // `ipclog` kshell command.  Its init_defaults() previously seeded three
+    // FABRICATED channels — `system_bus`, `vfs_channel`, `gui_events` — with
+    // invented message/byte/latency/error counts (inconsistent with the system
+    // totals, which were seeded at 0), which /proc/ipclog and the list_channels
+    // view displayed as if real IPC traffic.  record() has NO real callers — the
+    // IPC subsystem (crate::ipc) does not call it — so the module is entirely
+    // unwired.  ipclog now seeds an EMPTY log (channels/messages arrive via record
+    // once the IPC layer wires it; see the DEFERRED PROPER FIX note in todo.txt).
+    // This self_test (never wired before, and whose old version relied on the
+    // fabricated channels with no end-reset) builds its own fixtures via the real
+    // API with exact assertions and resets STATE afterward so nothing leaks into
+    // /proc/ipclog.
+    fs::ipclog::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

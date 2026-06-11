@@ -1918,6 +1918,40 @@
 ##                    memory-compaction subsystem, which this kernel does not have. Do
 ##                    as a focused task once a buddyinfo accessor and a compaction path
 ##                    exist. Until then the empty table is honest.
+##   - ipclog (2026-06-11): FIXED — fabrication case (a) (full record/clear/
+##                    set_enabled API already existed). Kernel-side IPC message log
+##                    behind /proc/ipclog and the `ipclog` kshell command.
+##                    init_defaults() FABRICATED three channels — system_bus (ch 1,
+##                    100 sent/100 recv/25600/12800 bytes/15us), vfs_channel (ch 2,
+##                    500/500/204800/1048576/45us/2 err), gui_events (ch 3, 1000/980/
+##                    64000/32000/5us) — which /proc/ipclog and list_channels displayed
+##                    as if real IPC traffic. The per-channel counts were inconsistent
+##                    with the system totals (seeded at 0). record() has NO real callers
+##                    (the IPC subsystem crate::ipc never calls it); procfs/kshell only
+##                    read or run interactive subcommands. Fixed: init_defaults() now
+##                    seeds an EMPTY log (no channels, no messages, logging_enabled
+##                    kept true as a real setting). Also: the self_test was NEVER wired
+##                    into boot AND relied on the fabricated channels (asserted len==3,
+##                    messages_sent>=101) with no end-reset — so wiring it would have
+##                    leaked fixtures into /proc/ipclog. Rewrote it residue-free (clears
+##                    STATE at start AND end) with EXACT assertions (empty init,
+##                    record→seq 1, query by pid/channel, channel 1 has 1 sent/1 recv,
+##                    auto-create channel 99, clear empties message buffer, final 2
+##                    channels / 0 messages / 3 total / 896 bytes / 0 errors) and WIRED
+##                    it into the boot self-test path. /proc/ipclog now reports an empty
+##                    log (truthful).
+##                    DEFERRED PROPER FIX: the real IPC channel registry lives in
+##                    crate::ipc (channels created dynamically by ID, not the fabricated
+##                    system_bus/vfs_channel/gui_events names). The proper fix is to
+##                    have the IPC send/receive paths call ipclog::record(msg_type, src,
+##                    dst, channel, size, latency, label) on every message when logging
+##                    is enabled. Deferred because: (1) IPC send/recv is a perf-critical
+##                    hot path (<2us round-trip target) and an unconditional Mutex +
+##                    Vec push per message would blow the budget — it needs a lock-free
+##                    / ring-buffer / per-CPU design gated on logging_enabled, and (2)
+##                    the channel_id → name mapping must come from the real channel
+##                    registry. Do as a focused task once the IPC layer exposes a
+##                    hot-path-safe trace hook. Until then the empty log is honest.
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -1931,7 +1965,7 @@
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
 ##     + netfilter + mempress + devfreq + memcg + cgmem + vmzone + vmballoon
-##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport + hwrng + certmgr + authbroker + secmod + binfmt + recoverypart + diskclean + fnotify + memlayout + irqbalance + netmon + swapmon + netusage + taskmon + vmmap + pftrack + vmfrag (just fixed) were fifty-three. Next ticks: work through the
+##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport + hwrng + certmgr + authbroker + secmod + binfmt + recoverypart + diskclean + fnotify + memlayout + irqbalance + netmon + swapmon + netusage + taskmon + vmmap + pftrack + vmfrag + ipclog (just fixed) were fifty-four. Next ticks: work through the
 ##     remaining candidates ONE PER TICK, auditing each before acting. The
 ##     52-file list includes both STATISTICS modules (fix: empty / zero-counters)
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or

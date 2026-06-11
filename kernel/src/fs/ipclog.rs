@@ -121,16 +121,31 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** IPC log.
+///
+/// Seeds NO channels and NO messages.  Channels and messages are tracked through
+/// [`record`] as the IPC subsystem services sends/receives; until that wiring
+/// exists, `/proc/ipclog` and the `ipclog` kshell command report an empty log
+/// rather than fabricated traffic — the kernel's hard "never invent data in
+/// procfs" rule.  `logging_enabled` defaults to `true` (a real setting: once
+/// `record` is wired the log captures immediately).
+///
+/// (Previously this seeded three fabricated channels — `system_bus` (channel 1,
+/// 100 sent / 100 recv / 25600 / 12800 bytes / 15us), `vfs_channel` (channel 2,
+/// 500 / 500 / 204800 / 1048576 / 45us / 2 errors) and `gui_events` (channel 3,
+/// 1000 / 980 / 64000 / 32000 / 5us) — which `/proc/ipclog` and the `list_channels`
+/// view then displayed as if they were real measured IPC traffic.  The per-channel
+/// counts were even inconsistent with the system totals, which were seeded at 0.
+/// None of [`record`]'s callers are real — the IPC subsystem does not yet call it —
+/// so the module is entirely unwired; the real channel registry lives in
+/// `crate::ipc`.  See the DEFERRED PROPER FIX note in todo.txt.  The self-test now
+/// builds its own fixtures via the real API — see [`self_test`].)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
         messages: Vec::new(),
-        channels: alloc::vec![
-            ChannelStats { channel_id: 1, name: String::from("system_bus"), messages_sent: 100, messages_received: 100, bytes_sent: 25600, bytes_received: 12800, avg_latency_us: 15, errors: 0 },
-            ChannelStats { channel_id: 2, name: String::from("vfs_channel"), messages_sent: 500, messages_received: 500, bytes_sent: 204800, bytes_received: 1048576, avg_latency_us: 45, errors: 2 },
-            ChannelStats { channel_id: 3, name: String::from("gui_events"), messages_sent: 1000, messages_received: 980, bytes_sent: 64000, bytes_received: 32000, avg_latency_us: 5, errors: 0 },
-        ],
+        channels: Vec::new(),
         next_seq: 1,
         total_messages: 0,
         total_bytes: 0,
@@ -258,15 +273,21 @@ pub fn stats() -> (usize, usize, u64, u64, u64, bool, u64) {
 
 pub fn self_test() {
     crate::serial_println!("ipclog::self_test() — running tests...");
+    // Start from a clean slate so the fixtures built below can never leak into
+    // the live /proc/ipclog table (this self-test now runs at boot).
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(list_channels().len(), 3);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty defaults — no fabricated channels or messages.
+    assert_eq!(list_channels().len(), 0);
+    let (c0, m0, t0, b0, e0, en0, _o0) = stats();
+    assert_eq!((c0, m0, t0, b0, e0), (0, 0, 0, 0, 0));
+    assert!(en0); // logging enabled by default.
+    crate::serial_println!("  [1/8] empty defaults: OK");
 
-    // 2: Record message.
+    // 2: Record a message — auto-creates channel 1.
     let seq = record(MsgType::Send, 1, 100, 1, 256, 10, "test_msg").expect("record");
-    assert!(seq >= 1);
+    assert_eq!(seq, 1);
     crate::serial_println!("  [2/8] record: OK");
 
     // 3: Query by PID.
@@ -275,15 +296,16 @@ pub fn self_test() {
     assert_eq!(msgs[0].src_pid, 1);
     crate::serial_println!("  [3/8] query pid: OK");
 
-    // 4: Query by channel.
+    // 4: Query by channel — second message on channel 1.
     record(MsgType::Receive, 100, 1, 1, 128, 12, "reply").expect("record2");
     let msgs = query_channel(1, 10);
     assert_eq!(msgs.len(), 2);
     crate::serial_println!("  [4/8] query channel: OK");
 
-    // 5: Channel stats updated.
+    // 5: Channel stats — exactly 1 send + 1 receive recorded on channel 1.
     let ch = channel_stats(1).expect("ch");
-    assert!(ch.messages_sent >= 101);
+    assert_eq!(ch.messages_sent, 1);
+    assert_eq!(ch.messages_received, 1);
     crate::serial_println!("  [5/8] channel stats: OK");
 
     // 6: New channel auto-create.
@@ -291,21 +313,25 @@ pub fn self_test() {
     assert!(channel_stats(99).is_some());
     crate::serial_println!("  [6/8] auto channel: OK");
 
-    // 7: Clear.
+    // 7: Clear — the message buffer empties (channel stats persist).
     clear().expect("clear");
     assert_eq!(recent(10).len(), 0);
     crate::serial_println!("  [7/8] clear: OK");
 
-    // 8: Stats.
+    // 8: Stats — exact totals (2 channels, message buffer cleared, 3 recorded,
+    //    896 bytes, no errors, logging still enabled).
     let (channels, msgs, total, bytes, errors, enabled, ops) = stats();
-    assert!(channels >= 4);
-    assert_eq!(msgs, 0); // Cleared.
-    assert!(total >= 3);
-    assert!(bytes > 0);
-    let _ = errors;
+    assert_eq!(channels, 2);
+    assert_eq!(msgs, 0);
+    assert_eq!(total, 3);
+    assert_eq!(bytes, 896);
+    assert_eq!(errors, 0);
     assert!(enabled);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Reset so the boot self-test leaves no fixtures behind in /proc/ipclog.
+    *STATE.lock() = None;
 
     crate::serial_println!("ipclog::self_test() — all 8 tests passed");
 }

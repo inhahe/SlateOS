@@ -114,22 +114,37 @@ fn make_pool(pool: BufPool, active: u64, bytes: u64, allocs: u64, frees: u64, dr
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise the socket-buffer pool statistics state.
+///
+/// Starts with the six buffer pools (tcp, udp, raw, icmp, mcast, general)
+/// present but with all per-pool and global counters at zero. The six
+/// pools are a fixed taxonomy, so they are always listed — but with zeroed
+/// active-buffer/byte/alloc/free/drop/peak counters. The `/proc/sockbuf`
+/// generator and the `sockbuf` kshell command surface this table (and
+/// `pool_stats`) as if it reflects real buffer-pool activity, so seeding it
+/// with invented allocations would be fabricated procfs data. The counters
+/// advance only through real [`alloc`] / [`free`] / [`record_drop`] calls.
+///
+/// (Previously this seeded fabricated activity across all six pools —
+/// e.g. TCP with 50,000 active buffers, 100M allocs and 200MB in flight —
+/// with global totals of 176.5M allocs, 176.4M frees, 6,660 drops, and
+/// 231.6MB allocated.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
         pools: [
-            make_pool(BufPool::Tcp, 50_000, 200_000_000, 100_000_000, 99_950_000, 5_000, 100_000),
-            make_pool(BufPool::Udp, 10_000, 20_000_000, 50_000_000, 49_990_000, 1_000, 30_000),
-            make_pool(BufPool::Raw, 500, 1_000_000, 1_000_000, 999_500, 100, 2_000),
-            make_pool(BufPool::Icmp, 200, 100_000, 5_000_000, 4_999_800, 50, 1_000),
-            make_pool(BufPool::Multicast, 100, 500_000, 500_000, 499_900, 10, 500),
-            make_pool(BufPool::General, 5_000, 10_000_000, 20_000_000, 19_995_000, 500, 15_000),
+            make_pool(BufPool::Tcp, 0, 0, 0, 0, 0, 0),
+            make_pool(BufPool::Udp, 0, 0, 0, 0, 0, 0),
+            make_pool(BufPool::Raw, 0, 0, 0, 0, 0, 0),
+            make_pool(BufPool::Icmp, 0, 0, 0, 0, 0, 0),
+            make_pool(BufPool::Multicast, 0, 0, 0, 0, 0, 0),
+            make_pool(BufPool::General, 0, 0, 0, 0, 0, 0),
         ],
-        total_allocs: 176_500_000,
-        total_frees: 176_434_200,
-        total_drops: 6_660,
-        total_bytes_allocated: 231_600_000,
+        total_allocs: 0,
+        total_frees: 0,
+        total_drops: 0,
+        total_bytes_allocated: 0,
         ops: 0,
     });
 }
@@ -191,57 +206,69 @@ pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("sockbuf::self_test() — running tests...");
+    // Start from a clean, empty state so the assertions below are exact and
+    // no fixtures leak into the live buffer-pool table afterwards.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(pool_stats().len(), 6);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty defaults — six zeroed pool rows, zero totals.
+    let pools = pool_stats();
+    assert_eq!(pools.len(), 6);
+    for p in &pools {
+        assert_eq!((p.active_buffers, p.total_bytes, p.allocs, p.frees, p.drops, p.peak_buffers),
+                   (0, 0, 0, 0, 0, 0));
+    }
+    let (c0, a0, f0, d0, b0, _) = stats();
+    assert_eq!((c0, a0, f0, d0, b0), (6, 0, 0, 0, 0));
+    crate::serial_println!("  [1/8] empty defaults: OK");
 
-    // 2: Alloc.
-    let before = pool_stats()[0].active_buffers;
+    // 2: Alloc — active/allocs/bytes/peak advance for the pool and globals.
     alloc(BufPool::Tcp, 1500).expect("alloc");
-    let after = pool_stats()[0].active_buffers;
-    assert_eq!(after, before + 1);
+    let t = &pool_stats()[BufPool::Tcp.index()];
+    assert_eq!((t.active_buffers, t.allocs, t.total_bytes, t.peak_buffers), (1, 1, 1500, 1));
+    let (_, allocs, _, _, bytes, _) = stats();
+    assert_eq!((allocs, bytes), (1, 1500));
     crate::serial_println!("  [2/8] alloc: OK");
 
-    // 3: Free.
+    // 3: Free — active and total_bytes drop; frees and peak behaviour exact.
     free(BufPool::Tcp, 1500).expect("free");
-    let after2 = pool_stats()[0].active_buffers;
-    assert_eq!(after2, before);
+    let t = &pool_stats()[BufPool::Tcp.index()];
+    assert_eq!((t.active_buffers, t.frees, t.total_bytes, t.peak_buffers), (0, 1, 0, 1));
+    assert_eq!(stats().2, 1); // total_frees
     crate::serial_println!("  [3/8] free: OK");
 
-    // 4: Drop.
-    let before = pool_stats()[1].drops;
+    // 4: Drop — per-pool and global drop counters advance.
     record_drop(BufPool::Udp).expect("drop");
-    let after = pool_stats()[1].drops;
-    assert_eq!(after, before + 1);
+    assert_eq!(pool_stats()[BufPool::Udp.index()].drops, 1);
+    assert_eq!(stats().3, 1); // total_drops
     crate::serial_println!("  [4/8] drop: OK");
 
-    // 5: Peak tracking.
+    // 5: Peak tracking — peak holds the high-water mark after frees.
     for _ in 0..5 { alloc(BufPool::Icmp, 64).expect("multi_alloc"); }
-    let p = &pool_stats()[3];
-    assert!(p.peak_buffers >= p.active_buffers);
+    for _ in 0..2 { free(BufPool::Icmp, 64).expect("multi_free"); }
+    let p = &pool_stats()[BufPool::Icmp.index()];
+    assert_eq!((p.active_buffers, p.peak_buffers), (3, 5));
     crate::serial_println!("  [5/8] peak: OK");
 
-    // 6: Multiple pools.
+    // 6: Multiple pools — General alloc then free nets zero active buffers.
     alloc(BufPool::General, 4096).expect("gen_alloc");
     free(BufPool::General, 4096).expect("gen_free");
+    assert_eq!(pool_stats()[BufPool::General.index()].active_buffers, 0);
     crate::serial_println!("  [6/8] multi pool: OK");
 
-    // 7: Pool stats.
-    let pools = pool_stats();
-    assert!(pools[0].allocs > 100_000_000);
+    // 7: Pool stats — TCP saw exactly one alloc.
+    assert_eq!(pool_stats()[BufPool::Tcp.index()].allocs, 1);
     crate::serial_println!("  [7/8] pool stats: OK");
 
-    // 8: Stats.
+    // 8: Final stats reflect only the real activity above. allocs: tcp 1 +
+    //    icmp 5 + general 1 = 7; frees: tcp 1 + icmp 2 + general 1 = 4; drops 1;
+    //    bytes: 1500 + 5*64 + 4096 = 5916 (cumulative, not reduced by frees).
     let (count, allocs, frees, drops, bytes, ops) = stats();
-    assert_eq!(count, 6);
-    assert!(allocs > 176_500_000);
-    assert!(frees > 176_434_200);
-    assert!(drops > 6_660);
-    assert!(bytes > 231_600_000);
+    assert_eq!((count, allocs, frees, drops, bytes), (6, 7, 4, 1, 5916));
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 
+    // Leave no residue in the live state.
+    *STATE.lock() = None;
     crate::serial_println!("sockbuf::self_test() — all 8 tests passed");
 }

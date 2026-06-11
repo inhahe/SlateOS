@@ -949,6 +949,21 @@
 ##                    hits / 1 miss / 300ns). NOTE: ftrace was NOT previously wired
 ##                    into the boot self-test path — now added. /proc/ftrace now
 ##                    106 bytes.)
+##   - sockbuf.rs    (fixed 2026-06-11; fs/sockbuf.rs statistics module backing
+##                    /proc/sockbuf and the `sockbuf` kshell command; was:
+##                    fabricated activity across all six buffer pools — e.g. TCP
+##                    with 50,000 active buffers, 100M allocs and 200MB in flight —
+##                    with global totals of 176.5M allocs / 176.4M frees / 6,660
+##                    drops / 231.6MB. MIXED structure: the six pools (tcp/udp/raw/
+##                    icmp/mcast/general) are a fixed taxonomy → KEPT with ZEROED
+##                    counters (case c); the alloc/free/record_drop API already
+##                    exists (case a). Rebuilt self_test residue-free with exact
+##                    assertions: per-pool + global alloc/byte/peak advance, free
+##                    drops active+bytes, peak holds high-water across frees, drop
+##                    counting, cumulative byte accounting, final totals (7 allocs /
+##                    4 frees / 1 drop / 5916 bytes). NOTE: sockbuf was NOT
+##                    previously wired into the boot self-test path — now added.
+##                    /proc/sockbuf now 77 bytes.)
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -962,14 +977,14 @@
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
 ##     + netfilter + mempress + devfreq + memcg + cgmem + vmzone + vmballoon
-##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace (just fixed) were twenty-five. Next ticks: work through the
+##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf (just fixed) were twenty-six. Next ticks: work through the
 ##     remaining candidates ONE PER TICK, auditing each before acting. The
 ##     52-file list includes both STATISTICS modules (fix: empty / zero-counters)
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or
 ##     real topology (LEAVE ALONE). Verify each is a statistics module fabricating
 ##     observed numbers surfaced via /proc before emptying it. Next candidate:
-##     sockbuf. Remaining flagged names incl.:
-##     sockbuf, msivec,
+##     msivec. Remaining flagged names incl.:
+##     msivec,
 ##     clocksrc, cpuidle, cpucache, userfault, iomem, pgtable, memdiag, sysuptime,
 ##     sysmaint, ipcns, ioport, hwrng, certmgr, authbroker, secmod, binfmt,
 ##     recoverypart, logrotate, diskclean, gamemode, usagetime, screentime,

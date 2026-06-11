@@ -1630,6 +1630,19 @@ extern "C" fn kernel_main() -> ! {
     // disabled-probe miss counting, max-ns tracking, and the global toggle) and
     // resets the list afterward, so it is safe at boot.
     fs::ftrace::self_test();
+    // sockbuf backs /proc/sockbuf (socket-buffer pool diagnostics: per-pool
+    // active-buffers/bytes/allocs/frees/drops/peak across tcp/udp/raw/icmp/mcast/
+    // general plus global alloc/free/drop/byte totals).  Its init_defaults()
+    // previously seeded fabricated activity across all six pools — e.g. TCP with
+    // 50,000 active buffers, 100M allocs and 200MB in flight — with global totals
+    // of 176.5M allocs / 176.4M frees / 6,660 drops / 231.6MB; that demo data was
+    // removed.  The six buffer pools are a fixed taxonomy so they are kept with
+    // ZEROED counters, and counters advance only on real alloc/free/record_drop
+    // calls.  The residue-free self_test builds its fixtures via the real API
+    // with exact assertions (incl. peak high-water tracking across frees and
+    // cumulative byte accounting) and resets the table afterward, so it is safe
+    // at boot.
+    fs::sockbuf::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

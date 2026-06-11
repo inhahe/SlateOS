@@ -107,27 +107,56 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** RCU-statistics table.
+///
+/// Seeds NO per-CPU rows, no grace-period history, and zero totals (current GP
+/// id 0).  Real RCU accounting is wired through [`register_cpu`] (one
+/// zero-counter row per online CPU, populated by the RCU core at bring-up),
+/// [`begin_gp`]/[`end_gp`], [`queue_callback`]/[`process_callbacks`],
+/// [`quiescent`], and [`report_stall`]; until those are called the tables are
+/// genuinely empty, so the `/proc/rcustat` file and the `rcustat` kshell
+/// command report zeros rather than fabricated numbers — the kernel's hard
+/// "never invent data in procfs" rule.
+///
+/// NOTE: this previously seeded four fictional per-CPU rows (cpu0..3 with
+/// callbacks_invoked 1000–2500 and quiescent_states 50_000–80_000) plus
+/// invented aggregate state (current_gp_id 100, total_gp 100, total_callbacks
+/// 6000), which `/proc/rcustat` then displayed as if they were real
+/// grace-period/callback measurements.  That demo data was removed; the
+/// self-test now builds its own fixtures explicitly via the real API (see
+/// [`self_test`]).  The RCU core is expected to call [`register_cpu`] per online
+/// CPU and the begin_gp/end_gp/queue_callback/etc. functions as RCU runs.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
-    let now = crate::hpet::elapsed_ns();
-    let mut cpu_states = Vec::new();
-    for i in 0..4u32 {
-        cpu_states.push(CpuRcuState {
-            cpu_id: i, callbacks_pending: 0, callbacks_invoked: 1000 + i as u64 * 500,
-            quiescent_states: 50000 + i as u64 * 10000, in_critical_section: false,
-        });
-    }
     *guard = Some(State {
-        cpu_states,
+        cpu_states: Vec::new(),
         gp_history: Vec::new(),
-        current_gp_id: 100,
-        current_gp_start: now,
-        total_gp: 100,
-        total_callbacks: 6000,
+        current_gp_id: 0,
+        current_gp_start: 0,
+        total_gp: 0,
+        total_callbacks: 0,
         total_stalls: 0,
         ops: 0,
     });
+}
+
+/// Register a CPU for RCU tracking.
+///
+/// The RCU core calls this once per online CPU at bring-up so the per-CPU state
+/// table reflects the real topology with zeroed counters.  Callback/quiescent
+/// accounting ([`queue_callback`], [`process_callbacks`], [`quiescent`]) returns
+/// `NotFound` for an unregistered CPU id.
+pub fn register_cpu(cpu_id: u32) -> KernelResult<()> {
+    with_state(|state| {
+        if state.cpu_states.iter().any(|c| c.cpu_id == cpu_id) { return Err(KernelError::AlreadyExists); }
+        if state.cpu_states.len() >= MAX_CPU { return Err(KernelError::ResourceExhausted); }
+        state.cpu_states.push(CpuRcuState {
+            cpu_id, callbacks_pending: 0, callbacks_invoked: 0,
+            quiescent_states: 0, in_critical_section: false,
+        });
+        Ok(())
+    })
 }
 
 /// Begin a new grace period.
@@ -225,58 +254,77 @@ pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("rcustat::self_test() — running tests...");
+    // Begin from a clean, EMPTY table and build every fixture via the real
+    // API, so the test exercises genuine accounting paths and never relies on
+    // fabricated seed data (which /proc/rcustat must never surface).
+    // Resetting first clears any residue from a prior `rcustat test` run so the
+    // totals asserted below are exact.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(cpu_stats().len(), 4);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty after init — no fabricated CPUs, history, or grace periods.
+    assert_eq!(cpu_stats().len(), 0);
+    let (c0, gp0, tgp0, tcb0, st0, _o0) = stats();
+    assert_eq!((c0, gp0, tgp0, tcb0, st0), (0, 0, 0, 0, 0));
+    crate::serial_println!("  [1/8] empty init: OK");
 
-    // 2: Begin GP.
+    // 2: Register CPUs (zeroed); the grace-period id starts from 0.
+    register_cpu(0).expect("cpu0");
+    register_cpu(1).expect("cpu1");
+    assert!(register_cpu(0).is_err());
     let gp_id = begin_gp(RcuFlavor::Preempt).expect("begin");
-    assert_eq!(gp_id, 101);
+    assert_eq!(gp_id, 1);
     crate::serial_println!("  [2/8] begin gp: OK");
 
-    // 3: End GP.
+    // 3: End GP records exactly one history entry.
     end_gp(RcuFlavor::Preempt, 10).expect("end");
     let hist = gp_history(5);
     assert_eq!(hist.len(), 1);
     assert_eq!(hist[0].callbacks_processed, 10);
     crate::serial_println!("  [3/8] end gp: OK");
 
-    // 4: Queue callback.
+    // 4: Queue callbacks (exact, from zero); unknown CPU fails.
     queue_callback(0).expect("queue");
     queue_callback(0).expect("queue2");
-    let cpus = cpu_stats();
-    assert_eq!(cpus[0].callbacks_pending, 2);
+    let c = cpu_stats().iter().find(|c| c.cpu_id == 0).cloned().expect("cpu0");
+    assert_eq!(c.callbacks_pending, 2);
+    assert!(queue_callback(99).is_err());
     crate::serial_println!("  [4/8] queue callback: OK");
 
-    // 5: Process callbacks.
+    // 5: Process callbacks moves pending → invoked.
     process_callbacks(0, 1).expect("process");
-    let cpus = cpu_stats();
-    assert_eq!(cpus[0].callbacks_pending, 1);
+    let c = cpu_stats().iter().find(|c| c.cpu_id == 0).cloned().expect("cpu0");
+    assert_eq!(c.callbacks_pending, 1);
+    assert_eq!(c.callbacks_invoked, 1);
     crate::serial_println!("  [5/8] process callbacks: OK");
 
-    // 6: Quiescent.
-    let before = cpu_stats()[0].quiescent_states;
+    // 6: Quiescent state increments from exactly zero.
     quiescent(0).expect("qs");
-    let after = cpu_stats()[0].quiescent_states;
-    assert_eq!(after, before + 1);
+    let c = cpu_stats().iter().find(|c| c.cpu_id == 0).cloned().expect("cpu0");
+    assert_eq!(c.quiescent_states, 1);
     crate::serial_println!("  [6/8] quiescent: OK");
 
-    // 7: Stall.
+    // 7: Stall counter increments exactly.
     report_stall(0).expect("stall");
     let (_, _, _, _, stalls, _) = stats();
     assert_eq!(stalls, 1);
     crate::serial_println!("  [7/8] stall: OK");
 
-    // 8: Stats.
+    // 8: Aggregate totals equal the exact sums of the operations above.
+    //    total_callbacks = 10 (end_gp) + 1 (process_callbacks) = 11.
     let (cpus, gp, total_gp, total_cb, _stalls, ops) = stats();
-    assert_eq!(cpus, 4);
-    assert_eq!(gp, 101);
-    assert!(total_gp >= 101);
-    assert!(total_cb > 6000);
+    assert_eq!(cpus, 2);
+    assert_eq!(gp, 1);
+    assert_eq!(total_gp, 1);
+    assert_eq!(total_cb, 11);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Leave NO residue: a diagnostic self-test must not populate the live
+    // /proc/rcustat table with its fixtures.  Reset to the uninitialised state
+    // so production reads report an empty table until the RCU core wires real
+    // accounting.
+    *STATE.lock() = None;
 
     crate::serial_println!("rcustat::self_test() — all 8 tests passed");
 }

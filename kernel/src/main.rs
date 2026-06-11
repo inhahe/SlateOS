@@ -1152,6 +1152,13 @@ extern "C" fn kernel_main() -> ! {
     // automated coverage it previously lacked (it was only reachable via the
     // `migstat test` kshell subcommand).
     fs::migstat::self_test();
+    // rcustat backs /proc/rcustat (RCU grace-period/callback/per-CPU stats);
+    // like its siblings the self-test now builds fixtures via the real
+    // register_cpu/begin_gp/end_gp/queue_callback API and resets the table
+    // afterward (leaving no fabricated rows), so it is safe at boot and gives
+    // the module automated coverage it previously lacked (it was only reachable
+    // via the `rcustat test` kshell subcommand).
+    fs::rcustat::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

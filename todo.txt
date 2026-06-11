@@ -292,14 +292,20 @@
 ##                    wired into boot. Resolves the per-CPU zero-row judgment:
 ##                    the right answer is a real registration API, not seeded
 ##                    rows — same pattern applies to rcustat/tlbstat below.)
+##   - rcustat.rs    (fixed 2026-06-11; was: fake per-CPU rows cpu0..3
+##                    callbacks_invoked 1000–2500, quiescent_states 50_000–80_000;
+##                    invented current_gp_id 100, total_gp 100, total_callbacks
+##                    6000. Added register_cpu(cpu_id) for zeroed per-CPU rows;
+##                    emptied init_defaults and rebuilt self_test with exact
+##                    assertions, wired into boot.)
 ## Confirmed STILL FABRICATING (audited 2026-06-11, NOT yet fixed):
-##   - rcustat.rs    (per-CPU: fake callbacks_invoked 1000+, quiescent_states
-##                    50000+, current_gp_id 100, total_callbacks 6000. Apply the
-##                    migstat pattern: add register_cpu(cpu_id) for zero-counter
-##                    per-CPU rows, empty init_defaults, rebuild self_test.)
 ##   - tlbstat.rs    (per-CPU: fake hits 5_000_000+, misses 50_000+, shootdowns,
-##                    walk_cycles; aggregate total_hits 26_000_000. Same migstat
-##                    register_cpu pattern.)
+##                    walk_cycles; aggregate total_hits 26_000_000. Same migstat/
+##                    rcustat register_cpu pattern: add register_cpu(cpu_id) for
+##                    zeroed per-CPU rows, empty init_defaults, rebuild self_test.)
+## After tlbstat, audit the remaining *stat/*latency/*stats siblings for the same
+## fabricated-observation pattern (numastat, cpustat, irqstat, wqstat, … — each
+## needs the statistics-vs-settings judgment before emptying).
 ## EXPOSURE: main.rs does NOT mass-invoke these init_defaults() at boot, so the
 ## fabricated data is LATENT — it only becomes live in /proc once someone runs
 ## the module's `<name> test` kshell subcommand (whose old self_test called

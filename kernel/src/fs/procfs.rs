@@ -2302,10 +2302,9 @@ fn gen_pid_oom_score(task_id: u64) -> KernelResult<Vec<u8>> {
 
 /// `/proc/<pid>/oom_score_adj` — user OOM adjustment for the process.
 ///
-/// Read-only for now: the procfs `write_file` path is `NotSupported`
-/// globally, so user writes to tune the adjustment are a separate
-/// follow-up (tracked in `todo.txt`).  Unregistered processes report the
-/// Linux default of `0`.  Gated on process existence.
+/// Writable: see [`set_pid_oom_score_adj`] / the `ProcFs::write_file`
+/// override.  Unregistered processes report the Linux default of `0`.
+/// Gated on process existence.
 fn gen_pid_oom_score_adj(task_id: u64) -> KernelResult<Vec<u8>> {
     if crate::proc::pcb::state(task_id).is_none() {
         return Err(KernelError::NotFound);
@@ -2315,6 +2314,42 @@ fn gen_pid_oom_score_adj(task_id: u64) -> KernelResult<Vec<u8>> {
         .and_then(crate::fs::oomkiller::get_score)
         .map_or(0, |s| s.adj);
     Ok(render_oom_score_adj(adj))
+}
+
+/// Parse the value written to `/proc/<pid>/oom_score_adj`.
+///
+/// Pure helper (unit-testable).  Linux accepts an ASCII decimal integer,
+/// tolerating surrounding whitespace and a trailing newline (the shell's
+/// `echo -1000 > .../oom_score_adj`), and rejects anything outside the
+/// `-1000..=1000` range.  We mirror that: trim ASCII whitespace, parse a
+/// signed integer, and bound-check.  An empty or malformed write is
+/// `InvalidArgument` (Linux returns `-EINVAL`).
+fn parse_oom_score_adj(data: &[u8]) -> KernelResult<i32> {
+    let text = core::str::from_utf8(data)
+        .map_err(|_| KernelError::InvalidArgument)?;
+    let trimmed = text.trim();
+    let value: i32 = trimmed.parse().map_err(|_| KernelError::InvalidArgument)?;
+    if !(-1000..=1000).contains(&value) {
+        return Err(KernelError::InvalidArgument);
+    }
+    Ok(value)
+}
+
+/// Apply a write to `/proc/<pid>/oom_score_adj`.
+///
+/// Gated on process existence (NotFound for bare scheduler tasks), then
+/// validates the value via [`parse_oom_score_adj`] and stores it through
+/// [`crate::fs::oomkiller::adjust_score`].  A process the OOM subsystem
+/// has not registered yet returns `NotFound` from `adjust_score` — we have
+/// nowhere to persist an adjustment for an untracked process, which is the
+/// truthful outcome rather than silently dropping the write.
+fn set_pid_oom_score_adj(task_id: u64, data: &[u8]) -> KernelResult<()> {
+    if crate::proc::pcb::state(task_id).is_none() {
+        return Err(KernelError::NotFound);
+    }
+    let adj = parse_oom_score_adj(data)?;
+    let pid = u32::try_from(task_id).map_err(|_| KernelError::InvalidArgument)?;
+    crate::fs::oomkiller::adjust_score(pid, adj)
 }
 
 /// Render `/proc/<pid>/schedstat` — scheduler statistics, Linux-format.
@@ -11278,6 +11313,26 @@ impl FileSystem for ProcFs {
         }
     }
 
+    /// Procfs is read-only except for the handful of tunable per-PID
+    /// control files.  Currently only `/proc/<pid>/oom_score_adj` accepts
+    /// writes (mirroring Linux's `echo N > .../oom_score_adj`); every other
+    /// path stays `NotSupported`, preserving the read-only contract the
+    /// rest of procfs relies on.
+    fn write_file(&mut self, path: &str, data: &[u8]) -> KernelResult<()> {
+        let rel = strip_root(path);
+
+        match classify_path(rel) {
+            ProcPath::PidFile(pid, "oom_score_adj") => {
+                if !task_exists(pid) {
+                    return Err(KernelError::NotFound);
+                }
+                set_pid_oom_score_adj(pid, data)
+            }
+            ProcPath::NotFound => Err(KernelError::NotFound),
+            _ => Err(KernelError::NotSupported),
+        }
+    }
+
     fn stat(&mut self, path: &str) -> KernelResult<DirEntry> {
         let rel = strip_root(path);
 
@@ -11520,12 +11575,28 @@ pub fn self_test() -> KernelResult<()> {
     }
     serial_println!("[procfs]   read_file /: IsADirectory OK");
 
-    // Test write (should fail — read-only).
+    // Test write to a read-only root file (should fail — NotSupported).
     if fs.write_file("/version", b"hacked").is_ok() {
         serial_println!("[procfs]   FAIL: write_file should fail (NotSupported)");
         return Err(KernelError::InternalError);
     }
     serial_println!("[procfs]   write_file: NotSupported OK");
+
+    // The one writable per-PID file: a malformed oom_score_adj write must
+    // be rejected before it can reach the OOM subsystem.  Use a live PID
+    // path so it gets past classify_path; any existing task id works since
+    // the value is invalid regardless.
+    {
+        let probe_tid = crate::sched::current_task_id();
+        let bad_path = format!("/{probe_tid}/oom_score_adj");
+        if fs.write_file(&bad_path, b"not-a-number").is_ok() {
+            serial_println!(
+                "[procfs]   FAIL: oom_score_adj accepted malformed write"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[procfs]   oom_score_adj write: rejects malformed OK");
+    }
 
     // --- Per-PID directory tests ---
 
@@ -11828,6 +11899,49 @@ pub fn self_test() -> KernelResult<()> {
             }
         }
         serial_println!("[procfs]   oom_score/oom_score_adj render: {} cases OK", cases.len());
+    }
+
+    // --- /proc/<pid>/oom_score_adj write parsing ---
+    // parse_oom_score_adj is the pure parser behind the writable file: it
+    // trims whitespace/newlines, parses a signed integer, and rejects the
+    // out-of-range and malformed cases with InvalidArgument.
+    {
+        // Accepted forms, including the shell's trailing newline and spaces.
+        let ok_cases: [(&[u8], i32); 6] = [
+            (b"0", 0),
+            (b"500\n", 500),
+            (b"-1000\n", -1000),
+            (b"1000", 1000),
+            (b"  42  \n", 42),
+            (b"-7", -7),
+        ];
+        for (input, want) in ok_cases {
+            match parse_oom_score_adj(input) {
+                Ok(v) if v == want => {}
+                other => {
+                    serial_println!(
+                        "[procfs]   FAIL: parse_oom_score_adj({:?}) = {:?}, want {}",
+                        input, other, want
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+        }
+        // Rejected forms: out of range, empty, non-numeric.
+        let bad_cases: [&[u8]; 5] = [b"1001", b"-1001", b"", b"abc", b"12x"];
+        for input in bad_cases {
+            if parse_oom_score_adj(input).is_ok() {
+                serial_println!(
+                    "[procfs]   FAIL: parse_oom_score_adj({:?}) accepted, want InvalidArgument",
+                    input
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        serial_println!(
+            "[procfs]   oom_score_adj parse: {} accept + {} reject OK",
+            ok_cases.len(), bad_cases.len()
+        );
     }
 
     // --- /proc/<pid>/schedstat rendering ---

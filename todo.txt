@@ -33,18 +33,20 @@
 ## per-PID generators keyed by tid.  Deferred: structural change, larger
 ## than a single autonomous tick warrants without review.
 ##
-## FOLLOW-UP (2026-06-10): writable /proc/<pid>/oom_score_adj
-## /proc/<pid>/oom_score and /proc/<pid>/oom_score_adj are now served
-## read-only (kernel/src/fs/procfs.rs: gen_pid_oom_score{,_adj},
-## render_oom_score{,_adj}), backed by fs::oomkiller::get_score.  Real
-## apps (Chromium, systemd, journald) WRITE oom_score_adj to tune kill
-## priority.  procfs write_file is NotSupported globally, so writes are a
-## separate feature.  Proper fix: add a per-PID writable-file path in the
-## procfs FileSystem::write_file impl that parses an integer in
-## -1000..=1000 and calls oomkiller::adjust_score(pid, adj) (which already
-## validates the range).  Trigger: when a ported app needs to lower its
-## own OOM priority, or when wiring oom_score_adj into the OOM victim
-## selection from userspace.
+## DONE (2026-06-10): writable /proc/<pid>/oom_score_adj
+## /proc/<pid>/oom_score_adj now accepts writes (kernel/src/fs/procfs.rs:
+## ProcFs::write_file override → set_pid_oom_score_adj → parse_oom_score_adj
+## → fs::oomkiller::adjust_score). The write_file override routes only
+## PidFile(pid,"oom_score_adj") to the setter; every other procfs path
+## stays NotSupported, preserving the read-only contract. parse_oom_score_adj
+## trims whitespace/newline, parses a signed int, and rejects out-of-range
+## (-1000..=1000) / malformed input with InvalidArgument. A process the OOM
+## subsystem has not registered returns NotFound from adjust_score (we have
+## nowhere to persist an adjustment for an untracked process). Self-tested
+## (6 accept + 5 reject parse cases, plus a live malformed-write rejection).
+## REMAINING: lazily register a process with the oomkiller on first write so
+## an adj can be stored before the OOM scanner first sees the process — only
+## needed if a ported app writes oom_score_adj very early in its lifetime.
 ##
 ## DONE (2026-06-10): /proc/<pid>/exe symlink
 ## procfs serves /proc/<pid>/{cwd,root,exe} as real symlinks

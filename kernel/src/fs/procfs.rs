@@ -1791,19 +1791,20 @@ fn gen_thread_status(proc_id: u64, tid: u64) -> KernelResult<Vec<u8>> {
     Ok(build_pid_status(task, proc_id))
 }
 
-/// Format a CPU affinity mask as Linux's `/proc/<pid>/status` `Cpus_allowed:`
-/// hex bitmap.  Matches the kernel's `%*pb` (`bitmap_string`) output exactly:
-/// the bitmap is sized to `ncpus`, printed in comma-separated 32-bit groups
-/// most-significant-first; the top (possibly partial) group is zero-padded to
-/// `ceil(top_bits / 4)` hex digits and every lower group to 8.  Examples:
-/// `(0xff, 8) -> "ff"`, `(1, 12) -> "001"`, `(u64::MAX, 64) ->
-/// "ffffffff,ffffffff"`, `(all_40, 40) -> "ff,ffffffff"`.  Pure (no locks),
-/// so it is unit-tested directly with synthetic masks in `self_test`.
-fn format_cpus_allowed(mask: u64, ncpus: usize) -> String {
+/// Format a bitmap (`u64` mask, sized to `nbits` significant bits) the way the
+/// Linux kernel's `%*pb` (`bitmap_string`) conversion does — used for the
+/// `/proc/<pid>/status` `Cpus_allowed:` and `Mems_allowed:` hex bitmaps.  The
+/// bitmap is printed in comma-separated 32-bit groups most-significant-first;
+/// the top (possibly partial) group is zero-padded to `ceil(top_bits / 4)` hex
+/// digits and every lower group to 8.  Examples: `(0xff, 8) -> "ff"`,
+/// `(1, 12) -> "001"`, `(u64::MAX, 64) -> "ffffffff,ffffffff"`,
+/// `(all_40, 40) -> "ff,ffffffff"`, `(1, 1) -> "1"`, `(3, 2) -> "3"`.  Pure (no
+/// locks), so it is unit-tested directly with synthetic masks in `self_test`.
+fn format_bitmap_hex(mask: u64, nbits_in: usize) -> String {
     use core::fmt::Write as _;
     // Our mask is a u64, so cap the width at 64; size to at least one bit
-    // because Linux always emits a group (nr_cpu_ids >= 1).
-    let nbits = ncpus.clamp(1, 64);
+    // because Linux always emits a group (the bitmap width is >= 1).
+    let nbits = nbits_in.clamp(1, 64);
     // Drop any stray bits beyond the sized width, as the kernel does.
     let mask = if nbits >= 64 {
         mask
@@ -1835,12 +1836,13 @@ fn format_cpus_allowed(mask: u64, ncpus: usize) -> String {
     s
 }
 
-/// Format a CPU affinity mask as Linux's `Cpus_allowed_list:` range list, e.g.
-/// `(0xff, 8) -> "0-7"`, `(0b1101, 8) -> "0,2-3"`, `(1, 8) -> "0"`,
-/// `(0, 8) -> ""`.  Pure; unit-tested in `self_test`.
-fn format_cpus_allowed_list(mask: u64, ncpus: usize) -> String {
+/// Format a bitmap as Linux's range list (used for `Cpus_allowed_list:` and
+/// `Mems_allowed_list:`), e.g. `(0xff, 8) -> "0-7"`, `(0b1101, 8) -> "0,2-3"`,
+/// `(1, 8) -> "0"`, `(0, 8) -> ""`, `(1, 1) -> "0"`.  Pure; unit-tested in
+/// `self_test`.
+fn format_bitmap_list(mask: u64, nbits_in: usize) -> String {
     use core::fmt::Write as _;
-    let nbits = ncpus.clamp(0, 64);
+    let nbits = nbits_in.clamp(0, 64);
     let mut s = String::new();
     let mut cpu = 0usize;
     let mut first = true;
@@ -1988,11 +1990,29 @@ fn build_pid_status(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
             (1u64 << ncpus).wrapping_sub(1)
         }
     });
-    let _ = writeln!(s, "Cpus_allowed:\t{}", format_cpus_allowed(affinity, ncpus));
+    let _ = writeln!(s, "Cpus_allowed:\t{}", format_bitmap_hex(affinity, ncpus));
     let _ = writeln!(
         s,
         "Cpus_allowed_list:\t{}",
-        format_cpus_allowed_list(affinity, ncpus)
+        format_bitmap_list(affinity, ncpus)
+    );
+    // NUMA memory-node affinity.  We do not track a per-process mempolicy /
+    // cpuset mems mask, so the truthful value is "all online nodes allowed" —
+    // exactly Linux's default for a process under no cpuset restriction.  This
+    // is process-wide, sourced from the online node count (not invented data).
+    // numactl reads these.  node_count() <= MAX_NODES (8), so the mask always
+    // fits in a single small chunk.
+    let nnodes = crate::numa::node_count();
+    let node_mask = if nnodes >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << nnodes).wrapping_sub(1)
+    };
+    let _ = writeln!(s, "Mems_allowed:\t{}", format_bitmap_hex(node_mask, nnodes));
+    let _ = writeln!(
+        s,
+        "Mems_allowed_list:\t{}",
+        format_bitmap_list(node_mask, nnodes)
     );
     // Context switches: the native scheduler tracks a single schedule count,
     // not Linux's voluntary/nonvoluntary split.  A preemptive round-robin
@@ -12313,12 +12333,30 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[procfs]   build_pid_status: Cpus_allowed present and ordered OK");
+
+        // Mems_allowed/Mems_allowed_list lines must be present and ordered
+        // after Cpus_allowed_list, before the ctxt-switch lines.
+        if !stext.contains("\nMems_allowed:\t") || !stext.contains("\nMems_allowed_list:\t") {
+            serial_println!("[procfs]   FAIL: status missing Mems_allowed lines");
+            return Err(KernelError::InternalError);
+        }
+        let p_cpus_list = stext.find("\nCpus_allowed_list:\t");
+        let p_mems = stext.find("\nMems_allowed:\t");
+        if !(p_cpus_list < p_mems && p_mems < p_vctx2) {
+            serial_println!(
+                "[procfs]   FAIL: status order Cpus_allowed_list<Mems_allowed<voluntary_ctxt_switches violated"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[procfs]   build_pid_status: Mems_allowed present and ordered OK");
     }
 
-    // --- Cpus_allowed bitmap/list formatter unit tests (deterministic) ---
+    // --- Bitmap hex/list formatter unit tests (deterministic) ---
     // Exact Linux %*pb (bitmap_string) expectations across chunk boundaries.
+    // These formatters back both Cpus_allowed and Mems_allowed, so the cases
+    // cover small (NUMA-node-style) widths as well as full CPU-mask widths.
     {
-        let hex_cases: [(u64, usize, &str); 9] = [
+        let hex_cases: [(u64, usize, &str); 12] = [
             (0xff, 8, "ff"),
             (1, 8, "01"),
             (0xfff, 12, "fff"),
@@ -12328,35 +12366,42 @@ pub fn self_test() -> KernelResult<()> {
             (u64::MAX, 64, "ffffffff,ffffffff"),
             (1, 64, "00000000,00000001"),
             (0xff_ffff_ffff, 40, "ff,ffffffff"),
+            // Small NUMA-node-style widths (Mems_allowed).
+            (1, 1, "1"),
+            (3, 2, "3"),
+            (0xff, 8, "ff"),
         ];
-        for (mask, ncpus, want) in hex_cases {
-            let got = format_cpus_allowed(mask, ncpus);
+        for (mask, nbits, want) in hex_cases {
+            let got = format_bitmap_hex(mask, nbits);
             if got != want {
                 serial_println!(
-                    "[procfs]   FAIL: format_cpus_allowed({mask:#x}, {ncpus}) = {:?}, want {:?}",
+                    "[procfs]   FAIL: format_bitmap_hex({mask:#x}, {nbits}) = {:?}, want {:?}",
                     got, want
                 );
                 return Err(KernelError::InternalError);
             }
         }
-        let list_cases: [(u64, usize, &str); 5] = [
+        let list_cases: [(u64, usize, &str); 7] = [
             (0xff, 8, "0-7"),
             (0b1101, 8, "0,2-3"),
             (1, 8, "0"),
             (0, 8, ""),
             (0b1010_0001, 8, "0,5,7"),
+            // Small NUMA-node-style widths (Mems_allowed_list).
+            (1, 1, "0"),
+            (3, 2, "0-1"),
         ];
-        for (mask, ncpus, want) in list_cases {
-            let got = format_cpus_allowed_list(mask, ncpus);
+        for (mask, nbits, want) in list_cases {
+            let got = format_bitmap_list(mask, nbits);
             if got != want {
                 serial_println!(
-                    "[procfs]   FAIL: format_cpus_allowed_list({mask:#x}, {ncpus}) = {:?}, want {:?}",
+                    "[procfs]   FAIL: format_bitmap_list({mask:#x}, {nbits}) = {:?}, want {:?}",
                     got, want
                 );
                 return Err(KernelError::InternalError);
             }
         }
-        serial_println!("[procfs]   format_cpus_allowed/list: all bitmap cases OK");
+        serial_println!("[procfs]   format_bitmap_hex/list: all bitmap cases OK");
     }
 
     // --- Per-PID directory tests ---

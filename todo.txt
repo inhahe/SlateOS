@@ -6,6 +6,24 @@
 ## [60, 3600], so 60 is the fastest the loop can fire).  Do NOT
 ## pad above 60 unless something specifically requires waiting.
 
+## DONE (2026-06-11): /proc/<pid>/status Mems_allowed + Mems_allowed_list
+## Linux always prints `Mems_allowed:`/`Mems_allowed_list:` (the NUMA memory
+## nodes a task may allocate from) right after the Cpus_allowed lines; numactl
+## and NUMA-aware tooling read them.  We do NOT track a per-process mempolicy /
+## cpuset mems mask, so the truthful value is "all online nodes allowed" — which
+## is exactly Linux's default for a process under no cpuset restriction (NOT
+## invented data; sourced from numa::node_count()).  node_count() <= MAX_NODES
+## (8), so the mask is always a single small chunk.
+## Refactor: the two Cpus_allowed formatters were renamed to generic bitmap
+## formatters (format_cpus_allowed -> format_bitmap_hex, format_cpus_allowed_list
+## -> format_bitmap_list) since they now back both CPU and NUMA-node bitmaps;
+## docs made bitmap-generic.  Added small-width self-test cases (1,1)->"1",
+## (3,2)->"3" hex and (1,1)->"0", (3,2)->"0-1" list, plus an integration
+## ordering assertion (Cpus_allowed_list < Mems_allowed < voluntary_ctxt_switches).
+## Boot test PASSED; serial shows "Mems_allowed present and ordered OK" and
+## "format_bitmap_hex/list: all bitmap cases OK".  build_pid_status in
+## kernel\src\fs\procfs.rs.
+
 ## DONE (2026-06-11): /proc/<pid>/status Cpus_allowed + Cpus_allowed_list
 ## Implemented properly (the deferral risk was mitigated by writing the
 ## formatting as PURE, unit-tested functions matching Linux %*pb exactly).

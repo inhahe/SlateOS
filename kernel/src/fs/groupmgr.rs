@@ -93,6 +93,25 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise the group manager with the standard system-group SKELETON.
+///
+/// The group definitions (gid, name, type, description) are a legitimate
+/// compiled-in skeleton — the universal Unix system groups that every install
+/// ships, analogous to a default `/etc/group`. They are configuration, not
+/// observations, so they are valid defaults.
+///
+/// Their MEMBER lists, however, are observations of which users belong to which
+/// group, and must come from the real user database — not be fabricated. The
+/// previous implementation seeded `wheel` with UID 1000 and `users` with UIDs
+/// 1000/1001 (UID 1001 does not exist in `useracct` at all), which `/proc` and
+/// the `groupmgr` shell command surfaced as real group memberships. So every
+/// group starts with an EMPTY member list; memberships are populated via
+/// `add_member()` when users are actually assigned.
+///
+/// DEFERRED PROPER FIX: wire group membership to `useracct` so the two stay
+/// consistent. NOTE (tech debt): `useracct` keeps its OWN, conflicting group
+/// list (e.g. gid 1 = "users" there vs "wheel" here) — the two group databases
+/// should be unified into a single source of truth.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
@@ -100,13 +119,13 @@ pub fn init_defaults() {
     *guard = Some(State {
         groups: alloc::vec![
             Group { gid: 0, name: String::from("root"), group_type: GroupType::System,
-                members: alloc::vec![0], description: String::from("System administrators"),
+                members: Vec::new(), description: String::from("System administrators"),
                 created_ns: now },
             Group { gid: 1, name: String::from("wheel"), group_type: GroupType::System,
-                members: alloc::vec![0, 1000], description: String::from("Sudo-capable users"),
+                members: Vec::new(), description: String::from("Sudo-capable users"),
                 created_ns: now },
             Group { gid: 100, name: String::from("users"), group_type: GroupType::User,
-                members: alloc::vec![1000, 1001], description: String::from("Regular users"),
+                members: Vec::new(), description: String::from("Regular users"),
                 created_ns: now },
             Group { gid: 999, name: String::from("daemon"), group_type: GroupType::Service,
                 members: Vec::new(), description: String::from("System daemons"),
@@ -217,11 +236,17 @@ pub fn stats() -> (usize, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("groupmgr::self_test() — running tests...");
+
+    // Residue-free: start from a known-empty state.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Default groups.
-    assert_eq!(list_groups().len(), 4);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Default group SKELETON — 4 groups, all with EMPTY memberships
+    // (we never fabricate which users belong to which group).
+    let groups = list_groups();
+    assert_eq!(groups.len(), 4);
+    assert!(groups.iter().all(|g| g.members.is_empty()));
+    crate::serial_println!("  [1/8] skeleton (empty members): OK");
 
     // 2: Get group.
     let g = get_group(0).expect("get");
@@ -229,10 +254,12 @@ pub fn self_test() {
     assert_eq!(g.group_type, GroupType::System);
     crate::serial_println!("  [2/8] get: OK");
 
-    // 3: Get by name.
+    // 3: Get by name. wheel starts empty; membership is added explicitly.
     let g = get_by_name("wheel").expect("by_name");
     assert_eq!(g.gid, 1);
-    assert!(g.members.contains(&1000));
+    assert!(g.members.is_empty());
+    add_member(1, 1000).expect("add wheel member");
+    assert!(get_by_name("wheel").expect("by_name2").members.contains(&1000));
     crate::serial_println!("  [3/8] by_name: OK");
 
     // 4: Create group.
@@ -251,9 +278,10 @@ pub fn self_test() {
     assert_eq!(g.members.len(), 1);
     crate::serial_println!("  [5/8] members: OK");
 
-    // 6: Groups for user.
+    // 6: Groups for user. UID 1000 was added to wheel (test 3) and developers
+    // (test 5); no memberships are fabricated at init.
     let user_groups = groups_for_user(1000);
-    assert!(user_groups.len() >= 3); // wheel, users, developers.
+    assert_eq!(user_groups.len(), 2);
     crate::serial_println!("  [6/8] groups_for_user: OK");
 
     // 7: Delete group.
@@ -270,6 +298,9 @@ pub fn self_test() {
     assert!(member_ops >= 3);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Residue-free: leave no fixtures behind.
+    *STATE.lock() = None;
 
     crate::serial_println!("groupmgr::self_test() — all 8 tests passed");
 }

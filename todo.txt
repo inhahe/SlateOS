@@ -2637,11 +2637,21 @@
 ##           set through the real content-addressed store / generations DB once pkg/
 ##           exposes a query API, and load repo config from its on-disk config.
 ##           boot-test PASSED (25s).
-##         - groupmgr: seeds root/wheel/users/daemon. System GIDs are a legitimate
-##           /etc/group skeleton, BUT member lists [0,1000]/[1000,1001] presume
-##           fabricated user UIDs. FIX: keep standard system groups (structural
-##           default) but EMPTY their member lists until a real user DB populates them
-##           — verify against any usermgr module for consistency.
+##         - groupmgr: FIXED 2026-06-11. Kept the 4 standard system-group
+##           DEFINITIONS (root/wheel/users/daemon — a legitimate /etc/group-style
+##           skeleton, config not observation) but EMPTIED all member lists. The old
+##           code seeded wheel=[0,1000] and users=[1000,1001] (UID 1001 exists in NO
+##           module — useracct only seeds UID 0 + UID 1000 "user"), surfaced via /proc
+##           and `groupmgr` as real memberships. Memberships are now populated via
+##           add_member() when users are actually assigned. self_test rewritten
+##           residue-free (reset STATE None start+end; assert all members empty; build
+##           membership fixtures explicitly via add_member). boot-test PASSED (27s).
+##           TECH DEBT logged (separate from fabrication): useracct keeps its OWN
+##           group list with CONFLICTING GIDs (gid 1 = "users" in useracct vs "wheel"
+##           in groupmgr; useracct also has audio/video/network/storage groups that
+##           groupmgr lacks). Two group databases = a design inconsistency that should
+##           be unified into a single source of truth (groupmgr) with useracct
+##           referencing it. DEFERRED: wire groupmgr membership to useracct.
 ##         - fontmgr: seeds Noto Sans/Serif/JetBrains Mono/Noto Color Emoji with
 ##           paths + fabricated glyph counts (3500/3200/800/3600). If these fonts
 ##           genuinely ship in the base image the family list is a legitimate

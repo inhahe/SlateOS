@@ -1687,6 +1687,22 @@ extern "C" fn kernel_main() -> ! {
     // transition counting) and resets the table afterward, so it is safe at
     // boot.
     fs::cpuidle::self_test();
+    // cpucache backs /proc/cpucache (CPU cache-hierarchy diagnostics: per-level
+    // geometry — size / line size / ways / sets / shared-CPU count — and
+    // hit/miss/eviction counters across L1d/L1i/L2/L3, plus global hit/miss
+    // totals and hit-rate percentages).  Its init_defaults() previously seeded a
+    // plausible-looking but unprobed hierarchy (32KB 8-way L1d/L1i, 256KB L2,
+    // 8MB 16-way L3 shared by 4 CPUs) with fabricated activity of 25,000,000,000
+    // total hits / 850,000,000 misses — surfaced as if the cache topology had
+    // been read from CPUID and its activity measured.  The four levels are a
+    // fixed taxonomy so the rows are kept, but with ZEROED geometry and
+    // counters; a new set_geometry() API lets a CPUID probe fill in real
+    // geometry, and the counters advance only on real record_hit/miss/eviction
+    // calls.  The residue-free self_test builds its fixtures via the real API
+    // with exact assertions (geometry persistence, per-level + overall hit-rate
+    // math, level→index mapping) and resets the table afterward, so it is safe
+    // at boot.
+    fs::cpucache::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

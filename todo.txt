@@ -1027,6 +1027,29 @@
 ##                    — now added. /proc/cpuidle now 53 bytes. PROPER FIX DEFERRED:
 ##                    SMP bringup should call cpuidle::register_cpu() for each core
 ##                    as it comes online — wire that when SMP CPU onlining exists.)
+##   - cpucache.rs   (fixed 2026-06-11; fs/cpucache.rs statistics module backing
+##                    /proc/cpucache and the `cpucache` kshell command; was: a
+##                    plausible-looking but UNPROBED cache hierarchy (32KB 8-way
+##                    L1d/L1i, 256KB L2, 8MB 16-way L3 shared by 4 CPUs) with
+##                    fabricated activity of 25,000,000,000 total hits /
+##                    850,000,000 misses — surfaced as if the topology had been
+##                    read from CPUID and its activity measured. MIXED structure:
+##                    the four levels (L1d/L1i/L2/L3) are a fixed taxonomy → KEPT
+##                    (case c) but with ZEROED geometry AND counters (the geometry
+##                    was just as fabricated as the counters — nothing probed
+##                    CPUID). record_hit/miss/eviction already exist; added
+##                    set_geometry(level, size_kb, line_size, ways, sets,
+##                    shared_cpus) so a real CPUID probe can fill the topology.
+##                    Rebuilt self_test residue-free with exact assertions:
+##                    set_geometry persists without touching counters, per-level +
+##                    global hit/miss advance, eviction counting, hit_rate(L1d)
+##                    7500 from 3 hits/1 miss, overall_hit_rate 6000 from 3 hits/2
+##                    misses, level→index mapping, final totals (3 hits / 2
+##                    misses). NOTE: cpucache was NOT previously wired into the
+##                    boot self-test path — now added. /proc/cpucache now 70 bytes.
+##                    PROPER FIX DEFERRED: a CPUID cache-topology probe at startup
+##                    should call cpucache::set_geometry() for each level — wire
+##                    that when CPUID cache enumeration exists.)
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -1040,14 +1063,14 @@
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
 ##     + netfilter + mempress + devfreq + memcg + cgmem + vmzone + vmballoon
-##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle (just fixed) were twenty-nine. Next ticks: work through the
+##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache (just fixed) were thirty. Next ticks: work through the
 ##     remaining candidates ONE PER TICK, auditing each before acting. The
 ##     52-file list includes both STATISTICS modules (fix: empty / zero-counters)
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or
 ##     real topology (LEAVE ALONE). Verify each is a statistics module fabricating
 ##     observed numbers surfaced via /proc before emptying it. Next candidate:
-##     cpucache. Remaining flagged names incl.:
-##     cpucache, userfault, iomem, pgtable, memdiag, sysuptime,
+##     userfault. Remaining flagged names incl.:
+##     userfault, iomem, pgtable, memdiag, sysuptime,
 ##     sysmaint, ipcns, ioport, hwrng, certmgr, authbroker, secmod, binfmt,
 ##     recoverypart, logrotate, diskclean, gamemode, usagetime, screentime,
 ##     startupopt, eyeprotect, fnotify. SETTINGS-looking names in that set

@@ -104,20 +104,62 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+fn empty_level(level: CacheLevel) -> CacheLevelInfo {
+    CacheLevelInfo {
+        level, size_kb: 0, line_size: 0, ways: 0, sets: 0, shared_cpus: 0,
+        hits: 0, misses: 0, evictions: 0,
+    }
+}
+
+/// Initialise the CPU-cache statistics state.
+///
+/// The four cache levels (L1d, L1i, L2, L3) are a fixed taxonomy so the rows
+/// are always present, but with ZEROED geometry and hit/miss/eviction
+/// counters. Real cache geometry (size, line size, ways, sets, shared-CPU
+/// count) is filled in through [`set_geometry`] once a CPUID-probe routine has
+/// read it from the hardware, and the hit/miss/eviction counters advance only
+/// through real [`record_hit`] / [`record_miss`] / [`record_eviction`] calls.
+/// The `/proc/cpucache` generator and the `cpucache` kshell command surface
+/// this table (and [`topology`] / [`hit_rate`]) as if it reflects the real
+/// cache hierarchy and its measured activity, so seeding it with invented
+/// geometry or counters would be fabricated procfs data.
+///
+/// (Previously this seeded a plausible-looking but unprobed hierarchy —
+/// 32KB 8-way L1d/L1i, 256KB L2, 8MB 16-way L3 shared by 4 CPUs — with
+/// fabricated activity of 25,000,000,000 total hits and 850,000,000 misses
+/// across the levels.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
         caches: [
-            CacheLevelInfo { level: CacheLevel::L1d, size_kb: 32, line_size: 64, ways: 8, sets: 64, shared_cpus: 1, hits: 10_000_000_000, misses: 500_000_000, evictions: 400_000_000 },
-            CacheLevelInfo { level: CacheLevel::L1i, size_kb: 32, line_size: 64, ways: 8, sets: 64, shared_cpus: 1, hits: 8_000_000_000, misses: 200_000_000, evictions: 150_000_000 },
-            CacheLevelInfo { level: CacheLevel::L2, size_kb: 256, line_size: 64, ways: 8, sets: 512, shared_cpus: 1, hits: 5_000_000_000, misses: 100_000_000, evictions: 80_000_000 },
-            CacheLevelInfo { level: CacheLevel::L3, size_kb: 8192, line_size: 64, ways: 16, sets: 8192, shared_cpus: 4, hits: 2_000_000_000, misses: 50_000_000, evictions: 40_000_000 },
+            empty_level(CacheLevel::L1d),
+            empty_level(CacheLevel::L1i),
+            empty_level(CacheLevel::L2),
+            empty_level(CacheLevel::L3),
         ],
-        total_hits: 25_000_000_000,
-        total_misses: 850_000_000,
+        total_hits: 0,
+        total_misses: 0,
         ops: 0,
     });
+}
+
+/// Set the geometry for a cache level from probed CPUID data.
+///
+/// This populates the hardware description of a level (size, line size,
+/// associativity ways, sets, and the number of CPUs sharing the cache) without
+/// touching its hit/miss/eviction counters. Intended to be called by the
+/// CPUID cache-topology probe at startup.
+pub fn set_geometry(level: CacheLevel, size_kb: u32, line_size: u32, ways: u32, sets: u32, shared_cpus: u32) -> KernelResult<()> {
+    with_state(|state| {
+        let c = &mut state.caches[level.index()];
+        c.size_kb = size_kb;
+        c.line_size = line_size;
+        c.ways = ways;
+        c.sets = sets;
+        c.shared_cpus = shared_cpus;
+        Ok(())
+    })
 }
 
 /// Record a cache hit.
@@ -193,57 +235,72 @@ pub fn stats() -> (usize, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("cpucache::self_test() — running tests...");
+    // Start from a clean, empty state so the assertions below are exact and
+    // no fixtures leak into the live cache table afterwards.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(topology().len(), 4);
-    crate::serial_println!("  [1/8] defaults: OK");
-
-    // 2: Hit.
-    let before = topology()[0].hits;
-    record_hit(CacheLevel::L1d).expect("hit");
-    let after = topology()[0].hits;
-    assert_eq!(after, before + 1);
-    crate::serial_println!("  [2/8] hit: OK");
-
-    // 3: Miss.
-    let before = topology()[2].misses;
-    record_miss(CacheLevel::L2).expect("miss");
-    let after = topology()[2].misses;
-    assert_eq!(after, before + 1);
-    crate::serial_println!("  [3/8] miss: OK");
-
-    // 4: Eviction.
-    let before = topology()[3].evictions;
-    record_eviction(CacheLevel::L3).expect("evict");
-    let after = topology()[3].evictions;
-    assert_eq!(after, before + 1);
-    crate::serial_println!("  [4/8] eviction: OK");
-
-    // 5: Hit rate per level.
-    let rate = hit_rate(CacheLevel::L1d);
-    assert!(rate > 9000); // > 90%.
-    crate::serial_println!("  [5/8] hit rate: OK");
-
-    // 6: Overall hit rate.
-    let rate = overall_hit_rate();
-    assert!(rate > 9000);
-    crate::serial_println!("  [6/8] overall rate: OK");
-
-    // 7: Topology.
+    // 1: Empty defaults — four zeroed levels, zero totals, zero overall rate.
     let topo = topology();
-    assert_eq!(topo[0].size_kb, 32);
-    assert_eq!(topo[3].size_kb, 8192);
-    assert_eq!(topo[3].shared_cpus, 4);
-    crate::serial_println!("  [7/8] topology: OK");
+    assert_eq!(topo.len(), 4);
+    for c in &topo {
+        assert_eq!((c.size_kb, c.line_size, c.ways, c.sets, c.shared_cpus), (0, 0, 0, 0, 0));
+        assert_eq!((c.hits, c.misses, c.evictions), (0, 0, 0));
+    }
+    let (l0, h0, m0, _) = stats();
+    assert_eq!((l0, h0, m0), (4, 0, 0));
+    assert_eq!(overall_hit_rate(), 0);
+    crate::serial_println!("  [1/8] empty defaults: OK");
 
-    // 8: Stats.
+    // 2: Geometry — set_geometry populates a level's hardware description
+    //    without touching its counters.
+    set_geometry(CacheLevel::L1d, 32, 64, 8, 64, 1).expect("geometry");
+    let c = topology()[CacheLevel::L1d.index()].clone();
+    assert_eq!((c.size_kb, c.line_size, c.ways, c.sets, c.shared_cpus), (32, 64, 8, 64, 1));
+    assert_eq!((c.hits, c.misses), (0, 0));
+    crate::serial_println!("  [2/8] geometry: OK");
+
+    // 3: Hits — three L1d hits advance the level and the global total.
+    for _ in 0..3 { record_hit(CacheLevel::L1d).expect("hit"); }
+    assert_eq!(topology()[CacheLevel::L1d.index()].hits, 3);
+    assert_eq!(stats().1, 3); // total_hits
+    crate::serial_println!("  [3/8] hit: OK");
+
+    // 4: Misses — one L1d miss and one L2 miss; per-level and global advance.
+    record_miss(CacheLevel::L1d).expect("miss_l1d");
+    record_miss(CacheLevel::L2).expect("miss_l2");
+    assert_eq!(topology()[CacheLevel::L1d.index()].misses, 1);
+    assert_eq!(topology()[CacheLevel::L2.index()].misses, 1);
+    assert_eq!(stats().2, 2); // total_misses
+    crate::serial_println!("  [4/8] miss: OK");
+
+    // 5: Eviction — L3 eviction counter advances (no global eviction total).
+    record_eviction(CacheLevel::L3).expect("evict");
+    assert_eq!(topology()[CacheLevel::L3.index()].evictions, 1);
+    crate::serial_println!("  [5/8] eviction: OK");
+
+    // 6: Hit rate — L1d saw 3 hits / 1 miss → 7500 (75.00%); an untouched level
+    //    (L1i) reports 0.
+    assert_eq!(hit_rate(CacheLevel::L1d), 7500);
+    assert_eq!(hit_rate(CacheLevel::L1i), 0);
+    crate::serial_println!("  [6/8] hit rate: OK");
+
+    // 7: Overall hit rate — 3 hits / 2 misses across all levels → 6000 (60.00%).
+    assert_eq!(overall_hit_rate(), 6000);
+    crate::serial_println!("  [7/8] overall rate: OK");
+
+    // 8: Final stats reflect only the real activity above; the level→index
+    //    mapping is intact (each row's level matches its slot).
+    let topo = topology();
+    for (i, c) in topo.iter().enumerate() {
+        assert_eq!(c.level.index(), i);
+    }
     let (levels, hits, misses, ops) = stats();
-    assert_eq!(levels, 4);
-    assert!(hits > 25_000_000_000);
-    assert!(misses > 850_000_000);
+    assert_eq!((levels, hits, misses), (4, 3, 2));
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 
+    // Leave no residue in the live state.
+    *STATE.lock() = None;
     crate::serial_println!("cpucache::self_test() — all 8 tests passed");
 }

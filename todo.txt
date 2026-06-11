@@ -784,6 +784,23 @@
 ##                    rss-vs-cache bucket routing, usage=rss+cache, high_events on
 ##                    over-limit charge, OOM accounting, and exact totals. Wired
 ##                    into boot. /proc/cgmem now 88 bytes.)
+##   - vmzone.rs     (fixed 2026-06-11; was: four fictional memory zones — DMA
+##                    4096 pages / 3000 free / 10k allocs; DMA32 262k pages / 1M
+##                    allocs / 5k reclaims; Normal 2M pages / 50M allocs / 100k
+##                    reclaims; Movable 500k pages / 5M allocs — plus invented
+##                    totals (56.01M allocs, 54.76M frees, 125.05k reclaims),
+##                    shown via /proc/vmzone and the vmzone kshell command as the
+##                    real page allocator's per-zone state. Memory zones ARE real
+##                    structure, but the page counts AND activity here were
+##                    fabricated; the page allocator publishes real zones via the
+##                    existing register(name,type,total,wmarks) API. Emptied
+##                    init_defaults (no zones, all totals 0) and rebuilt self_test
+##                    residue-free with exact assertions incl. free→active on
+##                    alloc, active→free on free, inactive→free on reclaim,
+##                    free_pages saturation at 0, and not-found on all three record
+##                    fns. Wired into boot. /proc/vmzone now 84 bytes. NOTE: when
+##                    the page allocator is wired to publish real zones, it should
+##                    call vmzone::register for each real zone at mm init.)
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -796,14 +813,15 @@
 ##     to `fn init_defaults` bodies containing a large numeric literal
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
-##     + netfilter + mempress + devfreq + memcg + cgmem (just fixed) were
-##     fifteen. Next ticks: work through the remaining candidates ONE PER TICK,
-##     auditing each before acting. The 52-file list includes both STATISTICS
-##     modules (fix: empty / zero-counters) AND SETTINGS or structural modules
-##     that seed LEGITIMATE config defaults or real topology (LEAVE ALONE). Verify
-##     each is a statistics module fabricating observed numbers surfaced via /proc
-##     before emptying it. Next candidate: vmzone. Remaining flagged names incl.:
-##     vmzone, vmballoon, softirq, timerq,
+##     + netfilter + mempress + devfreq + memcg + cgmem + vmzone (just fixed)
+##     were sixteen. Next ticks: work through the remaining candidates ONE PER
+##     TICK, auditing each before acting. The 52-file list includes both
+##     STATISTICS modules (fix: empty / zero-counters) AND SETTINGS or structural
+##     modules that seed LEGITIMATE config defaults or real topology (LEAVE
+##     ALONE). Verify each is a statistics module fabricating observed numbers
+##     surfaced via /proc before emptying it. Next candidate: vmballoon. Remaining
+##     flagged names incl.:
+##     vmballoon, softirq, timerq,
 ##     schedclass, schedwait, kthread, kstack, kprobes, ftrace, sockbuf, msivec,
 ##     clocksrc, cpuidle, cpucache, userfault, iomem, pgtable, memdiag, sysuptime,
 ##     sysmaint, ipcns, ioport, hwrng, certmgr, authbroker, secmod, binfmt,

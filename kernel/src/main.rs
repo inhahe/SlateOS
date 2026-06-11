@@ -1503,6 +1503,18 @@ extern "C" fn kernel_main() -> ! {
     // the real API with exact assertions and resets the table afterward, so it is
     // safe at boot.
     fs::cgmem::self_test();
+    // vmzone backs /proc/vmzone (per-zone page totals, watermarks, free/active/
+    // inactive pages, alloc/free/reclaim activity).  Its init_defaults()
+    // previously seeded four fictional zones — DMA 4096 pages / 10k allocs,
+    // DMA32 262k pages / 1M allocs, Normal 2M pages / 50M allocs / 100k reclaims,
+    // Movable 500k pages / 5M allocs — plus invented totals (56.01M allocs,
+    // 54.76M frees, 125.05k reclaims); that demo data was removed (the page
+    // allocator registers its real zones via register() with their actual page
+    // totals and watermarks, and publishes activity only through real
+    // record_alloc/record_free/record_reclaim calls).  The residue-free self_test
+    // builds its fixtures via the real API with exact assertions and resets the
+    // table afterward, so it is safe at boot.
+    fs::vmzone::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

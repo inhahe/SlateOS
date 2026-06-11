@@ -104,19 +104,29 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise the VM-zone statistics state.
+///
+/// Starts with no zones and all alloc/free/reclaim totals at zero. The
+/// `/proc/vmzone` generator and the `vmzone` kshell command surface this
+/// table as if it reflects the real page allocator's per-zone state, so
+/// seeding it with invented zones, page counts, and activity would be
+/// fabricated procfs data. The page allocator registers its real zones
+/// through [`register`] (with their actual page totals and watermarks) and
+/// publishes activity only through real [`record_alloc`] / [`record_free`]
+/// / [`record_reclaim`] calls.
+///
+/// (Previously this seeded four fictional zones — DMA 4096 pages / 10k
+/// allocs; DMA32 262k pages / 1M allocs; Normal 2M pages / 50M allocs /
+/// 100k reclaims; Movable 500k pages / 5M allocs — plus invented totals
+/// (56.01M allocs, 54.76M frees, 125.05k reclaims).)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        zones: alloc::vec![
-            ZoneStats { name: String::from("DMA"), zone_type: ZoneType::Dma, total_pages: 4096, free_pages: 3000, active_pages: 500, inactive_pages: 596, wmark_min: 100, wmark_low: 200, wmark_high: 400, allocs: 10_000, frees: 9_500, reclaim_count: 50 },
-            ZoneStats { name: String::from("DMA32"), zone_type: ZoneType::Dma32, total_pages: 262_144, free_pages: 100_000, active_pages: 100_000, inactive_pages: 62_144, wmark_min: 5_000, wmark_low: 10_000, wmark_high: 20_000, allocs: 1_000_000, frees: 950_000, reclaim_count: 5_000 },
-            ZoneStats { name: String::from("Normal"), zone_type: ZoneType::Normal, total_pages: 2_000_000, free_pages: 500_000, active_pages: 1_000_000, inactive_pages: 500_000, wmark_min: 50_000, wmark_low: 100_000, wmark_high: 200_000, allocs: 50_000_000, frees: 49_000_000, reclaim_count: 100_000 },
-            ZoneStats { name: String::from("Movable"), zone_type: ZoneType::Movable, total_pages: 500_000, free_pages: 200_000, active_pages: 200_000, inactive_pages: 100_000, wmark_min: 10_000, wmark_low: 20_000, wmark_high: 50_000, allocs: 5_000_000, frees: 4_800_000, reclaim_count: 20_000 },
-        ],
-        total_allocs: 56_010_000,
-        total_frees: 54_759_500,
-        total_reclaims: 125_050,
+        zones: Vec::new(),
+        total_allocs: 0,
+        total_frees: 0,
+        total_reclaims: 0,
         ops: 0,
     });
 }
@@ -195,63 +205,77 @@ pub fn stats() -> (usize, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("vmzone::self_test() — running tests...");
+    // Start from a clean, empty state so the assertions below are exact and
+    // no fixtures leak into the live zone table afterwards.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(per_zone().len(), 4);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty defaults — no fabricated zones, all totals zero.
+    assert_eq!(per_zone().len(), 0);
+    let (zones0, allocs0, frees0, reclaims0, _) = stats();
+    assert_eq!((zones0, allocs0, frees0, reclaims0), (0, 0, 0, 0));
+    crate::serial_println!("  [1/8] empty defaults: OK");
 
-    // 2: Register.
+    // 2: Register — new zone starts fully free; duplicate name errors.
     register("Test", ZoneType::Normal, 1000, 10, 50, 100).expect("register");
-    assert_eq!(per_zone().len(), 5);
+    assert_eq!(per_zone().len(), 1);
+    let z = per_zone().into_iter().find(|z| z.name == "Test").expect("z");
+    assert_eq!(z.free_pages, 1000);
+    assert_eq!(z.active_pages, 0);
     assert!(register("Test", ZoneType::Normal, 1000, 10, 50, 100).is_err());
     crate::serial_println!("  [2/8] register: OK");
 
-    // 3: Alloc.
+    // 3: Alloc moves pages free → active.
     record_alloc("Test", 100).expect("alloc");
-    let z = per_zone().iter().find(|z| z.name == "Test").cloned().unwrap();
+    let z = per_zone().into_iter().find(|z| z.name == "Test").expect("z");
     assert_eq!(z.allocs, 1);
     assert_eq!(z.free_pages, 900);
     assert_eq!(z.active_pages, 100);
     crate::serial_println!("  [3/8] alloc: OK");
 
-    // 4: Free.
+    // 4: Free moves pages active → free.
     record_free("Test", 50).expect("free");
-    let z = per_zone().iter().find(|z| z.name == "Test").cloned().unwrap();
+    let z = per_zone().into_iter().find(|z| z.name == "Test").expect("z");
     assert_eq!(z.frees, 1);
     assert_eq!(z.free_pages, 950);
     assert_eq!(z.active_pages, 50);
     crate::serial_println!("  [4/8] free: OK");
 
-    // 5: Reclaim.
-    // First put some pages in inactive
-    let z = per_zone().iter().find(|z| z.name == "Test").cloned().unwrap();
-    assert_eq!(z.inactive_pages, 0);
-    // Reclaim from Normal zone which has inactive pages
-    record_reclaim("Normal", 1000).expect("reclaim");
-    let z = per_zone().iter().find(|z| z.name == "Normal").cloned().unwrap();
-    assert!(z.reclaim_count > 100_000);
+    // 5: Reclaim moves inactive → free and counts the event. Seed inactive
+    //    pages via a second zone we control.
+    register("Reclaimable", ZoneType::Movable, 2000, 10, 50, 100).expect("register2");
+    // Move some pages into inactive by allocating then aging is out of scope
+    // here; record_reclaim simply saturates inactive at 0 and adds to free.
+    record_reclaim("Reclaimable", 100).expect("reclaim");
+    let z = per_zone().into_iter().find(|z| z.name == "Reclaimable").expect("z");
+    assert_eq!(z.reclaim_count, 1);
+    assert_eq!(z.inactive_pages, 0); // saturated, was 0
+    assert_eq!(z.free_pages, 2100); // 2000 initial + 100 reclaimed
     crate::serial_println!("  [5/8] reclaim: OK");
 
-    // 6: Saturating free (can't go below 0).
+    // 6: Allocs saturate free_pages at 0 (cannot go negative).
     for _ in 0..20 { record_alloc("Test", 100).expect("alloc_many"); }
-    let z = per_zone().iter().find(|z| z.name == "Test").cloned().unwrap();
-    // free_pages should be saturated at 0 (we allocated more than available)
-    assert!(z.free_pages == 0 || z.free_pages < 1000);
+    let z = per_zone().into_iter().find(|z| z.name == "Test").expect("z");
+    assert_eq!(z.free_pages, 0);
     crate::serial_println!("  [6/8] saturation: OK");
 
-    // 7: Not found.
+    // 7: Operations on an unknown zone error.
     assert!(record_alloc("nonexist", 1).is_err());
+    assert!(record_free("nonexist", 1).is_err());
+    assert!(record_reclaim("nonexist", 1).is_err());
     crate::serial_println!("  [7/8] not found: OK");
 
-    // 8: Stats.
+    // 8: Final stats reflect only the real activity above (21 allocs total:
+    //    1 in test 3 + 20 in test 6; 1 free; 1 reclaim; 2 zones).
     let (zones, allocs, frees, reclaims, ops) = stats();
-    assert!(zones >= 5);
-    assert!(allocs > 56_010_000);
-    assert!(frees > 54_759_500);
-    assert!(reclaims > 125_050);
+    assert_eq!(zones, 2);
+    assert_eq!(allocs, 21);
+    assert_eq!(frees, 1);
+    assert_eq!(reclaims, 1);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 
+    // Leave no residue in the live state.
+    *STATE.lock() = None;
     crate::serial_println!("vmzone::self_test() — all 8 tests passed");
 }

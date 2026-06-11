@@ -1218,6 +1218,14 @@ extern "C" fn kernel_main() -> ! {
     // coverage it previously lacked (it was only reachable via the
     // `bpfstat test` kshell subcommand).
     fs::bpfstat::self_test();
+    // budstat backs /proc/buddyinfo (per-zone buddy-allocator free counts and
+    // split/coalesce activity); like its siblings the self-test now builds
+    // fixtures via the real register_zone/update_free/record_split/
+    // record_coalesce API and resets the table afterward (leaving no fabricated
+    // rows), so it is safe at boot and gives the module automated coverage it
+    // previously lacked (it was only reachable via the `budstat test` kshell
+    // subcommand).
+    fs::budstat::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

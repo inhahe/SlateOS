@@ -76,26 +76,32 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** buddy-allocator info table.
+///
+/// Seeds NO zones and zero totals.  Real fragmentation accounting is wired
+/// through [`register_zone`] (one row per memory zone the page allocator
+/// brings online) and the `update_free`/`record_split`/`record_coalesce`
+/// functions; until those are called the table is genuinely empty, so the
+/// `/proc/buddyinfo` file and the `budstat` kshell command report zeros rather
+/// than fabricated numbers — the kernel's hard "never invent data in procfs"
+/// rule.
+///
+/// NOTE: this previously seeded two fictional zones ("DMA32" and "Normal") with
+/// invented per-order free_counts, splits (up to 1_000_000 at order 0), and
+/// coalesces, plus invented aggregate totals (total_splits 2_189_600,
+/// total_coalesces 2_079_570), which `/proc/buddyinfo` then displayed as if
+/// they were real per-zone fragmentation measurements.  That demo data was
+/// removed; the self-test now builds its own fixtures explicitly via the real
+/// API (see [`self_test`]).  The page allocator is expected to call
+/// [`register_zone`] per online zone and the update/record functions as the
+/// buddy structure splits and coalesces.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        zones: alloc::vec![
-            ZoneBuddyInfo {
-                zone_name: String::from("DMA32"),
-                free_counts: [512, 256, 128, 64, 32, 16, 8, 4, 2, 1, 0],
-                splits: [100_000, 50_000, 25_000, 12_000, 6_000, 3_000, 1_500, 700, 300, 100, 0],
-                coalesces: [90_000, 45_000, 22_000, 11_000, 5_500, 2_800, 1_400, 650, 280, 90, 0],
-            },
-            ZoneBuddyInfo {
-                zone_name: String::from("Normal"),
-                free_counts: [4096, 2048, 1024, 512, 256, 128, 64, 32, 16, 8, 4],
-                splits: [1_000_000, 500_000, 250_000, 125_000, 60_000, 30_000, 15_000, 7_000, 3_000, 1_000, 0],
-                coalesces: [950_000, 475_000, 237_000, 118_000, 58_000, 29_000, 14_500, 6_800, 2_900, 950, 0],
-            },
-        ],
-        total_splits: 2_189_600,
-        total_coalesces: 2_079_570,
+        zones: Vec::new(),
+        total_splits: 0,
+        total_coalesces: 0,
         ops: 0,
     });
 }
@@ -170,52 +176,70 @@ pub fn stats() -> (usize, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("buddyinfo::self_test() — running tests...");
+    // Begin from a clean, EMPTY table and build every fixture via the real
+    // API, so the test exercises genuine accounting paths and never relies on
+    // fabricated seed data (which /proc/buddyinfo must never surface).
+    // Resetting first clears any residue from a prior `budstat test` run so the
+    // totals asserted below are exact.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(per_zone().len(), 2);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty after init — no fabricated zones or totals.
+    assert_eq!(per_zone().len(), 0);
+    let (z0, s0, c0, _o0) = stats();
+    assert_eq!((z0, s0, c0), (0, 0, 0));
+    crate::serial_println!("  [1/8] empty init: OK");
 
-    // 2: Register.
+    // 2: Register zones (zeroed); duplicate name fails.
     register_zone("Test").expect("register");
-    assert_eq!(per_zone().len(), 3);
+    assert_eq!(per_zone().len(), 1);
     assert!(register_zone("Test").is_err());
+    let z = per_zone().iter().find(|z| z.zone_name == "Test").cloned().expect("zone");
+    assert_eq!(z.free_counts[0], 0);
+    assert_eq!(z.splits[0], 0);
     crate::serial_println!("  [2/8] register: OK");
 
-    // 3: Update free.
+    // 3: Update free sets the per-order count exactly.
     update_free("Test", 0, 100).expect("update");
-    let z = per_zone().iter().find(|z| z.zone_name == "Test").cloned().unwrap();
+    let z = per_zone().iter().find(|z| z.zone_name == "Test").cloned().expect("zone");
     assert_eq!(z.free_counts[0], 100);
     crate::serial_println!("  [3/8] update free: OK");
 
-    // 4: Split.
+    // 4: Split increments the per-order counter exactly from zero.
     record_split("Test", 3).expect("split");
-    let z = per_zone().iter().find(|z| z.zone_name == "Test").cloned().unwrap();
+    let z = per_zone().iter().find(|z| z.zone_name == "Test").cloned().expect("zone");
     assert_eq!(z.splits[3], 1);
     crate::serial_println!("  [4/8] split: OK");
 
-    // 5: Coalesce.
+    // 5: Coalesce increments the per-order counter exactly from zero.
     record_coalesce("Test", 2).expect("coalesce");
-    let z = per_zone().iter().find(|z| z.zone_name == "Test").cloned().unwrap();
+    let z = per_zone().iter().find(|z| z.zone_name == "Test").cloned().expect("zone");
     assert_eq!(z.coalesces[2], 1);
     crate::serial_println!("  [5/8] coalesce: OK");
 
-    // 6: Invalid order.
+    // 6: Out-of-range order is rejected with InvalidArgument.
     assert!(record_split("Test", MAX_ORDER).is_err());
     assert!(update_free("Test", MAX_ORDER + 1, 1).is_err());
     crate::serial_println!("  [6/8] invalid order: OK");
 
-    // 7: Not found.
+    // 7: Operations on an unregistered zone fail with NotFound.
     assert!(record_split("nonexist", 0).is_err());
+    assert!(update_free("nonexist", 0, 1).is_err());
     crate::serial_println!("  [7/8] not found: OK");
 
-    // 8: Stats.
+    // 8: Aggregate totals equal the exact sums of the operations above.
     let (zones, splits, coalesces, ops) = stats();
-    assert!(zones >= 3);
-    assert!(splits > 2_189_600);
-    assert!(coalesces > 2_079_570);
+    assert_eq!(zones, 1);
+    assert_eq!(splits, 1);     // one record_split
+    assert_eq!(coalesces, 1);  // one record_coalesce
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Leave NO residue: a diagnostic self-test must not populate the live
+    // /proc/buddyinfo table with its fixtures.  Reset to the uninitialised
+    // state so production reads report an empty table until the page allocator
+    // wires real accounting.
+    *STATE.lock() = None;
 
     crate::serial_println!("buddyinfo::self_test() — all 8 tests passed");
 }

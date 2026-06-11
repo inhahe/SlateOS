@@ -371,16 +371,24 @@
 ##                    record_verifier_error API; just emptied init_defaults
 ##                    (next ids reset to 1) and rebuilt self_test with exact
 ##                    assertions, wired into boot.)
+##   - budstat.rs    (fixed 2026-06-11; backs /proc/buddyinfo. Was: two fake
+##                    zones "DMA32" and "Normal" with invented per-order
+##                    free_counts, splits up to 1_000_000 at order 0, coalesces;
+##                    aggregates total_splits 2_189_600, total_coalesces
+##                    2_079_570. Already had a full register_zone/update_free/
+##                    record_split/record_coalesce API; just emptied
+##                    init_defaults and rebuilt self_test with exact assertions,
+##                    wired into boot.)
 ## Confirmed STILL FABRICATING (audited 2026-06-11, NOT yet fixed):
 ##   - (none currently confirmed — next tick: audit the remaining seeded
 ##     *stat siblings to find the next fabricator. Candidates flagged as SEEDED
-##     by grep (init_defaults with alloc::vec!/String::from/push): budstat,
-##     cgiostat, compstat, dmastat, inodestat, ksmstat, mmapstat, pagestat,
-##     pidstat, pmcstat, powerstat, procstat, ratestat, rqstat, schedlat,
-##     ttystat, zramstat. NOTE: some may be SETTINGS modules seeding legitimate
-##     config defaults — verify each is a STATISTICS module seeding fake
-##     OBSERVATIONS before emptying it.)
-## After bpfstat, continue auditing the remaining *stat/*latency/*stats siblings.
+##     by grep (init_defaults with alloc::vec!/String::from/push): cgiostat,
+##     compstat, dmastat, inodestat, ksmstat, mmapstat, pagestat, pidstat,
+##     pmcstat, powerstat, procstat, ratestat, rqstat, schedlat, ttystat,
+##     zramstat. NOTE: some may be SETTINGS modules seeding legitimate config
+##     defaults — verify each is a STATISTICS module seeding fake OBSERVATIONS
+##     before emptying it.)
+## After budstat, continue auditing the remaining *stat/*latency/*stats siblings.
 ## EXPOSURE: main.rs does NOT mass-invoke these init_defaults() at boot, so the
 ## fabricated data is LATENT — it only becomes live in /proc once someone runs
 ## the module's `<name> test` kshell subcommand (whose old self_test called

@@ -133,32 +133,19 @@ where
 // ---------------------------------------------------------------------------
 
 pub fn init_defaults() {
+    // No modules are loaded at start. This is a microkernel — drivers run in
+    // userspace and the FAT/ext4 filesystems are compiled in, so there is no
+    // real loaded-kernel-module table to read from. Seeding "Live" modules
+    // (virtio_blk/virtio_net/fat) with invented sizes and ref counts would
+    // surface fabricated module records through /proc and the `kmod` shell
+    // command as if real modules had been loaded. Modules appear only when
+    // registered through load_module().
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
-    let now = crate::hpet::elapsed_ns();
     *guard = Some(State {
-        modules: alloc::vec![
-            KernelModule {
-                name: String::from("virtio_blk"), mod_type: ModuleType::Driver,
-                state: ModuleState::Live, version: String::from("1.0"),
-                size_bytes: 32768, ref_count: 1, depends_on: Vec::new(),
-                loaded_at_ns: now, description: String::from("VirtIO block driver"),
-            },
-            KernelModule {
-                name: String::from("virtio_net"), mod_type: ModuleType::Network,
-                state: ModuleState::Live, version: String::from("1.0"),
-                size_bytes: 45056, ref_count: 1, depends_on: Vec::new(),
-                loaded_at_ns: now, description: String::from("VirtIO network driver"),
-            },
-            KernelModule {
-                name: String::from("fat"), mod_type: ModuleType::Filesystem,
-                state: ModuleState::Live, version: String::from("1.0"),
-                size_bytes: 65536, ref_count: 2, depends_on: Vec::new(),
-                loaded_at_ns: now, description: String::from("FAT filesystem"),
-            },
-        ],
+        modules: Vec::new(),
         params: Vec::new(),
-        total_loads: 3,
+        total_loads: 0,
         total_unloads: 0,
         total_errors: 0,
         ops: 0,
@@ -212,6 +199,32 @@ pub fn unload_module(name: &str) -> KernelResult<()> {
         }
         state.modules[idx].state = ModuleState::Gone;
         state.total_unloads += 1;
+        Ok(())
+    })
+}
+
+/// Take a reference on a live module (something started using it). A module
+/// with a non-zero reference count cannot be unloaded.
+pub fn add_ref(name: &str) -> KernelResult<()> {
+    with_state(|state| {
+        let module = state.modules.iter_mut()
+            .find(|m| m.name == name && m.state == ModuleState::Live)
+            .ok_or(KernelError::NotFound)?;
+        module.ref_count = module.ref_count.saturating_add(1);
+        Ok(())
+    })
+}
+
+/// Release a previously-taken reference on a live module.
+pub fn drop_ref(name: &str) -> KernelResult<()> {
+    with_state(|state| {
+        let module = state.modules.iter_mut()
+            .find(|m| m.name == name && m.state == ModuleState::Live)
+            .ok_or(KernelError::NotFound)?;
+        if module.ref_count == 0 {
+            return Err(KernelError::InvalidArgument);
+        }
+        module.ref_count = module.ref_count.saturating_sub(1);
         Ok(())
     })
 }
@@ -287,17 +300,27 @@ pub fn stats() -> (usize, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("kmod::self_test() — running tests...");
+
+    // Residue-free: start from a clean, controlled State so assertions hold
+    // regardless of prior kshell/procfs activity.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Default modules.
-    assert_eq!(list_modules().len(), 3);
+    // 1: Empty defaults — no modules loaded at start.
+    assert_eq!(list_modules().len(), 0);
+    assert_eq!(live_count(), 0);
+    // Build the test fixture through the real load_module() API.
+    load_module("virtio_blk", ModuleType::Driver, 32768, "VirtIO block driver").expect("load blk");
+    load_module("virtio_net", ModuleType::Network, 45056, "VirtIO network driver").expect("load net");
+    load_module("fat", ModuleType::Filesystem, 65536, "FAT filesystem").expect("load fat");
     assert_eq!(live_count(), 3);
-    crate::serial_println!("  [1/8] defaults: OK");
+    crate::serial_println!("  [1/8] defaults+fixture: OK");
 
     // 2: Get module.
     let m = get_module("virtio_blk").expect("get");
     assert_eq!(m.mod_type, ModuleType::Driver);
     assert_eq!(m.state, ModuleState::Live);
+    assert_eq!(m.ref_count, 0); // load_module starts at zero refs (no fabrication).
     crate::serial_println!("  [2/8] get: OK");
 
     // 3: Load module.
@@ -314,8 +337,12 @@ pub fn self_test() {
     assert_eq!(live_count(), 3);
     crate::serial_println!("  [5/8] unload: OK");
 
-    // 6: Can't unload with ref_count.
+    // 6: Can't unload with a live reference.
+    add_ref("virtio_blk").expect("add_ref");
     assert!(unload_module("virtio_blk").is_err());
+    drop_ref("virtio_blk").expect("drop_ref");
+    unload_module("virtio_blk").expect("unload after drop_ref");
+    assert_eq!(live_count(), 2);
     crate::serial_println!("  [6/8] ref_count block: OK");
 
     // 7: Module params.
@@ -325,14 +352,18 @@ pub fn self_test() {
     assert_eq!(params[0].value, "437");
     crate::serial_println!("  [7/8] params: OK");
 
-    // 8: Stats.
+    // 8: Stats — exact totals: 4 loads (3 fixture + test_mod), 2 unloads
+    //    (test_mod + virtio_blk), 2 live (virtio_net + fat).
     let (live, loads, unloads, errors, ops) = stats();
-    assert_eq!(live, 3);
-    assert!(loads >= 4);
-    assert!(unloads >= 1);
-    let _ = errors;
+    assert_eq!(live, 2);
+    assert_eq!(loads, 4);
+    assert_eq!(unloads, 2);
+    assert_eq!(errors, 0);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Leave no residue for later callers / boot-time tests.
+    *STATE.lock() = None;
 
     crate::serial_println!("kmod::self_test() — all 8 tests passed");
 }

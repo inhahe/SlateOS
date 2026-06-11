@@ -2263,6 +2263,20 @@
 ##     PASSED (28s). DEFERRED PROPER FIX: wire register_process() to the real
 ##     process table so /proc/oomkiller reflects actual live processes and
 ##     their memory footprints rather than only manually-registered entries.
+##     kmod fixed 2026-06-11: case (a) empty-init. init_defaults seeded 3
+##     fabricated "Live" kernel modules (virtio_blk/virtio_net/fat) with
+##     invented sizes and ref counts plus total_loads: 3 — surfaced through
+##     /proc and the `kmod` shell command as if real modules had been loaded.
+##     This is a microkernel: drivers run in userspace and FAT/ext4 are
+##     compiled in, so there is NO real loaded-kernel-module table to read
+##     from. Emptied modules to Vec::new() and zeroed total_loads; load_module()
+##     is the honest entry point. Added a small add_ref()/drop_ref() lifecycle
+##     API so the ref_count field is genuinely manipulable (previously it was
+##     ONLY ever set by the fabricated seed) and the unload-block path stays
+##     test-covered. self_test rewritten residue-free: resets STATE None at
+##     start AND end, asserts empty defaults, builds the fixture via
+##     load_module, exercises load/dup/unload/ref-block/params with EXACT stats
+##     (4 loads, 2 unloads, 2 live, 0 errors). boot-test PASSED (27s).
 ##     (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its

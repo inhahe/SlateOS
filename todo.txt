@@ -6,6 +6,33 @@
 ## [60, 3600], so 60 is the fastest the loop can fire).  Do NOT
 ## pad above 60 unless something specifically requires waiting.
 
+## DONE (2026-06-10): /proc/<pid>/stat starttime (field 22) is now real
+## Field 22 was hardcoded 0, making every process look like it started at
+## boot (ps/top/htop derive process age and normalise CPU% from it).  Added
+## a boot-relative creation timestamp: Task.start_tick (sched/task.rs),
+## captured via apic::tick_count() in Task::new_kernel (0 for idle tasks,
+## created before the timer ticks).  USER_HZ == TICK_RATE_HZ == 100 so the
+## tick count is already in ABI units.  Plumbed through TaskInfo.start_tick
+## (sched/mod.rs task_list snapshot) into build_pid_stat field 22.  Tested:
+## a deterministic synthetic-task check (field 22 echoes a distinctive
+## start_tick, proving it is not a 0 stub) + a live cross-check against the
+## probe task's start_tick.  (taskmon.rs has a separate local TaskInfo type;
+## unaffected.)
+##
+## BUG FOUND & FIXED (2026-06-10): procfs readdir-count self-test was stale
+## When the `task` subdir was added to every PID directory (earlier tick),
+## the readdir-count assertion (expected PID_FILES+PID_LINKS) was not
+## bumped, so it FAILed (21 vs 20).  It slipped through because the procfs
+## self-test failure is NON-FATAL: main.rs:1039 logs "WARNING: ProcFs
+## self-test failed" and boots on, so BOOT_OK still prints and
+## boot-test.sh reports PASSED.  Fixed the count (+1 for `task`) and added
+## an explicit assertion that the extra entry IS the `task` directory.
+## TOOLING GAP (process note): boot-test.sh's BOOT_OK grep does NOT catch
+## non-fatal self-test failures.  Until that is hardened (option: make the
+## fs self-tests fatal, or have boot-test.sh grep the serial log for
+## "FAIL:"/"WARNING:"), ALWAYS grep build/serial-test.txt for FAIL/WARNING
+## after a boot test — do not rely on "Boot test PASSED" alone.
+##
 ## FOLLOW-UP (2026-06-10): real /proc/<pid>/auxv + kernel-side saved_auxv
 ## /proc/<pid>/auxv is NOT yet served.  Implementing it properly requires
 ## the same kernel-side auxv storage that PR_GET_AUXV is already waiting

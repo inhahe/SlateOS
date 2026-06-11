@@ -2075,6 +2075,16 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
         0
     };
 
+    // starttime (field 22): the boot-relative tick when this task was
+    // created, in clock ticks at USER_HZ.  The native timer ticks at
+    // TICK_RATE_HZ == USER_HZ == 100, so the captured tick count is already
+    // in ABI units (no rescale).  ps/top/htop subtract this from system
+    // uptime to compute process age and to normalise CPU% over the
+    // process's lifetime, so reporting the real value (rather than 0) makes
+    // those columns correct.  This is a thread/task property, so it comes
+    // from `task`, not `proc_id`.
+    let starttime = task.start_tick;
+
     // Field order matches proc(5) / Linux fs/proc/array.c do_task_stat().
     // 1:pid 2:comm 3:state 4:ppid 5:pgrp 6:session 7:tty_nr 8:tpgid 9:flags
     // 10:minflt 11:cminflt 12:majflt 13:cmajflt 14:utime 15:stime 16:cutime
@@ -2089,13 +2099,13 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     // Placeholders left-to-right: pid comm state ppid pgrp session
     // <tty_nr/tpgid/flags=0/-1/0> <minflt..cmajflt=0> utime
     // <stime..cstime=0> priority nice=0 num_threads itrealvalue=0
-    // starttime=0 vsize rss rsslim <startcode..wchan=0> <nswap/cnswap=0>
+    // starttime vsize rss rsslim <startcode..wchan=0> <nswap/cnswap=0>
     // exit_signal=17 <processor..env_end=0> exit_code.
     let text = format!(
-        "{} ({}) {} {} {} {} 0 -1 0 0 0 0 0 {} 0 0 0 {} 0 {} 0 0 {} {} {} \
+        "{} ({}) {} {} {} {} 0 -1 0 0 0 0 0 {} 0 0 0 {} 0 {} 0 {} {} {} {} \
          0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0 0 {}\n",
         task.id, name, state_char, ppid, pgrp_sid, pgrp_sid,
-        utime, priority, num_threads,
+        utime, priority, num_threads, starttime,
         vsize, rss_pages, rsslim,
         exit_code,
     );
@@ -11988,6 +11998,57 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[procfs]   thread status: Pid/Tgid=={} OK", probe);
     }
 
+    // --- build_pid_stat starttime wiring (deterministic) ---
+    // The live stat test above runs in the boot task (start_tick 0), so it
+    // would still pass if field 22 were hardcoded 0.  Drive build_pid_stat
+    // directly with a synthetic task carrying a distinctive start_tick and a
+    // proc_id that maps to no process (process-wide lookups fall back to
+    // their defaults); field 22 must echo the synthetic start_tick, proving
+    // the field is really wired through and lands in the right column.
+    {
+        let mut name = [0u8; 32];
+        name[..4].copy_from_slice(b"synt");
+        let synth = crate::sched::TaskInfo {
+            id: 4242,
+            name,
+            name_len: 4,
+            state: crate::sched::task::TaskState::Ready,
+            priority: 20,
+            total_ticks: 7,
+            total_cycles: 0,
+            schedule_count: 0,
+            start_tick: 99_999,
+            last_cpu: 0,
+            cpu_quota_pct: 0,
+            throttled: false,
+            total_wait_ticks: 0,
+            max_wait_ticks: 0,
+            stack_used: None,
+            stack_pct: None,
+        };
+        let data = build_pid_stat(&synth, 999_999);
+        let text = core::str::from_utf8(&data).unwrap_or("");
+        let line = text.strip_suffix('\n').unwrap_or(text);
+        let close = line.rfind(')').unwrap_or(0);
+        let tail = line.get(close..).unwrap_or("");
+        let rest: Vec<&str> = tail.strip_prefix(')').unwrap_or(tail)
+            .trim_start().split(' ').filter(|s| !s.is_empty()).collect();
+        // field 22 sits at index 22 - 3 == 19 of the post-comm fields.
+        if rest.get(19).and_then(|f| f.parse::<u64>().ok()) != Some(99_999) {
+            serial_println!(
+                "[procfs]   FAIL: synthetic stat starttime = {:?}, want 99999",
+                rest.get(19)
+            );
+            return Err(KernelError::InternalError);
+        }
+        // field 1 must be the synthetic task id (sanity on the whole line).
+        if line.split(' ').next() != Some("4242") {
+            serial_println!("[procfs]   FAIL: synthetic stat field1 != 4242");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[procfs]   build_pid_stat: synthetic starttime OK");
+    }
+
     // --- Per-PID directory tests ---
 
     // Get the current task ID to test against a known-live PID.
@@ -12003,13 +12064,23 @@ pub fn self_test() -> KernelResult<()> {
     }
     serial_println!("[procfs]   stat {}: directory OK", pid_path);
 
-    // readdir on PID directory — should have PID_FILES + PID_LINKS entries.
+    // readdir on PID directory — PID_FILES + PID_LINKS, plus the one `task`
+    // subdirectory every PID directory exposes (the per-thread tree).
     let pid_entries = fs.readdir(&pid_path)?;
-    let expected_pid_entries = PID_FILES.len() + PID_LINKS.len();
+    let expected_pid_entries = PID_FILES.len() + PID_LINKS.len() + 1;
     if pid_entries.len() != expected_pid_entries {
         serial_println!(
             "[procfs]   FAIL: readdir {} returned {} entries, expected {}",
             pid_path, pid_entries.len(), expected_pid_entries
+        );
+        return Err(KernelError::InternalError);
+    }
+    // The extra entry must be the `task` directory specifically.
+    if !pid_entries.iter().any(|e| {
+        e.name == "task" && e.entry_type == EntryType::Directory
+    }) {
+        serial_println!(
+            "[procfs]   FAIL: readdir {} missing `task` subdirectory", pid_path
         );
         return Err(KernelError::InternalError);
     }
@@ -12808,6 +12879,27 @@ pub fn self_test() -> KernelResult<()> {
             pgrp_field, session_field, expected_pgrp, expected_pgrp
         );
         return Err(KernelError::InternalError);
+    }
+    // Field 22 (starttime) must equal the live task's captured start_tick.
+    // rest_fields is field3-based, so field 22 sits at index 22 - 3 == 19.
+    // This guards the field-position wiring (a regression would shift every
+    // field after it) and confirms we serve the real value, not a 0 stub.
+    let live_start_tick = crate::sched::task_list()
+        .iter()
+        .find(|t| t.id == current_tid)
+        .map(|t| t.start_tick);
+    let starttime_field = rest_fields.get(19).and_then(|f| f.parse::<u64>().ok());
+    if let Some(expected) = live_start_tick {
+        if starttime_field != Some(expected) {
+            serial_println!(
+                "[procfs]   FAIL: stat starttime (field 22) = {:?}, expected {}",
+                starttime_field, expected
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[procfs]   {}/stat: starttime field 22 == {} OK", current_tid, expected
+        );
     }
     serial_println!("[procfs]   {}/stat: 52 fields OK", current_tid);
 

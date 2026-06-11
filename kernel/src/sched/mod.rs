@@ -2670,6 +2670,9 @@ pub struct TaskInfo {
     pub total_cycles: u64,
     /// Number of times this task was scheduled.
     pub schedule_count: u64,
+    /// Boot-relative tick (USER_HZ = 100) when the task was created.
+    /// Exposed as `/proc/<pid>/stat` field 22 (`starttime`).
+    pub start_tick: u64,
     /// CPU this task last ran on.
     pub last_cpu: usize,
     /// CPU bandwidth quota (0 = unlimited, 1–100 = %).
@@ -2703,6 +2706,7 @@ pub fn task_list() -> alloc::vec::Vec<TaskInfo> {
             total_ticks: task.total_ticks,
             total_cycles: task.total_cycles,
             schedule_count: task.schedule_count,
+            start_tick: task.start_tick,
             last_cpu: task.last_cpu,
             cpu_quota_pct: task.cpu_quota_pct,
             throttled: task.throttled,

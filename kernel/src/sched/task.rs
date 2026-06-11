@@ -421,6 +421,17 @@ pub struct Task {
     /// frequently (excessive context switch overhead).
     pub schedule_count: u64,
 
+    /// Global tick count (`apic::tick_count`, USER_HZ = 100) captured when
+    /// this task was created.  Monotonic, boot-relative.
+    ///
+    /// Exposed via `/proc/<pid>/stat` field 22 (`starttime`), which `ps`,
+    /// `top`, and `htop` subtract from system uptime to compute process
+    /// age and to normalise CPU% over the process's lifetime.  A value of
+    /// 0 (e.g. the idle task, created before the timer starts ticking)
+    /// reads as "started at boot", which is exactly correct for those
+    /// tasks.
+    pub start_tick: u64,
+
     // --- Wait time tracking (starvation detection) ---
 
     /// Tick count when the task last entered the Ready state.
@@ -705,6 +716,9 @@ impl Task {
             total_ticks: 0,
             total_cycles: 0,
             schedule_count: 0,
+            // Idle tasks are created at boot, before the timer ticks; a
+            // start_tick of 0 reads as "started at boot" in /proc stat.
+            start_tick: 0,
             ready_since_tick: 0,
             total_wait_ticks: 0,
             max_wait_ticks: 0,
@@ -776,6 +790,9 @@ impl Task {
             total_ticks: 0,
             total_cycles: 0,
             schedule_count: 0,
+            // Idle tasks are created at boot, before the timer ticks; a
+            // start_tick of 0 reads as "started at boot" in /proc stat.
+            start_tick: 0,
             ready_since_tick: 0,
             total_wait_ticks: 0,
             max_wait_ticks: 0,
@@ -902,6 +919,9 @@ impl Task {
             total_ticks: 0,
             total_cycles: 0,
             schedule_count: 0,
+            // Capture the boot-relative creation time for /proc/<pid>/stat
+            // starttime (field 22).  USER_HZ == tick rate, so no rescale.
+            start_tick: crate::apic::tick_count(),
             ready_since_tick: 0,
             total_wait_ticks: 0,
             max_wait_ticks: 0,

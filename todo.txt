@@ -2414,6 +2414,24 @@
 ##     (honest). self_test was ALREADY residue-free: clear_all() at start AND
 ##     end, all fixtures built via create_profile(), exact assertions — left
 ##     untouched. No fabricated procfs data here.
+##     filerules fixed 2026-06-11: case (a) empty-init. init_defaults() seeded 3
+##     fabricated file-organization rules — "Move downloads" (InDirectory
+##     /downloads → MoveTo /documents/sorted, disabled), "Tag images" (png →
+##     AddTag, ENABLED), and "Compress large logs" (size>10MB → Compress gzip,
+##     ENABLED) — surfaced through /proc/filerules (rule_count) and the
+##     `filerules list` shell command as if the user had authored them. A file
+##     rule is discrete, user-authored automation (like a VPN profile or saved
+##     Wi-Fi network), NOT a universal tunable — a fresh OS has zero, and there's
+##     no sensible default set; the two enabled ones would silently act on the
+##     user's files (move/tag/compress) if evaluate() were ever wired to real
+##     file events (today it's only called by the manual `filerules eval`
+##     kshell command; init_defaults only by `filerules init` — neither is
+##     boot-wired). Emptied rules to Vec::new() (next_id 1); add_rule() is the
+##     honest entry point. self_test rewritten residue-free: resets STATE None at
+##     start AND end, asserts empty defaults, builds a 2-rule fixture via
+##     add_rule(), and asserts EXACT stats (2 rules, 5 evaluations, 3 matches).
+##     boot-test PASSED (27s). DEFERRED PROPER FIX: wire evaluate() to the real
+##     filesystem-notify/file-event source so rules act on genuine file events.
 ##     (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its

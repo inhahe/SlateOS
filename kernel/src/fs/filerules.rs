@@ -132,15 +132,20 @@ where
 // ---------------------------------------------------------------------------
 
 pub fn init_defaults() {
+    // Start with no rules. A file-organization rule is discrete, user-authored
+    // automation (move/tag/compress/delete files matching a condition) — a fresh
+    // system has none, and there is no universal "default" rule set. Seeding
+    // examples like "Tag images" (enabled), "Compress large logs >10 MB"
+    // (enabled), or "Move downloads → /documents/sorted" would surface
+    // fabricated, never-created rules through /proc/filerules and the
+    // `filerules` shell command as if the user had configured them — and, were
+    // evaluate() ever wired to real file events, those enabled rules would
+    // silently act on the user's files. Rules appear only via add_rule().
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        rules: alloc::vec![
-            FileRule { id: 1, name: String::from("Move downloads"), condition: MatchCondition::InDirectory, pattern: String::from("/downloads"), action: RuleAction::MoveTo, action_param: String::from("/documents/sorted"), enabled: false, hit_count: 0, last_hit_ns: 0 },
-            FileRule { id: 2, name: String::from("Tag images"), condition: MatchCondition::ExtensionIs, pattern: String::from("png"), action: RuleAction::AddTag, action_param: String::from("image"), enabled: true, hit_count: 0, last_hit_ns: 0 },
-            FileRule { id: 3, name: String::from("Compress large logs"), condition: MatchCondition::SizeGreaterThan, pattern: String::from("10485760"), action: RuleAction::Compress, action_param: String::from("gzip"), enabled: true, hit_count: 0, last_hit_ns: 0 },
-        ],
-        next_id: 4,
+        rules: Vec::new(),
+        next_id: 1,
         total_evaluations: 0,
         total_matches: 0,
         total_applied: 0,
@@ -250,11 +255,23 @@ pub fn stats() -> (usize, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("filerules::self_test() — running tests...");
+
+    // Residue-free: start from a clean, controlled State so assertions hold
+    // regardless of prior kshell/procfs activity, and build the fixture through
+    // the real add_rule() API rather than relying on seeded rules.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Default rules.
-    assert_eq!(list_rules().len(), 3);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty defaults — no rules until the user creates one.
+    assert_eq!(list_rules().len(), 0);
+    crate::serial_println!("  [1/8] empty defaults: OK");
+
+    // Build a fixture: a Tag-images rule and a Compress-large-logs rule.
+    let _tag_id = add_rule("Tag images", MatchCondition::ExtensionIs, "png",
+        RuleAction::AddTag, "image").expect("add tag");
+    let _zip_id = add_rule("Compress large logs", MatchCondition::SizeGreaterThan,
+        "10485760", RuleAction::Compress, "gzip").expect("add zip");
+    assert_eq!(list_rules().len(), 2);
 
     // 2: Extension match.
     let matches = evaluate("photo.png", "png", 1000, "/home/user").expect("eval1");
@@ -264,8 +281,7 @@ pub fn self_test() {
 
     // 3: Size match.
     let matches = evaluate("huge.log", "log", 20_000_000, "/var/log").expect("eval2");
-    assert!(!matches.is_empty());
-    assert_eq!(matches[0].1, RuleAction::Compress);
+    assert!(matches.iter().any(|m| m.1 == RuleAction::Compress));
     crate::serial_println!("  [3/8] size match: OK");
 
     // 4: No match.
@@ -285,18 +301,22 @@ pub fn self_test() {
     assert!(matches.iter().all(|m| m.0 != rid));
     crate::serial_println!("  [6/8] disable: OK");
 
-    // 7: Remove rule.
+    // 7: Remove rule — back to the 2 fixture rules.
     remove_rule(rid).expect("remove");
-    assert_eq!(list_rules().len(), 3);
+    assert_eq!(list_rules().len(), 2);
     crate::serial_println!("  [7/8] remove: OK");
 
-    // 8: Stats.
+    // 8: Stats — exact: 2 rules, 5 evaluations, 3 matches (eval1 png→Tag,
+    //    eval2 log→Compress, eval4 doc→Backup; eval3 + the disabled eval5 = 0).
     let (rules, evals, matches, _applied, ops) = stats();
-    assert_eq!(rules, 3);
-    assert!(evals >= 5);
-    assert!(matches >= 2);
+    assert_eq!(rules, 2);
+    assert_eq!(evals, 5);
+    assert_eq!(matches, 3);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Leave no residue for later callers / boot-time tests.
+    *STATE.lock() = None;
 
     crate::serial_println!("filerules::self_test() — all 8 tests passed");
 }

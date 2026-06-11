@@ -1802,6 +1802,22 @@ extern "C" fn kernel_main() -> ! {
     // cumulative totals) and resets the table afterward, so it is safe at boot
     // and /proc/ioport reads as a truthful empty table.
     fs::ioport::self_test();
+    // Hardware-RNG statistics self-test (hwrng) — exercises the entropy pool
+    // status and per-source breakdown surfaced by /proc/hwrng and the `hwrng`
+    // kshell command (RDRAND/RDSEED/interrupt/disk/input/jitter byte counts and
+    // failures, pool fill level, reseed count).  Its init_defaults() previously
+    // seeded fabricated activity — per-source bytes [500M, 100M, 50M, 10M, 5M,
+    // 20M], 685M generated / 600M requested, a FULL 4096-bit pool reporting
+    // "ready", and 100K reseeds — claiming cryptographic-quality entropy had
+    // been gathered when none has (a dangerous lie for a security surface).
+    // init_defaults now starts with an EMPTY pool (0 bits, not ready) and all
+    // source/total counters zeroed; only the pool CAPACITY (4096 bits, a
+    // structural constant) is non-zero.  The residue-free self_test builds its
+    // fixtures via the real API with exact assertions (generation adds to the
+    // pool, requests drain it, per-source failure tracking, reseed refills to
+    // capacity, six-source breakdown) and resets afterward, so it is safe at
+    // boot and /proc/hwrng reads as a truthful empty pool.
+    fs::hwrng::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

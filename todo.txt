@@ -1239,6 +1239,34 @@
 ##                    driver port claims) should call ioport::register_region for
 ##                    each claimed range and record_in/record_out on every access
 ##                    — wire that when port I/O is instrumented for auditing.
+##   - hwrng (2026-06-11): FIXED — fabrication case (c) (fixed source taxonomy,
+##                    zero counters). Hardware-RNG / entropy-pool stats
+##                    (per-source RDRAND/RDSEED/interrupt/disk/input/jitter byte
+##                    counts + failures, pool fill level, reseed count), surfaced
+##                    via /proc/hwrng and the `hwrng` kshell command. init_defaults
+##                    seeded per-source bytes [500M, 100M, 50M, 10M, 5M, 20M],
+##                    failures [100, 500, 0, 0, 0, 200], 685M generated / 600M
+##                    requested/served, a FULL 4096-bit pool reporting ready, and
+##                    100K reseeds — a particularly dangerous lie for a security
+##                    surface (claims crypto-quality entropy gathered when none
+##                    has). The 6 sources are a fixed [u64;6] dimension (counter
+##                    arrays, not removable structure), so zeroed all per-source
+##                    + global counters AND entropy_bits (pool now starts EMPTY →
+##                    pool_status.ready=false, truthful at boot). Kept only
+##                    pool_size_bits as a structural constant (POOL_SIZE_BITS=4096,
+##                    the pool capacity — not an observation). Rebuilt self_test
+##                    residue-free with exact assertions (generation adds to pool,
+##                    request drains it, per-source failure tracking, reseed
+##                    refills to capacity, six-source breakdown with only RDRAND
+##                    populated) and reset afterward. NOTE: hwrng was NOT
+##                    previously wired into the boot self-test path — now added.
+##                    /proc/hwrng now 115 bytes (truthful empty pool). PROPER FIX
+##                    DEFERRED: the real entropy subsystem (RDRAND/RDSEED probing,
+##                    interrupt/jitter entropy collection, CSPRNG reseed) should
+##                    call hwrng::record_generation/request/failure/reseed so the
+##                    pool status reflects genuine entropy — wire when the entropy
+##                    pool / CSPRNG is implemented. Until then the pool correctly
+##                    reports NOT ready (no entropy gathered).
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -1252,19 +1280,20 @@
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
 ##     + netfilter + mempress + devfreq + memcg + cgmem + vmzone + vmballoon
-##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport (just fixed) were thirty-six. Next ticks: work through the
+##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport + hwrng (just fixed) were thirty-seven. Next ticks: work through the
 ##     remaining candidates ONE PER TICK, auditing each before acting. The
 ##     52-file list includes both STATISTICS modules (fix: empty / zero-counters)
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or
 ##     real topology (LEAVE ALONE). Verify each is a statistics module fabricating
 ##     observed numbers surfaced via /proc before emptying it. Next candidate:
-##     hwrng. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
+##     certmgr. (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its
 ##     self_test residue-free. ipcns + ioport fixed 2026-06-11: emptied fictional
-##     namespaces / port regions, case (a). See audit notes above.) Remaining
-##     flagged names incl.:
-##     hwrng, certmgr, authbroker, secmod, binfmt,
+##     namespaces / port regions, case (a). hwrng fixed 2026-06-11: zeroed fake
+##     entropy activity, kept 6-source dimension + pool capacity, case (c). See
+##     audit notes above.) Remaining flagged names incl.:
+##     certmgr, authbroker, secmod, binfmt,
 ##     recoverypart, logrotate, diskclean, gamemode, usagetime, screentime,
 ##     startupopt, eyeprotect, fnotify, memlayout. SETTINGS-looking names in that
 ##     set (eyeprotect, gamemode, startupopt, screentime, usagetime) likely seed

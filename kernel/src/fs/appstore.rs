@@ -158,39 +158,31 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** app-store catalog.
+///
+/// Entries appear only when a real catalog source calls [`add_app`] (which
+/// honestly starts each app at `rating: 0`, `download_count: 0`), so
+/// `/proc/appstore` and the `appstore` kshell command report an empty store
+/// rather than fabricated listings — the kernel's "never invent data in procfs"
+/// rule.
+///
+/// (Previously this seeded THREE FABRICATED catalog apps — "Text Editor Pro" by
+/// "DevTools Inc" (download_count 25000, rating 450 = 4.5★), "Image Viewer" by
+/// "PixelCraft" (50000 downloads, 4.2★), and "File Manager Plus" by
+/// "SystemUtils" (100000 downloads, 4.7★) — none of which exist in this OS, with
+/// entirely invented download counts and star ratings that the store listing
+/// and `/proc/appstore` then displayed as if they were real published apps with
+/// real user-engagement metrics.  The real package manager is the separate `pkg`
+/// crate; this `fs::appstore` is the GUI-facing catalog and must stay empty
+/// until a real catalog/repository source is wired to populate it.)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
 
-    let now = crate::hpet::elapsed_ns();
-    let apps = alloc::vec![
-        StoreApp {
-            id: 1, name: String::from("Text Editor Pro"), developer: String::from("DevTools Inc"),
-            description: String::from("Advanced text editor with syntax highlighting"),
-            category: AppCategory::Development, version: String::from("2.1.0"),
-            installed_version: String::new(), size_kb: 15360,
-            state: InstallState::Available, rating: 450, download_count: 25000, added_ns: now,
-        },
-        StoreApp {
-            id: 2, name: String::from("Image Viewer"), developer: String::from("PixelCraft"),
-            description: String::from("Fast image viewer with format support"),
-            category: AppCategory::Graphics, version: String::from("1.5.0"),
-            installed_version: String::new(), size_kb: 8192,
-            state: InstallState::Available, rating: 420, download_count: 50000, added_ns: now,
-        },
-        StoreApp {
-            id: 3, name: String::from("File Manager Plus"), developer: String::from("SystemUtils"),
-            description: String::from("Dual-pane file manager with tabs"),
-            category: AppCategory::Utilities, version: String::from("3.0.0"),
-            installed_version: String::new(), size_kb: 12288,
-            state: InstallState::Available, rating: 470, download_count: 100000, added_ns: now,
-        },
-    ];
-
     *guard = Some(State {
-        apps,
+        apps: Vec::new(),
         reviews: Vec::new(),
-        next_app_id: 4,
+        next_app_id: 1,
         next_review_id: 1,
         total_installs: 0,
         total_uninstalls: 0,
@@ -392,12 +384,29 @@ pub fn stats() -> (usize, usize, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("appstore::self_test() — running tests...");
+    // Start from a clean slate so the catalog/reviews built below can never leak
+    // into the live /proc/appstore view.  appstore is not boot-wired (kshell
+    // lazily init_defaults() per command), so the natural state is uninitialised
+    // — `appstore test` must leave it that way rather than injecting fixtures.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Default catalog.
+    // 1: Empty defaults, then build a catalog via the real add_app API (each app
+    // honestly starts at rating 0 / download_count 0 — no fabricated metrics).
+    assert!(list_apps().is_empty());
+    let id1 = add_app("Text Editor Pro", "DevTools Inc",
+        "Advanced text editor with syntax highlighting",
+        AppCategory::Development, "2.1.0", 15360).expect("add1");
+    add_app("Image Viewer", "PixelCraft", "Fast image viewer with format support",
+        AppCategory::Graphics, "1.5.0", 8192).expect("add2");
+    add_app("File Manager Plus", "SystemUtils", "Dual-pane file manager with tabs",
+        AppCategory::Utilities, "3.0.0", 12288).expect("add3");
+    assert_eq!(id1, 1);
     let apps = list_apps();
     assert_eq!(apps.len(), 3);
-    crate::serial_println!("  [1/10] default catalog: OK");
+    assert_eq!(apps[0].rating, 0); // No fabricated rating.
+    assert_eq!(apps[0].download_count, 0); // No fabricated downloads.
+    crate::serial_println!("  [1/10] empty default + build catalog: OK");
 
     // 2: Search.
     let results = search("editor");
@@ -449,7 +458,7 @@ pub fn self_test() {
     assert_eq!(app.state, InstallState::Available);
     crate::serial_println!("  [9/10] uninstall: OK");
 
-    // 10: Stats.
+    // 10: Stats — exact totals (3 apps, none installed now, 1 install, 1 update).
     let (count, installed, installs, updates, ops) = stats();
     assert_eq!(count, 3);
     assert_eq!(installed, 0);
@@ -457,6 +466,9 @@ pub fn self_test() {
     assert_eq!(updates, 1);
     assert!(ops > 0);
     crate::serial_println!("  [10/10] stats: OK");
+
+    // Reset so the test leaves no fixtures behind in the live /proc/appstore.
+    *STATE.lock() = None;
 
     crate::serial_println!("appstore::self_test() — all 10 tests passed");
 }

@@ -2218,6 +2218,25 @@
 ##     stack interface list. Also CPU base/boost freq + RAM SMBIOS (DIMM/type/speed)
 ##     once those detectors are wired. Until then the panel honestly shows only
 ##     CPU + memory + OS + kernel params, with empty storage/GPU/net.
+##     appstore FIXED 2026-06-11: fabricator, case (a) empty-init. init_defaults()
+##     seeded THREE fabricated catalog apps that don't exist in this OS — "Text
+##     Editor Pro" by DevTools Inc (download_count 25000, rating 450 = 4.5*),
+##     "Image Viewer" by PixelCraft (50000, 4.2*), "File Manager Plus" by
+##     SystemUtils (100000, 4.7*) — with entirely invented download counts + star
+##     ratings that the store listing and /proc/appstore displayed as real
+##     published apps with real user-engagement metrics. The real package manager
+##     is the SEPARATE `pkg` crate; this fs::appstore is the GUI-facing catalog and
+##     has no real repository source wired. FIXED: init_defaults now starts EMPTY
+##     (no apps/reviews, next ids 1, zero counters). The existing add_app API
+##     honestly starts each app at rating 0 / download_count 0. NOT boot-wired
+##     (kshell lazily inits). self_test rewritten residue-free: resets STATE None
+##     at start AND end, builds the 3-app catalog via add_app (asserts rating 0 /
+##     download_count 0 — no fabricated metrics), exercises install/update/review/
+##     uninstall, exact stats (3 apps, 1 install, 1 update). makes sixty-three.
+##     DEFERRED PROPER FIX: wire fs::appstore to a real catalog source — either the
+##     `pkg` content-addressed store's available-package list or a package
+##     repository index — so /proc/appstore reflects genuinely installable apps
+##     with real (or absent, never fabricated) ratings/download metrics.
 ##     (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its

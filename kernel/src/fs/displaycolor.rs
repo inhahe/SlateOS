@@ -157,6 +157,13 @@ pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
 
+    // Standard ICC color-space definitions ship by default: sRGB, Adobe RGB
+    // (1998), and Display P3 are well-known industry standards with fixed white
+    // points / gamma / primaries — built-in definitions, not observed data.
+    // Every color-managed OS provides these (analogous to shipping default
+    // sysctl tunables), so seeding them is legitimate, not fabrication. The
+    // `path` fields name the conventional install location for the on-disk .icc;
+    // the color data itself is embedded here and does not depend on those files.
     let profiles = alloc::vec![
         ColorProfile {
             id: 1, name: String::from("sRGB IEC61966-2.1"),
@@ -181,17 +188,16 @@ pub fn init_defaults() {
         },
     ];
 
-    let assignments = alloc::vec![
-        DisplayAssignment {
-            display_id: 1, display_name: String::from("Primary Display"),
-            profile_id: 1, calibrated: false, calibrated_ns: 0,
-            brightness: 0, contrast: 0,
-        },
-    ];
-
+    // No display assignments are seeded. A DisplayAssignment claims a real
+    // display exists and is bound to a color profile; inventing a "Primary
+    // Display" would surface a phantom display through /proc/displaycolor and
+    // the `displaycolor displays` shell command (the same fabrication fixed in
+    // the monitors and netsettings modules in this sweep). Real displays are
+    // registered from display enumeration via register_display(); assignments
+    // appear only then.
     *guard = Some(State {
         profiles,
-        assignments,
+        assignments: Vec::new(),
         next_profile_id: 4,
         total_calibrations: 0,
         ops: 0,
@@ -318,14 +324,22 @@ pub fn stats() -> (usize, usize, usize, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("displaycolor::self_test() — running tests...");
+
+    // Residue-free: start from a clean, controlled State so assertions hold
+    // regardless of prior kshell/procfs activity.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Default profiles.
+    // 1: Standard color profiles ship by default (sRGB / Adobe RGB / Display P3).
     let profiles = list_profiles();
     assert_eq!(profiles.len(), 3);
     crate::serial_println!("  [1/11] default profiles: OK");
 
-    // 2: Default display.
+    // 2: No display assignments until a real display is registered. Register one
+    //    here to build the assignment fixture (as display enumeration would at
+    //    runtime); it defaults to the sRGB profile (id 1).
+    assert_eq!(list_assignments().len(), 0);
+    register_display(1, "Primary Display").expect("register primary");
     let assigns = list_assignments();
     assert_eq!(assigns.len(), 1);
     assert_eq!(assigns[0].profile_id, 1);
@@ -379,14 +393,18 @@ pub fn self_test() {
     assert_eq!(assigns[0].profile_id, 1);
     crate::serial_println!("  [10/11] remove profile: OK");
 
-    // 11: Stats.
+    // 11: Stats — exact: 3 profiles (4 installed - 1 removed), 2 displays
+    //    (registered 1 + 2), 1 calibrated, 1 total calibration.
     let (profiles, displays, calibrated, cals, ops) = stats();
     assert_eq!(profiles, 3);
     assert_eq!(displays, 2);
-    assert!(calibrated >= 1);
-    assert!(cals >= 1);
+    assert_eq!(calibrated, 1);
+    assert_eq!(cals, 1);
     assert!(ops > 0);
     crate::serial_println!("  [11/11] stats: OK");
+
+    // Leave no residue for later callers / boot-time tests.
+    *STATE.lock() = None;
 
     crate::serial_println!("displaycolor::self_test() — all 11 tests passed");
 }

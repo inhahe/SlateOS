@@ -2432,6 +2432,31 @@
 ##     add_rule(), and asserts EXACT stats (2 rules, 5 evaluations, 3 matches).
 ##     boot-test PASSED (27s). DEFERRED PROPER FIX: wire evaluate() to the real
 ##     filesystem-notify/file-event source so rules act on genuine file events.
+##     displaycolor fixed 2026-06-11: case (a) empty-init for the FABRICATED part
+##     only (mixed module — kept the legitimate part). init_defaults() seeded two
+##     things: (1) three STANDARD ICC color-space profiles (sRGB IEC61966-2.1,
+##     Adobe RGB 1998, Display P3) with fixed standard white point 6500K / gamma
+##     2.20 — these are built-in industry-standard definitions, not observed data
+##     (every color-managed OS ships them, like default sysctl tunables), so they
+##     are LEGITIMATE and were KEPT; and (2) one DisplayAssignment "Primary
+##     Display" bound to sRGB — a FABRICATED phantom display surfaced through
+##     /proc/displaycolor (display count) and the `displaycolor displays` shell
+##     command, the same fabrication fixed in monitors (Built-in Display) and
+##     netsettings (eth0). Emptied assignments to Vec::new(); real displays are
+##     registered from display enumeration via register_display() (which defaults
+##     a new display to sRGB). init_defaults is NOT boot-wired (only the
+##     `displaycolor init`/`test` kshell commands), so /proc/displaycolor is empty
+##     at boot. self_test rewritten residue-free: resets STATE None at start AND
+##     end, asserts 3 profiles + 0 assignments after init, registers display 1 to
+##     build the fixture, and asserts EXACT stats (3 profiles, 2 displays, 1
+##     calibrated, 1 calibration). boot-test PASSED (27s). MINOR NOTE: the kept
+##     profiles' `path` fields name a conventional on-disk .icc location
+##     (/usr/share/color/*.icc) that may not exist yet; the color data is embedded
+##     so this is harmless, but if `displaycolor list` is ever made to imply the
+##     file is installed, blank the path for built-in profiles. Low priority.
+##     DEFERRED PROPER FIX: register displays + assignments from the real display/
+##     monitors enumeration so /proc/displaycolor reflects genuine connected
+##     displays and their bound profiles.
 ##     (sysuptime audited 2026-06-11: NOT fabricating — real HPET boot
 ##     timestamp, left functional. sysmaint audited 2026-06-11: LEGITIMATE
 ##     settings module — default maintenance schedule, left alone; only made its

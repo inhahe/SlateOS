@@ -502,11 +502,24 @@
 ##                    (dropped the hpet::elapsed_ns seed timestamp) and rebuilt
 ##                    self_test with exact assertions incl. deterministic
 ##                    top_cpu/top_mem ordering, wired into boot.)
+##   - ratestat.rs   (fixed 2026-06-11; was: three fake token-bucket limiters
+##                    "printk" (rate 10 / burst 50 / allows 1M / denies 500k /
+##                    burst_events 10k), "net_icmp" (rate 100 / burst 200 /
+##                    allows 5M / denies 100k / burst_events 500), "auth_fail"
+##                    (rate 5 / burst 10 / allows 50k / denies 200k / burst_events
+##                    20k) plus invented aggregates total_allows 6_050_000 /
+##                    total_denies 800_000 / total_bursts 30_500, shown via
+##                    /proc/ratestat as real rate-limiting decisions. Already had
+##                    a full register/record_allow/record_deny/refill/per_limiter
+##                    API; just emptied init_defaults and rebuilt self_test with
+##                    exact assertions incl. burst_events bumping exactly once when
+##                    the bucket drains to 0 and refill capping at burst_size,
+##                    wired into boot.)
 ## Confirmed STILL FABRICATING (audited 2026-06-11, NOT yet fixed):
 ##   - (none currently confirmed — next tick: audit the remaining seeded
 ##     *stat siblings to find the next fabricator. Candidates flagged as SEEDED
-##     by grep (init_defaults with alloc::vec!/String::from/push): ratestat,
-##     rqstat, schedlat, ttystat, zramstat. NOTE: some may be SETTINGS modules
+##     by grep (init_defaults with alloc::vec!/String::from/push): rqstat,
+##     schedlat, ttystat, zramstat. NOTE: some may be SETTINGS modules
 ##     seeding legitimate config defaults — verify each is a STATISTICS module
 ##     seeding fake OBSERVATIONS before emptying it.)
 ## After dmastat, continue auditing the remaining *stat/*latency/*stats siblings.

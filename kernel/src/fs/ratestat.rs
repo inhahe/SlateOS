@@ -77,18 +77,33 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** rate-limiter statistics table.
+///
+/// Seeds NO limiters and zero counters.  Real rate-limiter accounting is wired
+/// through [`register`] (one row per limiter a subsystem creates, with its real
+/// rate/burst configuration) and the `record_allow`/`record_deny`/`refill`
+/// functions; until those are called the table is genuinely empty, so
+/// `/proc/ratestat` and the `ratestat` kshell command report zeros rather than
+/// fabricated numbers — the kernel's hard "never invent data in procfs" rule.
+///
+/// NOTE: this previously seeded three fictional limiters ("printk": rate 10 /
+/// burst 50 / allows 1M / denies 500k / 10k burst events; "net_icmp": rate 100 /
+/// burst 200 / allows 5M / denies 100k; "auth_fail": rate 5 / burst 10 / allows
+/// 50k / denies 200k / 20k burst events) plus invented aggregate totals
+/// (total_allows 6.05M, total_denies 800k, total_bursts 30.5k), which
+/// `/proc/ratestat` then displayed as if they were real measured rate-limiting
+/// decisions.  That demo data was removed; the self-test now builds its own
+/// fixtures explicitly via the real API (see [`self_test`]).  Each subsystem
+/// (printk, netfilter, auth, ...) is expected to call [`register`] for its
+/// limiter and the record functions on every allow/deny decision.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        limiters: alloc::vec![
-            LimiterStats { name: String::from("printk"), rate_per_sec: 10, burst_size: 50, current_tokens: 50, allows: 1_000_000, denies: 500_000, burst_events: 10_000 },
-            LimiterStats { name: String::from("net_icmp"), rate_per_sec: 100, burst_size: 200, current_tokens: 200, allows: 5_000_000, denies: 100_000, burst_events: 500 },
-            LimiterStats { name: String::from("auth_fail"), rate_per_sec: 5, burst_size: 10, current_tokens: 10, allows: 50_000, denies: 200_000, burst_events: 20_000 },
-        ],
-        total_allows: 6_050_000,
-        total_denies: 800_000,
-        total_bursts: 30_500,
+        limiters: Vec::new(),
+        total_allows: 0,
+        total_denies: 0,
+        total_bursts: 0,
         ops: 0,
     });
 }
@@ -165,57 +180,82 @@ pub fn stats() -> (usize, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("ratestat::self_test() — running tests...");
+    // Begin from a clean, EMPTY table and build every fixture via the real API,
+    // so the test exercises genuine accounting paths and never relies on
+    // fabricated seed data (which /proc/ratestat must never surface).  Resetting
+    // first clears any residue from a prior `ratestat test` run so the totals
+    // asserted below are exact.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(per_limiter().len(), 3);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty after init — no fabricated limiters or counters.
+    assert_eq!(per_limiter().len(), 0);
+    let (c0, a0, d0, b0, _o0) = stats();
+    assert_eq!((c0, a0, d0, b0), (0, 0, 0, 0));
+    crate::serial_println!("  [1/8] empty init: OK");
 
-    // 2: Register.
+    // 2: Register — current_tokens seeded to burst_size; dup name fails.
     register("test_rl", 10, 5).expect("register");
-    assert_eq!(per_limiter().len(), 4);
+    assert_eq!(per_limiter().len(), 1);
+    let l = per_limiter().iter().find(|l| l.name == "test_rl").cloned().expect("find");
+    assert_eq!(l.rate_per_sec, 10);
+    assert_eq!(l.burst_size, 5);
+    assert_eq!(l.current_tokens, 5);
+    assert_eq!((l.allows, l.denies, l.burst_events), (0, 0, 0));
     assert!(register("test_rl", 10, 5).is_err());
     crate::serial_println!("  [2/8] register: OK");
 
-    // 3: Allow.
+    // 3: Allow — count up, one token consumed.
     record_allow("test_rl").expect("allow");
-    let l = per_limiter().iter().find(|l| l.name == "test_rl").cloned().unwrap();
+    let l = per_limiter().iter().find(|l| l.name == "test_rl").cloned().expect("find");
     assert_eq!(l.allows, 1);
     assert_eq!(l.current_tokens, 4);
+    assert_eq!(l.burst_events, 0);
     crate::serial_println!("  [3/8] allow: OK");
 
-    // 4: Deny.
+    // 4: Deny — count up, tokens unchanged.
     record_deny("test_rl").expect("deny");
-    let l = per_limiter().iter().find(|l| l.name == "test_rl").cloned().unwrap();
+    let l = per_limiter().iter().find(|l| l.name == "test_rl").cloned().expect("find");
     assert_eq!(l.denies, 1);
+    assert_eq!(l.current_tokens, 4);
     crate::serial_println!("  [4/8] deny: OK");
 
-    // 5: Burst detection.
+    // 5: Burst detection — draining the last 4 tokens reaches 0 exactly once,
+    // bumping burst_events once (only the allow that lands on 0 counts).
     for _ in 0..4 { record_allow("test_rl").expect("allow_drain"); }
-    let l = per_limiter().iter().find(|l| l.name == "test_rl").cloned().unwrap();
+    let l = per_limiter().iter().find(|l| l.name == "test_rl").cloned().expect("find");
     assert_eq!(l.current_tokens, 0);
-    assert!(l.burst_events >= 1);
+    assert_eq!(l.allows, 5);
+    assert_eq!(l.burst_events, 1);
     crate::serial_println!("  [5/8] burst: OK");
 
-    // 6: Refill.
+    // 6: Refill adds tokens without exceeding burst_size.
     refill("test_rl", 3).expect("refill");
-    let l = per_limiter().iter().find(|l| l.name == "test_rl").cloned().unwrap();
+    let l = per_limiter().iter().find(|l| l.name == "test_rl").cloned().expect("find");
     assert_eq!(l.current_tokens, 3);
     crate::serial_println!("  [6/8] refill: OK");
 
-    // 7: Refill cap.
+    // 7: Refill caps at burst_size; unknown limiter → NotFound.
     refill("test_rl", 100).expect("refill_cap");
-    let l = per_limiter().iter().find(|l| l.name == "test_rl").cloned().unwrap();
+    let l = per_limiter().iter().find(|l| l.name == "test_rl").cloned().expect("find");
     assert_eq!(l.current_tokens, 5); // capped at burst_size
-    crate::serial_println!("  [7/8] refill cap: OK");
+    assert!(record_allow("missing").is_err());
+    assert!(record_deny("missing").is_err());
+    assert!(refill("missing", 1).is_err());
+    crate::serial_println!("  [7/8] refill cap + not found: OK");
 
-    // 8: Stats.
-    let (limiters, allows, denies, _bursts, ops) = stats();
-    assert!(limiters >= 4);
-    assert!(allows > 6_050_000);
-    assert!(denies > 800_000);
+    // 8: Aggregate stats are exact: 5 allows, 1 deny, 1 burst event.
+    let (limiters, allows, denies, bursts, ops) = stats();
+    assert_eq!(limiters, 1);
+    assert_eq!(allows, 5);
+    assert_eq!(denies, 1);
+    assert_eq!(bursts, 1);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Leave NO residue: reset to the uninitialised state so a diagnostic run
+    // never leaves fixtures resident in the live /proc/ratestat table.
+    *STATE.lock() = None;
 
     crate::serial_println!("ratestat::self_test() — all 8 tests passed");
 }

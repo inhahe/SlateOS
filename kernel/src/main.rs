@@ -1311,6 +1311,14 @@ extern "C" fn kernel_main() -> ! {
     // safe at boot and gives the module automated coverage it previously lacked
     // (it was only reachable via the `procstat test` kshell subcommand).
     fs::procstat::self_test();
+    // ratestat backs /proc/ratestat (per-limiter token-bucket rate-limiting
+    // stats: allow/deny counts, current bucket level, burst-exhaustion events);
+    // the self-test now builds fixtures via the real register/record_allow/
+    // record_deny/refill API and resets the table afterward (leaving no
+    // fabricated rows), so it is safe at boot and gives the module automated
+    // coverage it previously lacked (it was only reachable via the `ratestat
+    // test` kshell subcommand).
+    fs::ratestat::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

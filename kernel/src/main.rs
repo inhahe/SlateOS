@@ -1347,6 +1347,16 @@ extern "C" fn kernel_main() -> ! {
     // coverage it previously lacked (it was only reachable via the `ttystat test`
     // kshell subcommand).
     fs::ttystat::self_test();
+    // zramstat backs /proc/zramstat (per-ZRAM-device compressed-swap stats:
+    // original/compressed sizes, mem used, read/write/discard ops, compression
+    // ratio); already had a full create_device/remove_device/record_write/
+    // record_read/record_discard API, so just emptied init_defaults. The
+    // self-test now builds fixtures via that real API with exact size/ratio
+    // assertions (incl. saturating mem_used on over-discard) and resets the table
+    // afterward (leaving no fabricated rows), so it is safe at boot and gives the
+    // module automated coverage it previously lacked (it was only reachable via
+    // the `zramstat test` kshell subcommand).
+    fs::zramstat::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

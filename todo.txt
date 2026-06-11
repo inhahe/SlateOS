@@ -554,13 +554,26 @@
 ##                    record_signal/record_overrun/set_buf_used API; just emptied
 ##                    init_defaults and rebuilt self_test with exact byte/op
 ##                    assertions + NotFound on every record path, wired into boot.)
+##   - zramstat.rs   (fixed 2026-06-11; was: one fake device "zram0" (4GB disk /
+##                    2GB original / 800MB compressed / 850MB mem used / 5M reads
+##                    / 10M writes / 3M discards / 200k zero / 100k same pages)
+##                    plus invented aggregates total_orig 2GB / total_compr 800MB
+##                    / total_reads 5M / total_writes 10M, shown via /proc/zramstat
+##                    and the per_device/compression_ratio_x100 views as real
+##                    compressed-swap usage. Already had a full create_device/
+##                    remove_device/record_write/record_read/record_discard API;
+##                    just emptied init_defaults (next_id 0) and rebuilt self_test
+##                    with exact size/ratio assertions incl. saturating mem_used on
+##                    over-discard, wired into boot.)
 ## Confirmed STILL FABRICATING (audited 2026-06-11, NOT yet fixed):
-##   - (none currently confirmed — next tick: audit the remaining seeded
-##     *stat siblings to find the next fabricator. Candidates flagged as SEEDED
-##     by grep (init_defaults with alloc::vec!/String::from/push): zramstat.
-##     NOTE: some may be SETTINGS modules seeding legitimate config defaults —
-##     verify each is a STATISTICS module seeding fake OBSERVATIONS before
-##     emptying it.)
+##   - (none currently confirmed. The five grep-flagged candidates from the
+##     2026-06-11 sweep — ratestat, rqstat, schedlat, ttystat, zramstat — are ALL
+##     now fixed. Next tick: re-run the SEEDED-module grep heuristic across
+##     kernel/src/fs/*.rs (init_defaults bodies containing alloc::vec!/
+##     String::from/push) to find any remaining statistics modules seeding fake
+##     OBSERVATIONS. Remember: SETTINGS modules seeding legitimate config defaults
+##     are LEGITIMATE — only empty STATISTICS modules that fabricate observed
+##     numbers surfaced via /proc.)
 ## After dmastat, continue auditing the remaining *stat/*latency/*stats siblings.
 ## EXPOSURE: main.rs does NOT mass-invoke these init_defaults() at boot, so the
 ## fabricated data is LATENT — it only becomes live in /proc once someone runs

@@ -83,23 +83,35 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** ZRAM statistics table.
+///
+/// Seeds NO devices and zero counters.  Real ZRAM accounting is wired through
+/// [`create_device`] (one row per ZRAM swap device the mm/swap layer brings up)
+/// and the `record_write`/`record_read`/`record_discard` functions; until those
+/// are called the table is genuinely empty, so `/proc/zramstat` and the
+/// `zramstat` kshell command report zeros rather than fabricated numbers — the
+/// kernel's hard "never invent data in procfs" rule.
+///
+/// NOTE: this previously seeded one fictional device ("zram0": 4GB disk / 2GB
+/// original data / 800MB compressed / 850MB mem used / 5M reads / 10M writes / 3M
+/// discards / 200k zero pages / 100k same pages) plus invented aggregate totals
+/// (total_orig 2GB, total_compr 800MB, total_reads 5M, total_writes 10M), which
+/// `/proc/zramstat` (and the `per_device`/`compression_ratio_x100` views) then
+/// displayed as if they were real measured compressed-swap usage.  That demo data
+/// was removed; the self-test now builds its own fixtures explicitly via the real
+/// API (see [`self_test`]).  The swap layer is expected to call [`create_device`]
+/// when a ZRAM device is configured and the record functions on every
+/// write/read/discard.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        devices: alloc::vec![
-            ZramDevice {
-                dev_id: 0, name: String::from("zram0"), disk_size: 4_000_000_000,
-                orig_data_size: 2_000_000_000, compr_data_size: 800_000_000,
-                mem_used: 850_000_000, reads: 5_000_000, writes: 10_000_000,
-                discards: 3_000_000, zero_pages: 200_000, same_pages: 100_000,
-            },
-        ],
-        next_id: 1,
-        total_orig: 2_000_000_000,
-        total_compr: 800_000_000,
-        total_reads: 5_000_000,
-        total_writes: 10_000_000,
+        devices: Vec::new(),
+        next_id: 0,
+        total_orig: 0,
+        total_compr: 0,
+        total_reads: 0,
+        total_writes: 0,
         ops: 0,
     });
 }
@@ -198,59 +210,80 @@ pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("zramstat::self_test() — running tests...");
+    // Begin from a clean, EMPTY table and build every fixture via the real API,
+    // so the test exercises genuine accounting paths and never relies on
+    // fabricated seed data (which /proc/zramstat must never surface).  Resetting
+    // first clears any residue from a prior `zramstat test` run so the totals
+    // asserted below are exact.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(per_device().len(), 1);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty after init — no fabricated devices or counters.
+    assert_eq!(per_device().len(), 0);
+    let (c0, o0, cp0, r0, w0, _op0) = stats();
+    assert_eq!((c0, o0, cp0, r0, w0), (0, 0, 0, 0, 0));
+    assert!(record_read(0).is_err()); // no phantom device exists yet
+    crate::serial_println!("  [1/8] empty init: OK");
 
-    // 2: Create device.
-    let id = create_device("zram1", 2_000_000_000).expect("create");
-    assert!(id >= 1);
-    assert_eq!(per_device().len(), 2);
+    // 2: Create device — zeroed counters, disk_size preserved.
+    let id = create_device("zram0", 2_000_000_000).expect("create");
+    assert_eq!(per_device().len(), 1);
+    let d = per_device().into_iter().find(|d| d.dev_id == id).expect("find");
+    assert_eq!(d.disk_size, 2_000_000_000);
+    assert_eq!((d.orig_data_size, d.compr_data_size, d.reads, d.writes), (0, 0, 0, 0));
     crate::serial_println!("  [2/8] create: OK");
 
-    // 3: Write.
+    // 3: Write — counts and sizes accumulate; mem_used grows by compressed size.
     record_write(id, 4096, 2048).expect("write");
-    let d = per_device().iter().find(|d| d.dev_id == id).cloned().unwrap();
+    let d = per_device().into_iter().find(|d| d.dev_id == id).expect("find");
     assert_eq!(d.writes, 1);
     assert_eq!(d.orig_data_size, 4096);
     assert_eq!(d.compr_data_size, 2048);
+    assert_eq!(d.mem_used, 2048);
     crate::serial_println!("  [3/8] write: OK");
 
     // 4: Read.
     record_read(id).expect("read");
-    let d = per_device().iter().find(|d| d.dev_id == id).cloned().unwrap();
+    let d = per_device().into_iter().find(|d| d.dev_id == id).expect("find");
     assert_eq!(d.reads, 1);
     crate::serial_println!("  [4/8] read: OK");
 
-    // 5: Discard.
-    let before = per_device().iter().find(|d| d.dev_id == id).cloned().unwrap().mem_used;
+    // 5: Discard — mem_used drops by the freed bytes (saturating).
     record_discard(id, 1024).expect("discard");
-    let after = per_device().iter().find(|d| d.dev_id == id).cloned().unwrap().mem_used;
-    assert_eq!(after, before - 1024);
+    let d = per_device().into_iter().find(|d| d.dev_id == id).expect("find");
+    assert_eq!(d.discards, 1);
+    assert_eq!(d.mem_used, 1024); // 2048 - 1024
+    record_discard(id, 99_999).expect("over_discard"); // saturates, no underflow
+    let d = per_device().into_iter().find(|d| d.dev_id == id).expect("find");
+    assert_eq!(d.mem_used, 0);
     crate::serial_println!("  [5/8] discard: OK");
 
-    // 6: Compression ratio.
-    let ratio = compression_ratio_x100(id);
-    assert_eq!(ratio, 200); // 4096/2048 * 100 = 200
+    // 6: Compression ratio = orig*100/compr = 4096*100/2048 = 200.
+    assert_eq!(compression_ratio_x100(id), 200);
     crate::serial_println!("  [6/8] ratio: OK");
 
-    // 7: Remove.
+    // 7: Remove — gone from the table; second remove and records → NotFound.
     remove_device(id).expect("remove");
-    assert_eq!(per_device().len(), 1);
+    assert_eq!(per_device().len(), 0);
     assert!(remove_device(id).is_err());
-    crate::serial_println!("  [7/8] remove: OK");
+    assert!(record_write(id, 1, 1).is_err());
+    assert!(record_read(id).is_err());
+    crate::serial_println!("  [7/8] remove + not found: OK");
 
-    // 8: Stats.
+    // 8: Aggregate stats are exact: 1 device created+removed (count 0 now), the
+    // 4096/2048 write counted, 1 read, 1 write.
     let (devs, orig, compr, reads, writes, ops) = stats();
-    assert_eq!(devs, 1);
-    assert!(orig > 2_000_000_000);
-    assert!(compr > 800_000_000);
-    assert!(reads > 5_000_000);
-    assert!(writes > 10_000_000);
+    assert_eq!(devs, 0);
+    assert_eq!(orig, 4096);
+    assert_eq!(compr, 2048);
+    assert_eq!(reads, 1);
+    assert_eq!(writes, 1);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Leave NO residue: reset to the uninitialised state so a diagnostic run
+    // never leaves fixtures resident in the live /proc/zramstat table.
+    *STATE.lock() = None;
 
     crate::serial_println!("zramstat::self_test() — all 8 tests passed");
 }

@@ -8955,13 +8955,24 @@ fn gen_irqbalance() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     out.push_str("=== IRQ Balance ===\n");
-    let (irqs, rebalances, migrations, ops) = crate::fs::irqbalance::stats();
-    out.push_str(&format!("irq_count: {}\n", irqs));
-    out.push_str(&format!("total_rebalances: {}\n", rebalances));
-    out.push_str(&format!("total_migrations: {}\n", migrations));
-    out.push_str(&format!("ops: {}\n", ops));
-    if let Some(policy) = crate::fs::irqbalance::get_policy() {
-        out.push_str(&format!("policy: {}\n", policy.label()));
+    // Read the REAL interrupt balancer (crate::irqbalance), which tracks live
+    // per-IRQ affinity from IRQ_STATES and the actual CPU count from SMP. The
+    // former fs::irqbalance backing seeded a fabricated IRQ table (timer/eth0/
+    // usb0 with invented CPU assignments and a hardcoded 4-CPU layout) that its
+    // init_defaults() was never even wired to call — surfacing it here would
+    // have been invented procfs data. This now reflects the running system.
+    let st = crate::irqbalance::stats();
+    let irqs = crate::irqbalance::irq_info();
+    out.push_str(&format!("enabled: {}\n", st.enabled));
+    out.push_str(&format!("cpu_count: {}\n", st.cpu_count));
+    out.push_str(&format!("irq_count: {}\n", irqs.len()));
+    out.push_str(&format!("balance_ops: {}\n", st.balance_ops));
+    out.push_str(&format!("migrations: {}\n", st.migrations));
+    for info in &irqs {
+        out.push_str(&format!(
+            "irq {}: cpu={} pinned={} hint={} rate={}\n",
+            info.irq, info.cpu, info.pinned, info.hint, info.rate
+        ));
     }
     out.into_bytes()
 }

@@ -1676,6 +1676,30 @@
 ##                    so no fixtures leak. /proc/memlayout 141 bytes (now reflects the
 ##                    real QEMU memory map). No deferral — memlayout is fully wired to
 ##                    its real data source.
+##   - irqbalance (2026-06-11): FIXED — fabrication, PROPER FIX (wired /proc to the
+##                    REAL balancer + DELETED the redundant module). There were TWO
+##                    irqbalance modules: the real interrupt balancer
+##                    (kernel/src/irqbalance.rs, wired at boot, tracks live per-IRQ
+##                    affinity from IRQ_STATES + SMP cpu_count) and a procfs
+##                    diagnostic (kernel/src/fs/irqbalance.rs) that backed
+##                    /proc/irqbalance. The fs module's init_defaults() seeded a
+##                    FABRICATED IRQ table — timer/keyboard/rtc/ata0/ata1/eth0/usb0
+##                    with invented affinity masks + assigned_cpu values (eth0→cpu2,
+##                    usb0→cpu3) and a hardcoded 4-CPU cpu_loads layout
+##                    (assigned_irqs 4/1/1/1) — none discovered from real hardware.
+##                    (Counts were already 0, but the TABLE itself — which IRQs
+##                    exist, their CPU assignments, the CPU count — was invented.)
+##                    The fs module was also DEAD: its init_defaults() was never
+##                    called anywhere (no boot wiring, and the kshell `irqbalance`
+##                    command uses the real crate::irqbalance), so /proc/irqbalance
+##                    actually always read an uninitialised (0,0,0,0) State — but it
+##                    was a loaded footgun. PROPER FIX: rewrote procfs::gen_irqbalance
+##                    to read crate::irqbalance::stats() (enabled, cpu_count,
+##                    balance_ops, migrations) + irq_info() (live active IRQs with
+##                    cpu/pinned/hint/rate), then DELETED kernel/src/fs/irqbalance.rs
+##                    and its `pub mod irqbalance;` in fs/mod.rs. /proc/irqbalance now
+##                    90 bytes reflecting the running balancer (single CPU in QEMU →
+##                    balancer disabled, irq_count 0 — honest). No deferral.
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -1689,7 +1713,7 @@
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
 ##     + netfilter + mempress + devfreq + memcg + cgmem + vmzone + vmballoon
-##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport + hwrng + certmgr + authbroker + secmod + binfmt + recoverypart + diskclean + fnotify + memlayout (just fixed) were forty-five. Next ticks: work through the
+##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport + hwrng + certmgr + authbroker + secmod + binfmt + recoverypart + diskclean + fnotify + memlayout + irqbalance (just fixed) were forty-six. Next ticks: work through the
 ##     remaining candidates ONE PER TICK, auditing each before acting. The
 ##     52-file list includes both STATISTICS modules (fix: empty / zero-counters)
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or

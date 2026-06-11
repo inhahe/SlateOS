@@ -198,7 +198,11 @@ pub mod ipcns;
 pub mod iotdevice;
 pub mod ioport;
 pub mod ioprio;
-pub mod irqbalance;
+// NOTE: the former `fs::irqbalance` procfs module was removed — it seeded a
+// fabricated IRQ table (timer/eth0/usb0 with invented CPU assignments and a
+// hardcoded 4-CPU layout) whose init_defaults() was never wired to any caller,
+// and it duplicated the real balancer. /proc/irqbalance now reads the live
+// `crate::irqbalance` balancer directly (see procfs::gen_irqbalance).
 pub mod irqstat;
 pub mod integrity;
 pub mod iso9660;

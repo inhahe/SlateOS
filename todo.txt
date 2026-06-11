@@ -1846,6 +1846,42 @@
 ##                    dirty mapping must be defined deliberately rather than guessed.
 ##                    Do as a focused task once a process-enumeration hook is exposed.
 ##                    Until then the empty table is honest.
+##   - pftrack (2026-06-11): FIXED — fabrication case (a) (full record/clear API
+##                    already existed). Kernel-side page-fault tracker behind
+##                    /proc/pftrack and the `pftrack` kshell command. init_defaults()
+##                    FABRICATED three processes — init pid 1 (120 minor/5 major/10
+##                    cow/135 total), sshd pid 100 (450/20/30/500), browser pid 200
+##                    (15000/500/2/800/16302) — plus invented system totals
+##                    (total_minor 15570, total_major 525, total_faults 16937), which
+##                    /proc/pftrack and the hotspots/top_faulters views displayed as
+##                    if real. record() has NO real callers (the page-fault handler
+##                    never calls it); procfs/kshell only read stats/list_processes.
+##                    Fixed: init_defaults() now seeds an EMPTY table (no processes,
+##                    no events, no hotspots, zero totals). Also: the self_test was
+##                    NEVER wired into boot AND relied on the fabricated processes
+##                    (asserted len==3, browser-is-top) with no end-reset — so wiring
+##                    it would have leaked fixtures into /proc/pftrack. Rewrote it
+##                    residue-free (clears STATE at start AND end) with EXACT
+##                    assertions (empty init, record→auto-create, hotspot count==3,
+##                    top faulter pid 1 total 3, 4 events, clear→0, final 2 procs /
+##                    0 events / 0 totals) and WIRED it into the boot self-test path.
+##                    /proc/pftrack now reports an empty table (truthful).
+##                    DEFERRED PROPER FIX: two parts. (1) The system-wide aggregate
+##                    is crate::mm::fault::fault_stats() -> PageFaultStats {
+##                    kernel_resolved, user_resolved, fatal, cow, swap_in,
+##                    stack_growth }; pftrack's stats() total_faults/minor/major could
+##                    read through it. Deferred because the minor-vs-major mapping is
+##                    lossy/decision-heavy (which of kernel_resolved/user_resolved/cow/
+##                    stack_growth is "minor"? is major exactly swap_in?) and would
+##                    conflict with State's own record()-summed totals once record is
+##                    wired. (2) Per-process / hotspot / event detail needs the
+##                    page-fault handler to call pftrack::record(pid, addr, kind, ip)
+##                    on every fault — deferred because that adds a Mutex lock + Vec
+##                    scan/push + allocation to the perf-critical fault path (<10us
+##                    target), so it needs a lock-free / per-CPU design decision, not
+##                    a naive hook. Do both as a focused task once fault accounting
+##                    has a per-process source and a hot-path-safe record sink. Until
+##                    then the empty table is honest.
 ## DEFERRED PROPER FIX (netspeed::run_test): a real network speed test must
 ##   saturate the link to a measurement server and compute actual achieved
 ##   throughput/latency/jitter. That needs a network measurement backend (a
@@ -1859,7 +1895,7 @@
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
 ##     + netfilter + mempress + devfreq + memcg + cgmem + vmzone + vmballoon
-##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport + hwrng + certmgr + authbroker + secmod + binfmt + recoverypart + diskclean + fnotify + memlayout + irqbalance + netmon + swapmon + netusage + taskmon + vmmap (just fixed) were fifty-one. Next ticks: work through the
+##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport + hwrng + certmgr + authbroker + secmod + binfmt + recoverypart + diskclean + fnotify + memlayout + irqbalance + netmon + swapmon + netusage + taskmon + vmmap + pftrack (just fixed) were fifty-two. Next ticks: work through the
 ##     remaining candidates ONE PER TICK, auditing each before acting. The
 ##     52-file list includes both STATISTICS modules (fix: empty / zero-counters)
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or

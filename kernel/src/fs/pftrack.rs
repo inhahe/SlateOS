@@ -124,20 +124,34 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** page-fault tracking table.
+///
+/// Seeds NO processes, NO events, NO hotspots, and zero totals.  Faults are
+/// tracked through [`record`] as the page-fault handler services them; until
+/// that wiring exists, `/proc/pftrack` and the `pftrack` kshell command report an
+/// empty table rather than fabricated activity — the kernel's hard "never invent
+/// data in procfs" rule.
+///
+/// (Previously this seeded three fabricated processes — `init` pid 1 with 120
+/// minor / 5 major / 10 cow / 135 total, `sshd` pid 100 with 450/20/30/500, and
+/// `browser` pid 200 with 15000/500/2/800/16302 — plus invented system totals
+/// (total_minor 15570, total_major 525, total_faults 16937), which `/proc/pftrack`
+/// and the `hotspots`/`top_faulters` views then displayed as if they were real
+/// measured fault activity.  None of [`record`]'s callers are real — the page-fault
+/// handler does not yet call it — so the table is entirely unwired; see the
+/// DEFERRED PROPER FIX note in todo.txt for wiring `record` from the fault handler
+/// and reading the system-wide aggregate from [`crate::mm::fault::fault_stats`].
+/// The self-test now builds its own fixtures via the real API — see [`self_test`].)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
         events: Vec::new(),
-        processes: alloc::vec![
-            ProcessFaults { pid: 1, name: String::from("init"), minor: 120, major: 5, invalid: 0, protection: 0, cow: 10, total: 135 },
-            ProcessFaults { pid: 100, name: String::from("sshd"), minor: 450, major: 20, invalid: 0, protection: 0, cow: 30, total: 500 },
-            ProcessFaults { pid: 200, name: String::from("browser"), minor: 15000, major: 500, invalid: 2, protection: 0, cow: 800, total: 16302 },
-        ],
+        processes: Vec::new(),
         hotspots: Vec::new(),
-        total_minor: 15570,
-        total_major: 525,
-        total_faults: 16937,
+        total_minor: 0,
+        total_major: 0,
+        total_faults: 0,
         ops: 0,
     });
 }
@@ -262,60 +276,71 @@ pub fn stats() -> (usize, usize, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("pftrack::self_test() — running tests...");
+    // Start from a clean slate so the fixtures built below can never leak into
+    // the live /proc/pftrack table (this self-test now runs at boot).
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(list_processes().len(), 3);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty defaults — no fabricated per-process fault records.
+    assert_eq!(list_processes().len(), 0);
+    let (p0, e0, t0, mi0, ma0, _o0) = stats();
+    assert_eq!((p0, e0, t0, mi0, ma0), (0, 0, 0, 0, 0));
+    crate::serial_println!("  [1/8] empty defaults: OK");
 
-    // 2: Record fault.
+    // 2: Record a minor fault — auto-creates the process with minor=1.
     record(1, 0x1000, FaultKind::Minor, 0x400000).expect("record");
     let p = get_process(1).expect("get");
-    assert_eq!(p.minor, 121);
-    crate::serial_println!("  [2/8] record: OK");
+    assert_eq!(p.minor, 1);
+    assert_eq!(p.total, 1);
+    crate::serial_println!("  [2/8] record minor: OK");
 
-    // 3: New process auto-create.
+    // 3: New process auto-create on a major fault.
     record(999, 0x2000, FaultKind::Major, 0x500000).expect("record2");
     let p = get_process(999).expect("get2");
     assert_eq!(p.major, 1);
     assert_eq!(p.total, 1);
     crate::serial_println!("  [3/8] auto-create: OK");
 
-    // 4: Hotspots.
+    // 4: Hotspots — three faults on the same page rank it first.
     record(1, 0x1000, FaultKind::Minor, 0x400004).expect("record3");
     record(1, 0x1000, FaultKind::Minor, 0x400008).expect("record4");
     let hs = hotspots(5);
     assert!(!hs.is_empty());
     assert_eq!(hs[0].address, 0x1000);
-    assert!(hs[0].count >= 3);
+    assert_eq!(hs[0].count, 3);
     crate::serial_println!("  [4/8] hotspots: OK");
 
-    // 5: Top faulters.
+    // 5: Top faulters — pid 1 now has 3 faults, ahead of pid 999's 1.
     let top = top_faulters(2);
     assert_eq!(top.len(), 2);
-    assert_eq!(top[0].pid, 200); // Browser has most faults.
+    assert_eq!(top[0].pid, 1);
+    assert_eq!(top[0].total, 3);
     crate::serial_println!("  [5/8] top faulters: OK");
 
-    // 6: Recent events.
+    // 6: Recent events — exactly the four faults recorded above.
     let events = recent_events(10);
-    assert!(events.len() >= 4);
+    assert_eq!(events.len(), 4);
     crate::serial_println!("  [6/8] recent events: OK");
 
-    // 7: Clear.
+    // 7: Clear — per-process counters and the event log reset to zero.
     clear().expect("clear");
     let p = get_process(1).expect("get3");
     assert_eq!(p.total, 0);
     crate::serial_println!("  [7/8] clear: OK");
 
-    // 8: Stats.
+    // 8: Stats — events cleared, totals zero; the two process rows remain
+    //    (counters zeroed); ops bumped by the record/clear writes above.
     let (procs, evs, total, minor, major, ops) = stats();
-    assert!(procs >= 3);
-    assert_eq!(evs, 0); // Cleared.
+    assert_eq!(procs, 2);
+    assert_eq!(evs, 0);
     assert_eq!(total, 0);
-    let _ = minor;
-    let _ = major;
+    assert_eq!(minor, 0);
+    assert_eq!(major, 0);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Reset so the boot self-test leaves no fixtures behind in /proc/pftrack.
+    *STATE.lock() = None;
 
     crate::serial_println!("pftrack::self_test() — all 8 tests passed");
 }

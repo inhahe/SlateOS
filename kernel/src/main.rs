@@ -2064,6 +2064,21 @@ extern "C" fn kernel_main() -> ! {
     // via the real API with exact assertions and resets STATE afterward so
     // nothing leaks into /proc/vmmap.
     fs::vmmap::self_test();
+    // pftrack is the kernel-side page-fault tracker behind /proc/pftrack and the
+    // `pftrack` kshell command.  Its init_defaults() previously seeded three
+    // FABRICATED processes (init pid 1, sshd pid 100, browser pid 200) with
+    // invented minor/major/cow fault counts plus invented system totals
+    // (total_minor 15570, total_major 525, total_faults 16937), which
+    // /proc/pftrack and the hotspots/top_faulters views displayed as if they were
+    // real measured fault activity.  record() has NO real callers — the page-fault
+    // handler does not call it — so the module is entirely unwired; the system-wide
+    // aggregate lives in crate::mm::fault::fault_stats().  pftrack now seeds an
+    // EMPTY table (faults arrive via record once the fault handler wires it; see
+    // the DEFERRED PROPER FIX note in todo.txt).  This self_test (never wired
+    // before, and whose old version relied on the fabricated processes with no
+    // end-reset) builds its own fixtures via the real API with exact assertions
+    // and resets STATE afterward so nothing leaks into /proc/pftrack.
+    fs::pftrack::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

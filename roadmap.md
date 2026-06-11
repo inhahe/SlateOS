@@ -5088,7 +5088,7 @@ _Depends on: Phase 4 (working daily-driver desktop). Goal: competitive OS._
 ### 5.1 Linux compatibility layer
 - [ ] Linux syscall translation layer (like FreeBSD's Linuxulator)
 - [ ] epoll, eventfd, signalfd emulation
-- [-] /proc emulation (enough for WINE and common Linux apps) — broad procfs implemented; added per-PID comm/statm/limits (2026-06-10); /proc/<pid>/stat now emits full Linux 52-field layout for positional parsers (ps/top/htop/glibc/WINE) (2026-06-10)
+- [-] /proc emulation (enough for WINE and common Linux apps) — broad procfs implemented; added per-PID comm/statm/limits (2026-06-10); /proc/<pid>/stat now emits full Linux 52-field layout for positional parsers (ps/top/htop/glibc/WINE) (2026-06-10); /proc/<pid>/status rewritten to Linux key:value format, /proc/self symlink, /proc/<pid>/maps from the VMA list (committed + lazy mmap both register a VMA), and /proc/<pid>/mountinfo in Linux 11-field show_mountinfo format for findmnt/glibc/systemd (2026-06-10)
 - [ ] Linux threading model (clone, futex)
 - [ ] Linux DRM/KMS compatibility (for NVIDIA proprietary driver userspace)
 - [ ] ALSA/PulseAudio compatibility shim

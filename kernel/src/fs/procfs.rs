@@ -2071,9 +2071,12 @@ fn render_maps(vmas: &[crate::mm::vma::Vma]) -> Vec<u8> {
 
 /// `/proc/<pid>/maps` — virtual memory area listing, Linux-format.
 ///
-/// Lists the process's registered VMAs (demand-paged anonymous/stack
-/// regions, guard pages, fixed mappings) one per line in Linux
-/// `/proc/<pid>/maps` format; see [`render_maps`] for the exact layout.
+/// Lists the process's registered VMAs (both committed and demand-paged
+/// anonymous/stack regions, guard pages, fixed mappings) one per line in
+/// Linux `/proc/<pid>/maps` format; see [`render_maps`] for the exact
+/// layout.  Every `mmap` region — committed (default) and lazy
+/// (`MAP_LAZY`) — registers a VMA, so this stays consistent with the
+/// RLIMIT_AS accounting behind `/proc/<pid>/status` VmSize and statm.
 /// Bare scheduler tasks (kernel threads with no PCB) carry no VMAs and
 /// return `NotFound`, matching how every other process-only per-PID file
 /// behaves.  A process that has registered no VMAs yet yields an empty

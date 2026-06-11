@@ -2887,14 +2887,16 @@ pub fn is_process_running(pid: ProcessId) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Per-process VMA management (for lazy/demand-paged allocations)
+// Per-process VMA management (address-space records for all mmap regions)
 // ---------------------------------------------------------------------------
 
 /// Add a VMA to a process's per-process VMA list.
 ///
-/// Used by `SYS_MMAP` with `MAP_LAZY` to register a demand-paged
-/// memory region.  The VMA must not overlap any existing VMA in the
-/// process.
+/// Used by `SYS_MMAP` to register a mapped region — both committed
+/// (default) and lazy/demand-paged (`MAP_LAZY`) mappings register a VMA
+/// so the list reflects the full user address space (and drives
+/// `/proc/<pid>/maps`).  The VMA must not overlap any existing VMA in
+/// the process.
 ///
 /// # Errors
 ///

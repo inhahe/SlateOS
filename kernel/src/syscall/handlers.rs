@@ -813,6 +813,35 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
         // Committed anonymous mapping (default): allocate and map
         // fresh zeroed frames immediately.  map_committed_range handles
         // alloc + zero + map atomically with full rollback on partial failure.
+        //
+        // Register a VMA for the region first.  Committed regions are
+        // first-class address-space entries just like lazy ones: this is
+        // what makes them visible in `/proc/<pid>/maps` and keeps the VMA
+        // list consistent with the RLIMIT_AS accounting that drives
+        // `/proc/<pid>/status` VmSize and `/proc/<pid>/statm`.  The frames
+        // are pre-populated here, but the VMA still describes the logical
+        // anonymous region (matching Linux MAP_POPULATE semantics: VMA
+        // present + pages pre-faulted); a stray not-present fault inside it
+        // would correctly resolve to a fresh zero page via the demand-fault
+        // handler.  We add the VMA before mapping so a mapping failure rolls
+        // back cleanly with `remove_vma` (no unmap loop needed).
+        use crate::mm::vma::{Vma, VmaKind};
+
+        let vma = Vma {
+            start: base_vaddr,
+            end: base_vaddr.saturating_add(size_aligned),
+            kind: VmaKind::Anonymous,
+            flags: page_flags,
+        };
+
+        if let Err(e) = pcb::add_vma(pid, vma) {
+            serial_println!(
+                "[mmap] Committed VMA registration failed at {:#x}: {:?}",
+                base_vaddr, e
+            );
+            return SyscallResult::err(e);
+        }
+
         // SAFETY: pml4_phys is a valid page table for this process.
         if let Err(e) = unsafe {
             page_table::map_committed_range(
@@ -822,6 +851,9 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
                 page_flags,
             )
         } {
+            // Roll back the VMA we just registered so the list stays
+            // consistent with what's actually mapped.
+            pcb::remove_vma(pid, base_vaddr);
             serial_println!(
                 "[mmap] Committed map failed at {:#x} ({} frames): {:?}",
                 base_vaddr, num_frames, e
@@ -910,8 +942,10 @@ pub fn sys_munmap(args: &SyscallArgs) -> SyscallResult {
     }
 
     // Also remove any per-process VMA that starts at this address.
-    // This handles lazy-mapped regions created with MAP_LAZY.
-    // If no VMA matches, this is a no-op (committed regions don't have VMAs).
+    // Both committed and lazy (MAP_LAZY) mmap regions register a VMA, so
+    // this drops the address-space record alongside the unmapped frames.
+    // If no VMA matches (e.g. a partial unmap that doesn't start on a VMA
+    // boundary), this is a no-op.
     pcb::remove_vma(pid, vaddr);
 
     serial_println!(

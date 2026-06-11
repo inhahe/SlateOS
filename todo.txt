@@ -577,16 +577,27 @@
 ##                    NotFound), so kept-with-zeroed-counters rather than emptied to
 ##                    a Vec; rebuilt self_test with exact byte-credit assertions
 ##                    (2MiB per PMD promo, 1GiB per PUD promo), wired into boot.)
+##   - swapact.rs    (fixed 2026-06-11; was: two fake swap areas "/dev/sda2"
+##                    partition (2M total / 500k used / 1M swap-ins / 1.5M in-pages
+##                    / 800k swap-outs / 1.2M out-pages) and "/dev/zram0" zram (1M
+##                    total / 300k used / 500k swap-ins / 400k swap-outs) plus
+##                    invented aggregates total_swap_in 1.5M / total_swap_out 1.2M
+##                    / total_swap_in_pages 2.1M / total_swap_out_pages 1.7M, shown
+##                    via /proc/swapact and the per_area view as real swap traffic.
+##                    Already had a full register/record_in/record_out API; just
+##                    emptied init_defaults and rebuilt self_test with exact page/
+##                    latency assertions incl. swap-in underflow guard and used_pages
+##                    clamped to total on swap-out, wired into boot.)
 ## Confirmed STILL FABRICATING (audited 2026-06-11, NOT yet fixed):
 ##   - (none currently confirmed. Broadened the SEEDED-module grep on 2026-06-11
 ##     to `fn init_defaults` bodies containing a large numeric literal
-##     (..._000_000): 52 candidate fs/*.rs files. thpstat (just fixed) was one.
-##     Next ticks: work through the remaining candidates ONE PER TICK, auditing
-##     each before acting. The 52-file list includes both STATISTICS modules
-##     (fix: empty / zero-counters) AND SETTINGS or structural modules that seed
-##     LEGITIMATE config defaults or real topology (LEAVE ALONE). Verify each is a
-##     statistics module fabricating observed numbers surfaced via /proc before
-##     emptying it. Remaining flagged names incl.: swapact, writeback, blkqueue,
+##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact (just fixed)
+##     were two. Next ticks: work through the remaining candidates ONE PER TICK,
+##     auditing each before acting. The 52-file list includes both STATISTICS
+##     modules (fix: empty / zero-counters) AND SETTINGS or structural modules that
+##     seed LEGITIMATE config defaults or real topology (LEAVE ALONE). Verify each
+##     is a statistics module fabricating observed numbers surfaced via /proc
+##     before emptying it. Remaining flagged names incl.: writeback, blkqueue,
 ##     netqueue, pagecache, taskio, netspeed, diskhealth, netdev, netfilter,
 ##     mempress, devfreq, memcg, cgmem, vmzone, vmballoon, softirq, timerq,
 ##     schedclass, schedwait, kthread, kstack, kprobes, ftrace, sockbuf, msivec,

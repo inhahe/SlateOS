@@ -100,18 +100,34 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** swap-activity table.
+///
+/// Seeds NO swap areas and zero counters.  Real swap accounting is wired through
+/// [`register`] (one row per swap area the mm/swap layer activates) and the
+/// `record_in`/`record_out` functions; until those are called the table is
+/// genuinely empty, so `/proc/swapact` and the `swapact` kshell command report
+/// zeros rather than fabricated numbers — the kernel's hard "never invent data in
+/// procfs" rule.
+///
+/// NOTE: this previously seeded two fictional swap areas ("/dev/sda2" partition:
+/// 2M total / 500k used pages / 1M swap-ins / 1.5M in-pages / 800k swap-outs /
+/// 1.2M out-pages; "/dev/zram0" zram: 1M total / 300k used / 500k swap-ins / 400k
+/// swap-outs) plus invented aggregate totals (total_swap_in 1.5M, total_swap_out
+/// 1.2M, total_swap_in_pages 2.1M, total_swap_out_pages 1.7M), which
+/// `/proc/swapact` (and the `per_area` view) then displayed as if they were real
+/// measured swap traffic.  That demo data was removed; the self-test now builds
+/// its own fixtures explicitly via the real API (see [`self_test`]).  The swap
+/// layer is expected to call [`register`] when a swap area is activated and the
+/// record functions on every swap-in/swap-out.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
     *guard = Some(State {
-        areas: alloc::vec![
-            SwapAreaStats { name: String::from("/dev/sda2"), swap_type: SwapType::Partition, total_pages: 2_000_000, used_pages: 500_000, swap_in_count: 1_000_000, swap_in_pages: 1_500_000, swap_in_ns: 150_000_000_000, swap_out_count: 800_000, swap_out_pages: 1_200_000, swap_out_ns: 240_000_000_000, priority: -1 },
-            SwapAreaStats { name: String::from("/dev/zram0"), swap_type: SwapType::Zram, total_pages: 1_000_000, used_pages: 300_000, swap_in_count: 500_000, swap_in_pages: 600_000, swap_in_ns: 10_000_000_000, swap_out_count: 400_000, swap_out_pages: 500_000, swap_out_ns: 15_000_000_000, priority: 100 },
-        ],
-        total_swap_in: 1_500_000,
-        total_swap_out: 1_200_000,
-        total_swap_in_pages: 2_100_000,
-        total_swap_out_pages: 1_700_000,
+        areas: Vec::new(),
+        total_swap_in: 0,
+        total_swap_out: 0,
+        total_swap_in_pages: 0,
+        total_swap_out_pages: 0,
         ops: 0,
     });
 }
@@ -181,59 +197,81 @@ pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("swapact::self_test() — running tests...");
+    // Begin from a clean, EMPTY table and build every fixture via the real API,
+    // so the test exercises genuine accounting paths and never relies on
+    // fabricated seed data (which /proc/swapact must never surface).  Resetting
+    // first clears any residue from a prior `swapact test` run so the totals
+    // asserted below are exact.
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(per_area().len(), 2);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty after init — no fabricated areas or counters.
+    assert_eq!(per_area().len(), 0);
+    let (c0, si0, so0, sip0, sop0, _o0) = stats();
+    assert_eq!((c0, si0, so0, sip0, sop0), (0, 0, 0, 0, 0));
+    assert!(record_in("/swapfile", 1, 1).is_err()); // no phantom area exists yet
+    crate::serial_println!("  [1/8] empty init: OK");
 
-    // 2: Register.
+    // 2: Register — zeroed counters, type/total/priority preserved; dup fails.
     register("/swapfile", SwapType::File, 500_000, -2).expect("register");
-    assert_eq!(per_area().len(), 3);
+    let a = per_area().into_iter().find(|a| a.name == "/swapfile").expect("find");
+    assert_eq!(a.swap_type, SwapType::File);
+    assert_eq!(a.total_pages, 500_000);
+    assert_eq!(a.priority, -2);
+    assert_eq!((a.used_pages, a.swap_in_count, a.swap_out_count), (0, 0, 0));
     assert!(register("/swapfile", SwapType::File, 500_000, -2).is_err());
     crate::serial_println!("  [2/8] register: OK");
 
-    // 3: Swap out.
+    // 3: Swap out — count/pages/latency rise, used_pages grows.
     record_out("/swapfile", 100, 5000).expect("out");
-    let a = per_area().iter().find(|a| a.name == "/swapfile").cloned().unwrap();
+    let a = per_area().into_iter().find(|a| a.name == "/swapfile").expect("find");
     assert_eq!(a.swap_out_count, 1);
     assert_eq!(a.swap_out_pages, 100);
+    assert_eq!(a.swap_out_ns, 5000);
     assert_eq!(a.used_pages, 100);
     crate::serial_println!("  [3/8] swap out: OK");
 
-    // 4: Swap in.
+    // 4: Swap in — used_pages drops by the paged-in count.
     record_in("/swapfile", 50, 3000).expect("in");
-    let a = per_area().iter().find(|a| a.name == "/swapfile").cloned().unwrap();
+    let a = per_area().into_iter().find(|a| a.name == "/swapfile").expect("find");
     assert_eq!(a.swap_in_count, 1);
     assert_eq!(a.swap_in_pages, 50);
+    assert_eq!(a.swap_in_ns, 3000);
     assert_eq!(a.used_pages, 50); // 100 - 50
     crate::serial_println!("  [4/8] swap in: OK");
 
-    // 5: Latency.
-    let a = per_area().iter().find(|a| a.name == "/swapfile").cloned().unwrap();
-    assert_eq!(a.swap_out_ns, 5000);
-    assert_eq!(a.swap_in_ns, 3000);
-    crate::serial_println!("  [5/8] latency: OK");
+    // 5: Swap-in underflow guard — paging in more than resident saturates to 0,
+    // never underflows.
+    record_in("/swapfile", 9999, 1).expect("in_over");
+    let a = per_area().into_iter().find(|a| a.name == "/swapfile").expect("find");
+    assert_eq!(a.used_pages, 0);
+    crate::serial_println!("  [5/8] swap-in underflow guard: OK");
 
-    // 6: Saturation (used can't exceed total).
-    for _ in 0..10 { record_out("/swapfile", 100_000, 100).expect("out_many"); }
-    let a = per_area().iter().find(|a| a.name == "/swapfile").cloned().unwrap();
-    assert!(a.used_pages <= a.total_pages);
+    // 6: Saturation — used_pages is clamped to total_pages on swap-out.
+    record_out("/swapfile", 1_000_000, 100).expect("out_big");
+    let a = per_area().into_iter().find(|a| a.name == "/swapfile").expect("find");
+    assert_eq!(a.used_pages, a.total_pages); // clamped to 500_000
     crate::serial_println!("  [6/8] saturation: OK");
 
-    // 7: Not found.
+    // 7: Unknown area → NotFound on both record paths.
     assert!(record_in("nonexist", 1, 1).is_err());
+    assert!(record_out("nonexist", 1, 1).is_err());
     crate::serial_println!("  [7/8] not found: OK");
 
-    // 8: Stats.
+    // 8: Aggregate totals are exact: 2 swap-ins (50 + 9999 pages), 2 swap-outs
+    // (100 + 1,000,000 pages).
     let (areas, si, so, sip, sop, ops) = stats();
-    assert!(areas >= 3);
-    assert!(si > 1_500_000);
-    assert!(so > 1_200_000);
-    assert!(sip > 2_100_000);
-    assert!(sop > 1_700_000);
+    assert_eq!(areas, 1);
+    assert_eq!(si, 2);
+    assert_eq!(so, 2);
+    assert_eq!(sip, 50 + 9999);
+    assert_eq!(sop, 100 + 1_000_000);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Leave NO residue: reset to the uninitialised state so a diagnostic run
+    // never leaves fixtures resident in the live /proc/swapact table.
+    *STATE.lock() = None;
 
     crate::serial_println!("swapact::self_test() — all 8 tests passed");
 }

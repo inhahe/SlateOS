@@ -1367,6 +1367,15 @@ extern "C" fn kernel_main() -> ! {
     // coverage it previously lacked (it was only reachable via the `thpstat test`
     // kshell subcommand).
     fs::thpstat::self_test();
+    // swapact backs /proc/swapact (per-swap-area swap-in/out counts, pages, and
+    // latencies); already had a full register/record_in/record_out API, so just
+    // emptied init_defaults. The self-test now builds fixtures via that real API
+    // with exact page/latency assertions (incl. swap-in underflow guard and
+    // used_pages clamped to total on swap-out) and resets the table afterward
+    // (leaving no fabricated rows), so it is safe at boot and gives the module
+    // automated coverage it previously lacked (it was only reachable via the
+    // `swapact test` kshell subcommand).
+    fs::swapact::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

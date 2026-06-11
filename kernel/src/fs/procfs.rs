@@ -551,6 +551,7 @@ const PID_FILES: &[&str] = &[
     "limits",
     "environ",
     "mountinfo",
+    "cgroup",
 ];
 
 /// Per-PID symbolic links, served via [`FileSystem::readlink`].
@@ -2160,6 +2161,54 @@ fn gen_pid_mountinfo(task_id: u64) -> KernelResult<Vec<u8>> {
     Ok(render_mountinfo(&mounts))
 }
 
+/// Render a process's cgroup membership as a Linux `/proc/<pid>/cgroup`
+/// line (cgroup v2 unified hierarchy).
+///
+/// Pure helper (no cgroupfs lock access) so it can be unit-tested with a
+/// synthetic group list in kernel context.  We run a cgroup v2 unified
+/// hierarchy, so the file is a single line:
+///
+/// ```text
+/// 0::<path>
+/// ```
+///
+/// where hierarchy id is `0`, the controller field is empty (v2 lists
+/// controllers in `cgroup.controllers`, not here), and `<path>` is the
+/// group's path relative to the cgroup mount.  A process not explicitly
+/// assigned to any group lives in the root cgroup `/`, which is exactly
+/// what Linux reports.  `systemd`, container runtimes, and
+/// `systemd-detect-virt` parse this line.
+fn render_cgroup(pid: u64, groups: &[crate::fs::cgroupfs::Cgroup]) -> Vec<u8> {
+    use core::fmt::Write as _;
+
+    // cgroup membership is keyed by the 32-bit PID the cgroup API uses.
+    let path = u32::try_from(pid)
+        .ok()
+        .and_then(|p| groups.iter().find(|g| g.processes.contains(&p)))
+        .map_or("/", |g| g.path.as_str());
+
+    let mut text = String::with_capacity(path.len().saturating_add(4));
+    // `writeln!` into a String is infallible; the Result is ignored.
+    let _ = writeln!(text, "0::{path}");
+    text.into_bytes()
+}
+
+/// `/proc/<pid>/cgroup` — the process's cgroup membership, Linux-format.
+///
+/// Reflects the real cgroup the process belongs to in our cgroup v2
+/// subsystem (see [`render_cgroup`]); processes that were never assigned
+/// to a group report the root cgroup `/`.  Gated on process existence so
+/// bare scheduler tasks (kernel threads with no PCB) return `NotFound`,
+/// matching every other process-only per-PID file.
+fn gen_pid_cgroup(task_id: u64) -> KernelResult<Vec<u8>> {
+    // Process-only file: a bare scheduler task has no process record.
+    if crate::proc::pcb::state(task_id).is_none() {
+        return Err(KernelError::NotFound);
+    }
+    let groups = crate::fs::cgroupfs::list_groups();
+    Ok(render_cgroup(task_id, &groups))
+}
+
 /// `/proc/<pid>/caps` — capability table listing.
 ///
 /// Shows the count and types of capabilities granted to this process,
@@ -2388,6 +2437,7 @@ fn generate_pid(task_id: u64, file_name: &str) -> KernelResult<Vec<u8>> {
         "limits" => gen_pid_limits(task_id),
         "environ" => gen_pid_environ(task_id),
         "mountinfo" => gen_pid_mountinfo(task_id),
+        "cgroup" => gen_pid_cgroup(task_id),
         _ => Err(KernelError::NotFound),
     }
 }
@@ -11492,6 +11542,50 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[procfs]   mountinfo render: {} mount lines OK", lines.len());
     }
 
+    // --- /proc/<pid>/cgroup rendering ---
+    // render_cgroup is the pure formatter behind the cgroup file; exercise
+    // it with a synthetic group list (no cgroupfs lock needed) to confirm
+    // the v2 "0::<path>" line, that an assigned PID resolves to its group
+    // path, and that an unassigned PID falls back to the root cgroup "/".
+    {
+        use crate::fs::cgroupfs::Cgroup;
+        let groups = [
+            Cgroup {
+                path: String::from("/"),
+                cpu_weight: 100, cpu_max_us: 0, memory_max: 0, memory_current: 0,
+                io_weight: 100, pids_max: 0, pids_current: 0,
+                processes: Vec::new(), created_ns: 0,
+            },
+            Cgroup {
+                path: String::from("/app.slice"),
+                cpu_weight: 100, cpu_max_us: 0, memory_max: 0, memory_current: 0,
+                io_weight: 100, pids_max: 0, pids_current: 1,
+                processes: alloc::vec![42u32], created_ns: 0,
+            },
+        ];
+        let assigned = render_cgroup(42, &groups);
+        let unassigned = render_cgroup(99, &groups);
+        let assigned_text = core::str::from_utf8(&assigned)
+            .map_err(|_| KernelError::InternalError)?;
+        let unassigned_text = core::str::from_utf8(&unassigned)
+            .map_err(|_| KernelError::InternalError)?;
+        if assigned_text != "0::/app.slice\n" {
+            serial_println!(
+                "[procfs]   FAIL: cgroup assigned {:?} != \"0::/app.slice\\n\"",
+                assigned_text
+            );
+            return Err(KernelError::InternalError);
+        }
+        if unassigned_text != "0::/\n" {
+            serial_println!(
+                "[procfs]   FAIL: cgroup unassigned {:?} != \"0::/\\n\"",
+                unassigned_text
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[procfs]   cgroup render: assigned + root fallback OK");
+    }
+
     // --- New per-PID files: comm, statm, limits ---
 
     // /proc/<pid>/comm — non-empty, newline-terminated, <= 16 bytes
@@ -11585,6 +11679,35 @@ pub fn self_test() -> KernelResult<()> {
         }
         Err(e) => {
             serial_println!("[procfs]   FAIL: mountinfo unexpected error {:?}", e);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // /proc/<pid>/cgroup — process-only (like statm/mountinfo), so a bare
+    // scheduler task returns NotFound.  When it succeeds, it must be the
+    // single cgroup v2 line "0::<path>\n".
+    match fs.read_file(&format!("/{current_tid}/cgroup")) {
+        Ok(cg_data) => {
+            let cg_text = core::str::from_utf8(&cg_data)
+                .map_err(|_| KernelError::InternalError)?;
+            if !cg_text.starts_with("0::/") || cg_text.lines().count() != 1 {
+                serial_println!(
+                    "[procfs]   FAIL: cgroup malformed ({:?})", cg_text
+                );
+                return Err(KernelError::InternalError);
+            }
+            serial_println!(
+                "[procfs]   {}/cgroup: {} bytes OK", current_tid, cg_data.len()
+            );
+        }
+        Err(KernelError::NotFound) => {
+            serial_println!(
+                "[procfs]   {}/cgroup: NotFound (bare task, no PCB) OK",
+                current_tid
+            );
+        }
+        Err(e) => {
+            serial_println!("[procfs]   FAIL: cgroup unexpected error {:?}", e);
             return Err(KernelError::InternalError);
         }
     }

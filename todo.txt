@@ -2074,7 +2074,7 @@
 ##     (..._000_000): 52 candidate fs/*.rs files. thpstat + swapact + writeback +
 ##     blkqueue + netqueue + pagecache + taskio + netspeed + diskhealth + netdev
 ##     + netfilter + mempress + devfreq + memcg + cgmem + vmzone + vmballoon
-##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport + hwrng + certmgr + authbroker + secmod + binfmt + recoverypart + diskclean + fnotify + memlayout + irqbalance + netmon + swapmon + netusage + taskmon + vmmap + pftrack + vmfrag + ipclog + telemetry + fdtable were fifty-six; sysprofiler (just fixed via read-through to real CPUID/topology/buddy-allocator sources, NOT empty-init) makes fifty-seven. Next ticks: work through the
+##     + softirq + timerq + schedclass + schedwait + kthread + kstack + kprobes + ftrace + sockbuf + msivec + clocksrc + cpuidle + cpucache + userfault + iomem + pgtable + memdiag + ipcns + ioport + hwrng + certmgr + authbroker + secmod + binfmt + recoverypart + diskclean + fnotify + memlayout + irqbalance + netmon + swapmon + netusage + taskmon + vmmap + pftrack + vmfrag + ipclog + telemetry + fdtable were fifty-six; sysprofiler (just fixed via read-through to real CPUID/topology/buddy-allocator sources, NOT empty-init) makes fifty-seven; fs::eventlog (case-(a) fabricator: redundant unwired parallel tracker, emptied init + residue-free self_test) makes fifty-eight. Next ticks: work through the
 ##     remaining candidates ONE PER TICK, auditing each before acting. The
 ##     52-file list includes both STATISTICS modules (fix: empty / zero-counters)
 ##     AND SETTINGS or structural modules that seed LEGITIMATE config defaults or
@@ -2124,7 +2124,32 @@
 ##     boot-wired, so /proc/sysresource is uninitialised at boot (no fabrication).
 ##     Only fix: made self_test residue-free (resets STATE at start AND end) so the
 ##     interactive `sysresource test` kshell command no longer permanently injects
-##     2 fake samples + a phantom alert into the live /proc/sysresource view.)
+##     2 fake samples + a phantom alert into the live /proc/sysresource view.
+##     eventlog fixed 2026-06-11: fabrication case (a). fs::eventlog is a
+##     (redundant, unwired) structured event log behind /proc/eventlog and the
+##     `eventlog` kshell command. init_defaults() FABRICATED two entries — an
+##     Info/System/"kernel" "System boot completed" and "Event log initialized",
+##     both stamped now — plus total_logged=2 and counts_by_severity=[0,2,0,0,0],
+##     which /proc/eventlog and the query/recent views displayed as if real logged
+##     events. No subsystem calls log_event(): the kernel's REAL system event log
+##     is the SEPARATE crate::eventlog module behind /proc/sysevents, so this
+##     fs::eventlog is an entirely unwired parallel tracker. Fixed: init_defaults
+##     now starts EMPTY (no events, next_id=1, all counters zero). Also: the
+##     self_test was NEVER wired into boot AND relied on the fabricated entries
+##     (asserted count==2) with no end-reset — so the kshell `eventlog test`
+##     permanently injected its fixtures into /proc/eventlog. Rewrote it residue-
+##     free (clears STATE at start AND end) with EXACT assertions (empty init,
+##     3 logs → severity_counts [1,0,1,1,0], query severity/source/category,
+##     recent-order, clear_source eth0, final 2 events/3 logged/1 cleared/4
+##     queries) and WIRED it into the boot self-test path. /proc/eventlog now
+##     reports an empty log (truthful).
+##     DEFERRED PROPER FIX: fs::eventlog duplicates the real crate::eventlog
+##     facility. Either wire real producers (drivers/services/diag) to
+##     fs::eventlog::log_event, or — better — retire fs::eventlog and have
+##     /proc/eventlog read through to crate::eventlog so there is a single source
+##     of truth. Deferred because consolidating the two requires deciding the
+##     unified schema (severity/category/source) and updating the kshell command +
+##     procfs generator together. Until then the empty log is honest.)
 ##     Remaining flagged
 ##     names incl.: (none — all previously-flagged candidates resolved. Re-run the
 ##     `fn init_defaults` + large-numeric-literal grep over kernel/src/fs/*.rs to

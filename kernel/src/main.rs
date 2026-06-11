@@ -2159,6 +2159,21 @@ extern "C" fn kernel_main() -> ! {
     // builders, then rebuilds the real snapshot so /proc/sysprofiler reflects
     // actual CPU + Memory and not its scratch entries.
     fs::sysprofiler::self_test();
+    // fs::eventlog is a (redundant, unwired) structured event log behind
+    // /proc/eventlog and the `eventlog` kshell command.  Its init_defaults()
+    // previously seeded two FABRICATED entries — an Info/System/"kernel" "System
+    // boot completed" and "Event log initialized", both stamped with the current
+    // time — plus a fabricated total_logged of 2 and counts_by_severity of
+    // [0, 2, 0, 0, 0], which /proc/eventlog and the query/recent views displayed
+    // as if real logged events.  No subsystem calls log_event(): the kernel's
+    // REAL system event log is the separate crate::eventlog module behind
+    // /proc/sysevents, so this fs::eventlog is an entirely unwired parallel
+    // tracker.  init_defaults now starts EMPTY (no events, zero counters);
+    // entries appear only via log_event once a producer wires it.  This self_test
+    // (never wired before, and whose old version relied on the fabricated entries
+    // with no end-reset) builds its own fixtures via the real API with exact
+    // assertions and resets STATE afterward so nothing leaks into /proc/eventlog.
+    fs::eventlog::self_test();
     // Register default file type associations, then self-test.
     fs::associations::register_defaults();
     if let Err(e) = fs::associations::self_test() {

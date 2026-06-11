@@ -137,20 +137,32 @@ fn severity_index(s: Severity) -> usize {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** event log.
+///
+/// Seeds NO events and zero counters.  Entries appear only when a real
+/// subsystem calls [`log_event`]; until that wiring exists, `/proc/eventlog`
+/// and the `eventlog` kshell command report an empty log rather than
+/// fabricated entries — the kernel's hard "never invent data in procfs" rule.
+///
+/// (Previously this seeded two FABRICATED entries — an Info/System/"kernel"
+/// "System boot completed" and "Event log initialized", both stamped with the
+/// current time — plus a fabricated `total_logged` of 2 and a
+/// `counts_by_severity` of `[0, 2, 0, 0, 0]`, which `/proc/eventlog` and the
+/// query/recent views then displayed as if they were real logged events.  No
+/// subsystem calls [`log_event`]: the kernel's REAL system event log is the
+/// separate `crate::eventlog` module behind `/proc/sysevents`, so this
+/// `fs::eventlog` is an entirely unwired parallel tracker.  The self-test now
+/// builds its own fixtures via the real API — see [`self_test`].)
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() { return; }
-    let now = crate::hpet::elapsed_ns();
     *guard = Some(State {
-        events: alloc::vec![
-            EventEntry { id: 1, severity: Severity::Info, category: EventCategory::System, source: String::from("kernel"), message: String::from("System boot completed"), timestamp_ns: now },
-            EventEntry { id: 2, severity: Severity::Info, category: EventCategory::System, source: String::from("kernel"), message: String::from("Event log initialized"), timestamp_ns: now },
-        ],
-        next_id: 3,
-        total_logged: 2,
+        events: Vec::new(),
+        next_id: 1,
+        total_logged: 0,
         total_cleared: 0,
         total_queries: 0,
-        counts_by_severity: [0, 2, 0, 0, 0],
+        counts_by_severity: [0; 5],
         ops: 0,
     });
 }
@@ -290,22 +302,30 @@ pub fn stats() -> (usize, u64, u64, u64, u64) {
 
 pub fn self_test() {
     crate::serial_println!("eventlog::self_test() — running tests...");
+    // Start from a clean slate so the fixtures built below can never leak into
+    // the live /proc/eventlog registry (this module is not boot-wired, so the
+    // natural state is uninitialised — `eventlog test` must leave it that way).
+    *STATE.lock() = None;
     init_defaults();
 
-    // 1: Default entries.
-    assert_eq!(count(), 2);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Empty defaults — no fabricated entries.
+    assert_eq!(count(), 0);
+    let (c0, l0, cl0, q0, _o0) = stats();
+    assert_eq!((c0, l0, cl0, q0), (0, 0, 0, 0));
+    assert_eq!(severity_counts(), [0; 5]);
+    crate::serial_println!("  [1/8] empty defaults: OK");
 
-    // 2: Log events.
+    // 2: Log events — counters rise from zero.
     log_event(Severity::Warning, EventCategory::Hardware, "disk", "Disk temperature high").expect("log1");
     log_event(Severity::Error, EventCategory::Network, "eth0", "Link down").expect("log2");
     log_event(Severity::Debug, EventCategory::Application, "app1", "Debug trace").expect("log3");
-    assert_eq!(count(), 5);
+    assert_eq!(count(), 3);
+    assert_eq!(severity_counts(), [1, 0, 1, 1, 0]); // debug, info, warn, error, crit.
     crate::serial_println!("  [2/8] log: OK");
 
-    // 3: Query by severity.
+    // 3: Query by severity — warning + error are >= Warning, debug is not.
     let warnings = query_by_severity(Severity::Warning, 100);
-    assert!(warnings.len() >= 2); // warning + error.
+    assert_eq!(warnings.len(), 2);
     crate::serial_println!("  [3/8] query severity: OK");
 
     // 4: Query by source.
@@ -319,25 +339,29 @@ pub fn self_test() {
     assert_eq!(net_events.len(), 1);
     crate::serial_println!("  [5/8] query category: OK");
 
-    // 6: Recent.
-    let rec = recent(3);
-    assert_eq!(rec.len(), 3);
+    // 6: Recent — most recent first (app1 was logged last).
+    let rec = recent(2);
+    assert_eq!(rec.len(), 2);
+    assert_eq!(rec[0].source, "app1");
     crate::serial_println!("  [6/8] recent: OK");
 
-    // 7: Clear source.
-    let cleared = clear_source("kernel").expect("clear");
-    assert_eq!(cleared, 2);
-    assert_eq!(count(), 3);
+    // 7: Clear source — removes exactly the eth0 event.
+    let cleared = clear_source("eth0").expect("clear");
+    assert_eq!(cleared, 1);
+    assert_eq!(count(), 2);
     crate::serial_println!("  [7/8] clear source: OK");
 
-    // 8: Stats.
+    // 8: Stats — exact totals (2 events, 3 logged, 1 cleared, 4 queries).
     let (evt_count, logged, cleared_total, queries, ops) = stats();
-    assert_eq!(evt_count, 3);
-    assert!(logged >= 5);
-    assert!(cleared_total >= 2);
-    assert!(queries >= 4);
+    assert_eq!(evt_count, 2);
+    assert_eq!(logged, 3);
+    assert_eq!(cleared_total, 1);
+    assert_eq!(queries, 4);
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
+
+    // Reset so the test leaves no fixtures behind in /proc/eventlog.
+    *STATE.lock() = None;
 
     crate::serial_println!("eventlog::self_test() — all 8 tests passed");
 }

@@ -22,9 +22,18 @@
 ##   post-unlock wake added.  The actual park path is exercised only by real userspace
 ##   (needs another runnable task to post the signal); the self-test covers the registry
 ##   partition logic and the non-blocking/already-pending fast paths.
-##   NOTE: rt_sigtimedwait still returns EAGAIN instead of blocking — it could now share
-##   this same SIGNALFD_WAITERS infra (register a sleeper, block, wake on set_pending) as
-##   a follow-up; the wait-queue machinery it needs is now in place.
+##   FOLLOW-UP DONE (2026-06-12): rt_sigtimedwait now blocks instead of always returning
+##   EAGAIN — sys_rt_sigtimedwait (syscall/linux.rs) reuses this same SIGNALFD_WAITERS infra
+##   (register_signalfd_waiter + take_pending_in_mask, woken by set_pending) plus the timerfd
+##   hrtimer idiom for the timeout: NULL timeout blocks indefinitely; a zero timeout polls
+##   once → EAGAIN; a finite timeout arms a one-shot hrtimer (sigtimedwait_timeout_wake) and
+##   parks via block_current, timing out to EAGAIN past the absolute monotonic deadline.
+##   SIGKILL/SIGSTOP are stripped from the acceptance set (Linux sigdelsetmask). On a matched
+##   signal it dequeues, fills uinfo si_signo (sigtimedwait_deliver), and returns the signo.
+##   The validation-gate discriminators (EINVAL/EFAULT/EAGAIN) are preserved; an in-kernel
+##   caller (caller_pid()==None, incl. the boot self-test) returns EAGAIN so the single-
+##   threaded boot never blocks. The real park path needs a second runnable task to post the
+##   signal, so (like signalfd) only the gates + caller-None fast path are self-tested.
 ##
 ## FIXED (2026-06-12): kernel-level timerfd blocking read now parks the caller
 ## Was: a read of an unexpired timerfd returned EAGAIN even for a BLOCKING
@@ -114,8 +123,8 @@
 ##   actual park path needs a second runnable task and is exercised by real userspace.
 ##   This was the LAST of the three fd-family blocking-read gaps (timerfd + signalfd
 ##   fixed earlier the same day) — all of signalfd/timerfd/inotify now park instead of
-##   spinning on EAGAIN.  (rt_sigtimedwait still returns EAGAIN; it can reuse the
-##   signalfd wait-queue infra as a follow-up.)
+##   spinning on EAGAIN.  (rt_sigtimedwait now blocks too, via the same signalfd
+##   wait-queue infra + an hrtimer timeout — see the signalfd FIXED entry's follow-up note.)
 ##
 ## LIMITATION (2026-06-12): kernel-level inotify event coverage is native-derived
 ## inotify watches are backed 1:1 by native fs::notify watches, so the reportable
@@ -10037,6 +10046,10 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##           Programs that use SIGCHLD reaping (test runners,
 ##           init systems) will see EAGAIN and fall back to
 ##           polling waitpid, which is implemented.
+##           (SUPERSEDED 2026-06-12: rt_sigtimedwait now actually
+##           blocks on the signalfd wait-queue infra + an hrtimer
+##           timeout — see the signalfd FIXED entry's follow-up
+##           note near the top of this file.)
 ##         * Forwarding rt_sigqueueinfo to kill is correct
 ##           except for the siginfo payload, which is rarely
 ##           consumed (most callers fire-and-forget the signal).

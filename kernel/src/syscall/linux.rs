@@ -25432,6 +25432,63 @@ fn sys_rt_sigsuspend(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::EINTR)
 }
 
+/// `hrtimer` callback waking a parked `rt_sigtimedwait` reader when its
+/// finite timeout expires.  Same any-context idiom as the `timerfd` /
+/// `signalfd` paths: prefer a direct wake, fall back to a deferred wake if
+/// the target has not parked yet (closing the wake-before-block race).
+fn sigtimedwait_timeout_wake(tid: u64) {
+    if !crate::sched::try_wake(tid) {
+        crate::sched::defer_wake(tid);
+    }
+}
+
+/// Read a `__kernel_timespec` (`tv_sec: i64`, `tv_nsec: i64`) at `ptr` and
+/// fold it to absolute nanoseconds (saturating).  The pointer must already
+/// have been validated for readability and value range by
+/// [`validate_user_timespec64`]; a copy fault here yields `0` (treated as a
+/// zero timeout, i.e. a single non-blocking poll), which is safe.
+fn read_timespec64_ns(ptr: u64) -> u64 {
+    let mut buf = [0u8; 16];
+    // SAFETY: caller validated [ptr, +16) readable via validate_user_timespec64.
+    if unsafe { crate::mm::user::copy_from_user(ptr, buf.as_mut_ptr(), 16) }.is_err() {
+        return 0;
+    }
+    let (sec_b, nsec_b) = buf.split_at(8);
+    let sec = i64::from_ne_bytes(sec_b.try_into().unwrap_or([0u8; 8]));
+    let nsec = i64::from_ne_bytes(nsec_b.try_into().unwrap_or([0u8; 8]));
+    // sec >= 0 and nsec in [0, 1e9) were enforced by validate_user_timespec64,
+    // so the sign-loss casts below cannot wrap a negative into a huge u64.
+    #[allow(clippy::cast_sign_loss)]
+    let sec_ns = (sec.max(0) as u64).saturating_mul(1_000_000_000);
+    #[allow(clippy::cast_sign_loss)]
+    let nsec_u = nsec.max(0) as u64;
+    sec_ns.saturating_add(nsec_u)
+}
+
+/// Deliver a dequeued signal as the result of `rt_sigtimedwait`: optionally
+/// fill the user `uinfo` siginfo (best-effort: `si_signo` in the first u32,
+/// remaining fields zero, matching what our signal queue carries), then
+/// return the signal number.  Mirrors Linux's
+/// `copy_siginfo_to_user(uinfo)` + `return info.si_signo`.
+fn sigtimedwait_deliver(uinfo: u64, sig: u32) -> SyscallResult {
+    if uinfo != 0 {
+        let mut info = [0u8; 128];
+        if let Some(dst) = info.get_mut(0..4) {
+            dst.copy_from_slice(&sig.to_ne_bytes());
+        }
+        if let Err(e) = crate::mm::user::validate_user_write(uinfo, 128) {
+            return linux_err(linux_errno_for(e));
+        }
+        // SAFETY: validate_user_write confirmed [uinfo, +128) is writable.
+        if let Err(e) =
+            unsafe { crate::mm::user::copy_to_user(info.as_ptr(), uinfo, 128) }
+        {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    SyscallResult::ok(i64::from(sig))
+}
+
 /// `rt_sigtimedwait(set*, info*, timeout*, sigsetsize)`.
 ///
 /// Linux gate order (kernel/signal.c
@@ -25445,6 +25502,13 @@ fn sys_rt_sigsuspend(args: &SyscallArgs) -> SyscallResult {
 ///      b. schedule_timeout / dequeue_signal
 ///      c. signal arrived: `copy_siginfo_to_user(uinfo)` -> EFAULT
 ///      d. timeout fired                        -> EAGAIN
+///
+/// We implement step 4b for real by reusing the `signalfd` wait-queue
+/// infrastructure (`register_signalfd_waiter` / `take_pending_in_mask`,
+/// woken by `set_pending`) and the `timerfd` `hrtimer` idiom for the
+/// timeout.  A NULL timeout blocks indefinitely; a zero timeout polls
+/// once; a finite timeout arms an `hrtimer` and parks.  SIGKILL/SIGSTOP
+/// are stripped from the acceptance set (Linux `sigdelsetmask`).
 ///
 /// Critical: `uinfo` is NEVER validated upfront. Linux only touches
 /// the user info buffer inside `do_sigtimedwait` *after* a signal has
@@ -25462,10 +25526,11 @@ fn sys_rt_sigsuspend(args: &SyscallArgs) -> SyscallResult {
 ///     discriminator (EFAULT-from-uinfo instead of EFAULT-from-uts
 ///     or EINVAL-from-bad-value).
 ///
-/// Since our implementation always returns EAGAIN (we never inject a
-/// signal into this path), we mirror Linux step 4d exactly: `uinfo`
-/// is never read or written, so it doesn't matter what the caller
-/// passed.
+/// `uinfo` is still never read or written on the timeout / no-signal
+/// path (step 4d): we only touch it via [`sigtimedwait_deliver`] *after*
+/// a matching signal has been dequeued, so a NULL or bogus `uinfo`
+/// combined with a timeout produces EAGAIN, never EFAULT — exactly as
+/// Linux step 4d.
 fn sys_rt_sigtimedwait(args: &SyscallArgs) -> SyscallResult {
     // Gate 1: sigsetsize must equal sizeof(sigset_t)=8.
     if args.arg3 != 8 {
@@ -25489,13 +25554,92 @@ fn sys_rt_sigtimedwait(args: &SyscallArgs) -> SyscallResult {
             return r;
         }
     }
-    // Gate 4d: timeout fired.  Linux returns EAGAIN with `uinfo`
-    // untouched.  We do the same.  We treat NULL (= infinite)
-    // timeout identically because we have no path that injects a
-    // matching signal into this stub yet — hanging the caller would
-    // be worse than the Linux-fidelity divergence on the infinite
-    // timeout.  This shortcut is documented in todo.txt.
-    linux_err(errno::EAGAIN)
+    // Real blocking needs a calling process whose signal queue we can
+    // wait on.  In the boot self-test (and any in-kernel caller)
+    // `caller_pid()` is None: there is no queue to wait on and the boot
+    // CPU is single-threaded, so blocking would hang.  Return EAGAIN for
+    // that case — the validation gates above already ran, preserving the
+    // EINVAL/EFAULT discriminators the self-test pins.
+    let caller = match caller_pid() {
+        Some(p) => p,
+        None => return linux_err(errno::EAGAIN),
+    };
+
+    // Parse the acceptance set (uthese).  A `sigset_t` uses bit (sig-1);
+    // our pending bitmask uses the same convention, so the raw u64 is the
+    // mask directly.  SIGKILL/SIGSTOP can never be waited for (Linux
+    // `sigdelsetmask` in `do_sigtimedwait`), so strip them.
+    let mut mask_buf = [0u8; 8];
+    // SAFETY: validate_user_read(arg0, 8) above confirmed 8 readable bytes.
+    if let Err(e) =
+        unsafe { crate::mm::user::copy_from_user(args.arg0, mask_buf.as_mut_ptr(), 8) }
+    {
+        return linux_err(linux_errno_for(e));
+    }
+    const SIGKILL_BIT: u64 = 1 << (9 - 1);
+    const SIGSTOP_BIT: u64 = 1 << (19 - 1);
+    let mask = u64::from_ne_bytes(mask_buf) & !(SIGKILL_BIT | SIGSTOP_BIT);
+
+    // Parse the timeout.  NULL (arg2 == 0) => block indefinitely.  A
+    // present timespec was value-validated above; fold it to an absolute
+    // monotonic deadline.  A zero timeout is a single non-blocking poll.
+    let deadline: Option<u64> = if args.arg2 == 0 {
+        None
+    } else {
+        let ns = read_timespec64_ns(args.arg2);
+        if ns == 0 {
+            return match crate::proc::signal::take_pending_in_mask(caller, mask) {
+                Some(sig) => sigtimedwait_deliver(args.arg1, sig),
+                None => linux_err(errno::EAGAIN),
+            };
+        }
+        Some(crate::timekeeping::clock_monotonic().saturating_add(ns))
+    };
+
+    let task = crate::sched::current_task_id();
+    loop {
+        if let Some(sig) = crate::proc::signal::take_pending_in_mask(caller, mask) {
+            return sigtimedwait_deliver(args.arg1, sig);
+        }
+        // Register-then-recheck so a signal raised in the gap before we
+        // park is not missed (`set_pending` wakes registered waiters).
+        crate::proc::signal::register_signalfd_waiter(caller, task, mask);
+        if crate::proc::signal::has_pending_in_mask(caller, mask) {
+            crate::proc::signal::deregister_signalfd_waiter(caller, task);
+            continue;
+        }
+        // Arm a wakeup `hrtimer` for the finite-timeout case; the infinite
+        // case relies solely on `set_pending` waking us.
+        let timer = match deadline {
+            Some(d) => {
+                let now = crate::timekeeping::clock_monotonic();
+                if now >= d {
+                    crate::proc::signal::deregister_signalfd_waiter(caller, task);
+                    return linux_err(errno::EAGAIN);
+                }
+                Some(crate::hrtimer::schedule_ns(
+                    d.saturating_sub(now).max(1),
+                    sigtimedwait_timeout_wake,
+                    task,
+                ))
+            }
+            None => None,
+        };
+        crate::sched::block_current();
+        if let Some(th) = timer {
+            crate::hrtimer::cancel(th);
+        }
+        crate::proc::signal::deregister_signalfd_waiter(caller, task);
+        // If the finite deadline has passed and nothing is pending, the
+        // wake was the timer firing: time out with EAGAIN.
+        if let Some(d) = deadline {
+            if crate::timekeeping::clock_monotonic() >= d
+                && !crate::proc::signal::has_pending_in_mask(caller, mask)
+            {
+                return linux_err(errno::EAGAIN);
+            }
+        }
+    }
 }
 
 /// `rt_sigqueueinfo(pid, sig, info*)`.

@@ -51680,3 +51680,69 @@ persist, so a synthetic PCB carries the round-trip):
 Build clean, clippy clean (no new warnings), boot-test PASS (26s).
 NOTE: numbered 527 (not 511) — 511 was already taken by the uname
 batch; 526 was the previous highest.
+
+----------------------------------------------------------------
+SIBLING-CONSISTENCY GAP (identified 2026-06-12, during batch 527):
+   sched_setattr SCHED_FLAG_KEEP_POLICY / KEEP_PARAMS semantics
+----------------------------------------------------------------
+
+Status: DEFERRED with plan (NOT yet implemented).  Found while doing
+batch 527 (RESET_ON_FORK) — the sibling-consistency obligation in the
+resolved "version-surface policy" (option ii) says when we honor one
+sched_flags bit we should also honor (or deliberately document the
+absence of) the same-family companion bits a caller assumes ship
+together.  batch 527 made RESET_ON_FORK (0x01) round-trip; its
+same-syscall siblings KEEP_POLICY (0x08) and KEEP_PARAMS (0x10) are
+currently accepted-by-mask (batch 507's SCHED_FLAG_ALL=0x7F gate) but
+their SEMANTICS are ignored.
+
+The gap: sys_sched_setattr unconditionally reads attr.sched_policy /
+attr.sched_priority and stores them into the PCB.  With KEEP_POLICY a
+caller means "keep my current policy, ignore attr.sched_policy"; with
+KEEP_PARAMS "keep my current priority/nice".  We overwrite anyway, so
+e.g. a FIFO task doing setattr(KEEP_POLICY, sched_policy=0) to tweak
+only nice gets its policy clobbered to SCHED_NORMAL — observable via
+sched_getattr / sched_getscheduler.
+
+v6.6 mechanism (as understood — MUST be verified verbatim against
+kernel/sched/syscalls.c before implementing; this is the reason it's
+deferred rather than done now):
+  * SYSCALL_DEFINE3(sched_setattr): after sched_copy_attr,
+      if ((int)attr.sched_policy < 0) return -EINVAL;        // pre-gate
+      if (attr.sched_flags & SCHED_FLAG_KEEP_POLICY)
+          attr.sched_policy = SETPARAM_POLICY;  // SETPARAM_POLICY = -1
+    So even with KEEP_POLICY the *input* sched_policy must be >= 0, but
+    its value is then discarded.
+  * __sched_setscheduler: `if (policy < 0) { reset_on_fork =
+    p->sched_reset_on_fork; policy = oldpolicy = p->policy; }` — note
+    under KEEP_POLICY the effective policy AND reset_on_fork come from
+    the TASK, not from attr.sched_flags (so RESET_ON_FORK in the same
+    call is ignored when KEEP_POLICY is set — a subtle interaction with
+    batch 527 that must be preserved).
+  * KEEP_PARAMS: skips the priority/nice change (keep current).  The
+    exact code path (the "nothing changed" fast-path vs. an explicit
+    keep) is the part I'm least sure of and is precisely why this needs
+    source verification.
+
+Implementation plan (once verified):
+  1. After reading attr, if sched_flags & KEEP_POLICY: substitute the
+     effective policy with the target PCB's current
+     linux_sched_policy, and take reset_on_fork from the PCB's current
+     linux_sched_reset_on_fork (NOT from attr) — guard the pre-gate
+     that attr.sched_policy still had to be >= 0.
+  2. Run sched_priority_check_for_policy against the EFFECTIVE policy.
+  3. If sched_flags & KEEP_PARAMS: do not call set_sched_priority
+     (and skip nice once nice is wired through setattr).
+  4. Store only the fields not "kept".
+  5. Boot self-tests on a synthetic PCB: set FIFO/prio via
+     setscheduler, then setattr(KEEP_POLICY, sched_policy=0) and
+     verify getscheduler still reports FIFO; setattr(KEEP_PARAMS) and
+     verify priority unchanged; verify KEEP_POLICY makes a same-call
+     RESET_ON_FORK bit be ignored (taken from task instead).
+
+TRIGGER to implement: next time the v6.6 kernel/sched/syscalls.c
+source is in hand to quote verbatim (the campaign's citation bar),
+fold this into a batch alongside re-reading __sched_setscheduler's
+KEEP_PARAMS path.  Low user-visible urgency (no known program depends
+on KEEP_* against our OS yet); tracked here so it isn't re-discovered
+from scratch.

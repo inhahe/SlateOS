@@ -2856,24 +2856,33 @@ fn fdinfo_flags(entry: &crate::proc::linux_fd::FdEntry) -> u32 {
     flags
 }
 
-/// Build `/proc/<pid>/fdinfo/<n>` for a real, open fd.
+/// Render `/proc/<pid>/fdinfo/<n>` directly from an fd-table entry.
 ///
 /// The `pos:` value is the open-file description's current offset for a
 /// regular file (via [`crate::fs::handle::current_offset`]); for objects
 /// with no seek position (pipes, console, eventfd/pidfd/memfd) it is `0`,
-/// which is the truthful answer Linux also reports for those.  Returns
-/// `NotFound` if the pid has no kernel-visible fd table or the fd is not
-/// open.
-fn gen_pid_fdinfo(pid: u64, fd: i32) -> KernelResult<Vec<u8>> {
+/// which is the truthful answer Linux also reports for those.
+///
+/// Taking the entry by reference lets callers that already hold one (e.g.
+/// `readdir`, which enumerated the whole table via `linux_fd_list`) avoid
+/// a redundant `PROCESS_TABLE` re-lookup per fd.
+fn fdinfo_from_entry(entry: &crate::proc::linux_fd::FdEntry) -> Vec<u8> {
     use crate::proc::linux_fd::HandleKind;
-    let entry = crate::proc::pcb::linux_fd_lookup(pid, fd).ok_or(KernelError::NotFound)?;
     let pos = match entry.kind {
         // Only seekable file objects carry a meaningful offset; for
         // everything else f_pos is 0 (and we don't invent one).
         HandleKind::File => crate::fs::handle::current_offset(entry.raw_handle).unwrap_or(0),
         _ => 0,
     };
-    Ok(render_pid_fdinfo(pos, fdinfo_flags(&entry)))
+    render_pid_fdinfo(pos, fdinfo_flags(entry))
+}
+
+/// Build `/proc/<pid>/fdinfo/<n>` for a real, open fd, looking the entry
+/// up by `(pid, fd)`.  Returns `NotFound` if the pid has no kernel-visible
+/// fd table or the fd is not open.
+fn gen_pid_fdinfo(pid: u64, fd: i32) -> KernelResult<Vec<u8>> {
+    let entry = crate::proc::pcb::linux_fd_lookup(pid, fd).ok_or(KernelError::NotFound)?;
+    Ok(fdinfo_from_entry(&entry))
 }
 
 /// The audit "unset" sentinel — `(uid_t)-1` / `(unsigned)-1`.
@@ -11913,8 +11922,10 @@ impl FileSystem for ProcFs {
                 let entries = crate::proc::pcb::linux_fd_list(pid)
                     .unwrap_or_default()
                     .into_iter()
-                    .map(|(fd, _entry)| {
-                        let size = gen_pid_fdinfo(pid, fd).map_or(0, |d| d.len() as u64);
+                    .map(|(fd, entry)| {
+                        // Render from the entry we already hold — no need to
+                        // re-lock PROCESS_TABLE per fd via gen_pid_fdinfo.
+                        let size = fdinfo_from_entry(&entry).len() as u64;
                         DirEntry {
                             name: format!("{fd}"),
                             entry_type: EntryType::File,

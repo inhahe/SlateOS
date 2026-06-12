@@ -1013,6 +1013,93 @@ pub fn build_test_elf_public() -> alloc::vec::Vec<u8> {
     build_test_elf()
 }
 
+/// Build a **Linux-ABI** test ELF that exits with `argc` as its status.
+///
+/// This validates the System V initial-stack wiring end-to-end: the
+/// binary is tagged `ELFOSABI_GNU`, so `detect_linux_abi` reports true
+/// and `spawn_process` builds a System V stack (argc/argv/envp/auxv).
+/// The code reads `argc` from `[%rsp]` — exactly where the SysV ABI says
+/// the kernel must place it — and passes it to `exit(2)`:
+///
+/// ```text
+///   mov rdi, [rsp]      ; rdi = argc                (48 8B 3C 24)
+///   mov eax, 60         ; Linux SYS_exit            (B8 3C 00 00 00)
+///   syscall             ; exit(argc)                (0F 05)
+///   int3                ; unreachable trap          (CC ...)
+/// ```
+///
+/// If the kernel laid out the stack correctly, the resulting zombie's
+/// exit code equals the number of argv entries passed to the spawn.
+pub fn build_linux_argc_exit_test_elf() -> alloc::vec::Vec<u8> {
+    use alloc::vec;
+
+    let phdr_offset: u64 = 64;
+    let code_offset: u64 = 120;
+    let code_size: u64 = 16;
+    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+
+    let mut buf = vec![0u8; (code_offset + code_size) as usize];
+
+    // --- ELF header ---
+    buf[0] = 0x7F;
+    buf[1] = b'E';
+    buf[2] = b'L';
+    buf[3] = b'F';
+    buf[EI_CLASS] = ELFCLASS64;
+    buf[EI_DATA] = ELFDATA2LSB;
+    buf[EI_VERSION] = EV_CURRENT;
+    // Tag as Linux/GNU so detect_linux_abi() returns true (signal 1).
+    buf[EI_OSABI] = ELFOSABI_GNU;
+
+    write_u16(&mut buf, 16, ET_EXEC);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr); // e_entry
+    write_u64(&mut buf, 32, phdr_offset); // e_phoff
+    write_u64(&mut buf, 40, 0); // e_shoff
+    write_u32(&mut buf, 48, 0); // e_flags
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, 1); // e_phnum
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0);
+    write_u16(&mut buf, 62, 0);
+
+    // --- Program header (PT_LOAD) ---
+    let ph = phdr_offset as usize;
+    write_u32(&mut buf, ph, PT_LOAD);
+    write_u32(&mut buf, ph + 4, PF_R | PF_X);
+    write_u64(&mut buf, ph + 8, code_offset);
+    write_u64(&mut buf, ph + 16, load_vaddr);
+    write_u64(&mut buf, ph + 24, 0);
+    write_u64(&mut buf, ph + 32, code_size);
+    write_u64(&mut buf, ph + 40, code_size);
+    write_u64(&mut buf, ph + 48, 0x1000);
+
+    // --- Code: exit(argc) reading argc from [rsp]. ---
+    let code_start = code_offset as usize;
+    let code_end = (code_offset + code_size) as usize;
+    for byte in &mut buf[code_start..code_end] {
+        *byte = 0xCC; // INT3 trap padding.
+    }
+    // mov rdi, [rsp]  (48 8B 3C 24)
+    buf[code_start] = 0x48;
+    buf[code_start + 1] = 0x8B;
+    buf[code_start + 2] = 0x3C;
+    buf[code_start + 3] = 0x24;
+    // mov eax, 60  (B8 3C 00 00 00) — Linux SYS_exit
+    buf[code_start + 4] = 0xB8;
+    buf[code_start + 5] = 0x3C;
+    buf[code_start + 6] = 0x00;
+    buf[code_start + 7] = 0x00;
+    buf[code_start + 8] = 0x00;
+    // syscall  (0F 05)
+    buf[code_start + 9] = 0x0F;
+    buf[code_start + 10] = 0x05;
+
+    buf
+}
+
 /// Build a "Hello from userspace!" ELF that calls SYS_CONSOLE_WRITE
 /// then SYS_EXIT(0).
 ///

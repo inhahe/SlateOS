@@ -479,7 +479,7 @@ pub fn spawn_process(
     }
 
     // Step 4: Allocate and map the user stack.
-    let user_rsp = match setup_user_stack(pml4_phys) {
+    let mut user_rsp = match setup_user_stack(pml4_phys) {
         Ok(rsp) => rsp,
         Err(e) => {
             serial_println!("[spawn] Failed to set up user stack: {:?}", e);
@@ -487,6 +487,31 @@ pub fn spawn_process(
             return Err(e);
         }
     };
+
+    // Step 4b (Linux ABI only): build the System V initial stack.
+    //
+    // A Linux binary's `_start` reads argc/argv/envp/auxv from the stack,
+    // not via SYS_PROCESS_GET_ARGS.  `install_linux_stack` writes that
+    // layout into the just-mapped stack frames and returns the aligned
+    // `%rsp` to enter at.  The native `setup_user_stack` is deliberately
+    // left untouched (design-decision #4); this only runs for Linux-ABI
+    // images.
+    if is_linux_abi {
+        match build_linux_initial_stack(pml4_phys, &elf_file, options.argv, options.envp) {
+            Ok(rsp) => {
+                serial_println!(
+                    "[spawn] Built Linux SysV stack: rsp={:#x} (was {:#x})",
+                    rsp, user_rsp
+                );
+                user_rsp = rsp;
+            }
+            Err(e) => {
+                serial_println!("[spawn] Failed to build Linux SysV stack: {:?}", e);
+                pcb::destroy(pid);
+                return Err(e);
+            }
+        }
+    }
 
     // Step 5: Grant initial capabilities.
     for &(resource_type, resource_id, rights) in options.capabilities {
@@ -878,7 +903,7 @@ pub fn exec_process(
     }
 
     // Step 5: Allocate and map a fresh user stack.
-    let user_rsp = match setup_user_stack(pml4_phys) {
+    let mut user_rsp = match setup_user_stack(pml4_phys) {
         Ok(rsp) => rsp,
         Err(e) => {
             serial_println!("[exec] Failed to set up user stack: {:?}", e);
@@ -886,6 +911,30 @@ pub fn exec_process(
             return Err(e);
         }
     };
+
+    // Step 5a (Linux ABI only): build the System V initial stack.
+    //
+    // If the new image speaks the Linux ABI, its `_start` expects argc/
+    // argv/envp/auxv on the stack.  Build that layout in-place (the active
+    // page table is already `pml4_phys` here, but `install_linux_stack`
+    // walks the table explicitly via HHDM so it is independent of CR3).
+    // Native images keep the bare stack from `setup_user_stack`.
+    if new_abi_mode == pcb::AbiMode::Linux {
+        match build_linux_initial_stack(pml4_phys, &elf_file, argv, envp) {
+            Ok(rsp) => {
+                serial_println!(
+                    "[exec] Built Linux SysV stack: rsp={:#x} (was {:#x})",
+                    rsp, user_rsp
+                );
+                user_rsp = rsp;
+            }
+            Err(e) => {
+                serial_println!("[exec] Failed to build Linux SysV stack: {:?}", e);
+                let _ = pcb::set_exit_code(pid, KILLED_EXIT_CODE);
+                return Err(e);
+            }
+        }
+    }
 
     // Step 5b: Update the process's ABI mode to match the new image.
     //
@@ -1024,6 +1073,48 @@ pub fn exec_process(
         entry_rip: entry_point,
         user_rsp,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Linux System V initial-stack setup (Linux-ABI processes only)
+// ---------------------------------------------------------------------------
+
+/// Build and install the System V initial stack for a Linux-ABI process.
+///
+/// Fetches 16 bytes of randomness for `AT_RANDOM` and delegates the
+/// actual layout to [`crate::proc::linux_stack::install_linux_stack`],
+/// which writes argc/argv/envp/auxv into the already-mapped stack frames
+/// (`[USER_STACK_TOP - USER_STACK_SIZE, USER_STACK_TOP)`) and returns the
+/// aligned initial `%rsp`.
+///
+/// This is **never** called for native processes — they get the bare
+/// stack from [`setup_user_stack`] and read argv via
+/// `SYS_PROCESS_GET_ARGS` (design-decision #4).
+///
+/// # Errors
+///
+/// Propagates failures from the stack builder (e.g.
+/// [`KernelError::OutOfMemory`] if the arguments do not fit).
+fn build_linux_initial_stack(
+    pml4_phys: u64,
+    elf_file: &elf::ElfFile<'_>,
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+) -> KernelResult<u64> {
+    let stack_bottom = USER_STACK_TOP
+        .checked_sub(USER_STACK_SIZE)
+        .ok_or(KernelError::Overflow)?;
+    let mut random16 = [0u8; 16];
+    crate::rng::fill(&mut random16);
+    crate::proc::linux_stack::install_linux_stack(
+        pml4_phys,
+        USER_STACK_TOP,
+        stack_bottom,
+        elf_file,
+        argv,
+        envp,
+        &random16,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1200,7 +1291,70 @@ pub fn self_test() -> KernelResult<()> {
     test_spawn_with_argv_envp()?;
     test_spawn_args_one_shot()?;
     test_spawn_ex_args_layout()?;
+    test_spawn_linux_sysv_stack()?;
 
+    Ok(())
+}
+
+/// Test 20: end-to-end Linux System V initial-stack delivery.
+///
+/// Spawns a Linux-ABI ELF (tagged `ELFOSABI_GNU`) whose entry code reads
+/// `argc` from `[%rsp]` and calls `exit(argc)`.  If `spawn_process` built
+/// and installed the System V stack correctly, the process exits with a
+/// status equal to the number of argv entries passed.  This validates the
+/// whole path: `detect_linux_abi` → `build_linux_initial_stack` →
+/// `install_linux_stack` writing into the mapped frames → ring-3 entry at
+/// the overridden `%rsp`.
+fn test_spawn_linux_sysv_stack() -> KernelResult<()> {
+    let elf_data = elf::build_linux_argc_exit_test_elf();
+    // Three argv entries → the binary must exit(3).
+    let argv: &[&[u8]] = &[b"prog", b"one", b"two"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-sysv",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+    };
+
+    let result = spawn_process(&elf_data, &options)?;
+
+    // Let the thread run: trampoline → ring 3 → read argc → exit(argc).
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+
+    let s = pcb::state(result.pid);
+    if s != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: Linux SysV stack — expected Zombie, got {:?}",
+            s
+        );
+        thread::on_thread_exit(result.task_id);
+        pcb::destroy(result.pid);
+        return Err(KernelError::InternalError);
+    }
+
+    // exit(argc) with 3 argv entries must yield exit code 3 — proving the
+    // kernel placed argc at [%rsp] per the System V ABI.
+    let ec = pcb::exit_code(result.pid);
+    if ec != Some(3) {
+        serial_println!(
+            "[spawn]   FAIL: Linux SysV stack — expected exit code 3 (argc), got {:?}",
+            ec
+        );
+        thread::on_thread_exit(result.task_id);
+        pcb::destroy(result.pid);
+        return Err(KernelError::InternalError);
+    }
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    serial_println!("[spawn]   Linux SysV initial-stack delivery (exit(argc)): OK");
     Ok(())
 }
 

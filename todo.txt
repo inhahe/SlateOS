@@ -356,6 +356,20 @@
 ##   Net: not "risky to land in native exec" — it simply must NOT live in
 ##   native exec at all.  It rides in on the Linux compat ELF loader.
 ##
+## UPDATE (2026-06-12): the SysV initial-stack builder NOW EXISTS —
+## kernel/src/proc/linux_stack.rs::build_sysv_stack/install_linux_stack,
+## wired into the AbiMode::Linux branch of proc::spawn (spawn_process + exec)
+## only.  It already constructs the full auxv (AT_PAGESZ=4096 — NOTE: the
+## Linux ABI reports 4096, NOT our 16 KiB FRAME_SIZE; an earlier line below
+## misstated this — see design-decision #1; AT_PHDR/PHENT/PHNUM/ENTRY from
+## elf.rs, AT_RANDOM into the process's own SysV stack, AT_EXECFN, identity
+## uid/gid).  So a Linux binary now gets a correct argc/argv/envp/auxv stack.
+## What remains for /proc/<pid>/auxv + PR_GET_AUXV: PERSIST a copy of that
+## auxv into Linux-ABI per-process PCB state (alongside KernelFdTable) at
+## install_linux_stack time, then serve it from PR_GET_AUXV and a new
+## gen_pid_auxv() (honestly-empty AT_NULL for native pids).  The build is
+## done; only the save+serve plumbing is left.
+##
 ## SYSTEMIC FINDING (2026-06-11): fabricated demo data in fs:: diagnostic
 ## modules' init_defaults() — a whole FAMILY, not isolated incidents.
 ## ~250 modules under kernel/src/fs/ define an init_defaults().  Many of the

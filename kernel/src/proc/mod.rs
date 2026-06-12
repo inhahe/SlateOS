@@ -38,6 +38,7 @@ pub mod elf;
 pub mod exception;
 pub mod fork;
 pub mod linux_fd;
+pub mod linux_stack;
 pub mod pcb;
 pub mod signal;
 pub mod spawn;
@@ -70,6 +71,8 @@ pub fn self_test() -> KernelResult<()> {
     fork::self_test()?;
     serial_println!("[proc] Running Linux fd-table self-test...");
     linux_fd::self_test()?;
+    serial_println!("[proc] Running Linux SysV-stack self-test...");
+    linux_stack::self_test()?;
     serial_println!("[proc] Running thread-clone self-test...");
     thread_clone::self_test()?;
 

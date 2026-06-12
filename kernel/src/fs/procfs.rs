@@ -13600,7 +13600,7 @@ pub fn self_test() -> KernelResult<()> {
             for line in mi_text.lines() {
                 let fields: Vec<&str> = line.split(' ').collect();
                 // mount_id parent maj:min root mp opts - fstype src superopts
-                if fields.len() < 10 || !fields.iter().any(|f| *f == "-") {
+                if fields.len() < 10 || !fields.contains(&"-") {
                     serial_println!(
                         "[procfs]   FAIL: mountinfo line malformed ({:?})", line
                     );

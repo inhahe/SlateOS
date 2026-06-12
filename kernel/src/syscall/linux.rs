@@ -7187,22 +7187,31 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
         //     short read by comparing the return value against
         //     the buffer length.
         //
-        // Our stance: we do not yet populate a per-process saved
-        // auxv (the ELF loader writes the auxv onto the user
-        // stack at exec time but doesn't keep a kernel-side
-        // copy).  The truthful answer is therefore "an auxv
-        // consisting of a single AT_NULL terminator" — 16 bytes
-        // of zeros (one elf_auxv_t with a_type = AT_NULL = 0,
-        // a_un.a_val = 0).  A caller that walks the result sees
-        // an immediately-terminated vector and uses its fallback
-        // (getauxval-via-aux-on-stack), which DOES work because
-        // the ELF loader still populates the user stack the
-        // normal way.
+        // Our stance: no process has a saved auxv yet, so the
+        // truthful answer is "an auxv consisting of a single
+        // AT_NULL terminator" — 16 bytes of zeros (one
+        // elf_auxv_t with a_type = AT_NULL = 0, a_un.a_val = 0).
+        // A caller walking the result sees an immediately-
+        // terminated vector.
         //
-        // Known limitation: tracked in todo.txt — when the ELF
-        // loader gains kernel-side auxv storage, this arm will
-        // return the real saved_auxv instead of just the
-        // terminator.  No surface change required at that point.
+        // IMPORTANT (corrected 2026-06-12): an earlier version of
+        // this comment claimed the ELF loader writes the auxv onto
+        // the user stack at exec and that getauxval's stack
+        // fallback therefore works.  That is FALSE — there is NO
+        // System V initial stack anywhere.  Native processes get
+        // argv/envp from the kernel via SYS_PROCESS_GET_ARGS (see
+        // posix/src/crt.rs) and have no auxv at all by design; the
+        // auxv is a Linux/SysV-ABI construct that must never enter
+        // the native launch path.  A real auxv will appear only for
+        // Linux-ABI processes, built by the (not-yet-existing)
+        // Linux compat ELF loader when it constructs a SysV initial
+        // stack, and stored in that process's Linux-ABI state.
+        //
+        // Known limitation: tracked in todo.txt (the
+        // "/proc/<pid>/auxv (Linux-ABI processes ONLY)" block).
+        // When that loader lands, this arm returns the per-process
+        // saved auxv for Linux-ABI pids and keeps the bare AT_NULL
+        // terminator for native pids.  No surface change required.
         0x4155_5856 => {
             if args.arg3 != 0 || args.arg4 != 0 {
                 return linux_err(errno::EINVAL);

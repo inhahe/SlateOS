@@ -38,16 +38,23 @@ re-opening F6/F7.
 recurrence rate and bisect the hang window the way F1/F4 were diagnosed
 (finer-grained pre/post serial markers around the suspected lock).
 
-**Soak 2026-06-12:** ran a 12× back-to-back `boot-test.sh` soak
-(`build/oom-soak-*.log`) targeting this hang window — **12/12 clean,
-every run BOOT_OK at 25s, zero recurrence, no truncated serial.** No
-failure serials were produced to bisect. Consistent with the "OOM
-self-test is the victim, not the cause" assessment: the single
-recorded truncation has not reproduced in 12 further runs. Kept on
-WATCHLIST (the diagnostic recommendation was ~20×; 12 clean raises
-confidence but isn't yet a full soak). If a future idle tick has time,
-extend with another ~8–10 runs to reach the ~20× bar before
-considering closure.
+**Soak 2026-06-12:** ran the diagnostic soak in two batches —
+12× then a further 10× back-to-back `boot-test.sh` runs
+(`build/oom-soak-*.log`, `build/oom-soak2-*.log`) targeting this hang
+window. **22/22 clean, every run BOOT_OK at 25s, zero recurrence, no
+truncated serial, no failure serials to bisect.** This **meets the
+~20× diagnostic bar** the entry set, with an observed recurrence rate
+of **0/22**. Consistent with the "OOM self-test is the victim, not the
+cause" assessment: the single recorded truncation has not reproduced.
+
+**Status:** downgraded to passive monitoring. Not fully closed yet
+only to stay consistent with project precedent (F6/F7 were closed
+after 90 consecutive clean boots); 22 dedicated clean runs plus
+routine boot tests are accumulating toward that. **Closure condition:**
+close this item (move to Fixed/Closed as "likely cured incidentally,"
+like F6/F7) once the combined dedicated-soak + routine-boot clean
+streak passes ~90 with no recurrence. Re-open and bisect immediately
+if any run truncates mid-self-test again.
 
 _(No other active bugs.  The two prior watchlist items — accounting
 self-test hang and invariant self-test hang — went 90 consecutive

@@ -335,6 +335,24 @@
 ## PR_GET_AUXV and a new gen_pid_auxv() return it.  High value: glibc/
 ## ld.so/WINE read /proc/self/auxv at startup.  Deferred because it
 ## touches the process-launch critical path (risky to land unattended).
+## CLARIFICATION (2026-06-12, after auditing the launch path): the kernel
+## is UNAMBIGUOUSLY the right (and only) place to build this — there is no
+## userspace component that constructs auxv.  crt.rs (our libc startup,
+## posix/src/crt.rs) does NOT read a System V stack; it pulls argv/envp from
+## the kernel via SYS_PROCESS_GET_ARGS and synthesizes argc/argv/envp for
+## main().  posix/src/linux_binfmt_elf.rs and posix/src/sys_auxv.rs are inert
+## scaffolding (AT_* consts + types, NO pub fn, no stack builder).  And the
+## kernel already parses every value the auxv needs: kernel/src/proc/elf.rs
+## exposes e_entry, e_phoff, e_phentsize (AT_PHENT), e_phnum (AT_PHNUM) and
+## per-segment p_vaddr (AT_PHDR = load_base + e_phoff, or the PT_PHDR segment
+## vaddr).  AT_PAGESZ is our 16 KiB FRAME_SIZE.  AT_RANDOM needs 16 random
+## bytes living in user memory — setup_user_stack owns the stack top, so the
+## cleanest spot is to write them just below USER_STACK_TOP and point
+## AT_RANDOM there (the same region where the auxv/argv/envv block would go
+## if we ever build a real SysV stack).  So the whole feature is kernel-local:
+## elf metadata -> build [(type,val)] vec -> store in PCB -> serve from
+## PR_GET_AUXV + gen_pid_auxv; the inert userspace getauxval() can later be
+## pointed at PR_GET_AUXV.  No userspace/loader changes required.
 ##
 ## SYSTEMIC FINDING (2026-06-11): fabricated demo data in fs:: diagnostic
 ## modules' init_defaults() — a whole FAMILY, not isolated incidents.

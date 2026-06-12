@@ -36,6 +36,27 @@
 ## across ALL CPUs, sourced honestly from cputime::aggregate_stats().idle_ns
 ## (real per-CPU TSC idle accounting) — never fabricated.  Strict two-field
 ## parsers (sscanf "%lf %lf") now work.  boot-test PASSED.
+## DONE (2026-06-11): /proc/loadavg now reports REAL 1/5/15-minute EWMAs
+## (gen_loadavg, procfs.rs + update_load_average, kernel\src\sched\mod.rs).
+## Previously gen_loadavg walked task_list() and stuffed the INSTANTANEOUS
+## runnable count into all three load slots ("load load load") — meaningless to
+## uptime/top/w which expect genuine time-averaged load.  The scheduler already
+## had an O(1) per-second EWMA sampler (update_load_average, reading per-CPU
+## queue_length — no task-list walk), but it kept only ONE 64s-half-life average
+## and gen_loadavg ignored it.  Fix: replaced LOAD_AVG_X100 with three Linux-
+## faithful fixed-point EWMAs (LOAD_AVG_1/5/15) using Linux's exact constants
+## (FSHIFT=11, FIXED_1=2048, EXP_1=1884/EXP_5=2014/EXP_15=2037; calc_load =
+## (load*exp + active*(FIXED_1-exp)) >> FSHIFT).  The sampler is gated to a
+## 5-second effective interval (Linux LOAD_FREQ) via LOAD_SAMPLE_DIVIDER while
+## keeping the existing 1s timer_tick call site.  gen_loadavg now formats the
+## three averages <int>.<2-digit-frac> via sched::load_int/load_frac (== Linux
+## LOAD_INT/LOAD_FRAC) and keeps the honest runnable/total + last_pid fields
+## (computed at read time from task_list — fine, not ISR context).
+## load_average_x100() (used by kdiag/kshell) preserved, now derived from the
+## 1-minute EWMA so it stays consistent with /proc/loadavg.  Self-test added
+## (asserts 5 space-split fields, loads parse as <int>.<2-frac>, field 4 is
+## <runnable>/<total>, field 5 is an integer).  boot-test PASSED; serial shows
+## '/loadavg: five-field Linux layout OK ("0.00 0.00 0.00 1/1 0")'.
 ## NOTE: /proc/meminfo and /proc/cpuinfo
 ## are INTENTIONALLY native-format (their doc comments say "our own
 ## field names"); converting THOSE to Linux layout is a separate design

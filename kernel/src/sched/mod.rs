@@ -353,17 +353,58 @@ static IDLE_TICK_COUNTS: [CachePadded<AtomicU64>; priority_rr::MAX_CPUS] = {
     [INIT; priority_rr::MAX_CPUS]
 };
 
-/// System load average (EWMA of runnable task count).
+/// System load averages over 1, 5, and 15 minutes.
 ///
-/// Stored as fixed-point × 100 (so load 2.50 = 250).  Updated every
-/// second (100 ticks) by the BSP.  Uses the same EWMA formula as
-/// Linux: `load = load × exp_factor + n_runnable × (1 - exp_factor)`
+/// Stored in Linux's exact fixed-point representation: a value `v`
+/// represents the real load `v / FIXED_1` where `FIXED_1 = 1 << FSHIFT`
+/// (`FSHIFT = 11`, so `FIXED_1 = 2048`).  The three EWMAs are sampled
+/// every 5 seconds (Linux's `LOAD_FREQ`) from the per-CPU runnable
+/// counts and decayed with Linux's published constants `EXP_1`/`EXP_5`/
+/// `EXP_15` (see [`calc_load`]).  Using the same representation and
+/// constants as Linux means `/proc/loadavg` reports values directly
+/// comparable to a Linux box under the same workload, instead of the
+/// previous misleading scheme that stuffed the *instantaneous* runnable
+/// count into all three slots.
 ///
-/// We use a 1-minute decay constant (like Linux's `loadavg[0]`).
-/// With α ≈ 1/60 (sample every 1s, 60s decay): each sample contributes
-/// ~1.7%.  We approximate with: `load = load - load/64 + n_runnable`
-/// (which gives a ~64-sample / 64-second half-life).
-static LOAD_AVG_X100: AtomicU64 = AtomicU64::new(0);
+/// Reference: Linux `kernel/sched/loadavg.c` (`calc_load`, `LOAD_INT`,
+/// `LOAD_FRAC`) and `include/linux/sched/loadavg.h` (the `EXP_*` table).
+static LOAD_AVG_1: AtomicU64 = AtomicU64::new(0);
+static LOAD_AVG_5: AtomicU64 = AtomicU64::new(0);
+static LOAD_AVG_15: AtomicU64 = AtomicU64::new(0);
+
+/// Counter of [`update_load_average`] invocations (once per second).  The
+/// EWMA is only recomputed every 5th call, matching Linux's 5-second
+/// `LOAD_FREQ` sampling interval while keeping the existing 1-second
+/// `timer_tick` call site.
+static LOAD_SAMPLE_DIVIDER: AtomicU64 = AtomicU64::new(0);
+
+/// Load-average fixed-point shift: a value of `1 << LOAD_FSHIFT`
+/// (= 2048) represents a real load of `1.00`.  Matches Linux `FSHIFT`.
+const LOAD_FSHIFT: u64 = 11;
+/// Fixed-point representation of `1.00` load (Linux `FIXED_1`).
+const LOAD_FIXED_1: u64 = 1 << LOAD_FSHIFT;
+/// EWMA decay factor for the 1-minute average at a 5s sample interval
+/// (Linux `EXP_1` = `1/exp(5/60)` in fixed-point).
+const LOAD_EXP_1: u64 = 1884;
+/// EWMA decay factor for the 5-minute average (Linux `EXP_5`).
+const LOAD_EXP_5: u64 = 2014;
+/// EWMA decay factor for the 15-minute average (Linux `EXP_15`).
+const LOAD_EXP_15: u64 = 2037;
+
+/// Advance one load-average EWMA by a single 5-second sample.
+///
+/// Implements Linux's `calc_load`:
+///   `load = (load * exp + active * (FIXED_1 - exp)) >> FSHIFT`
+/// where `active` is the runnable count already shifted into fixed-point
+/// (`n_runnable << FSHIFT`).  All arithmetic is saturating so a pathological
+/// runnable count can never overflow or panic.
+#[must_use]
+fn calc_load(load: u64, exp: u64, active: u64) -> u64 {
+    let weighted = load
+        .saturating_mul(exp)
+        .saturating_add(active.saturating_mul(LOAD_FIXED_1.saturating_sub(exp)));
+    weighted >> LOAD_FSHIFT
+}
 
 /// Per-CPU TSC timestamp of the last context switch-in.
 ///
@@ -527,7 +568,7 @@ pub fn sched_stats() -> SchedStats {
         total_tasks_spawned: TASKS_SPAWNED.load(Ordering::Relaxed),
         total_tasks_exited: TASKS_EXITED.load(Ordering::Relaxed),
         num_cpus,
-        load_avg_x100: LOAD_AVG_X100.load(Ordering::Relaxed),
+        load_avg_x100: load_average_x100(),
         cpu_ticks: [(0, 0); priority_rr::MAX_CPUS],
     };
 
@@ -1635,19 +1676,24 @@ fn unthrottle_expired() {
     }
 }
 
-/// Update the system load average.
+/// Update the system load averages (1/5/15-minute EWMAs).
 ///
-/// Called once per second (every `BANDWIDTH_PERIOD_TICKS`) by the BSP.
-/// Samples the number of runnable tasks across all CPUs, then updates
-/// the EWMA with exponential decay (~64 second half-life).
-///
-/// Load average formula (fixed-point × 100):
-///   `load = load - load/64 + n_runnable`
-///
-/// This gives a smoothed view of system load similar to Linux's
-/// 1-minute load average.
+/// Called once per second (every `BANDWIDTH_PERIOD_TICKS`) by the BSP,
+/// but only recomputes the EWMAs every 5th call so the effective sample
+/// interval is 5 seconds — Linux's `LOAD_FREQ`.  Samples the number of
+/// runnable tasks across all CPUs (an O(num_cpus) read of per-CPU queue
+/// lengths — no task-list walk, safe in ISR context) and decays the three
+/// averages with Linux's `EXP_1`/`EXP_5`/`EXP_15` constants.
 fn update_load_average() {
-    // Count runnable tasks: query per-CPU queue lengths.
+    // Gate to a 5-second effective sample interval.  fetch_add returns the
+    // pre-increment value, so the very first call (n == 0) samples
+    // immediately, then every 5th call thereafter.
+    let n = LOAD_SAMPLE_DIVIDER.fetch_add(1, Ordering::Relaxed);
+    if !n.is_multiple_of(5) {
+        return;
+    }
+
+    // Count runnable tasks: query per-CPU queue lengths (cheap, lock-light).
     let num_cpus = crate::smp::cpu_count().max(1);
     let mut runnable: u64 = 0;
     for cpu_idx in 0..num_cpus.min(priority_rr::MAX_CPUS) {
@@ -1656,27 +1702,60 @@ fn update_load_average() {
         );
     }
 
-    // EWMA update: load = load - load/64 + runnable_count × 100
-    // (multiply runnable by 100 because LOAD_AVG_X100 stores ×100)
-    let old = LOAD_AVG_X100.load(Ordering::Relaxed);
-    #[allow(clippy::arithmetic_side_effects)]
-    let decay = old.saturating_sub(old / 64);
-    let new_val = decay.saturating_add(runnable.saturating_mul(100) / 64);
-    LOAD_AVG_X100.store(new_val, Ordering::Relaxed);
+    // active = n_runnable in fixed-point (Linux passes `nr_active * FIXED_1`).
+    let active = runnable.saturating_mul(LOAD_FIXED_1);
+    LOAD_AVG_1.store(
+        calc_load(LOAD_AVG_1.load(Ordering::Relaxed), LOAD_EXP_1, active),
+        Ordering::Relaxed,
+    );
+    LOAD_AVG_5.store(
+        calc_load(LOAD_AVG_5.load(Ordering::Relaxed), LOAD_EXP_5, active),
+        Ordering::Relaxed,
+    );
+    LOAD_AVG_15.store(
+        calc_load(LOAD_AVG_15.load(Ordering::Relaxed), LOAD_EXP_15, active),
+        Ordering::Relaxed,
+    );
 }
 
-/// Get the system load average (scaled ×100).
+/// Get the three system load averages in Linux fixed-point form.
 ///
-/// Returns a value like 150 meaning load = 1.50 (one and a half
-/// runnable tasks on average).  Divide by 100 for the traditional
-/// "load average" number.
-///
-/// A load of 100 = 1.00 means one CPU is fully occupied on average.
-/// A load of `num_cpus × 100` means all CPUs are saturated.
+/// Each value `v` represents the real load `v / 2048` (`FIXED_1`).  The
+/// tuple is `(1-minute, 5-minute, 15-minute)`.  `/proc/loadavg` formats
+/// these with [`load_int`]/[`load_frac`] exactly as Linux does.
 #[must_use]
 #[allow(dead_code)] // Public API for procfs /proc/loadavg.
+pub fn load_averages_fixed() -> (u64, u64, u64) {
+    (
+        LOAD_AVG_1.load(Ordering::Relaxed),
+        LOAD_AVG_5.load(Ordering::Relaxed),
+        LOAD_AVG_15.load(Ordering::Relaxed),
+    )
+}
+
+/// Integer part of a Linux fixed-point load value (`v >> FSHIFT`).
+#[must_use]
+pub fn load_int(v: u64) -> u64 {
+    v >> LOAD_FSHIFT
+}
+
+/// Two-digit fractional part of a Linux fixed-point load value.
+///
+/// Matches Linux's `LOAD_FRAC`: `LOAD_INT((v & (FIXED_1 - 1)) * 100)`.
+#[must_use]
+pub fn load_frac(v: u64) -> u64 {
+    load_int((v & (LOAD_FIXED_1.saturating_sub(1))).saturating_mul(100))
+}
+
+/// Get the 1-minute system load average scaled ×100.
+///
+/// Returns a value like 150 meaning load = 1.50.  Derived from the
+/// Linux fixed-point 1-minute EWMA so it stays consistent with
+/// `/proc/loadavg`.
+#[must_use]
+#[allow(dead_code)] // Public API for kdiag / kshell.
 pub fn load_average_x100() -> u64 {
-    LOAD_AVG_X100.load(Ordering::Relaxed)
+    LOAD_AVG_1.load(Ordering::Relaxed).saturating_mul(100) >> LOAD_FSHIFT
 }
 
 /// Anti-starvation check: boost priority of tasks stuck in Ready too long.

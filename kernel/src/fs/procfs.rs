@@ -943,20 +943,28 @@ fn gen_loadavg() -> Vec<u8> {
 
     use crate::sched::task::TaskState;
 
+    // Linux /proc/loadavg fields (fs/proc/loadavg.c show_loadavg):
+    //   "<load1> <load5> <load15> <runnable>/<total> <last_pid>\n"
+    //
+    // The three load figures are the scheduler's 1/5/15-minute EWMAs in
+    // Linux fixed-point form, formatted as <int>.<2-digit-frac> exactly as
+    // Linux does (LOAD_INT / LOAD_FRAC).  Previously this stuffed the
+    // instantaneous runnable count into all three slots, which is
+    // meaningless to any consumer (uptime/top/w) expecting time-averaged
+    // load — now they get genuine moving averages.
+    let (l1, l5, l15) = crate::sched::load_averages_fixed();
+
     let runnable = tasks.iter()
         .filter(|t| matches!(t.state, TaskState::Running | TaskState::Ready))
         .count();
     let total = tasks.len();
-
-    // Format: "load_now running/total last_pid\n"
-    // We use the instantaneous runnable count for all three slots
-    // (1/5/15 min) since we don't track history yet.
-    let load = runnable as f64; // exact integer, no precision loss
     let last_pid = tasks.iter().map(|t| t.id).max().unwrap_or(0);
 
     let text = format!(
-        "{:.2} {:.2} {:.2} {runnable}/{total} {last_pid}\n",
-        load, load, load,
+        "{}.{:02} {}.{:02} {}.{:02} {runnable}/{total} {last_pid}\n",
+        crate::sched::load_int(l1), crate::sched::load_frac(l1),
+        crate::sched::load_int(l5), crate::sched::load_frac(l5),
+        crate::sched::load_int(l15), crate::sched::load_frac(l15),
     );
     text.into_bytes()
 }
@@ -13529,6 +13537,58 @@ pub fn self_test() -> KernelResult<()> {
             }
         }
         serial_println!("[procfs]   /uptime: two-field Linux layout OK ({:?})", line);
+    }
+
+    // --- system-wide /proc/loadavg Linux layout ---
+    // gen_loadavg now emits the Linux fs/proc/loadavg.c five-field
+    // "<load1> <load5> <load15> <runnable>/<total> <last_pid>" format,
+    // with the three loads as <int>.<2-digit-frac> fixed-point figures.
+    {
+        let data = fs.read_file("/loadavg")?;
+        let text = core::str::from_utf8(&data).map_err(|_| KernelError::InternalError)?;
+        let line = text.strip_suffix('\n').unwrap_or(text);
+        let fields: Vec<&str> = line.split(' ').filter(|s| !s.is_empty()).collect();
+        if fields.len() != 5 {
+            serial_println!(
+                "[procfs]   FAIL: /loadavg has {} fields, want 5", fields.len()
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Fields 0..3 are the three load averages: "<int>.<2-digit-frac>".
+        for f in fields.iter().take(3) {
+            let mut parts = f.split('.');
+            let int_part = parts.next().and_then(|s| s.parse::<u64>().ok());
+            let frac = parts.next();
+            let frac_ok = frac.is_some_and(|c| c.len() == 2 && c.parse::<u64>().is_ok());
+            if int_part.is_none() || parts.next().is_some() || !frac_ok {
+                serial_println!(
+                    "[procfs]   FAIL: /loadavg load field {:?} not '<int>.<2-digit-frac>'", f
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // Field 3 is "<runnable>/<total>" — two integers separated by '/'.
+        let rt_field = fields.get(3).copied().unwrap_or("");
+        {
+            let mut rt = rt_field.split('/');
+            let runnable = rt.next().and_then(|s| s.parse::<u64>().ok());
+            let total = rt.next().and_then(|s| s.parse::<u64>().ok());
+            if runnable.is_none() || total.is_none() || rt.next().is_some() {
+                serial_println!(
+                    "[procfs]   FAIL: /loadavg field 4 {:?} not '<runnable>/<total>'", rt_field
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // Field 4 is the last PID — a plain integer.
+        let pid_field = fields.get(4).copied().unwrap_or("");
+        if pid_field.parse::<u64>().is_err() {
+            serial_println!(
+                "[procfs]   FAIL: /loadavg last_pid {:?} not an integer", pid_field
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[procfs]   /loadavg: five-field Linux layout OK ({:?})", line);
     }
 
     serial_println!("[procfs] Self-test PASSED");

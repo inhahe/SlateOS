@@ -35309,6 +35309,29 @@ fn sys_clock_gettime(args: &SyscallArgs) -> SyscallResult {
         _ => return linux_err(errno::EINVAL),
     };
 
+    // Coarse clocks advance only at the periodic tick.  Linux's
+    // CLOCK_*_COARSE read the time snapshot captured at the last timer
+    // tick (ktime_get_coarse_*_ts64), so consecutive reads within one
+    // tick return the identical value and the clock's effective
+    // resolution is TICK_NSEC (10ms at our HZ=100).  We don't keep a
+    // separate per-tick snapshot, so we model the same observable
+    // semantics by flooring the high-res reading to the TICK_NSEC grid:
+    // distinct values then only appear every 10ms, exactly as on Linux,
+    // and the value is always <= the true time (a past-tick snapshot).
+    // This keeps clock_gettime self-consistent with the TICK_NSEC
+    // resolution clock_getres reports for these clockids.
+    let ns = if clockid == CLOCK_REALTIME_COARSE || clockid == CLOCK_MONOTONIC_COARSE {
+        // 1e9 / HZ(100) = 10ms.  Floor (truncating division) to the grid.
+        // `checked_div` by a non-zero const never returns None; the
+        // map_or fallback to the unfloored `ns` is unreachable but keeps
+        // the path panic-free without a bare division operator.
+        const TICK_NSEC: u64 = 10_000_000;
+        ns.checked_div(TICK_NSEC)
+            .map_or(ns, |q| q.saturating_mul(TICK_NSEC))
+    } else {
+        ns
+    };
+
     let ts = LinuxTimespec::from_nanos(ns);
     if let Err(e) = write_timespec(tp_ptr, ts) {
         return linux_err(linux_errno_for(e));
@@ -35318,7 +35341,20 @@ fn sys_clock_gettime(args: &SyscallArgs) -> SyscallResult {
 
 /// `clock_getres(clockid, res)` — reports resolution.
 ///
-/// We report 1 ns (the resolution our hrtimer reports in `now_ns`).
+/// Per-clock resolution, matching v6.6's `k_clock.clock_getres` handlers:
+///   * High-res clocks (REALTIME(0), MONOTONIC(1), MONOTONIC_RAW(4),
+///     BOOTTIME(7), REALTIME_ALARM(8), BOOTTIME_ALARM(9), TAI(11)) use
+///     `posix_get_hrtimer_res`, which reports `hrtimer_resolution` — 1ns
+///     when high-res timers are active (our hrtimer is ns-granular).
+///   * CPU-time clocks (PROCESS_CPUTIME_ID(2), THREAD_CPUTIME_ID(3)) are
+///     the *well-known* CPU clocks built with `CPUCLOCK_SCHED`
+///     (`PROCESS_CLOCK`/`THREAD_CLOCK = make_*_cpuclock(0, CPUCLOCK_SCHED)`),
+///     so `posix_cpu_clock_getres` takes its `CPUCLOCK_WHICH(...) ==
+///     CPUCLOCK_SCHED` branch and reports `tv_nsec = 1` (1ns).
+///   * Coarse clocks (REALTIME_COARSE(5), MONOTONIC_COARSE(6)) use
+///     `posix_get_coarse_res`, which reports `KTIME_LOW_RES = TICK_NSEC`
+///     — 10ms at our HZ=100.  `sys_clock_gettime` floors these clockids
+///     to the same 10ms grid, so getres/gettime stay consistent.
 fn sys_clock_getres(args: &SyscallArgs) -> SyscallResult {
     // Linux's `SYSCALL_DEFINE2(clock_getres)` (kernel/time/posix-timers.c):
     //   kc = clockid_to_kclock(which_clock);
@@ -35329,6 +35365,8 @@ fn sys_clock_getres(args: &SyscallArgs) -> SyscallResult {
     // (including SGI_CYCLE=10 and 99/garbage) returned 1ns success.
     // Linux returns EINVAL for unknown clockids before touching the
     // user pointer.
+    const CLOCK_REALTIME_COARSE: i32 = 5;
+    const CLOCK_MONOTONIC_COARSE: i32 = 6;
     let clockid = args.arg0;
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let clockid_i32 = clockid as i32;
@@ -35344,7 +35382,15 @@ fn sys_clock_getres(args: &SyscallArgs) -> SyscallResult {
         // Linux permits NULL — succeed without writing.
         return SyscallResult::ok(0);
     }
-    let ts = LinuxTimespec { tv_sec: 0, tv_nsec: 1 };
+    // Coarse clocks report TICK_NSEC (10ms at HZ=100); every other
+    // (high-res / well-known CPU-SCHED) clock reports 1ns.
+    let tv_nsec: i64 =
+        if clockid_i32 == CLOCK_REALTIME_COARSE || clockid_i32 == CLOCK_MONOTONIC_COARSE {
+            10_000_000 // 1e9 / HZ(100)
+        } else {
+            1
+        };
+    let ts = LinuxTimespec { tv_sec: 0, tv_nsec };
     if let Err(e) = write_timespec(res_ptr, ts) {
         return linux_err(linux_errno_for(e));
     }
@@ -50000,11 +50046,22 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   clock_settime !kc->clock_set folds into EINVAL (Linux v6.6 posix-timers.c: `if (!kc || !kc->clock_set) return -EINVAL`): OK"
         );
-        // clock_getres — Linux gates on clockid first; we then return
-        // 1ns for any valid clockid. NULL res ptr is OK (no write).
+        // clock_getres — Linux gates on clockid first, then reports the
+        // per-clock resolution (batch 530): 1ns for high-res clocks
+        // {0,1,4,7,8,9,11} (posix_get_hrtimer_res -> hrtimer_resolution)
+        // and well-known CPU-SCHED clocks {2,3} (posix_cpu_clock_getres
+        // CPUCLOCK_SCHED branch -> tv_nsec=1); TICK_NSEC (10ms at HZ=100)
+        // for coarse clocks {5,6} (posix_get_coarse_res -> KTIME_LOW_RES).
+        // NULL res ptr is OK (no write).
         let mut res_buf = [0u8; 16];
         let res_ptr = res_buf.as_mut_ptr() as u64;
-        // Valid: REALTIME -> 0.
+        // Helper: read tv_nsec (bytes 8..16) from res_buf as i64.
+        let read_res_nsec = |b: &[u8; 16]| -> i64 {
+            i64::from_le_bytes([
+                b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15],
+            ])
+        };
+        // Valid: REALTIME -> 0, and reports tv_sec=0 / tv_nsec=1.
         let a = SyscallArgs { arg0: 0, arg1: res_ptr, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::CLOCK_GETRES, &a).value != 0 {
@@ -50012,6 +50069,89 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 "[syscall/linux]   FAIL: clock_getres REALTIME not 0"
             );
             return Err(KernelError::InternalError);
+        }
+        if read_res_nsec(&res_buf) != 1 {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_getres REALTIME res want 1ns got {}",
+                read_res_nsec(&res_buf)
+            );
+            return Err(KernelError::InternalError);
+        }
+        // High-res clocks {1 MONOTONIC, 4 MONOTONIC_RAW, 7 BOOTTIME,
+        // 8 REALTIME_ALARM, 9 BOOTTIME_ALARM, 11 TAI} -> 1ns; and the
+        // well-known CPU-time clocks {2 PROCESS_CPUTIME, 3 THREAD_CPUTIME}
+        // -> 1ns (CPUCLOCK_SCHED branch).
+        for cid in [1u64, 2, 3, 4, 7, 8, 9, 11] {
+            res_buf = [0u8; 16];
+            let a = SyscallArgs { arg0: cid, arg1: res_ptr, arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::CLOCK_GETRES, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: clock_getres clk {} not 0", cid
+                );
+                return Err(KernelError::InternalError);
+            }
+            if read_res_nsec(&res_buf) != 1 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: clock_getres clk {} res want 1ns got {}",
+                    cid, read_res_nsec(&res_buf)
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // Coarse clocks {5 REALTIME_COARSE, 6 MONOTONIC_COARSE} ->
+        // TICK_NSEC = 10_000_000 (10ms at HZ=100).
+        for cid in [5u64, 6] {
+            res_buf = [0u8; 16];
+            let a = SyscallArgs { arg0: cid, arg1: res_ptr, arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::CLOCK_GETRES, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: clock_getres coarse {} not 0", cid
+                );
+                return Err(KernelError::InternalError);
+            }
+            if read_res_nsec(&res_buf) != 10_000_000 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: clock_getres coarse {} want 10ms got {}",
+                    cid, read_res_nsec(&res_buf)
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // clock_gettime on a coarse clock must land on the 10ms grid
+        // (tv_nsec multiple of 10ms boundary): read MONOTONIC_COARSE and
+        // verify (sec*1e9 + nsec) % TICK_NSEC == 0, matching the reported
+        // coarse resolution.
+        {
+            let mut t_buf = [0u8; 16];
+            let t_ptr = t_buf.as_mut_ptr() as u64;
+            let a = SyscallArgs { arg0: 6, arg1: t_ptr, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::CLOCK_GETTIME, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: clock_gettime MONOTONIC_COARSE not 0"
+                );
+                return Err(KernelError::InternalError);
+            }
+            let sec = i64::from_le_bytes([
+                t_buf[0], t_buf[1], t_buf[2], t_buf[3],
+                t_buf[4], t_buf[5], t_buf[6], t_buf[7],
+            ]);
+            let nsec = read_res_nsec(&t_buf);
+            let total = sec.saturating_mul(1_000_000_000).saturating_add(nsec);
+            // Boot self-test grid check: `total` is a real wall-clock
+            // nanosecond count well under i64::MAX, so the modulo cannot
+            // overflow.  Suppress arithmetic_side_effects for this probe.
+            #[allow(clippy::arithmetic_side_effects)]
+            let on_grid = total % 10_000_000 == 0;
+            if !on_grid {
+                serial_println!(
+                    "[syscall/linux]   FAIL: coarse gettime not on 10ms grid: {}ns",
+                    total
+                );
+                return Err(KernelError::InternalError);
+            }
         }
         // Valid + NULL res -> 0 (NULL permitted by Linux).
         let a = SyscallArgs { arg0: 1, arg1: 0, arg2: 0, arg3: 0,
@@ -50053,7 +50193,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!(
-            "[syscall/linux]   clock_getres clockid gating: OK"
+            "[syscall/linux]   clock_getres clockid gating + per-class resolution (batch 530): OK"
         );
         // adjtimex / clock_adjtime: batch 122 adds the modes=0 read
         // path used by chrony / ntpd / timedatectl.  Non-zero modes

@@ -51904,3 +51904,81 @@ reports it; (f) setattr(FIFO,prio=10) -> getattr nice=0/prio=10 (RT
 branch).  Serial stamp "sched_setattr/getattr nice round-trip
 (batch 529): OK".  cargo build + clippy (baseline, no new warnings) +
 boot-test all pass.
+
+================================================================
+ABI fidelity batch 530 — clock_getres per-clock resolution +
+coarse-clock coarsening (kernel/src/syscall/linux.rs)
+================================================================
+Divergence: sys_clock_getres returned tv_nsec=1 (1ns) for EVERY valid
+clockid.  v6.6's k_clock.clock_getres handlers report per-clock-class
+resolution:
+  * High-res clocks {REALTIME(0), MONOTONIC(1), MONOTONIC_RAW(4),
+    BOOTTIME(7), REALTIME_ALARM(8), BOOTTIME_ALARM(9), TAI(11)} ->
+    posix_get_hrtimer_res -> hrtimer_resolution (1ns when high-res
+    timers active; our hrtimer is ns-granular).  ALREADY FAITHFUL.
+  * Well-known CPU-time clocks {PROCESS_CPUTIME_ID(2),
+    THREAD_CPUTIME_ID(3)} -> posix_cpu_clock_getres.  These are built
+    as PROCESS_CLOCK/THREAD_CLOCK = make_*_cpuclock(0, CPUCLOCK_SCHED),
+    so CPUCLOCK_WHICH(...) == CPUCLOCK_SCHED and the handler reports
+    tv_nsec = 1 (1ns), NOT (NSEC_PER_SEC+HZ-1)/HZ.  ALREADY FAITHFUL.
+    (The 10ms ceil branch only applies to PROF/VIRT CPU clocks, which
+    are reachable only via negative fd-encoded dynamic clockids that we
+    don't implement.)
+  * Coarse clocks {REALTIME_COARSE(5), MONOTONIC_COARSE(6)} ->
+    posix_get_coarse_res -> KTIME_LOW_RES = TICK_NSEC = 10ms at our
+    HZ=100.  THIS was the real divergence (we said 1ns).
+
+Verbatim v6.6 citations (kernel/time/posix-timers.c):
+  static int posix_get_coarse_res(...) { *tp =
+      ktime_to_timespec64(KTIME_LOW_RES); return 0; }
+  static int posix_get_hrtimer_res(...) { tp->tv_sec=0;
+      tp->tv_nsec=hrtimer_resolution; return 0; }
+  clock_realtime/monotonic/monotonic_raw/tai/boottime/...:
+      .clock_getres = posix_get_hrtimer_res;
+  clock_realtime_coarse/clock_monotonic_coarse:
+      .clock_getres = posix_get_coarse_res;
+(kernel/time/posix-cpu-timers.c):
+  posix_cpu_clock_getres: tp->tv_nsec = ((NSEC_PER_SEC+HZ-1)/HZ);
+      if (CPUCLOCK_WHICH(which_clock)==CPUCLOCK_SCHED) tp->tv_nsec=1;
+  #define PROCESS_CLOCK make_process_cpuclock(0, CPUCLOCK_SCHED)
+  #define THREAD_CLOCK  make_thread_cpuclock(0, CPUCLOCK_SCHED)
+
+Fix — the PROPER fix, not just patching getres:
+  Reporting 10ms in getres alone would make getres lie relative to
+  clock_gettime, which returned FULL-resolution values for coarse
+  clockids (REALTIME_COARSE routed to clock_realtime(), MONOTONIC_COARSE
+  to hrtimer::now_ns()).  On Linux a coarse clock genuinely advances
+  only at the periodic tick (ktime_get_coarse_*), so its values change
+  only every TICK_NSEC and getres/gettime agree.  To stay self-
+  consistent AND match Linux semantics we made the coarse clocks
+  actually coarse:
+    1. sys_clock_gettime: for clockid 5/6, floor the high-res reading to
+       the TICK_NSEC (10ms) grid: ns.checked_div(10_000_000).map_or(ns,
+       |q| q.saturating_mul(10_000_000)).  Distinct values now appear
+       only every 10ms and are always <= true time (a past-tick
+       snapshot), exactly like Linux's cached coarse time.
+    2. sys_clock_getres: report tv_nsec=10_000_000 for clockid 5/6,
+       tv_nsec=1 for every other valid clock.
+  HZ=100 is our established model-wide jiffies rate (sys_times uses
+  clock_monotonic()/10_000_000); TICK_NSEC=1e9/100=10ms is consistent
+  with it.
+
+Decision (Claude autonomous): chose the consistent fix (coarsen gettime
++ 10ms getres) over either (a) reporting fake 10ms getres while gettime
+stays high-res — internally inconsistent — or (b) leaving both at 1ns —
+diverges from Linux's coarse-clock semantics.  Coarse clocks explicitly
+mean "approximate/low-res", so flooring opted-in callers to the 10ms
+grid is faithful and cannot break a correct program.  Reversible (pure
+translator change; no PCB/state).
+
+Tests: extended the existing clock_getres boot self-test —
+  * REALTIME(0) getres -> tv_nsec=1;
+  * clocks {1,2,3,4,7,8,9,11} getres -> 1ns each (loop);
+  * coarse {5,6} getres -> 10_000_000ns each (loop);
+  * clock_gettime(MONOTONIC_COARSE) value lands on the 10ms grid
+    ((sec*1e9+nsec) % 10ms == 0).
+Serial stamp "clock_getres clockid gating + per-class resolution
+(batch 530): OK".  cargo build clean; clippy no new warnings
+(production coarse-floor uses checked_div/saturating_mul — no bare
+arithmetic); boot-test PASSED (BOOT_OK 25s, stamp present, no clock
+FAILs).

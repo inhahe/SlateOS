@@ -288,3 +288,193 @@ path is never modified to produce one.**
   serve a bare `AT_NULL` for native processes.
 - Do **not**, at any point, add auxv construction to
   `spawn.rs::setup_user_stack` or any other native launch code.
+
+---
+
+## 5. fork() copy-on-write — swap swapped-out parent pages back IN rather than refcount swap slots
+
+**Date:** 2026-05-31 (predates this file; recorded retroactively 2026-06-12)
+
+**Context:**
+`fork()` clones the parent address space copy-on-write. A parent page that
+has been **evicted to swap** at fork time poses a question: the child must
+end up sharing (CoW) the same logical page, but the page currently lives in a
+swap slot, not in RAM. Either the swap slot becomes shared between parent and
+child (requiring the swap subsystem to refcount slots), or the page is brought
+back to RAM before the CoW share happens.
+
+**Decision — bring the page back in first.**
+`clone_user_half` (the CoW fork path) detects a PTE holding a swap entry and
+calls `swap::swap_in_page(parent_pml4, virt, swap_in_default_flags())` to
+fault the page back into RAM before CoW-sharing it. `swap_in_default_flags()`
+returns `PRESENT | WRITABLE | USER_ACCESSIBLE | NO_EXECUTE`, mirroring the
+page-fault handler's swap-in path (`idt.rs`), which likewise does not track
+per-page protection and restores pages as user RW+NX. The page is then
+re-registered as reclaimable so it can be evicted again later.
+
+**Rationale:**
+- Avoids adding a swap-slot refcount table and the associated free/evict
+  bookkeeping (a slot shared by N address spaces can only be released when the
+  last sharer drops it — that's a whole refcount lifecycle to get right).
+- Keeps swap slots single-owner, which keeps the swap subsystem simple and its
+  invariants easy to reason about.
+
+**Cons / cost accepted:**
+- A fork of a process with swapped-out pages pays I/O to page them back in,
+  even if neither parent nor child ever touches them again. With swap-slot
+  sharing, an untouched shared page would never need to come back.
+- Transient RAM pressure: the swapped-out working set is materialized at fork.
+
+**Alternatives considered:**
+- *Refcount swap slots and share them directly across the CoW boundary* —
+  rejected for now: materially more code and a new lifecycle to maintain; the
+  swap-in approach is correct and simpler. **If fork-of-large-swapped-process
+  becomes a measured hot path, switch to slot refcounting** — `clone_user_half`
+  can then share the slot instead of calling `swap_in_page`.
+
+**Where it lives:**
+- `kernel/src/mm/cow.rs`: `clone_user_half` swap-entry branch (~line 557),
+  `swap_in_default_flags()` (~line 365).
+- `kernel/src/mm/swap.rs`: `swap_in_page`, `register_reclaimable`.
+
+**How to reverse:**
+- Add a refcount field to the swap-slot table; in `clone_user_half`, bump the
+  slot refcount and copy the swap PTE into the child instead of swapping in;
+  make swap-slot free refcount-aware; teach the fault handler that a faulting
+  swap page may be shared (CoW-on-swap-in).
+
+---
+
+## 6. fork() / dup() file-descriptor inheritance — refcounted shared open-file descriptions
+
+**Date:** 2026-05-31 (fork) / 2026-06-01 (dup fix); recorded retroactively 2026-06-12
+
+**Context:**
+On `fork()`, the child's userspace libc fd table is CoW-copied, so it
+references the **same kernel handle ids** as the parent — the kernel cannot
+rewrite that userspace table. POSIX also requires that a forked child (and a
+`dup()`/`dup2()`/`F_DUPFD` descriptor) **share one open file description**:
+same file offset, same status flags. The kernel's `fs::handle` originally did
+*not* refcount `OpenFile` — each id was a distinct entry and `handle::dup`
+allocated a **new** id with an **independent cursor** (that is `dup()`-of-a-
+*new-description* semantics, which is wrong for both fork sharing and POSIX
+`dup`).
+
+**Decision — refcount the open-file description and share ids.**
+- Added a refcount to `OpenFile` plus `fs::handle::dup_shared(id)` (bump
+  refcount, return the **same** id) and a refcount-aware `close` (the
+  underlying description is released only when the last referencing fd closes).
+- **fork** bumps refcounts on the existing ids rather than allocating new ones,
+  matching pipes/sockets/eventfd which already did same-id refcounted dup.
+- **dup()/dup2()/F_DUPFD** for `HandleKind::File` no longer call `SYS_FS_DUP`;
+  the userspace `posix` crate shares the source fd's kernel handle id at the
+  fd-table level via `alloc_fd_with_flags`, exactly like Pipe/Console/socket
+  kinds. `close()` gates `SYS_FS_CLOSE` behind `is_handle_referenced()`.
+- The old kernel `handle::dup` (independent cursor) is **left unchanged** and
+  still used by `spawn.rs` fd inheritance, where a genuinely separate
+  description is wanted.
+
+**Rationale:**
+- This is the only model that yields correct POSIX shared-offset semantics
+  given that the kernel can't rewrite the child's userspace fd table — both
+  ends *must* point at one refcounted description.
+- Folding File into the same shared-id path the other handle kinds already use
+  removes a special case and a latent dup() correctness bug in one stroke.
+
+**Alternatives considered:**
+- *Allocate fresh handle ids for the child on fork* — rejected: impossible to
+  apply correctly (the kernel can't edit the CoW-copied userspace fd table) and
+  semantically wrong (would give the child an independent offset).
+- *Keep `handle::dup`'s independent-cursor behavior for dup()/dup2()* —
+  rejected: that is a pre-existing POSIX bug (dup'd fds must share the
+  description); fixed by routing File dup through fd-table id sharing.
+
+**Where it lives:**
+- `kernel/src/fs/handle.rs`: `OpenFile` refcount, `dup_shared`, refcount-aware
+  `close`, `is_handle_referenced`.
+- `posix/src/file.rs` (dup/dup2), `posix/src/fcntl_ops.rs::dup_fd_from`
+  (F_DUPFD): File shares the id via `alloc_fd_with_flags`.
+- `kernel/src/proc/fork.rs`: fd inheritance bumps refcounts.
+- `posix` `fdtable.rs` module doc: documents the shared-id model.
+
+**How to reverse:**
+- Revert dup/dup2/F_DUPFD to `SYS_FS_DUP` + restore independent-cursor
+  `handle::dup` for File (reintroduces the POSIX dup bug — not advisable).
+- Drop the `OpenFile` refcount and have fork allocate new ids (breaks shared
+  offset — not advisable). This decision is effectively load-bearing for POSIX
+  correctness; reversal is only sensible if the fd model is redesigned.
+
+---
+
+## 7. waitpid(pid <= 0) — collapse all "any child" cases; single any-child waiter slot; reaped-pid via arg1
+
+**Date:** 2026-05-31 (predates this file; recorded retroactively 2026-06-12)
+
+**Context:**
+POSIX `waitpid` distinguishes four pid forms: `> 0` (that specific child),
+`== 0` (any child in the **caller's process group**), `< -1` (any child in
+process group `|pid|`), and `== -1` (any child whatsoever). The first
+"wait for any child" implementation had to choose how faithfully to model the
+process-group cases when there is **no process-group subsystem yet**, how to
+register the any-child waiter, and how to return the reaped pid to userspace
+without breaking the existing specific-pid syscall ABI.
+
+**Decision (three sub-decisions):**
+- **(a) Collapse all `pid <= 0` to "any child."** With no process groups,
+  `pid == 0` and `pid < -1` are treated identically to `pid == -1`. Correct for
+  the common case (shells/make use `-1`) and for any single-process-group
+  workload.
+- **(b) One any-child waiter slot on the parent PCB** (`Process::wait_any_task`),
+  unlike the specific-pid waiter which lives on the *child* PCB. If two threads
+  of the same process both call `waitpid(-1)` concurrently, the second
+  registration clobbers the first; only one thread reliably gets the child-exit
+  wake (the other relies on its own `try_reap_any` at block entry or a later
+  wake). The clobber is **safe**: `clear_wait_any_task` only clears the slot if
+  it still holds the caller's own `TaskId`, so a thread never clears another's
+  registration.
+- **(c) Reaped pid returned via the `arg1` pointer.** The any-child path writes
+  the reaped child's pid as an `i32` to the user `arg1` slot (posix `waitpid`
+  passes a real `&mut` via `syscall2`), while `rax` still carries the exit code.
+  The kernel writes `arg1` **only** in the any-child branch — specific-pid
+  callers (init/services using `syscall1`) leave a stale pointer in `rsi/arg1`,
+  so writing it for them would corrupt memory.
+
+**Rationale:**
+- Ships a working `wait(-1)` (the form shells and `make` actually use) without
+  blocking on a process-group subsystem that isn't needed yet.
+- The single-slot waiter matches typical single-threaded-waiter usage and
+  avoids a per-process waiter list before any caller needs one.
+- The `arg1` ABI extends wait without breaking the established specific-pid
+  calling convention.
+
+**Cons / cost accepted:**
+- `pid == 0` / `pid < -1` do **not** filter by process group — once process
+  groups land, a caller that means "my group only" would over-match. Acceptable
+  while there is exactly one group.
+- Concurrent multi-thread `waitpid(-1)` in one process is not fully reliable
+  (only one waiter is registered at a time).
+
+**Alternatives considered:**
+- *Implement process-group filtering now* — rejected: requires a process-group
+  subsystem that doesn't exist; premature.
+- *A list/set of any-child waiters woken together* — deferred: no current
+  caller does concurrent multi-thread `wait(-1)`; the proper fix when one
+  appears is to make `wait_any_task` a small `TaskId` list and wake all.
+- *Return the reaped pid in `rax` and the exit code elsewhere* — rejected:
+  would break the existing specific-pid ABI (`rax` = exit code) that init and
+  services already depend on.
+
+**Where it lives:**
+- `kernel/src/syscall/handlers.rs`: `sys_process_wait` / `sys_process_try_wait`
+  (`pid_arg <= 0` branch ~line 3162+), `write_reaped_pid` (~line 3147),
+  `set_wait_any_task` / `clear_wait_any_task` usage (~line 3238+).
+- `kernel/src/proc/pcb.rs`: `Process::wait_any_task`, `set_/clear_wait_any_task`.
+- `posix/src/process.rs::waitpid`: passes the `&mut` reaped-pid slot.
+
+**How to reverse:**
+- **(a)** When process groups land, subdivide the `pid_arg <= 0` branch on the
+  exact value (`0` → caller's group, `< -1` → group `|pid|`, `-1` → any).
+- **(b)** Replace `wait_any_task` with a `TaskId` list/set and wake all
+  registered waiters on child exit.
+- **(c)** Only revisit if the wait ABI is redesigned; the split (exit code in
+  `rax`, pid in `arg1`) is intentional and back-compatible.

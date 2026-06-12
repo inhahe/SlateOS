@@ -9,11 +9,19 @@ where a reasonable alternative exists and the operator might want to revisit.
 
 Format for each entry:
 
-- **Decided by** — who made the call: `Claude (autonomous)`, `Operator`, or a
-  mixed form like `Operator (Claude proposed; operator chose)` /
-  `Claude (operator-approved scope)`. An **Operator** decision is settled
-  policy and should not be silently revisited; a **Claude (autonomous)** one is
-  Claude's to revisit and the operator may want to overrule it.
+- **Decided by** — who made the **final call**, *not* who first proposed the
+  idea. Use `Operator` whenever the decision was put to the operator and the
+  operator chose — **regardless of who suggested the chosen option.** Claude
+  having proposed (or argued against) the option that was picked never moves the
+  attribution to Claude; it stays `Operator`. Use `Claude (autonomous)` only when
+  Claude resolved it without putting it to the operator (`Claude
+  (operator-approved scope)` when the operator pre-approved the direction but
+  Claude made the specific call). A parenthetical may record the collaboration —
+  who proposed the option and whether Claude agreed — e.g. `Operator (Claude
+  proposed this option)` or `Operator (Claude recommended otherwise; operator
+  overruled)` — but that note never changes the attribution. An **Operator**
+  decision is settled policy and should not be silently revisited; a **Claude**
+  one is Claude's to revisit and the operator may want to overrule it.
 - **Context** — what problem forced a choice.
 - **Decision** — what was chosen.
 - **Rationale** — why.

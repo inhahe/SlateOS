@@ -87,8 +87,9 @@
 ## cycles) have no honest Linux equivalent.  Honest native names beat misleading
 ## Linux-named numbers, so it stays native like meminfo/cpuinfo.
 ## STATUS: the cleanly-convertible standard-Linux /proc files are now ALL done
-## (stat, uptime, loadavg, buddyinfo).  The remainder are either blocked on new
-## accounting infra (interrupts, diskstats, <pid>/io, <pid>/auxv) or intentionally
+## (stat, uptime, loadavg, buddyinfo; <pid>/io added 2026-06-11 with real PCB
+## counters — see DONE entry below).  The remainder are either blocked on new
+## accounting infra (interrupts, diskstats, <pid>/auxv) or intentionally
 ## native (meminfo, cpuinfo, vmstat).  No further small in-thread procfs work.
 
 ## DONE (2026-06-11): /proc/<pid>/status Mems_allowed + Mems_allowed_list
@@ -209,39 +210,44 @@
 ## failed" logs both correctly flag red.  (You may still grep the log
 ## manually, but the harness now enforces it automatically.)
 ##
-## FOLLOW-UP (2026-06-11): real /proc/<pid>/io — do NOT back it with taskstats
-## /proc/<pid>/io (rchar/wchar/syscr/syscw/read_bytes/write_bytes/
-## cancelled_write_bytes) is intentionally NOT served.  WARNING for any future
-## session: the obvious-looking backing source crate::fs::taskstats (it has a
-## get(pid)->TaskAccounting with read_bytes/write_bytes/read_syscalls/
-## write_syscalls) is NON-FUNCTIONAL.  Verified 2026-06-11: taskstats::update_io,
-## update_cpu and register have ZERO callers outside taskstats.rs itself, so the
-## table is permanently EMPTY in production — it has no real accounting source.
-## (UPDATE 2026-06-11: init_defaults() previously seeded two fabricated tasks
-## with invented numbers, e.g. read_bytes: 1_073_741_824, which /proc/taskstats
-## and the `taskstats` kshell command displayed as real; that fabricated seed
-## was removed — init_defaults() now creates an empty table and the self-test
-## builds its own fixtures via the real API and resets afterward.  So
-## taskstats::get() now returns None/zeros rather than invented data.)  Wiring
-## /proc/<pid>/io to taskstats would therefore give an all-zero file with no
-## real backing — still the wrong source.  Proper fix is
-## structural: add real per-process IO byte/syscall counters to the PCB (or
-## make taskstats real), increment them from the VFS read/write syscall path
-## (kernel/src/syscall/ read/write/pread/pwrite handlers) and register tasks at
-## process creation, THEN serve /proc/<pid>/io from those genuine counters.
-## Deferred because it touches the hot read/write syscall path (perf-sensitive,
-## risky to land unattended).  glibc/top/iotop read this file.
-## TESTING BLOCKER (the deeper reason, same class as CLONE_PIDFD below): the
-## VALUE here is that the byte/syscall counts are REAL, but the boot self-test
-## harness runs in KERNEL context and cannot drive a real userspace process
-## through read/write to observe its per-process counters incrementing.  Only
-## the pure render_io(counter values) formatter would be self-testable; the
-## actual accounting wiring (the part that matters) would ship UNTESTED,
-## violating "ship nothing untested".  So this is blocked on the SAME missing
-## userspace syscall integration-test harness as CLONE_PIDFD — implement them
-## together, or build that harness first.  Do NOT land render_io + counter
-## wiring just because the formatter passes a synthetic test; that would give a
-## false sense of coverage over the untested hot-path increments.
+## DONE (2026-06-11): real /proc/<pid>/io — implemented with honest PCB counters.
+## /proc/<pid>/io is now served from genuine per-process counters, NOT taskstats
+## (which stays demo-only as warned below).  Design as landed:
+##   - PCB gained four u64 counters (io_rchar/io_wchar/io_syscr/io_syscw) in
+##     kernel/src/proc/pcb.rs, zero-initialised in Process::new and reset to zero
+##     for a freshly-forked child (matches Linux copy_process zeroing task->ioac).
+##   - pcb::account_io_read/account_io_write bump syscr/syscw once per call and
+##     rchar/wchar by the byte count (saturating); pcb::io_counters(pid) snapshots
+##     them.  All under the existing PROCESS_TABLE lock — read/write already take
+##     that lock for the fd-table lookup (lookup_caller_fd), so this adds no new
+##     lock to the hot path, just one more short critical section on the same lock
+##     (same pattern as linux_as_charge).
+##   - Hooked at the Linux-ABI syscall boundary in syscall::linux::dispatch_linux
+##     via account_io_syscall(nr, result.value): classifies READ/READV/PREAD64/
+##     PREADV/PREADV2 as reads and WRITE/WRITEV/PWRITE64/PWRITEV/PWRITEV2 as
+##     writes (exactly the family Linux folds into rchar/wchar — sockets and
+##     sendfile/splice are excluded, as on Linux).  Non-IO syscalls pay only a
+##     cheap match before returning.  No-op in kernel context (caller_pid None).
+##   - procfs gen_pid_io + render_pid_io emit Linux's 7-line key:value layout.
+##     The three storage-layer counters (read_bytes/write_bytes/
+##     cancelled_write_bytes) render as 0 — genuinely untracked (no per-process
+##     block-layer attribution), NOT fabricated, per the "never invent data in
+##     procfs" rule.  "io" added to PID_FILES + read_pid_file dispatch.
+## On the former TESTING-BLOCKER concern (kernel self-test can't drive a userspace
+## read/write): resolved the testable core directly — pcb::test_io_accounting
+## exercises the real account_io_read/write/io_counters increment semantics in
+## kernel context (fresh=zero, syscr/syscw +1 per call incl. zero-byte, rchar/
+## wchar accumulate bytes only, reads/writes independent, unknown-pid no-op), and
+## procfs self-test verifies render_pid_io's exact 7-line output + live path
+## classification/PCB gating.  The only part not exercised end-to-end is the thin
+## syscall-number->account_io mapping in dispatch_linux, which is a flat auditable
+## table.  LIMITATION (documented on gen_pid_io): accounting currently covers the
+## Linux-ABI read/write path only; a purely native-ABI process reads all-zero
+## counters (honest — native byte transfers are not yet tracked).  FOLLOW-UP: fold
+## the native read/write/pipe/console handlers in kernel/src/syscall/handlers.rs
+## into the same account_io_{read,write} calls so native processes get real io
+## counts too (deferred: native dispatch is many specialized syscalls, larger
+## surface, and the Linux-ABI path is what /proc consumers exercise first).
 ##
 ## FOLLOW-UP (2026-06-10): real /proc/<pid>/auxv + kernel-side saved_auxv
 ## /proc/<pid>/auxv is NOT yet served.  Implementing it properly requires

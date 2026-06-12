@@ -558,6 +558,7 @@ const PID_FILES: &[&str] = &[
     "schedstat",
     "loginuid",
     "sessionid",
+    "io",
 ];
 
 /// Per-PID symbolic links, served via [`FileSystem::readlink`].
@@ -2748,6 +2749,61 @@ fn gen_pid_schedstat(task_id: u64) -> KernelResult<Vec<u8>> {
     Ok(render_schedstat(cpu_ns, run_delay_ns, task.schedule_count))
 }
 
+/// Render `/proc/<pid>/io` from a process's I/O counters.
+///
+/// Pure helper (unit-testable).  Emits Linux's exact seven-line
+/// `key: value\n` layout (`fs/proc/base.c::proc_tgid_io_accounting`):
+///
+/// ```text
+/// rchar: <bytes read via read-family syscalls>
+/// wchar: <bytes written via write-family syscalls>
+/// syscr: <number of read syscalls>
+/// syscw: <number of write syscalls>
+/// read_bytes: 0
+/// write_bytes: 0
+/// cancelled_write_bytes: 0
+/// ```
+///
+/// The last three counters are storage-layer attribution Linux fills
+/// from the block layer (`task_io_account_read` and friends).  We have
+/// no per-process block-layer accounting, so we report them as 0 rather
+/// than fabricate values — consistent with the project's "never invent
+/// data in procfs" rule.  `rchar`/`wchar`/`syscr`/`syscw` are real,
+/// tracked at the syscall boundary by `pcb::account_io_{read,write}`.
+fn render_pid_io(rchar: u64, wchar: u64, syscr: u64, syscw: u64) -> Vec<u8> {
+    format!(
+        "rchar: {rchar}\n\
+         wchar: {wchar}\n\
+         syscr: {syscr}\n\
+         syscw: {syscw}\n\
+         read_bytes: 0\n\
+         write_bytes: 0\n\
+         cancelled_write_bytes: 0\n"
+    )
+    .into_bytes()
+}
+
+/// `/proc/<pid>/io` — per-process I/O byte accounting.
+///
+/// Consumed by `iotop`, `pidstat -d`, and monitoring agents.  Gated on
+/// process existence (NotFound for a bare scheduler task with no PCB).
+/// Reads the four honestly-tracked counters via [`crate::proc::pcb::
+/// io_counters`]; the three storage-layer fields render as 0 (see
+/// [`render_pid_io`]).
+///
+/// Limitation: the `rchar`/`wchar`/`syscr`/`syscw` counters are folded
+/// in only on the **Linux-ABI** read/write syscall path (see
+/// `syscall::linux::account_io_syscall`).  A process using the native
+/// ABI exclusively will read all-zero counters here.  This is honest —
+/// we genuinely do not yet track native-ABI byte transfers — not a
+/// fabricated value; native accounting is a documented follow-up in
+/// todo.txt.
+fn gen_pid_io(task_id: u64) -> KernelResult<Vec<u8>> {
+    let (rchar, wchar, syscr, syscw) =
+        crate::proc::pcb::io_counters(task_id).ok_or(KernelError::NotFound)?;
+    Ok(render_pid_io(rchar, wchar, syscr, syscw))
+}
+
 /// The audit "unset" sentinel — `(uid_t)-1` / `(unsigned)-1`.
 ///
 /// Linux reports this for `loginuid`/`sessionid` on any task the audit
@@ -3024,6 +3080,7 @@ fn generate_pid(task_id: u64, file_name: &str) -> KernelResult<Vec<u8>> {
         "schedstat" => gen_pid_schedstat(task_id),
         "loginuid" => gen_pid_loginuid(task_id),
         "sessionid" => gen_pid_sessionid(task_id),
+        "io" => gen_pid_io(task_id),
         _ => Err(KernelError::NotFound),
     }
 }
@@ -12975,6 +13032,58 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[procfs]   schedstat render: OK");
+    }
+
+    // --- /proc/<pid>/io rendering ---
+    // Pure formatter: seven `key: value\n` lines.  rchar/wchar/syscr/syscw
+    // carry the supplied honestly-tracked counters; the three storage-layer
+    // counters are always 0 (untracked — we never fabricate them).
+    {
+        let rendered = render_pid_io(4096, 1024, 12, 3);
+        let io_text = core::str::from_utf8(&rendered)
+            .map_err(|_| KernelError::InternalError)?;
+        let expected = "rchar: 4096\n\
+                        wchar: 1024\n\
+                        syscr: 12\n\
+                        syscw: 3\n\
+                        read_bytes: 0\n\
+                        write_bytes: 0\n\
+                        cancelled_write_bytes: 0\n";
+        if io_text != expected {
+            serial_println!("[procfs]   FAIL: io render {:?} != {:?}", io_text, expected);
+            return Err(KernelError::InternalError);
+        }
+        // The live file is process-only (gated on PCB existence, like
+        // oom_score): when it resolves it must expose all seven Linux keys;
+        // a bare scheduler task with no PCB legitimately returns NotFound.
+        match fs.read_file(&format!("/{current_tid}/io")) {
+            Ok(io_data) => {
+                let live = core::str::from_utf8(&io_data)
+                    .map_err(|_| KernelError::InternalError)?;
+                for key in [
+                    "rchar:", "wchar:", "syscr:", "syscw:",
+                    "read_bytes:", "write_bytes:", "cancelled_write_bytes:",
+                ] {
+                    if !live.contains(key) {
+                        serial_println!(
+                            "[procfs]   FAIL: /{}/io missing key {:?}", current_tid, key
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                }
+                serial_println!("[procfs]   io render + live read: OK");
+            }
+            Err(KernelError::NotFound) => {
+                serial_println!(
+                    "[procfs]   io render OK; /{}/io NotFound (bare task, no PCB) OK",
+                    current_tid
+                );
+            }
+            Err(e) => {
+                serial_println!("[procfs]   FAIL: /{}/io unexpected error {:?}", current_tid, e);
+                return Err(KernelError::InternalError);
+            }
+        }
     }
 
     // --- /proc/<pid>/loginuid,sessionid rendering ---

@@ -869,6 +869,33 @@ pub struct Process {
     /// class/data are inherited from the parent, so a plain copy
     /// is correct.
     pub linux_ioprio: i32,
+
+    // --- Per-process I/O byte accounting (backs /proc/<pid>/io) ---
+    //
+    // These mirror four of Linux's `task_io_accounting` counters, kept
+    // per-process and updated at the read/write syscall boundary (see
+    // `account_io_read` / `account_io_write`).  We track only the four
+    // fields we can populate *honestly* from the syscall layer:
+    //
+    //   - `io_rchar` / `io_wchar`: bytes transferred by the read/write
+    //     syscall family, counted by the syscall's return value.
+    //   - `io_syscr` / `io_syscw`: number of read/write syscalls issued.
+    //
+    // Linux's three storage-layer counters — `read_bytes`,
+    // `write_bytes`, `cancelled_write_bytes` — require per-process
+    // attribution inside the block layer, which we do not have.  Rather
+    // than fabricate them, `/proc/<pid>/io` reports those three as 0
+    // (genuinely untracked), in line with the project's "never invent
+    // data in procfs" rule.  Inherited as zero across fork (Linux resets
+    // task I/O accounting for a freshly-forked child).
+    /// Cumulative bytes returned by read-family syscalls (`rchar`).
+    pub io_rchar: u64,
+    /// Cumulative bytes consumed by write-family syscalls (`wchar`).
+    pub io_wchar: u64,
+    /// Number of read-family syscalls issued (`syscr`).
+    pub io_syscr: u64,
+    /// Number of write-family syscalls issued (`syscw`).
+    pub io_syscw: u64,
 }
 
 /// Highest valid Linux capability number — fixed at
@@ -1070,6 +1097,11 @@ impl Process {
             // (2) at priority 4 — the middle of the BE band.
             // Matches `ionice -p $$` on a stock task.
             linux_ioprio: LINUX_IOPRIO_DEFAULT,
+            // Fresh process has issued no I/O yet.
+            io_rchar: 0,
+            io_wchar: 0,
+            io_syscr: 0,
+            io_syscw: 0,
         }
     }
 }
@@ -1478,6 +1510,13 @@ pub fn fork_create(
         // unless O_CLOEXEC-like behaviour is opted in, which we
         // don't model).
         linux_ioprio,
+        // Linux resets task I/O accounting for a freshly-forked child
+        // (copy_process zeroes task->ioac); the child starts its own
+        // /proc/<pid>/io counters from zero.
+        io_rchar: 0,
+        io_wchar: 0,
+        io_syscr: 0,
+        io_syscw: 0,
     };
 
     table.insert(pid, child);
@@ -2652,6 +2691,48 @@ pub fn linux_as_release(pid: ProcessId, bytes: u64) {
 #[must_use]
 pub fn linux_as_used(pid: ProcessId) -> Option<u64> {
     PROCESS_TABLE.lock().get(&pid).map(|p| p.linux_as_bytes)
+}
+
+/// Record one read-family syscall against `pid`'s I/O accounting.
+///
+/// Bumps `io_syscr` by one (every read syscall counts, matching Linux's
+/// unconditional `inc_syscr`) and `io_rchar` by `bytes` (the number of
+/// bytes the syscall actually returned — pass 0 for an error or EOF, so
+/// only real transfers accumulate, like Linux's `add_rchar`).  Backs
+/// `/proc/<pid>/io`.  Silently no-ops if `pid` is unknown (the caller
+/// was kernel context, or the process has already been reaped).
+pub fn account_io_read(pid: ProcessId, bytes: u64) {
+    if let Some(proc) = PROCESS_TABLE.lock().get_mut(&pid) {
+        proc.io_syscr = proc.io_syscr.saturating_add(1);
+        proc.io_rchar = proc.io_rchar.saturating_add(bytes);
+    }
+}
+
+/// Record one write-family syscall against `pid`'s I/O accounting.
+///
+/// Mirror of [`account_io_read`] for the write path: bumps `io_syscw`
+/// unconditionally and `io_wchar` by the bytes the syscall consumed.
+pub fn account_io_write(pid: ProcessId, bytes: u64) {
+    if let Some(proc) = PROCESS_TABLE.lock().get_mut(&pid) {
+        proc.io_syscw = proc.io_syscw.saturating_add(1);
+        proc.io_wchar = proc.io_wchar.saturating_add(bytes);
+    }
+}
+
+/// Snapshot a process's I/O byte counters as
+/// `(rchar, wchar, syscr, syscw)`.
+///
+/// Returns `None` if `pid` is unknown.  Used by procfs to render
+/// `/proc/<pid>/io`.  The three storage-layer counters Linux also
+/// exposes (`read_bytes`, `write_bytes`, `cancelled_write_bytes`) are
+/// not tracked here — procfs reports them as 0 rather than fabricate
+/// per-process block-layer attribution we do not collect.
+#[must_use]
+pub fn io_counters(pid: ProcessId) -> Option<(u64, u64, u64, u64)> {
+    PROCESS_TABLE
+        .lock()
+        .get(&pid)
+        .map(|p| (p.io_rchar, p.io_wchar, p.io_syscr, p.io_syscw))
 }
 
 /// Set the exit code for a process.
@@ -4060,7 +4141,61 @@ pub fn self_test() -> KernelResult<()> {
     test_destroy()?;
     test_reap_zombie()?;
     test_reap_any()?;
+    test_io_accounting()?;
 
+    Ok(())
+}
+
+/// Test: per-process I/O byte accounting (`/proc/<pid>/io` backing).
+///
+/// Exercises the real [`account_io_read`] / [`account_io_write`] /
+/// [`io_counters`] logic against a throwaway process — the part that
+/// matters (the increment semantics), independent of the userspace
+/// syscall harness that the boot self-test cannot drive.  Verifies:
+///   - a fresh process starts at all-zero counters,
+///   - `syscr`/`syscw` bump once per call (even a zero-byte call),
+///   - `rchar`/`wchar` accumulate only the supplied byte counts,
+///   - reads and writes are tracked independently,
+///   - an unknown pid is a silent no-op (kernel-context / reaped case).
+fn test_io_accounting() -> KernelResult<()> {
+    let pid = create("io-acct-test", 0);
+
+    // Fresh process: every counter starts at zero.
+    if io_counters(pid) != Some((0, 0, 0, 0)) {
+        serial_println!("[proc]   FAIL: fresh io_counters not all-zero");
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    }
+
+    // Two reads (4096 + 0 bytes) and one write (1024 bytes).  The
+    // zero-byte read models an EOF/short read: it must still bump
+    // syscr but contribute nothing to rchar.
+    account_io_read(pid, 4096);
+    account_io_read(pid, 0);
+    account_io_write(pid, 1024);
+
+    // Expect rchar=4096, wchar=1024, syscr=2, syscw=1.
+    if io_counters(pid) != Some((4096, 1024, 2, 1)) {
+        serial_println!(
+            "[proc]   FAIL: io_counters {:?} != Some((4096, 1024, 2, 1))",
+            io_counters(pid)
+        );
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    }
+
+    destroy(pid);
+
+    // After reap the pid is unknown: counters read None and accounting
+    // is a silent no-op (no panic, no resurrection of the entry).
+    account_io_read(pid, 999);
+    account_io_write(pid, 999);
+    if io_counters(pid).is_some() {
+        serial_println!("[proc]   FAIL: io_counters live after destroy");
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[proc]   I/O accounting: OK");
     Ok(())
 }
 

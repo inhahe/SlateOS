@@ -1984,7 +1984,7 @@ fn linux_execve(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
 /// `-ENOSYS`.
 #[must_use]
 pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
-    match nr {
+    let result = match nr {
         nr::READ => sys_read(args),
         nr::WRITE => sys_write(args),
         nr::OPEN => sys_open(args),
@@ -2355,6 +2355,54 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr::VSERVER => sys_vserver(args),
         nr::FUTIMESAT => sys_futimesat(args),
         _ => linux_err(errno::ENOSYS),
+    };
+    account_io_syscall(nr, result.value);
+    result
+}
+
+/// Per-process I/O accounting hook, run after every Linux syscall
+/// returns, for the read/write syscall family only (`/proc/<pid>/io`).
+///
+/// Classifies `nr` as a read-family or write-family transfer and folds
+/// the syscall's byte result into the calling process's counters:
+///   - `syscr`/`syscw` is bumped once per syscall (even on error/EOF),
+///     matching Linux's unconditional `inc_syscr`/`inc_syscw`.
+///   - `rchar`/`wchar` is bumped only by a non-negative byte count,
+///     matching Linux's `add_rchar`/`add_wchar` (errors carry a
+///     negative `value`, which contributes 0).
+///
+/// Mirrors which syscalls Linux's task I/O accounting covers: the
+/// `read`/`write`/`pread`/`pwrite`/`readv`/`writev`/`preadv`/`pwritev`
+/// (+`2`) family.  Socket send/recv and `sendfile`/`splice` are
+/// deliberately excluded — Linux likewise does not fold those into
+/// `rchar`/`wchar`.  No-ops in kernel context (`caller_pid()` is
+/// `None`).
+///
+/// Fidelity note: this fires per dispatched syscall, so a read that
+/// fails *before* reaching the VFS (e.g. `pread64` with a negative
+/// offset → EINVAL) still bumps `syscr`, whereas Linux gates `inc_syscr`
+/// on reaching `vfs_read`.  We count the syscall the process actually
+/// issued, which is honest if marginally more inclusive than Linux on
+/// the pre-VFS error paths.
+fn account_io_syscall(nr: u64, value: i64) {
+    enum Dir {
+        Read,
+        Write,
+    }
+    let dir = match nr {
+        nr::READ | nr::READV | nr::PREAD64 | nr::PREADV | nr::PREADV2 => Dir::Read,
+        nr::WRITE | nr::WRITEV | nr::PWRITE64 | nr::PWRITEV | nr::PWRITEV2 => Dir::Write,
+        _ => return,
+    };
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => return,
+    };
+    // Negative `value` is an errno — no bytes transferred, so fold 0.
+    let bytes = u64::try_from(value).unwrap_or(0);
+    match dir {
+        Dir::Read => crate::proc::pcb::account_io_read(pid, bytes),
+        Dir::Write => crate::proc::pcb::account_io_write(pid, bytes),
     }
 }
 

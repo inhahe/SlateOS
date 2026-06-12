@@ -1,22 +1,30 @@
 
-## LIMITATION (2026-06-12): kernel-level signalfd blocking read returns EAGAIN
-## The new kernel Linux-ABI signalfd (kernel/src/ipc/signalfd.rs + the
-## HandleKind::SignalFd wiring in kernel/src/syscall/linux.rs) drains masked-pending
-## signals into signalfd_siginfo records on read.  A read with nothing pending
-## returns EAGAIN even for a BLOCKING (non-SFD_NONBLOCK) fd, because this kernel has
-## no signal-arrival wakeup path — a thread cannot park on "next signal in mask".
-##   WHY: same documented shortcut as rt_sigtimedwait, which also returns EAGAIN
-##   instead of blocking.  There is no wait-queue keyed on the process pending-signal
-##   set to wake a signalfd reader (or a sigtimedwait sleeper) when a signal arrives.
-##   IMPACT: low-moderate — apps that select/poll/epoll on a signalfd and only read
-##   when POLLIN fires work fully (readiness IS reported via has_pending_in_mask).
-##   Apps that do a bare blocking read() on a signalfd and expect it to sleep until a
-##   signal arrives will instead spin (EAGAIN) — but that idiom is rare; the canonical
-##   signalfd usage is the event-loop/poll one, which works.
-##   FIX: add a per-process signal wait-queue.  proc::signal delivery (set_pending)
-##   would wake any signalfd reader / sigtimedwait sleeper whose mask intersects the
-##   newly-pending signal; the signalfd read path and rt_sigtimedwait would block on
-##   that queue instead of returning EAGAIN.  Shared infra benefits both call sites.
+## FIXED (2026-06-12): kernel-level signalfd blocking read now parks the caller
+## Was: a read of a signalfd with no masked-pending signal returned EAGAIN even for a
+## BLOCKING (non-SFD_NONBLOCK) fd, because this kernel had no signal-arrival wakeup path
+## — a thread could not park on "next signal in mask".
+##   FIX SHIPPED: proc::signal grew a per-process signalfd wait-queue
+##   (SIGNALFD_WAITERS: Mutex<BTreeMap<ProcessId, Vec<SignalFdWaiter{task,mask}>>>) kept
+##   as a SEPARATE registry from SignalState so the latter stays Copy.  set_pending() now
+##   wakes (try_wake → defer_wake) every registered reader whose mask intersects the
+##   newly-pending signal, but only on a clear→set transition, after releasing
+##   SIGNAL_STATES (leaf-lock discipline).  dispatch_signalfd_read in syscall/linux.rs
+##   became a register-then-recheck loop: drain masked-pending signals; if none and the
+##   fd is non-blocking → EAGAIN; else register_signalfd_waiter(), re-check
+##   has_pending_in_mask() (closing the cross-lock lost-wakeup race — any bit set after
+##   the recheck finds us registered and wakes us; any bit set before is seen by the
+##   recheck), then sched::block_current() and loop to re-drain on wake.  remove() drops
+##   a dying process's waiter registrations.  The partition logic is split into a pure
+##   take_matching_signalfd_waiters() (unit-tested by the new test_signalfd_waiter_registry
+##   self-test — register/take-matching/idempotent-remask/deregister, no scheduler) from
+##   the scheduler-touching wake wrapper.  set_pending's bit/return semantics are
+##   byte-identical to before (the existing signal self-tests still pass), with only the
+##   post-unlock wake added.  The actual park path is exercised only by real userspace
+##   (needs another runnable task to post the signal); the self-test covers the registry
+##   partition logic and the non-blocking/already-pending fast paths.
+##   NOTE: rt_sigtimedwait still returns EAGAIN instead of blocking — it could now share
+##   this same SIGNALFD_WAITERS infra (register a sleeper, block, wake on set_pending) as
+##   a follow-up; the wait-queue machinery it needs is now in place.
 ##
 ## FIXED (2026-06-12): kernel-level timerfd blocking read now parks the caller
 ## Was: a read of an unexpired timerfd returned EAGAIN even for a BLOCKING
@@ -41,9 +49,9 @@
 ##   overwrite because each blocked reader is also woken by its own hrtimer (task id
 ##   captured at arm time), so only the rare concurrent-disarmed-blocking-readers edge
 ##   could lose a waiter — acceptable and matching the eventfd model.
-##   (signalfd + inotify still return EAGAIN on blocking read — see their entries;
-##   their wake sources are cross-cutting (signal delivery / fs::notify) rather than a
-##   self-contained hrtimer, so they are deferred as separate follow-ups.)
+##   (signalfd's blocking read is now FIXED too — see its entry above; inotify still
+##   returns EAGAIN on blocking read — see its entry; its wake source is cross-cutting
+##   (fs::notify) rather than a self-contained hrtimer, so it is a separate follow-up.)
 ##
 ## LIMITATION (2026-06-12): kernel-level timerfd TFD_TIMER_CANCEL_ON_SET not implemented
 ## timerfd_settime accepts the TFD_TIMER_CANCEL_ON_SET flag (bit 1) without error,

@@ -47,8 +47,10 @@
 
 use crate::error::{KernelError, KernelResult};
 use crate::proc::pcb::ProcessId;
+use crate::sched::{self, task::TaskId};
 use crate::serial_println;
 use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
 
@@ -219,6 +221,105 @@ static SIGNAL_STATES: Mutex<BTreeMap<ProcessId, SignalState>> =
 static PENDING_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 // ---------------------------------------------------------------------------
+// signalfd blocking-read wait queue
+// ---------------------------------------------------------------------------
+
+/// A thread parked in a *blocking* `signalfd` `read()`, waiting for a signal
+/// in `mask` to become pending on its process.
+#[derive(Debug, Clone, Copy)]
+struct SignalFdWaiter {
+    /// The blocked task to wake when a matching signal arrives.
+    task: TaskId,
+    /// The fd's acceptance mask (bit `n-1` set ⇒ accepts signal `n`).
+    mask: u64,
+}
+
+/// Per-process list of threads blocked in a `signalfd` read.
+///
+/// Kept as a **separate** registry rather than a field of [`SignalState`] so
+/// that `SignalState` stays `Copy` (it is cloned by value in several places).
+/// The cross-lock lost-wakeup hazard this creates is closed by the
+/// register-then-recheck protocol in the reader (see
+/// `dispatch_signalfd_read`): the reader registers *before* re-checking
+/// [`has_pending_in_mask`], and [`set_pending`] sets the pending bit *before*
+/// scanning this registry, so any bit set after the reader's re-check is
+/// guaranteed to find the reader registered (and wake it), while any bit set
+/// before is seen by the re-check (and the reader does not block).
+static SIGNALFD_WAITERS: Mutex<BTreeMap<ProcessId, Vec<SignalFdWaiter>>> =
+    Mutex::new(BTreeMap::new());
+
+/// Register `task` as blocked in a `signalfd` read on `pid`, accepting `mask`.
+///
+/// Idempotent per `(pid, task)`: a re-registration updates the mask rather than
+/// adding a duplicate entry (a thread can only be blocked in one read at a
+/// time, so at most one entry per task is meaningful).
+pub fn register_signalfd_waiter(pid: ProcessId, task: TaskId, mask: u64) {
+    let mut waiters = SIGNALFD_WAITERS.lock();
+    let list = waiters.entry(pid).or_default();
+    if let Some(existing) = list.iter_mut().find(|w| w.task == task) {
+        existing.mask = mask;
+    } else {
+        list.push(SignalFdWaiter { task, mask });
+    }
+}
+
+/// Remove `task`'s `signalfd` waiter registration for `pid`, if present.
+///
+/// A harmless no-op if the task was never registered or was already woken
+/// (and thereby removed) by [`set_pending`].
+pub fn deregister_signalfd_waiter(pid: ProcessId, task: TaskId) {
+    let mut waiters = SIGNALFD_WAITERS.lock();
+    if let Some(list) = waiters.get_mut(&pid) {
+        list.retain(|w| w.task != task);
+        if list.is_empty() {
+            waiters.remove(&pid);
+        }
+    }
+}
+
+/// Remove and return every `signalfd` waiter of `pid` whose mask intersects
+/// `bit`, leaving non-matching waiters registered.
+///
+/// Pure registry mutation (no scheduler interaction), split out from
+/// [`wake_signalfd_waiters`] so the partition logic is unit-testable without a
+/// live scheduler.
+fn take_matching_signalfd_waiters(pid: ProcessId, bit: u64) -> Vec<TaskId> {
+    let mut waiters = SIGNALFD_WAITERS.lock();
+    let Some(list) = waiters.get_mut(&pid) else {
+        return Vec::new();
+    };
+    let mut matched = Vec::new();
+    list.retain(|w| {
+        if w.mask & bit != 0 {
+            matched.push(w.task);
+            false
+        } else {
+            true
+        }
+    });
+    if list.is_empty() {
+        waiters.remove(&pid);
+    }
+    matched
+}
+
+/// Wake every `signalfd` reader of `pid` whose mask intersects `bit` (a single
+/// signal bit that just transitioned to pending), removing them from the
+/// registry first so a burst of arriving signals wakes each reader only once.
+///
+/// Uses the `try_wake`/`defer_wake` idiom so it is safe to call from any
+/// context (it never blocks and never directly enters the scheduler's
+/// run-queue manipulation if the target is not currently parked).
+fn wake_signalfd_waiters(pid: ProcessId, bit: u64) {
+    // Take the matching waiters out, then wake outside the registry lock.
+    for task in take_matching_signalfd_waiters(pid, bit) {
+        if !sched::try_wake(task) {
+            sched::defer_wake(task);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Trampoline registration
 // ---------------------------------------------------------------------------
 
@@ -256,6 +357,10 @@ pub fn remove(pid: ProcessId) {
             PENDING_COUNT.fetch_sub(n, Ordering::Relaxed);
         }
     }
+    drop(states);
+    // Drop any signalfd waiter registrations for the dying process so the
+    // registry never accumulates stale entries for tasks being torn down.
+    SIGNALFD_WAITERS.lock().remove(&pid);
 }
 
 /// Reset signal state across `exec()`.
@@ -360,15 +465,26 @@ pub fn set_pending(pid: ProcessId, sig: u32) -> bool {
     let Some(bit) = signal_bit(sig) else {
         return false;
     };
-    let mut states = SIGNAL_STATES.lock();
-    let state = states.entry(pid).or_default();
-    if state.pending & bit == 0 {
-        state.pending |= bit;
-        PENDING_COUNT.fetch_add(1, Ordering::Relaxed);
-        true
-    } else {
-        false
+    let newly = {
+        let mut states = SIGNAL_STATES.lock();
+        let state = states.entry(pid).or_default();
+        if state.pending & bit == 0 {
+            state.pending |= bit;
+            PENDING_COUNT.fetch_add(1, Ordering::Relaxed);
+            true
+        } else {
+            false
+        }
+    };
+    // Wake any signalfd reader blocked on this signal — but only on a
+    // clear→set transition (a re-post of an already-pending signal delivers
+    // nothing new to drain).  Done after releasing SIGNAL_STATES (leaf-lock
+    // discipline); the SIGNAL_STATES → SIGNALFD_WAITERS ordering is the same
+    // happens-before edge the reader's register-then-recheck relies on.
+    if newly {
+        wake_signalfd_waiters(pid, bit);
     }
+    newly
 }
 
 /// The kernel's decision about what to do with a posted signal.
@@ -523,8 +639,9 @@ pub fn self_test() -> KernelResult<()> {
     test_on_exec()?;
     test_pending_count_accounting()?;
     test_signalfd_dequeue()?;
+    test_signalfd_waiter_registry()?;
 
-    serial_println!("[signal] Signal-shim self-test PASSED (10 tests)");
+    serial_println!("[signal] Signal-shim self-test PASSED (11 tests)");
     Ok(())
 }
 
@@ -709,5 +826,50 @@ fn test_signalfd_dequeue() -> KernelResult<()> {
     )?;
     remove(p);
     serial_println!("[signal]   signalfd dequeue (mask/blocked-independent): OK");
+    Ok(())
+}
+
+/// Exercise the signalfd waiter registry's pure partition logic
+/// (register / take-matching / deregister) without touching the scheduler.
+fn test_signalfd_waiter_registry() -> KernelResult<()> {
+    let p = TEST_PID_BASE + 8;
+    let mask_a = 1u64 << 4; // accepts signal 5
+    let mask_b = 1u64 << 9; // accepts signal 10
+    let task_a: TaskId = 0xA11;
+    let task_b: TaskId = 0xB22;
+
+    // Two tasks waiting on disjoint masks.
+    register_signalfd_waiter(p, task_a, mask_a);
+    register_signalfd_waiter(p, task_b, mask_b);
+
+    // A non-matching bit wakes nobody and leaves both registered.
+    check(
+        take_matching_signalfd_waiters(p, 1u64 << 20).is_empty(),
+        "non-matching bit takes no waiter",
+    )?;
+
+    // Signal 5's bit matches only task_a.
+    let woken = take_matching_signalfd_waiters(p, mask_a);
+    check(woken.len() == 1 && woken.first() == Some(&task_a), "bit{5} takes only task_a")?;
+    // task_a is now gone; re-taking the same bit yields nothing.
+    check(
+        take_matching_signalfd_waiters(p, mask_a).is_empty(),
+        "task_a not taken twice",
+    )?;
+
+    // Idempotent re-registration updates the mask rather than duplicating.
+    register_signalfd_waiter(p, task_b, mask_a | mask_b);
+    let woken = take_matching_signalfd_waiters(p, mask_a);
+    check(woken.len() == 1 && woken.first() == Some(&task_b), "remask wakes task_b on bit{5}")?;
+
+    // Deregister of an already-taken / unknown task is a harmless no-op,
+    // and the registry entry for p is cleaned up once empty.
+    deregister_signalfd_waiter(p, task_a);
+    deregister_signalfd_waiter(p, task_b);
+    check(
+        take_matching_signalfd_waiters(p, !0u64).is_empty(),
+        "registry empty after deregister",
+    )?;
+    serial_println!("[signal]   signalfd waiter registry (partition logic): OK");
     Ok(())
 }

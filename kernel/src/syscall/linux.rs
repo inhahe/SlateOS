@@ -2883,12 +2883,15 @@ const SIGNALFD_SIGINFO_SIZE: usize = 128;
 ///     records), emit a record whose `ssi_signo` is the signal number;
 ///     all other fields are zeroed (we do not yet carry siginfo payloads,
 ///     matching our `rt_sigqueueinfo` which drops the payload).
-///   * If no masked signal is pending: `O_NONBLOCK` → EAGAIN.  A blocking
-///     read also returns EAGAIN rather than sleeping — the kernel has no
-///     signal-arrival wakeup path yet (the same documented shortcut as
-///     `rt_sigtimedwait`; see todo.txt).  In practice a signalfd is read
-///     after `poll`/`epoll` reports it readable, so a masked signal is
-///     already pending on entry and the drain path runs.
+///   * If no masked signal is pending: `O_NONBLOCK` → EAGAIN.  A blocking read
+///     instead parks the caller until a masked signal arrives, via the
+///     per-process `signalfd` wait queue: it registers in
+///     [`crate::proc::signal::register_signalfd_waiter`], re-checks
+///     [`crate::proc::signal::has_pending_in_mask`] (closing the wakeup race),
+///     then [`crate::sched::block_current`]s; [`crate::proc::signal::set_pending`]
+///     wakes it when a matching signal becomes pending.  In practice a signalfd
+///     is read after `poll`/`epoll` reports it readable, so a masked signal is
+///     already pending on entry and neither path blocks.
 fn dispatch_signalfd_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
     if (cap as usize) < SIGNALFD_SIGINFO_SIZE {
         return linux_err(errno::EINVAL);
@@ -2898,48 +2901,70 @@ fn dispatch_signalfd_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
         None => return linux_err(errno::EBADF),
     };
     let handle = crate::ipc::signalfd::SignalFdHandle::from_raw(entry.raw_handle);
-    let mask = match crate::ipc::signalfd::mask(handle) {
-        Some(m) => m,
-        None => return linux_err(errno::EBADF),
-    };
 
-    // How many records fit in the user buffer.
+    // How many records fit in the user buffer (validated once — independent of
+    // the mask, which we re-fetch each iteration so a concurrently-closed fd
+    // surfaces EBADF rather than blocking forever).
     let max_records = (cap as usize) / SIGNALFD_SIGINFO_SIZE;
     let total_bytes = max_records.saturating_mul(SIGNALFD_SIGINFO_SIZE);
     if let Err(e) = crate::mm::user::validate_user_write(buf, total_bytes) {
         return linux_err(linux_errno_for(e));
     }
 
-    // Build the records for as many masked-pending signals as we can drain.
-    let mut out = alloc::vec![0u8; total_bytes];
-    let mut produced = 0usize;
-    while produced < max_records {
-        let Some(sig) = crate::proc::signal::take_pending_in_mask(caller, mask) else {
-            break;
+    let nonblock = (entry.status_flags & oflags::O_NONBLOCK) != 0;
+
+    loop {
+        let mask = match crate::ipc::signalfd::mask(handle) {
+            Some(m) => m,
+            None => return linux_err(errno::EBADF),
         };
-        let off = produced.saturating_mul(SIGNALFD_SIGINFO_SIZE);
-        // ssi_signo is the first u32 of the record; the rest stay zero.
-        let bytes = sig.to_le_bytes();
-        // off + 4 <= total_bytes since produced < max_records.
-        out[off..off.saturating_add(4)].copy_from_slice(&bytes);
-        produced = produced.saturating_add(1);
-    }
 
-    if produced == 0 {
-        // Nothing to deliver.  Blocking and non-blocking both surface
-        // EAGAIN (no signal-arrival wakeup path — see doc comment).
-        return linux_err(errno::EAGAIN);
-    }
+        // Build the records for as many masked-pending signals as we can drain.
+        let mut out = alloc::vec![0u8; total_bytes];
+        let mut produced = 0usize;
+        while produced < max_records {
+            let Some(sig) = crate::proc::signal::take_pending_in_mask(caller, mask) else {
+                break;
+            };
+            let off = produced.saturating_mul(SIGNALFD_SIGINFO_SIZE);
+            // ssi_signo is the first u32 of the record; the rest stay zero.
+            let bytes = sig.to_le_bytes();
+            // off + 4 <= total_bytes since produced < max_records.
+            out[off..off.saturating_add(4)].copy_from_slice(&bytes);
+            produced = produced.saturating_add(1);
+        }
 
-    let n = produced.saturating_mul(SIGNALFD_SIGINFO_SIZE);
-    // SAFETY: validate_user_write confirmed [buf, +total_bytes) is
-    // writable and n <= total_bytes.
-    let r = unsafe { crate::mm::user::copy_to_user(out.as_ptr(), buf, n) };
-    if let Err(e) = r {
-        return linux_err(linux_errno_for(e));
+        if produced > 0 {
+            let n = produced.saturating_mul(SIGNALFD_SIGINFO_SIZE);
+            // SAFETY: validate_user_write confirmed [buf, +total_bytes) is
+            // writable and n <= total_bytes.
+            let r = unsafe { crate::mm::user::copy_to_user(out.as_ptr(), buf, n) };
+            if let Err(e) = r {
+                return linux_err(linux_errno_for(e));
+            }
+            #[allow(clippy::cast_possible_wrap)]
+            return SyscallResult::ok(n as i64);
+        }
+
+        // Nothing to deliver.
+        if nonblock {
+            return linux_err(errno::EAGAIN);
+        }
+
+        // Blocking: register as a waiter, then re-check before parking so a
+        // signal that arrives in the gap is not lost (register-then-recheck).
+        let task = crate::sched::current_task_id();
+        crate::proc::signal::register_signalfd_waiter(caller, task, mask);
+        if crate::proc::signal::has_pending_in_mask(caller, mask) {
+            // Raced with an arriving signal — drain it on the next iteration.
+            crate::proc::signal::deregister_signalfd_waiter(caller, task);
+            continue;
+        }
+        crate::sched::block_current();
+        // Woken (matching signal arrived, or spurious) — deregister (a no-op if
+        // the waker already removed us) and loop to re-drain.
+        crate::proc::signal::deregister_signalfd_waiter(caller, task);
     }
-    #[allow(clippy::cast_possible_wrap)]
-    SyscallResult::ok(n as i64)
 }
 
 /// timerfd read: return the 8-byte `u64` count of expirations since the last

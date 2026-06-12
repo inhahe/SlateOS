@@ -2848,6 +2848,7 @@ fn fd_link_target(entry: &crate::proc::linux_fd::FdEntry) -> String {
         HandleKind::EventFd => String::from("anon_inode:[eventfd]"),
         HandleKind::PidFd => String::from("anon_inode:[pidfd]"),
         HandleKind::MemFd => String::from("anon_inode:[memfd]"),
+        HandleKind::Epoll => String::from("anon_inode:[eventpoll]"),
     }
 }
 

@@ -154,6 +154,14 @@ pub enum ResourceType {
     /// process dies, and so `fork()` knows to bump the refcount in the
     /// child.
     MemFd = 17,
+    /// An epoll instance (Linux `epoll_create`/`epoll_create1`).
+    ///
+    /// A refcounted reference into [`crate::ipc::epoll`] holding an
+    /// interest set; no capability is required to create one — the handle
+    /// itself is the authority.  Tracked per-process so the instance is
+    /// released when an owning process dies, and so `fork()` knows to bump
+    /// the refcount in the child.
+    Epoll = 18,
 }
 
 // ---------------------------------------------------------------------------

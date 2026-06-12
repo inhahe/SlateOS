@@ -80,20 +80,16 @@ pub struct EpollHandle(u64);
 
 impl EpollHandle {
     // `from_raw`/`raw` are the bridge to the Linux fd table: the syscall
-    // wiring layer (`HandleKind::Epoll`, added in the follow-up commit that
-    // implements epoll_create/ctl/wait) stores the handle as a raw `u64` in
-    // an `FdEntry` and reconstructs it on each syscall.  They have no
-    // in-crate caller until that layer lands, hence the `dead_code` allow.
+    // layer (`HandleKind::Epoll`) stores the handle as a raw `u64` in an
+    // `FdEntry` and reconstructs it on each epoll_ctl / epoll_wait call.
     /// Reconstruct a handle from its raw `u64` representation.
     #[must_use]
-    #[allow(dead_code)]
     pub const fn from_raw(raw: u64) -> Self {
         Self(raw)
     }
 
     /// The raw `u64` representation (what gets stored in an `FdEntry`).
     #[must_use]
-    #[allow(dead_code)]
     pub const fn raw(self) -> u64 {
         self.0
     }

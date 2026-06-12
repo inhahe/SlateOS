@@ -111,6 +111,12 @@ pub enum HandleKind {
     /// Read/write are byte-stream operations against the in-kernel
     /// `MEMFD_TABLE` data buffer; close releases one refcount.
     MemFd,
+    /// epoll instance — Linux `epoll_create`/`epoll_create1`.
+    /// `raw_handle` holds the `ipc::epoll::EpollHandle` raw u64.
+    /// Read/write return `EINVAL`; the interest set is mutated via
+    /// `epoll_ctl` and harvested via `epoll_wait`.  Close releases one
+    /// refcount on the in-kernel `EPOLL_TABLE` entry.
+    Epoll,
 }
 
 impl HandleKind {
@@ -120,7 +126,7 @@ impl HandleKind {
     pub const fn needs_kernel_close(self) -> bool {
         match self {
             Self::Console | Self::PidFd => false,
-            Self::File | Self::Pipe | Self::EventFd | Self::MemFd => true,
+            Self::File | Self::Pipe | Self::EventFd | Self::MemFd | Self::Epoll => true,
         }
     }
 }
@@ -242,6 +248,21 @@ impl FdEntry {
             raw_handle: handle,
             fd_flags: 0,
             status_flags,
+            f_owner: 0,
+            f_owner_sig: 0,
+        }
+    }
+
+    /// Construct an entry for an epoll instance.  `raw_handle` is the
+    /// `ipc::epoll::EpollHandle` raw u64.  `fd_flags` carries `FD_CLOEXEC`
+    /// when the instance was created with `EPOLL_CLOEXEC`.
+    #[must_use]
+    pub const fn epoll(handle: u64, fd_flags: u32) -> Self {
+        Self {
+            kind: HandleKind::Epoll,
+            raw_handle: handle,
+            fd_flags,
+            status_flags: 0,
             f_owner: 0,
             f_owner_sig: 0,
         }

@@ -76,6 +76,9 @@ pub fn cleanup_handles(handles: &[(ResourceType, u64)]) {
             ResourceType::MemFd => {
                 memfd::close(memfd::MemFdHandle::from_raw(handle_raw));
             }
+            ResourceType::Epoll => {
+                epoll::close(epoll::EpollHandle::from_raw(handle_raw));
+            }
             ResourceType::File => {
                 // Open file handles are refcounted in the open-file table;
                 // closing here drops this process's single reference.  A

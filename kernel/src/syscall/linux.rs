@@ -2561,6 +2561,21 @@ pub fn close_handle(entry: FdEntry) -> SyscallResult {
             crate::ipc::memfd::close(h);
             SyscallResult::ok(0)
         }
+        HandleKind::Epoll => {
+            // Deregister from the per-process ipc_handles list — same
+            // rationale as the EventFd/MemFd arms above — then drop one
+            // refcount on the in-kernel epoll instance.
+            if let Some(pid) = caller_pid() {
+                pcb::deregister_ipc_handle(
+                    pid,
+                    crate::cap::ResourceType::Epoll,
+                    entry.raw_handle,
+                );
+            }
+            let h = crate::ipc::epoll::EpollHandle::from_raw(entry.raw_handle);
+            crate::ipc::epoll::close(h);
+            SyscallResult::ok(0)
+        }
     }
 }
 
@@ -2617,7 +2632,7 @@ fn dispatch_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
             linux_from_native(handlers::sys_pipe_write(&a))
         }
         HandleKind::EventFd => dispatch_eventfd_write(entry, buf, len),
-        HandleKind::PidFd => linux_err(errno::EINVAL),
+        HandleKind::PidFd | HandleKind::Epoll => linux_err(errno::EINVAL),
         HandleKind::MemFd => dispatch_memfd_write(entry, buf, len),
     }
 }
@@ -2797,7 +2812,7 @@ fn dispatch_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
             linux_from_native(handlers::sys_pipe_read(&a))
         }
         HandleKind::EventFd => dispatch_eventfd_read(entry, buf, cap),
-        HandleKind::PidFd => linux_err(errno::EINVAL),
+        HandleKind::PidFd | HandleKind::Epoll => linux_err(errno::EINVAL),
         HandleKind::MemFd => dispatch_memfd_read(entry, buf, cap),
     }
 }
@@ -3613,7 +3628,11 @@ fn fcntl_flock_apply(
     // way Linux does for unsupported fd types.
     match entry.kind {
         HandleKind::File | HandleKind::MemFd => {}
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd => {
+        HandleKind::Console
+        | HandleKind::Pipe
+        | HandleKind::EventFd
+        | HandleKind::PidFd
+        | HandleKind::Epoll => {
             return linux_err(errno::EBADF);
         }
     }
@@ -3748,7 +3767,7 @@ fn sys_lseek(args: &SyscallArgs) -> SyscallResult {
                 Err(e) => linux_err(linux_errno_for(e)),
             }
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll => linux_err(errno::ESPIPE),
     }
 }
 
@@ -10159,7 +10178,7 @@ fn sys_fsync(args: &SyscallArgs) -> SyscallResult {
     };
     match entry.kind {
         HandleKind::File | HandleKind::MemFd => SyscallResult::ok(0),
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd => linux_err(errno::EINVAL),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll => linux_err(errno::EINVAL),
     }
 }
 
@@ -11012,7 +11031,8 @@ fn sys_readahead(args: &SyscallArgs) -> SyscallResult {
         HandleKind::Console
         | HandleKind::Pipe
         | HandleKind::EventFd
-        | HandleKind::PidFd => return linux_err(errno::EINVAL),
+        | HandleKind::PidFd
+        | HandleKind::Epoll => return linux_err(errno::EINVAL),
     }
     SyscallResult::ok(0)
 }
@@ -12548,6 +12568,9 @@ fn fill_stat_for_fd(
         // glibc / mesa probe `st_mode & S_IFMT == S_IFREG` to confirm the
         // mmap target is a regular file.
         HandleKind::MemFd => (S_IFREG | 0o777, 4096),
+        // epoll is an anon_inode like eventfd/pidfd — regular file,
+        // 0600, blocksize 4096.
+        HandleKind::Epoll => (S_IFREG | 0o600, 4096),
     };
 
     // Inode: use the raw_handle as a stable-ish identity.
@@ -12827,6 +12850,8 @@ fn fill_statx_for_fd(
         HandleKind::PidFd => ((S_IFREG | 0o600) as u16, 4096),
         // memfd: regular file on the anon "memfd:" inode, 0777, like Linux.
         HandleKind::MemFd => ((S_IFREG | 0o777) as u16, 4096),
+        // epoll anon_inode — S_IFREG | 0600, like eventfd/pidfd.
+        HandleKind::Epoll => ((S_IFREG | 0o600) as u16, 4096),
     };
     let st_ino: u64 = entry.raw_handle;
     // Surface the live memfd data length so stx_size reflects what callers
@@ -13986,8 +14011,8 @@ fn sys_ftruncate(args: &SyscallArgs) -> SyscallResult {
                 Err(_) => linux_err(errno::EIO),
             }
         }
-        // Pipes, consoles, eventfds, pidfds cannot be truncated.
-        HandleKind::Pipe | HandleKind::Console | HandleKind::EventFd | HandleKind::PidFd => linux_err(errno::EINVAL),
+        // Pipes, consoles, eventfds, pidfds, epoll cannot be truncated.
+        HandleKind::Pipe | HandleKind::Console | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll => linux_err(errno::EINVAL),
     }
 }
 
@@ -17163,6 +17188,12 @@ fn sys_pidfd_getfd(args: &SyscallArgs) -> SyscallResult {
                 return linux_err(errno::EBADF);
             }
         }
+        HandleKind::Epoll => {
+            let h = crate::ipc::epoll::EpollHandle::from_raw(entry.raw_handle);
+            if crate::ipc::epoll::dup(h).is_err() {
+                return linux_err(errno::EBADF);
+            }
+        }
     }
 
     // Linux always sets FD_CLOEXEC on the new fd, regardless of the
@@ -17195,6 +17226,7 @@ fn sys_pidfd_getfd(args: &SyscallArgs) -> SyscallResult {
         HandleKind::Pipe => Some(crate::cap::ResourceType::Pipe),
         HandleKind::EventFd => Some(crate::cap::ResourceType::EventFd),
         HandleKind::MemFd => Some(crate::cap::ResourceType::MemFd),
+        HandleKind::Epoll => Some(crate::cap::ResourceType::Epoll),
         HandleKind::Console | HandleKind::PidFd => None,
     };
     if let Some(rt) = resource {
@@ -17249,6 +17281,10 @@ fn release_handle_ref(kind: HandleKind, raw_handle: u64) {
         HandleKind::MemFd => {
             let h = crate::ipc::memfd::MemFdHandle::from_raw(raw_handle);
             crate::ipc::memfd::close(h);
+        }
+        HandleKind::Epoll => {
+            let h = crate::ipc::epoll::EpollHandle::from_raw(raw_handle);
+            crate::ipc::epoll::close(h);
         }
     }
 }
@@ -19889,6 +19925,20 @@ fn poll_revents_from_entry(entry: crate::proc::linux_fd::FdEntry, events: u16) -
             }
             r
         }
+        HandleKind::Epoll => {
+            // Polling an epoll fd *itself* (nesting it inside poll/select
+            // or another epoll) reports POLLIN once any registered fd in
+            // its interest set is ready.  Computing that requires resolving
+            // each member fd against the *owning process's* fd table, but
+            // this shared readiness engine has no pid in scope — it is
+            // called with a bare FdEntry by poll/ppoll/select/pselect6 and
+            // by epoll_wait for member fds.  Until the engine is threaded
+            // with the owner pid, a polled epoll fd reports "not ready"
+            // (0) rather than lying.  Direct epoll_wait is unaffected: it
+            // walks interest_list and polls each member fd with the pid in
+            // hand.  Tracked in todo.txt (epoll nesting in poll/select).
+            0
+        }
     };
 
     raw & mask
@@ -20482,6 +20532,54 @@ fn sys_pselect6(args: &SyscallArgs) -> SyscallResult {
     select_core(nfds, args.arg1, args.arg2, args.arg3, len, timeout_ms_signed)
 }
 
+/// Allocate a fresh epoll instance and install it as a new fd in the
+/// caller's Linux fd table.  Shared by `epoll_create` and
+/// `epoll_create1`.  `cloexec` sets `FD_CLOEXEC` on the new fd.
+///
+/// Mirrors the memfd_create install pattern: create the kernel object,
+/// register it in the caller's per-process IPC-handle list (so
+/// process-exit cleanup and `fork` see it), then install the fd —
+/// rolling back both on install failure.
+fn epoll_install(cloexec: bool) -> SyscallResult {
+    let caller = match caller_pid() {
+        Some(p) => p,
+        None => return linux_err(errno::EBADF),
+    };
+
+    let handle = crate::ipc::epoll::create();
+
+    // Register in the caller's IPC-handle list so (a) process-exit
+    // cleanup releases the instance via `ipc::cleanup_handles`, and
+    // (b) `fork` runs `dup_one` to bump the refcount in the child.
+    pcb::register_ipc_handle(
+        caller,
+        crate::cap::ResourceType::Epoll,
+        handle.raw(),
+    );
+
+    let fd_flags = if cloexec {
+        crate::proc::linux_fd::FD_CLOEXEC
+    } else {
+        0
+    };
+    let entry = crate::proc::linux_fd::FdEntry::epoll(handle.raw(), fd_flags);
+
+    match pcb::linux_fd_install(caller, entry, 0) {
+        Ok(fd) => SyscallResult::ok(i64::from(fd)),
+        Err(e) => {
+            // Install failed (table full).  Drop the just-registered
+            // ipc_handles entry and release the instance.
+            pcb::deregister_ipc_handle(
+                caller,
+                crate::cap::ResourceType::Epoll,
+                handle.raw(),
+            );
+            crate::ipc::epoll::close(handle);
+            linux_err(linux_errno_for(e))
+        }
+    }
+}
+
 /// `epoll_create(size)` — historical, size is now ignored but must be > 0.
 fn sys_epoll_create(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
@@ -20489,7 +20587,7 @@ fn sys_epoll_create(args: &SyscallArgs) -> SyscallResult {
     if size <= 0 {
         return linux_err(errno::EINVAL);
     }
-    linux_err(errno::ENOSYS)
+    epoll_install(false)
 }
 
 /// `epoll_create1(flags)` — flags is EPOLL_CLOEXEC (0o2_000_000) only.
@@ -20500,12 +20598,14 @@ fn sys_epoll_create1(args: &SyscallArgs) -> SyscallResult {
     if flags & !EPOLL_CLOEXEC != 0 {
         return linux_err(errno::EINVAL);
     }
-    linux_err(errno::ENOSYS)
+    epoll_install(flags & EPOLL_CLOEXEC != 0)
 }
 
 /// `epoll_ctl(epfd, op, fd, event*)` — op in {ADD=1, DEL=2, MOD=3}.
 fn sys_epoll_ctl(args: &SyscallArgs) -> SyscallResult {
+    const EPOLL_CTL_ADD: i32 = 1;
     const EPOLL_CTL_DEL: i32 = 2;
+    const EPOLL_CTL_MOD: i32 = 3;
 
     // Linux gate order (fs/eventpoll.c):
     //
@@ -20546,33 +20646,117 @@ fn sys_epoll_ctl(args: &SyscallArgs) -> SyscallResult {
     //     the event read, so the EFAULT path covers ADD, MOD, and
     //     every value other than DEL.
     //
-    // Post-batch:
+    // Now that epoll_create hands out real epoll fds, all six gates are
+    // live and run in Linux order:
     //   1. op != DEL  ->  read event (EFAULT on NULL/unreadable).
-    //   2. fdget(epfd) -> EBADF.  No real epfds exist in this kernel
-    //      (epoll_create returns ENOSYS), so every well-formed call
-    //      terminates here.
-    //   3-6 (target fd / file_can_poll / is_file_epoll / op switch):
-    //      unreachable in our model — all gated behind a valid epfd
-    //      which we never hand out.
+    //   2. fdget(epfd) -> EBADF on a missing epfd.
+    //   3. fdget(fd)   -> EBADF on a missing target fd.
+    //   4. file_can_poll(tf) -> EPERM for regular files (File / MemFd).
+    //   5. f.file == tf.file || !is_file_epoll(f.file) -> EINVAL
+    //      (self-loop, or epfd is not actually an epoll instance).
+    //   6. op switch: ADD/MOD/DEL mutate the interest set; unknown op
+    //      -> EINVAL (the switch default, the last possible gate).
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let op = args.arg1 as i32;
 
     // Gate 1 (outer wrapper): copy_from_user(event) when op != DEL.
+    // struct epoll_event is packed 12 bytes on x86_64: u32 events + u64 data.
+    let mut ev_events: u32 = 0;
+    let mut ev_data: u64 = 0;
     if op != EPOLL_CTL_DEL {
         if args.arg3 == 0 {
             return linux_err(errno::EFAULT);
         }
-        // struct epoll_event is 12 bytes on x86_64 (packed): u32 events + u64 data.
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg3, 12) {
+        let mut ev_buf = [0u8; 12];
+        // SAFETY: copy_from_user validates the 12-byte source range is
+        // readable for the caller before copying; on failure it returns
+        // Err and we translate to the matching errno without touching
+        // ev_buf's (zero-initialised) contents.
+        let r = unsafe {
+            crate::mm::user::copy_from_user(args.arg3, ev_buf.as_mut_ptr(), 12)
+        };
+        if let Err(e) = r {
             return linux_err(linux_errno_for(e));
         }
+        ev_events = u32::from_ne_bytes([ev_buf[0], ev_buf[1], ev_buf[2], ev_buf[3]]);
+        ev_data = u64::from_ne_bytes([
+            ev_buf[4], ev_buf[5], ev_buf[6], ev_buf[7],
+            ev_buf[8], ev_buf[9], ev_buf[10], ev_buf[11],
+        ]);
     }
 
-    // Gate 2 (do_epoll_ctl): fdget(epfd) — always EBADF in our kernel.
-    // This terminal answer subsumes gates 3-6 because they require a
-    // valid epfd to proceed.  Unknown op + bad epfd -> EBADF, NOT
-    // EINVAL (the switch default is the last possible gate).
-    linux_err(errno::EBADF)
+    // Gate 2 (do_epoll_ctl): fdget(epfd) -> EBADF on a missing fd.
+    let caller = match caller_pid() {
+        Some(p) => p,
+        None => return linux_err(errno::EBADF),
+    };
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let epfd = args.arg0 as i32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let target_fd = args.arg2 as i32;
+
+    let ep_entry = match pcb::linux_fd_lookup(caller, epfd) {
+        Some(e) => e,
+        None => return linux_err(errno::EBADF),
+    };
+
+    // Gate 3 (do_epoll_ctl): fdget(fd) -> EBADF on a missing target.
+    let target_entry = match pcb::linux_fd_lookup(caller, target_fd) {
+        Some(e) => e,
+        None => return linux_err(errno::EBADF),
+    };
+
+    use crate::proc::linux_fd::HandleKind;
+
+    // Gate 4: file_can_poll(tf) -> EPERM if the target does not support
+    // poll.  Regular files (File, MemFd) have no .poll in Linux, so
+    // epoll rejects them with EPERM — userspace relies on this to fall
+    // back to thread-pool I/O for regular files.
+    match target_entry.kind {
+        HandleKind::File | HandleKind::MemFd => return linux_err(errno::EPERM),
+        HandleKind::Console
+        | HandleKind::Pipe
+        | HandleKind::EventFd
+        | HandleKind::PidFd
+        | HandleKind::Epoll => {}
+    }
+
+    // Gate 5: f.file == tf.file || !is_file_epoll(f.file) -> EINVAL.
+    //   * epfd must itself be an epoll instance.
+    //   * adding an fd that IS the epoll instance to itself is rejected
+    //     (a self-loop).  We approximate Linux's `f.file == tf.file`
+    //     check by comparing fd numbers — the only way two fds share the
+    //     same epoll description in our model is being the same fd.
+    if ep_entry.kind != HandleKind::Epoll || epfd == target_fd {
+        return linux_err(errno::EINVAL);
+    }
+
+    let ep_handle = crate::ipc::epoll::EpollHandle::from_raw(ep_entry.raw_handle);
+
+    // Gate 6: the op switch.  Map epoll's interest-set errors to Linux
+    // errnos: AlreadyExists -> EEXIST (re-ADD), NotFound -> ENOENT
+    // (MOD/DEL of an unregistered fd).
+    match op {
+        EPOLL_CTL_ADD => match crate::ipc::epoll::ctl_add(ep_handle, target_fd, ev_events, ev_data) {
+            Ok(()) => SyscallResult::ok(0),
+            Err(crate::error::KernelError::AlreadyExists) => linux_err(errno::EEXIST),
+            Err(crate::error::KernelError::InvalidHandle) => linux_err(errno::EBADF),
+            Err(e) => linux_err(linux_errno_for(e)),
+        },
+        EPOLL_CTL_MOD => match crate::ipc::epoll::ctl_mod(ep_handle, target_fd, ev_events, ev_data) {
+            Ok(()) => SyscallResult::ok(0),
+            Err(crate::error::KernelError::NotFound) => linux_err(errno::ENOENT),
+            Err(crate::error::KernelError::InvalidHandle) => linux_err(errno::EBADF),
+            Err(e) => linux_err(linux_errno_for(e)),
+        },
+        EPOLL_CTL_DEL => match crate::ipc::epoll::ctl_del(ep_handle, target_fd) {
+            Ok(()) => SyscallResult::ok(0),
+            Err(crate::error::KernelError::NotFound) => linux_err(errno::ENOENT),
+            Err(crate::error::KernelError::InvalidHandle) => linux_err(errno::EBADF),
+            Err(e) => linux_err(linux_errno_for(e)),
+        },
+        _ => linux_err(errno::EINVAL),
+    }
 }
 
 /// Linux's `EP_MAX_EVENTS` cap from fs/eventpoll.c — the maximum
@@ -20580,6 +20764,117 @@ fn sys_epoll_ctl(args: &SyscallArgs) -> SyscallResult {
 /// before they return EINVAL.  Equals `INT_MAX / sizeof(struct
 /// epoll_event)`; struct epoll_event is packed 12 bytes on x86_64.
 const EP_MAX_EVENTS: i32 = i32::MAX / 12;
+
+/// Shared core for `epoll_wait` / `epoll_pwait` / `epoll_pwait2`.
+///
+/// Callers have already validated `maxevents` (`1..=EP_MAX_EVENTS`),
+/// confirmed the `events` output buffer is writable, and parsed any
+/// signal mask / timespec into `timeout_ms_signed`.  This function does
+/// the epfd lookup, the interest-set readiness scan (level-triggered,
+/// re-polling on a timeout the same way `poll_core` does), and the
+/// result write-back.
+///
+/// `timeout_ms_signed` follows epoll_wait(2): positive = deadline in ms,
+/// 0 = return immediately, negative = wait indefinitely.
+fn epoll_wait_core(
+    epfd: i32,
+    events_ptr: u64,
+    maxevents: i32,
+    timeout_ms_signed: i64,
+) -> SyscallResult {
+    use alloc::{vec, vec::Vec};
+    use crate::proc::linux_fd::HandleKind;
+
+    let caller = match caller_pid() {
+        Some(p) => p,
+        None => return linux_err(errno::EBADF),
+    };
+
+    // fdget(epfd) -> EBADF; is_file_epoll -> EINVAL on a non-epoll fd.
+    let ep_entry = match pcb::linux_fd_lookup(caller, epfd) {
+        Some(e) => e,
+        None => return linux_err(errno::EBADF),
+    };
+    if ep_entry.kind != HandleKind::Epoll {
+        return linux_err(errno::EINVAL);
+    }
+    let ep_handle = crate::ipc::epoll::EpollHandle::from_raw(ep_entry.raw_handle);
+
+    #[allow(clippy::cast_sign_loss)]
+    let max = maxevents as usize;
+    // Output buffer: up to `maxevents` packed 12-byte epoll_event records.
+    let mut out: Vec<u8> = vec![0u8; max.saturating_mul(12)];
+    let mut remaining_ms: i64 = timeout_ms_signed;
+
+    loop {
+        // Snapshot the interest set fresh each iteration so an
+        // epoll_ctl from another thread/process (shared instance) is
+        // reflected in the next scan.
+        let interest = crate::ipc::epoll::interest_list(ep_handle).unwrap_or_default();
+
+        let mut count: usize = 0;
+        for (fd, events, data) in interest {
+            if count >= max {
+                break;
+            }
+            // A registered fd that has since been closed is simply not
+            // ready (Linux auto-removes it; we skip it).
+            let Some(target) = pcb::linux_fd_lookup(caller, fd) else {
+                continue;
+            };
+            // The poll engine works in 16-bit POLL* space; EPOLL* readiness
+            // bits (IN/OUT/ERR/HUP/PRI) share those values.  Behaviour
+            // flags in the high bits (EPOLLET 1<<31, EPOLLONESHOT 1<<30)
+            // are not readiness bits and are dropped by the u16 cast.
+            #[allow(clippy::cast_possible_truncation)]
+            let revents = poll_revents_from_entry(target, events as u16);
+            if revents == 0 {
+                continue;
+            }
+            let off = count.saturating_mul(12);
+            // events field (u32): zero-extend the 16-bit revents.
+            let ev_bytes = u32::from(revents).to_ne_bytes();
+            let data_bytes = data.to_ne_bytes();
+            // SAFETY-of-indexing: off+11 < max*12 == out.len() because
+            // count < max (guarded above).
+            out[off..off + 4].copy_from_slice(&ev_bytes);
+            out[off + 4..off + 12].copy_from_slice(&data_bytes);
+            count = count.saturating_add(1);
+        }
+
+        if count > 0 || remaining_ms == 0 {
+            if count > 0 {
+                let nbytes = count.saturating_mul(12);
+                // SAFETY: the caller validated `events_ptr` is writable for
+                // maxevents*12 bytes; `nbytes <= max*12` so we write within
+                // that validated range.
+                let w = unsafe {
+                    crate::mm::user::copy_to_user(out.as_ptr(), events_ptr, nbytes)
+                };
+                if let Err(e) = w {
+                    return linux_err(linux_errno_for(e));
+                }
+            }
+            #[allow(clippy::cast_possible_wrap)]
+            return SyscallResult::ok(count as i64);
+        }
+
+        // Nothing ready yet and we have time left — sleep in 10 ms slices
+        // so a state change from another task is picked up promptly.
+        let slice_ms: u64 = if remaining_ms < 0 {
+            10
+        } else {
+            #[allow(clippy::cast_sign_loss)]
+            core::cmp::min(remaining_ms as u64, 10)
+        };
+        crate::sched::sleep_ms(slice_ms);
+        if remaining_ms > 0 {
+            #[allow(clippy::cast_possible_wrap)]
+            let consumed = slice_ms as i64;
+            remaining_ms = remaining_ms.saturating_sub(consumed);
+        }
+    }
+}
 
 /// `epoll_wait(epfd, events*, maxevents, timeout_ms)`.
 fn sys_epoll_wait(args: &SyscallArgs) -> SyscallResult {
@@ -20602,7 +20897,11 @@ fn sys_epoll_wait(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = crate::mm::user::validate_user_write(args.arg1, len as usize) {
         return linux_err(linux_errno_for(e));
     }
-    linux_err(errno::EBADF)
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let epfd = args.arg0 as i32;
+    #[allow(clippy::cast_possible_wrap)]
+    let timeout_ms = args.arg3 as i64;
+    epoll_wait_core(epfd, args.arg1, maxevents, timeout_ms)
 }
 
 /// `epoll_pwait(epfd, events*, maxevents, timeout_ms, sigmask*, sigsetsize)`.
@@ -20642,7 +20941,11 @@ fn sys_epoll_pwait(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = crate::mm::user::validate_user_write(args.arg1, len as usize) {
         return linux_err(linux_errno_for(e));
     }
-    linux_err(errno::EBADF)
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let epfd = args.arg0 as i32;
+    #[allow(clippy::cast_possible_wrap)]
+    let timeout_ms = args.arg3 as i64;
+    epoll_wait_core(epfd, args.arg1, maxevents, timeout_ms)
 }
 
 /// `epoll_pwait2(epfd, events*, maxevents, timespec*, sigmask*, sigsetsize)`.
@@ -20709,7 +21012,35 @@ fn sys_epoll_pwait2(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = crate::mm::user::validate_user_write(args.arg1, len as usize) {
         return linux_err(linux_errno_for(e));
     }
-    linux_err(errno::EBADF)
+    // Convert the (already-validated) timespec into a millisecond
+    // timeout for the shared core: a NULL timespec means wait
+    // indefinitely (-1), matching epoll_pwait2(2).  We re-read the
+    // values here rather than threading them down from gate 1 to keep
+    // that gate's structure untouched.
+    let timeout_ms: i64 = if args.arg3 == 0 {
+        -1
+    } else {
+        let mut ts = [0u8; 16];
+        // SAFETY: gate 1 already validated 16 readable bytes at args.arg3.
+        if let Err(e) = unsafe {
+            crate::mm::user::copy_from_user(args.arg3, ts.as_mut_ptr(), 16)
+        } {
+            return linux_err(linux_errno_for(e));
+        }
+        let tv_sec = i64::from_ne_bytes([
+            ts[0], ts[1], ts[2], ts[3], ts[4], ts[5], ts[6], ts[7],
+        ]);
+        let tv_nsec = i64::from_ne_bytes([
+            ts[8], ts[9], ts[10], ts[11], ts[12], ts[13], ts[14], ts[15],
+        ]);
+        // Round nsec up to the next ms (Linux's poll_select_set_timeout
+        // also rounds up so a tiny timeout never collapses to 0).
+        let nsec_ms = tv_nsec.saturating_add(999_999) / 1_000_000;
+        tv_sec.saturating_mul(1000).saturating_add(nsec_ms)
+    };
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let epfd = args.arg0 as i32;
+    epoll_wait_core(epfd, args.arg1, maxevents, timeout_ms)
 }
 
 // ---------------------------------------------------------------------------
@@ -23277,6 +23608,7 @@ fn handle_kind_ord(k: crate::proc::linux_fd::HandleKind) -> u64 {
         HandleKind::EventFd => 3,
         HandleKind::PidFd => 4,
         HandleKind::MemFd => 5,
+        HandleKind::Epoll => 6,
     }
 }
 
@@ -24249,7 +24581,7 @@ fn sys_cachestat(args: &SyscallArgs) -> SyscallResult {
                 // memfd is page-cache-backed on Linux, so cachestat is
                 // valid against it (always zero in our world).
                 HandleKind::File | HandleKind::MemFd => {}
-                HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd => {
+                HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll => {
                     return linux_err(errno::EOPNOTSUPP);
                 }
             }
@@ -28619,7 +28951,7 @@ fn sys_pread64(args: &SyscallArgs) -> SyscallResult {
                 Err(e) => linux_err(e),
             }
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll => linux_err(errno::ESPIPE),
     }
 }
 
@@ -28676,7 +29008,7 @@ fn sys_pwrite64(args: &SyscallArgs) -> SyscallResult {
                 Err(e) => linux_err(e),
             }
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll => linux_err(errno::ESPIPE),
     }
 }
 
@@ -29894,7 +30226,7 @@ fn sys_preadv(args: &SyscallArgs) -> SyscallResult {
             let off = offset as u64;
             preadv_memfd_walk(entry.raw_handle, off, iov_ptr, iovcnt)
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll => linux_err(errno::ESPIPE),
     }
 }
 
@@ -29925,7 +30257,7 @@ fn sys_pwritev(args: &SyscallArgs) -> SyscallResult {
             let off = offset as u64;
             pwritev_memfd_walk(entry.raw_handle, off, iov_ptr, iovcnt)
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll => linux_err(errno::ESPIPE),
     }
 }
 
@@ -29987,7 +30319,7 @@ fn sys_preadv2(args: &SyscallArgs) -> SyscallResult {
             let off = offset as u64;
             preadv_memfd_walk(entry.raw_handle, off, iov_ptr, iovcnt)
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll => linux_err(errno::ESPIPE),
     }
 }
 
@@ -30031,7 +30363,7 @@ fn sys_pwritev2(args: &SyscallArgs) -> SyscallResult {
             let off = offset as u64;
             pwritev_memfd_walk(entry.raw_handle, off, iov_ptr, iovcnt)
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll => linux_err(errno::ESPIPE),
     }
 }
 
@@ -43206,6 +43538,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 HandleKind::Pipe => Some(crate::cap::ResourceType::Pipe),
                 HandleKind::EventFd => Some(crate::cap::ResourceType::EventFd),
                 HandleKind::MemFd => Some(crate::cap::ResourceType::MemFd),
+                HandleKind::Epoll => Some(crate::cap::ResourceType::Epoll),
                 HandleKind::Console | HandleKind::PidFd => None,
             }
         };
@@ -58073,16 +58406,19 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: epoll_create(0) not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // epoll_create(1) -> ENOSYS.
+        // epoll_create(1) -> EBADF in kernel/boot self-test context.
+        // size>0 passes the legacy validation, then epoll_install runs;
+        // caller_pid() is None here (no current PCB), so install returns
+        // EBADF.  (Pre-implementation this returned ENOSYS as a stub.)
         let a = SyscallArgs { arg0: 1, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::EPOLL_CREATE, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: epoll_create(1) not ENOSYS");
+        if dispatch_linux(nr::EPOLL_CREATE, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: epoll_create(1) not EBADF");
             return Err(KernelError::InternalError);
         }
-        // epoll_create1(0) -> ENOSYS.
+        // epoll_create1(0) -> EBADF (same no-caller-PCB reasoning).
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::EPOLL_CREATE1, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: epoll_create1(0) not ENOSYS");
+        if dispatch_linux(nr::EPOLL_CREATE1, &a).value != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: epoll_create1(0) not EBADF");
             return Err(KernelError::InternalError);
         }
         // epoll_create1 with unknown flag bits -> EINVAL.

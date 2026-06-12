@@ -204,6 +204,16 @@ fn dup_one(rtype: ResourceType, id: u64) -> KernelResult<Option<(ResourceType, u
             )?;
             Ok(Some((rtype, id)))
         }
+        ResourceType::Epoll => {
+            // Bump the epoll instance refcount so parent and child each
+            // own one reference to the shared interest set — same id.  An
+            // `epoll_ctl` from either is visible to the other, matching
+            // Linux's shared-kernel-object semantics across fork.
+            crate::ipc::epoll::dup(
+                crate::ipc::epoll::EpollHandle::from_raw(id),
+            )?;
+            Ok(Some((rtype, id)))
+        }
         // No refcounted same-id dup yet — not inherited.  Documented
         // limitation in todo.txt; revisit when these gain dup support.
         ResourceType::Channel
@@ -252,6 +262,11 @@ fn close_one(rtype: ResourceType, id: u64) {
         ResourceType::MemFd => {
             crate::ipc::memfd::close(
                 crate::ipc::memfd::MemFdHandle::from_raw(id),
+            );
+        }
+        ResourceType::Epoll => {
+            crate::ipc::epoll::close(
+                crate::ipc::epoll::EpollHandle::from_raw(id),
             );
         }
         // Nothing was duped for these in `dup_one`.

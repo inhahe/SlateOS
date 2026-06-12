@@ -241,13 +241,27 @@
 ## procfs self-test verifies render_pid_io's exact 7-line output + live path
 ## classification/PCB gating.  The only part not exercised end-to-end is the thin
 ## syscall-number->account_io mapping in dispatch_linux, which is a flat auditable
-## table.  LIMITATION (documented on gen_pid_io): accounting currently covers the
-## Linux-ABI read/write path only; a purely native-ABI process reads all-zero
-## counters (honest — native byte transfers are not yet tracked).  FOLLOW-UP: fold
-## the native read/write/pipe/console handlers in kernel/src/syscall/handlers.rs
-## into the same account_io_{read,write} calls so native processes get real io
-## counts too (deferred: native dispatch is many specialized syscalls, larger
-## surface, and the Linux-ABI path is what /proc consumers exercise first).
+## table.
+## NATIVE-ABI FOLLOW-UP DONE (2026-06-11): native processes now get real io
+## counters too.  syscall::dispatch::dispatch() folds completed native read/write
+## syscalls into the same pcb::account_io_{read,write} via a pure, unit-tested
+## classifier io_dir_for_syscall(nr): reads = SYS_FS_READ, SYS_FS_READ_FILE,
+## SYS_PIPE_READ/_TRY_READ/_READ_TIMEOUT, SYS_CONSOLE_READ_CHAR/_TRY_READ_CHAR;
+## writes = SYS_FS_WRITE, SYS_PIPE_WRITE/_TRY_WRITE/_WRITE_TIMEOUT,
+## SYS_CONSOLE_WRITE.  Hooked after the handler returns, reusing the task_id
+## already resolved for the syscall filter (no extra lookup); owner_process(task_id)
+## maps to pid and kernel tasks (None) are skipped.  syscr/syscw count every such
+## syscall incl. failures; rchar/wchar fold only the positive returned byte count
+## (matches Linux task_io_accounting).  Native and Linux-ABI dispatch are separate
+## entry paths, so a process is accounted in exactly one — no double count.  New
+## self-test test_io_dir_classification pins the number->direction mapping (boot:
+## "[syscall]   Native I/O syscall classification: OK").
+## DELIBERATE EXCLUSION: SYS_FS_WRITE_FILE is NOT accounted — its handler returns
+## 0 on success (not a byte count), so folding result.value would bump syscw with
+## a zero wchar (dishonest undercount).  If whole-file writes must appear in wchar,
+## account them at the handler level using the data_len arg (the dispatch funnel
+## only sees result.value, not the written length).  Likewise read_bytes/
+## write_bytes/cancelled_write_bytes stay 0 (no per-process block-layer attribution).
 ##
 ## FOLLOW-UP (2026-06-10): real /proc/<pid>/auxv + kernel-side saved_auxv
 ## /proc/<pid>/auxv is NOT yet served.  Implementing it properly requires

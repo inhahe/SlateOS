@@ -623,8 +623,78 @@ pub fn dispatch(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr,
         result.value as u64,
     );
+
+    // Per-process I/O byte accounting for `/proc/<pid>/io` (rchar/wchar,
+    // syscr/syscw).  The Linux-ABI dispatch path accounts its own
+    // read/write family separately in `linux::dispatch_linux`; this hook
+    // covers the *native* read/write syscalls so native processes get
+    // honest io counters instead of all-zero.  `task_id` is already
+    // resolved above for the syscall filter, so this adds no extra lookup.
+    account_io_syscall_native(nr, task_id, result.value);
+
     crate::sclatency::exit(sc_start, nr);
     result
+}
+
+/// Fold a completed native read/write syscall into the owning process's
+/// `/proc/<pid>/io` counters.
+///
+/// Mirrors Linux's `task_io_accounting`: `syscr`/`syscw` count every
+/// read/write-family syscall unconditionally (even failing ones), while
+/// `rchar`/`wchar` accumulate only the *positive* byte count returned.
+/// A negative `value` (error) folds as zero bytes but still bumps the
+/// syscall counter, exactly as Linux does.
+///
+/// Only syscalls whose return value *is* the transferred byte count are
+/// accounted here.  `SYS_FS_WRITE_FILE` is deliberately excluded: it
+/// returns `0` on success rather than a byte count, so folding its
+/// result would bump `syscw` without a matching `wchar` — dishonest
+/// undercounting.  See `todo.txt` for the note on accounting it at the
+/// handler level if whole-file writes need to appear in `wchar`.
+/// Direction of a byte-transferring read/write syscall.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IoDir {
+    Read,
+    Write,
+}
+
+/// Classify a native syscall number as a read/write-family byte transfer,
+/// or `None` if it does not contribute to `/proc/<pid>/io` accounting.
+///
+/// Only syscalls whose return value *is* the transferred byte count are
+/// listed here.  `SYS_FS_WRITE_FILE` is deliberately excluded: it returns
+/// `0` on success rather than a byte count, so folding its result would
+/// bump `syscw` without a matching `wchar` — dishonest undercounting.
+const fn io_dir_for_syscall(nr: u64) -> Option<IoDir> {
+    match nr {
+        SYS_FS_READ | SYS_FS_READ_FILE | SYS_PIPE_READ | SYS_PIPE_TRY_READ
+        | SYS_PIPE_READ_TIMEOUT | SYS_CONSOLE_READ_CHAR
+        | SYS_CONSOLE_TRY_READ_CHAR => Some(IoDir::Read),
+        SYS_FS_WRITE | SYS_PIPE_WRITE | SYS_PIPE_TRY_WRITE
+        | SYS_PIPE_WRITE_TIMEOUT | SYS_CONSOLE_WRITE => Some(IoDir::Write),
+        _ => None,
+    }
+}
+
+fn account_io_syscall_native(nr: u64, task_id: crate::sched::task::TaskId, value: i64) {
+    let dir = match io_dir_for_syscall(nr) {
+        Some(d) => d,
+        // Not a byte-transferring read/write syscall — nothing to account.
+        None => return,
+    };
+
+    // Kernel tasks (no owning process) have no `/proc/<pid>/io` to update.
+    let pid = match crate::proc::thread::owner_process(task_id) {
+        Some(p) => p,
+        None => return,
+    };
+
+    // Negative return = error; fold as zero bytes (but still count the syscall).
+    let bytes = u64::try_from(value).unwrap_or(0);
+    match dir {
+        IoDir::Read => crate::proc::pcb::account_io_read(pid, bytes),
+        IoDir::Write => crate::proc::pcb::account_io_write(pid, bytes),
+    }
 }
 
 /// Get the current syscall ABI version.
@@ -652,8 +722,46 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_clock_adjtime()?;
     test_dispatch_console_write()?;
     test_dispatch_fs_roundtrip()?;
+    test_io_dir_classification()?;
 
     serial_println!("[syscall] Dispatch self-test PASSED");
+    Ok(())
+}
+
+/// Verify the native read/write syscall classification feeding
+/// `/proc/<pid>/io` accounting.  The byte-folding side effect itself is
+/// covered by `proc::pcb::test_io_accounting`; here we pin down the
+/// syscall-number → direction mapping so a misfiled number is caught.
+fn test_io_dir_classification() -> KernelResult<()> {
+    // Reads.
+    for nr in [
+        SYS_FS_READ, SYS_FS_READ_FILE, SYS_PIPE_READ, SYS_PIPE_TRY_READ,
+        SYS_PIPE_READ_TIMEOUT, SYS_CONSOLE_READ_CHAR, SYS_CONSOLE_TRY_READ_CHAR,
+    ] {
+        if io_dir_for_syscall(nr) != Some(IoDir::Read) {
+            serial_println!("[syscall]   FAIL: nr {} not classified as Read", nr);
+            return Err(KernelError::InternalError);
+        }
+    }
+    // Writes.
+    for nr in [
+        SYS_FS_WRITE, SYS_PIPE_WRITE, SYS_PIPE_TRY_WRITE, SYS_PIPE_WRITE_TIMEOUT,
+        SYS_CONSOLE_WRITE,
+    ] {
+        if io_dir_for_syscall(nr) != Some(IoDir::Write) {
+            serial_println!("[syscall]   FAIL: nr {} not classified as Write", nr);
+            return Err(KernelError::InternalError);
+        }
+    }
+    // Non-IO syscalls and the deliberately-excluded whole-file write must
+    // not be accounted.
+    for nr in [SYS_YIELD, SYS_TASK_ID, SYS_FS_WRITE_FILE, SYS_FS_OPEN] {
+        if io_dir_for_syscall(nr).is_some() {
+            serial_println!("[syscall]   FAIL: nr {} should not be IO-classified", nr);
+            return Err(KernelError::InternalError);
+        }
+    }
+    serial_println!("[syscall]   Native I/O syscall classification: OK");
     Ok(())
 }
 

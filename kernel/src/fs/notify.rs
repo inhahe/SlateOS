@@ -51,6 +51,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
 use crate::error::{KernelError, KernelResult};
+use crate::sched::{self, task::TaskId};
 
 // ---------------------------------------------------------------------------
 // Event types and masks
@@ -151,6 +152,12 @@ struct FsWatch {
     max_events: usize,
     /// Whether events have been dropped due to overflow.
     overflowed: bool,
+    /// Opaque owner token used to wake a *blocked* reader when this watch
+    /// queues an event (0 = no blocking owner — the poll/`read_events`-only
+    /// consumers).  The Linux-ABI inotify adapter sets this to the owning
+    /// instance id so any watch of that instance — including ones added after
+    /// the reader parked — routes the wake to the same blocked task.
+    owner_token: u64,
 }
 
 /// Maximum number of events per watch queue.
@@ -168,6 +175,77 @@ static NEXT_WATCH_ID: AtomicU64 = AtomicU64::new(1);
 static WATCHES: Mutex<BTreeMap<u64, FsWatch>> = Mutex::new(BTreeMap::new());
 
 // ---------------------------------------------------------------------------
+// Blocking-read wait queue
+// ---------------------------------------------------------------------------
+//
+// A consumer (e.g. the Linux-ABI inotify adapter) that wants to *block* until
+// one of its watches produces an event registers its task here, keyed by an
+// opaque **owner token** (the consumer's instance id), then re-checks for
+// pending events before parking (register-then-recheck — see the inotify read
+// path).  `emit()` wakes every task registered against the owner token of a
+// watch it just queued an event for, after dropping the `WATCHES` lock
+// (leaf-lock discipline), so the wake never runs with `WATCHES` held.
+//
+// Keying by owner token (rather than per-watch id) means a reader registers
+// ONCE for its whole instance: a watch added *after* the reader parked, or an
+// instance that had no watches at park time, still routes the wake correctly,
+// matching Linux's per-`inotify_group` wait queue.
+//
+// The registry is kept SEPARATE from `FsWatch` so the hot `emit()` scan does
+// not touch it for watches with no blocked readers, and so the wake set can be
+// collected under `WATCHES` and woken after the lock is released.
+
+/// `owner_token → tasks blocked waiting for an event on that owner's watches`.
+static NOTIFY_WAITERS: Mutex<BTreeMap<u64, Vec<TaskId>>> = Mutex::new(BTreeMap::new());
+
+/// Register `task` as blocked waiting for an event on any watch owned by
+/// `owner_token`.
+///
+/// Idempotent: a task already registered for this owner is not duplicated.
+pub fn register_notify_waiter(owner_token: u64, task: TaskId) {
+    let mut waiters = NOTIFY_WAITERS.lock();
+    let list = waiters.entry(owner_token).or_default();
+    if !list.contains(&task) {
+        list.push(task);
+    }
+}
+
+/// Remove `task`'s registration for `owner_token` (a no-op if not present).
+pub fn deregister_notify_waiter(owner_token: u64, task: TaskId) {
+    let mut waiters = NOTIFY_WAITERS.lock();
+    if let Some(list) = waiters.get_mut(&owner_token) {
+        list.retain(|&t| t != task);
+        if list.is_empty() {
+            waiters.remove(&owner_token);
+        }
+    }
+}
+
+/// Remove and return every task waiting on `owner_token` (pure registry
+/// mutation, no scheduler interaction — split out so it is unit-testable).
+fn take_notify_waiters(owner_token: u64) -> Vec<TaskId> {
+    NOTIFY_WAITERS.lock().remove(&owner_token).unwrap_or_default()
+}
+
+/// Wake every task blocked on any of `owner_tokens`.
+///
+/// Uses the `try_wake`/`defer_wake` idiom so it is safe to call from any
+/// context and never re-enters a held lock.  Call this only after releasing
+/// `WATCHES`.
+pub fn wake_notify_waiters(owner_tokens: &[u64]) {
+    for &token in owner_tokens {
+        if token == 0 {
+            continue;
+        }
+        for task in take_notify_waiters(token) {
+            if !sched::try_wake(task) {
+                sched::defer_wake(task);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Public API — watch management
 // ---------------------------------------------------------------------------
 
@@ -177,11 +255,28 @@ static WATCHES: Mutex<BTreeMap<u64, FsWatch>> = Mutex::new(BTreeMap::new());
 /// events from subdirectories are also reported.
 ///
 /// Returns a watch ID that can be used with [`read_events`] and
-/// [`close_watch`].
+/// [`close_watch`].  The watch has no blocking-read owner (poll/`read_events`
+/// consumers only); use [`create_watch_owned`] to attach a wake owner token.
 pub fn create_watch(
     path: &str,
     mask: FsEventMask,
     recursive: bool,
+) -> KernelResult<u64> {
+    create_watch_owned(path, mask, recursive, 0)
+}
+
+/// Create a watch with an opaque `owner_token` for blocking-read wakeups.
+///
+/// Identical to [`create_watch`] except that, when this watch queues an event,
+/// [`emit`] wakes any task registered (via [`register_notify_waiter`]) against
+/// `owner_token`.  A token of 0 means "no blocking owner".  Used by the
+/// Linux-ABI inotify adapter, which passes its instance id so a blocked
+/// `read()` is woken when any of the instance's watches fire.
+pub fn create_watch_owned(
+    path: &str,
+    mask: FsEventMask,
+    recursive: bool,
+    owner_token: u64,
 ) -> KernelResult<u64> {
     if path.is_empty() {
         return Err(KernelError::InvalidArgument);
@@ -212,11 +307,12 @@ pub fn create_watch(
         events: VecDeque::with_capacity(16),
         max_events: DEFAULT_MAX_EVENTS,
         overflowed: false,
+        owner_token,
     });
 
     crate::serial_println!(
-        "[notify] Watch {} created for '{}' (mask={:#x}, recursive={})",
-        id, path, mask.0, recursive
+        "[notify] Watch {} created for '{}' (mask={:#x}, recursive={}, owner={:#x})",
+        id, path, mask.0, recursive, owner_token
     );
 
     Ok(id)
@@ -271,8 +367,17 @@ pub fn pending_count(watch_id: u64) -> KernelResult<usize> {
 /// All pending events are discarded.
 pub fn close_watch(watch_id: u64) -> KernelResult<()> {
     let mut watches = WATCHES.lock();
-    if watches.remove(&watch_id).is_none() {
+    let Some(removed) = watches.remove(&watch_id) else {
         return Err(KernelError::InvalidHandle);
+    };
+    let owner_token = removed.owner_token;
+    drop(watches);
+
+    // Wake any readers parked on this watch's owner so they re-evaluate (e.g.
+    // pick up a synthesized IN_IGNORED, or fall through to their remaining
+    // watches) rather than sleeping against a now-removed watch.
+    if owner_token != 0 {
+        wake_notify_waiters(&[owner_token]);
     }
 
     crate::serial_println!("[notify] Watch {} closed", watch_id);
@@ -353,6 +458,11 @@ pub fn emit(event_type: FsEventType, path: &str, new_path: Option<&str>) {
         return;
     }
 
+    // Owner tokens of watches that actually gained a new event this call —
+    // their blocked readers are woken after the WATCHES lock is released
+    // (leaf-lock order).
+    let mut woke_tokens: Vec<u64> = Vec::new();
+
     // Check each watch for a matching path.
     for watch in watches.values_mut() {
         // Does this watch care about this event type?
@@ -395,6 +505,16 @@ pub fn emit(event_type: FsEventType, path: &str, new_path: Option<&str>) {
             path: String::from(path),
             new_path: new_path.map(String::from),
         });
+        if watch.owner_token != 0 {
+            woke_tokens.push(watch.owner_token);
+        }
+    }
+
+    // Release WATCHES before waking so the scheduler is never entered with the
+    // notify lock held (and so a woken reader can immediately re-take it).
+    drop(watches);
+    if !woke_tokens.is_empty() {
+        wake_notify_waiters(&woke_tokens);
     }
 }
 
@@ -657,6 +777,45 @@ pub fn self_test() -> KernelResult<()> {
     }
     crate::serial_println!("[notify]   Watch cleanup verified ✓");
 
+    waiter_registry_self_test()?;
+
     crate::serial_println!("[notify] Self-test passed.");
+    Ok(())
+}
+
+/// Pure partition-logic test for the blocking-read waiter registry
+/// (register / take / deregister), exercised without touching the scheduler.
+///
+/// Split out so it can also be driven from an *unconditional* boot self-test
+/// (the main [`self_test`] is gated behind a mounted FAT filesystem); the
+/// owner-token wake path otherwise only runs when a real task blocks.
+pub fn waiter_registry_self_test() -> KernelResult<()> {
+    // Use owner tokens well outside any real instance id range so a concurrent
+    // live waiter can never collide with the synthetic ones used here.
+    let (w1, w2) = (0xF0F1_0001u64, 0xF0F1_0002u64);
+    let (t_a, t_b): (TaskId, TaskId) = (0xA1, 0xB2);
+    register_notify_waiter(w1, t_a);
+    register_notify_waiter(w1, t_a); // idempotent
+    register_notify_waiter(w1, t_b);
+    register_notify_waiter(w2, t_a);
+    // take w1 → both tasks, once.
+    let mut taken = take_notify_waiters(w1);
+    taken.sort_unstable();
+    if taken != alloc::vec![t_a, t_b] {
+        crate::serial_println!("[notify]   FAIL: waiter take returned {:?}", taken);
+        return Err(KernelError::InternalError);
+    }
+    if !take_notify_waiters(w1).is_empty() {
+        crate::serial_println!("[notify]   FAIL: waiters taken twice");
+        return Err(KernelError::InternalError);
+    }
+    // deregister t_a from w2 empties it; deregister of an unknown is a no-op.
+    deregister_notify_waiter(w2, t_b);
+    deregister_notify_waiter(w2, t_a);
+    if !take_notify_waiters(w2).is_empty() {
+        crate::serial_println!("[notify]   FAIL: registry not empty after deregister");
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("[notify]   Blocking-read waiter registry verified ✓");
     Ok(())
 }

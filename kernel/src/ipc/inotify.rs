@@ -540,7 +540,7 @@ pub fn add_watch(handle: InotifyHandle, path: &str, in_mask: u32) -> KernelResul
         } else {
             in_mask & REPORTABLE_EVENTS
         };
-        rebind_native(ino, wd, &norm, new_mask)?;
+        rebind_native(ino, handle.id(), wd, &norm, new_mask)?;
         return Ok(wd);
     }
 
@@ -550,7 +550,7 @@ pub fn add_watch(handle: InotifyHandle, path: &str, in_mask: u32) -> KernelResul
     ino.next_wd = ino.next_wd.saturating_add(1);
 
     let effective = in_mask & REPORTABLE_EVENTS;
-    let native_id = create_native(&norm, effective)?;
+    let native_id = create_native(&norm, effective, handle.id())?;
     ino.watches.insert(wd, Watch {
         native_id,
         in_mask: in_mask & REPORTABLE_EVENTS,
@@ -561,12 +561,15 @@ pub fn add_watch(handle: InotifyHandle, path: &str, in_mask: u32) -> KernelResul
 
 /// Create a native watch for `norm`/`effective`, returning 0 when the mask
 /// has no observable native events (a tracked-but-inert watch).
-fn create_native(norm: &str, effective: u32) -> KernelResult<u64> {
+///
+/// `owner_token` is the owning inotify instance id, registered on the native
+/// watch so a blocked `read()` on this instance is woken when the watch fires.
+fn create_native(norm: &str, effective: u32, owner_token: u64) -> KernelResult<u64> {
     let native_mask = to_native_mask(effective);
     if native_mask.0 == 0 {
         return Ok(0);
     }
-    notify::create_watch(norm, native_mask, false).map_err(|e| match e {
+    notify::create_watch_owned(norm, native_mask, false, owner_token).map_err(|e| match e {
         KernelError::OutOfMemory => KernelError::OutOfMemory,
         _ => KernelError::InvalidArgument,
     })
@@ -577,9 +580,15 @@ fn create_native(norm: &str, effective: u32) -> KernelResult<u64> {
 /// The native layer has no in-place mask update, so we tear down the old
 /// native watch (discarding any queued-but-undrained events for it — the same
 /// thing Linux's IN_MASK_ADD semantics tolerate) and create a fresh one.
-fn rebind_native(ino: &mut Inotify, wd: i32, norm: &str, new_mask: u32) -> KernelResult<()> {
+fn rebind_native(
+    ino: &mut Inotify,
+    owner_token: u64,
+    wd: i32,
+    norm: &str,
+    new_mask: u32,
+) -> KernelResult<()> {
     // Create the replacement first so a failure leaves the old watch intact.
-    let new_native = create_native(norm, new_mask)?;
+    let new_native = create_native(norm, new_mask, owner_token)?;
     if let Some(w) = ino.watches.get_mut(&wd) {
         if w.native_id != 0 {
             let _ = notify::close_watch(w.native_id);
@@ -873,5 +882,12 @@ pub fn self_test() -> KernelResult<()> {
     close(ino); // harmless no-op.
 
     serial_println!("[inotify]   inotify instance object (create/watch/read/rm/dup/close): OK");
+
+    // Exercise the fs::notify blocking-read waiter registry here too: this
+    // self-test runs unconditionally at boot, whereas notify::self_test is
+    // gated behind a mounted FAT filesystem, so this is the path that actually
+    // verifies the inotify-blocking-read wake registry on a typical boot.
+    crate::fs::notify::waiter_registry_self_test()?;
+
     Ok(())
 }

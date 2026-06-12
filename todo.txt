@@ -86,20 +86,36 @@
 ##   threaded owner_pid) calls epoll::interest_list + recursively evaluates each child
 ##   fd (with a depth cap, matching Linux's EP_MAX_NESTS=4).
 
-## LIMITATION (2026-06-12): kernel-level inotify blocking read returns EAGAIN
-## The new kernel Linux-ABI inotify (kernel/src/ipc/inotify.rs + the
-## HandleKind::Inotify wiring in kernel/src/syscall/linux.rs) drains the native
-## fs::notify watches into inotify_event records on read.  A read with nothing
-## pending returns EAGAIN even for a BLOCKING (non-IN_NONBLOCK) fd, because — like
-## signalfd / timerfd — this kernel has no fs-event-arrival wakeup path to park a
-## reader on.
-##   IMPACT: low-moderate — the canonical inotify idiom is poll/select/epoll on the
-##   fd then read when POLLIN fires; that works (is_readable refills + reports
-##   readiness).  Apps that do a bare blocking read() expecting it to sleep until an
-##   event arrives will instead spin.
-##   FIX: add a per-inotify wait-queue woken by fs::notify when a subscribed watch
-##   produces an event; the read path blocks on that queue instead of returning
-##   EAGAIN.  Could share the same wait-queue infra as the signalfd/timerfd fixes.
+## FIXED (2026-06-12): kernel-level inotify blocking read now parks the caller
+## Was: a read of an inotify fd with no queued event returned EAGAIN even for a
+## BLOCKING (non-IN_NONBLOCK) fd, because the kernel had no fs-event-arrival wakeup
+## path to park a reader on.
+##   FIX SHIPPED: fs::notify grew a blocking-read wait queue keyed by an opaque
+##   OWNER TOKEN (NOTIFY_WAITERS: Mutex<BTreeMap<u64, Vec<TaskId>>>).  FsWatch gained
+##   an owner_token field; the new create_watch_owned(path,mask,recursive,owner_token)
+##   sets it (create_watch keeps its old signature, delegating with token 0 = no
+##   blocking owner).  emit() collects the owner tokens of watches that gained a new
+##   event and, AFTER dropping the WATCHES lock (leaf-lock discipline), wakes their
+##   registered tasks (try_wake → defer_wake).  close_watch() likewise wakes the
+##   removed watch's owner so a reader re-evaluates (picks up a synthesized IN_IGNORED
+##   or falls through).  The Linux-ABI inotify adapter passes its INSTANCE ID as the
+##   owner token (kernel/src/ipc/inotify.rs create_native → create_watch_owned), so a
+##   reader registers ONCE per instance: keying by instance (not per-watch) means a
+##   watch added AFTER the reader parked — or an instance with no watches at park time
+##   — still routes the wake, matching Linux's per-inotify_group wait queue.
+##   dispatch_inotify_read (syscall/linux.rs) became a register-then-recheck loop:
+##   drain via read_into; if empty and IN_NONBLOCK → EAGAIN; else
+##   register_notify_waiter(handle.raw(), task), re-check is_readable() (closing the
+##   cross-lock race), then sched::block_current() and loop to re-drain on wake.
+##   Tested: a pure register/take/deregister partition self-test
+##   (notify::waiter_registry_self_test) is run from BOTH notify::self_test and the
+##   UNCONDITIONAL ipc::inotify::self_test (notify::self_test itself is gated behind a
+##   mounted FAT fs, so the inotify caller is what verifies it on a typical boot); the
+##   actual park path needs a second runnable task and is exercised by real userspace.
+##   This was the LAST of the three fd-family blocking-read gaps (timerfd + signalfd
+##   fixed earlier the same day) — all of signalfd/timerfd/inotify now park instead of
+##   spinning on EAGAIN.  (rt_sigtimedwait still returns EAGAIN; it can reuse the
+##   signalfd wait-queue infra as a follow-up.)
 ##
 ## LIMITATION (2026-06-12): kernel-level inotify event coverage is native-derived
 ## inotify watches are backed 1:1 by native fs::notify watches, so the reportable

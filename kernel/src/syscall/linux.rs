@@ -15257,24 +15257,48 @@ fn inotify_init_common(flags: u32) -> SyscallResult {
 /// 16; 0 when the event has no name).  As many whole events as fit in `cap`
 /// are returned; the remainder stay queued for the next read.
 ///
-/// Like signalfd / timerfd, there is no event-arrival wakeup path, so a read
-/// with nothing queued returns `EAGAIN` for both blocking and non-blocking
-/// fds (documented shortcut; canonical usage is poll/epoll then read on
-/// POLLIN).  A buffer too small to hold even the first pending event returns
-/// `EINVAL`, matching Linux.
+/// A buffer too small to hold even the first pending event returns `EINVAL`,
+/// matching Linux.
+///
+/// If nothing is queued: an `IN_NONBLOCK` fd returns `EAGAIN`.  A blocking fd
+/// parks the caller on the instance's `fs::notify` owner-token wait queue
+/// (register-then-recheck against [`crate::ipc::inotify::is_readable`], closing
+/// the wakeup race) until any of the instance's watches fires — `notify::emit`
+/// wakes it.  In practice an inotify fd is read after `poll`/`epoll` reports it
+/// readable, so an event is already queued on entry and neither path blocks.
 fn dispatch_inotify_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
     let handle = crate::ipc::inotify::InotifyHandle::from_raw(entry.raw_handle);
     let budget = cap as usize;
-    let events = match crate::ipc::inotify::read_into(handle, budget) {
-        Ok(ev) => ev,
-        // Buffer too small for the first event (events left queued).
-        Err(KernelError::InvalidArgument) => return linux_err(errno::EINVAL),
-        Err(_) => return linux_err(errno::EBADF),
+    let nonblock = (entry.status_flags & oflags::O_NONBLOCK) != 0;
+
+    let events = loop {
+        match crate::ipc::inotify::read_into(handle, budget) {
+            Ok(ev) if !ev.is_empty() => break ev,
+            // Nothing queued.
+            Ok(_) => {
+                if nonblock {
+                    return linux_err(errno::EAGAIN);
+                }
+                // Block until a watch fires.  Register on the instance's owner
+                // token (handle.raw()) BEFORE re-checking readability so an
+                // event arriving in the gap is not lost (register-then-recheck);
+                // notify::emit wakes us when any owned watch queues an event.
+                let token = handle.raw();
+                let task = crate::sched::current_task_id();
+                crate::fs::notify::register_notify_waiter(token, task);
+                if crate::ipc::inotify::is_readable(handle) {
+                    crate::fs::notify::deregister_notify_waiter(token, task);
+                    continue;
+                }
+                crate::sched::block_current();
+                crate::fs::notify::deregister_notify_waiter(token, task);
+                // Loop to re-drain (matching event arrived, or spurious wake).
+            }
+            // Buffer too small for the first event (events left queued).
+            Err(KernelError::InvalidArgument) => return linux_err(errno::EINVAL),
+            Err(_) => return linux_err(errno::EBADF),
+        }
     };
-    if events.is_empty() {
-        // Nothing queued — no fs-event wakeup path, so surface EAGAIN.
-        return linux_err(errno::EAGAIN);
-    }
 
     // Serialize the consumed events into a contiguous kernel buffer.
     let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();

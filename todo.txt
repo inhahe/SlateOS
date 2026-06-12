@@ -57,6 +57,25 @@
 ## (asserts 5 space-split fields, loads parse as <int>.<2-frac>, field 4 is
 ## <runnable>/<total>, field 5 is an integer).  boot-test PASSED; serial shows
 ## '/loadavg: five-field Linux layout OK ("0.00 0.00 0.00 1/1 0")'.
+## DONE (2026-06-11): /proc/buddyinfo cleaned to pure Linux frag_show layout
+## (gen_buddyinfo, procfs.rs).  The per-order free-block counts were already
+## real (mm::frame::stats().order_counts — the buddy allocator's per-order free
+## lists, MAX_ORDER=10 → 11 columns, 16 KiB base page), but the generator
+## appended two NON-Linux comment lines ("# Order sizes: ..." and "# Total free
+## frames: ...") after the zone line, which would corrupt any strict
+## /proc/buddyinfo parser (procps, fragmentation monitors).  Now emits ONLY the
+## Linux "Node 0, zone %8s %6lu %6lu ..." line, matching mm/vmstat.c column
+## spacing.  The dropped totals are still available via /proc/meminfo.  Self-test
+## added (asserts 'Node 0, zone' prefix, all per-order columns parse as ints, and
+## no stray non-zone trailing lines).  boot-test PASSED; serial shows
+## '/buddyinfo: Linux frag_show layout OK (11 columns)'.
+## NOTE: the OTHER standard-Linux /proc files still in custom native format
+## (/proc/interrupts, /proc/diskstats) are NOT cleanly convertible: real Linux
+## /proc/interrupts needs per-IRQ-line counters and /proc/diskstats needs the 20
+## per-device IO fields (reads/writes completed, sectors, ms) — we track neither
+## (only aggregate irq_count and aggregate blkdev reads/writes).  Converting them
+## would mean emitting mostly-zero columns, which is worse than the current honest
+## custom format; defer until per-IRQ and per-device accounting exist.
 ## NOTE: /proc/meminfo and /proc/cpuinfo
 ## are INTENTIONALLY native-format (their doc comments say "our own
 ## field names"); converting THOSE to Linux layout is a separate design

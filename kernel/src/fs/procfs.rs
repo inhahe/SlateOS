@@ -1320,26 +1320,26 @@ fn gen_vmstat() -> Vec<u8> {
 fn gen_buddyinfo() -> Vec<u8> {
     match crate::mm::frame::stats() {
         Some(stats) => {
-            let mut s = String::with_capacity(256);
-            s.push_str("Node 0, zone Normal ");
-            for (order, count) in stats.order_counts.iter().enumerate() {
-                if order > 0 {
-                    s.push(' ');
-                }
-                s.push_str(&format!("{count}"));
+            // Linux fs/proc layout (mm/vmstat.c frag_show):
+            //   "Node <id>, zone <name> <free_order0> <free_order1> ... <free_orderN>"
+            // one line per memory zone, each column the number of free blocks
+            // of that buddy order.  We expose a single Node 0 / zone Normal with
+            // our 16 KiB base page and MAX_ORDER=10 (11 columns, orders 0..=10).
+            //
+            // Matches Linux's column spacing ("Node %d, zone %8s " then "%6lu "
+            // per order) so that tools parsing /proc/buddyinfo by whitespace
+            // (e.g. procps, fragmentation monitors) read it correctly.  Counts
+            // come straight from the buddy allocator's per-order free lists
+            // (mm::frame::stats().order_counts) — never fabricated.  The old
+            // format appended non-Linux "# Order sizes"/"# Total free frames"
+            // comment lines that would corrupt any strict parser; those are
+            // dropped (the same totals are available via /proc/meminfo).
+            let mut s = String::with_capacity(128);
+            s.push_str(&format!("Node 0, zone {:>8} ", "Normal"));
+            for count in &stats.order_counts {
+                s.push_str(&format!("{count:>6} "));
             }
             s.push('\n');
-
-            // Also show derived info.
-            s.push_str(&format!(
-                "\n# Order sizes: 0={} KiB, 1={} KiB, ..., 10={} KiB\n",
-                16, 32, 16 * 1024
-            ));
-            s.push_str(&format!(
-                "# Total free frames: {}\n",
-                stats.free_frames
-            ));
-
             s.into_bytes()
         }
         None => b"(frame allocator not initialized)\n".to_vec(),
@@ -13589,6 +13589,43 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[procfs]   /loadavg: five-field Linux layout OK ({:?})", line);
+    }
+
+    // --- system-wide /proc/buddyinfo Linux layout ---
+    // gen_buddyinfo now emits only the Linux mm/vmstat.c frag_show line(s):
+    // "Node 0, zone Normal <c0> <c1> ... <c10>" with no trailing comment block.
+    // Verify the prefix and that every per-order column parses as an integer.
+    {
+        let data = fs.read_file("/buddyinfo")?;
+        let text = core::str::from_utf8(&data).map_err(|_| KernelError::InternalError)?;
+        let line = text.lines().next().unwrap_or("");
+        if !line.starts_with("Node 0, zone") {
+            serial_println!("[procfs]   FAIL: /buddyinfo missing 'Node 0, zone' prefix: {:?}", line);
+            return Err(KernelError::InternalError);
+        }
+        // Tokenise; the zone-name token ("Normal") is followed by the per-order
+        // free-block counts, all of which must be integers.  Skip the fixed
+        // "Node" "0," "zone" "Normal" header tokens (4 of them).
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        let counts = tokens.get(4..).unwrap_or(&[]);
+        if counts.is_empty() {
+            serial_println!("[procfs]   FAIL: /buddyinfo has no per-order columns: {:?}", line);
+            return Err(KernelError::InternalError);
+        }
+        for c in counts {
+            if c.parse::<u64>().is_err() {
+                serial_println!("[procfs]   FAIL: /buddyinfo column {:?} not an integer", c);
+                return Err(KernelError::InternalError);
+            }
+        }
+        // And no stray non-zone lines (the old comment block) should remain.
+        for extra in text.lines().skip(1) {
+            if !extra.trim().is_empty() && !extra.starts_with("Node ") {
+                serial_println!("[procfs]   FAIL: /buddyinfo has non-Linux trailing line: {:?}", extra);
+                return Err(KernelError::InternalError);
+            }
+        }
+        serial_println!("[procfs]   /buddyinfo: Linux frag_show layout OK ({} columns)", counts.len());
     }
 
     serial_println!("[procfs] Self-test PASSED");

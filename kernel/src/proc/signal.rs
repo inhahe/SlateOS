@@ -360,6 +360,44 @@ fn wake_signalfd_waiters(pid: ProcessId, bit: u64) {
     }
 }
 
+/// Remove and return **every** signal-waiter registered for `pid`, regardless
+/// of its mask.
+///
+/// Split out from [`wake_all_waiters`] so the registry mutation is unit-testable
+/// without a live scheduler.
+fn take_all_waiters(pid: ProcessId) -> Vec<TaskId> {
+    with_waiters(|waiters| {
+        waiters
+            .remove(&pid)
+            .map(|list| list.into_iter().map(|w| w.task).collect())
+            .unwrap_or_default()
+    })
+}
+
+/// Wake every parked signal-waiter for `pid`, ignoring registered masks.
+///
+/// Used by `rt_sigprocmask` when it unblocks one or more already-pending
+/// signals.  A thread parked in `pause()` (or a future `rt_sigsuspend`)
+/// registered its waiter with a snapshot of the deliverable mask (`!blocked`)
+/// taken *before* the unblock, so that snapshot necessarily **excludes** the
+/// just-unblocked bits — matching by waiter mask (as [`wake_signalfd_waiters`]
+/// does) could never wake it.  We therefore wake all waiters and let each
+/// re-check its own condition: the register-then-recheck park loops treat a
+/// spurious wake as a no-op and simply re-park.  Unblocking an already-pending
+/// signal is rare, so the occasional spurious wake of an unrelated `signalfd`
+/// reader (which will recheck its mask and re-park) is a negligible,
+/// self-correcting cost.
+///
+/// Uses the `try_wake`/`defer_wake` idiom, so it is safe to call from any
+/// context.
+pub fn wake_all_waiters(pid: ProcessId) {
+    for task in take_all_waiters(pid) {
+        if !sched::try_wake(task) {
+            sched::defer_wake(task);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Trampoline registration
 // ---------------------------------------------------------------------------
@@ -682,8 +720,9 @@ pub fn self_test() -> KernelResult<()> {
     test_pending_count_accounting()?;
     test_signalfd_dequeue()?;
     test_signalfd_waiter_registry()?;
+    test_take_all_waiters()?;
 
-    serial_println!("[signal] Signal-shim self-test PASSED (11 tests)");
+    serial_println!("[signal] Signal-shim self-test PASSED (12 tests)");
     Ok(())
 }
 
@@ -913,5 +952,38 @@ fn test_signalfd_waiter_registry() -> KernelResult<()> {
         "registry empty after deregister",
     )?;
     serial_println!("[signal]   signalfd waiter registry (partition logic): OK");
+    Ok(())
+}
+
+/// Exercise `take_all_waiters` — the mask-independent drain used by
+/// [`wake_all_waiters`] on the `rt_sigprocmask` unblock path.
+fn test_take_all_waiters() -> KernelResult<()> {
+    let p = TEST_PID_BASE + 9;
+    let task_a: TaskId = 0xA1;
+    let task_b: TaskId = 0xB2;
+    let task_c: TaskId = 0xC3;
+
+    // Empty registry drains to nothing.
+    check(take_all_waiters(p).is_empty(), "empty pid drains to nothing")?;
+
+    // Disjoint masks (including one that covers no real signal) all drain —
+    // the point of wake_all_waiters is that the mask is ignored. task_b's
+    // mask deliberately excludes signal 5 to prove drain ignores the mask.
+    register_signalfd_waiter(p, task_a, 1u64 << 4); // accepts signal 5
+    register_signalfd_waiter(p, task_b, 1u64 << 20); // accepts signal 21 only
+    register_signalfd_waiter(p, task_c, 0); // accepts nothing
+
+    let mut drained = take_all_waiters(p);
+    drained.sort_unstable();
+    check(drained == [task_a, task_b, task_c], "all three waiters drained")?;
+
+    // Registry is empty afterwards (entry removed), so a re-drain is empty
+    // and a mask-based take finds nothing either.
+    check(take_all_waiters(p).is_empty(), "registry empty after drain")?;
+    check(
+        take_matching_signalfd_waiters(p, !0u64).is_empty(),
+        "no stale entries after drain",
+    )?;
+    serial_println!("[signal]   take_all_waiters (mask-independent drain): OK");
     Ok(())
 }

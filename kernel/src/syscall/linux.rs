@@ -5343,6 +5343,19 @@ fn sys_rt_sigprocmask(args: &SyscallArgs) -> SyscallResult {
             // Linux's sequence even though the final stored mask is
             // identical either way.
             let _ = crate::proc::signal::set_blocked(pid, next);
+            // recalc_sigpending parity: if this call unblocked one or more
+            // already-pending signals, a thread parked in pause()/sigwait may
+            // now have a deliverable signal it could not see when it parked
+            // (its waiter mask is a pre-unblock `!blocked` snapshot that
+            // excludes the just-unblocked bits). Wake parked waiters so they
+            // re-evaluate. Matching by waiter mask cannot work here — see
+            // signal::wake_all_waiters. Only fire when something actually
+            // became deliverable to keep the common path free of wakeups.
+            let newly_unblocked_pending =
+                old_set & !next & crate::proc::signal::pending(pid);
+            if newly_unblocked_pending != 0 {
+                crate::proc::signal::wake_all_waiters(pid);
+            }
         }
     }
 
@@ -12727,11 +12740,13 @@ fn sys_alarm(args: &SyscallArgs) -> SyscallResult {
 /// self-test) has no signal queue to wait on and the boot CPU is
 /// single-threaded, so we keep the honest `ENOSYS` for that case.
 ///
-/// Known limitation: unblocking an already-pending signal via
-/// `rt_sigprocmask` on another thread does not re-wake a paused thread
-/// (no `recalc_sigpending`-style wake on mask change); `pause()` is woken
-/// by signal *arrival* (`set_pending`), the dominant case.  Tracked in
-/// todo.txt.
+/// Wakeups come from two sources: signal *arrival* (`set_pending` wakes a
+/// waiter whose snapshot mask covers the arriving bit) and signal *unblock*
+/// (`rt_sigprocmask` calls `signal::wake_all_waiters` when it unblocks an
+/// already-pending signal, since the parked waiter's `!blocked` snapshot
+/// predates the unblock).  After either wake the loop re-checks
+/// `pending & !blocked` against the *current* blocked mask, so a spurious
+/// wake just re-parks.
 fn sys_pause(_args: &SyscallArgs) -> SyscallResult {
     let caller = match caller_pid() {
         Some(p) => p,

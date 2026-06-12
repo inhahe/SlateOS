@@ -9391,11 +9391,21 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##           ignored signals never set_pending so the park persists —
 ##           all matching Linux. An in-kernel caller (caller_pid()==
 ##           None, incl. the boot self-test) keeps the honest ENOSYS
-##           since there's no signal queue to wait on. KNOWN LIMIT:
-##           unblocking an already-pending signal via rt_sigprocmask
-##           on another thread does not re-wake a paused thread (no
-##           recalc_sigpending-style wake on mask change); pause() is
-##           woken by signal arrival (set_pending), the dominant case.
+##           since there's no signal queue to wait on.
+##           UPDATE (2026-06-12): the recalc_sigpending wake-on-unblock
+##           gap below is now CLOSED. rt_sigprocmask, after lowering the
+##           blocked mask, computes (old_blocked & !new_blocked & pending)
+##           and, if any already-pending signal just became deliverable,
+##           calls signal::wake_all_waiters(pid) — a mask-independent
+##           drain of the SIGNALFD_WAITERS registry (a parked pause()
+##           waiter's snapshot mask predates the unblock and excludes
+##           those bits, so a mask-matched wake could never reach it).
+##           Each woken waiter re-checks its own condition and re-parks on
+##           a spurious wake. Unit-tested via take_all_waiters self-test;
+##           full wake path needs multi-thread runtime (review-verified).
+##           (FORMER LIMIT, now fixed:) unblocking an already-pending
+##           signal via rt_sigprocmask on another thread did not re-wake a
+##           paused thread (no recalc_sigpending-style wake on mask change).
 ##      Limitation: when SIGALRM / SIGVTALRM / SIGPROF delivery
 ##      lands, these must route through it; until then, programs
 ##      that rely on alarm() to interrupt blocking calls will

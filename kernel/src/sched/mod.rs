@@ -393,16 +393,25 @@ const LOAD_EXP_15: u64 = 2037;
 
 /// Advance one load-average EWMA by a single 5-second sample.
 ///
-/// Implements Linux's `calc_load`:
-///   `load = (load * exp + active * (FIXED_1 - exp)) >> FSHIFT`
+/// Implements Linux's `calc_load` (kernel/sched/loadavg.c):
+///   `newload = load * exp + active * (FIXED_1 - exp)`
+///   `if (active >= load) newload += FIXED_1 - 1;`   // round up while rising
+///   `return newload / FIXED_1;`
 /// where `active` is the runnable count already shifted into fixed-point
-/// (`n_runnable << FSHIFT`).  All arithmetic is saturating so a pathological
-/// runnable count can never overflow or panic.
+/// (`n_runnable << FSHIFT`).  The round-up-when-rising term matters: without
+/// it, integer truncation biases every step downward, so a genuinely rising
+/// load can stall just below the integer target (e.g. sit at 0.99 forever
+/// under a steady single-runnable workload).  Linux adds it only when
+/// `active >= load` so a falling load still decays cleanly.  All arithmetic
+/// is saturating so a pathological runnable count can never overflow or panic.
 #[must_use]
 fn calc_load(load: u64, exp: u64, active: u64) -> u64 {
-    let weighted = load
+    let mut weighted = load
         .saturating_mul(exp)
         .saturating_add(active.saturating_mul(LOAD_FIXED_1.saturating_sub(exp)));
+    if active >= load {
+        weighted = weighted.saturating_add(LOAD_FIXED_1.saturating_sub(1));
+    }
     weighted >> LOAD_FSHIFT
 }
 
@@ -3859,8 +3868,61 @@ pub fn self_test() -> KernelResult<()> {
     test_cpu_bandwidth()?;
     test_wait_time_tracking()?;
     test_stack_watermark()?;
+    test_load_average()?;
 
     serial_println!("[sched] Scheduler self-test PASSED");
+    Ok(())
+}
+
+/// Test the load-average EWMA math (`calc_load`) and fixed-point formatting.
+///
+/// Regression guard for the round-up-when-rising term in `calc_load`: a
+/// steady single-runnable workload must converge UP to *exactly* load 1.00
+/// (`FIXED_1`).  Without the round-up, integer truncation stalls the average
+/// one unit short (2047) and it never reaches the integer target — so this
+/// test fails against the buggy version and passes against the fixed one.
+fn test_load_average() -> KernelResult<()> {
+    // Rising load: active = 1.00 in fixed-point (one runnable task).
+    let active_one = LOAD_FIXED_1;
+    let mut load = 0u64;
+    for _ in 0..400 {
+        load = calc_load(load, LOAD_EXP_1, active_one);
+    }
+    if load != LOAD_FIXED_1 {
+        serial_println!(
+            "[sched]   FAIL: rising load converged to {load}, want {LOAD_FIXED_1}"
+        );
+        return Err(KernelError::InternalError);
+    }
+    if load_int(load) != 1 || load_frac(load) != 0 {
+        serial_println!(
+            "[sched]   FAIL: load 1.00 formatted as {}.{:02}",
+            load_int(load), load_frac(load)
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Falling load: with no runnable tasks the average must decay to 0.
+    let mut load = LOAD_FIXED_1;
+    for _ in 0..400 {
+        load = calc_load(load, LOAD_EXP_1, 0);
+    }
+    if load != 0 {
+        serial_println!("[sched]   FAIL: idle load decayed to {load}, want 0");
+        return Err(KernelError::InternalError);
+    }
+
+    // Fixed-point formatting (Linux LOAD_INT / LOAD_FRAC): 1.50 == 3072.
+    let l = LOAD_FIXED_1.saturating_add(LOAD_FIXED_1 / 2);
+    if load_int(l) != 1 || load_frac(l) != 50 {
+        serial_println!(
+            "[sched]   FAIL: 1.50 fixed-point formatted as {}.{:02}",
+            load_int(l), load_frac(l)
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[sched]   load-average EWMA + formatting OK");
     Ok(())
 }
 

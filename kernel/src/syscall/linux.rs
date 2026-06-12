@@ -4439,6 +4439,39 @@ fn sys_pipe2(args: &SyscallArgs) -> SyscallResult {
     pipe_common(args.arg0, args.arg1 as u32)
 }
 
+/// Resolve an `mmap` address hint against `MAP_FIXED`, mirroring Linux's
+/// `get_unmapped_area` address handling (`mm/mmap.c`).
+///
+/// * `MAP_FIXED` set — the address is binding.  Linux's
+///   `get_unmapped_area` runs `if (offset_in_page(addr)) return -EINVAL;`
+///   on the returned (unchanged, for FIXED) address, so an unaligned
+///   address is rejected.  With our 16 KiB pages, frame alignment is the
+///   binding requirement; an unaligned address returns `Err(())` (→
+///   EINVAL).
+/// * `MAP_FIXED` clear — the address is only an advisory hint.  Linux
+///   runs `round_hint_to_min(addr)` and then `arch_get_unmapped_area`,
+///   which aligns the result and may place the mapping anywhere, so an
+///   unaligned hint must **not** fail.  Our native `mmap` rejects any
+///   non-zero unaligned hint with `BadAlignment` (→ EINVAL), so we drop
+///   an unaligned hint to 0 (let the kernel choose) — preserving Linux's
+///   contract that the call still succeeds.  An already-aligned hint is
+///   passed through so the native allocator can honour it when free.
+///
+/// Returns `Some(addr)` (the address to hand the native allocator), or
+/// `None` when the request is an unaligned `MAP_FIXED` (the Linux EINVAL
+/// case the caller maps to `-EINVAL`).
+fn resolve_mmap_addr_hint(addr: u64, fixed: bool, frame_size: u64) -> Option<u64> {
+    let aligned = (addr & frame_size.wrapping_sub(1)) == 0;
+    if fixed {
+        if aligned { Some(addr) } else { None }
+    } else if aligned {
+        Some(addr)
+    } else {
+        // Unaligned advisory hint → let the kernel pick (Linux relocates).
+        Some(0)
+    }
+}
+
 /// `mmap(addr, length, prot, flags, fd, offset)` — anonymous private only.
 ///
 /// Linux flags translation:
@@ -4472,11 +4505,21 @@ fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
         return linux_err(errno::EINVAL);
     }
 
+    let frame_size = FRAME_SIZE as u64;
+    // Resolve the address hint vs MAP_FIXED, mirroring Linux's
+    // get_unmapped_area (mm/mmap.c).  Done BEFORE the RLIMIT_AS charge
+    // because Linux's get_unmapped_area — including its unaligned-
+    // MAP_FIXED EINVAL — runs ahead of the VM accounting in mmap_region.
+    let fixed = (flags & MAP_FIXED) != 0;
+    let addr_hint = match resolve_mmap_addr_hint(addr_hint, fixed, frame_size) {
+        Some(a) => a,
+        None => return linux_err(errno::EINVAL),
+    };
+
     // Round the request up to the 16 KiB frame size to match what the
     // native mmap path actually allocates.  RLIMIT_AS is documented as
     // counting *virtual* address-space bytes, so the aligned size is
     // the right thing to charge.
-    let frame_size = FRAME_SIZE as u64;
     let length_aligned = match length
         .checked_add(frame_size - 1)
         .map(|v| v & !(frame_size - 1))
@@ -4499,7 +4542,7 @@ fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
     // Native SYS_MMAP: arg0 = hint, arg1 = length, arg2 = our flags,
     // arg3 = phys addr.  We pass 0 flags (private RW), which our handler
     // treats as "anonymous, demand-allocated".
-    let native_flags: u64 = if (flags & MAP_FIXED) != 0 { 0x01 } else { 0 };
+    let native_flags: u64 = if fixed { 0x01 } else { 0 };
     let native_args = SyscallArgs {
         arg0: addr_hint,
         arg1: length,
@@ -50195,6 +50238,65 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   clock_getres clockid gating + per-class resolution (batch 530): OK"
         );
+
+        // mmap MAP_FIXED address-alignment fidelity (batch 531).  Linux's
+        // get_unmapped_area returns EINVAL for an unaligned MAP_FIXED
+        // address but treats an unaligned non-FIXED address as an
+        // advisory hint (rounds/relocates → success).  Our native mmap
+        // rejected ANY non-zero unaligned hint with EINVAL, so a
+        // non-FIXED unaligned hint wrongly failed.  resolve_mmap_addr_hint
+        // is the pure decision helper; verify it directly (side-effect-
+        // free, unlike exercising the native mapping path which needs a
+        // real user address space the boot task lacks).
+        const TEST_FRAME: u64 = 16384; // our 16 KiB page
+        // FIXED + unaligned -> None (EINVAL).
+        if resolve_mmap_addr_hint(0x1234, true, TEST_FRAME).is_some() {
+            serial_println!("[syscall/linux]   FAIL: mmap FIXED unaligned not None");
+            return Err(KernelError::InternalError);
+        }
+        // FIXED + aligned -> Some(addr) unchanged.
+        if resolve_mmap_addr_hint(0x8000, true, TEST_FRAME) != Some(0x8000) {
+            serial_println!("[syscall/linux]   FAIL: mmap FIXED aligned not passthrough");
+            return Err(KernelError::InternalError);
+        }
+        // non-FIXED + unaligned -> Some(0) (advisory hint dropped, NOT EINVAL).
+        if resolve_mmap_addr_hint(0x1234, false, TEST_FRAME) != Some(0) {
+            serial_println!("[syscall/linux]   FAIL: mmap hint unaligned not dropped to 0");
+            return Err(KernelError::InternalError);
+        }
+        // non-FIXED + aligned -> Some(addr) passthrough.
+        if resolve_mmap_addr_hint(0x8000, false, TEST_FRAME) != Some(0x8000) {
+            serial_println!("[syscall/linux]   FAIL: mmap aligned hint not passthrough");
+            return Err(KernelError::InternalError);
+        }
+        // addr == 0 (no hint) -> Some(0) in both modes.
+        if resolve_mmap_addr_hint(0, false, TEST_FRAME) != Some(0)
+            || resolve_mmap_addr_hint(0, true, TEST_FRAME) != Some(0)
+        {
+            serial_println!("[syscall/linux]   FAIL: mmap null hint not Some(0)");
+            return Err(KernelError::InternalError);
+        }
+        // End-to-end: dispatch MMAP with MAP_ANONYMOUS|MAP_PRIVATE|
+        // MAP_FIXED (0x32), fd=-1, len>0, unaligned addr -> EINVAL at the
+        // alignment gate BEFORE any native mapping (no side effects).
+        {
+            let a = SyscallArgs {
+                arg0: 0x1234,           // unaligned addr
+                arg1: 0x4000,           // len = 16384 (>0)
+                arg2: 0,                // prot (ignored)
+                arg3: 0x02 | 0x20 | 0x10, // PRIVATE|ANON|FIXED
+                arg4: u64::MAX,         // fd = -1
+                arg5: 0,
+            };
+            if dispatch_linux(nr::MMAP, &a).value != i64::from(errno::EINVAL).wrapping_neg() {
+                serial_println!("[syscall/linux]   FAIL: mmap FIXED unaligned dispatch not EINVAL");
+                return Err(KernelError::InternalError);
+            }
+        }
+        serial_println!(
+            "[syscall/linux]   mmap MAP_FIXED alignment / advisory-hint fidelity (batch 531): OK"
+        );
+
         // adjtimex / clock_adjtime: batch 122 adds the modes=0 read
         // path used by chrony / ntpd / timedatectl.  Non-zero modes
         // still returns EPERM (no CAP_SYS_TIME).

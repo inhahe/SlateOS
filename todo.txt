@@ -51982,3 +51982,63 @@ Serial stamp "clock_getres clockid gating + per-class resolution
 (production coarse-floor uses checked_div/saturating_mul — no bare
 arithmetic); boot-test PASSED (BOOT_OK 25s, stamp present, no clock
 FAILs).
+
+================================================================
+ABI batch 531 — mmap MAP_FIXED alignment / advisory-hint fidelity
+================================================================
+Date: 2026-06-12   Decided by: Claude (autonomous)
+File: kernel/src/syscall/linux.rs (translator only)
+
+Divergence: the Linux mmap translator returned EINVAL for ANY non-zero
+unaligned address hint, regardless of MAP_FIXED.  Linux only rejects an
+unaligned address when MAP_FIXED is set; an unaligned address WITHOUT
+MAP_FIXED is a mere advisory hint that the kernel rounds/relocates, so
+the call succeeds.
+
+Verbatim v6.6 citation (mm/mmap.c, get_unmapped_area):
+  - get_unmapped_area runs `if (offset_in_page(addr)) return -EINVAL;`
+    on the address it resolves.
+  - For MAP_FIXED, the addr is returned unchanged (no relocation), so an
+    unaligned MAP_FIXED addr trips offset_in_page -> EINVAL.
+  - For non-FIXED, arch_get_unmapped_area aligns/relocates the hint, so
+    offset_in_page is 0 -> no EINVAL; an unaligned hint succeeds.
+  - do_mmap order: !len -> EINVAL; non-FIXED round_hint_to_min(addr);
+    len align/overflow; get_unmapped_area (the FIXED-unaligned EINVAL);
+    then RLIMIT_AS accounting inside mmap_region.  So the alignment
+    EINVAL precedes VM accounting.
+
+Root cause: native sys_mmap (handlers.rs:717) rejects any non-zero
+unaligned vaddr_hint with BadAlignment->EINVAL, with no notion of
+MAP_FIXED.  Native mmap is the wrong layer to encode Linux's
+FIXED-vs-hint policy (it serves the OuRoS-native ABI too).
+
+Fix (translator-only): added pure helper resolve_mmap_addr_hint(addr,
+fixed, frame_size) -> Option<u64>:
+  - FIXED + aligned   -> Some(addr)   (pass through)
+  - FIXED + unaligned -> None         (caller maps to EINVAL)
+  - non-FIXED aligned -> Some(addr)   (pass through)
+  - non-FIXED unaligned -> Some(0)    (drop hint; let kernel pick,
+                                       mirroring Linux relocation)
+Wired into sys_mmap AFTER the len==0 EINVAL and BEFORE the RLIMIT_AS
+charge, matching the do_mmap ordering above.  native_flags now derives
+MAP_FIXED (0x01) from the same `fixed` bool.
+
+Tests: boot self-test verifies the helper directly (side-effect-free,
+unlike exercising the native mapping path which needs a real user
+address space the boot task lacks):
+  * FIXED+unaligned(0x1234)   -> None
+  * FIXED+aligned(0x8000)     -> Some(0x8000)
+  * non-FIXED+unaligned(0x1234) -> Some(0)
+  * non-FIXED+aligned(0x8000) -> Some(0x8000)
+  * addr==0 both modes        -> Some(0)
+  * end-to-end dispatch_linux(MMAP, FIXED|unaligned) -> EINVAL (the
+    alignment gate fires before any native mapping; no side effects).
+Note: the native SUCCESS path is not exercisable from the boot task
+(pid 0 lacks a user PML4; a real mapping could leak) — only the EINVAL
+gate is dispatch-tested.
+
+Serial stamp "mmap MAP_FIXED alignment / advisory-hint fidelity
+(batch 531): OK".  cargo build clean; clippy back at 17477 baseline
+(self-test EINVAL compare uses wrapping_neg to avoid arithmetic
+side-effects); boot-test PASSED (BOOT_OK 26s, stamp present, no mmap
+FAILs).  Reversible (pure translator change; no PCB/state).

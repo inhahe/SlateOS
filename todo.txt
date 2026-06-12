@@ -69,6 +69,43 @@
 ##   threaded owner_pid) calls epoll::interest_list + recursively evaluates each child
 ##   fd (with a depth cap, matching Linux's EP_MAX_NESTS=4).
 
+## LIMITATION (2026-06-12): kernel-level inotify blocking read returns EAGAIN
+## The new kernel Linux-ABI inotify (kernel/src/ipc/inotify.rs + the
+## HandleKind::Inotify wiring in kernel/src/syscall/linux.rs) drains the native
+## fs::notify watches into inotify_event records on read.  A read with nothing
+## pending returns EAGAIN even for a BLOCKING (non-IN_NONBLOCK) fd, because — like
+## signalfd / timerfd — this kernel has no fs-event-arrival wakeup path to park a
+## reader on.
+##   IMPACT: low-moderate — the canonical inotify idiom is poll/select/epoll on the
+##   fd then read when POLLIN fires; that works (is_readable refills + reports
+##   readiness).  Apps that do a bare blocking read() expecting it to sleep until an
+##   event arrives will instead spin.
+##   FIX: add a per-inotify wait-queue woken by fs::notify when a subscribed watch
+##   produces an event; the read path blocks on that queue instead of returning
+##   EAGAIN.  Could share the same wait-queue infra as the signalfd/timerfd fixes.
+##
+## LIMITATION (2026-06-12): kernel-level inotify event coverage is native-derived
+## inotify watches are backed 1:1 by native fs::notify watches, so the reportable
+## event set is exactly what the native layer produces: IN_CREATE/IN_DELETE/
+## IN_MODIFY/IN_ATTRIB/IN_MOVED_FROM/IN_MOVED_TO (Renamed→pair)/IN_DELETE_SELF/
+## IN_MOVE_SELF, plus synthetic IN_Q_OVERFLOW and IN_IGNORED.  NOT observable
+## (silently dropped from the interest mask): IN_OPEN, IN_ACCESS, IN_CLOSE_WRITE,
+## IN_CLOSE_NOWRITE (the native layer has no open/close hooks) and IN_ISDIR (FsEvent
+## carries no dir flag, so the directory-subject bit is never OR'd into reported
+## masks).  Watches are NON-RECURSIVE and keyed by NORMALIZED PATH STRING, not inode
+## — re-adding the same path returns the same wd (mask replaced, or OR-combined under
+## IN_MASK_ADD); a watched path that is deleted and recreated keeps the same wd.
+## IN_ONESHOT / IN_DONT_FOLLOW / IN_EXCL_UNLINK are accepted-but-ignored control bits.
+## Linux FS-mutation syscalls (mkdir/unlink/rename/...) are still stubs, so inotify
+## events flow ONLY from native-VFS activity, not from Linux-ABI file operations.
+##   IMPACT: moderate for apps that rely on open/close/access notifications (rare) or
+##   on inode-identity semantics across delete+recreate (rarer); low for the common
+##   "watch a dir for create/delete/modify/move" file-manager/build-tool idiom.
+##   FIX: (a) add open/close/access hooks to the VFS and an is_dir flag to FsEvent to
+##   widen coverage; (b) route the Linux-ABI mutation syscalls through the native VFS
+##   so they generate fs::notify events; (c) switch watch identity to inode if/when
+##   stable inode numbers are available.
+
 ## SESSION PREFERENCE (user, 2026-06-06): autonomous-loop pacing
 ## At the end of each `<<autonomous-loop-dynamic>>` tick, call
 ## ScheduleWakeup with `delaySeconds = 60` (the runtime's hard

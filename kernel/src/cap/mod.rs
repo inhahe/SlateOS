@@ -178,6 +178,14 @@ pub enum ResourceType {
     /// so the instance is released when an owning process dies, and so
     /// `fork()` knows to bump the refcount in the child.
     Timerfd = 20,
+    /// An inotify instance (Linux `inotify_init`/`inotify_init1`).
+    ///
+    /// A refcounted reference into [`crate::ipc::inotify`] holding a table of
+    /// filesystem watches; no capability is required to create one — the
+    /// handle itself is the authority.  Tracked per-process so the instance
+    /// (and every native watch it owns) is released when an owning process
+    /// dies, and so `fork()` knows to bump the refcount in the child.
+    Inotify = 21,
 }
 
 // ---------------------------------------------------------------------------

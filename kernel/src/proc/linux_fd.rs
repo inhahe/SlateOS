@@ -131,6 +131,14 @@ pub enum HandleKind {
     /// when created with `TFD_NONBLOCK`.  Close releases one refcount on
     /// the in-kernel `TIMERFD_TABLE` entry.
     Timerfd,
+    /// inotify instance — Linux `inotify_init`/`inotify_init1`.
+    /// `raw_handle` holds the `ipc::inotify::InotifyHandle` raw u64.
+    /// `read` drains queued filesystem-change events into variable-length
+    /// `struct inotify_event` records; `write` returns `EINVAL`.
+    /// `status_flags` carries `O_NONBLOCK` when created with `IN_NONBLOCK`.
+    /// Close releases one refcount on the in-kernel `INOTIFY_TABLE` entry
+    /// (and, on final close, every native watch it owns).
+    Inotify,
 }
 
 impl HandleKind {
@@ -146,7 +154,8 @@ impl HandleKind {
             | Self::MemFd
             | Self::Epoll
             | Self::SignalFd
-            | Self::Timerfd => true,
+            | Self::Timerfd
+            | Self::Inotify => true,
         }
     }
 }
@@ -312,6 +321,22 @@ impl FdEntry {
     pub const fn timerfd(handle: u64, fd_flags: u32, status_flags: u32) -> Self {
         Self {
             kind: HandleKind::Timerfd,
+            raw_handle: handle,
+            fd_flags,
+            status_flags,
+            f_owner: 0,
+            f_owner_sig: 0,
+        }
+    }
+
+    /// Construct an entry for an inotify instance.  `raw_handle` is the
+    /// `ipc::inotify::InotifyHandle` raw u64.  `fd_flags` carries
+    /// `FD_CLOEXEC` when created with `IN_CLOEXEC`; `status_flags` carries
+    /// `O_NONBLOCK` when created with `IN_NONBLOCK`.
+    #[must_use]
+    pub const fn inotify(handle: u64, fd_flags: u32, status_flags: u32) -> Self {
+        Self {
+            kind: HandleKind::Inotify,
             raw_handle: handle,
             fd_flags,
             status_flags,

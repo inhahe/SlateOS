@@ -234,6 +234,16 @@ fn dup_one(rtype: ResourceType, id: u64) -> KernelResult<Option<(ResourceType, u
             )?;
             Ok(Some((rtype, id)))
         }
+        ResourceType::Inotify => {
+            // Bump the inotify instance refcount so parent and child each own
+            // one reference to the shared watch table — same id.  A watch
+            // added/removed from either is visible to the other, matching
+            // Linux's shared-kernel-object semantics across fork.
+            crate::ipc::inotify::dup(
+                crate::ipc::inotify::InotifyHandle::from_raw(id),
+            )?;
+            Ok(Some((rtype, id)))
+        }
         // No refcounted same-id dup yet — not inherited.  Documented
         // limitation in todo.txt; revisit when these gain dup support.
         ResourceType::Channel
@@ -297,6 +307,11 @@ fn close_one(rtype: ResourceType, id: u64) {
         ResourceType::Timerfd => {
             crate::ipc::timerfd::close(
                 crate::ipc::timerfd::TimerFdHandle::from_raw(id),
+            );
+        }
+        ResourceType::Inotify => {
+            crate::ipc::inotify::close(
+                crate::ipc::inotify::InotifyHandle::from_raw(id),
             );
         }
         // Nothing was duped for these in `dup_one`.

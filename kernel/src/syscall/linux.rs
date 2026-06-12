@@ -2606,6 +2606,22 @@ pub fn close_handle(entry: FdEntry) -> SyscallResult {
             crate::ipc::timerfd::close(h);
             SyscallResult::ok(0)
         }
+        HandleKind::Inotify => {
+            // Deregister from the per-process ipc_handles list — same
+            // rationale as the EventFd/MemFd/Epoll/SignalFd/Timerfd arms
+            // above — then drop one refcount on the in-kernel inotify
+            // instance (final close releases every native watch it owns).
+            if let Some(pid) = caller_pid() {
+                pcb::deregister_ipc_handle(
+                    pid,
+                    crate::cap::ResourceType::Inotify,
+                    entry.raw_handle,
+                );
+            }
+            let h = crate::ipc::inotify::InotifyHandle::from_raw(entry.raw_handle);
+            crate::ipc::inotify::close(h);
+            SyscallResult::ok(0)
+        }
     }
 }
 
@@ -2662,8 +2678,8 @@ fn dispatch_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
             linux_from_native(handlers::sys_pipe_write(&a))
         }
         HandleKind::EventFd => dispatch_eventfd_write(entry, buf, len),
-        // signalfd and timerfd are read-only: write(2) always returns EINVAL.
-        HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd => {
+        // signalfd, timerfd and inotify are read-only: write(2) → EINVAL.
+        HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify => {
             linux_err(errno::EINVAL)
         }
         HandleKind::MemFd => dispatch_memfd_write(entry, buf, len),
@@ -2849,6 +2865,7 @@ fn dispatch_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
         HandleKind::MemFd => dispatch_memfd_read(entry, buf, cap),
         HandleKind::SignalFd => dispatch_signalfd_read(entry, buf, cap),
         HandleKind::Timerfd => dispatch_timerfd_read(entry, buf, cap),
+        HandleKind::Inotify => dispatch_inotify_read(entry, buf, cap),
     }
 }
 
@@ -3783,7 +3800,8 @@ fn fcntl_flock_apply(
         | HandleKind::PidFd
         | HandleKind::Epoll
         | HandleKind::SignalFd
-        | HandleKind::Timerfd => {
+        | HandleKind::Timerfd
+        | HandleKind::Inotify => {
             return linux_err(errno::EBADF);
         }
     }
@@ -3918,7 +3936,7 @@ fn sys_lseek(args: &SyscallArgs) -> SyscallResult {
                 Err(e) => linux_err(linux_errno_for(e)),
             }
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify => linux_err(errno::ESPIPE),
     }
 }
 
@@ -10329,7 +10347,7 @@ fn sys_fsync(args: &SyscallArgs) -> SyscallResult {
     };
     match entry.kind {
         HandleKind::File | HandleKind::MemFd => SyscallResult::ok(0),
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd => linux_err(errno::EINVAL),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify => linux_err(errno::EINVAL),
     }
 }
 
@@ -11185,7 +11203,8 @@ fn sys_readahead(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::PidFd
         | HandleKind::Epoll
         | HandleKind::SignalFd
-        | HandleKind::Timerfd => return linux_err(errno::EINVAL),
+        | HandleKind::Timerfd
+        | HandleKind::Inotify => return linux_err(errno::EINVAL),
     }
     SyscallResult::ok(0)
 }
@@ -12728,6 +12747,8 @@ fn fill_stat_for_fd(
         HandleKind::SignalFd => (S_IFREG | 0o600, 4096),
         // timerfd is an anon_inode like signalfd/epoll/eventfd.
         HandleKind::Timerfd => (S_IFREG | 0o600, 4096),
+        // inotify is an anon_inode like the rest of the fd family.
+        HandleKind::Inotify => (S_IFREG | 0o600, 4096),
     };
 
     // Inode: use the raw_handle as a stable-ish identity.
@@ -13013,6 +13034,8 @@ fn fill_statx_for_fd(
         HandleKind::SignalFd => ((S_IFREG | 0o600) as u16, 4096),
         // timerfd anon_inode — S_IFREG | 0600, like signalfd/epoll/eventfd.
         HandleKind::Timerfd => ((S_IFREG | 0o600) as u16, 4096),
+        // inotify anon_inode — S_IFREG | 0600, like the rest of the family.
+        HandleKind::Inotify => ((S_IFREG | 0o600) as u16, 4096),
     };
     let st_ino: u64 = entry.raw_handle;
     // Surface the live memfd data length so stx_size reflects what callers
@@ -14174,7 +14197,7 @@ fn sys_ftruncate(args: &SyscallArgs) -> SyscallResult {
         }
         // Pipes, consoles, eventfds, pidfds, epoll, signalfds, timerfds cannot
         // be truncated.
-        HandleKind::Pipe | HandleKind::Console | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd => linux_err(errno::EINVAL),
+        HandleKind::Pipe | HandleKind::Console | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify => linux_err(errno::EINVAL),
     }
 }
 
@@ -15129,28 +15152,125 @@ fn sys_timerfd_gettime(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(0)
 }
 
-/// `inotify_init()`.
+/// `inotify_init()` — equivalent to `inotify_init1(0)`.
 fn sys_inotify_init(_args: &SyscallArgs) -> SyscallResult {
-    linux_err(errno::ENOSYS)
+    inotify_init_common(0)
 }
 
 /// `inotify_init1(flags)`.
 fn sys_inotify_init1(args: &SyscallArgs) -> SyscallResult {
-    // IN_NONBLOCK = O_NONBLOCK, IN_CLOEXEC = O_CLOEXEC.
-    const IN_NONBLOCK: u64 = 0o4000;
-    const IN_CLOEXEC: u64 = 0o2_000_000;
-    const VALID_FLAGS: u64 = IN_NONBLOCK | IN_CLOEXEC;
     // x86_64 syscall ABI: Linux declares `int inotify_init1(int flags)`
     // so only the low 32 bits of rdi are visible to the gate.  Probes
     // with sentinel high bits saw EINVAL where Linux would proceed.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let flags_i32 = args.arg0 as i32;
     #[allow(clippy::cast_sign_loss)]
-    let flags: u64 = u64::from(flags_i32 as u32);
+    let flags: u32 = flags_i32 as u32;
+    inotify_init_common(flags)
+}
+
+/// Shared backend for `inotify_init` / `inotify_init1`: validate flags,
+/// create a fresh instance, register it in the caller's per-process
+/// ipc_handles list, and install an fd.  Mirrors the timerfd/signalfd
+/// create path (refcount-1 object + register + install with rollback).
+fn inotify_init_common(flags: u32) -> SyscallResult {
+    // IN_NONBLOCK = O_NONBLOCK, IN_CLOEXEC = O_CLOEXEC.
+    const IN_NONBLOCK: u32 = 0o4000;
+    const IN_CLOEXEC: u32 = 0o2_000_000;
+    const VALID_FLAGS: u32 = IN_NONBLOCK | IN_CLOEXEC;
     if flags & !VALID_FLAGS != 0 {
         return linux_err(errno::EINVAL);
     }
-    linux_err(errno::ENOSYS)
+    let caller = match caller_pid() {
+        Some(p) => p,
+        None => return linux_err(errno::EBADF),
+    };
+    let handle = crate::ipc::inotify::create();
+    pcb::register_ipc_handle(
+        caller,
+        crate::cap::ResourceType::Inotify,
+        handle.raw(),
+    );
+    let fd_flags = if flags & IN_CLOEXEC != 0 {
+        crate::proc::linux_fd::FD_CLOEXEC
+    } else {
+        0
+    };
+    let status_flags = if flags & IN_NONBLOCK != 0 {
+        oflags::O_NONBLOCK
+    } else {
+        0
+    };
+    let entry = crate::proc::linux_fd::FdEntry::inotify(handle.raw(), fd_flags, status_flags);
+    match pcb::linux_fd_install(caller, entry, 0) {
+        Ok(new_fd) => SyscallResult::ok(i64::from(new_fd)),
+        Err(e) => {
+            pcb::deregister_ipc_handle(
+                caller,
+                crate::cap::ResourceType::Inotify,
+                handle.raw(),
+            );
+            crate::ipc::inotify::close(handle);
+            linux_err(linux_errno_for(e))
+        }
+    }
+}
+
+/// Drain queued inotify events into the user buffer as a stream of
+/// variable-length `struct inotify_event` records.
+///
+/// Each record is a 16-byte header (`wd: i32`, `mask: u32`, `cookie: u32`,
+/// `len: u32`) followed by `len` name bytes (null-padded, `len` a multiple of
+/// 16; 0 when the event has no name).  As many whole events as fit in `cap`
+/// are returned; the remainder stay queued for the next read.
+///
+/// Like signalfd / timerfd, there is no event-arrival wakeup path, so a read
+/// with nothing queued returns `EAGAIN` for both blocking and non-blocking
+/// fds (documented shortcut; canonical usage is poll/epoll then read on
+/// POLLIN).  A buffer too small to hold even the first pending event returns
+/// `EINVAL`, matching Linux.
+fn dispatch_inotify_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
+    let handle = crate::ipc::inotify::InotifyHandle::from_raw(entry.raw_handle);
+    let budget = cap as usize;
+    let events = match crate::ipc::inotify::read_into(handle, budget) {
+        Ok(ev) => ev,
+        // Buffer too small for the first event (events left queued).
+        Err(KernelError::InvalidArgument) => return linux_err(errno::EINVAL),
+        Err(_) => return linux_err(errno::EBADF),
+    };
+    if events.is_empty() {
+        // Nothing queued — no fs-event wakeup path, so surface EAGAIN.
+        return linux_err(errno::EAGAIN);
+    }
+
+    // Serialize the consumed events into a contiguous kernel buffer.
+    let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    for ev in &events {
+        let name_len = ev.name.len();
+        let padded = crate::ipc::inotify::record_name_len(name_len);
+        out.extend_from_slice(&ev.wd.to_ne_bytes());
+        out.extend_from_slice(&ev.mask.to_ne_bytes());
+        out.extend_from_slice(&ev.cookie.to_ne_bytes());
+        #[allow(clippy::cast_possible_truncation)]
+        out.extend_from_slice(&(padded as u32).to_ne_bytes());
+        if padded > 0 {
+            out.extend_from_slice(&ev.name);
+            // Null-pad the name field out to `padded` bytes.
+            out.resize(out.len().saturating_add(padded.saturating_sub(name_len)), 0);
+        }
+    }
+
+    let total = out.len();
+    if let Err(e) = crate::mm::user::validate_user_write(buf, total) {
+        return linux_err(linux_errno_for(e));
+    }
+    // SAFETY: validate_user_write confirmed [buf, +total) is writable.
+    let r = unsafe { crate::mm::user::copy_to_user(out.as_ptr(), buf, total) };
+    if let Err(e) = r {
+        return linux_err(linux_errno_for(e));
+    }
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(total as i64)
 }
 
 /// `inotify_add_watch(fd, pathname, mask)`.
@@ -15206,35 +15326,88 @@ fn sys_inotify_add_watch(args: &SyscallArgs) -> SyscallResult {
         Some(p) => p,
         None => return linux_err(errno::EBADF),
     };
-    if pcb::linux_fd_lookup(pid, fd).is_none() {
-        return linux_err(errno::EBADF);
+    let entry = match pcb::linux_fd_lookup(pid, fd) {
+        Some(e) => e,
+        None => return linux_err(errno::EBADF),
+    };
+
+    // Gate 4: f.file->f_op != inotify_fops → EINVAL (fd isn't an inotify fd).
+    if entry.kind != crate::proc::linux_fd::HandleKind::Inotify {
+        return linux_err(errno::EINVAL);
     }
 
-    // Real fd that isn't an inotify fd → EINVAL (Linux's f_op check).
-    // Before that, validate the path pointer (mirrors user_path_at's
-    // EFAULT in the kernel-context case where we have no real fd).
+    // Gate 5: user_path_at(pathname).  NULL/unreadable → EFAULT; then
+    // canonicalize against the caller's cwd and confirm the target exists
+    // (Linux's lookup walk returns ENOENT for a missing path, ENOTDIR when
+    // IN_ONLYDIR was requested but the target is not a directory).
     let path_ptr = args.arg1;
     if path_ptr == 0 {
         return linux_err(errno::EFAULT);
     }
-    if let Err(e) = crate::mm::user::validate_user_read(path_ptr, 1) {
-        return linux_err(linux_errno_for(e));
+    const PATH_MAX: usize = 4096;
+    let path_bytes = match read_user_cstr(path_ptr, PATH_MAX) {
+        Ok(b) => b,
+        Err(e) => return linux_err(e),
+    };
+    if path_bytes.is_empty() {
+        // Empty pathname → ENOENT (Linux's getname).
+        return linux_err(errno::ENOENT);
     }
-    linux_err(errno::EINVAL)
+    let cwd = pcb::get_cwd(pid).unwrap_or_else(|| alloc::vec![b'/']);
+    let canon = match canonicalize_path(&cwd, &path_bytes) {
+        Ok(p) => p,
+        Err(e) => return linux_err(e),
+    };
+    let path_str = match core::str::from_utf8(&canon) {
+        Ok(s) => s,
+        Err(_) => return linux_err(errno::EINVAL),
+    };
+    use crate::ipc::inotify::IN_ONLYDIR;
+    match crate::fs::Vfs::stat(path_str) {
+        Ok(st) => {
+            if mask & IN_ONLYDIR != 0
+                && st.entry_type != crate::fs::EntryType::Directory
+            {
+                return linux_err(errno::ENOTDIR);
+            }
+        }
+        Err(KernelError::NotFound) => return linux_err(errno::ENOENT),
+        Err(e) => return linux_err(linux_errno_for(e)),
+    }
+
+    let handle = crate::ipc::inotify::InotifyHandle::from_raw(entry.raw_handle);
+    match crate::ipc::inotify::add_watch(handle, path_str, mask) {
+        Ok(wd) => SyscallResult::ok(i64::from(wd)),
+        Err(KernelError::AlreadyExists) => linux_err(errno::EEXIST),
+        Err(KernelError::OutOfMemory) => linux_err(errno::ENOSPC),
+        Err(_) => linux_err(errno::EINVAL),
+    }
 }
 
 /// `inotify_rm_watch(fd, wd)`.
 fn sys_inotify_rm_watch(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let wd = args.arg1 as i32;
     let pid = match caller_pid() {
         Some(p) => p,
         None => return linux_err(errno::EBADF),
     };
-    if pcb::linux_fd_lookup(pid, fd).is_none() {
-        return linux_err(errno::EBADF);
+    let entry = match pcb::linux_fd_lookup(pid, fd) {
+        Some(e) => e,
+        None => return linux_err(errno::EBADF),
+    };
+    // f_op != inotify_fops → EINVAL (fd isn't an inotify fd).
+    if entry.kind != crate::proc::linux_fd::HandleKind::Inotify {
+        return linux_err(errno::EINVAL);
     }
-    linux_err(errno::EINVAL)
+    let handle = crate::ipc::inotify::InotifyHandle::from_raw(entry.raw_handle);
+    match crate::ipc::inotify::rm_watch(handle, wd) {
+        Ok(()) => SyscallResult::ok(0),
+        // Unknown/stale wd → EINVAL (Linux's inotify_rm_watch on a bad wd).
+        Err(_) => linux_err(errno::EINVAL),
+    }
 }
 
 /// `fanotify_init(flags, event_f_flags)`.
@@ -17542,6 +17715,12 @@ fn sys_pidfd_getfd(args: &SyscallArgs) -> SyscallResult {
                 return linux_err(errno::EBADF);
             }
         }
+        HandleKind::Inotify => {
+            let h = crate::ipc::inotify::InotifyHandle::from_raw(entry.raw_handle);
+            if crate::ipc::inotify::dup(h).is_err() {
+                return linux_err(errno::EBADF);
+            }
+        }
     }
 
     // Linux always sets FD_CLOEXEC on the new fd, regardless of the
@@ -17577,6 +17756,7 @@ fn sys_pidfd_getfd(args: &SyscallArgs) -> SyscallResult {
         HandleKind::Epoll => Some(crate::cap::ResourceType::Epoll),
         HandleKind::SignalFd => Some(crate::cap::ResourceType::SignalFd),
         HandleKind::Timerfd => Some(crate::cap::ResourceType::Timerfd),
+        HandleKind::Inotify => Some(crate::cap::ResourceType::Inotify),
         HandleKind::Console | HandleKind::PidFd => None,
     };
     if let Some(rt) = resource {
@@ -17643,6 +17823,10 @@ fn release_handle_ref(kind: HandleKind, raw_handle: u64) {
         HandleKind::Timerfd => {
             let h = crate::ipc::timerfd::TimerFdHandle::from_raw(raw_handle);
             crate::ipc::timerfd::close(h);
+        }
+        HandleKind::Inotify => {
+            let h = crate::ipc::inotify::InotifyHandle::from_raw(raw_handle);
+            crate::ipc::inotify::close(h);
         }
     }
 }
@@ -20345,6 +20529,20 @@ fn poll_revents_from_entry(
                 0
             }
         }
+        HandleKind::Inotify => {
+            // An inotify fd is readable when at least one filesystem-change
+            // event is queued.  Like timerfd this is independent of any
+            // process state (the watch table lives in the instance), so it
+            // needs no owner pid — the check is identical in the real
+            // poll/epoll path and in self-tests.
+            if crate::ipc::inotify::is_readable(
+                crate::ipc::inotify::InotifyHandle::from_raw(entry.raw_handle),
+            ) {
+                poll_bits::POLLIN | poll_bits::POLLRDNORM
+            } else {
+                0
+            }
+        }
     };
 
     raw & mask
@@ -21126,7 +21324,8 @@ fn sys_epoll_ctl(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::PidFd
         | HandleKind::Epoll
         | HandleKind::SignalFd
-        | HandleKind::Timerfd => {}
+        | HandleKind::Timerfd
+        | HandleKind::Inotify => {}
     }
 
     // Gate 5: f.file == tf.file || !is_file_epoll(f.file) -> EINVAL.
@@ -24019,6 +24218,7 @@ fn handle_kind_ord(k: crate::proc::linux_fd::HandleKind) -> u64 {
         HandleKind::Epoll => 6,
         HandleKind::SignalFd => 7,
         HandleKind::Timerfd => 8,
+        HandleKind::Inotify => 9,
     }
 }
 
@@ -24991,7 +25191,7 @@ fn sys_cachestat(args: &SyscallArgs) -> SyscallResult {
                 // memfd is page-cache-backed on Linux, so cachestat is
                 // valid against it (always zero in our world).
                 HandleKind::File | HandleKind::MemFd => {}
-                HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd => {
+                HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify => {
                     return linux_err(errno::EOPNOTSUPP);
                 }
             }
@@ -29361,7 +29561,7 @@ fn sys_pread64(args: &SyscallArgs) -> SyscallResult {
                 Err(e) => linux_err(e),
             }
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify => linux_err(errno::ESPIPE),
     }
 }
 
@@ -29418,7 +29618,7 @@ fn sys_pwrite64(args: &SyscallArgs) -> SyscallResult {
                 Err(e) => linux_err(e),
             }
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify => linux_err(errno::ESPIPE),
     }
 }
 
@@ -30636,7 +30836,7 @@ fn sys_preadv(args: &SyscallArgs) -> SyscallResult {
             let off = offset as u64;
             preadv_memfd_walk(entry.raw_handle, off, iov_ptr, iovcnt)
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify => linux_err(errno::ESPIPE),
     }
 }
 
@@ -30667,7 +30867,7 @@ fn sys_pwritev(args: &SyscallArgs) -> SyscallResult {
             let off = offset as u64;
             pwritev_memfd_walk(entry.raw_handle, off, iov_ptr, iovcnt)
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify => linux_err(errno::ESPIPE),
     }
 }
 
@@ -30729,7 +30929,7 @@ fn sys_preadv2(args: &SyscallArgs) -> SyscallResult {
             let off = offset as u64;
             preadv_memfd_walk(entry.raw_handle, off, iov_ptr, iovcnt)
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify => linux_err(errno::ESPIPE),
     }
 }
 
@@ -30773,7 +30973,7 @@ fn sys_pwritev2(args: &SyscallArgs) -> SyscallResult {
             let off = offset as u64;
             pwritev_memfd_walk(entry.raw_handle, off, iov_ptr, iovcnt)
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify => linux_err(errno::ESPIPE),
     }
 }
 
@@ -43951,6 +44151,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 HandleKind::Epoll => Some(crate::cap::ResourceType::Epoll),
                 HandleKind::SignalFd => Some(crate::cap::ResourceType::SignalFd),
                 HandleKind::Timerfd => Some(crate::cap::ResourceType::Timerfd),
+                HandleKind::Inotify => Some(crate::cap::ResourceType::Inotify),
                 HandleKind::Console | HandleKind::PidFd => None,
             }
         };
@@ -52193,12 +52394,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "[syscall/linux]   timerfd_gettime fd-first gating: OK"
         );
 
-        // inotify_init() -> ENOSYS.
+        // inotify_init() in kernel context -> EBADF.  The ABI is now
+        // implemented; in boot-self-test context caller_pid() is None,
+        // so the fd-install path short-circuits to EBADF (no caller to
+        // install the fd into).  Functional coverage lives in
+        // ipc::inotify::self_test().
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::INOTIFY_INIT, &a).value
-            != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: inotify_init not ENOSYS");
+            != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: inotify_init not EBADF");
             return Err(KernelError::InternalError);
         }
         // inotify_init1 with bogus flag -> EINVAL.
@@ -52209,12 +52414,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: inotify_init1(bad flag) not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // inotify_init1(0) -> ENOSYS.
+        // inotify_init1(0) in kernel context -> EBADF (same fd-install
+        // short-circuit as inotify_init above).
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::INOTIFY_INIT1, &a).value
-            != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: inotify_init1 not ENOSYS");
+            != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: inotify_init1 not EBADF");
             return Err(KernelError::InternalError);
         }
         // inotify_add_watch(fd=0, path=NULL, mask=IN_ACCESS) -> EBADF.
@@ -54705,8 +54911,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
 
         // (c) inotify_init1: flags = 0x1_0000_0800 (high bit 32 +
-        //     IN_NONBLOCK).  Linux truncates -> ENOSYS.  Pre-batch:
-        //     EINVAL.
+        //     IN_NONBLOCK).  The i32→u32 narrowing in sys_inotify_init1
+        //     truncates the high half, leaving flags = IN_NONBLOCK (valid),
+        //     so the call passes flag validation and reaches the fd-install
+        //     path — which, in boot-self-test context (caller_pid() == None),
+        //     short-circuits to EBADF.  Pre-batch this returned ENOSYS (stub);
+        //     if the high half had leaked it would be EINVAL.  EBADF proves
+        //     both that the truncation happened and that the ABI is live.
         let a = SyscallArgs {
             arg0: 0x1_0000_0800,
             arg1: 0,
@@ -54715,7 +54926,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             arg4: 0,
             arg5: 0,
         };
-        if dispatch_linux(nr::INOTIFY_INIT1, &a).value != -i64::from(errno::ENOSYS) {
+        if dispatch_linux(nr::INOTIFY_INIT1, &a).value != -i64::from(errno::EBADF) {
             serial_println!(
                 "[syscall/linux]   FAIL: inotify_init1 flags high-half not truncated"
             );

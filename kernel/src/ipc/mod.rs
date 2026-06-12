@@ -24,6 +24,7 @@ pub mod completion;
 pub mod epoll;
 pub mod eventfd;
 pub mod futex;
+pub mod inotify;
 pub mod io_ring;
 pub mod memfd;
 pub mod namespace;
@@ -86,6 +87,9 @@ pub fn cleanup_handles(handles: &[(ResourceType, u64)]) {
             }
             ResourceType::Timerfd => {
                 timerfd::close(timerfd::TimerFdHandle::from_raw(handle_raw));
+            }
+            ResourceType::Inotify => {
+                inotify::close(inotify::InotifyHandle::from_raw(handle_raw));
             }
             ResourceType::File => {
                 // Open file handles are refcounted in the open-file table;

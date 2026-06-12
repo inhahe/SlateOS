@@ -583,6 +583,18 @@ extern "C" fn kernel_main() -> ! {
         cpu::halt_loop();
     }
 
+    // Step 15a (cont.): Inotify subsystem.
+    // An inotify instance multiplexes a set of path watches over the
+    // native fs::notify subsystem, translating Linux IN_* masks and
+    // serializing native FsEvents into inotify_event records.  This
+    // self-test exercises mask translation, record sizing, add_watch +
+    // event emission/read, move-pair cookie pairing, buffer-too-small
+    // EINVAL, rm_watch IN_IGNORED, and dup/close refcounting.
+    if let Err(e) = ipc::inotify::self_test() {
+        serial_println!("FATAL: Inotify self-test failed: {}", e);
+        cpu::halt_loop();
+    }
+
     // Step 15b: Memfd subsystem.
     // Anonymous in-memory regular file backing memfd_create(2).  Exercises
     // create/close/dup refcounting, read/write/seek, pread/pwrite,

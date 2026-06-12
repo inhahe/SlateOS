@@ -2826,6 +2826,56 @@ fn fd_link_target(entry: &crate::proc::linux_fd::FdEntry) -> String {
     }
 }
 
+/// Render the body of `/proc/<pid>/fdinfo/<n>` from an fd's `pos` and
+/// `flags`, mirroring Linux's `fs/proc/fd.c::seq_show`.
+///
+/// Linux emits `pos:\t<f_pos>\nflags:\t0<octal f_flags>\n` followed by
+/// `mnt_id:` and `ino:`.  We emit only the two fields we genuinely track
+/// — the open-file offset and the Linux status flags — and deliberately
+/// omit `mnt_id`/`ino` rather than fabricate them: we have no per-fd
+/// mount id and no stable inode number to report, and inventing zeros
+/// would be dishonest (the "never invent data in procfs" rule).  Tools
+/// that read fdinfo (lsof, CRIU) look up `pos:`/`flags:` by key, so the
+/// omission does not break them.  The `flags` value is printed with a
+/// leading `0` then octal exactly as Linux does (`0%o`).
+fn render_pid_fdinfo(pos: u64, flags: u32) -> Vec<u8> {
+    format!("pos:\t{pos}\nflags:\t0{flags:o}\n").into_bytes()
+}
+
+/// Compute the displayed `flags` for an fd entry the way Linux's
+/// `fs/proc/fd.c` does: take the file's status flags, clear the stored
+/// `O_CLOEXEC` bit, then re-add it iff the descriptor's `FD_CLOEXEC` is
+/// set.  This keeps the reported close-on-exec state authoritative on
+/// the descriptor flag, not on a possibly-stale status-flag copy.
+fn fdinfo_flags(entry: &crate::proc::linux_fd::FdEntry) -> u32 {
+    use crate::proc::linux_fd::{FD_CLOEXEC, O_CLOEXEC};
+    let mut flags = entry.status_flags & !O_CLOEXEC;
+    if entry.fd_flags & FD_CLOEXEC != 0 {
+        flags |= O_CLOEXEC;
+    }
+    flags
+}
+
+/// Build `/proc/<pid>/fdinfo/<n>` for a real, open fd.
+///
+/// The `pos:` value is the open-file description's current offset for a
+/// regular file (via [`crate::fs::handle::current_offset`]); for objects
+/// with no seek position (pipes, console, eventfd/pidfd/memfd) it is `0`,
+/// which is the truthful answer Linux also reports for those.  Returns
+/// `NotFound` if the pid has no kernel-visible fd table or the fd is not
+/// open.
+fn gen_pid_fdinfo(pid: u64, fd: i32) -> KernelResult<Vec<u8>> {
+    use crate::proc::linux_fd::HandleKind;
+    let entry = crate::proc::pcb::linux_fd_lookup(pid, fd).ok_or(KernelError::NotFound)?;
+    let pos = match entry.kind {
+        // Only seekable file objects carry a meaningful offset; for
+        // everything else f_pos is 0 (and we don't invent one).
+        HandleKind::File => crate::fs::handle::current_offset(entry.raw_handle).unwrap_or(0),
+        _ => 0,
+    };
+    Ok(render_pid_fdinfo(pos, fdinfo_flags(&entry)))
+}
+
 /// The audit "unset" sentinel — `(uid_t)-1` / `(unsigned)-1`.
 ///
 /// Linux reports this for `loginuid`/`sessionid` on any task the audit
@@ -11635,6 +11685,10 @@ enum ProcPath<'a> {
     PidFdDir(u64),
     /// A `/proc/<pid>/fd/<n>` magic symlink to the backing object of fd `n`.
     PidFdLink(u64, i32),
+    /// The `/proc/<pid>/fdinfo` directory listing the process's open fds.
+    PidFdInfoDir(u64),
+    /// A `/proc/<pid>/fdinfo/<n>` regular file describing fd `n` (pos/flags).
+    PidFdInfoFile(u64, i32),
     NotFound,
 }
 
@@ -11711,6 +11765,22 @@ fn classify_path(rel: &str) -> ProcPath<'_> {
         if !sub.contains('/') {
             if let Ok(n) = sub.parse::<i32>() {
                 return ProcPath::PidFdLink(pid, n);
+            }
+        }
+        return ProcPath::NotFound;
+    }
+
+    // The `fdinfo/` subtree: `<pid>/fdinfo` (directory) and
+    // `<pid>/fdinfo/<n>` (a regular file with the fd's pos/flags).  Like
+    // `fd/`, only Linux-ABI processes have a kernel-visible fd table, so
+    // the directory is empty and each `<n>` is NotFound otherwise.
+    if rest == "fdinfo" {
+        return ProcPath::PidFdInfoDir(pid);
+    }
+    if let Some(sub) = rest.strip_prefix("fdinfo/") {
+        if !sub.contains('/') {
+            if let Ok(n) = sub.parse::<i32>() {
+                return ProcPath::PidFdInfoFile(pid, n);
             }
         }
         return ProcPath::NotFound;
@@ -11825,6 +11895,33 @@ impl FileSystem for ProcFs {
                     entry_type: EntryType::Directory,
                     size: 0,
                 });
+                // The `fdinfo/` subdirectory (per-fd pos/flags).
+                entries.push(DirEntry {
+                    name: String::from("fdinfo"),
+                    entry_type: EntryType::Directory,
+                    size: 0,
+                });
+                Ok(entries)
+            }
+            ProcPath::PidFdInfoDir(pid) => {
+                // `/proc/<pid>/fdinfo` — one regular file per open fd, each
+                // holding that fd's pos/flags.  Same fd source and
+                // honestly-empty-for-native behaviour as `fd/`.
+                if !task_exists(pid) {
+                    return Err(KernelError::NotFound);
+                }
+                let entries = crate::proc::pcb::linux_fd_list(pid)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(fd, _entry)| {
+                        let size = gen_pid_fdinfo(pid, fd).map_or(0, |d| d.len() as u64);
+                        DirEntry {
+                            name: format!("{fd}"),
+                            entry_type: EntryType::File,
+                            size,
+                        }
+                    })
+                    .collect();
                 Ok(entries)
             }
             ProcPath::PidFdDir(pid) => {
@@ -11881,7 +11978,8 @@ impl FileSystem for ProcFs {
             }
             ProcPath::RootFile(_) | ProcPath::PidFile(_, _)
             | ProcPath::PidLink(_, _) | ProcPath::SelfLink
-            | ProcPath::PidTaskFile(_, _, _) | ProcPath::PidFdLink(_, _) => {
+            | ProcPath::PidTaskFile(_, _, _) | ProcPath::PidFdLink(_, _)
+            | ProcPath::PidFdInfoFile(_, _) => {
                 Err(KernelError::NotADirectory)
             }
             ProcPath::NotFound => Err(KernelError::NotFound),
@@ -11894,7 +11992,7 @@ impl FileSystem for ProcFs {
         match classify_path(rel) {
             ProcPath::Root | ProcPath::PidDir(_)
             | ProcPath::PidTaskDir(_) | ProcPath::PidTaskTidDir(_, _)
-            | ProcPath::PidFdDir(_) => {
+            | ProcPath::PidFdDir(_) | ProcPath::PidFdInfoDir(_) => {
                 Err(KernelError::IsADirectory)
             }
             ProcPath::RootFile(name) => generate(name),
@@ -11916,6 +12014,12 @@ impl FileSystem for ProcFs {
             ProcPath::PidLink(_, _) | ProcPath::SelfLink
             | ProcPath::PidFdLink(_, _) => {
                 Err(KernelError::InvalidArgument)
+            }
+            ProcPath::PidFdInfoFile(pid, fd) => {
+                if !task_exists(pid) {
+                    return Err(KernelError::NotFound);
+                }
+                gen_pid_fdinfo(pid, fd)
             }
             ProcPath::NotFound => Err(KernelError::NotFound),
         }
@@ -12044,6 +12148,25 @@ impl FileSystem for ProcFs {
                     name: format!("{fd}"),
                     entry_type: EntryType::Symlink,
                     size: 0,
+                })
+            }
+            ProcPath::PidFdInfoDir(pid) => {
+                if !task_exists(pid) {
+                    return Err(KernelError::NotFound);
+                }
+                Ok(DirEntry {
+                    name: String::from("fdinfo"),
+                    entry_type: EntryType::Directory,
+                    size: 0,
+                })
+            }
+            ProcPath::PidFdInfoFile(pid, fd) => {
+                // A regular file, present only for a currently-open fd.
+                let size = gen_pid_fdinfo(pid, fd)?.len() as u64;
+                Ok(DirEntry {
+                    name: format!("{fd}"),
+                    entry_type: EntryType::File,
+                    size,
                 })
             }
             ProcPath::NotFound => Err(KernelError::NotFound),
@@ -12466,6 +12589,99 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[procfs]   fd/ directory: gating OK");
     }
 
+    // --- fdinfo/ path classification + renderer ---
+    // The `fdinfo/` subtree parallels `fd/` but yields regular files
+    // (`<pid>/fdinfo` is a directory, `<pid>/fdinfo/<n>` a file).  The
+    // body renderer and the cloexec-folding flags helper are pure, so we
+    // pin their output deterministically without needing a live fd.
+    {
+        let cases: &[(&str, &str)] = &[
+            ("5/fdinfo", "fdinfodir"),
+            ("5/fdinfo/0", "fdinfofile"),
+            ("5/fdinfo/255", "fdinfofile"),
+            ("5/fdinfo/abc", "notfound"),  // non-numeric fd
+            ("5/fdinfo/0/x", "notfound"),  // nested beyond an fd
+        ];
+        for (path, want) in cases {
+            let got = match classify_path(path) {
+                ProcPath::PidFdInfoDir(5) => "fdinfodir",
+                ProcPath::PidFdInfoFile(5, _) => "fdinfofile",
+                ProcPath::NotFound => "notfound",
+                _ => "other",
+            };
+            if got != *want {
+                serial_println!(
+                    "[procfs]   FAIL: classify_path({:?}) = {}, want {}",
+                    path, got, want
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // Pure body render: Linux's `pos:\t..\nflags:\t0<octal>\n` shape.
+        let body = render_pid_fdinfo(4096, 0o2);
+        let btext = core::str::from_utf8(&body).unwrap_or("");
+        if btext != "pos:\t4096\nflags:\t02\n" {
+            serial_println!("[procfs]   FAIL: render_pid_fdinfo body = {:?}", btext);
+            return Err(KernelError::InternalError);
+        }
+
+        // fdinfo_flags folds the descriptor's FD_CLOEXEC into O_CLOEXEC and
+        // never double-counts a stale O_CLOEXEC already in status_flags.
+        use crate::proc::linux_fd::{FdEntry, FD_CLOEXEC, O_CLOEXEC};
+        // file(handle, status_flags): O_RDWR(2), no cloexec on the fd.
+        let no_cloexec = FdEntry::file(1, 0o2);
+        if fdinfo_flags(&no_cloexec) != 0o2 {
+            serial_println!("[procfs]   FAIL: fdinfo_flags(no cloexec) wrong");
+            return Err(KernelError::InternalError);
+        }
+        // Stale O_CLOEXEC in status_flags but FD_CLOEXEC unset -> cleared.
+        let stale = FdEntry::file(1, 0o2 | O_CLOEXEC);
+        if fdinfo_flags(&stale) != 0o2 {
+            serial_println!("[procfs]   FAIL: fdinfo_flags(stale cloexec) wrong");
+            return Err(KernelError::InternalError);
+        }
+        // FD_CLOEXEC set -> O_CLOEXEC appears regardless of status_flags.
+        let mut cloexec = FdEntry::file(1, 0o2);
+        cloexec.fd_flags = FD_CLOEXEC;
+        if fdinfo_flags(&cloexec) != (0o2 | O_CLOEXEC) {
+            serial_println!("[procfs]   FAIL: fdinfo_flags(cloexec) wrong");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[procfs]   fdinfo/ classify: {} cases OK; render+flags OK", cases.len()
+        );
+    }
+
+    // --- fdinfo/ directory, live ---
+    // Mirrors the fd/ live test: every PID dir lists an `fdinfo`
+    // subdirectory; the bare self-test task has no kernel fd table so the
+    // listing is empty and any `fdinfo/<n>` file is NotFound.
+    {
+        let probe = crate::sched::current_task_id();
+        let dir_entries = fs.readdir(&format!("/{probe}"))?;
+        if !dir_entries.iter().any(|e| {
+            e.name == "fdinfo" && e.entry_type == EntryType::Directory
+        }) {
+            serial_println!("[procfs]   FAIL: /{}/ missing `fdinfo` subdirectory", probe);
+            return Err(KernelError::InternalError);
+        }
+        let fds = fs.readdir(&format!("/{probe}/fdinfo"))?;
+        serial_println!("[procfs]   /{}/fdinfo: {} fd(s) OK", probe, fds.len());
+        // Reading fdinfo for an fd that isn't open must be NotFound.
+        match fs.read_file(&format!("/{probe}/fdinfo/0")) {
+            Err(KernelError::NotFound) => {}
+            other => {
+                serial_println!(
+                    "[procfs]   FAIL: /{}/fdinfo/0 read = {:?}, want NotFound",
+                    probe, other.map(|d| d.len())
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        serial_println!("[procfs]   fdinfo/ directory: gating OK");
+    }
+
     // --- thread stat, live ---
     // gen_thread_stat keys its thread-specific fields off the tid and its
     // process-wide fields off the owning pid.  A bogus tid must be NotFound;
@@ -12842,11 +13058,11 @@ pub fn self_test() -> KernelResult<()> {
     }
     serial_println!("[procfs]   stat {}: directory OK", pid_path);
 
-    // readdir on PID directory — PID_FILES + PID_LINKS, plus the two
-    // subdirectories every PID directory exposes: `task` (per-thread tree)
-    // and `fd` (open file descriptors).
+    // readdir on PID directory — PID_FILES + PID_LINKS, plus the three
+    // subdirectories every PID directory exposes: `task` (per-thread tree),
+    // `fd` (open file descriptors) and `fdinfo` (per-fd pos/flags).
     let pid_entries = fs.readdir(&pid_path)?;
-    let expected_pid_entries = PID_FILES.len() + PID_LINKS.len() + 2;
+    let expected_pid_entries = PID_FILES.len() + PID_LINKS.len() + 3;
     if pid_entries.len() != expected_pid_entries {
         serial_println!(
             "[procfs]   FAIL: readdir {} returned {} entries, expected {}",
@@ -12854,22 +13070,17 @@ pub fn self_test() -> KernelResult<()> {
         );
         return Err(KernelError::InternalError);
     }
-    // The extra entries must be the `task` and `fd` directories specifically.
-    if !pid_entries.iter().any(|e| {
-        e.name == "task" && e.entry_type == EntryType::Directory
-    }) {
-        serial_println!(
-            "[procfs]   FAIL: readdir {} missing `task` subdirectory", pid_path
-        );
-        return Err(KernelError::InternalError);
-    }
-    if !pid_entries.iter().any(|e| {
-        e.name == "fd" && e.entry_type == EntryType::Directory
-    }) {
-        serial_println!(
-            "[procfs]   FAIL: readdir {} missing `fd` subdirectory", pid_path
-        );
-        return Err(KernelError::InternalError);
+    // The extra entries must be the `task`, `fd` and `fdinfo` directories.
+    for subdir in ["task", "fd", "fdinfo"] {
+        if !pid_entries.iter().any(|e| {
+            e.name == subdir && e.entry_type == EntryType::Directory
+        }) {
+            serial_println!(
+                "[procfs]   FAIL: readdir {} missing `{}` subdirectory",
+                pid_path, subdir
+            );
+            return Err(KernelError::InternalError);
+        }
     }
     serial_println!("[procfs]   readdir {}: {} entries OK", pid_path, pid_entries.len());
 

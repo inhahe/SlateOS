@@ -429,6 +429,27 @@ pub fn peek_write_offset(handle: u64) -> KernelResult<u64> {
     }
 }
 
+/// Return the file's current offset (`f_pos`) **without** modifying it.
+///
+/// This is the raw open-file-description position — exactly the value
+/// `/proc/<pid>/fdinfo/<n>` reports as `pos:`.  Unlike
+/// [`peek_write_offset`], it never applies the `APPEND`→EOF adjustment:
+/// `pos` is literally `f_pos`, the same as `lseek(fd, 0, SEEK_CUR)`.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidHandle`] — `handle` is not in the table.
+/// - [`KernelError::IsADirectory`] — `handle` is a directory handle
+///   (directories have no byte offset).
+pub fn current_offset(handle: u64) -> KernelResult<u64> {
+    let table = OPEN_FILES.lock();
+    let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
+    if file.is_directory {
+        return Err(KernelError::IsADirectory);
+    }
+    Ok(file.offset)
+}
+
 /// Write bytes to the file at the current offset (or at EOF if APPEND).
 ///
 /// Advances the offset by the number of bytes written.  Grows the

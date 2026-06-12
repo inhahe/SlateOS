@@ -5081,6 +5081,21 @@ fn sys_munmap(args: &SyscallArgs) -> SyscallResult {
     use crate::mm::frame::FRAME_SIZE;
 
     let len = args.arg1;
+
+    // Linux do_vmi_munmap (mm/mmap.c) computes
+    //   end = start + PAGE_ALIGN(len);
+    //   if (end == start) return -EINVAL;
+    // so a zero length (PAGE_ALIGN(0) == 0 → end == start) is EINVAL.
+    // Our native munmap treats size==0 as an idempotent no-op (returns 0),
+    // which is the OuRoS-native ABI; the Linux translator must instead
+    // report EINVAL.  An unaligned start also yields EINVAL on Linux
+    // (offset_in_page(start)), which the native handler already maps via
+    // BadAlignment → EINVAL — and when both apply the errno is identical,
+    // so gating len==0 here first is faithful in every case.
+    if len == 0 {
+        return linux_err(errno::EINVAL);
+    }
+
     let native_args = SyscallArgs {
         arg0: args.arg0,
         arg1: len,
@@ -5092,8 +5107,9 @@ fn sys_munmap(args: &SyscallArgs) -> SyscallResult {
     let result = linux_from_native(handlers::sys_munmap(&native_args));
 
     // Only refund on success: a failed munmap (e.g. EINVAL on a bad
-    // address) didn't actually take any pages back.
-    if result.value == 0 && len != 0 {
+    // address) didn't actually take any pages back.  (len == 0 already
+    // returned EINVAL above, so a success here always has len > 0.)
+    if result.value == 0 {
         let frame_size = FRAME_SIZE as u64;
         if let Some(len_aligned) = len
             .checked_add(frame_size - 1)
@@ -50344,6 +50360,30 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   mmap byte-offset page-alignment gate (batch 532): OK"
+        );
+
+        // munmap zero-length EINVAL (batch 533).  Linux do_vmi_munmap
+        // (mm/mmap.c) sets end = start + PAGE_ALIGN(len) and returns
+        // -EINVAL when end == start, so munmap(addr, 0) is EINVAL.  Our
+        // translator gates len==0 before the native call, which returns
+        // before touching any address space — dispatch a page-aligned
+        // addr with len=0 and assert EINVAL (no side effects).
+        {
+            let a = SyscallArgs {
+                arg0: 0x4000, // page-aligned addr (irrelevant; gated first)
+                arg1: 0,      // len == 0
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0,
+            };
+            if dispatch_linux(nr::MUNMAP, &a).value != i64::from(errno::EINVAL).wrapping_neg() {
+                serial_println!("[syscall/linux]   FAIL: munmap len==0 not EINVAL");
+                return Err(KernelError::InternalError);
+            }
+        }
+        serial_println!(
+            "[syscall/linux]   munmap zero-length EINVAL (batch 533): OK"
         );
 
         // adjtimex / clock_adjtime: batch 122 adds the modes=0 read

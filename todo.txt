@@ -52085,3 +52085,37 @@ Serial stamp "mmap byte-offset page-alignment gate (batch 532): OK".
 cargo build clean; clippy at 17477 baseline (EINVAL compare uses
 wrapping_neg); boot-test PASSED (BOOT_OK 25s, stamp present, no mmap
 FAILs).  Reversible (pure translator change; no PCB/state).
+
+================================================================
+ABI batch 533 — munmap zero-length EINVAL
+================================================================
+Date: 2026-06-12   Decided by: Claude (autonomous)
+File: kernel/src/syscall/linux.rs (translator only)
+
+Divergence: munmap(addr, 0) returned 0 (success) instead of EINVAL.
+The native munmap (handlers.rs:892) treats size==0 as an idempotent
+no-op — correct for the OuRoS-native ABI — but Linux rejects a
+zero-length unmap.
+
+Verbatim v6.6 citation (mm/mmap.c, do_vmi_munmap):
+  if ((offset_in_page(start)) || start > TASK_SIZE || len > TASK_SIZE-start)
+      return -EINVAL;
+  end = start + PAGE_ALIGN(len);
+  if (end == start)
+      return -EINVAL;
+For len==0, PAGE_ALIGN(0)==0 so end==start -> EINVAL.  (An unaligned
+start also EINVALs via offset_in_page; the native handler already maps
+that BadAlignment -> EINVAL, and since both produce the same errno,
+gating len==0 first in the translator is faithful in every combination.)
+
+Fix (translator-only): in sys_munmap, return EINVAL when len==0 before
+dispatching to the native handler.  Simplified the downstream AS-refund
+guard (`result.value == 0 && len != 0` -> `result.value == 0`) since
+len==0 now returns early.
+
+Tests: boot self-test dispatches munmap(addr=0x4000, len=0) and asserts
+EINVAL (the gate returns before the native path, so no address space is
+touched — side-effect-free).  Serial stamp "munmap zero-length EINVAL
+(batch 533): OK".  cargo build clean; clippy at 17477 baseline; boot-test
+PASSED (BOOT_OK 25s, stamp present, no munmap FAILs).  Reversible (pure
+translator change; no PCB/state).

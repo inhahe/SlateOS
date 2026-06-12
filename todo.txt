@@ -52119,3 +52119,54 @@ touched — side-effect-free).  Serial stamp "munmap zero-length EINVAL
 (batch 533): OK".  cargo build clean; clippy at 17477 baseline; boot-test
 PASSED (BOOT_OK 25s, stamp present, no munmap FAILs).  Reversible (pure
 translator change; no PCB/state).
+
+================================================================
+ABI batch 534 — readahead FMODE_READ gate (EBADF on write-only fd)
+================================================================
+Date: 2026-06-12   Decided by: Claude (autonomous)
+File: kernel/src/syscall/linux.rs (translator only)
+
+Divergence: sys_readahead accepted a write-only (O_WRONLY) descriptor
+and returned 0, where Linux returns EBADF.  We honoured the missing-fd
+EBADF and the file-type EINVAL gate, but skipped the "open for reading"
+check that sits between them.
+
+Verbatim v6.6 citation (mm/readahead.c, ksys_readahead):
+  ssize_t ksys_readahead(int fd, loff_t offset, size_t count)
+  {
+      ssize_t ret;
+      struct fd f;
+      ret = -EBADF;
+      f = fdget(fd);
+      if (!f.file || !(f.file->f_mode & FMODE_READ))
+          goto out;
+      ret = -EINVAL;
+      if (!f.file->f_mapping || !f.file->f_mapping->a_ops ||
+          !S_ISREG(file_inode(f.file)->i_mode))
+          goto out;
+      ret = vfs_fadvise(f.file, offset, count, POSIX_FADV_WILLNEED);
+  out:
+      fdput(f);
+      return ret;
+  }
+The FMODE_READ check (gate 1) is EBADF and runs ahead of the file-type
+EINVAL (gate 2).  FMODE_READ derives from OPEN_FMODE = (flags+1) &
+O_ACCMODE, so only the pure O_WRONLY access mode clears it.
+
+Fix (translator-only): added pure helper fd_access_is_readable(
+status_flags) -> bool (readable iff (status_flags & O_ACCMODE) !=
+O_WRONLY) and gated sys_readahead on it (EBADF) immediately after the
+fd lookup, before the HandleKind EINVAL check — matching Linux's gate
+order.  FdEntry.status_flags already records the open access mode.
+
+Tests: the full dispatch path is not reachable from the boot task —
+sys_readahead short-circuits to 0 when caller_pid() is None (kernel
+context) — so the boot self-test verifies the pure predicate
+fd_access_is_readable (the exact decision the EBADF gate makes):
+O_RDONLY, O_RDWR, and O_RDWR|O_APPEND are readable; pure O_WRONLY and
+O_WRONLY|O_APPEND are not.  Serial stamp "readahead FMODE_READ gate
+(batch 534): OK".  cargo build clean; clippy at 17477 baseline (a doc
+list-continuation lint required relocating the helper above the
+sys_readahead doc block so the two doc comments stay separate);
+boot-test PASSED (BOOT_OK 25s, stamp present, no readahead FAILs).
+Reversible (pure translator change; no PCB/state).

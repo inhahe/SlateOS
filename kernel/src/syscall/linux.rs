@@ -11315,6 +11315,19 @@ fn sys_fadvise64(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(0)
 }
 
+/// True when a descriptor opened with `status_flags` is readable, i.e.
+/// its access mode admits reads (the Linux `FMODE_READ` bit).
+///
+/// Linux derives `FMODE_READ` from `OPEN_FMODE`, computed as `(flags + 1)
+/// & O_ACCMODE`: read-only yields `FMODE_READ`, write-only yields
+/// `FMODE_WRITE`, and read-write yields both.  Only the pure write-only
+/// access mode clears `FMODE_READ`; every other access mode (and any
+/// non-access status bits layered on top) keeps it set.
+fn fd_access_is_readable(status_flags: u32) -> bool {
+    const O_ACCMODE: u32 = 0o3;
+    (status_flags & O_ACCMODE) != crate::proc::linux_fd::O_WRONLY
+}
+
 /// `readahead(fd, offset, count)` — advisory hint to populate the page
 /// cache for the byte range `[offset, offset+count)` of a regular file
 /// or block device.
@@ -11361,6 +11374,16 @@ fn sys_readahead(args: &SyscallArgs) -> SyscallResult {
         Some(e) => e,
         None => return linux_err(errno::EBADF),
     };
+    // Gate 1b (Linux): the fd must be open for reading.  ksys_readahead
+    // (mm/readahead.c) starts with `ret = -EBADF; if (!f.file ||
+    // !(f.file->f_mode & FMODE_READ)) goto out;` — a write-only
+    // (O_WRONLY) descriptor is rejected with EBADF, and this gate runs
+    // BEFORE the file-type EINVAL check below.  Pre-batch we skipped it,
+    // so readahead on an O_WRONLY regular file returned 0 instead of
+    // EBADF.
+    if !fd_access_is_readable(entry.status_flags) {
+        return linux_err(errno::EBADF);
+    }
     // Gate 2 (Linux): backing must be a regular file or block device.
     // Reject anything without an address_space equivalent — pipes,
     // eventfd, pidfd, console — with EINVAL.
@@ -50384,6 +50407,32 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   munmap zero-length EINVAL (batch 533): OK"
+        );
+
+        // readahead FMODE_READ gate (batch 534).  ksys_readahead
+        // (mm/readahead.c) returns -EBADF when the fd is not open for
+        // reading (a write-only descriptor), ahead of its file-type
+        // EINVAL check.  The full dispatch path is not reachable from the
+        // boot task — sys_readahead short-circuits to 0 when caller_pid()
+        // is None (kernel context) — so verify the pure access-mode
+        // predicate fd_access_is_readable, which is exactly the decision
+        // the EBADF gate makes.  O_RDONLY(0)/O_RDWR(2) and read modes with
+        // extra status bits are readable; pure O_WRONLY(1) is not.
+        {
+            use crate::proc::linux_fd::{O_RDWR, O_WRONLY};
+            const O_APPEND: u32 = 0o2000;
+            if !fd_access_is_readable(0) // O_RDONLY
+                || !fd_access_is_readable(O_RDWR)
+                || !fd_access_is_readable(O_RDWR | O_APPEND)
+                || fd_access_is_readable(O_WRONLY)
+                || fd_access_is_readable(O_WRONLY | O_APPEND)
+            {
+                serial_println!("[syscall/linux]   FAIL: readahead FMODE_READ predicate wrong");
+                return Err(KernelError::InternalError);
+            }
+        }
+        serial_println!(
+            "[syscall/linux]   readahead FMODE_READ gate (batch 534): OK"
         );
 
         // adjtimex / clock_adjtime: batch 122 adds the modes=0 read

@@ -36,6 +36,7 @@ pub mod signalfd;
 pub mod stats;
 pub mod stream_socket;
 pub mod timer;
+pub mod timerfd;
 
 // TODO: Splice/vmsplice for pipes.
 
@@ -82,6 +83,9 @@ pub fn cleanup_handles(handles: &[(ResourceType, u64)]) {
             }
             ResourceType::SignalFd => {
                 signalfd::close(signalfd::SignalFdHandle::from_raw(handle_raw));
+            }
+            ResourceType::Timerfd => {
+                timerfd::close(timerfd::TimerFdHandle::from_raw(handle_raw));
             }
             ResourceType::File => {
                 // Open file handles are refcounted in the open-file table;

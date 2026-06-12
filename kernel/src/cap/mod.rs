@@ -170,6 +170,14 @@ pub enum ResourceType {
     /// released when an owning process dies, and so `fork()` knows to bump
     /// the refcount in the child.
     SignalFd = 19,
+    /// A timerfd instance (Linux `timerfd_create`/`settime`/`gettime`).
+    ///
+    /// A refcounted reference into [`crate::ipc::timerfd`] holding an armed
+    /// timer (clock id, next expiry, interval); no capability is required to
+    /// create one — the handle itself is the authority.  Tracked per-process
+    /// so the instance is released when an owning process dies, and so
+    /// `fork()` knows to bump the refcount in the child.
+    Timerfd = 20,
 }
 
 // ---------------------------------------------------------------------------

@@ -572,6 +572,17 @@ extern "C" fn kernel_main() -> ! {
         cpu::halt_loop();
     }
 
+    // Step 15a (cont.): Timerfd subsystem.
+    // A timerfd object holds an armed-timer state (clock id, next expiry,
+    // interval); reads return the lazily-computed expiration count.  This
+    // self-test exercises the pure expiry math (one-shot/periodic/overdue),
+    // arm/disarm/query, dup/close refcounting with shared armed state, and
+    // stale-handle safety.
+    if let Err(e) = ipc::timerfd::self_test() {
+        serial_println!("FATAL: Timerfd self-test failed: {}", e);
+        cpu::halt_loop();
+    }
+
     // Step 15b: Memfd subsystem.
     // Anonymous in-memory regular file backing memfd_create(2).  Exercises
     // create/close/dup refcounting, read/write/seek, pread/pwrite,

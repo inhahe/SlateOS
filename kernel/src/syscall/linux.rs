@@ -2591,6 +2591,21 @@ pub fn close_handle(entry: FdEntry) -> SyscallResult {
             crate::ipc::signalfd::close(h);
             SyscallResult::ok(0)
         }
+        HandleKind::Timerfd => {
+            // Deregister from the per-process ipc_handles list — same
+            // rationale as the EventFd/MemFd/Epoll/SignalFd arms above —
+            // then drop one refcount on the in-kernel timerfd instance.
+            if let Some(pid) = caller_pid() {
+                pcb::deregister_ipc_handle(
+                    pid,
+                    crate::cap::ResourceType::Timerfd,
+                    entry.raw_handle,
+                );
+            }
+            let h = crate::ipc::timerfd::TimerFdHandle::from_raw(entry.raw_handle);
+            crate::ipc::timerfd::close(h);
+            SyscallResult::ok(0)
+        }
     }
 }
 
@@ -2647,8 +2662,10 @@ fn dispatch_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
             linux_from_native(handlers::sys_pipe_write(&a))
         }
         HandleKind::EventFd => dispatch_eventfd_write(entry, buf, len),
-        // signalfd is read-only: write(2) always returns EINVAL.
-        HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd => linux_err(errno::EINVAL),
+        // signalfd and timerfd are read-only: write(2) always returns EINVAL.
+        HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd => {
+            linux_err(errno::EINVAL)
+        }
         HandleKind::MemFd => dispatch_memfd_write(entry, buf, len),
     }
 }
@@ -2831,6 +2848,7 @@ fn dispatch_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
         HandleKind::PidFd | HandleKind::Epoll => linux_err(errno::EINVAL),
         HandleKind::MemFd => dispatch_memfd_read(entry, buf, cap),
         HandleKind::SignalFd => dispatch_signalfd_read(entry, buf, cap),
+        HandleKind::Timerfd => dispatch_timerfd_read(entry, buf, cap),
     }
 }
 
@@ -2905,6 +2923,47 @@ fn dispatch_signalfd_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
     }
     #[allow(clippy::cast_possible_wrap)]
     SyscallResult::ok(n as i64)
+}
+
+/// timerfd read: return the 8-byte `u64` count of expirations since the last
+/// read (host-endian), exactly as Linux's `timerfd_read`.
+///
+/// Semantics:
+///   * `cap < 8` → EINVAL (Linux requires room for the `u64`).
+///   * If one or more expirations are pending, consume them (resetting the
+///     count to 0) and return 8.
+///   * If none are pending: `O_NONBLOCK` → EAGAIN.  A blocking read also
+///     returns EAGAIN rather than sleeping — the kernel has no timer-arrival
+///     wakeup path (the same documented shortcut as `signalfd` /
+///     `rt_sigtimedwait`; see todo.txt).  In practice a timerfd is read after
+///     `poll`/`epoll` reports it readable, so an expiration is already pending
+///     on entry.
+fn dispatch_timerfd_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
+    const U64_SIZE: usize = 8;
+    if (cap as usize) < U64_SIZE {
+        return linux_err(errno::EINVAL);
+    }
+    let handle = crate::ipc::timerfd::TimerFdHandle::from_raw(entry.raw_handle);
+    let count = match crate::ipc::timerfd::read_expirations(handle) {
+        Some(c) => c,
+        None => return linux_err(errno::EBADF),
+    };
+    if count == 0 {
+        // Not yet expired.  Blocking and non-blocking both surface EAGAIN
+        // (no timer-arrival wakeup path — see doc comment).
+        return linux_err(errno::EAGAIN);
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(buf, U64_SIZE) {
+        return linux_err(linux_errno_for(e));
+    }
+    let bytes = count.to_ne_bytes();
+    // SAFETY: validate_user_write confirmed [buf, +8) is writable.
+    let r = unsafe { crate::mm::user::copy_to_user(bytes.as_ptr(), buf, U64_SIZE) };
+    if let Err(e) = r {
+        return linux_err(linux_errno_for(e));
+    }
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(U64_SIZE as i64)
 }
 
 /// `write(fd, buf, count)` — consults the per-process Linux fd table.
@@ -3723,7 +3782,8 @@ fn fcntl_flock_apply(
         | HandleKind::EventFd
         | HandleKind::PidFd
         | HandleKind::Epoll
-        | HandleKind::SignalFd => {
+        | HandleKind::SignalFd
+        | HandleKind::Timerfd => {
             return linux_err(errno::EBADF);
         }
     }
@@ -3858,7 +3918,7 @@ fn sys_lseek(args: &SyscallArgs) -> SyscallResult {
                 Err(e) => linux_err(linux_errno_for(e)),
             }
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd => linux_err(errno::ESPIPE),
     }
 }
 
@@ -10269,7 +10329,7 @@ fn sys_fsync(args: &SyscallArgs) -> SyscallResult {
     };
     match entry.kind {
         HandleKind::File | HandleKind::MemFd => SyscallResult::ok(0),
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd => linux_err(errno::EINVAL),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd => linux_err(errno::EINVAL),
     }
 }
 
@@ -11124,7 +11184,8 @@ fn sys_readahead(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::EventFd
         | HandleKind::PidFd
         | HandleKind::Epoll
-        | HandleKind::SignalFd => return linux_err(errno::EINVAL),
+        | HandleKind::SignalFd
+        | HandleKind::Timerfd => return linux_err(errno::EINVAL),
     }
     SyscallResult::ok(0)
 }
@@ -12665,6 +12726,8 @@ fn fill_stat_for_fd(
         HandleKind::Epoll => (S_IFREG | 0o600, 4096),
         // signalfd is an anon_inode like epoll/eventfd.
         HandleKind::SignalFd => (S_IFREG | 0o600, 4096),
+        // timerfd is an anon_inode like signalfd/epoll/eventfd.
+        HandleKind::Timerfd => (S_IFREG | 0o600, 4096),
     };
 
     // Inode: use the raw_handle as a stable-ish identity.
@@ -12948,6 +13011,8 @@ fn fill_statx_for_fd(
         HandleKind::Epoll => ((S_IFREG | 0o600) as u16, 4096),
         // signalfd anon_inode — S_IFREG | 0600, like epoll/eventfd.
         HandleKind::SignalFd => ((S_IFREG | 0o600) as u16, 4096),
+        // timerfd anon_inode — S_IFREG | 0600, like signalfd/epoll/eventfd.
+        HandleKind::Timerfd => ((S_IFREG | 0o600) as u16, 4096),
     };
     let st_ino: u64 = entry.raw_handle;
     // Surface the live memfd data length so stx_size reflects what callers
@@ -14107,9 +14172,9 @@ fn sys_ftruncate(args: &SyscallArgs) -> SyscallResult {
                 Err(_) => linux_err(errno::EIO),
             }
         }
-        // Pipes, consoles, eventfds, pidfds, epoll, signalfds cannot be
-        // truncated.
-        HandleKind::Pipe | HandleKind::Console | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd => linux_err(errno::EINVAL),
+        // Pipes, consoles, eventfds, pidfds, epoll, signalfds, timerfds cannot
+        // be truncated.
+        HandleKind::Pipe | HandleKind::Console | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd => linux_err(errno::EINVAL),
     }
 }
 
@@ -14802,7 +14867,44 @@ fn sys_timerfd_create(args: &SyscallArgs) -> SyscallResult {
     if matches!(clockid, 8 | 9) {
         return linux_err(errno::EPERM);
     }
-    linux_err(errno::ENOSYS)
+
+    // Real backend: create a disarmed timerfd instance, register it in the
+    // caller's per-process ipc_handles list, and install an fd.  Mirrors
+    // signalfd_common's create path (refcount-1 object + register + install
+    // with rollback on table-full).
+    let caller = match caller_pid() {
+        Some(p) => p,
+        None => return linux_err(errno::EBADF),
+    };
+    let handle = crate::ipc::timerfd::create(clockid);
+    pcb::register_ipc_handle(
+        caller,
+        crate::cap::ResourceType::Timerfd,
+        handle.raw(),
+    );
+    let fd_flags = if flags & TFD_CLOEXEC != 0 {
+        crate::proc::linux_fd::FD_CLOEXEC
+    } else {
+        0
+    };
+    let status_flags = if flags & TFD_NONBLOCK != 0 {
+        oflags::O_NONBLOCK
+    } else {
+        0
+    };
+    let entry = crate::proc::linux_fd::FdEntry::timerfd(handle.raw(), fd_flags, status_flags);
+    match pcb::linux_fd_install(caller, entry, 0) {
+        Ok(new_fd) => SyscallResult::ok(i64::from(new_fd)),
+        Err(e) => {
+            pcb::deregister_ipc_handle(
+                caller,
+                crate::cap::ResourceType::Timerfd,
+                handle.raw(),
+            );
+            crate::ipc::timerfd::close(handle);
+            linux_err(linux_errno_for(e))
+        }
+    }
 }
 
 /// `timerfd_settime(fd, flags, new_value, old_value)`.
@@ -14906,28 +15008,84 @@ fn sys_timerfd_settime(args: &SyscallArgs) -> SyscallResult {
         return linux_err(errno::EINVAL);
     }
 
-    // Gate 3 (timerfd_fget): unknown fd -> EBADF.  No timerfd fds
-    // exist in our kernel, so any fd reference is bad.
+    // Gate 3 (timerfd_fget): unknown fd -> EBADF; an fd that isn't a
+    // timerfd -> EINVAL (Linux's f.file->f_op != &timerfd_fops check).
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
     let pid = match caller_pid() {
         Some(p) => p,
         None => return linux_err(errno::EBADF),
     };
-    if pcb::linux_fd_lookup(pid, fd).is_none() {
-        return linux_err(errno::EBADF);
+    let entry = match pcb::linux_fd_lookup(pid, fd) {
+        Some(e) => e,
+        None => return linux_err(errno::EBADF),
+    };
+    if entry.kind != crate::proc::linux_fd::HandleKind::Timerfd {
+        return linux_err(errno::EINVAL);
     }
 
-    // Gate 5 (put_itimerspec64 at the very end): validate otmr if
-    // provided.  Linux performs this AFTER the timer is set, so
-    // this fires last.  A NULL otmr is allowed (Linux skips the put).
+    // Combine sec/nsec into absolute-ns values.  The Gate-2 validity check
+    // above already bounded nsec to [0, 1e9) and sec to >= 0, so each
+    // product fits the saturating math; a value so large it would overflow
+    // simply pins at u64::MAX (a timer that effectively never fires).
+    #[allow(clippy::cast_sign_loss)]
+    let to_ns = |sec: i64, nsec: i64| -> u64 {
+        (sec as u64)
+            .saturating_mul(NSEC_PER_SEC as u64)
+            .saturating_add(nsec as u64)
+    };
+    let value_ns = to_ns(it_value_sec, it_value_nsec);
+    let interval_ns = to_ns(it_interval_sec, it_interval_nsec);
+    let abstime = flags & 1 != 0; // TFD_TIMER_ABSTIME
+
+    let handle = crate::ipc::timerfd::TimerFdHandle::from_raw(entry.raw_handle);
+    let (old_value_ns, old_interval_ns) =
+        match crate::ipc::timerfd::settime(handle, abstime, value_ns, interval_ns) {
+            Ok(old) => old,
+            Err(e) => return linux_err(linux_errno_for(e)),
+        };
+
+    // Gate 5 (put_itimerspec64 at the very end): write the previous setting
+    // back through otmr if provided.  Linux performs this AFTER the timer is
+    // set, so a bad otmr is the last possible failure mode.  A NULL otmr is
+    // allowed (Linux skips the put).
     if args.arg3 != 0 {
         if let Err(e) = crate::mm::user::validate_user_write(args.arg3, 32) {
             return linux_err(linux_errno_for(e));
         }
+        if let Err(e) = write_itimerspec(args.arg3, old_value_ns, old_interval_ns) {
+            return linux_err(linux_errno_for(e));
+        }
     }
-    // Even if the fd refers to a real fd, it isn't a timerfd, so:
-    linux_err(errno::EINVAL)
+    SyscallResult::ok(0)
+}
+
+/// Serialise an `(it_value_ns, it_interval_ns)` pair into the 32-byte
+/// `struct itimerspec` at `ptr` (it_interval first, then it_value, each a
+/// `struct timespec` of two little-endian i64s `{tv_sec, tv_nsec}`).
+///
+/// Caller must have validated `ptr..ptr+32` as user-writable.
+fn write_itimerspec(
+    ptr: u64,
+    it_value_ns: u64,
+    it_interval_ns: u64,
+) -> crate::error::KernelResult<()> {
+    const NSEC_PER_SEC: u64 = 1_000_000_000;
+    let mut buf = [0u8; 32];
+    let mut put = |off: usize, total_ns: u64| {
+        let sec = total_ns / NSEC_PER_SEC;
+        let nsec = total_ns % NSEC_PER_SEC;
+        #[allow(clippy::cast_possible_wrap)]
+        buf[off..off + 8].copy_from_slice(&(sec as i64).to_ne_bytes());
+        #[allow(clippy::cast_possible_wrap)]
+        buf[off + 8..off + 16].copy_from_slice(&(nsec as i64).to_ne_bytes());
+    };
+    // it_interval at offset 0, it_value at offset 16.
+    put(0, it_interval_ns);
+    put(16, it_value_ns);
+    // SAFETY: copy_to_user validates the destination range itself; caller has
+    // already validated it as well.  Arg order is (kernel_src, user_dst, len).
+    unsafe { crate::mm::user::copy_to_user(buf.as_ptr(), ptr, 32) }
 }
 
 /// `timerfd_gettime(fd, curr_value)`.
@@ -14944,8 +15102,13 @@ fn sys_timerfd_gettime(args: &SyscallArgs) -> SyscallResult {
         Some(p) => p,
         None => return linux_err(errno::EBADF),
     };
-    if pcb::linux_fd_lookup(pid, fd).is_none() {
-        return linux_err(errno::EBADF);
+    let entry = match pcb::linux_fd_lookup(pid, fd) {
+        Some(e) => e,
+        None => return linux_err(errno::EBADF),
+    };
+    // f_op != &timerfd_fops -> EINVAL (an fd that isn't a timerfd).
+    if entry.kind != crate::proc::linux_fd::HandleKind::Timerfd {
+        return linux_err(errno::EINVAL);
     }
     let curr_ptr = args.arg1;
     if curr_ptr == 0 {
@@ -14954,7 +15117,16 @@ fn sys_timerfd_gettime(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = crate::mm::user::validate_user_write(curr_ptr, 32) {
         return linux_err(linux_errno_for(e));
     }
-    linux_err(errno::EINVAL)
+    let handle = crate::ipc::timerfd::TimerFdHandle::from_raw(entry.raw_handle);
+    let (value_ns, interval_ns) = match crate::ipc::timerfd::gettime(handle) {
+        Some(v) => v,
+        // Handle vanished between lookup and query (concurrent close): EBADF.
+        None => return linux_err(errno::EBADF),
+    };
+    if let Err(e) = write_itimerspec(curr_ptr, value_ns, interval_ns) {
+        return linux_err(linux_errno_for(e));
+    }
+    SyscallResult::ok(0)
 }
 
 /// `inotify_init()`.
@@ -17364,6 +17536,12 @@ fn sys_pidfd_getfd(args: &SyscallArgs) -> SyscallResult {
                 return linux_err(errno::EBADF);
             }
         }
+        HandleKind::Timerfd => {
+            let h = crate::ipc::timerfd::TimerFdHandle::from_raw(entry.raw_handle);
+            if crate::ipc::timerfd::dup(h).is_err() {
+                return linux_err(errno::EBADF);
+            }
+        }
     }
 
     // Linux always sets FD_CLOEXEC on the new fd, regardless of the
@@ -17398,6 +17576,7 @@ fn sys_pidfd_getfd(args: &SyscallArgs) -> SyscallResult {
         HandleKind::MemFd => Some(crate::cap::ResourceType::MemFd),
         HandleKind::Epoll => Some(crate::cap::ResourceType::Epoll),
         HandleKind::SignalFd => Some(crate::cap::ResourceType::SignalFd),
+        HandleKind::Timerfd => Some(crate::cap::ResourceType::Timerfd),
         HandleKind::Console | HandleKind::PidFd => None,
     };
     if let Some(rt) = resource {
@@ -17460,6 +17639,10 @@ fn release_handle_ref(kind: HandleKind, raw_handle: u64) {
         HandleKind::SignalFd => {
             let h = crate::ipc::signalfd::SignalFdHandle::from_raw(raw_handle);
             crate::ipc::signalfd::close(h);
+        }
+        HandleKind::Timerfd => {
+            let h = crate::ipc::timerfd::TimerFdHandle::from_raw(raw_handle);
+            crate::ipc::timerfd::close(h);
         }
     }
 }
@@ -20148,6 +20331,20 @@ fn poll_revents_from_entry(
                 None => 0,
             }
         }
+        HandleKind::Timerfd => {
+            // A timerfd is readable exactly when its expiration count is
+            // non-zero — purely a function of the current time versus the
+            // armed expiry, with no dependence on any process state.  So
+            // (unlike signalfd) it needs no owner pid: the readiness check
+            // is identical in the real poll/epoll path and in self-tests.
+            if crate::ipc::timerfd::is_readable(
+                crate::ipc::timerfd::TimerFdHandle::from_raw(entry.raw_handle),
+            ) {
+                poll_bits::POLLIN | poll_bits::POLLRDNORM
+            } else {
+                0
+            }
+        }
     };
 
     raw & mask
@@ -20928,7 +21125,8 @@ fn sys_epoll_ctl(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::EventFd
         | HandleKind::PidFd
         | HandleKind::Epoll
-        | HandleKind::SignalFd => {}
+        | HandleKind::SignalFd
+        | HandleKind::Timerfd => {}
     }
 
     // Gate 5: f.file == tf.file || !is_file_epoll(f.file) -> EINVAL.
@@ -23820,6 +24018,7 @@ fn handle_kind_ord(k: crate::proc::linux_fd::HandleKind) -> u64 {
         HandleKind::MemFd => 5,
         HandleKind::Epoll => 6,
         HandleKind::SignalFd => 7,
+        HandleKind::Timerfd => 8,
     }
 }
 
@@ -24792,7 +24991,7 @@ fn sys_cachestat(args: &SyscallArgs) -> SyscallResult {
                 // memfd is page-cache-backed on Linux, so cachestat is
                 // valid against it (always zero in our world).
                 HandleKind::File | HandleKind::MemFd => {}
-                HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd => {
+                HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd => {
                     return linux_err(errno::EOPNOTSUPP);
                 }
             }
@@ -29162,7 +29361,7 @@ fn sys_pread64(args: &SyscallArgs) -> SyscallResult {
                 Err(e) => linux_err(e),
             }
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd => linux_err(errno::ESPIPE),
     }
 }
 
@@ -29219,7 +29418,7 @@ fn sys_pwrite64(args: &SyscallArgs) -> SyscallResult {
                 Err(e) => linux_err(e),
             }
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd => linux_err(errno::ESPIPE),
     }
 }
 
@@ -30437,7 +30636,7 @@ fn sys_preadv(args: &SyscallArgs) -> SyscallResult {
             let off = offset as u64;
             preadv_memfd_walk(entry.raw_handle, off, iov_ptr, iovcnt)
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd => linux_err(errno::ESPIPE),
     }
 }
 
@@ -30468,7 +30667,7 @@ fn sys_pwritev(args: &SyscallArgs) -> SyscallResult {
             let off = offset as u64;
             pwritev_memfd_walk(entry.raw_handle, off, iov_ptr, iovcnt)
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd => linux_err(errno::ESPIPE),
     }
 }
 
@@ -30530,7 +30729,7 @@ fn sys_preadv2(args: &SyscallArgs) -> SyscallResult {
             let off = offset as u64;
             preadv_memfd_walk(entry.raw_handle, off, iov_ptr, iovcnt)
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd => linux_err(errno::ESPIPE),
     }
 }
 
@@ -30574,7 +30773,7 @@ fn sys_pwritev2(args: &SyscallArgs) -> SyscallResult {
             let off = offset as u64;
             pwritev_memfd_walk(entry.raw_handle, off, iov_ptr, iovcnt)
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd => linux_err(errno::ESPIPE),
     }
 }
 
@@ -43751,6 +43950,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 HandleKind::MemFd => Some(crate::cap::ResourceType::MemFd),
                 HandleKind::Epoll => Some(crate::cap::ResourceType::Epoll),
                 HandleKind::SignalFd => Some(crate::cap::ResourceType::SignalFd),
+                HandleKind::Timerfd => Some(crate::cap::ResourceType::Timerfd),
                 HandleKind::Console | HandleKind::PidFd => None,
             }
         };
@@ -51669,12 +51869,17 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: timerfd_create(bad flag) not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // timerfd_create(CLOCK_MONOTONIC, 0) -> ENOSYS.
+        // timerfd_create(CLOCK_MONOTONIC, 0): clockid + flags both valid,
+        // so it reaches the real backend, which needs a caller process to
+        // install the fd into.  The boot self-test runs in kernel context
+        // (`caller_pid()` is None), so the create surfaces EBADF.  Under a
+        // real Linux-ABI process this returns a fresh timerfd fd.  Pre-
+        // backend this asserted ENOSYS.
         let a = SyscallArgs { arg0: 1, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::TIMERFD_CREATE, &a).value
-            != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: timerfd_create not ENOSYS");
+            != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: timerfd_create(valid) not EBADF");
             return Err(KernelError::InternalError);
         }
         // Batch 515: timerfd_create(CLOCK_REALTIME_ALARM=8, 0) -> EPERM.
@@ -54476,7 +54681,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         // (b) timerfd_create: clockid=CLOCK_MONOTONIC,
         //     flags = 0x1_0000_0800 (high bit 32 + TFD_NONBLOCK).
-        //     Linux truncates -> ENOSYS.  Pre-batch: EINVAL.
+        //     Linux truncates the flags to TFD_NONBLOCK and proceeds; our
+        //     real backend then needs a caller process to install the fd
+        //     into, and the boot self-test runs in kernel context where
+        //     `caller_pid()` is None, so it surfaces EBADF.  The point of
+        //     the test is that the high-half does NOT leak into the flag
+        //     mask: if it did, the flag-mask gate would return EINVAL
+        //     *before* the caller-pid check.  EBADF (not EINVAL) confirms
+        //     the truncation.  Pre-backend this asserted ENOSYS.
         let a = SyscallArgs {
             arg0: 1,
             arg1: 0x1_0000_0800,
@@ -54485,7 +54697,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             arg4: 0,
             arg5: 0,
         };
-        if dispatch_linux(nr::TIMERFD_CREATE, &a).value != -i64::from(errno::ENOSYS) {
+        if dispatch_linux(nr::TIMERFD_CREATE, &a).value != -i64::from(errno::EBADF) {
             serial_println!(
                 "[syscall/linux]   FAIL: timerfd_create flags high-half not truncated"
             );

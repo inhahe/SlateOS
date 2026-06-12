@@ -124,6 +124,13 @@ pub enum HandleKind {
     /// `O_NONBLOCK` when created with `SFD_NONBLOCK`.  Close releases one
     /// refcount on the in-kernel `SIGNALFD_TABLE` entry.
     SignalFd,
+    /// timerfd instance — Linux `timerfd_create`/`settime`/`gettime`.
+    /// `raw_handle` holds the `ipc::timerfd::TimerFdHandle` raw u64.
+    /// `read` returns the 8-byte expiration count (and resets it);
+    /// `write` returns `EINVAL`.  `status_flags` carries `O_NONBLOCK`
+    /// when created with `TFD_NONBLOCK`.  Close releases one refcount on
+    /// the in-kernel `TIMERFD_TABLE` entry.
+    Timerfd,
 }
 
 impl HandleKind {
@@ -133,9 +140,13 @@ impl HandleKind {
     pub const fn needs_kernel_close(self) -> bool {
         match self {
             Self::Console | Self::PidFd => false,
-            Self::File | Self::Pipe | Self::EventFd | Self::MemFd | Self::Epoll | Self::SignalFd => {
-                true
-            }
+            Self::File
+            | Self::Pipe
+            | Self::EventFd
+            | Self::MemFd
+            | Self::Epoll
+            | Self::SignalFd
+            | Self::Timerfd => true,
         }
     }
 }
@@ -285,6 +296,22 @@ impl FdEntry {
     pub const fn signalfd(handle: u64, fd_flags: u32, status_flags: u32) -> Self {
         Self {
             kind: HandleKind::SignalFd,
+            raw_handle: handle,
+            fd_flags,
+            status_flags,
+            f_owner: 0,
+            f_owner_sig: 0,
+        }
+    }
+
+    /// Construct an entry for a timerfd instance.  `raw_handle` is the
+    /// `ipc::timerfd::TimerFdHandle` raw u64.  `fd_flags` carries
+    /// `FD_CLOEXEC` when created with `TFD_CLOEXEC`; `status_flags`
+    /// carries `O_NONBLOCK` when created with `TFD_NONBLOCK`.
+    #[must_use]
+    pub const fn timerfd(handle: u64, fd_flags: u32, status_flags: u32) -> Self {
+        Self {
+            kind: HandleKind::Timerfd,
             raw_handle: handle,
             fd_flags,
             status_flags,

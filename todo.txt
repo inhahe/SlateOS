@@ -18,6 +18,38 @@
 ##   newly-pending signal; the signalfd read path and rt_sigtimedwait would block on
 ##   that queue instead of returning EAGAIN.  Shared infra benefits both call sites.
 ##
+## LIMITATION (2026-06-12): kernel-level timerfd blocking read returns EAGAIN
+## The new kernel Linux-ABI timerfd (kernel/src/ipc/timerfd.rs + the
+## HandleKind::Timerfd wiring in kernel/src/syscall/linux.rs) uses a lazy-expiry
+## model: no background hrtimer fires per timerfd; the expiration count is computed
+## on demand from the current clock at read/poll/gettime.  A read of an unexpired
+## timerfd returns EAGAIN even for a BLOCKING (non-TFD_NONBLOCK) fd, because — like
+## signalfd — this kernel has no timer-arrival wakeup path to park a reader on.
+##   WHY: same shortcut as signalfd / rt_sigtimedwait.  Without a per-timerfd
+##   wait-queue armed to fire at expiry_ns, a blocking read cannot sleep "until the
+##   timer fires"; it would have to busy-poll.  EAGAIN is the honest answer.
+##   IMPACT: low — the canonical timerfd idiom is poll/select/epoll on the fd, then
+##   read() once POLLIN fires; that works fully (is_readable reports readiness purely
+##   from the clock).  Only a bare blocking read() that expects to sleep until expiry
+##   spins (EAGAIN) instead — a rare idiom.
+##   FIX: schedule a real hrtimer (or reuse the timer wheel) at expiry_ns that wakes
+##   a per-timerfd wait-queue; the read path blocks on that queue instead of returning
+##   EAGAIN.  Could share the same wait-queue infra as the signalfd fix above.
+##
+## LIMITATION (2026-06-12): kernel-level timerfd TFD_TIMER_CANCEL_ON_SET not implemented
+## timerfd_settime accepts the TFD_TIMER_CANCEL_ON_SET flag (bit 1) without error,
+## but the cancel-on-clock-step behavior is NOT implemented: on Linux, a CLOCK_REALTIME
+## timerfd armed with an absolute expiry and this flag is "cancelled" (read returns
+## ECANCELED, poll reports EPOLLERR) if the system realtime clock is discontinuously
+## changed (settimeofday/clock_settime/NTP step).  We have no clock-step notification
+## hook, so the flag is silently a no-op.
+##   IMPACT: very low — the flag exists mainly for libc internals (glibc's absolute
+##   CLOCK_REALTIME condvar waits) to detect clock jumps; few apps depend on it, and
+##   this kernel rarely steps the realtime clock at runtime.
+##   FIX: maintain a generation counter bumped on every realtime-clock step; stamp it
+##   into the timerfd at settime when CANCEL_ON_SET is set; on read/poll, if the
+##   counter advanced, return ECANCELED / EPOLLERR and disarm.
+##
 ## LIMITATION (2026-06-12): kernel-level epoll nesting in poll/select unsupported
 ## The new kernel Linux-ABI epoll (kernel/src/ipc/epoll.rs + the HandleKind::Epoll
 ## wiring in kernel/src/syscall/linux.rs) reuses the shared poll_revents_from_entry

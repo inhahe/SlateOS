@@ -29813,6 +29813,13 @@ fn sys_mremap(args: &SyscallArgs) -> SyscallResult {
 ///   6. COLLAPSE_RANGE && (mode & ~COLLAPSE_RANGE)         → -EINVAL
 ///   7. INSERT_RANGE  && (mode & ~INSERT_RANGE)            → -EINVAL
 ///   8. UNSHARE_RANGE && (mode & ~(UNSHARE|KEEP_SIZE))     → -EINVAL
+///   9. !(f->f_mode & FMODE_WRITE)                         → -EBADF
+///
+/// Gate 9 (the FMODE_WRITE check) sits AFTER all the mode-validation
+/// gates in `vfs_fallocate`, so a read-only fd with an *invalid* mode
+/// still surfaces the mode error first; only a read-only fd with an
+/// otherwise-valid mode reaches the EBADF.  It precedes the terminal
+/// EOPNOTSUPP we return for "no `f_op->fallocate`".
 ///
 /// Note the errno discriminators: unknown-mode-bits and the
 /// PUNCH/ZERO/PUNCH-needs-KEEP_SIZE gates return EOPNOTSUPP (filesystem
@@ -29889,6 +29896,23 @@ fn sys_fallocate(args: &SyscallArgs) -> SyscallResult {
     // an allocate-mode modifier).  Any other bit is rejected.
     if mode & UNSHARE_RANGE != 0 && mode & !(UNSHARE_RANGE | KEEP_SIZE) != 0 {
         return linux_err(errno::EINVAL);
+    }
+    // (9) FMODE_WRITE check (vfs_fallocate, fs/open.c):
+    //   if (!(file->f_mode & FMODE_WRITE)) return -EBADF;
+    // positioned AFTER every mode-validation gate above (so an invalid
+    // mode still wins) and BEFORE the terminal EOPNOTSUPP for "no
+    // f_op->fallocate".  A read-only fd with an otherwise-valid mode is
+    // therefore EBADF, not EOPNOTSUPP.  validate_linux_fd already proved
+    // the fd exists; here we re-lookup to read its access mode.  In
+    // kernel context caller_pid() is None (and validate_linux_fd returned
+    // Ok unconditionally), so the access mode is unconsultable there —
+    // real callers always carry a pid.
+    if let Some(pid) = caller_pid() {
+        if let Some(entry) = pcb::linux_fd_lookup(pid, fd) {
+            if !fd_access_is_writable(entry.status_flags) {
+                return linux_err(errno::EBADF);
+            }
+        }
     }
     // Our VFS doesn't expose fallocate; calls fall through to
     // ftruncate-equivalent semantics elsewhere.  Most callers (sqlite,
@@ -50486,6 +50510,59 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   ftruncate FMODE_WRITE gate (batch 535): OK"
+        );
+
+        // fallocate FMODE_WRITE gate (batch 536).  vfs_fallocate
+        // (fs/open.c) returns -EBADF for a read-only fd, positioned AFTER
+        // the mode-validation gates and BEFORE the terminal EOPNOTSUPP.
+        // The EBADF path itself is not reachable from the boot task —
+        // caller_pid() is None there, so the access mode is unconsultable
+        // and the gate is skipped — but we can still confirm (a) a
+        // valid-mode dispatch falls through to the terminal EOPNOTSUPP
+        // (the new gate does not fire spuriously when the mode is
+        // unconsultable), (b) the mode-validation discriminators ahead of
+        // it still win (unknown bit -> EOPNOTSUPP; COLLAPSE+KEEP_SIZE ->
+        // EINVAL), and (c) the predicate fd_access_is_writable the gate
+        // consults is correct.
+        {
+            // (a) valid mode, len>0 -> EOPNOTSUPP terminal.
+            let a = SyscallArgs {
+                arg0: 0, arg1: 0, arg2: 0, arg3: 0x4000, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::FALLOCATE, &a).value
+                != i64::from(errno::EOPNOTSUPP).wrapping_neg()
+            {
+                serial_println!("[syscall/linux]   FAIL: fallocate valid-mode not EOPNOTSUPP");
+                return Err(KernelError::InternalError);
+            }
+            // (b1) unknown mode bit (0x80) -> EOPNOTSUPP (gate 3).
+            let b1 = SyscallArgs {
+                arg0: 0, arg1: 0x80, arg2: 0, arg3: 0x4000, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::FALLOCATE, &b1).value
+                != i64::from(errno::EOPNOTSUPP).wrapping_neg()
+            {
+                serial_println!("[syscall/linux]   FAIL: fallocate unknown-mode not EOPNOTSUPP");
+                return Err(KernelError::InternalError);
+            }
+            // (b2) COLLAPSE_RANGE|KEEP_SIZE (0x08|0x01) -> EINVAL (gate 6).
+            let b2 = SyscallArgs {
+                arg0: 0, arg1: 0x09, arg2: 0, arg3: 0x4000, arg4: 0, arg5: 0,
+            };
+            if dispatch_linux(nr::FALLOCATE, &b2).value
+                != i64::from(errno::EINVAL).wrapping_neg()
+            {
+                serial_println!("[syscall/linux]   FAIL: fallocate COLLAPSE+KEEP not EINVAL");
+                return Err(KernelError::InternalError);
+            }
+            // (c) predicate: a read-only fd would be the EBADF case.
+            if fd_access_is_writable(0) {
+                serial_println!("[syscall/linux]   FAIL: fallocate writable predicate wrong");
+                return Err(KernelError::InternalError);
+            }
+        }
+        serial_println!(
+            "[syscall/linux]   fallocate FMODE_WRITE gate (batch 536): OK"
         );
 
         // adjtimex / clock_adjtime: batch 122 adds the modes=0 read

@@ -52170,3 +52170,50 @@ list-continuation lint required relocating the helper above the
 sys_readahead doc block so the two doc comments stay separate);
 boot-test PASSED (BOOT_OK 25s, stamp present, no readahead FAILs).
 Reversible (pure translator change; no PCB/state).
+
+================================================================
+ABI batch 535 — ftruncate FMODE_WRITE gate (EINVAL on read-only fd)
+================================================================
+Date: 2026-06-12   Decided by: Claude (autonomous)
+File: kernel/src/syscall/linux.rs (translator only)
+
+Divergence: sys_ftruncate did not check the fd's access mode.  A
+read-only (O_RDONLY) File fd returned EROFS and a read-only MemFd fd
+proceeded to a (possibly successful) resize, where Linux returns EINVAL
+for both because the fd lacks FMODE_WRITE.
+
+Verbatim v6.6 citation (fs/open.c, do_sys_ftruncate):
+  error = -EINVAL;
+  if (length < 0)
+      goto out;
+  error = -EBADF;
+  f = fdget(fd);
+  if (!f.file)
+      goto out;
+  ...
+  error = -EINVAL;
+  if (!S_ISREG(inode->i_mode) || !(f.file->f_mode & FMODE_WRITE))
+      goto out_putf;
+  ...
+  error = do_truncate(...);          // mnt_want_write -> EROFS lives here
+Gate order: length<0 EINVAL, then EBADF, then the S_ISREG/FMODE_WRITE
+EINVAL, and only afterwards do_truncate (where a RO mount yields EROFS).
+So a read-only regular-file fd is EINVAL, not EROFS, and never reaches
+the resize.
+
+Fix (translator-only): added pure helper fd_access_is_writable(
+status_flags) -> bool (writable iff (status_flags & O_ACCMODE) !=
+O_RDONLY) and, in sys_ftruncate after the fd lookup, return EINVAL for a
+File|MemFd fd that is not writable — before the File EROFS terminal and
+the MemFd truncate.  The non-regular kinds keep their existing EINVAL
+(their inode mode is not S_ISREG, the other half of the same gate), so
+the scoped File|MemFd check is the missing FMODE_WRITE half.
+
+Tests: the full dispatch is not reachable from the boot task —
+sys_ftruncate short-circuits to EROFS when caller_pid() is None (no fd
+table) — so the boot self-test verifies the pure predicate
+fd_access_is_writable: O_WRONLY, O_RDWR, O_WRONLY|O_APPEND writable;
+pure O_RDONLY and O_RDONLY|O_APPEND not.  Serial stamp "ftruncate
+FMODE_WRITE gate (batch 535): OK".  cargo build clean; clippy at 17477
+baseline; boot-test PASSED (BOOT_OK 25s, stamp present, no ftruncate
+FAILs).  Reversible (pure translator change; no PCB/state).

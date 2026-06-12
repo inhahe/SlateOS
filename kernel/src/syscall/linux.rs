@@ -11328,6 +11328,17 @@ fn fd_access_is_readable(status_flags: u32) -> bool {
     (status_flags & O_ACCMODE) != crate::proc::linux_fd::O_WRONLY
 }
 
+/// True when a descriptor opened with `status_flags` is writable, i.e.
+/// its access mode admits writes (the Linux `FMODE_WRITE` bit).
+///
+/// By the same `OPEN_FMODE` derivation as [`fd_access_is_readable`], only
+/// the pure read-only access mode clears `FMODE_WRITE`; write-only and
+/// read-write both keep it set.
+fn fd_access_is_writable(status_flags: u32) -> bool {
+    const O_ACCMODE: u32 = 0o3;
+    (status_flags & O_ACCMODE) != crate::proc::linux_fd::O_RDONLY
+}
+
 /// `readahead(fd, offset, count)` — advisory hint to populate the page
 /// cache for the byte range `[offset, offset+count)` of a regular file
 /// or block device.
@@ -14503,6 +14514,22 @@ fn sys_ftruncate(args: &SyscallArgs) -> SyscallResult {
         None => return linux_err(errno::EBADF),
     };
     use crate::proc::linux_fd::HandleKind;
+    // Gate 3 (Linux do_sys_ftruncate, fs/open.c):
+    //   error = -EINVAL;
+    //   if (!S_ISREG(inode->i_mode) || !(f.file->f_mode & FMODE_WRITE))
+    //       goto out_putf;
+    // i.e. EINVAL unless the inode is a regular file AND the fd is open
+    // for writing.  The non-regular kinds are EINVAL'd in the match below
+    // (their inode mode is not S_ISREG); here we add the FMODE_WRITE half,
+    // which is what distinguishes a read-only regular-file/memfd fd.  This
+    // gate precedes do_truncate's mnt_want_write (the EROFS source) and
+    // the memfd grow, so a read-only File fd is EINVAL — not EROFS — and a
+    // read-only MemFd fd is EINVAL rather than a silent successful resize.
+    if matches!(entry.kind, HandleKind::File | HandleKind::MemFd)
+        && !fd_access_is_writable(entry.status_flags)
+    {
+        return linux_err(errno::EINVAL);
+    }
     match entry.kind {
         HandleKind::File => {
             // Terminal EROFS — every mount in this kernel is read-only.
@@ -50433,6 +50460,32 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   readahead FMODE_READ gate (batch 534): OK"
+        );
+
+        // ftruncate FMODE_WRITE gate (batch 535).  do_sys_ftruncate
+        // (fs/open.c) returns -EINVAL unless the fd is open for writing
+        // (`!(f_mode & FMODE_WRITE)`), ahead of the do_truncate path that
+        // would otherwise yield EROFS (File) or grow a memfd.  The full
+        // dispatch is not exercisable from the boot task — sys_ftruncate
+        // short-circuits to EROFS when caller_pid() is None (no fd table)
+        // — so verify the pure access-mode predicate fd_access_is_writable
+        // that the gate consults.  O_WRONLY(1)/O_RDWR(2) and write modes
+        // with extra status bits are writable; pure O_RDONLY(0) is not.
+        {
+            use crate::proc::linux_fd::{O_RDWR, O_WRONLY};
+            const O_APPEND: u32 = 0o2000;
+            if !fd_access_is_writable(O_WRONLY)
+                || !fd_access_is_writable(O_RDWR)
+                || !fd_access_is_writable(O_WRONLY | O_APPEND)
+                || fd_access_is_writable(0) // O_RDONLY
+                || fd_access_is_writable(O_APPEND) // O_RDONLY | O_APPEND
+            {
+                serial_println!("[syscall/linux]   FAIL: ftruncate FMODE_WRITE predicate wrong");
+                return Err(KernelError::InternalError);
+            }
+        }
+        serial_println!(
+            "[syscall/linux]   ftruncate FMODE_WRITE gate (batch 535): OK"
         );
 
         // adjtimex / clock_adjtime: batch 122 adds the modes=0 read

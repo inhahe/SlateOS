@@ -553,6 +553,15 @@ extern "C" fn kernel_main() -> ! {
         cpu::halt_loop();
     }
 
+    // Step 15a: Epoll subsystem.
+    // Epoll instances hold an interest set (fd -> events + user data) and
+    // serve epoll_wait via the shared poll-readiness engine.  This self-test
+    // exercises create/dup/close refcounting and ctl add/mod/del semantics.
+    if let Err(e) = ipc::epoll::self_test() {
+        serial_println!("FATAL: Epoll self-test failed: {}", e);
+        cpu::halt_loop();
+    }
+
     // Step 15b: Memfd subsystem.
     // Anonymous in-memory regular file backing memfd_create(2).  Exercises
     // create/close/dup refcounting, read/write/seek, pread/pwrite,

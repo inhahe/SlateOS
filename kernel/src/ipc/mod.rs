@@ -21,6 +21,7 @@
 
 pub mod channel;
 pub mod completion;
+pub mod epoll;
 pub mod eventfd;
 pub mod futex;
 pub mod io_ring;

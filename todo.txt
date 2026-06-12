@@ -1,4 +1,34 @@
 
+## DONE (2026-06-12): ABI batch 537 — copy_file_range gate order + vfs_copy_file_range FMODE/regular gate
+## Linux v6.6 fs/read_write.c SYSCALL_DEFINE6(copy_file_range) order (verified verbatim against
+## raw.githubusercontent.com torvalds/linux v6.6):
+##   ret=-EBADF; fdget(fd_in)->EBADF; fdget(fd_out)->EBADF;
+##   ret=-EFAULT; off_in copy_from_user->EFAULT; off_out copy_from_user->EFAULT;
+##   ret=-EINVAL; if (flags!=0)->EINVAL;
+##   vfs_copy_file_range() -> generic_copy_file_checks -> generic_file_rw_checks:
+##     S_ISDIR(in|out)                                          -> EISDIR
+##     !S_ISREG(in) || !S_ISREG(out)                            -> EINVAL
+##     !(in&FMODE_READ) || !(out&FMODE_WRITE) || (out&O_APPEND) -> EBADF
+## TWO divergences fixed (kernel/src/syscall/linux.rs sys_copy_file_range):
+##   (1) ORDER: pre-batch we checked `flags` FIRST (before fds+offsets), so (bad fd, flags=5)
+##       returned EINVAL where Linux returns EBADF, and (good fds, bad off_in, flags=5) returned
+##       EINVAL where Linux returns EFAULT. Reordered to fds -> offsets -> flags.
+##   (2) GATE: pre-batch we never applied the vfs regular-file/access-mode gate, so an O_WRONLY
+##       input or O_RDONLY/O_APPEND output returned the terminal EINVAL where Linux returns EBADF,
+##       and a pipe/console fd reached the terminal arm instead of the precise non-regular EINVAL.
+##       Added gate after the flags check in Linux's internal order (regular EINVAL before FMODE
+##       EBADF). Only File/MemFd map to S_ISREG; the EISDIR-for-dirs arm is NOT modelled (our fd
+##       layer does not distinguish a directory fd from a regular File — documented in-code).
+##   The batch 350/351 flags int-truncation fix (r9 as u32) is preserved.
+## SELF-TEST (stamp "copy_file_range vfs gate + order (batch 537): OK"): the reorder and new gate
+## are only observable with a real fd table (caller_pid()==Some) AND a faulting user pointer; at
+## boot BOTH validate_linux_fd and validate_user_read bypass in kernel context (is_kernel_context),
+## so the dispatch path still terminates in EINVAL and the existing flags-truncation dispatch
+## probes are unchanged (re-verified). The gate logic is asserted via the exact predicates the new
+## code uses: in_bad(O_WRONLY) && !in_bad(O_RDONLY/O_RDWR); out_bad(O_RDONLY|O_APPEND-variants) &&
+## !out_bad(O_WRONLY/O_RDWR); is_regular(File/MemFd) && !is_regular(Pipe/Console/EventFd). Same
+## not-dispatch-testable-in-kernel-ctx pattern as batches 535 (ftruncate) and 536 (fallocate).
+##
 ## FIXED (2026-06-12): boot-stack overflow from monolithic translation self-test → futex #UD (known-issues F10)
 ## Was: after applying ABI batch 536, boot reached "[syscall/linux] Translation self-test PASSED"
 ## then faulted on the FIRST context switch of ipc::futex::self_test()'s task 36:

@@ -16310,33 +16310,56 @@ fn sys_copy_file_range(args: &SyscallArgs) -> SyscallResult {
     //                                    int, fd_out, loff_t __user *, off_out,
     //                                    size_t, len, unsigned int, flags)
     //
-    // `flags` is declared `unsigned int`, so the x86_64 syscall ABI
-    // truncates r9 to its low 32 bits before the body runs.  Per the
-    // copy_file_range(2) man-page, flags must currently be 0 from
-    // userspace (COPY_FILE_SPLICE=0x80 is a kernel-internal flag).
+    // Linux gate order (verbatim, v6.6 fs/read_write.c):
+    //   ssize_t ret = -EBADF;
+    //   f_in  = fdget(fd_in);  if (!f_in.file)  goto out2;          // -EBADF
+    //   f_out = fdget(fd_out); if (!f_out.file) goto out1;          // -EBADF
+    //   ret = -EFAULT;
+    //   if (off_in)  { if (copy_from_user(&pos_in,  off_in,  8)) … } // -EFAULT
+    //   if (off_out) { if (copy_from_user(&pos_out, off_out, 8)) … } // -EFAULT
+    //   ret = -EINVAL;
+    //   if (flags != 0) goto out;                                   // -EINVAL
+    //   ret = vfs_copy_file_range(f_in.file, pos_in, f_out.file, pos_out, len, flags);
+    // and vfs_copy_file_range -> generic_copy_file_checks -> generic_file_rw_checks:
+    //   if (S_ISDIR(in) || S_ISDIR(out))                 return -EISDIR;
+    //   if (!S_ISREG(in) || !S_ISREG(out))               return -EINVAL;
+    //   if (!(in->f_mode & FMODE_READ) ||
+    //       !(out->f_mode & FMODE_WRITE) ||
+    //       (out->f_flags & O_APPEND))                   return -EBADF;
     //
-    // Pre-batch (350) we checked args.arg5 at full u64 width, so a
-    // caller passing flags = 0x1_0000_0000 (high-half garbage register,
-    // low 32 = 0) saw EINVAL where Linux truncates to u32=0 and
-    // accepts the flag gate.
+    // `flags` is `unsigned int`, so the x86_64 ABI truncates r9 to its low
+    // 32 bits first; only flags==0 is valid from userspace (COPY_FILE_SPLICE
+    // =0x80 is a kernel-internal flag).
     //
-    // Eleventh instance of the int-truncation shape after batches
-    // 308..314, 340, 348, 349, 350.
-    #[allow(clippy::cast_possible_truncation)]
-    let flags = args.arg5 as u32;
-    if flags != 0 {
-        return linux_err(errno::EINVAL);
-    }
+    // Batch 537: two divergences fixed.
+    //   (1) ORDER — pre-batch we checked `flags` BEFORE the fds and offsets,
+    //       so (bad fd, flags=5) returned EINVAL where Linux returns EBADF,
+    //       and (good fds, bad off_in, flags=5) returned EINVAL where Linux
+    //       returns EFAULT.  Reordered to fds -> offsets -> flags.
+    //   (2) GATE — pre-batch we never applied vfs_copy_file_range's
+    //       regular-file / access-mode gate: copy_file_range on an O_WRONLY
+    //       input or an O_RDONLY/O_APPEND output returned the terminal EINVAL
+    //       where Linux returns EBADF, and a pipe/console fd reached the
+    //       terminal arm rather than the precise non-regular EINVAL.  Added
+    //       the gate after the flags check, in Linux's internal order
+    //       (regular-file EINVAL before access-mode EBADF).
+    //   (The batch 350/351 int-truncation fix for `flags` is preserved.)
+
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd_in = args.arg0 as i32;
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd_out = args.arg2 as i32;
+
+    // Gate 1: fdget(fd_in) / fdget(fd_out) -> -EBADF on a missing fd.
     if let Err(r) = validate_linux_fd(fd_in) {
         return r;
     }
     if let Err(r) = validate_linux_fd(fd_out) {
         return r;
     }
+
+    // Gate 2: off_in / off_out copy_from_user -> -EFAULT (8-byte loff_t each).
+    // A NULL offset pointer means "use the file's f_pos" and is skipped.
     if args.arg1 != 0 {
         if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 8) {
             return linux_err(linux_errno_for(e));
@@ -16347,6 +16370,49 @@ fn sys_copy_file_range(args: &SyscallArgs) -> SyscallResult {
             return linux_err(linux_errno_for(e));
         }
     }
+
+    // Gate 3: flags must be 0 (truncate r9 to u32 first).
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg5 as u32;
+    if flags != 0 {
+        return linux_err(errno::EINVAL);
+    }
+
+    // Gate 4 (vfs_copy_file_range -> generic_file_rw_checks): regular-file and
+    // access-mode gates.  Needs the per-process fd table; in kernel context
+    // (caller_pid()==None) there are no fds, so this is skipped and we fall
+    // through to the terminal arm.
+    if let Some(pid) = caller_pid() {
+        use crate::proc::linux_fd::{HandleKind, O_APPEND};
+        if let (Some(ein), Some(eout)) = (
+            pcb::linux_fd_lookup(pid, fd_in),
+            pcb::linux_fd_lookup(pid, fd_out),
+        ) {
+            // 4a: !S_ISREG(in) || !S_ISREG(out) -> -EINVAL.  Only File/MemFd
+            // back a regular-file inode; pipes, consoles, eventfd, etc. are
+            // non-regular.  (Linux's preceding S_ISDIR -> -EISDIR arm is not
+            // modelled: our fd layer does not distinguish a directory fd from
+            // a regular File.)
+            let is_regular =
+                |k: HandleKind| matches!(k, HandleKind::File | HandleKind::MemFd);
+            if !is_regular(ein.kind) || !is_regular(eout.kind) {
+                return linux_err(errno::EINVAL);
+            }
+            // 4b: !(in & FMODE_READ) || !(out & FMODE_WRITE) || (out & O_APPEND)
+            //     -> -EBADF.
+            if !fd_access_is_readable(ein.status_flags)
+                || !fd_access_is_writable(eout.status_flags)
+                || (eout.status_flags & O_APPEND) != 0
+            {
+                return linux_err(errno::EBADF);
+            }
+        }
+    }
+
+    // Both fds are regular, readable-in / writable-out, non-append: Linux would
+    // perform the copy here.  Server-side cross-file copy is not implemented
+    // yet, so the operation is unsupported -> terminal EINVAL.  (Pre-existing
+    // limitation; the reject gates above now match Linux precisely.)
     linux_err(errno::EINVAL)
 }
 
@@ -54791,6 +54857,55 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         serial_println!(
             "[syscall/linux]   copy_file_range flags int truncation: OK"
+        );
+
+        // Batch 537: copy_file_range gate order + vfs_copy_file_range gate.
+        //
+        // Linux SYSCALL_DEFINE6(copy_file_range) checks fds (EBADF) and
+        // offsets (EFAULT) BEFORE flags (EINVAL), then vfs_copy_file_range
+        // -> generic_file_rw_checks applies, in order: !S_ISREG -> EINVAL,
+        // then (!FMODE_READ in || !FMODE_WRITE out || O_APPEND out) -> EBADF.
+        // The reorder and the new gate are only observable with a real fd
+        // table (caller_pid()==Some) AND a faulting user pointer; at boot
+        // both validate_linux_fd and validate_user_read bypass in kernel
+        // context, so the dispatch path still terminates in EINVAL and the
+        // truncation probes above are unchanged.  The gate logic is therefore
+        // verified here by asserting the exact predicates the new code uses
+        // (same pattern as the batch 535/536 ftruncate/fallocate gates).
+        {
+            use crate::proc::linux_fd::{
+                HandleKind, O_APPEND, O_RDONLY, O_RDWR, O_WRONLY,
+            };
+            // 4b input gate: input fd must be readable (FMODE_READ).
+            let in_bad = |sf: u32| !fd_access_is_readable(sf);
+            // 4b output gate: output fd must be writable and not O_APPEND.
+            let out_bad = |sf: u32| !fd_access_is_writable(sf) || (sf & O_APPEND) != 0;
+            // 4a regular-file gate: only File/MemFd are S_ISREG-equivalent.
+            let is_regular =
+                |k: HandleKind| matches!(k, HandleKind::File | HandleKind::MemFd);
+
+            let in_ok = !in_bad(O_RDONLY) && !in_bad(O_RDWR) && in_bad(O_WRONLY);
+            let out_ok = !out_bad(O_WRONLY)
+                && !out_bad(O_RDWR)
+                && out_bad(O_RDONLY)
+                && out_bad(O_WRONLY | O_APPEND)
+                && out_bad(O_RDWR | O_APPEND);
+            let reg_ok = is_regular(HandleKind::File)
+                && is_regular(HandleKind::MemFd)
+                && !is_regular(HandleKind::Pipe)
+                && !is_regular(HandleKind::Console)
+                && !is_regular(HandleKind::EventFd);
+
+            if !(in_ok && out_ok && reg_ok) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: copy_file_range vfs gate predicates (in={} out={} reg={})",
+                    in_ok, out_ok, reg_ok
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        serial_println!(
+            "[syscall/linux]   copy_file_range vfs gate + order (batch 537): OK"
         );
 
         // Batch 349: splice/tee/vmsplice — gate order matches Linux

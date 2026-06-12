@@ -3220,6 +3220,75 @@ pub fn try_reap_any(
     }
 }
 
+/// Non-destructively inspect a child's exit status without reaping it.
+///
+/// Like [`try_reap`] but leaves the zombie in the table (so a later
+/// `WNOWAIT` `waitid` can be followed by a real reaping wait).  Returns
+/// `Ok(Some((ExitInfo, uid)))` when `child_pid` is a zombie child of
+/// `parent_pid` — the `uid` is the child's real UID, needed for the
+/// `siginfo_t.si_uid` field that `waitid` reports.  `Ok(None)` if the
+/// child exists but is still running; `Err(NoSuchProcess)`/
+/// `Err(PermissionDenied)` mirror [`try_reap`] so the wait syscalls
+/// share error→`ECHILD` handling.
+pub fn peek_exit(
+    parent_pid: ProcessId,
+    child_pid: ProcessId,
+) -> KernelResult<Option<(ExitInfo, u32)>> {
+    let table = PROCESS_TABLE.lock();
+    let proc = table.get(&child_pid).ok_or(KernelError::NoSuchProcess)?;
+    if proc.parent != parent_pid {
+        return Err(KernelError::PermissionDenied);
+    }
+    if proc.state != ProcessState::Zombie {
+        return Ok(None);
+    }
+    let info = ExitInfo {
+        exit_code: proc.exit_code.unwrap_or(0),
+        crash: proc.crash_info,
+    };
+    Ok(Some((info, proc.credentials.uid)))
+}
+
+/// Non-destructively inspect *any* zombie child's exit status.
+///
+/// The `waitid(P_ALL, WNOWAIT)` analogue of [`peek_exit`].  Scans
+/// `parent_pid`'s children and returns the lowest-PID zombie's
+/// `(pid, ExitInfo, uid)` without reaping.  `Err(NoChildProcess)` if the
+/// parent has no children at all (→ `ECHILD`); `Ok(None)` if it has
+/// children but none are zombies yet.
+pub fn peek_exit_any(
+    parent_pid: ProcessId,
+) -> KernelResult<Option<(ProcessId, ExitInfo, u32)>> {
+    let table = PROCESS_TABLE.lock();
+    let mut has_child = false;
+    for proc in table.values() {
+        if proc.parent == parent_pid && proc.pid != parent_pid {
+            has_child = true;
+            if proc.state == ProcessState::Zombie {
+                let info = ExitInfo {
+                    exit_code: proc.exit_code.unwrap_or(0),
+                    crash: proc.crash_info,
+                };
+                return Ok(Some((proc.pid, info, proc.credentials.uid)));
+            }
+        }
+    }
+    if !has_child {
+        return Err(KernelError::NoChildProcess);
+    }
+    Ok(None)
+}
+
+/// Read a process's real UID, or `None` if the PID is unknown.
+///
+/// Used by `waitid` to fill `siginfo_t.si_uid` when reporting a
+/// still-living child's job-control (stop/continue) transition — the
+/// process is not reaped, so the UID must be looked up separately.
+#[must_use]
+pub fn process_uid(pid: ProcessId) -> Option<u32> {
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.credentials.uid)
+}
+
 /// Mark a process as "ready" (fully initialized and accepting requests).
 ///
 /// Called by the process itself via `SYS_NOTIFY_READY`.  The parent
@@ -4561,7 +4630,7 @@ fn test_job_control_state() -> KernelResult<()> {
     set_running(child)?;
 
     // No report yet → Ok(None) for both option sets.
-    if jc_report_for_child(parent, child, true, true, false)? != None {
+    if jc_report_for_child(parent, child, true, true, false)?.is_some() {
         serial_println!("[proc]   FAIL: jc_report_for_child false positive");
         destroy(child);
         destroy(parent);
@@ -4571,7 +4640,7 @@ fn test_job_control_state() -> KernelResult<()> {
     // Stop the child; a WUNTRACED waiter (want_stopped) should see it, a
     // WCONTINUED-only waiter should not.
     let _ = record_jc_stopped(child, 19)?;
-    if jc_report_for_child(parent, child, false, true, false)? != None {
+    if jc_report_for_child(parent, child, false, true, false)?.is_some() {
         serial_println!("[proc]   FAIL: stop matched continued-only wait");
         destroy(child);
         destroy(parent);
@@ -4611,7 +4680,7 @@ fn test_job_control_state() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     // No matching report now, but children exist → Ok(None), not ECHILD.
-    if jc_report_any_child(parent, true, true, false)? != None {
+    if jc_report_any_child(parent, true, true, false)?.is_some() {
         serial_println!("[proc]   FAIL: any-child scan false positive");
         destroy(child);
         destroy(parent);

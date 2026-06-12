@@ -8823,19 +8823,36 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          non-consuming peek, parent-mismatch PermissionDenied, ECHILD on
 ##          no children); encode_jc_wstatus unit-tested in linux::self_test.
 ##          Build + clippy clean; boots OK.
-##      DEFERRED — waitid job-control reporting: sys_waitid is still a
-##          REAPING STUB (validates the option/which/upid gates, then returns
-##          0 for WNOHANG or ECHILD — it does not reap zombies OR report
-##          stops at all, and never writes the siginfo_t).  Bolting
-##          WSTOPPED/WCONTINUED onto it in isolation would be inconsistent
-##          (it'd report stops while normal child exits still yield ECHILD).
-##          Implementing real waitid is a separate, larger task: P_ALL/P_PID/
-##          P_PGID/P_PIDFD child selection, 128-byte siginfo_t encoding
-##          (si_signo=SIGCHLD, si_code CLD_EXITED/KILLED/DUMPED/STOPPED/
-##          CONTINUED, si_pid/si_status/si_uid), WEXITED reaping, WNOWAIT
-##          peek, and the same jc_report_for_child/any_child reporting wait4
-##          now uses.  Trigger: when a ported program actually needs waitid
-##          (glibc posix_spawn pidfd path, some container runtimes).
+##      DONE — real sys_waitid (no longer a reaping stub).  Factored a
+##          waitid_scan(parent, target, want_exited/stopped/continued, nowait)
+##          core in syscall/linux.rs that does the full child selection:
+##          target=Some(pid) for P_PID/P_PIDFD (P_PIDFD resolves the target
+##          via entry.raw_handle), target=None for P_ALL/P_PGID (process
+##          groups unmodelled → any-child, same simplification wait4(pid<=0)
+##          makes).  WEXITED reaps zombies via new pcb::peek_exit /
+##          peek_exit_any (non-destructive, also return the child uid) + the
+##          existing try_reap; WNOWAIT peeks without reaping; WSTOPPED/
+##          WCONTINUED reuse pcb::jc_report_for_child / jc_report_any_child
+##          (consume = !WNOWAIT), exactly the helpers wait4 uses.  siginfo_t
+##          is a #[repr(C)] WaitidSiginfo (128 bytes, si_pid@16/si_uid@20/
+##          si_status@24) written via write_unaligned: si_signo=SIGCHLD(17),
+##          si_code = CLD_EXITED/KILLED/DUMPED/STOPPED/CONTINUED, si_status =
+##          exit code / signal.  WNOHANG with eligible-but-unchanged children
+##          returns 0 with a zeroed siginfo (si_pid==0); no eligible child →
+##          ECHILD.  The blocking loop is lost-wakeup-safe (set_wait_task /
+##          set_wait_any_task, re-scan, block_current) and wakes on the same
+##          parent waiters stop/continue/exit already signal.  Tested:
+##          test_waitid_scan() drives the core against synthetic PCBs
+##          (zombie reap + CLD_EXITED/status, WNOWAIT peek-no-reap,
+##          NoSuchProcess/NoChildProcess→ECHILD, CLD_STOPPED/CONTINUED
+##          consume-once, killed-by-signal encoder); the dispatch gate tests
+##          were made hang-proof (specific absent PID → deterministic ECHILD,
+##          never block_current).  Build + clippy clean; "waitid scan/siginfo:
+##          OK" prints at boot.  Also fixed 3 pre-existing partialeq_to_none
+##          clippy errors in pcb::test_job_control_state (!= None → is_some()).
+##      DEFERRED (needs process groups): waitid(P_PGID, pgid) currently waits
+##          on ANY child rather than the named group (no process-group model
+##          yet) — same gap as kill(-pgid).  Revisit with process groups.
 ##      DEFERRED (needs process groups): kill(-pgid, SIG) group routing;
 ##          Ctrl-Z sending SIGTSTP to the foreground process GROUP;
 ##          orphaned-process-group SIGHUP/SIGCONT on session leader exit.

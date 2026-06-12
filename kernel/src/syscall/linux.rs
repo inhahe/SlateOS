@@ -30729,6 +30729,356 @@ fn synth_inode(dir_path: &str, name: &str) -> u64 {
     if h == 0 { 1 } else { h }
 }
 
+/// Kernel-side `siginfo_t` layout for the `SIGCHLD` reports `waitid`
+/// writes.  x86_64 `siginfo_t` is 128 bytes; the `_sigchld` arm places
+/// `si_pid` at offset 16, `si_uid` at 20, `si_status` at 24 — after the
+/// common `si_signo`/`si_errno`/`si_code` header and the 4-byte pad the
+/// 64-bit ABI inserts so the union starts 8-byte aligned.  Trailing
+/// bytes (`si_utime`/`si_stime` and union padding) are zeroed, matching
+/// Linux clearing the whole struct before filling the SIGCHLD fields.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct WaitidSiginfo {
+    si_signo: i32,
+    si_errno: i32,
+    si_code: i32,
+    _pad0: i32,
+    si_pid: i32,
+    si_uid: u32,
+    si_status: i32,
+    _rest: [u8; 100],
+}
+
+// CLD_* si_code values for SIGCHLD (uapi/asm-generic/siginfo.h).
+const CLD_EXITED: i32 = 1;
+const CLD_KILLED: i32 = 2;
+const CLD_DUMPED: i32 = 3;
+const CLD_STOPPED: i32 = 5;
+const CLD_CONTINUED: i32 = 6;
+
+/// Derive `(si_code, si_status)` for a reaped child's exit.
+///
+/// * crash (unhandled exception) → `CLD_DUMPED` + `SIGSEGV` (11), mirroring
+///   [`encode_linux_wstatus`]'s crash synthesis.
+/// * killed by signal (`exit_code` in 128..=255 by kernel convention) →
+///   `CLD_KILLED` + the signal number.
+/// * normal exit → `CLD_EXITED` + the exit status (low 8 bits).
+fn waitid_si_from_exit(info: &crate::proc::pcb::ExitInfo) -> (i32, i32) {
+    if info.crash.is_some() {
+        return (CLD_DUMPED, 11);
+    }
+    let code = info.exit_code;
+    if (128..=255).contains(&code) {
+        // exit_code = 128 + sig (kernel convention).
+        (CLD_KILLED, (code - 128) & 0x7f)
+    } else {
+        (CLD_EXITED, code & 0xff)
+    }
+}
+
+/// Derive `(si_code, si_status)` for a job-control transition.
+///
+/// `Stopped(sig)` → `CLD_STOPPED` + the stop signal; `Continued` →
+/// `CLD_CONTINUED` + `SIGCONT` (18).
+fn waitid_si_from_jc(ev: &crate::proc::pcb::JobControlEvent) -> (i32, i32) {
+    use crate::proc::pcb::JobControlEvent;
+    match ev {
+        JobControlEvent::Stopped(sig) => {
+            #[allow(clippy::cast_possible_wrap)]
+            let s = (*sig & 0xff) as i32;
+            (CLD_STOPPED, s)
+        }
+        JobControlEvent::Continued => (CLD_CONTINUED, 18),
+    }
+}
+
+/// A child state-change found by [`waitid_scan`], ready to encode into
+/// the user's `siginfo_t`.
+struct WaitidFound {
+    si_code: i32,
+    si_pid: u64,
+    si_uid: u32,
+    si_status: i32,
+}
+
+/// One non-blocking pass of `waitid`'s child-selection logic.
+///
+/// `target` is `Some(pid)` for `P_PID`/`P_PIDFD` (a specific child) or
+/// `None` for `P_ALL`/`P_PGID` (any child — we do not model process
+/// groups, so `P_PGID` waits on any child, the same simplification
+/// `wait4(pid <= 0)` makes).  Returns:
+///   * `Ok(Some(found))` — a matching transition (consumed unless
+///     `nowait`); caller encodes the `siginfo` and returns success.
+///   * `Ok(None)` — eligible children exist but none have a matching
+///     unconsumed transition; caller blocks (or returns 0 for `WNOHANG`).
+///   * `Err(NoChildProcess | NoSuchProcess | PermissionDenied)` — no
+///     eligible child; caller maps to `ECHILD`.
+///
+/// `WEXITED` zombies are reaped (or peeked for `WNOWAIT`); `WSTOPPED`/
+/// `WCONTINUED` reports reuse the same [`pcb::jc_report_for_child`] /
+/// [`pcb::jc_report_any_child`] helpers `wait4` uses, so the two wait
+/// syscalls share one job-control reporting path.
+fn waitid_scan(
+    parent_pid: crate::proc::pcb::ProcessId,
+    target: Option<u64>,
+    want_exited: bool,
+    want_stopped: bool,
+    want_continued: bool,
+    nowait: bool,
+) -> crate::error::KernelResult<Option<WaitidFound>> {
+    use crate::proc::pcb;
+    let want_jc = want_stopped || want_continued;
+    match target {
+        Some(pid) => {
+            if want_exited {
+                match pcb::peek_exit(parent_pid, pid) {
+                    Ok(Some((info, uid))) => {
+                        if !nowait {
+                            // Reap the zombie; the exit info is identical to
+                            // the peek, so we keep `info` for encoding.
+                            pcb::try_reap(parent_pid, pid)?;
+                        }
+                        let (code, status) = waitid_si_from_exit(&info);
+                        return Ok(Some(WaitidFound {
+                            si_code: code,
+                            si_pid: pid,
+                            si_uid: uid,
+                            si_status: status,
+                        }));
+                    }
+                    Ok(None) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            if want_jc {
+                if let Some(ev) = pcb::jc_report_for_child(
+                    parent_pid, pid, want_stopped, want_continued, !nowait,
+                )? {
+                    let uid = pcb::process_uid(pid).unwrap_or(0);
+                    let (code, status) = waitid_si_from_jc(&ev);
+                    return Ok(Some(WaitidFound {
+                        si_code: code,
+                        si_pid: pid,
+                        si_uid: uid,
+                        si_status: status,
+                    }));
+                }
+            }
+            Ok(None)
+        }
+        None => {
+            if want_exited {
+                match pcb::peek_exit_any(parent_pid) {
+                    Ok(Some((cpid, info, uid))) => {
+                        if !nowait {
+                            pcb::try_reap(parent_pid, cpid)?;
+                        }
+                        let (code, status) = waitid_si_from_exit(&info);
+                        return Ok(Some(WaitidFound {
+                            si_code: code,
+                            si_pid: cpid,
+                            si_uid: uid,
+                            si_status: status,
+                        }));
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        // No children for the exit scan.  If a job-control
+                        // class is also requested, fall through to its scan
+                        // (which yields the same NoChildProcess); otherwise
+                        // surface ECHILD now.
+                        if !want_jc {
+                            return Err(e);
+                        }
+                    }
+                }
+            }
+            if want_jc {
+                if let Some((cpid, ev)) = pcb::jc_report_any_child(
+                    parent_pid, want_stopped, want_continued, !nowait,
+                )? {
+                    let uid = pcb::process_uid(cpid).unwrap_or(0);
+                    let (code, status) = waitid_si_from_jc(&ev);
+                    return Ok(Some(WaitidFound {
+                        si_code: code,
+                        si_pid: cpid,
+                        si_uid: uid,
+                        si_status: status,
+                    }));
+                }
+            }
+            Ok(None)
+        }
+    }
+}
+
+/// Write a filled `SIGCHLD` `siginfo_t` to the user `infop` buffer.
+///
+/// `infop` must already be validated as a writable 128-byte user range.
+/// A zero `infop` is a no-op (Linux permits a NULL `infop`).
+fn write_waitid_siginfo(infop: u64, found: &WaitidFound) {
+    if infop == 0 {
+        return;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let si_pid = found.si_pid as i32;
+    let info = WaitidSiginfo {
+        si_signo: 17, // SIGCHLD
+        si_errno: 0,
+        si_code: found.si_code,
+        _pad0: 0,
+        si_pid,
+        si_uid: found.si_uid,
+        si_status: found.si_status,
+        _rest: [0u8; 100],
+    };
+    // SAFETY: `infop` was validated as a writable 128-byte user range
+    // before the wait began and the address space has not changed (we are
+    // still in the calling process).  `WaitidSiginfo` is exactly 128 bytes
+    // (`#[repr(C)]`), and `write_unaligned` tolerates any user alignment.
+    unsafe {
+        core::ptr::write_unaligned(infop as *mut WaitidSiginfo, info);
+    }
+}
+
+/// Zero the user `siginfo_t` (used on the `WNOHANG`-with-no-event path so
+/// userspace can detect "nothing happened" via `si_pid == 0`/`si_signo
+/// == 0`, matching Linux).  No-op for a NULL `infop`.
+fn clear_waitid_siginfo(infop: u64) {
+    if infop == 0 {
+        return;
+    }
+    // SAFETY: `infop` validated as a writable 128-byte user range above;
+    // same-process, so the mapping is unchanged.
+    unsafe {
+        core::ptr::write_bytes(infop as *mut u8, 0, 128);
+    }
+}
+
+/// Boot self-test for the real `waitid` child-selection and `siginfo`
+/// encoding ([`waitid_scan`] / `waitid_si_*`).
+///
+/// The dispatch-level tests in `self_test()` can only exercise gates
+/// (PID 0 has no controllable children at boot), so the actual reaping /
+/// reporting logic is driven here against synthetic PCBs — the same
+/// pattern `proc::pcb::test_job_control_state` uses.  Verifies:
+///   * WEXITED reaps a zombie child and reports `CLD_EXITED` + exit code;
+///   * WNOWAIT peeks without reaping (the zombie survives a second scan);
+///   * a reaped/absent specific child → `NoSuchProcess` (→ ECHILD);
+///   * any-child with no children → `NoChildProcess` (→ ECHILD);
+///   * WSTOPPED/WCONTINUED report `CLD_STOPPED`/`CLD_CONTINUED` and are
+///     consumed once; and the pure killed-by-signal encoder branch.
+fn test_waitid_scan() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+    use crate::proc::pcb;
+    use crate::serial_println;
+
+    let parent = pcb::create("waitid-parent", 0);
+    pcb::set_running(parent)?;
+
+    // --- WEXITED path: a zombie child is reported and reaped ---
+    let child = pcb::create("waitid-child", parent);
+    pcb::set_running(child)?;
+    pcb::set_exit_code(child, 42)?;
+    // Transition to Zombie: register then drop the last thread.
+    pcb::add_thread(child, 7000)?;
+    pcb::remove_thread(child, 7000)?;
+
+    // WNOWAIT (any-child) finds the zombie but must NOT reap it.
+    match waitid_scan(parent, None, true, false, false, true)? {
+        Some(f)
+            if f.si_pid == child
+                && f.si_code == CLD_EXITED
+                && f.si_status == 42
+                && f.si_uid == 0 => {}
+        _ => {
+            serial_println!("[syscall/linux]   FAIL: waitid_scan WNOWAIT exit report");
+            pcb::destroy(child);
+            pcb::destroy(parent);
+            return Err(KernelError::InternalError);
+        }
+    }
+    if pcb::peek_exit(parent, child)?.is_none() {
+        serial_println!("[syscall/linux]   FAIL: WNOWAIT reaped the zombie");
+        pcb::destroy(child);
+        pcb::destroy(parent);
+        return Err(KernelError::InternalError);
+    }
+
+    // Real reap (specific PID, consume): reports then destroys the child.
+    match waitid_scan(parent, Some(child), true, false, false, false)? {
+        Some(f) if f.si_pid == child && f.si_code == CLD_EXITED && f.si_status == 42 => {}
+        _ => {
+            serial_println!("[syscall/linux]   FAIL: waitid_scan reap exit report");
+            pcb::destroy(child);
+            pcb::destroy(parent);
+            return Err(KernelError::InternalError);
+        }
+    }
+    // The child is gone now → specific scan is NoSuchProcess (→ ECHILD).
+    if !matches!(
+        waitid_scan(parent, Some(child), true, false, false, false),
+        Err(KernelError::NoSuchProcess)
+    ) {
+        serial_println!("[syscall/linux]   FAIL: reaped child not NoSuchProcess");
+        pcb::destroy(parent);
+        return Err(KernelError::InternalError);
+    }
+    // No children left → any-child scan is NoChildProcess (→ ECHILD).
+    if !matches!(
+        waitid_scan(parent, None, true, false, false, false),
+        Err(KernelError::NoChildProcess)
+    ) {
+        serial_println!("[syscall/linux]   FAIL: childless any-scan not NoChildProcess");
+        pcb::destroy(parent);
+        return Err(KernelError::InternalError);
+    }
+
+    // --- WSTOPPED / WCONTINUED reporting through waitid_scan ---
+    let child2 = pcb::create("waitid-child2", parent);
+    pcb::set_running(child2)?;
+    pcb::record_jc_stopped(child2, 19)?; // SIGSTOP
+    match waitid_scan(parent, None, false, true, false, false)? {
+        Some(f) if f.si_pid == child2 && f.si_code == CLD_STOPPED && f.si_status == 19 => {}
+        _ => {
+            serial_println!("[syscall/linux]   FAIL: waitid_scan stop report");
+            pcb::destroy(child2);
+            pcb::destroy(parent);
+            return Err(KernelError::InternalError);
+        }
+    }
+    // Consumed: a second WSTOPPED scan no longer reports it.
+    if waitid_scan(parent, None, false, true, false, false)?.is_some() {
+        serial_println!("[syscall/linux]   FAIL: stop report not consumed");
+        pcb::destroy(child2);
+        pcb::destroy(parent);
+        return Err(KernelError::InternalError);
+    }
+    pcb::record_jc_continued(child2)?;
+    match waitid_scan(parent, Some(child2), false, false, true, false)? {
+        Some(f) if f.si_pid == child2 && f.si_code == CLD_CONTINUED && f.si_status == 18 => {}
+        _ => {
+            serial_println!("[syscall/linux]   FAIL: waitid_scan continue report");
+            pcb::destroy(child2);
+            pcb::destroy(parent);
+            return Err(KernelError::InternalError);
+        }
+    }
+    pcb::destroy(child2);
+    pcb::destroy(parent);
+
+    // --- pure encoder branches ---
+    // Killed by signal: exit_code = 128 + 9 (SIGKILL) → CLD_KILLED, sig 9.
+    let killed = crate::proc::pcb::ExitInfo { exit_code: 137, crash: None };
+    if waitid_si_from_exit(&killed) != (CLD_KILLED, 9) {
+        serial_println!("[syscall/linux]   FAIL: waitid_si_from_exit kill branch");
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[syscall/linux]   waitid scan/siginfo: OK");
+    Ok(())
+}
+
 /// `waitid(idtype, id, infop, options, rusage)` — wait for child state change.
 ///
 /// idtype: 0=P_ALL, 1=P_PID, 2=P_PGID, 3=P_PIDFD.
@@ -30737,14 +31087,18 @@ fn synth_inode(dir_path: &str, name: &str) -> u64 {
 /// We validate options bits and idtype, and (when infop is non-NULL)
 /// the 128-byte siginfo_t output buffer.  At least one of
 /// {WEXITED, WSTOPPED=2, WCONTINUED} must be set per Linux's contract.
-/// On success-with-no-events return 0 (the conventional answer for
-/// WNOHANG with no pending state change).  Otherwise ECHILD — matches
-/// "no children eligible to wait on".  Our wait4 path already handles
-/// the real reaping case; waitid is a superset that real Linux
-/// programs use for posix_spawn and pidfd-based reapers, and they all
-/// fall back to wait4 when waitid returns ECHILD on a process with no
-/// children.
+///
+/// On a matching child state change we fill the `siginfo_t` (si_signo =
+/// SIGCHLD, si_code = CLD_*, si_pid/si_uid/si_status) and return 0.
+/// WEXITED reaps zombie children (peeked, not reaped, for WNOWAIT);
+/// WSTOPPED/WCONTINUED report job-control transitions using the same
+/// `pcb::jc_report_*` helpers wait4 uses.  WNOHANG with no pending change
+/// returns 0 with a zeroed siginfo (si_pid == 0); a blocking call with no
+/// eligible child returns ECHILD.  The child-selection core
+/// ([`waitid_scan`]) is factored out so the boot self-test can drive it
+/// against synthetic PCBs.
 fn sys_waitid(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::pcb;
     // Linux signature: `SYSCALL_DEFINE5(waitid, int, which, pid_t,
     // upid, struct siginfo __user *, infop, int, options, struct
     // rusage __user *, ru)`.  `which`, `upid`, and `options` are all
@@ -30806,17 +31160,26 @@ fn sys_waitid(args: &SyscallArgs) -> SyscallResult {
     //   P_PIDFD:  upid <  0 → EINVAL (pidfd is an fd, so negative
     //             is invalid before the fd-table lookup).
     //   default:  EINVAL.
-    match idtype {
-        0 => {} // P_ALL: no upid constraint.
+    //
+    // `target` becomes `Some(pid)` for the specific-child idtypes
+    // (P_PID, P_PIDFD) and `None` for the any-child idtypes (P_ALL,
+    // P_PGID).  We do not model process groups, so P_PGID waits on any
+    // child — the same simplification `wait4(pid <= 0)` makes.
+    let target: Option<u64> = match idtype {
+        0 => None, // P_ALL: no upid constraint, any child.
         1 => {
             if upid <= 0 {
                 return linux_err(errno::EINVAL);
             }
+            #[allow(clippy::cast_sign_loss)]
+            Some(upid as u64)
         }
         2 => {
             if upid < 0 {
                 return linux_err(errno::EINVAL);
             }
+            // P_PGID: process groups unmodelled → wait on any child.
+            None
         }
         3 => {
             if upid < 0 {
@@ -30839,9 +31202,12 @@ fn sys_waitid(args: &SyscallArgs) -> SyscallResult {
             if entry.kind != HandleKind::PidFd {
                 return linux_err(errno::EBADF);
             }
+            // entry.raw_handle holds the target PID (set by FdEntry::pidfd),
+            // the same field pidfd_send_signal dereferences.
+            Some(entry.raw_handle)
         }
         _ => return linux_err(errno::EINVAL),
-    }
+    };
 
     // User-pointer validation runs after the cheap gates so a
     // user with a bad pointer and bad options sees EINVAL (the
@@ -30858,12 +31224,96 @@ fn sys_waitid(args: &SyscallArgs) -> SyscallResult {
         }
     }
 
-    // WNOHANG: report "no state change" with 0 (Linux convention).
-    if options & WNOHANG != 0 {
-        return SyscallResult::ok(0);
+    let want_exited = options & WEXITED != 0;
+    let want_stopped = options & WSTOPPED != 0;
+    let want_continued = options & WCONTINUED != 0;
+    let nohang = options & WNOHANG != 0;
+    let nowait = options & WNOWAIT != 0;
+
+    let parent_pid = caller_pid().unwrap_or(0);
+    let task_id = crate::sched::current_task_id();
+
+    // Map a scan error to the observable wait errno.  No eligible child
+    // (specific pid not ours / nonexistent, or no children at all) →
+    // ECHILD; anything else propagates via linux_errno_for.
+    fn scan_err(e: KernelError) -> SyscallResult {
+        match e {
+            KernelError::PermissionDenied
+            | KernelError::NoSuchProcess
+            | KernelError::NoChildProcess => linux_err(errno::ECHILD),
+            other => linux_err(linux_errno_for(other)),
+        }
     }
-    // Blocking case: no children eligible.
-    linux_err(errno::ECHILD)
+
+    loop {
+        match waitid_scan(
+            parent_pid, target, want_exited, want_stopped, want_continued, nowait,
+        ) {
+            Ok(Some(found)) => {
+                write_waitid_siginfo(infop, &found);
+                if rusage != 0 {
+                    // We don't track per-process resource usage; zero the
+                    // whole struct.  Validated as writable above.
+                    // SAFETY: validated 144-byte writable user range; same
+                    // process, mapping unchanged.
+                    unsafe {
+                        core::ptr::write_bytes(rusage as *mut u8, 0, 144);
+                    }
+                }
+                return SyscallResult::ok(0);
+            }
+            Ok(None) => {}
+            Err(e) => return scan_err(e),
+        }
+        if nohang {
+            // No state change: zero the siginfo so userspace sees
+            // si_pid == 0 (Linux convention for "nothing to report").
+            clear_waitid_siginfo(infop);
+            return SyscallResult::ok(0);
+        }
+        // Block until a child changes state (lost-wakeup-safe: register
+        // the waiter, re-scan, then block).  A stop/continue/exit wakes
+        // this task through the same parent waiters wait4 uses.
+        match target {
+            Some(pid) => {
+                if let Err(e) = pcb::set_wait_task(pid, task_id) {
+                    return linux_err(linux_errno_for(e));
+                }
+            }
+            None => {
+                if let Err(e) = pcb::set_wait_any_task(parent_pid, task_id) {
+                    pcb::clear_wait_any_task(parent_pid, task_id);
+                    return scan_err(e);
+                }
+            }
+        }
+        match waitid_scan(
+            parent_pid, target, want_exited, want_stopped, want_continued, nowait,
+        ) {
+            Ok(Some(found)) => {
+                if target.is_none() {
+                    pcb::clear_wait_any_task(parent_pid, task_id);
+                }
+                write_waitid_siginfo(infop, &found);
+                if rusage != 0 {
+                    // SAFETY: validated 144-byte writable user range; same
+                    // process, mapping unchanged.
+                    unsafe {
+                        core::ptr::write_bytes(rusage as *mut u8, 0, 144);
+                    }
+                }
+                return SyscallResult::ok(0);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                if target.is_none() {
+                    pcb::clear_wait_any_task(parent_pid, task_id);
+                }
+                return scan_err(e);
+            }
+        }
+        crate::sched::block_current();
+    }
 }
 
 /// Validate the `(iov, iovcnt)` portion of a (p)readv/(p)writev call.
@@ -68313,14 +68763,24 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: waitid bad options not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // waitid WNOHANG | WEXITED -> 0.
-        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: siginfo_ptr, arg3: 1 | 4, arg4: rusage_ptr, arg5: 0 };
-        if dispatch_linux(nr::WAITID, &a).value != 0 {
-            serial_println!("[syscall/linux]   FAIL: waitid WNOHANG not 0");
+        // waitid for a specific, nonexistent child -> ECHILD.  These use
+        // P_PID with a guaranteed-absent PID so the result is deterministic
+        // and the blocking variant returns ECHILD *before* block_current
+        // (no eligible child → no hang), independent of whatever children
+        // the kernel-context process (PID 0) happens to have at boot.  The
+        // real selection/reaping logic is covered against synthetic PCBs by
+        // test_waitid_scan() below.
+        const ABSENT_PID: u64 = 0x3FFF_FFFE;
+        // WNOHANG: a nonexistent specific child is still ECHILD (Linux only
+        // returns 0 for WNOHANG when an *eligible* child exists but hasn't
+        // changed state).
+        let a = SyscallArgs { arg0: 1, arg1: ABSENT_PID, arg2: siginfo_ptr, arg3: 1 | 4, arg4: rusage_ptr, arg5: 0 };
+        if dispatch_linux(nr::WAITID, &a).value != -i64::from(errno::ECHILD) {
+            serial_println!("[syscall/linux]   FAIL: waitid(P_PID,absent,WNOHANG) not ECHILD");
             return Err(KernelError::InternalError);
         }
-        // waitid blocking WEXITED -> ECHILD.
-        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 4, arg4: 0, arg5: 0 };
+        // Blocking WEXITED on a nonexistent child -> ECHILD (no hang).
+        let a = SyscallArgs { arg0: 1, arg1: ABSENT_PID, arg2: 0, arg3: 4, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::WAITID, &a).value != -i64::from(errno::ECHILD) {
             serial_println!("[syscall/linux]   FAIL: waitid blocking not ECHILD");
             return Err(KernelError::InternalError);
@@ -68410,41 +68870,28 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        // (e) P_ALL with __WALL set in options.  Linux: accepted —
-        // falls through to ECHILD (no children) here.  Pre-batch:
-        // EINVAL (unknown options bit).
-        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0,
-            arg3: 4 | 0x4000_0000, arg4: 0, arg5: 0 };
+        // (e) __WALL accepted in options (not a bad-options EINVAL).  We
+        // use P_PID with an absent child + WNOHANG so the call returns
+        // ECHILD deterministically: ECHILD (not EINVAL) proves __WALL was
+        // accepted, and the absent specific PID guarantees no blocking.
+        let a = SyscallArgs { arg0: 1, arg1: ABSENT_PID, arg2: 0,
+            arg3: 1 | 4 | 0x4000_0000, arg4: 0, arg5: 0 };
         let v = dispatch_linux(nr::WAITID, &a).value;
         if v != -i64::from(errno::ECHILD) {
             serial_println!(
-                "[syscall/linux]   FAIL: waitid(P_ALL,_,WEXITED|__WALL) want ECHILD got {}",
+                "[syscall/linux]   FAIL: waitid(P_PID,absent,WNOHANG|WEXITED|__WALL) want ECHILD got {}",
                 v
             );
             return Err(KernelError::InternalError);
         }
-        // (f) P_ALL with __WCLONE set (bit 31).  Same rationale.
-        // 0x8000_0000 as u64 is u32::MAX+1 ÷ 2; passing it via
-        // arg3 ensures the i32 truncation sees the sign bit.
-        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0,
-            arg3: 4 | 0x8000_0000, arg4: 0, arg5: 0 };
+        // (f) __WCLONE accepted (bit 31).  0x8000_0000 via arg3 ensures
+        // the i32 truncation sees the sign bit.  Same absent-PID design.
+        let a = SyscallArgs { arg0: 1, arg1: ABSENT_PID, arg2: 0,
+            arg3: 1 | 4 | 0x8000_0000, arg4: 0, arg5: 0 };
         let v = dispatch_linux(nr::WAITID, &a).value;
         if v != -i64::from(errno::ECHILD) {
             serial_println!(
-                "[syscall/linux]   FAIL: waitid(P_ALL,_,WEXITED|__WCLONE) want ECHILD got {}",
-                v
-            );
-            return Err(KernelError::InternalError);
-        }
-        // (g) P_PID upid==1 with WNOHANG | WEXITED → 0.  Positive
-        // control: a legal P_PID call must reach WNOHANG and return
-        // 0 (since there's no eligible child to reap).
-        let a = SyscallArgs { arg0: 1, arg1: 1, arg2: 0,
-            arg3: 1 | 4, arg4: 0, arg5: 0 };
-        let v = dispatch_linux(nr::WAITID, &a).value;
-        if v != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: waitid(P_PID,1,WNOHANG|WEXITED) want 0 got {}",
+                "[syscall/linux]   FAIL: waitid(P_PID,absent,WNOHANG|WEXITED|__WCLONE) want ECHILD got {}",
                 v
             );
             return Err(KernelError::InternalError);
@@ -68452,6 +68899,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   waitid per-which upid gates + options mask: OK"
         );
+
+        // Real child-selection / siginfo encoding against synthetic PCBs.
+        test_waitid_scan()?;
 
         // preadv negative offset -> EINVAL.
         let a = SyscallArgs { arg0: 3, arg1: iov_ptr, arg2: 1, arg3: u64::MAX, arg4: 0, arg5: 0 };

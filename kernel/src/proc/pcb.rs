@@ -528,6 +528,21 @@ pub struct Process {
     /// Storing it per-PCB lets the get-side report the value the
     /// caller actually installed, instead of always 0.
     pub linux_sched_priority: i32,
+    /// `SCHED_RESET_ON_FORK` bit, as requested via
+    /// `sched_setscheduler(pid, policy | 0x4000_0000, ...)` or
+    /// `sched_setattr` with `SCHED_FLAG_RESET_ON_FORK` (0x01) in
+    /// `sched_flags`.  Reported back by `sched_getscheduler`
+    /// (OR'd into the returned policy) and `sched_getattr`
+    /// (set in the returned `sched_flags`).
+    ///
+    /// Semantics mirror Linux v6.6 `__sched_fork`: a child of a task
+    /// that has this set does NOT inherit it — on fork the flag is
+    /// cleared and, if the parent had an RT/DL policy, the child's
+    /// policy is reset to `SCHED_NORMAL` with priority 0 (a negative
+    /// nice is also reset to 0).  Like the policy/priority fields this
+    /// is pure ABI bookkeeping — our scheduler is priority-round-robin
+    /// and does not act on it.
+    pub linux_sched_reset_on_fork: bool,
     /// Linux nice value, as set via `setpriority(2)` and reported via
     /// `getpriority(2)`.  Range -20..=19; default 0.
     ///
@@ -1089,6 +1104,10 @@ impl Process {
             // exec'd binary inherits on stock Linux.
             linux_sched_policy: 0,
             linux_sched_priority: 0,
+            // SCHED_RESET_ON_FORK defaults off for every freshly
+            // exec'd binary; it must be opted into via
+            // sched_setscheduler/sched_setattr.
+            linux_sched_reset_on_fork: false,
             // Default nice value is 0 on Linux for every freshly
             // exec'd binary that hasn't inherited a non-zero value.
             linux_nice: 0,
@@ -1330,6 +1349,18 @@ pub fn fork_create(
             }
             alloc::boxed::Box::new(copy)
         });
+        // SCHED_RESET_ON_FORK (Linux v6.6 `__sched_fork`): a child never
+        // inherits the flag, and a parent that had it set forces the
+        // child's policy/priority/nice to be reset.  The reset rules
+        // live in the pure helper `sched_fork_child_params` so they can
+        // be unit-tested in isolation; the flag itself is always cleared
+        // in the child (hardcoded `false` in the Process literal below).
+        let (child_sched_policy, child_sched_priority, child_nice) = sched_fork_child_params(
+            parent.linux_sched_policy,
+            parent.linux_sched_priority,
+            parent.linux_nice,
+            parent.linux_sched_reset_on_fork,
+        );
         (
             parent.name.clone(),
             parent.cap_table.clone(),
@@ -1346,9 +1377,9 @@ pub fn fork_create(
             parent.linux_as_bytes,
             parent.linux_umask,
             parent.linux_personality,
-            parent.linux_sched_policy,
-            parent.linux_sched_priority,
-            parent.linux_nice,
+            child_sched_policy,
+            child_sched_priority,
+            child_nice,
             parent.linux_dumpable,
             parent.linux_keepcaps,
             parent.linux_no_new_privs,
@@ -1466,15 +1497,20 @@ pub fn fork_create(
         // re-arm via prctl(PR_SET_PDEATHSIG) itself.  Same rule
         // applies across exec.  Match Linux exactly.
         linux_pdeathsig: 0,
-        // Linux: scheduling policy and priority are inherited
-        // verbatim across fork.  (SCHED_RESET_ON_FORK is opt-in via
-        // OR'ing 0x40000000 into the policy at set time; we do not
-        // implement that flag yet — see todo entry.)
+        // Linux: scheduling policy and priority are inherited verbatim
+        // across fork, UNLESS the parent had SCHED_RESET_ON_FORK set —
+        // in which case `__sched_fork` resets the child (RT/DL policy
+        // -> SCHED_NORMAL/prio 0, negative nice -> 0) and clears the
+        // flag.  `child_sched_policy` / `child_sched_priority` /
+        // `child_nice` (computed above) already encode that reset; the
+        // flag is unconditionally cleared here.
         linux_sched_policy,
         linux_sched_priority,
+        linux_sched_reset_on_fork: false,
         // Linux: nice value is inherited verbatim across fork and
-        // preserved across exec.  Forked children start with the
-        // same nice as their parent.
+        // preserved across exec (the SCHED_RESET_ON_FORK reset above
+        // is the sole exception).  Forked children otherwise start
+        // with the same nice as their parent.
         linux_nice,
         // Linux: PR_SET_DUMPABLE state propagates verbatim across
         // fork.  Linux RESETS it to 1 on execve (unless the binary
@@ -2162,6 +2198,58 @@ pub fn set_sched_policy(pid: ProcessId, policy: u32) -> Option<u32> {
     let proc = table.get_mut(&pid)?;
     let old = proc.linux_sched_policy;
     proc.linux_sched_policy = policy;
+    Some(old)
+}
+
+/// Compute a forked child's `(policy, priority, nice)` from the parent's
+/// values and whether the parent had `SCHED_RESET_ON_FORK` set, per
+/// Linux v6.6 `__sched_fork`.  The child never inherits the flag itself
+/// (the caller stores `false`); this helper only resolves the reset of
+/// the scheduling triple:
+///
+/// - Parent flag clear: child inherits `(policy, priority, nice)`
+///   verbatim.
+/// - Parent flag set, RT (FIFO=1, RR=2) / DEADLINE (6): policy resets to
+///   `SCHED_NORMAL` (0), priority to 0, nice to 0
+///   (`static_prio = NICE_TO_PRIO(0)`).
+/// - Parent flag set, NORMAL/BATCH/IDLE: policy kept, priority kept
+///   (already 0 for these), and a *negative* nice is reset to 0 while a
+///   non-negative nice is preserved.
+#[must_use]
+pub fn sched_fork_child_params(
+    parent_policy: u32,
+    parent_priority: i32,
+    parent_nice: i32,
+    parent_reset_on_fork: bool,
+) -> (u32, i32, i32) {
+    if !parent_reset_on_fork {
+        return (parent_policy, parent_priority, parent_nice);
+    }
+    match parent_policy {
+        1 | 2 | 6 => (0, 0, 0),
+        other => (other, parent_priority, parent_nice.max(0)),
+    }
+}
+
+/// Read the recorded `SCHED_RESET_ON_FORK` flag for `pid`.
+///
+/// Returns `None` if `pid` is unknown; `Some(false)` is the default
+/// for a process that has never opted into the flag.
+#[must_use]
+pub fn get_sched_reset_on_fork(pid: ProcessId) -> Option<bool> {
+    PROCESS_TABLE
+        .lock()
+        .get(&pid)
+        .map(|p| p.linux_sched_reset_on_fork)
+}
+
+/// Set the `SCHED_RESET_ON_FORK` flag for `pid`, returning the prior
+/// value.  Returns `None` if `pid` is unknown.
+pub fn set_sched_reset_on_fork(pid: ProcessId, on: bool) -> Option<bool> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid)?;
+    let old = proc.linux_sched_reset_on_fork;
+    proc.linux_sched_reset_on_fork = on;
     Some(old)
 }
 

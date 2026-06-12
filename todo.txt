@@ -51601,3 +51601,82 @@ honestly testing this whole class of category-(b) process/fd features
 the reason CLONE_PIDFD is deferred rather than implemented blind.
 TRIGGER to implement: once a userspace syscall integration-test
 harness exists (or alongside building one).
+
+================================================================
+Batch 527 — sched: SCHED_RESET_ON_FORK strip / store / report
+================================================================
+
+The divergence (confirmed against the documented limitation that was
+in pcb.rs ~1469): SCHED_RESET_ON_FORK was neither stripped from the
+legacy sched_setscheduler policy arg, nor stored, nor reported back —
+so the whole flag was silently unsupported.
+
+v6.6 behavior (kernel/sched/core.c):
+  * sched_setscheduler legacy ABI ORs the flag 0x4000_0000 into the
+    `policy` int.  `_sched_setscheduler` fixes up the hack:
+        if (policy & SCHED_RESET_ON_FORK) {
+            attr.sched_flags |= SCHED_FLAG_RESET_ON_FORK;  // 0x01
+            policy &= ~SCHED_RESET_ON_FORK;
+            attr.sched_policy = policy;
+        }
+    then __sched_setscheduler runs valid_policy() on the STRIPPED
+    policy.  Pre-batch we matched on the raw policy incl. the flag bit
+    so e.g. sched_setscheduler(pid, SCHED_NORMAL|RESET_ON_FORK) =
+    0x4000_0000 missed every valid_policy arm and returned EINVAL.
+  * sched_getscheduler returns `policy | (reset_on_fork ?
+    SCHED_RESET_ON_FORK : 0)`.
+  * sched_setattr/getattr use SCHED_FLAG_RESET_ON_FORK (0x01) in the
+    sched_flags field (offset 8..16 of the 48-byte sched_attr v0).
+    The bit was already accepted by the SCHED_FLAG_ALL mask gate
+    (batch 507); now it's actually recorded and reported.
+  * __sched_fork reset semantics: the child NEVER inherits the flag.
+    If the parent had it set: RT(FIFO=1,RR=2)/DEADLINE(6) collapse to
+    SCHED_NORMAL(0)/prio0/nice0; NORMAL(0)/BATCH(3)/IDLE(5) keep
+    policy+prio but clamp negative nice to 0 (non-negative preserved).
+
+The fix (translator + PCB bookkeeping only — our scheduler is
+priority-round-robin and does not honor RT/DEADLINE; these fields are
+pure ABI round-trip state):
+  * kernel/src/proc/pcb.rs:
+      - new field `linux_sched_reset_on_fork: bool` (default false,
+        both the default-init and forked Process literals).
+      - pure helper `sched_fork_child_params(policy, prio, nice,
+        reset_on_fork) -> (policy, prio, nice)` encoding the
+        __sched_fork reset table; called on the fork path so the
+        child's recorded sched params follow v6.6 and the flag is
+        always cleared in the child.
+      - `get_sched_reset_on_fork` / `set_sched_reset_on_fork` helpers.
+  * kernel/src/syscall/linux.rs:
+      - sys_sched_setscheduler: strip 0x4000_0000 before valid_policy,
+        store the flag (gates 6/7 already use the stripped value).
+      - sys_sched_getscheduler: OR the flag back into the return.
+      - sys_sched_setattr: persist SCHED_FLAG_RESET_ON_FORK from
+        sched_flags.
+      - sys_sched_getattr: report it back in sched_flags @ 8..16.
+
+Deliberate omission (documented in the setscheduler comment): v6.6
+also returns -EPERM when an *unprivileged* task CLEARS a
+previously-set reset_on_fork.  We don't model the unprivileged/
+privileged split with a clean capability at this gate, so we skip it
+the same way other rlimit/cap gates exempt kernel-context callers.
+
+Boot self-tests (linux.rs self_test, kernel context — pid=0 doesn't
+persist, so a synthetic PCB carries the round-trip):
+  * setscheduler(NORMAL|RESET_ON_FORK) -> 0; getscheduler ->
+    0x4000_0000; get_sched_reset_on_fork == Some(true).
+  * setscheduler(FIFO|RESET_ON_FORK, prio1) -> 0; getscheduler ->
+    0x4000_0001.  Clear via plain NORMAL -> getscheduler 0,
+    get_sched_reset_on_fork == Some(false).
+  * setattr(sched_flags=0x01) persists + getattr reports buf[8..16]=
+    0x01; clear -> getattr reports 0.
+  * sched_fork_child_params direct table checks:
+    (2,50,-5,t)->(0,0,0); (1,99,3,t)->(0,0,0); (6,0,7,t)->(0,0,0);
+    (0,0,-5,t)->(0,0,0); (0,0,7,t)->(0,0,7); (3,0,2,t)->(3,0,2);
+    (5,0,-1,t)->(5,0,0); (2,50,7,f)->(2,50,7).
+  Serial stamps:
+    "SCHED_RESET_ON_FORK set/get/fork round-trip (batch 527): OK"
+    "sched_{set,get}attr SCHED_FLAG_RESET_ON_FORK round-trip (batch 527): OK"
+
+Build clean, clippy clean (no new warnings), boot-test PASS (26s).
+NOTE: numbered 527 (not 511) — 511 was already taken by the uname
+batch; 526 was the previous highest.

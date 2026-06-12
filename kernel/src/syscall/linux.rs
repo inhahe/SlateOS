@@ -9422,7 +9422,9 @@ fn sys_capset(args: &SyscallArgs) -> SyscallResult {
 ///   - `SCHED_BATCH == 3`, `SCHED_IDLE == 5`, `SCHED_DEADLINE == 6` —
 ///     Linux extensions.
 ///
-/// We always return 0 (SCHED_OTHER); ESRCH for non-existent pids.
+/// We return the policy recorded in the PCB (default 0 = SCHED_OTHER),
+/// OR'd with `SCHED_RESET_ON_FORK` (0x4000_0000) when that flag is set;
+/// ESRCH for non-existent pids, EINVAL for a negative pid.
 fn sys_sched_getscheduler(args: &SyscallArgs) -> SyscallResult {
     // Linux signature:
     //   `SYSCALL_DEFINE1(sched_getscheduler, pid_t, pid)`
@@ -9456,7 +9458,23 @@ fn sys_sched_getscheduler(args: &SyscallArgs) -> SyscallResult {
     let policy = target_pid
         .and_then(pcb::get_sched_policy)
         .unwrap_or(0);
-    SyscallResult::ok(i64::from(policy))
+    // ## Batch 527 — report SCHED_RESET_ON_FORK back in the returned
+    // policy.  Linux v6.6 `kernel/sched/syscalls.c::SYSCALL_DEFINE1(
+    // sched_getscheduler)`:
+    //   retval = p->policy;
+    //   if (p->sched_reset_on_fork)
+    //       retval |= SCHED_RESET_ON_FORK;
+    // so a task that opted in via sched_setscheduler/sched_setattr sees
+    // `policy | 0x4000_0000` here, round-tripping the bit.
+    let reset_on_fork = target_pid
+        .and_then(pcb::get_sched_reset_on_fork)
+        .unwrap_or(false);
+    let ret = if reset_on_fork {
+        i64::from(policy) | 0x4000_0000
+    } else {
+        i64::from(policy)
+    };
+    SyscallResult::ok(ret)
 }
 
 /// `sched_setscheduler(pid, policy, sched_param)` — install a new
@@ -9591,8 +9609,41 @@ fn sys_sched_setscheduler(args: &SyscallArgs) -> SyscallResult {
     // fidelity directive overrides that — match v6.6's CURRENT
     // valid_policy() surface so glibc-on-v6.6 probes that walk policy
     // values can correctly conclude SCHED_EXT is unavailable.
+    //
+    // ## Batch 527 — strip SCHED_RESET_ON_FORK before valid_policy()
+    //
+    // SCHED_RESET_ON_FORK (0x4000_0000) is a *flag* OR'd into the policy
+    // argument by the legacy sched_setscheduler ABI, not part of the
+    // policy value.  Linux v6.6 `_sched_setscheduler` fixes up the
+    // legacy hack before validation:
+    //
+    //   /* Fixup the legacy SCHED_RESET_ON_FORK hack. */
+    //   if (unlikely(policy & SCHED_RESET_ON_FORK)) {
+    //       attr.sched_flags |= SCHED_FLAG_RESET_ON_FORK;
+    //       policy &= ~SCHED_RESET_ON_FORK;
+    //       attr.sched_policy = policy;
+    //   }
+    //
+    // then `__sched_setscheduler` runs `if (!valid_policy(policy))
+    // return -EINVAL;` on the *stripped* policy.  Pre-batch we matched
+    // on the raw policy including the flag bit, so e.g.
+    // sched_setscheduler(pid, SCHED_NORMAL|RESET_ON_FORK) = 0x4000_0000
+    // missed every arm and returned EINVAL where v6.6 accepts it
+    // (strips the flag, base policy 0 is valid, stores reset_on_fork).
+    // The outer `policy < 0` gate above is unaffected — bit 30 never
+    // makes the `int` negative.
+    //
+    // Deliberate omission (documented): v6.6 additionally returns
+    // -EPERM when an *unprivileged* task clears a previously-set
+    // reset_on_fork (`if (p->sched_reset_on_fork && !reset_on_fork)
+    // return -EPERM;`).  We don't model the unprivileged/privileged
+    // split with a clean capability here, so we skip that gate the same
+    // way other rlimit/cap gates exempt kernel-context callers.
+    const SCHED_RESET_ON_FORK_BIT: u32 = 0x4000_0000;
     #[allow(clippy::cast_sign_loss)]
-    let policy_u32 = policy_i32 as u32;
+    let policy_raw = policy_i32 as u32;
+    let reset_on_fork = (policy_raw & SCHED_RESET_ON_FORK_BIT) != 0;
+    let policy_u32 = policy_raw & !SCHED_RESET_ON_FORK_BIT;
     match policy_u32 {
         0 | 1 | 2 | 3 | 5 | 6 => {}
         _ => return linux_err(errno::EINVAL),
@@ -9618,6 +9669,7 @@ fn sys_sched_setscheduler(args: &SyscallArgs) -> SyscallResult {
     if let Some(tp) = target_pid {
         let _ = pcb::set_sched_policy(tp, policy_u32);
         let _ = pcb::set_sched_priority(tp, sched_prio);
+        let _ = pcb::set_sched_reset_on_fork(tp, reset_on_fork);
     }
     SyscallResult::ok(0)
 }
@@ -23701,10 +23753,17 @@ fn sys_sched_setattr(args: &SyscallArgs) -> SyscallResult {
     if pid_i32 != 0 && pcb::state(pid_u).is_none() {
         return linux_err(errno::ESRCH);
     }
+    // ## Batch 527 — persist SCHED_FLAG_RESET_ON_FORK (0x01) from
+    // sched_flags so sched_getscheduler/sched_getattr report it back.
+    // The bit was already accepted by the SCHED_FLAG_ALL mask gate
+    // above (batch 507); we now actually record it.
+    const SCHED_FLAG_RESET_ON_FORK_BIT: u64 = 0x01;
+    let reset_on_fork = (sched_flags & SCHED_FLAG_RESET_ON_FORK_BIT) != 0;
     let target_pid = if pid_i32 == 0 { caller_pid() } else { Some(pid_u) };
     if let Some(tp) = target_pid {
         let _ = pcb::set_sched_policy(tp, policy);
         let _ = pcb::set_sched_priority(tp, sched_prio);
+        let _ = pcb::set_sched_reset_on_fork(tp, reset_on_fork);
     }
 
     SyscallResult::ok(0)
@@ -23732,7 +23791,9 @@ fn sys_sched_setattr(args: &SyscallArgs) -> SyscallResult {
 ///   * u32 sched_policy           — SCHED_OTHER (0), FIFO (1), RR (2),
 ///     BATCH (3), IDLE (5), DEADLINE (6),
 ///     EXT (7).
-///   * u64 sched_flags            — always 0 (no reset_on_fork / etc.).
+///   * u64 sched_flags            — SCHED_FLAG_RESET_ON_FORK (0x01) when
+///     the target opted in via sched_setscheduler/sched_setattr; else 0
+///     (no util_clamp / DEADLINE flags modelled).
 ///   * s32 sched_nice             — 0 (we don't track nice values).
 ///   * u32 sched_priority         — RT policies only; 0 otherwise.
 ///   * u64 sched_runtime          — 0 (no DEADLINE support).
@@ -23816,6 +23877,11 @@ fn sys_sched_getattr(args: &SyscallArgs) -> SyscallResult {
     } else {
         0
     };
+    // ## Batch 527 — sched_flags reports SCHED_FLAG_RESET_ON_FORK (0x01)
+    // when the target opted in.  Same PCB source as sched_getscheduler.
+    let reset_on_fork = target_pid
+        .and_then(pcb::get_sched_reset_on_fork)
+        .unwrap_or(false);
 
     // Assemble the v0-sized (48-byte) sched_attr.  We use a packed
     // byte array to guarantee the exact Linux ABI layout regardless
@@ -23859,7 +23925,10 @@ fn sys_sched_getattr(args: &SyscallArgs) -> SyscallResult {
     let mut buf = [0u8; 48];
     buf[0..4].copy_from_slice(&returned_size.to_le_bytes());
     buf[4..8].copy_from_slice(&policy.to_le_bytes());
-    // sched_flags @ 8..16 = 0 (already zero).
+    // sched_flags @ 8..16 — SCHED_FLAG_RESET_ON_FORK (0x01) when set,
+    // else 0 (batch 527).  Other flags stay 0 (no util_clamp / DL).
+    let sched_flags_out: u64 = if reset_on_fork { 0x01 } else { 0 };
+    buf[8..16].copy_from_slice(&sched_flags_out.to_le_bytes());
     // sched_nice @ 16..20 = 0.
     buf[20..24].copy_from_slice(&priority.to_le_bytes());
     // sched_runtime @ 24..32, sched_deadline @ 32..40,
@@ -47473,6 +47542,130 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   sched_setscheduler policy int-truncation (high-half ignored): OK"
         );
+        // Batch 527: SCHED_RESET_ON_FORK (0x4000_0000) is a flag OR'd
+        // into the legacy sched_setscheduler `policy` arg.  v6.6
+        // _sched_setscheduler strips it before valid_policy(), records
+        // it in the task's sched_reset_on_fork, and sched_getscheduler
+        // ORs it back into the returned policy.  Exercise the full
+        // round-trip on a synthetic PCB (pid=0 in kernel context does
+        // not persist), then the fork-reset helper directly.
+        {
+            let srof = pcb::create("srof-batch527", 0);
+            if srof > i32::MAX as u64 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: srof test_pid too large ({})", srof
+                );
+                pcb::destroy(srof);
+                return Err(KernelError::InternalError);
+            }
+            // (a) SCHED_NORMAL | RESET_ON_FORK, zero param -> 0.  The
+            // base policy 0 is valid only after the flag is stripped;
+            // pre-batch the raw 0x4000_0000 matched no arm -> EINVAL.
+            let a = SyscallArgs { arg0: srof, arg1: 0x4000_0000,
+                arg2: sched_param_zero_ptr, arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::SCHED_SETSCHEDULER, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: setscheduler(NORMAL|RESET_ON_FORK) want 0 got {}",
+                    dispatch_linux(nr::SCHED_SETSCHEDULER, &a).value,
+                );
+                pcb::destroy(srof);
+                return Err(KernelError::InternalError);
+            }
+            // (b) getscheduler ORs the flag back -> 0 | 0x4000_0000.
+            let a = SyscallArgs { arg0: srof, arg1: 0,
+                arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+            let v = dispatch_linux(nr::SCHED_GETSCHEDULER, &a).value;
+            if v != 0x4000_0000 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: getscheduler after NORMAL|RESET_ON_FORK want 0x4000_0000 got {:#x}", v
+                );
+                pcb::destroy(srof);
+                return Err(KernelError::InternalError);
+            }
+            // (c) the flag is mirrored in the PCB bookkeeping field.
+            if pcb::get_sched_reset_on_fork(srof) != Some(true) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: get_sched_reset_on_fork want Some(true) got {:?}",
+                    pcb::get_sched_reset_on_fork(srof)
+                );
+                pcb::destroy(srof);
+                return Err(KernelError::InternalError);
+            }
+            // (d) FIFO | RESET_ON_FORK (prio=1) -> 0; getscheduler -> 1|flag.
+            let a = SyscallArgs { arg0: srof, arg1: 0x4000_0001,
+                arg2: sched_param_fifo_ptr, arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::SCHED_SETSCHEDULER, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: setscheduler(FIFO|RESET_ON_FORK) want 0 got {}",
+                    dispatch_linux(nr::SCHED_SETSCHEDULER, &a).value,
+                );
+                pcb::destroy(srof);
+                return Err(KernelError::InternalError);
+            }
+            let a = SyscallArgs { arg0: srof, arg1: 0,
+                arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+            let v = dispatch_linux(nr::SCHED_GETSCHEDULER, &a).value;
+            if v != 0x4000_0001 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: getscheduler after FIFO|RESET_ON_FORK want 0x4000_0001 got {:#x}", v
+                );
+                pcb::destroy(srof);
+                return Err(KernelError::InternalError);
+            }
+            // (e) clearing: plain SCHED_NORMAL (no flag) -> getscheduler
+            // reports 0 and the PCB field clears.
+            let a = SyscallArgs { arg0: srof, arg1: 0,
+                arg2: sched_param_zero_ptr, arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::SCHED_SETSCHEDULER, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: setscheduler(NORMAL) clear want 0 got {}",
+                    dispatch_linux(nr::SCHED_SETSCHEDULER, &a).value,
+                );
+                pcb::destroy(srof);
+                return Err(KernelError::InternalError);
+            }
+            let a = SyscallArgs { arg0: srof, arg1: 0,
+                arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+            let v = dispatch_linux(nr::SCHED_GETSCHEDULER, &a).value;
+            if v != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: getscheduler after clear want 0 got {:#x}", v
+                );
+                pcb::destroy(srof);
+                return Err(KernelError::InternalError);
+            }
+            if pcb::get_sched_reset_on_fork(srof) != Some(false) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: get_sched_reset_on_fork after clear want Some(false) got {:?}",
+                    pcb::get_sched_reset_on_fork(srof)
+                );
+                pcb::destroy(srof);
+                return Err(KernelError::InternalError);
+            }
+            pcb::destroy(srof);
+        }
+        // Batch 527: __sched_fork reset semantics (pure helper).  When
+        // the parent has reset_on_fork set: RT/DEADLINE collapse to
+        // SCHED_NORMAL/prio0/nice0; NORMAL/BATCH/IDLE keep policy+prio
+        // but clamp negative nice to 0.  The flag itself never inherits.
+        // When unset, all params pass through unchanged.
+        if pcb::sched_fork_child_params(2, 50, -5, true) != (0, 0, 0)
+            || pcb::sched_fork_child_params(1, 99, 3, true) != (0, 0, 0)
+            || pcb::sched_fork_child_params(6, 0, 7, true) != (0, 0, 0)
+            || pcb::sched_fork_child_params(0, 0, -5, true) != (0, 0, 0)
+            || pcb::sched_fork_child_params(0, 0, 7, true) != (0, 0, 7)
+            || pcb::sched_fork_child_params(3, 0, 2, true) != (3, 0, 2)
+            || pcb::sched_fork_child_params(5, 0, -1, true) != (5, 0, 0)
+            || pcb::sched_fork_child_params(2, 50, 7, false) != (2, 50, 7)
+        {
+            serial_println!(
+                "[syscall/linux]   FAIL: sched_fork_child_params reset semantics mismatch"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   SCHED_RESET_ON_FORK set/get/fork round-trip (batch 527): OK"
+        );
         // Batch 255: sched_setparam routes through Linux's
         // do_sched_setscheduler, so its gate order is:
         //   1. !param || pid<0 -> EINVAL  (NULL param is EINVAL, NOT EFAULT)
@@ -61695,6 +61888,101 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   sched_{{set,get}}attr pid_t/uint truncation: OK"
+        );
+
+        // Batch 527: sched_setattr persists SCHED_FLAG_RESET_ON_FORK
+        // (0x01) from sched_flags, and sched_getattr reports it back in
+        // the sched_flags field (offset 8..16).  Round-trip on a
+        // synthetic PCB (pid=0 in kernel context does not persist).
+        {
+            let srof = pcb::create("srof-attr-b527", 0);
+            if srof > i32::MAX as u64 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: srof-attr test_pid too large ({})", srof
+                );
+                pcb::destroy(srof);
+                return Err(KernelError::InternalError);
+            }
+            // setattr: size=48, policy=SCHED_NORMAL, sched_flags=RESET_ON_FORK.
+            let mut sa = [0u8; 48];
+            sa[0..4].copy_from_slice(&48u32.to_le_bytes());      // size
+            // policy @4 = 0 (SCHED_NORMAL)
+            sa[8..16].copy_from_slice(&1u64.to_le_bytes());      // sched_flags = RESET_ON_FORK
+            // nice @16 = 0, priority @20 = 0
+            let sa_ptr = sa.as_ptr() as u64;
+            let a = SyscallArgs { arg0: srof, arg1: sa_ptr, arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: setattr(RESET_ON_FORK) want 0 got {}",
+                    dispatch_linux(nr::SCHED_SETATTR, &a).value,
+                );
+                pcb::destroy(srof);
+                return Err(KernelError::InternalError);
+            }
+            if pcb::get_sched_reset_on_fork(srof) != Some(true) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: setattr did not persist reset_on_fork"
+                );
+                pcb::destroy(srof);
+                return Err(KernelError::InternalError);
+            }
+            // getattr reads it back: sched_flags @ 8..16 must carry 0x01.
+            let mut ga = [0u8; 48];
+            let ga_ptr = ga.as_mut_ptr() as u64;
+            let a = SyscallArgs { arg0: srof, arg1: ga_ptr, arg2: 48,
+                arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::SCHED_GETATTR, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: getattr(RESET_ON_FORK) want 0 got {}",
+                    dispatch_linux(nr::SCHED_GETATTR, &a).value,
+                );
+                pcb::destroy(srof);
+                return Err(KernelError::InternalError);
+            }
+            let flags_back = u64::from_le_bytes([
+                ga[8], ga[9], ga[10], ga[11], ga[12], ga[13], ga[14], ga[15],
+            ]);
+            if flags_back != 0x01 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: getattr sched_flags want 0x01 got {:#x}", flags_back
+                );
+                pcb::destroy(srof);
+                return Err(KernelError::InternalError);
+            }
+            // Clear via setattr (sched_flags=0) -> getattr reports 0.
+            let mut sa = [0u8; 48];
+            sa[0..4].copy_from_slice(&48u32.to_le_bytes());
+            let sa_ptr = sa.as_ptr() as u64;
+            let a = SyscallArgs { arg0: srof, arg1: sa_ptr, arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: setattr(clear) want 0 got {}",
+                    dispatch_linux(nr::SCHED_SETATTR, &a).value,
+                );
+                pcb::destroy(srof);
+                return Err(KernelError::InternalError);
+            }
+            let mut ga = [0u8; 48];
+            let ga_ptr = ga.as_mut_ptr() as u64;
+            let a = SyscallArgs { arg0: srof, arg1: ga_ptr, arg2: 48,
+                arg3: 0, arg4: 0, arg5: 0 };
+            let _ = dispatch_linux(nr::SCHED_GETATTR, &a).value;
+            let flags_back = u64::from_le_bytes([
+                ga[8], ga[9], ga[10], ga[11], ga[12], ga[13], ga[14], ga[15],
+            ]);
+            if flags_back != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: getattr sched_flags after clear want 0 got {:#x}", flags_back
+                );
+                pcb::destroy(srof);
+                return Err(KernelError::InternalError);
+            }
+            pcb::destroy(srof);
+        }
+        serial_println!(
+            "[syscall/linux]   sched_{{set,get}}attr SCHED_FLAG_RESET_ON_FORK round-trip (batch 527): OK"
         );
 
         // Batch 384: landlock_create_ruleset VERSION-query.  Pre-batch

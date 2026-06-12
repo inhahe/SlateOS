@@ -333,7 +333,17 @@ impl Inotify {
             if rem.is_empty() {
                 return Vec::new();
             }
-            return rem.as_bytes().to_vec();
+            // inotify names are always a single path component (the immediate
+            // child of the watched directory), never a multi-level path.  Our
+            // native watches are non-recursive, so `rem` is normally already a
+            // single component; guard against a deeper path slipping through by
+            // taking only the first component so the emitted name can never
+            // contain an embedded '/' (which would corrupt the record stream).
+            let first = rem.split('/').next().unwrap_or(rem);
+            if first.is_empty() {
+                return Vec::new();
+            }
+            return first.as_bytes().to_vec();
         }
         // Path did not fall under the watch (shouldn't happen — native
         // already filtered) — fall back to the whole path's final component.

@@ -248,19 +248,58 @@ struct SignalFdWaiter {
 static SIGNALFD_WAITERS: Mutex<BTreeMap<ProcessId, Vec<SignalFdWaiter>>> =
     Mutex::new(BTreeMap::new());
 
+// ---------------------------------------------------------------------------
+// IRQ-safe lock accessors
+// ---------------------------------------------------------------------------
+//
+// Both signal registries below are plain spin locks that are taken in
+// *syscall* (process) context.  They must ALSO be touchable from *interrupt*
+// context — an `hrtimer` callback that posts `SIGALRM` for an expired
+// ITIMER_REAL, a future keyboard ISR raising `SIGINT`, etc.  If the timer ISR
+// fired on a CPU already holding one of these locks in syscall context and
+// then tried to re-acquire it, the CPU would spin forever on its own lock.
+//
+// The fix is to hold these locks only with interrupts disabled, so a holder
+// can never be interrupted mid-critical-section on its own CPU.  Routing
+// *every* access through these two helpers makes that invariant hold by
+// construction — no call site can forget the `without_interrupts` guard.  The
+// critical sections are short (bitmap/`BTreeMap` ops), so masking interrupts
+// across them is cheap.
+
+/// Run `f` with the [`SIGNAL_STATES`] lock held and interrupts disabled.
+#[inline]
+fn with_states<R>(f: impl FnOnce(&mut BTreeMap<ProcessId, SignalState>) -> R) -> R {
+    crate::cpu::without_interrupts(|| {
+        let mut states = SIGNAL_STATES.lock();
+        f(&mut states)
+    })
+}
+
+/// Run `f` with the [`SIGNALFD_WAITERS`] lock held and interrupts disabled.
+#[inline]
+fn with_waiters<R>(
+    f: impl FnOnce(&mut BTreeMap<ProcessId, Vec<SignalFdWaiter>>) -> R,
+) -> R {
+    crate::cpu::without_interrupts(|| {
+        let mut waiters = SIGNALFD_WAITERS.lock();
+        f(&mut waiters)
+    })
+}
+
 /// Register `task` as blocked in a `signalfd` read on `pid`, accepting `mask`.
 ///
 /// Idempotent per `(pid, task)`: a re-registration updates the mask rather than
 /// adding a duplicate entry (a thread can only be blocked in one read at a
 /// time, so at most one entry per task is meaningful).
 pub fn register_signalfd_waiter(pid: ProcessId, task: TaskId, mask: u64) {
-    let mut waiters = SIGNALFD_WAITERS.lock();
-    let list = waiters.entry(pid).or_default();
-    if let Some(existing) = list.iter_mut().find(|w| w.task == task) {
-        existing.mask = mask;
-    } else {
-        list.push(SignalFdWaiter { task, mask });
-    }
+    with_waiters(|waiters| {
+        let list = waiters.entry(pid).or_default();
+        if let Some(existing) = list.iter_mut().find(|w| w.task == task) {
+            existing.mask = mask;
+        } else {
+            list.push(SignalFdWaiter { task, mask });
+        }
+    });
 }
 
 /// Remove `task`'s `signalfd` waiter registration for `pid`, if present.
@@ -268,13 +307,14 @@ pub fn register_signalfd_waiter(pid: ProcessId, task: TaskId, mask: u64) {
 /// A harmless no-op if the task was never registered or was already woken
 /// (and thereby removed) by [`set_pending`].
 pub fn deregister_signalfd_waiter(pid: ProcessId, task: TaskId) {
-    let mut waiters = SIGNALFD_WAITERS.lock();
-    if let Some(list) = waiters.get_mut(&pid) {
-        list.retain(|w| w.task != task);
-        if list.is_empty() {
-            waiters.remove(&pid);
+    with_waiters(|waiters| {
+        if let Some(list) = waiters.get_mut(&pid) {
+            list.retain(|w| w.task != task);
+            if list.is_empty() {
+                waiters.remove(&pid);
+            }
         }
-    }
+    });
 }
 
 /// Remove and return every `signalfd` waiter of `pid` whose mask intersects
@@ -284,23 +324,24 @@ pub fn deregister_signalfd_waiter(pid: ProcessId, task: TaskId) {
 /// [`wake_signalfd_waiters`] so the partition logic is unit-testable without a
 /// live scheduler.
 fn take_matching_signalfd_waiters(pid: ProcessId, bit: u64) -> Vec<TaskId> {
-    let mut waiters = SIGNALFD_WAITERS.lock();
-    let Some(list) = waiters.get_mut(&pid) else {
-        return Vec::new();
-    };
-    let mut matched = Vec::new();
-    list.retain(|w| {
-        if w.mask & bit != 0 {
-            matched.push(w.task);
-            false
-        } else {
-            true
+    with_waiters(|waiters| {
+        let Some(list) = waiters.get_mut(&pid) else {
+            return Vec::new();
+        };
+        let mut matched = Vec::new();
+        list.retain(|w| {
+            if w.mask & bit != 0 {
+                matched.push(w.task);
+                false
+            } else {
+                true
+            }
+        });
+        if list.is_empty() {
+            waiters.remove(&pid);
         }
-    });
-    if list.is_empty() {
-        waiters.remove(&pid);
-    }
-    matched
+        matched
+    })
 }
 
 /// Wake every `signalfd` reader of `pid` whose mask intersects `bit` (a single
@@ -328,15 +369,15 @@ fn wake_signalfd_waiters(pid: ProcessId, bit: u64) {
 /// `addr == 0` unregisters, reverting to "no asynchronous delivery"
 /// (pending signals stay pending but are not delivered).
 pub fn register_trampoline(pid: ProcessId, addr: u64) {
-    let mut states = SIGNAL_STATES.lock();
-    states.entry(pid).or_default().trampoline = addr;
+    with_states(|states| {
+        states.entry(pid).or_default().trampoline = addr;
+    });
 }
 
 /// Get the registered trampoline address for a process, if any.
 #[must_use]
 pub fn trampoline(pid: ProcessId) -> Option<u64> {
-    let states = SIGNAL_STATES.lock();
-    states.get(&pid).map(|s| s.trampoline).filter(|&a| a != 0)
+    with_states(|states| states.get(&pid).map(|s| s.trampoline).filter(|&a| a != 0))
 }
 
 /// Returns `true` if the process has a non-zero trampoline registered.
@@ -350,17 +391,19 @@ pub fn has_trampoline(pid: ProcessId) -> bool {
 /// Decrements the global pending counter by the number of pending
 /// signals this process had, keeping the fast-path gate accurate.
 pub fn remove(pid: ProcessId) {
-    let mut states = SIGNAL_STATES.lock();
-    if let Some(state) = states.remove(&pid) {
-        let n = state.pending.count_ones() as usize;
-        if n != 0 {
-            PENDING_COUNT.fetch_sub(n, Ordering::Relaxed);
+    with_states(|states| {
+        if let Some(state) = states.remove(&pid) {
+            let n = state.pending.count_ones() as usize;
+            if n != 0 {
+                PENDING_COUNT.fetch_sub(n, Ordering::Relaxed);
+            }
         }
-    }
-    drop(states);
+    });
     // Drop any signalfd waiter registrations for the dying process so the
     // registry never accumulates stale entries for tasks being torn down.
-    SIGNALFD_WAITERS.lock().remove(&pid);
+    with_waiters(|waiters| {
+        waiters.remove(&pid);
+    });
 }
 
 /// Reset signal state across `exec()`.
@@ -374,12 +417,13 @@ pub fn remove(pid: ProcessId) {
 /// (matching POSIX), and will be delivered once the new image registers
 /// its trampoline.
 pub fn on_exec(pid: ProcessId) {
-    let mut states = SIGNAL_STATES.lock();
-    if let Some(state) = states.get_mut(&pid) {
-        state.trampoline = 0;
-        // Blocked mask is also reset on exec per POSIX.
-        state.blocked = 0;
-    }
+    with_states(|states| {
+        if let Some(state) = states.get_mut(&pid) {
+            state.trampoline = 0;
+            // Blocked mask is also reset on exec per POSIX.
+            state.blocked = 0;
+        }
+    });
 }
 
 /// Inherit signal state from a parent across `fork()`.
@@ -395,26 +439,27 @@ pub fn on_exec(pid: ProcessId) {
 /// Overwrites any existing child state (the child is freshly created, so
 /// there should be none, but this is idempotent).
 pub fn inherit_for_fork(parent: ProcessId, child: ProcessId) {
-    let mut states = SIGNAL_STATES.lock();
-    let (blocked, trampoline) = states
-        .get(&parent)
-        .map_or((0, 0), |s| (s.blocked, s.trampoline));
-    // If the child somehow already had pending signals recorded, drop
-    // them from the global counter before overwriting.
-    if let Some(existing) = states.get(&child) {
-        let n = existing.pending.count_ones() as usize;
-        if n != 0 {
-            PENDING_COUNT.fetch_sub(n, Ordering::Relaxed);
+    with_states(|states| {
+        let (blocked, trampoline) = states
+            .get(&parent)
+            .map_or((0, 0), |s| (s.blocked, s.trampoline));
+        // If the child somehow already had pending signals recorded, drop
+        // them from the global counter before overwriting.
+        if let Some(existing) = states.get(&child) {
+            let n = existing.pending.count_ones() as usize;
+            if n != 0 {
+                PENDING_COUNT.fetch_sub(n, Ordering::Relaxed);
+            }
         }
-    }
-    states.insert(
-        child,
-        SignalState {
-            pending: 0,
-            blocked,
-            trampoline,
-        },
-    );
+        states.insert(
+            child,
+            SignalState {
+                pending: 0,
+                blocked,
+                trampoline,
+            },
+        );
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -429,25 +474,24 @@ pub fn set_blocked(pid: ProcessId, mask: u64) -> u64 {
     // SIGKILL (bit 8) and SIGSTOP (bit 18) can never be blocked.
     let unblockable = (1u64 << (SIGKILL - 1)) | (1u64 << (SIGSTOP - 1));
     let mask = mask & !unblockable;
-    let mut states = SIGNAL_STATES.lock();
-    let state = states.entry(pid).or_default();
-    let old = state.blocked;
-    state.blocked = mask;
-    old
+    with_states(|states| {
+        let state = states.entry(pid).or_default();
+        let old = state.blocked;
+        state.blocked = mask;
+        old
+    })
 }
 
 /// Get the blocked-signal mask for a process.
 #[must_use]
 pub fn blocked(pid: ProcessId) -> u64 {
-    let states = SIGNAL_STATES.lock();
-    states.get(&pid).map(|s| s.blocked).unwrap_or(0)
+    with_states(|states| states.get(&pid).map(|s| s.blocked).unwrap_or(0))
 }
 
 /// Get the pending-signal set for a process (without clearing it).
 #[must_use]
 pub fn pending(pid: ProcessId) -> u64 {
-    let states = SIGNAL_STATES.lock();
-    states.get(&pid).map(|s| s.pending).unwrap_or(0)
+    with_states(|states| states.get(&pid).map(|s| s.pending).unwrap_or(0))
 }
 
 // ---------------------------------------------------------------------------
@@ -465,8 +509,7 @@ pub fn set_pending(pid: ProcessId, sig: u32) -> bool {
     let Some(bit) = signal_bit(sig) else {
         return false;
     };
-    let newly = {
-        let mut states = SIGNAL_STATES.lock();
+    let newly = with_states(|states| {
         let state = states.entry(pid).or_default();
         if state.pending & bit == 0 {
             state.pending |= bit;
@@ -475,7 +518,7 @@ pub fn set_pending(pid: ProcessId, sig: u32) -> bool {
         } else {
             false
         }
-    };
+    });
     // Wake any signalfd reader blocked on this signal — but only on a
     // clear→set transition (a re-post of an already-pending signal delivers
     // nothing new to drain).  Done after releasing SIGNAL_STATES (leaf-lock
@@ -546,20 +589,21 @@ pub fn classify_post(pid: ProcessId, sig: u32) -> PostDecision {
 /// if nothing is deliverable.
 #[must_use]
 pub fn take_deliverable(pid: ProcessId) -> Option<u32> {
-    let mut states = SIGNAL_STATES.lock();
-    let state = states.get_mut(&pid)?;
-    let deliverable = state.pending & !state.blocked;
-    if deliverable == 0 {
-        return None;
-    }
-    // Lowest set bit = lowest-numbered signal (POSIX delivers low first).
-    let bit_index = deliverable.trailing_zeros();
-    let bit = 1u64 << bit_index;
-    state.pending &= !bit;
-    PENDING_COUNT.fetch_sub(1, Ordering::Relaxed);
-    // bit_index is 0..=63, so +1 is 1..=64 — a valid signal number.
-    // `saturating_add` keeps this arithmetic-side-effect free.
-    Some(bit_index.saturating_add(1))
+    with_states(|states| {
+        let state = states.get_mut(&pid)?;
+        let deliverable = state.pending & !state.blocked;
+        if deliverable == 0 {
+            return None;
+        }
+        // Lowest set bit = lowest-numbered signal (POSIX delivers low first).
+        let bit_index = deliverable.trailing_zeros();
+        let bit = 1u64 << bit_index;
+        state.pending &= !bit;
+        PENDING_COUNT.fetch_sub(1, Ordering::Relaxed);
+        // bit_index is 0..=63, so +1 is 1..=64 — a valid signal number.
+        // `saturating_add` keeps this arithmetic-side-effect free.
+        Some(bit_index.saturating_add(1))
+    })
 }
 
 /// Pick and consume the lowest-numbered pending signal that is also in
@@ -574,18 +618,19 @@ pub fn take_deliverable(pid: ProcessId) -> Option<u32> {
 /// `None` if no pending signal falls within `mask`.
 #[must_use]
 pub fn take_pending_in_mask(pid: ProcessId, mask: u64) -> Option<u32> {
-    let mut states = SIGNAL_STATES.lock();
-    let state = states.get_mut(&pid)?;
-    let eligible = state.pending & mask;
-    if eligible == 0 {
-        return None;
-    }
-    let bit_index = eligible.trailing_zeros();
-    let bit = 1u64 << bit_index;
-    state.pending &= !bit;
-    PENDING_COUNT.fetch_sub(1, Ordering::Relaxed);
-    // bit_index is 0..=63, so +1 is 1..=64 — a valid signal number.
-    Some(bit_index.saturating_add(1))
+    with_states(|states| {
+        let state = states.get_mut(&pid)?;
+        let eligible = state.pending & mask;
+        if eligible == 0 {
+            return None;
+        }
+        let bit_index = eligible.trailing_zeros();
+        let bit = 1u64 << bit_index;
+        state.pending &= !bit;
+        PENDING_COUNT.fetch_sub(1, Ordering::Relaxed);
+        // bit_index is 0..=63, so +1 is 1..=64 — a valid signal number.
+        Some(bit_index.saturating_add(1))
+    })
 }
 
 /// Returns `true` if any pending signal for `pid` falls within `mask`.
@@ -595,10 +640,7 @@ pub fn take_pending_in_mask(pid: ProcessId, mask: u64) -> Option<u32> {
 /// consume anything.
 #[must_use]
 pub fn has_pending_in_mask(pid: ProcessId, mask: u64) -> bool {
-    let states = SIGNAL_STATES.lock();
-    states
-        .get(&pid)
-        .is_some_and(|s| s.pending & mask != 0)
+    with_states(|states| states.get(&pid).is_some_and(|s| s.pending & mask != 0))
 }
 
 /// Cheap fast-path gate: `true` if any signal might be pending anywhere.

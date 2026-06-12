@@ -9435,6 +9435,19 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##     and ITIMER_PROF stay ENOSYS/zero (they need per-task CPU-time accounting
 ##     hooks — separate, larger task).
 ##
+## *** BLOCKER — FIXED 2026-06-12 (foundation commit landed): ***
+## The IRQ-safe lock conversion described below is DONE.  signal.rs now routes
+## every SIGNAL_STATES / SIGNALFD_WAITERS access through two private helpers
+## `with_states` / `with_waiters` (both wrap the lock in
+## crate::cpu::without_interrupts), so all 16 former *.lock() sites hold their
+## lock with interrupts masked.  set_pending() is therefore now safe to call
+## from interrupt/softirq context (the SIGNAL_STATES->SIGNALFD_WAITERS leaf
+## ordering in set_pending is preserved; wakeups still happen after the states
+## lock is dropped, via try_wake/defer_wake which are independently IRQ-safe).
+## Built clean, clippy clean, boot-test PASSED.  The itimer.rs module above is
+## now unblocked and is the next step.  (Original blocker writeup kept below
+## for context.)
+##
 ## *** BLOCKER FOUND — must fix FIRST (this is why it's not done yet): ***
 ## The hrtimer callback (real_fire) runs in softirq/timer-ISR context, but
 ## proc::signal::set_pending() locks SIGNAL_STATES, a plain spin::Mutex taken

@@ -3776,6 +3776,26 @@ pub fn sys_signal_send(
             );
             SyscallResult::ok(0)
         }
+        signal::PostDecision::Stop(s) => {
+            // Suspend the target's threads for job control. If the caller is
+            // signalling itself, this is a self-stop: pass the current task
+            // so `stop_process_for_signal` parks it last (it yields and only
+            // returns on a later SIGCONT).
+            let self_task = if target == caller {
+                Some(task_id)
+            } else {
+                None
+            };
+            stop_process_for_signal(target, s, self_task);
+            SyscallResult::ok(0)
+        }
+        signal::PostDecision::Continue => {
+            // Resume the target's threads. A pending SIGCONT handler (set by
+            // classify_post when a trampoline is registered) runs on the
+            // target's next return to userspace.
+            continue_process(target);
+            SyscallResult::ok(0)
+        }
     }
 }
 
@@ -3930,6 +3950,92 @@ fn terminate_current_process_for_signal(
     sched::task_exit();
 }
 
+/// Wake the parent-side observers of a job-control transition.
+///
+/// Mirrors the zombie-transition wake in `thread::on_thread_exit`: `.0` is a
+/// task blocked in `waitpid(pid)` for this specific child; `.1` is a task in
+/// the parent blocked in `waitpid(-1)`. Each re-registers on its next
+/// blocking wait if the report does not match its `wait` options.
+fn wake_jc_waiters(waiters: crate::proc::pcb::JcWaiters) {
+    let (wake_task, any_waiter) = waiters;
+    if let Some(t) = wake_task {
+        sched::wake(t);
+    }
+    if let Some(t) = any_waiter {
+        sched::wake(t);
+    }
+}
+
+/// Stop a process for job control: suspend all its threads and record the
+/// stop so the parent's `wait4`/`waitid` can observe it (WUNTRACED/WSTOPPED).
+///
+/// `current_task` is `Some(tid)` only for a **self-stop** — when the running
+/// thread itself belongs to the target (e.g. `raise(SIGSTOP)`, or a stop at
+/// the syscall-return checkpoint). In that case the current thread is
+/// suspended **last**, because `sched::suspend(current)` yields and only
+/// returns once a `SIGCONT` resumes the thread; suspending it first would
+/// strand the remaining siblings un-suspended. For a cross-process stop the
+/// current thread is not part of the target, so `current_task` is `None` and
+/// every thread is suspended immediately before this returns.
+///
+/// Records the stop and wakes the parent's waiters *before* parking the
+/// current thread, so a tracing parent observes the stop without having to
+/// wait for this thread to be resumed.
+fn stop_process_for_signal(
+    pid: crate::proc::pcb::ProcessId,
+    sig: u32,
+    current_task: Option<crate::sched::task::TaskId>,
+) {
+    use crate::proc::pcb;
+
+    // Suspend every thread except the current one (if this is a self-stop).
+    let mut self_thread: Option<crate::sched::task::TaskId> = None;
+    if let Some(threads) = pcb::get_threads(pid) {
+        for t in threads {
+            if Some(t) == current_task {
+                self_thread = Some(t);
+                continue;
+            }
+            sched::suspend(t);
+        }
+    }
+
+    // Mark stopped and wake parent observers. If the process vanished
+    // between the signal check and here, there is nothing to record.
+    if let Ok(waiters) = pcb::record_jc_stopped(pid, sig) {
+        wake_jc_waiters(waiters);
+    }
+
+    serial_println!("[signal] Process {} stopped by signal {}", pid, sig);
+
+    // Finally park the current thread (self-stop only). Returns when a
+    // SIGCONT resumes us via `continue_process`.
+    if let Some(t) = self_thread {
+        sched::suspend(t);
+    }
+}
+
+/// Continue a stopped process: resume all its suspended threads and record
+/// the continue so the parent's `wait4`/`waitid` can observe it (WCONTINUED).
+///
+/// `sched::resume` is a no-op for threads that are not Suspended, so calling
+/// this on a process that is not actually stopped is harmless.
+fn continue_process(pid: crate::proc::pcb::ProcessId) {
+    use crate::proc::pcb;
+
+    if let Some(threads) = pcb::get_threads(pid) {
+        for t in threads {
+            sched::resume(t);
+        }
+    }
+
+    if let Ok(waiters) = pcb::record_jc_continued(pid) {
+        wake_jc_waiters(waiters);
+    }
+
+    serial_println!("[signal] Process {} continued", pid);
+}
+
 /// Deliver a pending signal to the current process on the way back to
 /// userspace, if one is deliverable.
 ///
@@ -3984,12 +4090,27 @@ pub fn deliver_pending_signal(
             // async-posted fatal signal (e.g. ITIMER_REAL's SIGALRM) to a
             // process with no handler would sit pending forever.
             while let Some(sig) = signal::take_deliverable(pid) {
-                if signal::default_action(sig) == signal::DefaultAction::Terminate
-                {
-                    terminate_current_process_for_signal(pid, task_id, sig);
-                    // Unreachable: task_exit never returns.
+                match signal::default_action(sig) {
+                    signal::DefaultAction::Terminate => {
+                        terminate_current_process_for_signal(pid, task_id, sig);
+                        // Unreachable: task_exit never returns.
+                    }
+                    signal::DefaultAction::Stop => {
+                        // A stop signal that was blocked at post time (kept
+                        // pending) is now deliverable: self-stop at the
+                        // checkpoint. Discard any pending SIGCONT first
+                        // (mutual cancellation now that the stop takes
+                        // effect), then park this thread (and siblings).
+                        // `stop_process_for_signal` returns once a SIGCONT
+                        // resumes us; the loop then re-checks for more.
+                        signal::discard_pending_cont(pid);
+                        stop_process_for_signal(pid, sig, Some(task_id));
+                    }
+                    signal::DefaultAction::Ignore
+                    | signal::DefaultAction::Continue => {
+                        // Dropped; check the next.
+                    }
                 }
-                // Ignore / Stop / Continue: dropped; check the next.
             }
             return false;
         }

@@ -8791,19 +8791,24 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          record_jc_stopped/record_jc_continued (return parent waiters
 ##          to wake) + is_stopped/peek_jc_report/take_jc_report.  Inert,
 ##          unit-tested (pcb::test_job_control_state).  Commit 268ded94.
-##        [NEXT] (2) Signal-delivery wiring: when a stop-default signal
-##          takes effect (SIGSTOP always; SIGTSTP/TTIN/TTOU when no
-##          handler), suspend ALL the target's threads, call
-##          record_jc_stopped, wake the returned parent waiters.  This
-##          must fire even for a process WITH a trampoline for SIGSTOP
-##          (uncatchable).  Drive it from handlers::deliver_pending_signal
-##          (current-process self-stop at the syscall-return checkpoint)
-##          and from classify_post/sys_signal_send (so kill(pid,SIGSTOP)
-##          to another process stops it).  SIGCONT: resume all threads +
-##          record_jc_continued + wake parent; SIGCONT also discards
-##          pending stop signals and a stop discards pending SIGCONT
-##          (mutual cancellation — Linux prepare_signal()).
-##        [THEN] (3) wait4/waitid reporting: honour WUNTRACED/WSTOPPED
+##        [DONE] (2) Signal-delivery wiring (commit pending): classify_post
+##          now returns PostDecision::Stop(sig)/Continue.  SIGSTOP always
+##          Stop (uncatchable, even with trampoline); SIGCONT always
+##          Continue (+ set_pending if a handler is registered so it also
+##          runs); catchable stops (SIGTSTP/TTIN/TTOU) -> Deliver if a
+##          handler exists, else Stop now (or kept pending->Drop if blocked,
+##          stopping later at the checkpoint).  Mutual cancellation via
+##          signal::clear_pending: SIGCONT discards pending stops, a stop
+##          discards pending SIGCONT.  handlers::stop_process_for_signal
+##          suspends all target threads (current thread LAST on a self-stop,
+##          since suspend(current) yields), record_jc_stopped + wakes parent
+##          waiters; continue_process resumes + record_jc_continued + wakes.
+##          Wired into sys_signal_send (Stop/Continue arms) and into
+##          deliver_pending_signal's no-trampoline loop (DefaultAction::Stop
+##          self-stop at the syscall-return checkpoint).  classify_post
+##          self-test extended (stop/continue/mutual-cancel/blocked cases);
+##          12 signal tests + pcb job-control test pass; boot OK.
+##        [NEXT] (3) wait4/waitid reporting: honour WUNTRACED/WSTOPPED
 ##          (report Stopped(sig) as status (sig<<8)|0x7f, do NOT reap) and
 ##          WCONTINUED (status 0xffff).  Use peek_jc_report in the scan,
 ##          take_jc_report on report (unless WNOWAIT).  Extend the

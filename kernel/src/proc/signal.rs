@@ -65,14 +65,27 @@ pub const NSIG: u32 = 64;
 /// `SIGKILL` — always fatal, never catchable. Standard Linux number.
 pub const SIGKILL: u32 = 9;
 
+/// `SIGCONT` — continue (resume) a stopped process. Never catchable as a
+/// stop-override (always resumes), but a handler may also run. Standard
+/// Linux number.
+pub const SIGCONT: u32 = 18;
+
 /// `SIGSTOP` — stop signal, never catchable. Standard Linux number.
 pub const SIGSTOP: u32 = 19;
+
+/// `SIGTSTP` — interactive stop (Ctrl-Z). Catchable, unlike `SIGSTOP`.
+pub const SIGTSTP: u32 = 20;
+
+/// `SIGTTIN` — background read from controlling terminal. Catchable stop.
+pub const SIGTTIN: u32 = 21;
+
+/// `SIGTTOU` — background write to controlling terminal. Catchable stop.
+pub const SIGTTOU: u32 = 22;
 
 /// Default disposition of a signal for a process with no handler.
 ///
 /// This mirrors the Linux default-action table closely enough for the
-/// kernel's fallback decision (terminate vs. drop) when no userspace
-/// trampoline is registered.
+/// kernel's fallback decision when no userspace trampoline is registered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DefaultAction {
     /// Terminate the process (optionally with a core dump — we don't
@@ -80,10 +93,12 @@ pub enum DefaultAction {
     Terminate,
     /// Ignore the signal (no effect).
     Ignore,
-    /// Stop the process. We have no suspend mechanism, so the fallback
-    /// treats this as a drop.
+    /// Stop the process: suspend all its threads via the scheduler until a
+    /// `SIGCONT` resumes it (real job control — see
+    /// `handlers::stop_process_for_signal`).
     Stop,
-    /// Continue a stopped process. No-op in our model.
+    /// Continue a stopped process: resume all its suspended threads (see
+    /// `handlers::continue_process`).
     Continue,
 }
 
@@ -568,6 +583,60 @@ pub fn set_pending(pid: ProcessId, sig: u32) -> bool {
     newly
 }
 
+/// Clear the given pending-signal bits for a process.
+///
+/// Used for stop/continue mutual cancellation (a `SIGCONT` discards pending
+/// stop signals and a stop discards a pending `SIGCONT`). Decrements the
+/// global pending counter by the number of bits actually cleared so the
+/// fast-path gate in the delivery checkpoint stays accurate.
+pub fn clear_pending(pid: ProcessId, mask: u64) {
+    if mask == 0 {
+        return;
+    }
+    with_states(|states| {
+        if let Some(state) = states.get_mut(&pid) {
+            let cleared = state.pending & mask;
+            if cleared != 0 {
+                state.pending &= !mask;
+                // `count_ones()` is 0..=64 — fits usize without arithmetic.
+                PENDING_COUNT.fetch_sub(cleared.count_ones() as usize, Ordering::Relaxed);
+            }
+        }
+    });
+}
+
+/// Bit mask of the stop-class signals (`SIGSTOP`, `SIGTSTP`, `SIGTTIN`,
+/// `SIGTTOU`). A `SIGCONT` discards any of these that are pending.
+#[inline]
+#[must_use]
+fn stop_signals_mask() -> u64 {
+    let mut m = 0u64;
+    for s in [SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU] {
+        if let Some(b) = signal_bit(s) {
+            m |= b;
+        }
+    }
+    m
+}
+
+/// Bit for `SIGCONT`. A stop signal discards a pending `SIGCONT`.
+#[inline]
+#[must_use]
+fn sigcont_bit() -> u64 {
+    signal_bit(SIGCONT).unwrap_or(0)
+}
+
+/// Discard any pending `SIGCONT` for `pid`.
+///
+/// Called when a stop takes effect (including at the syscall-return
+/// checkpoint for a blocked-then-unblocked stop signal), so a `SIGCONT`
+/// posted before the stop does not spuriously resume the just-stopped
+/// process. The classify-on-post path clears this eagerly for an
+/// immediately-effective stop; this is the deferred-stop equivalent.
+pub fn discard_pending_cont(pid: ProcessId) {
+    clear_pending(pid, sigcont_bit());
+}
+
 /// The kernel's decision about what to do with a posted signal.
 ///
 /// Returned by [`classify_post`] so the syscall handler can perform the
@@ -581,9 +650,21 @@ pub enum PostDecision {
     /// The target has no trampoline and the signal's default action is
     /// fatal: the caller must terminate the process with this exit code.
     Terminate(i32),
-    /// The signal was dropped (ignored / unsupported stop on a process
-    /// with no handler).
+    /// The signal was dropped (ignored), or kept pending for later (a stop
+    /// signal that is currently blocked on a process with no handler — it
+    /// will take effect at the syscall-return checkpoint once unblocked).
     Drop,
+    /// The signal's effect is to **stop** (suspend) the target for job
+    /// control. The caller must suspend the target's threads and record the
+    /// stop (see `handlers::stop_process_for_signal`). The payload is the
+    /// stop signal number, used for the parent's wait-status report.
+    Stop(u32),
+    /// The signal's effect is to **continue** (resume) a stopped target.
+    /// The caller must resume the target's threads and record the continue
+    /// (see `handlers::continue_process`). If a handler is also registered,
+    /// the signal was additionally marked pending so the handler runs after
+    /// the process resumes.
+    Continue,
 }
 
 /// Decide what to do with a signal posted to `pid`, and record pending
@@ -607,16 +688,58 @@ pub fn classify_post(pid: ProcessId, sig: u32) -> PostDecision {
         return PostDecision::Terminate(term_code);
     }
 
+    // SIGCONT always resumes a stopped process, regardless of whether a
+    // handler is registered, and discards any pending stop signal (mutual
+    // cancellation). If a handler is registered it is *also* marked pending
+    // so the handler runs once the process resumes.
+    if sig == SIGCONT {
+        clear_pending(pid, stop_signals_mask());
+        if has_trampoline(pid) {
+            set_pending(pid, sig);
+        }
+        return PostDecision::Continue;
+    }
+
+    // SIGSTOP always stops and is never catchable or blockable. It discards
+    // any pending SIGCONT (mutual cancellation).
+    if sig == SIGSTOP {
+        clear_pending(pid, sigcont_bit());
+        return PostDecision::Stop(sig);
+    }
+
+    // A registered handler takes precedence for every other catchable
+    // signal — including the catchable stop signals (SIGTSTP/TTIN/TTOU),
+    // which a handler may choose to ignore rather than stop. Mark it
+    // pending for trampoline delivery.
     if has_trampoline(pid) {
         set_pending(pid, sig);
-        PostDecision::Deliver
-    } else {
-        match default_action(sig) {
-            DefaultAction::Terminate => PostDecision::Terminate(term_code),
-            DefaultAction::Ignore
-            | DefaultAction::Stop
-            | DefaultAction::Continue => PostDecision::Drop,
+        return PostDecision::Deliver;
+    }
+
+    // No trampoline: the kernel default action decides.
+    match default_action(sig) {
+        DefaultAction::Terminate => PostDecision::Terminate(term_code),
+        DefaultAction::Stop => {
+            // Catchable stop signal with no handler. If currently blocked,
+            // keep it pending: it stops the process at the syscall-return
+            // checkpoint once unblocked (deliver_pending_signal). Otherwise
+            // stop now, discarding any pending SIGCONT.
+            if blocked(pid) & signal_bit(sig).unwrap_or(0) != 0 {
+                set_pending(pid, sig);
+                PostDecision::Drop
+            } else {
+                clear_pending(pid, sigcont_bit());
+                PostDecision::Stop(sig)
+            }
         }
+        DefaultAction::Continue => {
+            // Only SIGCONT has the Continue default, handled above; this is
+            // reachable only if the default-action table changes. Resume to
+            // stay consistent.
+            clear_pending(pid, stop_signals_mask());
+            PostDecision::Continue
+        }
+        DefaultAction::Ignore => PostDecision::Drop,
     }
 }
 
@@ -843,6 +966,75 @@ fn test_classify_post() -> KernelResult<()> {
         "SIGKILL terminate even with tramp",
     )?;
     remove(p);
+
+    // --- Stop / continue classification ---
+    let s = TEST_PID_BASE + 40;
+    // SIGSTOP stops even with no handler and is uncatchable.
+    check(
+        classify_post(s, SIGSTOP) == PostDecision::Stop(SIGSTOP),
+        "no-tramp SIGSTOP stop",
+    )?;
+    register_trampoline(s, 0x4000);
+    check(
+        classify_post(s, SIGSTOP) == PostDecision::Stop(SIGSTOP),
+        "SIGSTOP stop even with tramp (uncatchable)",
+    )?;
+    // Catchable stop signal with a handler → delivered to the trampoline.
+    check(
+        classify_post(s, SIGTSTP) == PostDecision::Deliver,
+        "tramp SIGTSTP deliver",
+    )?;
+    // SIGCONT with a handler → Continue *and* marked pending for the handler.
+    check(
+        classify_post(s, SIGCONT) == PostDecision::Continue,
+        "tramp SIGCONT continue",
+    )?;
+    check(
+        pending(s) & (1 << (SIGCONT - 1)) != 0,
+        "SIGCONT pending for handler after continue",
+    )?;
+    remove(s);
+
+    // Catchable stop signal with no handler → stop now.
+    let s2 = TEST_PID_BASE + 41;
+    check(
+        classify_post(s2, SIGTSTP) == PostDecision::Stop(SIGTSTP),
+        "no-tramp SIGTSTP stop",
+    )?;
+    remove(s2);
+
+    // Mutual cancellation: a pending stop is discarded by SIGCONT, and a
+    // pending SIGCONT is discarded by a stop.
+    let s3 = TEST_PID_BASE + 42;
+    register_trampoline(s3, 0x4000);
+    set_pending(s3, SIGTSTP); // pretend a stop was queued for the handler
+    let _ = classify_post(s3, SIGCONT);
+    check(
+        pending(s3) & (1 << (SIGTSTP - 1)) == 0,
+        "SIGCONT discards pending stop",
+    )?;
+    set_pending(s3, SIGCONT);
+    let _ = classify_post(s3, SIGSTOP);
+    check(
+        pending(s3) & (1 << (SIGCONT - 1)) == 0,
+        "stop discards pending SIGCONT",
+    )?;
+    remove(s3);
+
+    // Blocked catchable stop with no handler → kept pending (Drop), not an
+    // immediate stop.
+    let s4 = TEST_PID_BASE + 43;
+    set_blocked(s4, 1u64 << (SIGTSTP - 1));
+    check(
+        classify_post(s4, SIGTSTP) == PostDecision::Drop,
+        "blocked no-tramp SIGTSTP kept pending",
+    )?;
+    check(
+        pending(s4) & (1 << (SIGTSTP - 1)) != 0,
+        "blocked SIGTSTP is pending",
+    )?;
+    remove(s4);
+
     serial_println!("[signal]   classify_post: OK");
     Ok(())
 }

@@ -76,10 +76,20 @@
 ## (only aggregate irq_count and aggregate blkdev reads/writes).  Converting them
 ## would mean emitting mostly-zero columns, which is worse than the current honest
 ## custom format; defer until per-IRQ and per-device accounting exist.
-## NOTE: /proc/meminfo and /proc/cpuinfo
-## are INTENTIONALLY native-format (their doc comments say "our own
-## field names"); converting THOSE to Linux layout is a separate design
-## decision, not a bug — leave them unless the user asks.
+## NOTE: /proc/meminfo, /proc/cpuinfo AND /proc/vmstat
+## are INTENTIONALLY native-format; converting THOSE to Linux layout is a
+## separate design decision, not a bug — leave them unless the user asks.
+## /proc/vmstat already uses Linux's "key value" line format but with our own
+## key names; mapping them to Linux's canonical keys (nr_free_pages, pgfault,
+## pswpin, ...) is NOT clean because (a) our pages are 16 KiB vs Linux 4 KiB, so
+## reporting our frame count under "nr_free_pages" misleads any tool computing
+## bytes, and (b) several of our counters (zero-pool, zram internals, kswapd
+## cycles) have no honest Linux equivalent.  Honest native names beat misleading
+## Linux-named numbers, so it stays native like meminfo/cpuinfo.
+## STATUS: the cleanly-convertible standard-Linux /proc files are now ALL done
+## (stat, uptime, loadavg, buddyinfo).  The remainder are either blocked on new
+## accounting infra (interrupts, diskstats, <pid>/io, <pid>/auxv) or intentionally
+## native (meminfo, cpuinfo, vmstat).  No further small in-thread procfs work.
 
 ## DONE (2026-06-11): /proc/<pid>/status Mems_allowed + Mems_allowed_list
 ## Linux always prints `Mems_allowed:`/`Mems_allowed_list:` (the NUMA memory

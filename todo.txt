@@ -52042,3 +52042,46 @@ Serial stamp "mmap MAP_FIXED alignment / advisory-hint fidelity
 (self-test EINVAL compare uses wrapping_neg to avoid arithmetic
 side-effects); boot-test PASSED (BOOT_OK 26s, stamp present, no mmap
 FAILs).  Reversible (pure translator change; no PCB/state).
+
+================================================================
+ABI batch 532 — mmap byte-offset page-alignment gate
+================================================================
+Date: 2026-06-12   Decided by: Claude (autonomous)
+File: kernel/src/syscall/linux.rs (translator only)
+
+Divergence: the mmap translator never validated the 6th argument (byte
+offset).  Linux rejects a non-page-aligned offset with EINVAL as the
+very first action of the syscall, before any other validation.
+
+Verbatim v6.6 citation (arch/x86/kernel/sys_x86_64.c):
+  SYSCALL_DEFINE6(mmap, unsigned long, addr, unsigned long, len,
+          unsigned long, prot, unsigned long, flags,
+          unsigned long, fd, unsigned long, off)
+  {
+      if (off & ~PAGE_MASK)
+          return -EINVAL;
+      return ksys_mmap_pgoff(addr, len, prot, flags, fd, off >> PAGE_SHIFT);
+  }
+The `off & ~PAGE_MASK` gate precedes ksys_mmap_pgoff -> vm_mmap_pgoff ->
+do_mmap, hence ahead of the anon/file dispatch, the !len EINVAL, and the
+MAP_FIXED alignment check.  ~PAGE_MASK == PAGE_SIZE-1; our PAGE_SIZE is
+the 16 KiB frame.  The check applies even to anonymous maps (which
+ignore the offset functionally) — Linux still EINVALs an unaligned one.
+
+Fix (translator-only): added, as the first statement in sys_mmap (after
+reading args, before the anon/file ENOSYS checks), 
+  if (offset & (FRAME_SIZE as u64).wrapping_sub(1)) != 0 {
+      return linux_err(errno::EINVAL);
+  }
+Placed ahead of our ENOSYS-for-unsupported-kind returns so that, as on
+Linux, the offset EINVAL wins when both would apply.
+
+Tests: boot self-test dispatches an otherwise-valid anonymous PRIVATE
+mmap (len=16384, fd=-1) with off=0x1234 and asserts EINVAL; plus a
+direct page-mask predicate sanity on an aligned (0x4000) and unaligned
+(0x1234) offset.  The aligned-offset passthrough is NOT dispatched (the
+boot task lacks a user PML4; a real mapping could leak into pid 0).
+Serial stamp "mmap byte-offset page-alignment gate (batch 532): OK".
+cargo build clean; clippy at 17477 baseline (EINVAL compare uses
+wrapping_neg); boot-test PASSED (BOOT_OK 25s, stamp present, no mmap
+FAILs).  Reversible (pure translator change; no PCB/state).

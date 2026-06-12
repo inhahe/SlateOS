@@ -4490,6 +4490,19 @@ fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
     let _prot = args.arg2;
     let flags = args.arg3;
     let fd = args.arg4 as i32;
+    let offset = args.arg5;
+
+    // x86_64 SYSCALL_DEFINE6(mmap) (arch/x86/kernel/sys_x86_64.c) opens
+    // with `if (off & ~PAGE_MASK) return -EINVAL;` — the byte offset must
+    // be page-aligned, and this is the very first gate, ahead of the
+    // anon/file dispatch, the len==0 check, and MAP_FIXED handling.  Our
+    // PAGE_MASK is the 16 KiB frame.  Anonymous maps ignore the offset
+    // functionally, but Linux still rejects an unaligned one here, so we
+    // must too (and before the ENOSYS we report for unsupported map
+    // kinds, since Linux's EINVAL would win the race).
+    if (offset & (FRAME_SIZE as u64).wrapping_sub(1)) != 0 {
+        return linux_err(errno::EINVAL);
+    }
 
     // File-backed maps not yet supported.
     if (flags & MAP_ANONYMOUS) == 0 || fd >= 0 {
@@ -50295,6 +50308,42 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   mmap MAP_FIXED alignment / advisory-hint fidelity (batch 531): OK"
+        );
+
+        // mmap byte-offset page-alignment gate (batch 532).  x86_64
+        // SYSCALL_DEFINE6(mmap) opens with `if (off & ~PAGE_MASK) return
+        // -EINVAL;` ahead of every other check, so an unaligned offset is
+        // EINVAL even for a valid anonymous PRIVATE map.  Dispatch with a
+        // page-unaligned offset (0x1234) and an otherwise-valid anonymous
+        // private request; expect EINVAL.  This only reaches the gate
+        // (returns before any native mapping), so no side effects.
+        {
+            let a = SyscallArgs {
+                arg0: 0,                  // no addr hint
+                arg1: 0x4000,             // len = 16384 (>0)
+                arg2: 0,                  // prot (ignored)
+                arg3: 0x02 | 0x20,        // PRIVATE|ANON (no FIXED)
+                arg4: u64::MAX,           // fd = -1
+                arg5: 0x1234,             // unaligned byte offset
+            };
+            if dispatch_linux(nr::MMAP, &a).value != i64::from(errno::EINVAL).wrapping_neg() {
+                serial_println!("[syscall/linux]   FAIL: mmap unaligned offset not EINVAL");
+                return Err(KernelError::InternalError);
+            }
+        }
+        // Sanity-check the page-mask predicate the gate uses on both an
+        // aligned (one 16 KiB frame) and an unaligned byte offset.  We do
+        // NOT dispatch an aligned-offset mmap: from the boot task (no user
+        // PML4) the real allocation path could leak a mapping into pid 0,
+        // so the gate-passthrough case is verified by the predicate only.
+        if (0x4000u64 & (16384u64).wrapping_sub(1)) != 0
+            || (0x1234u64 & (16384u64).wrapping_sub(1)) == 0
+        {
+            serial_println!("[syscall/linux]   FAIL: mmap offset page-mask predicate wrong");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   mmap byte-offset page-alignment gate (batch 532): OK"
         );
 
         // adjtimex / clock_adjtime: batch 122 adds the modes=0 read

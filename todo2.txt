@@ -1,1 +1,25 @@
-upload claude.md to "os plans" google drive folder.
+All four items below handled — 2026-06-12. Status notes inline.
+
+[DONE] add to roadmap-detailed.md that the OS should have the capability of making a dump file when a program crashes (which can be set by the program itself or by the user) and a ported dump file debugger
+  -> Added "#### Crash Dumps & Postmortem Debugging" under §1.5 Capability Types
+     (registers/stacks/loaded-libs capture, minimal vs full scope, program self-opt-in
+     AND user/admin policy as two independent triggers, capability gating, storage/rotation).
+     Ported dump-file debugger added under §4.8 Development Tools (gdb/lldb, postmortem
+     dump loading, re-symbolicate against store paths, minidump/ELF-core-compatible format).
+
+[DONE] add if it's not already in roadmap-detailed.md that we should port an IDE ... vscode ... marketplace note
+  -> "Port VS Code" already existed in §4.7; expanded it: build from open-source `Code - OSS`
+     (MIT) NOT the MS-branded binary; MS license forbids only connecting to the Microsoft
+     Visual Studio Marketplace, so ship pointed at Open VSX / self-hosted registry (VSCodium
+     constraint). Added integration with our C/C++ (gcc/clang), Rust, and fastpy toolchains
+     + debugger integration.
+
+[ALREADY PRESENT] if it doesn't already exist, add to the capabilities the ability to display "always on top"
+  -> Already in roadmap-detailed.md line ~451: `ui.always_on_top` — show always-on-top window.
+     No change needed.
+
+[ALREADY DONE] coreutils crate vs standalone per-tool crates question
+  -> Resolved earlier today: answer written to `coreutils-canonical-answer.md` (effort/space
+     explicitly set aside; decision driven by per-tool least-privilege capability security).
+     Recorded in design-decisions.md §8 (Decided by: Operator) and closed in open-questions.md.
+     Recommendation: standalone per-tool crates are canonical + a shared `coreutils-common` lib.

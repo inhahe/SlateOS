@@ -528,6 +528,22 @@ _The debugging suite is NEVER granted to normal applications. These are for debu
   - [ ] Lock contention timing
   - [ ] Per-function CPU sampling (via hardware perf counters)
 
+#### Crash Dumps & Postmortem Debugging
+
+_When a program hits an **unhandled language-level exception** (our SEH-style model — hardware faults surface as exceptions, not Unix signals), the OS can capture a **crash dump file** for later postmortem analysis. Dump generation is policy-driven and capability-gated; the dump itself is a structured memory image (not a text log, so the "no binary logs" rule does not apply to it)._
+
+- [ ] **Crash dump generation** — on an unhandled exception, the OS writes a dump file before tearing down the process. Captured contents:
+  - [ ] Exception record (fault type, faulting address, the exception that went unhandled) and the full register state of every thread
+  - [ ] Per-thread stack memory + unwound backtraces (symbolicated if debug info is present)
+  - [ ] Loaded library/store-path manifest with versions (so the dump can be re-symbolicated later against the exact binaries — content-addressed store makes this exact)
+  - [ ] Selectable memory scope: **minimal** (registers + stacks + a small window around faulting addresses) or **full** (entire committed address space). Default minimal to keep dumps small; full is opt-in.
+- [ ] **Who can request a dump — two independent triggers:**
+  - [ ] **Program self-opt-in** — a program declares in its manifest (or toggles at runtime via API) that it wants dumps on crash, and chooses minimal vs full. A program can also install its own last-chance handler that writes a custom dump and/or annotates the OS dump before exit.
+  - [ ] **User/admin policy** — a system-wide setting ("collect crash dumps: never / minimal / full") with per-program overrides in settings, independent of whether the program asked. Lets a user capture a dump for a third-party app that never opted in.
+- [ ] **Capability gating** — capturing a *full* dump of a process you don't own (i.e., another user's or a system process) requires a debug capability (`debug.memory.read`-equivalent); a program dumping *itself* needs nothing. User-policy full dumps are an admin action.
+- [ ] **Storage & lifecycle** — dumps land in a per-user crash-dump directory with rotation/size caps (oldest pruned past a configurable quota); a crash-notification surfaces the dump and offers to open it in the dump debugger or report it.
+- [ ] **Dump file debugger** — a ported postmortem debugger that loads a dump file, re-symbolicates against the recorded store paths, and presents threads/stacks/registers/memory. Listed under Development Tools (§4.8). The on-disk dump format should be one the ported debugger already understands (e.g. a minidump/ELF-core-compatible container) so existing tooling works with minimal porting.
+
 #### Predefined Capability Groups (ship with OS)
 
 - [ ] "Developer Tools" — `debug.attach`, `debug.memory.read`, `debug.trace.syscalls`, `debug.trace.locks`, `hook.process`
@@ -1574,7 +1590,9 @@ _The theme editor makes it easy for non-technical users to create themes, which 
 
 - [ ] Port Chromium (~35M lines C++)
 - [ ] System web app framework (shared Chromium, not per-app Electron)
-- [ ] Port VS Code (via Chromium + Node.js)
+- [ ] Port VS Code (via Chromium + Node.js) — full IDE, not just an editor
+  - [ ] Build from the **open-source `Code - OSS` tree (MIT)**, not Microsoft's branded binary. Microsoft's MIT license permits doing essentially anything with the open-source source **except** connecting it to the **Microsoft Visual Studio Marketplace** (that endpoint is reserved for the official MS build). So the port must ship pointed at an open extension registry (e.g. **Open VSX**) or a self-hosted registry instead of the MS marketplace — same constraint VSCodium operates under.
+  - [ ] Integrate with our native toolchains so build/debug/run work out of the box: the **ported C/C++ compiler** (gcc/clang via POSIX layer), the **Rust compiler** (native target), and the **fastpy Python compiler** (AOT). Ship/auto-detect language extensions and task/launch templates wired to these toolchains, plus debugger integration against the OS crash-dump/postmortem debugger and the `debug.*` capabilities.
 - [ ] Port Thunderbird (email)
 
 _Chromium first (required for web app framework + VS Code). Firefox later via Linux compatibility layer._
@@ -1588,6 +1606,7 @@ _Chromium first (required for web app framework + VS Code). Firefox later via Li
 - [ ] fastpy compiler (AOT Python compiler — first-class language for OS userspace)
 - [ ] Custom Rust target for the OS
 - [ ] Port Rust std library to native syscalls
+- [ ] Port a debugger (gdb/lldb) — both live attach (`debug.*` capabilities) and **postmortem dump-file loading** (opens the crash dumps from §1.5 → Crash Dumps & Postmortem Debugging, re-symbolicates against recorded store paths). Dump format chosen to match what the ported debugger understands (minidump/ELF-core-compatible) so minimal porting is needed.
 
 #### Programming Language Support
 - [ ] Rust (native, first-class — kernel language)

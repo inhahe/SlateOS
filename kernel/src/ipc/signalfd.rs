@@ -73,7 +73,7 @@ const SIGSTOP_BIT: u64 = 1u64 << (crate::proc::signal::SIGSTOP - 1);
 /// Linux's `signalfd` silently ignores these bits rather than erroring, so a
 /// caller that passes `~0` gets "every signal except KILL/STOP".
 #[must_use]
-const fn sanitize_mask(mask: u64) -> u64 {
+pub const fn sanitize_mask(mask: u64) -> u64 {
     mask & !(SIGKILL_BIT | SIGSTOP_BIT)
 }
 
@@ -103,18 +103,14 @@ impl SignalFdHandle {
     // `from_raw`/`raw` are the bridge to the Linux fd table: the syscall
     // layer (`HandleKind::SignalFd`) stores the handle as a raw `u64` in an
     // `FdEntry` and reconstructs it on each signalfd read / mask update.
-    // `allow(dead_code)` until that wiring layer lands in a follow-up commit;
-    // remove the attribute once `HandleKind::SignalFd` references these.
     /// Reconstruct a handle from its raw `u64` representation.
     #[must_use]
-    #[allow(dead_code)]
     pub const fn from_raw(raw: u64) -> Self {
         Self(raw)
     }
 
     /// The raw `u64` representation (what gets stored in an `FdEntry`).
     #[must_use]
-    #[allow(dead_code)]
     pub const fn raw(self) -> u64 {
         self.0
     }

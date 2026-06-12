@@ -117,6 +117,13 @@ pub enum HandleKind {
     /// `epoll_ctl` and harvested via `epoll_wait`.  Close releases one
     /// refcount on the in-kernel `EPOLL_TABLE` entry.
     Epoll,
+    /// signalfd instance — Linux `signalfd`/`signalfd4`.
+    /// `raw_handle` holds the `ipc::signalfd::SignalFdHandle` raw u64.
+    /// `read` drains masked pending signals into `signalfd_siginfo`
+    /// records; `write` returns `EINVAL`.  `status_flags` carries
+    /// `O_NONBLOCK` when created with `SFD_NONBLOCK`.  Close releases one
+    /// refcount on the in-kernel `SIGNALFD_TABLE` entry.
+    SignalFd,
 }
 
 impl HandleKind {
@@ -126,7 +133,9 @@ impl HandleKind {
     pub const fn needs_kernel_close(self) -> bool {
         match self {
             Self::Console | Self::PidFd => false,
-            Self::File | Self::Pipe | Self::EventFd | Self::MemFd | Self::Epoll => true,
+            Self::File | Self::Pipe | Self::EventFd | Self::MemFd | Self::Epoll | Self::SignalFd => {
+                true
+            }
         }
     }
 }
@@ -263,6 +272,22 @@ impl FdEntry {
             raw_handle: handle,
             fd_flags,
             status_flags: 0,
+            f_owner: 0,
+            f_owner_sig: 0,
+        }
+    }
+
+    /// Construct an entry for a signalfd instance.  `raw_handle` is the
+    /// `ipc::signalfd::SignalFdHandle` raw u64.  `fd_flags` carries
+    /// `FD_CLOEXEC` when created with `SFD_CLOEXEC`; `status_flags`
+    /// carries `O_NONBLOCK` when created with `SFD_NONBLOCK`.
+    #[must_use]
+    pub const fn signalfd(handle: u64, fd_flags: u32, status_flags: u32) -> Self {
+        Self {
+            kind: HandleKind::SignalFd,
+            raw_handle: handle,
+            fd_flags,
+            status_flags,
             f_owner: 0,
             f_owner_sig: 0,
         }

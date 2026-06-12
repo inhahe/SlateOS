@@ -2576,6 +2576,21 @@ pub fn close_handle(entry: FdEntry) -> SyscallResult {
             crate::ipc::epoll::close(h);
             SyscallResult::ok(0)
         }
+        HandleKind::SignalFd => {
+            // Deregister from the per-process ipc_handles list — same
+            // rationale as the EventFd/MemFd/Epoll arms above — then drop
+            // one refcount on the in-kernel signalfd instance.
+            if let Some(pid) = caller_pid() {
+                pcb::deregister_ipc_handle(
+                    pid,
+                    crate::cap::ResourceType::SignalFd,
+                    entry.raw_handle,
+                );
+            }
+            let h = crate::ipc::signalfd::SignalFdHandle::from_raw(entry.raw_handle);
+            crate::ipc::signalfd::close(h);
+            SyscallResult::ok(0)
+        }
     }
 }
 
@@ -2632,7 +2647,8 @@ fn dispatch_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
             linux_from_native(handlers::sys_pipe_write(&a))
         }
         HandleKind::EventFd => dispatch_eventfd_write(entry, buf, len),
-        HandleKind::PidFd | HandleKind::Epoll => linux_err(errno::EINVAL),
+        // signalfd is read-only: write(2) always returns EINVAL.
+        HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd => linux_err(errno::EINVAL),
         HandleKind::MemFd => dispatch_memfd_write(entry, buf, len),
     }
 }
@@ -2814,7 +2830,81 @@ fn dispatch_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
         HandleKind::EventFd => dispatch_eventfd_read(entry, buf, cap),
         HandleKind::PidFd | HandleKind::Epoll => linux_err(errno::EINVAL),
         HandleKind::MemFd => dispatch_memfd_read(entry, buf, cap),
+        HandleKind::SignalFd => dispatch_signalfd_read(entry, buf, cap),
     }
+}
+
+/// Size of `struct signalfd_siginfo` (the per-signal record `read(2)`
+/// returns from a signalfd).  128 bytes on every Linux ABI.
+const SIGNALFD_SIGINFO_SIZE: usize = 128;
+
+/// signalfd read: drain pending signals that are in the fd's acceptance
+/// mask into one or more `struct signalfd_siginfo` records (128 bytes
+/// each), exactly as Linux's `signalfd_read`.
+///
+/// Semantics:
+///   * `cap < 128` → EINVAL (Linux requires room for at least one record).
+///   * For each consumable masked-pending signal (up to `cap / 128`
+///     records), emit a record whose `ssi_signo` is the signal number;
+///     all other fields are zeroed (we do not yet carry siginfo payloads,
+///     matching our `rt_sigqueueinfo` which drops the payload).
+///   * If no masked signal is pending: `O_NONBLOCK` → EAGAIN.  A blocking
+///     read also returns EAGAIN rather than sleeping — the kernel has no
+///     signal-arrival wakeup path yet (the same documented shortcut as
+///     `rt_sigtimedwait`; see todo.txt).  In practice a signalfd is read
+///     after `poll`/`epoll` reports it readable, so a masked signal is
+///     already pending on entry and the drain path runs.
+fn dispatch_signalfd_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
+    if (cap as usize) < SIGNALFD_SIGINFO_SIZE {
+        return linux_err(errno::EINVAL);
+    }
+    let caller = match caller_pid() {
+        Some(p) => p,
+        None => return linux_err(errno::EBADF),
+    };
+    let handle = crate::ipc::signalfd::SignalFdHandle::from_raw(entry.raw_handle);
+    let mask = match crate::ipc::signalfd::mask(handle) {
+        Some(m) => m,
+        None => return linux_err(errno::EBADF),
+    };
+
+    // How many records fit in the user buffer.
+    let max_records = (cap as usize) / SIGNALFD_SIGINFO_SIZE;
+    let total_bytes = max_records.saturating_mul(SIGNALFD_SIGINFO_SIZE);
+    if let Err(e) = crate::mm::user::validate_user_write(buf, total_bytes) {
+        return linux_err(linux_errno_for(e));
+    }
+
+    // Build the records for as many masked-pending signals as we can drain.
+    let mut out = alloc::vec![0u8; total_bytes];
+    let mut produced = 0usize;
+    while produced < max_records {
+        let Some(sig) = crate::proc::signal::take_pending_in_mask(caller, mask) else {
+            break;
+        };
+        let off = produced.saturating_mul(SIGNALFD_SIGINFO_SIZE);
+        // ssi_signo is the first u32 of the record; the rest stay zero.
+        let bytes = sig.to_le_bytes();
+        // off + 4 <= total_bytes since produced < max_records.
+        out[off..off.saturating_add(4)].copy_from_slice(&bytes);
+        produced = produced.saturating_add(1);
+    }
+
+    if produced == 0 {
+        // Nothing to deliver.  Blocking and non-blocking both surface
+        // EAGAIN (no signal-arrival wakeup path — see doc comment).
+        return linux_err(errno::EAGAIN);
+    }
+
+    let n = produced.saturating_mul(SIGNALFD_SIGINFO_SIZE);
+    // SAFETY: validate_user_write confirmed [buf, +total_bytes) is
+    // writable and n <= total_bytes.
+    let r = unsafe { crate::mm::user::copy_to_user(out.as_ptr(), buf, n) };
+    if let Err(e) = r {
+        return linux_err(linux_errno_for(e));
+    }
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(n as i64)
 }
 
 /// `write(fd, buf, count)` — consults the per-process Linux fd table.
@@ -3632,7 +3722,8 @@ fn fcntl_flock_apply(
         | HandleKind::Pipe
         | HandleKind::EventFd
         | HandleKind::PidFd
-        | HandleKind::Epoll => {
+        | HandleKind::Epoll
+        | HandleKind::SignalFd => {
             return linux_err(errno::EBADF);
         }
     }
@@ -3767,7 +3858,7 @@ fn sys_lseek(args: &SyscallArgs) -> SyscallResult {
                 Err(e) => linux_err(linux_errno_for(e)),
             }
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd => linux_err(errno::ESPIPE),
     }
 }
 
@@ -10178,7 +10269,7 @@ fn sys_fsync(args: &SyscallArgs) -> SyscallResult {
     };
     match entry.kind {
         HandleKind::File | HandleKind::MemFd => SyscallResult::ok(0),
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll => linux_err(errno::EINVAL),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd => linux_err(errno::EINVAL),
     }
 }
 
@@ -11032,7 +11123,8 @@ fn sys_readahead(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::Pipe
         | HandleKind::EventFd
         | HandleKind::PidFd
-        | HandleKind::Epoll => return linux_err(errno::EINVAL),
+        | HandleKind::Epoll
+        | HandleKind::SignalFd => return linux_err(errno::EINVAL),
     }
     SyscallResult::ok(0)
 }
@@ -12571,6 +12663,8 @@ fn fill_stat_for_fd(
         // epoll is an anon_inode like eventfd/pidfd — regular file,
         // 0600, blocksize 4096.
         HandleKind::Epoll => (S_IFREG | 0o600, 4096),
+        // signalfd is an anon_inode like epoll/eventfd.
+        HandleKind::SignalFd => (S_IFREG | 0o600, 4096),
     };
 
     // Inode: use the raw_handle as a stable-ish identity.
@@ -12852,6 +12946,8 @@ fn fill_statx_for_fd(
         HandleKind::MemFd => ((S_IFREG | 0o777) as u16, 4096),
         // epoll anon_inode — S_IFREG | 0600, like eventfd/pidfd.
         HandleKind::Epoll => ((S_IFREG | 0o600) as u16, 4096),
+        // signalfd anon_inode — S_IFREG | 0600, like epoll/eventfd.
+        HandleKind::SignalFd => ((S_IFREG | 0o600) as u16, 4096),
     };
     let st_ino: u64 = entry.raw_handle;
     // Surface the live memfd data length so stx_size reflects what callers
@@ -14011,8 +14107,9 @@ fn sys_ftruncate(args: &SyscallArgs) -> SyscallResult {
                 Err(_) => linux_err(errno::EIO),
             }
         }
-        // Pipes, consoles, eventfds, pidfds, epoll cannot be truncated.
-        HandleKind::Pipe | HandleKind::Console | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll => linux_err(errno::EINVAL),
+        // Pipes, consoles, eventfds, pidfds, epoll, signalfds cannot be
+        // truncated.
+        HandleKind::Pipe | HandleKind::Console | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd => linux_err(errno::EINVAL),
     }
 }
 
@@ -14443,6 +14540,91 @@ fn sys_utime(args: &SyscallArgs) -> SyscallResult {
 // feature support via specific error codes.
 // ---------------------------------------------------------------------------
 
+/// signalfd flag bits (shared by `signalfd` and `signalfd4`).
+/// `SFD_NONBLOCK == O_NONBLOCK`, `SFD_CLOEXEC == O_CLOEXEC`.
+const SFD_NONBLOCK: u64 = 0o4000;
+const SFD_CLOEXEC: u64 = 0o2_000_000;
+
+/// Read and sanitize the 8-byte user `sigset_t` at `mask_ptr`.
+///
+/// Returns the SIGKILL/SIGSTOP-stripped mask on success, or a ready-made
+/// errno `SyscallResult` on a faulting read.
+fn read_signalfd_mask(mask_ptr: u64) -> Result<u64, SyscallResult> {
+    if mask_ptr == 0 {
+        return Err(linux_err(errno::EFAULT));
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(mask_ptr, 8) {
+        return Err(linux_err(linux_errno_for(e)));
+    }
+    let mut bytes = [0u8; 8];
+    // SAFETY: validated as readable 8 bytes immediately above.
+    let r = unsafe { crate::mm::user::copy_from_user(mask_ptr, bytes.as_mut_ptr(), 8) };
+    if let Err(e) = r {
+        return Err(linux_err(linux_errno_for(e)));
+    }
+    // SIGKILL/SIGSTOP are silently removed from a signalfd mask, exactly
+    // as Linux does (kernel/signalfd.c sigdelsetmask).
+    Ok(crate::ipc::signalfd::sanitize_mask(u64::from_le_bytes(bytes)))
+}
+
+/// Core of `signalfd`/`signalfd4`: with `fd == -1`, create a new signalfd
+/// kernel object and install it as a new fd; otherwise update the mask on
+/// the existing signalfd referred to by `fd` (EINVAL if it is not one).
+///
+/// `cloexec`/`nonblock` come from the flag bits and only apply to the
+/// create path (Linux ignores them when updating an existing fd).
+fn signalfd_common(fd: i32, mask: u64, cloexec: bool, nonblock: bool) -> SyscallResult {
+    let caller = match caller_pid() {
+        Some(p) => p,
+        None => return linux_err(errno::EBADF),
+    };
+
+    if fd != -1 {
+        // Update path: the fd must refer to an existing signalfd.
+        let entry = match pcb::linux_fd_lookup(caller, fd) {
+            Some(e) => e,
+            None => return linux_err(errno::EBADF),
+        };
+        if entry.kind != crate::proc::linux_fd::HandleKind::SignalFd {
+            return linux_err(errno::EINVAL);
+        }
+        let handle = crate::ipc::signalfd::SignalFdHandle::from_raw(entry.raw_handle);
+        return match crate::ipc::signalfd::set_mask(handle, mask) {
+            Ok(()) => SyscallResult::ok(i64::from(fd)),
+            Err(e) => linux_err(linux_errno_for(e)),
+        };
+    }
+
+    // Create path: new kernel object + per-process registration + fd.
+    let handle = crate::ipc::signalfd::create(mask);
+    pcb::register_ipc_handle(
+        caller,
+        crate::cap::ResourceType::SignalFd,
+        handle.raw(),
+    );
+
+    let fd_flags = if cloexec {
+        crate::proc::linux_fd::FD_CLOEXEC
+    } else {
+        0
+    };
+    let status_flags = if nonblock { oflags::O_NONBLOCK } else { 0 };
+    let entry = crate::proc::linux_fd::FdEntry::signalfd(handle.raw(), fd_flags, status_flags);
+
+    match pcb::linux_fd_install(caller, entry, 0) {
+        Ok(new_fd) => SyscallResult::ok(i64::from(new_fd)),
+        Err(e) => {
+            pcb::deregister_ipc_handle(
+                caller,
+                crate::cap::ResourceType::SignalFd,
+                handle.raw(),
+            );
+            crate::ipc::signalfd::close(handle);
+            linux_err(linux_errno_for(e))
+        }
+    }
+}
+
 /// `signalfd(fd, mask, sizemask)` — legacy signalfd.
 ///
 /// `mask` points at a `sigset_t` (8 bytes on x86_64).
@@ -14453,28 +14635,14 @@ fn sys_signalfd(args: &SyscallArgs) -> SyscallResult {
     if sizemask != 8 {
         return linux_err(errno::EINVAL);
     }
-    if mask_ptr == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    if let Err(e) = crate::mm::user::validate_user_read(mask_ptr, 8) {
-        return linux_err(linux_errno_for(e));
-    }
-    // fd semantics: -1 means "create a new signalfd"; >=0 means "update
-    // the mask on this existing signalfd".  Since no HandleKind::SignalFd
-    // exists in this kernel, any >=0 fd is by definition the wrong kind
-    // — return EINVAL to match Linux (kernel/signalfd.c: do_signalfd4
-    // returns -EINVAL when the fd is present but not a signalfd).
-    // Without this check we were silently accepting "update mask on fd 5"
-    // and returning ENOSYS, hiding the descriptor error.
+    let mask = match read_signalfd_mask(mask_ptr) {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
-    if fd != -1 {
-        if let Err(r) = validate_linux_fd(fd) {
-            return r;
-        }
-        return linux_err(errno::EINVAL);
-    }
-    linux_err(errno::ENOSYS)
+    // signalfd(2) has no flags argument: cloexec/nonblock default off.
+    signalfd_common(fd, mask, false, false)
 }
 
 /// `signalfd4(fd, mask, sizemask, flags)`.
@@ -14504,16 +14672,12 @@ fn sys_signalfd4(args: &SyscallArgs) -> SyscallResult {
     }
     // Gate 3 (do_signalfd4): flags must be a subset of
     // SFD_CLOEXEC|SFD_NONBLOCK.
-    // SFD_NONBLOCK = O_NONBLOCK = 0o4000 (2048).
-    // SFD_CLOEXEC  = O_CLOEXEC  = 0o2_000_000 (524288).
-    const SFD_NONBLOCK: u64 = 0o4000;
-    const SFD_CLOEXEC: u64 = 0o2_000_000;
     const VALID_FLAGS: u64 = SFD_NONBLOCK | SFD_CLOEXEC;
     // x86_64 syscall ABI: `int flags` truncates to i32; the high half
     // of the register is invisible to Linux's gate.  Pre-batch a probe
     // with `flags = 0x1_0000_0800` (high bit 32 + SFD_NONBLOCK)
     // returned EINVAL where Linux truncates to SFD_NONBLOCK and
-    // proceeds (to ENOSYS in our stub).
+    // proceeds.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let flags_i32 = args.arg3 as i32;
     #[allow(clippy::cast_sign_loss)]
@@ -14521,16 +14685,16 @@ fn sys_signalfd4(args: &SyscallArgs) -> SyscallResult {
     if flags_u64 & !VALID_FLAGS != 0 {
         return linux_err(errno::EINVAL);
     }
-    // Same fd semantics as signalfd(2) — see comment there.
+    // Re-read + sanitize the mask now that the gates have passed.
+    let mask = match read_signalfd_mask(mask_ptr) {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
+    let cloexec = flags_u64 & SFD_CLOEXEC != 0;
+    let nonblock = flags_u64 & SFD_NONBLOCK != 0;
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
-    if fd != -1 {
-        if let Err(r) = validate_linux_fd(fd) {
-            return r;
-        }
-        return linux_err(errno::EINVAL);
-    }
-    linux_err(errno::ENOSYS)
+    signalfd_common(fd, mask, cloexec, nonblock)
 }
 
 /// `timerfd_create(clockid, flags)`.
@@ -17194,6 +17358,12 @@ fn sys_pidfd_getfd(args: &SyscallArgs) -> SyscallResult {
                 return linux_err(errno::EBADF);
             }
         }
+        HandleKind::SignalFd => {
+            let h = crate::ipc::signalfd::SignalFdHandle::from_raw(entry.raw_handle);
+            if crate::ipc::signalfd::dup(h).is_err() {
+                return linux_err(errno::EBADF);
+            }
+        }
     }
 
     // Linux always sets FD_CLOEXEC on the new fd, regardless of the
@@ -17227,6 +17397,7 @@ fn sys_pidfd_getfd(args: &SyscallArgs) -> SyscallResult {
         HandleKind::EventFd => Some(crate::cap::ResourceType::EventFd),
         HandleKind::MemFd => Some(crate::cap::ResourceType::MemFd),
         HandleKind::Epoll => Some(crate::cap::ResourceType::Epoll),
+        HandleKind::SignalFd => Some(crate::cap::ResourceType::SignalFd),
         HandleKind::Console | HandleKind::PidFd => None,
     };
     if let Some(rt) = resource {
@@ -17285,6 +17456,10 @@ fn release_handle_ref(kind: HandleKind, raw_handle: u64) {
         HandleKind::Epoll => {
             let h = crate::ipc::epoll::EpollHandle::from_raw(raw_handle);
             crate::ipc::epoll::close(h);
+        }
+        HandleKind::SignalFd => {
+            let h = crate::ipc::signalfd::SignalFdHandle::from_raw(raw_handle);
+            crate::ipc::signalfd::close(h);
         }
     }
 }
@@ -19831,7 +20006,18 @@ mod poll_bits {
 /// Compute revents for a known fd entry.  Used by `sys_poll`, by the
 /// per-pid wrapper, and directly by the self-test (with a synthetic
 /// FdEntry).
-fn poll_revents_from_entry(entry: crate::proc::linux_fd::FdEntry, events: u16) -> u16 {
+///
+/// `owner_pid` is the process that owns `entry`'s fd table, when known.
+/// It is `Some` on the real poll/epoll paths (where readiness of a
+/// `signalfd` depends on *that* process's pending signal set) and `None`
+/// in kernel/self-test context where there is no owning process — a
+/// `signalfd` then reports "not ready" rather than consulting an
+/// unrelated process's signals.
+fn poll_revents_from_entry(
+    entry: crate::proc::linux_fd::FdEntry,
+    events: u16,
+    owner_pid: Option<u64>,
+) -> u16 {
     use crate::proc::linux_fd::HandleKind;
     // POLLERR / POLLHUP / POLLNVAL are always returned, regardless of
     // the caller's `events` mask, per the Linux poll(2) man page.
@@ -19939,6 +20125,29 @@ fn poll_revents_from_entry(entry: crate::proc::linux_fd::FdEntry, events: u16) -
             // hand.  Tracked in todo.txt (epoll nesting in poll/select).
             0
         }
+        HandleKind::SignalFd => {
+            // A signalfd is readable exactly when one of the signals in
+            // its acceptance mask is pending for the *owning* process.
+            // That requires the owner pid (the pending set lives in
+            // crate::proc::signal keyed by pid), which the real poll /
+            // epoll_wait paths thread in via `owner_pid`.  Without it
+            // (kernel/self-test context) we report "not ready" rather
+            // than consulting an unrelated process's signals.
+            match owner_pid {
+                Some(pid) => {
+                    let fd_mask = crate::ipc::signalfd::mask(
+                        crate::ipc::signalfd::SignalFdHandle::from_raw(entry.raw_handle),
+                    )
+                    .unwrap_or(0);
+                    if crate::proc::signal::has_pending_in_mask(pid, fd_mask) {
+                        poll_bits::POLLIN | poll_bits::POLLRDNORM
+                    } else {
+                        0
+                    }
+                }
+                None => 0,
+            }
+        }
     };
 
     raw & mask
@@ -19961,7 +20170,7 @@ fn poll_compute_revents(pid: Option<u64>, fd: i32, events: u16) -> u16 {
     let Some(entry) = pcb::linux_fd_lookup(pid, fd) else {
         return poll_bits::POLLNVAL;
     };
-    poll_revents_from_entry(entry, events)
+    poll_revents_from_entry(entry, events, Some(pid))
 }
 
 /// Shared core for `sys_poll` / `sys_ppoll` — the user pointer validation
@@ -20718,7 +20927,8 @@ fn sys_epoll_ctl(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::Pipe
         | HandleKind::EventFd
         | HandleKind::PidFd
-        | HandleKind::Epoll => {}
+        | HandleKind::Epoll
+        | HandleKind::SignalFd => {}
     }
 
     // Gate 5: f.file == tf.file || !is_file_epoll(f.file) -> EINVAL.
@@ -20827,7 +21037,7 @@ fn epoll_wait_core(
             // flags in the high bits (EPOLLET 1<<31, EPOLLONESHOT 1<<30)
             // are not readiness bits and are dropped by the u16 cast.
             #[allow(clippy::cast_possible_truncation)]
-            let revents = poll_revents_from_entry(target, events as u16);
+            let revents = poll_revents_from_entry(target, events as u16, Some(caller));
             if revents == 0 {
                 continue;
             }
@@ -23609,6 +23819,7 @@ fn handle_kind_ord(k: crate::proc::linux_fd::HandleKind) -> u64 {
         HandleKind::PidFd => 4,
         HandleKind::MemFd => 5,
         HandleKind::Epoll => 6,
+        HandleKind::SignalFd => 7,
     }
 }
 
@@ -24581,7 +24792,7 @@ fn sys_cachestat(args: &SyscallArgs) -> SyscallResult {
                 // memfd is page-cache-backed on Linux, so cachestat is
                 // valid against it (always zero in our world).
                 HandleKind::File | HandleKind::MemFd => {}
-                HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll => {
+                HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd => {
                     return linux_err(errno::EOPNOTSUPP);
                 }
             }
@@ -28951,7 +29162,7 @@ fn sys_pread64(args: &SyscallArgs) -> SyscallResult {
                 Err(e) => linux_err(e),
             }
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd => linux_err(errno::ESPIPE),
     }
 }
 
@@ -29008,7 +29219,7 @@ fn sys_pwrite64(args: &SyscallArgs) -> SyscallResult {
                 Err(e) => linux_err(e),
             }
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd => linux_err(errno::ESPIPE),
     }
 }
 
@@ -30226,7 +30437,7 @@ fn sys_preadv(args: &SyscallArgs) -> SyscallResult {
             let off = offset as u64;
             preadv_memfd_walk(entry.raw_handle, off, iov_ptr, iovcnt)
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd => linux_err(errno::ESPIPE),
     }
 }
 
@@ -30257,7 +30468,7 @@ fn sys_pwritev(args: &SyscallArgs) -> SyscallResult {
             let off = offset as u64;
             pwritev_memfd_walk(entry.raw_handle, off, iov_ptr, iovcnt)
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd => linux_err(errno::ESPIPE),
     }
 }
 
@@ -30319,7 +30530,7 @@ fn sys_preadv2(args: &SyscallArgs) -> SyscallResult {
             let off = offset as u64;
             preadv_memfd_walk(entry.raw_handle, off, iov_ptr, iovcnt)
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd => linux_err(errno::ESPIPE),
     }
 }
 
@@ -30363,7 +30574,7 @@ fn sys_pwritev2(args: &SyscallArgs) -> SyscallResult {
             let off = offset as u64;
             pwritev_memfd_walk(entry.raw_handle, off, iov_ptr, iovcnt)
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd => linux_err(errno::ESPIPE),
     }
 }
 
@@ -43539,6 +43750,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 HandleKind::EventFd => Some(crate::cap::ResourceType::EventFd),
                 HandleKind::MemFd => Some(crate::cap::ResourceType::MemFd),
                 HandleKind::Epoll => Some(crate::cap::ResourceType::Epoll),
+                HandleKind::SignalFd => Some(crate::cap::ResourceType::SignalFd),
                 HandleKind::Console | HandleKind::PidFd => None,
             }
         };
@@ -51316,9 +51528,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: signalfd(NULL) not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // signalfd with fd=-1 (create new) in kernel context -> ENOSYS.
+        // signalfd with fd=-1 (create new) in kernel context -> EBADF.
         // -1i32 reinterpreted as u64 is the all-ones bit pattern; the
-        // syscall casts arg0 back to i32 which round-trips to -1.
+        // syscall casts arg0 back to i32 which round-trips to -1.  In
+        // kernel/self-test context there is no caller PCB to install the
+        // new fd into, so `signalfd_common` returns EBADF after the input
+        // gates pass (a real userspace caller creates the fd here).
         let sigmask = [0u8; 8];
         let a = SyscallArgs {
             arg0: u64::MAX,
@@ -51326,21 +51541,22 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             arg2: 8, arg3: 0, arg4: 0, arg5: 0,
         };
         if dispatch_linux(nr::SIGNALFD, &a).value
-            != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: signalfd(-1) not ENOSYS");
+            != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: signalfd(-1) not EBADF");
             return Err(KernelError::InternalError);
         }
-        // signalfd with fd=0 (stdin = Console, not a signalfd) -> EINVAL.
-        // Linux returns EINVAL when the fd is present but not a signalfd;
-        // we have no HandleKind::SignalFd, so every >=0 fd is "wrong kind".
+        // signalfd with fd=0 (stdin = Console, not a signalfd).  With a
+        // real caller this returns EINVAL ("wrong kind"); in kernel
+        // context the missing caller PCB short-circuits to EBADF before
+        // the fd-kind lookup can run.
         let a = SyscallArgs {
             arg0: 0,
             arg1: sigmask.as_ptr() as u64,
             arg2: 8, arg3: 0, arg4: 0, arg5: 0,
         };
         if dispatch_linux(nr::SIGNALFD, &a).value
-            != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: signalfd(fd=0) not EINVAL");
+            != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: signalfd(fd=0) not EBADF");
             return Err(KernelError::InternalError);
         }
         // signalfd4 with bogus flag -> EINVAL.
@@ -51354,26 +51570,29 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: signalfd4(bad flag) not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // signalfd4 with valid flag and fd=-1 -> ENOSYS.
+        // signalfd4 with valid flag and fd=-1 -> EBADF in kernel context
+        // (no caller PCB to install the new fd; see signalfd(-1) above).
         let a = SyscallArgs {
             arg0: u64::MAX,
             arg1: sigmask.as_ptr() as u64,
             arg2: 8, arg3: 0o4000, arg4: 0, arg5: 0,
         };
         if dispatch_linux(nr::SIGNALFD4, &a).value
-            != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: signalfd4(-1) not ENOSYS");
+            != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: signalfd4(-1) not EBADF");
             return Err(KernelError::InternalError);
         }
-        // signalfd4 with fd=0 (Console) -> EINVAL (wrong kind).
+        // signalfd4 with fd=0 (Console): EINVAL with a real caller,
+        // EBADF in kernel context (missing caller short-circuits the
+        // fd-kind lookup — see signalfd(fd=0) above).
         let a = SyscallArgs {
             arg0: 0,
             arg1: sigmask.as_ptr() as u64,
             arg2: 8, arg3: 0o4000, arg4: 0, arg5: 0,
         };
         if dispatch_linux(nr::SIGNALFD4, &a).value
-            != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: signalfd4(fd=0) not EINVAL");
+            != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: signalfd4(fd=0) not EBADF");
             return Err(KernelError::InternalError);
         }
         serial_println!("[syscall/linux]   signalfd/signalfd4 fd discrimination: OK");
@@ -54234,8 +54453,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         // (a) signalfd4: flags = 0x1_0000_0800 (high bit 32 +
         //     SFD_NONBLOCK), sizemask=8, mask=valid.  Linux truncates
-        //     to SFD_NONBLOCK -> ENOSYS in our stub.  Pre-batch:
-        //     EINVAL via unknown-flag check.
+        //     to SFD_NONBLOCK and proceeds to create the fd; in kernel
+        //     context that create returns EBADF (no caller PCB).  The
+        //     point of the assertion is that the high bit is truncated
+        //     away rather than rejected with EINVAL via the unknown-flag
+        //     check.
         let sigmask_b297 = [0u8; 8];
         let a = SyscallArgs {
             arg0: u64::MAX,
@@ -54245,7 +54467,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             arg4: 0,
             arg5: 0,
         };
-        if dispatch_linux(nr::SIGNALFD4, &a).value != -i64::from(errno::ENOSYS) {
+        if dispatch_linux(nr::SIGNALFD4, &a).value != -i64::from(errno::EBADF) {
             serial_println!(
                 "[syscall/linux]   FAIL: signalfd4 flags high-half not truncated"
             );
@@ -58017,7 +58239,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 f_owner: 0,
                 f_owner_sig: 0,
             };
-            let r = poll_revents_from_entry(file_entry, req);
+            let r = poll_revents_from_entry(file_entry, req, None);
             if r != 0x5 {
                 serial_println!("[syscall/linux]   FAIL: poll File POLLIN|POLLOUT got {:x}", r);
                 return Err(KernelError::InternalError);
@@ -58025,7 +58247,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // If caller also asks for POLLRDNORM|POLLWRNORM we should
             // get all four bits back.
             let req2: u16 = 0x1 | 0x4 | 0x40 | 0x100;
-            let r2 = poll_revents_from_entry(file_entry, req2);
+            let r2 = poll_revents_from_entry(file_entry, req2, None);
             if r2 != 0x145 {
                 serial_println!("[syscall/linux]   FAIL: poll File full request got {:x}", r2);
                 return Err(KernelError::InternalError);
@@ -58039,7 +58261,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 f_owner: 0,
                 f_owner_sig: 0,
             };
-            let r = poll_revents_from_entry(stdin_entry, req);
+            let r = poll_revents_from_entry(stdin_entry, req, None);
             if r != 0 {
                 serial_println!("[syscall/linux]   FAIL: poll stdin Console got {:x}", r);
                 return Err(KernelError::InternalError);
@@ -58053,7 +58275,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 f_owner: 0,
                 f_owner_sig: 0,
             };
-            let r = poll_revents_from_entry(stdout_entry, req);
+            let r = poll_revents_from_entry(stdout_entry, req, None);
             if r != 0x4 {
                 serial_println!("[syscall/linux]   FAIL: poll stdout Console got {:x}", r);
                 return Err(KernelError::InternalError);
@@ -58077,19 +58299,19 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 f_owner_sig: 0,
             };
             // Empty pipe: read end not readable, write end writable.
-            let rr = poll_revents_from_entry(pipe_read, 0x1 | 0x4);
+            let rr = poll_revents_from_entry(pipe_read, 0x1 | 0x4, None);
             if rr != 0 {
                 serial_println!("[syscall/linux]   FAIL: empty pipe read end got {:x}", rr);
                 return Err(KernelError::InternalError);
             }
-            let rw = poll_revents_from_entry(pipe_write, 0x1 | 0x4);
+            let rw = poll_revents_from_entry(pipe_write, 0x1 | 0x4, None);
             if rw != 0x4 {
                 serial_println!("[syscall/linux]   FAIL: empty pipe write end got {:x}", rw);
                 return Err(KernelError::InternalError);
             }
             // After a write, read end should become readable.
             let _ = crate::ipc::pipe::try_write(wh, b"x");
-            let rr2 = poll_revents_from_entry(pipe_read, 0x1 | 0x4);
+            let rr2 = poll_revents_from_entry(pipe_read, 0x1 | 0x4, None);
             if rr2 != 0x1 {
                 serial_println!("[syscall/linux]   FAIL: filled pipe read end got {:x}", rr2);
                 return Err(KernelError::InternalError);
@@ -58097,7 +58319,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // Close write end; read end should report POLLIN
             // (drain) and POLLHUP.
             crate::ipc::pipe::close(wh);
-            let rr3 = poll_revents_from_entry(pipe_read, 0x1);
+            let rr3 = poll_revents_from_entry(pipe_read, 0x1, None);
             // POLLIN(0x1) + POLLHUP(0x10) = 0x11; POLLHUP is implicit.
             if rr3 & 0x1 == 0 || rr3 & 0x10 == 0 {
                 serial_println!("[syscall/linux]   FAIL: pipe HUP read end got {:x}", rr3);
@@ -63516,7 +63738,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
             // poll on a PidFd whose target is gone -> POLLIN.
             // (pid 0x7FFF_FFFE was never allocated.)
-            let revents = poll_revents_from_entry(entry, poll_bits::POLLIN);
+            let revents = poll_revents_from_entry(entry, poll_bits::POLLIN, None);
             if revents & poll_bits::POLLIN == 0 {
                 serial_println!(
                     "[syscall/linux]   FAIL: pidfd poll missing-pid revents={:#x} (want POLLIN)",

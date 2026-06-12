@@ -162,6 +162,14 @@ pub enum ResourceType {
     /// released when an owning process dies, and so `fork()` knows to bump
     /// the refcount in the child.
     Epoll = 18,
+    /// A signalfd instance (Linux `signalfd`/`signalfd4`).
+    ///
+    /// A refcounted reference into [`crate::ipc::signalfd`] holding a
+    /// signal mask; no capability is required to create one — the handle
+    /// itself is the authority.  Tracked per-process so the instance is
+    /// released when an owning process dies, and so `fork()` knows to bump
+    /// the refcount in the child.
+    SignalFd = 19,
 }
 
 // ---------------------------------------------------------------------------

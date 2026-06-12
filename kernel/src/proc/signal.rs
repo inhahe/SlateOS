@@ -446,6 +446,45 @@ pub fn take_deliverable(pid: ProcessId) -> Option<u32> {
     Some(bit_index.saturating_add(1))
 }
 
+/// Pick and consume the lowest-numbered pending signal that is also in
+/// `mask`, for a `signalfd` read.
+///
+/// Unlike [`take_deliverable`], this does **not** consult the blocked
+/// mask: a `signalfd` consumes any pending signal that is in the fd's
+/// acceptance mask (the process is expected to have blocked those signals
+/// so they aren't first delivered to a handler, but the dequeue itself is
+/// gated only by the fd mask, matching Linux's `signalfd_dequeue`). The
+/// chosen signal's pending bit is cleared. Returns the signal number, or
+/// `None` if no pending signal falls within `mask`.
+#[must_use]
+pub fn take_pending_in_mask(pid: ProcessId, mask: u64) -> Option<u32> {
+    let mut states = SIGNAL_STATES.lock();
+    let state = states.get_mut(&pid)?;
+    let eligible = state.pending & mask;
+    if eligible == 0 {
+        return None;
+    }
+    let bit_index = eligible.trailing_zeros();
+    let bit = 1u64 << bit_index;
+    state.pending &= !bit;
+    PENDING_COUNT.fetch_sub(1, Ordering::Relaxed);
+    // bit_index is 0..=63, so +1 is 1..=64 — a valid signal number.
+    Some(bit_index.saturating_add(1))
+}
+
+/// Returns `true` if any pending signal for `pid` falls within `mask`.
+///
+/// Used by the `poll`/`select`/`epoll` readiness check for a `signalfd`:
+/// the fd is readable exactly when a masked signal is pending. Does not
+/// consume anything.
+#[must_use]
+pub fn has_pending_in_mask(pid: ProcessId, mask: u64) -> bool {
+    let states = SIGNAL_STATES.lock();
+    states
+        .get(&pid)
+        .is_some_and(|s| s.pending & mask != 0)
+}
+
 /// Cheap fast-path gate: `true` if any signal might be pending anywhere.
 ///
 /// The syscall-return delivery path calls this before doing any
@@ -483,8 +522,9 @@ pub fn self_test() -> KernelResult<()> {
     test_classify_post()?;
     test_on_exec()?;
     test_pending_count_accounting()?;
+    test_signalfd_dequeue()?;
 
-    serial_println!("[signal] Signal-shim self-test PASSED (9 tests)");
+    serial_println!("[signal] Signal-shim self-test PASSED (10 tests)");
     Ok(())
 }
 
@@ -639,5 +679,35 @@ fn test_pending_count_accounting() -> KernelResult<()> {
         "count restored after remove",
     )?;
     serial_println!("[signal]   pending-count accounting: OK");
+    Ok(())
+}
+
+fn test_signalfd_dequeue() -> KernelResult<()> {
+    let p = TEST_PID_BASE + 7;
+    // Signal 5 and signal 10 pending; a signalfd masks only {5, 7}.
+    set_pending(p, 5);
+    set_pending(p, 10);
+    let fd_mask = (1u64 << 4) | (1u64 << 6); // signals 5 and 7
+    check(has_pending_in_mask(p, fd_mask), "signal 5 visible to fd mask")?;
+    check(
+        !has_pending_in_mask(p, 1u64 << 6),
+        "signal 7 not pending → mask {7} not readable",
+    )?;
+    // Dequeue: only signal 5 is in the mask (10 is not), so 5 comes out
+    // and 10 stays pending.
+    check(take_pending_in_mask(p, fd_mask) == Some(5), "dequeue 5 from fd mask")?;
+    check(
+        take_pending_in_mask(p, fd_mask).is_none(),
+        "no further masked signal after 5 consumed",
+    )?;
+    check(pending(p) & (1u64 << 9) == (1u64 << 9), "signal 10 still pending")?;
+    // Dequeue ignores the blocked mask (unlike take_deliverable).
+    set_blocked(p, 1u64 << 9); // block signal 10
+    check(
+        take_pending_in_mask(p, 1u64 << 9) == Some(10),
+        "blocked signal still dequeued by signalfd",
+    )?;
+    remove(p);
+    serial_println!("[signal]   signalfd dequeue (mask/blocked-independent): OK");
     Ok(())
 }

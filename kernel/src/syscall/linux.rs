@@ -16142,23 +16142,72 @@ fn validate_linux_fd(fd: i32) -> Result<(), SyscallResult> {
 }
 
 /// `sendfile(out_fd, in_fd, offset, count)`.
+///
+/// Gate ordering and errno selection mirror Linux v6.6
+/// `SYSCALL_DEFINE4(sendfile64)` + `do_sendfile()` (fs/read_write.c) exactly:
+///   1. If `offset` is non-NULL, `copy_from_user(&pos, offset, 8)` runs in the
+///      syscall wrapper BEFORE `do_sendfile`, so an unreadable offset pointer
+///      yields EFAULT ahead of every fd check. (Linux reads the offset here;
+///      we model it as a `validate_user_read` since the access is a read.)
+///   2. `fdget(in_fd)` -> EBADF if absent.
+///   3. `!(in->f_mode & FMODE_READ)` -> EBADF.
+///   4. `if (ppos) !(in->f_mode & FMODE_PREAD)` -> ESPIPE (only when offset given).
+///   5. `fdget(out_fd)` -> EBADF if absent.
+///   6. `!(out->f_mode & FMODE_WRITE)` -> EBADF.
+///
+/// LIMITATION: Linux also runs `put_user(pos, offset)` *unconditionally* after
+/// the transfer, so a write-unmappable offset pointer can override a later
+/// success/error with EFAULT. We do not implement the data transfer, so that
+/// terminal write-back EFAULT is not modelled; the syscall returns EINVAL once
+/// all the front gates pass. The leading `validate_user_read` already rejects a
+/// wholly-unmapped offset pointer, matching the dominant Linux failure mode.
 fn sys_sendfile(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let out_fd = args.arg0 as i32;
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let in_fd = args.arg1 as i32;
-    if let Err(r) = validate_linux_fd(out_fd) {
-        return r;
-    }
-    if let Err(r) = validate_linux_fd(in_fd) {
-        return r;
-    }
-    // offset is `off_t *` (8 bytes) if non-NULL.
-    if args.arg2 != 0 {
-        if let Err(e) = crate::mm::user::validate_user_write(args.arg2, 8) {
+    let offset_ptr = args.arg2;
+
+    // Gate 1: copy_from_user(&pos, offset, 8) in the wrapper, before do_sendfile.
+    if offset_ptr != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(offset_ptr, 8) {
             return linux_err(linux_errno_for(e));
         }
     }
+
+    // Gate 2: fdget(in_fd) -> EBADF.
+    if let Err(r) = validate_linux_fd(in_fd) {
+        return r;
+    }
+
+    // Gates 3/4: in_fd FMODE_READ -> EBADF; if offset given, FMODE_PREAD -> ESPIPE.
+    if let Some(pid) = caller_pid() {
+        use crate::proc::linux_fd::HandleKind;
+        if let Some(ein) = pcb::linux_fd_lookup(pid, in_fd) {
+            if !fd_access_is_readable(ein.status_flags) {
+                return linux_err(errno::EBADF);
+            }
+            // FMODE_PREAD is set for seekable regular files; pipes/streams lack it.
+            if offset_ptr != 0 && !matches!(ein.kind, HandleKind::File | HandleKind::MemFd) {
+                return linux_err(errno::ESPIPE);
+            }
+        }
+    }
+
+    // Gate 5: fdget(out_fd) -> EBADF.
+    if let Err(r) = validate_linux_fd(out_fd) {
+        return r;
+    }
+
+    // Gate 6: out_fd FMODE_WRITE -> EBADF.
+    if let Some(pid) = caller_pid() {
+        if let Some(eout) = pcb::linux_fd_lookup(pid, out_fd) {
+            if !fd_access_is_writable(eout.status_flags) {
+                return linux_err(errno::EBADF);
+            }
+        }
+    }
+
     linux_err(errno::EINVAL)
 }
 
@@ -54734,6 +54783,46 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: sendfile not EINVAL");
             return Err(KernelError::InternalError);
+        }
+        // Batch 538: sendfile's FMODE_READ(in)/FMODE_WRITE(out) -> EBADF and the
+        // FMODE_PREAD -> ESPIPE gates are predicate-tested: at boot caller_pid()
+        // is None so the fd-table gates are bypassed (same as copy_file_range in
+        // batch 537). Verify the access-mode derivation and the pread/stream
+        // classification that drive those gates.
+        {
+            use crate::proc::linux_fd::{HandleKind, O_RDONLY, O_RDWR, O_WRONLY};
+            // in_fd FMODE_READ: write-only is NOT readable; rd/rdwr are.
+            if fd_access_is_readable(O_WRONLY) {
+                serial_println!("[syscall/linux]   FAIL: sendfile in O_WRONLY readable");
+                return Err(KernelError::InternalError);
+            }
+            if !fd_access_is_readable(O_RDONLY) || !fd_access_is_readable(O_RDWR) {
+                serial_println!("[syscall/linux]   FAIL: sendfile in O_RDONLY/O_RDWR not readable");
+                return Err(KernelError::InternalError);
+            }
+            // out_fd FMODE_WRITE: read-only is NOT writable; wr/rdwr are.
+            if fd_access_is_writable(O_RDONLY) {
+                serial_println!("[syscall/linux]   FAIL: sendfile out O_RDONLY writable");
+                return Err(KernelError::InternalError);
+            }
+            if !fd_access_is_writable(O_WRONLY) || !fd_access_is_writable(O_RDWR) {
+                serial_println!("[syscall/linux]   FAIL: sendfile out O_WRONLY/O_RDWR not writable");
+                return Err(KernelError::InternalError);
+            }
+            // FMODE_PREAD (offset given) -> ESPIPE for streams: File/MemFd are
+            // pread-capable; Pipe/Console/EventFd are not.
+            let pread_capable = |k: HandleKind| matches!(k, HandleKind::File | HandleKind::MemFd);
+            if !pread_capable(HandleKind::File) || !pread_capable(HandleKind::MemFd) {
+                serial_println!("[syscall/linux]   FAIL: sendfile File/MemFd not pread-capable");
+                return Err(KernelError::InternalError);
+            }
+            if pread_capable(HandleKind::Pipe)
+                || pread_capable(HandleKind::Console)
+                || pread_capable(HandleKind::EventFd) {
+                serial_println!("[syscall/linux]   FAIL: sendfile stream marked pread-capable");
+                return Err(KernelError::InternalError);
+            }
+            serial_println!("[syscall/linux]   sendfile gate order + FMODE/ESPIPE (batch 538): OK");
         }
         // splice with bogus flag -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0,

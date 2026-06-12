@@ -1,4 +1,37 @@
 
+## DONE (2026-06-12): ABI batch 538 — sendfile gate order + FMODE_READ/FMODE_WRITE/FMODE_PREAD gates
+## Linux v6.6 fs/read_write.c SYSCALL_DEFINE4(sendfile64) + do_sendfile() (verified verbatim against
+## raw.githubusercontent.com torvalds/linux v6.6):
+##   wrapper: if (offset) copy_from_user(&pos, offset, 8) -> -EFAULT  [BEFORE do_sendfile]
+##   do_sendfile: retval=-EBADF; fdget(in_fd)->EBADF;
+##                if !(in.f_mode & FMODE_READ) -> EBADF;
+##                retval=-ESPIPE; if (ppos) if !(in.f_mode & FMODE_PREAD) -> ESPIPE;
+##                rw_verify_area(READ,...);
+##                retval=-EBADF; fdget(out_fd)->EBADF;
+##                if !(out.f_mode & FMODE_WRITE) -> EBADF;
+##                ... transfer ...; put_user(pos, offset) -> EFAULT (unconditional, after transfer)
+## Pre-batch sys_sendfile diverged: (a) it validated out_fd BEFORE in_fd, where Linux validates
+## in_fd first; (b) it checked the offset pointer LAST with validate_user_write, where Linux reads
+## the offset FIRST (copy_from_user, a READ) before any fd touch; (c) it never applied the
+## FMODE_READ(in)/FMODE_WRITE(out) -> EBADF or the FMODE_PREAD -> ESPIPE gates.
+## Fix (translator-only, kernel/src/syscall/linux.rs sys_sendfile ~16145): reordered to
+##   1. offset!=0 -> validate_user_read(offset,8)->EFAULT  (matches copy_from_user, a read)
+##   2. validate_linux_fd(in_fd)->EBADF
+##   3. caller_pid Some: !fd_access_is_readable(in.status_flags)->EBADF;
+##      offset!=0 && in.kind not File/MemFd -> ESPIPE  (FMODE_PREAD held only by seekable regulars)
+##   4. validate_linux_fd(out_fd)->EBADF
+##   5. caller_pid Some: !fd_access_is_writable(out.status_flags)->EBADF
+##   terminal EINVAL (transfer unimplemented).
+## LIMITATION (documented in-code): Linux's terminal put_user(pos,offset) write-back EFAULT, which
+## runs unconditionally after the transfer and can override a success/EBADF, is NOT modelled because
+## we don't implement the transfer. The leading validate_user_read already rejects a wholly-unmapped
+## offset pointer, matching the dominant failure mode.
+## VERIFIED: At boot caller_pid()=None so the fd-table gates are bypassed (same as batch 537), so the
+## FMODE/ESPIPE behavior is predicate-tested, not dispatch-tested: fd_access_is_readable(O_WRONLY)=false
+## & true for O_RDONLY/O_RDWR; fd_access_is_writable(O_RDONLY)=false & true for O_WRONLY/O_RDWR;
+## File/MemFd pread-capable, Pipe/Console/EventFd not. Stamp "sendfile gate order + FMODE/ESPIPE
+## (batch 538): OK". cargo build clean; clippy 17477 (unchanged baseline); boot-test BOOT_OK 26s EXIT=0.
+
 ## DONE (2026-06-12): ABI batch 537 — copy_file_range gate order + vfs_copy_file_range FMODE/regular gate
 ## Linux v6.6 fs/read_write.c SYSCALL_DEFINE6(copy_file_range) order (verified verbatim against
 ## raw.githubusercontent.com torvalds/linux v6.6):

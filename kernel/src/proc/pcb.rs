@@ -136,6 +136,28 @@ pub enum ProcessState {
     Zombie,
 }
 
+/// A job-control state change that a parent's `wait()` has not yet consumed.
+///
+/// Orthogonal to [`ProcessState`], which tracks liveness
+/// (Creating/Running/Zombie): a process can be alive *and* stopped. POSIX
+/// job control lets a parent observe a child being stopped (`WUNTRACED` /
+/// `WSTOPPED`) or resumed (`WCONTINUED`) without the child exiting. We record
+/// the most recent such transition here and surface it to `wait4`/`waitid`,
+/// then clear it once reported (matching Linux, where each stop/continue is
+/// reported once unless `WNOWAIT` is used).
+///
+/// Only the *latest* transition is retained: a Stop followed by a Continue
+/// (or vice-versa) before the parent waits collapses to the final state,
+/// which is what a parent racing the transitions would observe on Linux too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobControlEvent {
+    /// The process was stopped by the given signal (its threads are
+    /// suspended). `sig` is the stop signal (SIGSTOP/SIGTSTP/SIGTTIN/SIGTTOU).
+    Stopped(u32),
+    /// The process was resumed by `SIGCONT` (its threads are runnable again).
+    Continued,
+}
+
 // ---------------------------------------------------------------------------
 // Syscall ABI mode — selects which syscall table interprets the process's
 // `syscall` instructions.
@@ -913,6 +935,16 @@ pub struct Process {
     pub io_syscr: u64,
     /// Number of write-family syscalls issued (`syscw`).
     pub io_syscw: u64,
+    /// Job-control: `true` while the process is stopped (all its threads
+    /// suspended by a stop signal). Set when a stop signal takes effect,
+    /// cleared by `SIGCONT`. A stopped process is still alive (not a
+    /// zombie); it simply has no runnable threads until continued.
+    pub stopped: bool,
+    /// Job-control: the most recent stop/continue transition that the
+    /// parent's `wait()` has not yet consumed, or `None` if there is
+    /// nothing new to report. Set on stop/continue, cleared once a
+    /// `wait4`/`waitid` reports it (unless `WNOWAIT`).
+    pub jc_report: Option<JobControlEvent>,
 }
 
 /// Highest valid Linux capability number — fixed at
@@ -1120,6 +1152,10 @@ impl Process {
             io_wchar: 0,
             io_syscr: 0,
             io_syscw: 0,
+            // Fresh process starts runnable, with no pending job-control
+            // report for its parent to observe.
+            stopped: false,
+            jc_report: None,
         }
     }
 }
@@ -1541,6 +1577,11 @@ pub fn fork_create(
         io_wchar: 0,
         io_syscr: 0,
         io_syscw: 0,
+        // POSIX: a forked child starts runnable even if the parent is
+        // stopped (it is a brand-new process), and has no pending
+        // job-control report of its own.
+        stopped: false,
+        jc_report: None,
     };
 
     table.insert(pid, child);
@@ -2771,6 +2812,111 @@ pub fn set_exit_code(pid: ProcessId, code: i32) -> KernelResult<()> {
 
     proc.exit_code = Some(code);
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Job control (stop / continue)
+// ---------------------------------------------------------------------------
+
+/// The parent-side waiters to wake after a job-control transition.
+///
+/// `.0` — a task blocked in `waitpid(pid)` for *this specific* process.
+/// `.1` — a task in this process's *parent* blocked in `waitpid(-1)`.
+///
+/// Mirrors the `(wait_task, any_waiter)` pair [`remove_thread`] returns on a
+/// zombie transition, so the caller can wake observers identically for a
+/// stop/continue as for an exit.  Both are taken (cleared) from their slots;
+/// each waiter re-registers on its next blocking wait if it goes back to
+/// sleep (e.g. the stop did not match its `wait` options).
+pub type JcWaiters = (Option<TaskId>, Option<TaskId>);
+
+/// Take (clear) the two parent-side wait slots associated with `pid` after a
+/// job-control transition, while the `PROCESS_TABLE` lock is held.
+///
+/// `proc` is the already-borrowed entry for `pid`; `parent` is its parent
+/// pid (captured before the second mutable borrow).  Factored out so
+/// [`record_jc_stopped`] and [`record_jc_continued`] share identical wake
+/// semantics.
+fn take_jc_waiters(
+    table: &mut BTreeMap<ProcessId, Process>,
+    pid: ProcessId,
+) -> JcWaiters {
+    let (wake, parent) = match table.get_mut(&pid) {
+        Some(proc) => (proc.wait_task.take(), proc.parent),
+        None => return (None, None),
+    };
+    let any = if parent != pid {
+        table.get_mut(&parent).and_then(|p| p.wait_any_task.take())
+    } else {
+        None
+    };
+    (wake, any)
+}
+
+/// Record that `pid` has been stopped by job-control signal `sig`.
+///
+/// Sets the stopped flag and records a `Stopped(sig)` report for the
+/// parent's `wait()` to observe.  Because stop and continue are mutually
+/// exclusive transitions, this supersedes any not-yet-reported `Continued`
+/// (overwriting `jc_report`).  Returns the parent-side waiters to wake (see
+/// [`JcWaiters`]).
+///
+/// This only updates job-control bookkeeping — actually suspending the
+/// process's threads is the caller's responsibility (the signal-delivery
+/// path), keeping this module free of scheduler coupling.
+///
+/// Returns `NoSuchProcess` if `pid` is unknown.
+pub fn record_jc_stopped(pid: ProcessId, sig: u32) -> KernelResult<JcWaiters> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+    proc.stopped = true;
+    proc.jc_report = Some(JobControlEvent::Stopped(sig));
+    Ok(take_jc_waiters(&mut table, pid))
+}
+
+/// Record that `pid` has been continued by `SIGCONT`.
+///
+/// Clears the stopped flag and records a `Continued` report, superseding any
+/// not-yet-reported `Stopped`.  Returns the parent-side waiters to wake (see
+/// [`JcWaiters`]).  Actually resuming the threads is the caller's job.
+///
+/// Returns `NoSuchProcess` if `pid` is unknown.
+pub fn record_jc_continued(pid: ProcessId) -> KernelResult<JcWaiters> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+    proc.stopped = false;
+    proc.jc_report = Some(JobControlEvent::Continued);
+    Ok(take_jc_waiters(&mut table, pid))
+}
+
+/// Whether `pid` is currently stopped (threads suspended for job control).
+///
+/// `false` for an unknown pid.
+#[must_use]
+pub fn is_stopped(pid: ProcessId) -> bool {
+    PROCESS_TABLE.lock().get(&pid).is_some_and(|p| p.stopped)
+}
+
+/// Peek at `pid`'s unconsumed job-control report without clearing it.
+///
+/// Used by `wait4`/`waitid` with `WNOWAIT`, and by the readiness scan that
+/// decides whether a stopped/continued child matches the caller's wait
+/// options.  `None` if there is nothing to report or the pid is unknown.
+#[must_use]
+pub fn peek_jc_report(pid: ProcessId) -> Option<JobControlEvent> {
+    PROCESS_TABLE.lock().get(&pid).and_then(|p| p.jc_report)
+}
+
+/// Consume `pid`'s job-control report, returning it and clearing the slot.
+///
+/// Called once a `wait4`/`waitid` (without `WNOWAIT`) has reported the
+/// stop/continue to userspace, so the same transition is not reported twice.
+/// `None` if there was nothing to report or the pid is unknown.
+pub fn take_jc_report(pid: ProcessId) -> Option<JobControlEvent> {
+    PROCESS_TABLE
+        .lock()
+        .get_mut(&pid)
+        .and_then(|p| p.jc_report.take())
 }
 
 /// Record crash information for a process killed by an unhandled exception.
@@ -4239,7 +4385,83 @@ pub fn self_test() -> KernelResult<()> {
     test_reap_zombie()?;
     test_reap_any()?;
     test_io_accounting()?;
+    test_job_control_state()?;
 
+    Ok(())
+}
+
+/// Test: job-control stop/continue state model (`record_jc_*`, `is_stopped`,
+/// peek/take report).
+///
+/// Exercises the pure PCB bookkeeping against a throwaway process — the
+/// scheduler suspend/resume and parent-wake wiring live in the signal path
+/// and are not driven here.  Verifies:
+///   - a fresh process is not stopped and has no report,
+///   - a stop sets `stopped` and a `Stopped(sig)` report,
+///   - a continue clears `stopped` and supersedes the report with
+///     `Continued` (mutual exclusion),
+///   - `peek` is non-destructive and `take` clears,
+///   - an unknown pid is a silent no-op / `None`.
+fn test_job_control_state() -> KernelResult<()> {
+    let pid = create("jc-test", 0);
+    set_running(pid)?;
+
+    if is_stopped(pid) || peek_jc_report(pid).is_some() {
+        serial_println!("[proc]   FAIL: fresh process should be runnable/no report");
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    }
+
+    // Stop by SIGTSTP (20). No parent waiters registered → both None.
+    let waiters = record_jc_stopped(pid, 20)?;
+    if waiters != (None, None) {
+        serial_println!("[proc]   FAIL: unexpected waiters on stop");
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    }
+    if !is_stopped(pid) || peek_jc_report(pid) != Some(JobControlEvent::Stopped(20)) {
+        serial_println!("[proc]   FAIL: stop did not record Stopped(20)");
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    }
+    // peek is non-destructive.
+    if peek_jc_report(pid) != Some(JobControlEvent::Stopped(20)) {
+        serial_println!("[proc]   FAIL: peek cleared the report");
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    }
+
+    // Continue supersedes the stop report and clears the stopped flag.
+    let _ = record_jc_continued(pid)?;
+    if is_stopped(pid) || peek_jc_report(pid) != Some(JobControlEvent::Continued) {
+        serial_println!("[proc]   FAIL: continue did not supersede with Continued");
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    }
+
+    // take consumes the report exactly once.
+    if take_jc_report(pid) != Some(JobControlEvent::Continued)
+        || take_jc_report(pid).is_some()
+    {
+        serial_println!("[proc]   FAIL: take did not consume report once");
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    }
+
+    destroy(pid);
+
+    // Unknown pid: queries are None/false, records are NoSuchProcess.
+    if is_stopped(pid) || peek_jc_report(pid).is_some() || take_jc_report(pid).is_some()
+    {
+        serial_println!("[proc]   FAIL: reaped pid reports job-control state");
+        return Err(KernelError::InternalError);
+    }
+    if record_jc_stopped(pid, 19).is_ok() || record_jc_continued(pid).is_ok() {
+        serial_println!("[proc]   FAIL: record on unknown pid should error");
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[proc]   job-control state model: OK");
     Ok(())
 }
 

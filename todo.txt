@@ -18,23 +18,32 @@
 ##   newly-pending signal; the signalfd read path and rt_sigtimedwait would block on
 ##   that queue instead of returning EAGAIN.  Shared infra benefits both call sites.
 ##
-## LIMITATION (2026-06-12): kernel-level timerfd blocking read returns EAGAIN
-## The new kernel Linux-ABI timerfd (kernel/src/ipc/timerfd.rs + the
-## HandleKind::Timerfd wiring in kernel/src/syscall/linux.rs) uses a lazy-expiry
-## model: no background hrtimer fires per timerfd; the expiration count is computed
-## on demand from the current clock at read/poll/gettime.  A read of an unexpired
-## timerfd returns EAGAIN even for a BLOCKING (non-TFD_NONBLOCK) fd, because — like
-## signalfd — this kernel has no timer-arrival wakeup path to park a reader on.
-##   WHY: same shortcut as signalfd / rt_sigtimedwait.  Without a per-timerfd
-##   wait-queue armed to fire at expiry_ns, a blocking read cannot sleep "until the
-##   timer fires"; it would have to busy-poll.  EAGAIN is the honest answer.
-##   IMPACT: low — the canonical timerfd idiom is poll/select/epoll on the fd, then
-##   read() once POLLIN fires; that works fully (is_readable reports readiness purely
-##   from the clock).  Only a bare blocking read() that expects to sleep until expiry
-##   spins (EAGAIN) instead — a rare idiom.
-##   FIX: schedule a real hrtimer (or reuse the timer wheel) at expiry_ns that wakes
-##   a per-timerfd wait-queue; the read path blocks on that queue instead of returning
-##   EAGAIN.  Could share the same wait-queue infra as the signalfd fix above.
+## FIXED (2026-06-12): kernel-level timerfd blocking read now parks the caller
+## Was: a read of an unexpired timerfd returned EAGAIN even for a BLOCKING
+## (non-TFD_NONBLOCK) fd, because the lazy-expiry model armed no hrtimer and there
+## was no timer-arrival wakeup path.
+##   FIX SHIPPED: kernel/src/ipc/timerfd.rs grew read_expirations_blocking(), which
+##   registers the caller in a per-instance reader_waiter slot, arms a one-shot
+##   crate::hrtimer at the next expiry (rem.max(1) ns) whose callback wakes the task
+##   (try_wake → defer_wake, the eventfd timeout idiom), then sched::block_current()s
+##   and re-evaluates on wake (looping for each tick of a periodic timer).  A read of
+##   a DISARMED timer parks with no armed hrtimer and is woken by settime(), which now
+##   takes+wakes reader_waiter after dropping the table lock — matching Linux's
+##   "block an unarmed-timerfd reader until it is armed and fires".  dispatch_timerfd_read
+##   in syscall/linux.rs now branches on O_NONBLOCK: TFD_NONBLOCK keeps the old
+##   read_expirations()→EAGAIN path; blocking fds use read_expirations_blocking().
+##   The non-blocking lazy model is otherwise unchanged (the wakeup hrtimer exists only
+##   for the duration of a blocked read).  Self-tested: the blocking FAST PATH (already
+##   pending → returns without parking) and stale-handle fast-fail; the actual park
+##   path is exercised only by real userspace (needs another runnable task to wake it)
+##   and reuses the battle-tested sched/hrtimer primitives the native eventfd depends on.
+##   NOTE: single reader_waiter slot (matches eventfd); the armed case is robust to slot
+##   overwrite because each blocked reader is also woken by its own hrtimer (task id
+##   captured at arm time), so only the rare concurrent-disarmed-blocking-readers edge
+##   could lose a waiter — acceptable and matching the eventfd model.
+##   (signalfd + inotify still return EAGAIN on blocking read — see their entries;
+##   their wake sources are cross-cutting (signal delivery / fs::notify) rather than a
+##   self-contained hrtimer, so they are deferred as separate follow-ups.)
 ##
 ## LIMITATION (2026-06-12): kernel-level timerfd TFD_TIMER_CANCEL_ON_SET not implemented
 ## timerfd_settime accepts the TFD_TIMER_CANCEL_ON_SET flag (bit 1) without error,

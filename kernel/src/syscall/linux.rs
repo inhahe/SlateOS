@@ -2949,25 +2949,33 @@ fn dispatch_signalfd_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
 ///   * `cap < 8` → EINVAL (Linux requires room for the `u64`).
 ///   * If one or more expirations are pending, consume them (resetting the
 ///     count to 0) and return 8.
-///   * If none are pending: `O_NONBLOCK` → EAGAIN.  A blocking read also
-///     returns EAGAIN rather than sleeping — the kernel has no timer-arrival
-///     wakeup path (the same documented shortcut as `signalfd` /
-///     `rt_sigtimedwait`; see todo.txt).  In practice a timerfd is read after
-///     `poll`/`epoll` reports it readable, so an expiration is already pending
-///     on entry.
+///   * If none are pending: `O_NONBLOCK` → EAGAIN.  A blocking read instead
+///     parks the caller until the next expiration (an `hrtimer` armed at the
+///     expiry wakes it; a disarmed timer blocks until re-armed), via
+///     [`crate::ipc::timerfd::read_expirations_blocking`].  In practice a
+///     timerfd is usually read after `poll`/`epoll` reports it readable, so an
+///     expiration is already pending on entry and neither path blocks.
 fn dispatch_timerfd_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
     const U64_SIZE: usize = 8;
     if (cap as usize) < U64_SIZE {
         return linux_err(errno::EINVAL);
     }
     let handle = crate::ipc::timerfd::TimerFdHandle::from_raw(entry.raw_handle);
-    let count = match crate::ipc::timerfd::read_expirations(handle) {
-        Some(c) => c,
-        None => return linux_err(errno::EBADF),
+    let nonblock = (entry.status_flags & oflags::O_NONBLOCK) != 0;
+    let count = if nonblock {
+        match crate::ipc::timerfd::read_expirations(handle) {
+            Some(c) => c,
+            None => return linux_err(errno::EBADF),
+        }
+    } else {
+        // Blocking read: park until at least one expiration is pending.
+        match crate::ipc::timerfd::read_expirations_blocking(handle) {
+            Ok(c) => c,
+            Err(_) => return linux_err(errno::EBADF),
+        }
     };
     if count == 0 {
-        // Not yet expired.  Blocking and non-blocking both surface EAGAIN
-        // (no timer-arrival wakeup path — see doc comment).
+        // Only reachable on the non-blocking path: not yet expired → EAGAIN.
         return linux_err(errno::EAGAIN);
     }
     if let Err(e) = crate::mm::user::validate_user_write(buf, U64_SIZE) {

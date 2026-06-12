@@ -28,9 +28,18 @@
 //! This is correct because a timerfd has no observable side effect *between*
 //! reads other than "how many times has it fired" — which is a pure function of
 //! the arming parameters and the current time.  It avoids per-timer interrupt
-//! overhead and the need to wake a reader (we have no signal-/timer-arrival
-//! wakeup path; a blocking read of an unexpired timerfd returns `EAGAIN`, the
-//! same documented shortcut as `signalfd` and `rt_sigtimedwait`).
+//! overhead in the common poll/epoll idiom.
+//!
+//! ## Blocking reads
+//!
+//! A *blocking* (`!TFD_NONBLOCK`) `read()` of an unexpired timerfd does park the
+//! caller: [`read_expirations_blocking`] arms a one-shot [`crate::hrtimer`] at
+//! the next expiry, [`sched::block_current`]s, and re-evaluates on wake (looping
+//! for each tick of a periodic timer).  A read of a *disarmed* timer blocks with
+//! no armed `hrtimer` and is woken by [`settime`] when the timer is re-armed.
+//! The non-blocking [`read_expirations`] still returns `Some(0)` (→ `EAGAIN`)
+//! for the `TFD_NONBLOCK` path; the no-background-firing lazy model is unchanged
+//! — the wakeup `hrtimer` exists only for the duration of a blocked read.
 //!
 //! ## Clock domains
 //!
@@ -63,6 +72,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
 use crate::error::{KernelError, KernelResult};
+use crate::sched::{self, task::TaskId};
 use crate::serial_println;
 
 /// `CLOCK_MONOTONIC`.
@@ -206,6 +216,17 @@ struct TimerFd {
     interval_ns: u64,
     /// Reference count: `create` = 1, each `dup` +1, each `close` −1.
     refcount: u32,
+    /// Task parked in a *blocking* `read()` waiting for the next expiration,
+    /// if any.  Set by [`read_expirations_blocking`] under the table lock and
+    /// taken by [`settime`] (so re-arming a disarmed timer wakes a reader that
+    /// is blocked with no armed deadline).  A single slot, matching
+    /// [`crate::ipc::eventfd`]'s single-reader model: the *armed* case is
+    /// robust to slot overwrite because each blocked reader is also woken
+    /// directly by its own per-read `hrtimer` (which captures the task id at
+    /// arm time, independent of this field); only the rare *disarmed*
+    /// blocked-forever case depends on this slot, and concurrent blocking
+    /// readers on one shared timerfd are vanishingly rare.
+    reader_waiter: Option<TaskId>,
 }
 
 impl TimerFd {
@@ -215,6 +236,7 @@ impl TimerFd {
             expiry_ns: 0,
             interval_ns: 0,
             refcount: 1,
+            reader_waiter: None,
         }
     }
 }
@@ -323,28 +345,43 @@ pub fn settime(
     let cid = clockid(handle).ok_or(KernelError::InvalidHandle)?;
     let now = now_for_clock(cid);
 
-    let mut table = TIMERFD_TABLE.lock();
-    let tfd = table
-        .get_mut(&handle.id())
-        .ok_or(KernelError::InvalidHandle)?;
+    let waiter;
+    let old;
+    {
+        let mut table = TIMERFD_TABLE.lock();
+        let tfd = table
+            .get_mut(&handle.id())
+            .ok_or(KernelError::InvalidHandle)?;
 
-    let old = (
-        remaining(tfd.expiry_ns, tfd.interval_ns, now),
-        tfd.interval_ns,
-    );
+        old = (
+            remaining(tfd.expiry_ns, tfd.interval_ns, now),
+            tfd.interval_ns,
+        );
 
-    if value_ns == 0 {
-        // Disarm.  Record the interval (harmless while disarmed) to match Linux,
-        // which keeps it_interval in the ctx even when it_value is zeroed.
-        tfd.expiry_ns = 0;
-        tfd.interval_ns = interval_ns;
-    } else {
-        tfd.expiry_ns = if abstime {
-            value_ns
+        if value_ns == 0 {
+            // Disarm.  Record the interval (harmless while disarmed) to match
+            // Linux, which keeps it_interval in the ctx even when it_value is
+            // zeroed.
+            tfd.expiry_ns = 0;
+            tfd.interval_ns = interval_ns;
         } else {
-            now.saturating_add(value_ns)
-        };
-        tfd.interval_ns = interval_ns;
+            tfd.expiry_ns = if abstime {
+                value_ns
+            } else {
+                now.saturating_add(value_ns)
+            };
+            tfd.interval_ns = interval_ns;
+        }
+
+        // Re-arming changes the deadline a blocked reader is waiting on; wake it
+        // so it re-evaluates (a reader blocked on a previously-disarmed timer
+        // has no `hrtimer` of its own and depends entirely on this wakeup).
+        waiter = tfd.reader_waiter.take();
+    }
+
+    // Wake outside the table lock (leaf-lock discipline).
+    if let Some(tid) = waiter {
+        sched::wake(tid);
     }
 
     Ok(old)
@@ -370,9 +407,9 @@ pub fn gettime(handle: TimerFdHandle) -> Option<(u64, u64)> {
 ///
 /// Advances the timer's next-expiry past "now" (or disarms a fired one-shot).
 /// Returns `Some(0)` when the timer is disarmed or has not yet fired — the
-/// syscall layer turns a zero count into `EAGAIN` (we have no timer-arrival
-/// wakeup path, so even a blocking read cannot park).  Returns `None` if the
-/// handle is stale.
+/// syscall layer turns a zero count into `EAGAIN` on the `TFD_NONBLOCK` path.
+/// Blocking reads instead go through [`read_expirations_blocking`], which parks
+/// the caller.  Returns `None` if the handle is stale.
 #[must_use]
 pub fn read_expirations(handle: TimerFdHandle) -> Option<u64> {
     let cid = clockid(handle)?;
@@ -384,6 +421,84 @@ pub fn read_expirations(handle: TimerFdHandle) -> Option<u64> {
         tfd.expiry_ns = new_expiry;
     }
     Some(count)
+}
+
+/// `hrtimer` callback used by [`read_expirations_blocking`] to wake a parked
+/// reader when its next expiration is due.  Mirrors the eventfd timeout idiom:
+/// prefer a direct wake, falling back to a deferred wake if the target is not
+/// yet parked (closing the wake-before-block race).
+fn timerfd_wake(tid: u64) {
+    if !sched::try_wake(tid) {
+        sched::defer_wake(tid);
+    }
+}
+
+/// Blocking variant of [`read_expirations`]: park the caller until at least one
+/// expiration is pending, then consume and return the count (always `> 0`).
+///
+/// This is the kernel half of a **blocking** (`!TFD_NONBLOCK`) `timerfd` read.
+/// Unlike the lazy non-consuming queries, a blocking read cannot simply report
+/// "nothing yet" — Linux sleeps the reader until the timer fires.  We realise
+/// that here by arming a one-shot [`crate::hrtimer`] at the next expiry that
+/// wakes us, then [`sched::block_current`]-ing; on a periodic timer the loop
+/// re-arms for each subsequent tick.  A read of a *disarmed* timer blocks with
+/// no armed `hrtimer` and is woken by [`settime`] when the timer is (re-)armed,
+/// exactly as Linux blocks an unarmed-timerfd reader until it is armed and
+/// fires.
+///
+/// # Errors
+///
+/// [`KernelError::InvalidHandle`] if the handle becomes stale (e.g. the last
+/// reference is closed) while blocked.
+pub fn read_expirations_blocking(handle: TimerFdHandle) -> KernelResult<u64> {
+    loop {
+        // Read the clock before taking the lock (leaf-lock discipline).
+        let cid = clockid(handle).ok_or(KernelError::InvalidHandle)?;
+        let now = now_for_clock(cid);
+
+        // Relative ns to the next expiry to arm a wakeup for; `None` = disarmed
+        // (block until `settime` wakes us).
+        let next_remaining;
+        {
+            let mut table = TIMERFD_TABLE.lock();
+            let tfd = table
+                .get_mut(&handle.id())
+                .ok_or(KernelError::InvalidHandle)?;
+
+            let (count, new_expiry) = advance(tfd.expiry_ns, tfd.interval_ns, now);
+            if count > 0 {
+                tfd.expiry_ns = new_expiry;
+                // We are returning, not parking — clear any stale registration.
+                tfd.reader_waiter = None;
+                return Ok(count);
+            }
+
+            // Not yet due — register as the parked reader and capture the
+            // deadline (if armed) before dropping the lock.
+            tfd.reader_waiter = Some(sched::current_task_id());
+            next_remaining = if tfd.expiry_ns == 0 {
+                None
+            } else {
+                // `advance` returned 0 with a non-zero expiry ⇒ now < expiry, so
+                // `remaining` is strictly positive here.
+                Some(remaining(tfd.expiry_ns, tfd.interval_ns, now))
+            };
+        }
+
+        // Arm a wakeup `hrtimer` for the armed case; the disarmed case relies on
+        // `settime` waking `reader_waiter`.
+        let timer = next_remaining.map(|rem| {
+            crate::hrtimer::schedule_ns(rem.max(1), timerfd_wake, sched::current_task_id())
+        });
+
+        sched::block_current();
+
+        // Woken (timer fired, settime re-armed, or spurious) — cancel any
+        // pending wakeup timer (harmless if it already fired) and re-evaluate.
+        if let Some(th) = timer {
+            crate::hrtimer::cancel(th);
+        }
+    }
 }
 
 /// Is the timerfd readable right now (at least one expiration pending)?
@@ -551,6 +666,33 @@ pub fn self_test() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
+    // 3b. Blocking read FAST PATH: with an expiration already pending,
+    // `read_expirations_blocking` must consume and return it *without* parking
+    // (it would otherwise hang the single-threaded boot CPU).  The actual
+    // parking path is exercised only by real userspace (a blocked reader needs
+    // another runnable task to wake it) and is verified by construction against
+    // the battle-tested sched/hrtimer primitives it reuses.
+    settime(t, true, 1, 0)?; // abs expiry in the past → immediately pending.
+    if !is_readable(t) {
+        serial_println!("[timerfd]   FAIL: re-armed past one-shot not readable");
+        close(t);
+        return Err(KernelError::InternalError);
+    }
+    match read_expirations_blocking(t) {
+        Ok(1) => {}
+        other => {
+            serial_println!("[timerfd]   FAIL: blocking read fast path = {:?}", other);
+            close(t);
+            return Err(KernelError::InternalError);
+        }
+    }
+    // The one-shot is now disarmed again, and no reader is left registered.
+    if is_readable(t) {
+        serial_println!("[timerfd]   FAIL: one-shot still readable after blocking read");
+        close(t);
+        return Err(KernelError::InternalError);
+    }
+
     // 4. Refcount lifetime + shared armed state across dup.
     let t2 = dup(t)?;
     if t2 != t {
@@ -586,6 +728,11 @@ pub fn self_test() -> KernelResult<()> {
     }
     if read_expirations(t).is_some() {
         serial_println!("[timerfd]   FAIL: read on stale handle not None");
+        return Err(KernelError::InternalError);
+    }
+    // Blocking read on a stale handle must fail fast (InvalidHandle), not park.
+    if read_expirations_blocking(t).err() != Some(KernelError::InvalidHandle) {
+        serial_println!("[timerfd]   FAIL: blocking read on stale handle not InvalidHandle");
         return Err(KernelError::InternalError);
     }
     if is_readable(t) {

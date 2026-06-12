@@ -3884,21 +3884,73 @@ pub fn sys_signal_return_with_frame(
     }
 }
 
-/// Deliver a pending signal to the current process on the way back to
-/// userspace, if one is deliverable and a trampoline is registered.
+/// Terminate the current process because a fatal signal was posted and no
+/// userspace handler trampoline is registered.
 ///
-/// Mirrors the SEH-style exception delivery (`idt::try_dispatch_user_
-/// exception`): build a [`SignalContext`](crate::proc::signal::SignalContext)
-/// on the user stack capturing the interrupted state (including the
-/// syscall's return value in RAX), then rewrite the syscall frame so the
-/// SYSRET path jumps to the trampoline with `rdi = signum` and
-/// `rsi = &ctx`.
+/// Mirrors the kernel default action for a terminating signal: the process
+/// exits with the conventional "killed by signal N" status (`128 + sig`),
+/// and every thread of the process is torn down. This is invoked from the
+/// syscall-return delivery checkpoint ([`deliver_pending_signal`]) for a
+/// process that has no trampoline — the same self-termination mechanism
+/// `sys_exit` uses, so it is safe to call here: `task_exit()` switches away
+/// and never returns.
+///
+/// Closes the gap where an asynchronously-posted fatal signal (e.g.
+/// `ITIMER_REAL`'s `SIGALRM`, or a future keyboard `SIGINT`) to a process
+/// with no handler would otherwise sit pending forever instead of killing
+/// it. (`kill()` to a non-POSIX process already terminates synchronously via
+/// `signal::classify_post`.)
+fn terminate_current_process_for_signal(
+    pid: crate::proc::pcb::ProcessId,
+    current_task: crate::sched::task::TaskId,
+    sig: u32,
+) {
+    use crate::proc::{pcb, thread};
+
+    // 128 + sig is the conventional wait-status for "terminated by signal".
+    #[allow(clippy::cast_possible_wrap)]
+    let exit_code = 128i32.wrapping_add(sig as i32);
+    let _ = pcb::set_exit_code(pid, exit_code);
+
+    // Tear down sibling threads first. `kill_task` refuses the *current*
+    // task (it must self-terminate via `task_exit`), so we only kill the
+    // others here and finish with the current thread below.
+    if let Some(threads) = pcb::get_threads(pid) {
+        for t in threads {
+            if t != current_task {
+                sched::kill_task(t);
+                thread::on_thread_exit(t);
+            }
+        }
+    }
+
+    // Tear down the current thread and switch away. `task_exit` never
+    // returns; the abandoned kernel stack is reaped by the scheduler.
+    thread::on_thread_exit(current_task);
+    sched::task_exit();
+}
+
+/// Deliver a pending signal to the current process on the way back to
+/// userspace, if one is deliverable.
+///
+/// If the process has a handler trampoline registered, this mirrors the
+/// SEH-style exception delivery (`idt::try_dispatch_user_exception`): build a
+/// [`SignalContext`](crate::proc::signal::SignalContext) on the user stack
+/// capturing the interrupted state (including the syscall's return value in
+/// RAX), then rewrite the syscall frame so the SYSRET path jumps to the
+/// trampoline with `rdi = signum` and `rsi = &ctx`.
+///
+/// If the process has **no** trampoline, the kernel default action applies
+/// instead: a terminating signal kills the process (exit `128 + sig`, via
+/// [`terminate_current_process_for_signal`] — this call does not return),
+/// while ignore/stop/continue defaults are consumed and dropped.
 ///
 /// `ret_val` is the value the interrupted syscall was about to return in
 /// RAX; it is saved into the context and restored on `SYS_SIGNAL_RETURN`.
 ///
-/// Returns `true` if a signal was delivered (the frame was rewritten),
-/// `false` otherwise (the normal return value should be used).
+/// Returns `true` if a signal was delivered to a handler (the frame was
+/// rewritten), `false` otherwise (the normal return value should be used).
+/// Note that a fatal no-handler signal does not return at all.
 ///
 /// If the user stack cannot hold the context (e.g. it would cross into an
 /// unmapped guard page), delivery is skipped and the signal stays pending
@@ -3924,7 +3976,23 @@ pub fn deliver_pending_signal(
 
     let trampoline = match signal::trampoline(pid) {
         Some(addr) => addr,
-        None => return false,
+        None => {
+            // No userspace handler trampoline: apply the kernel default
+            // action to each deliverable signal. A terminating default kills
+            // the process (exit 128+sig, never returns); ignore/stop/continue
+            // defaults are consumed and dropped. This closes the gap where an
+            // async-posted fatal signal (e.g. ITIMER_REAL's SIGALRM) to a
+            // process with no handler would sit pending forever.
+            while let Some(sig) = signal::take_deliverable(pid) {
+                if signal::default_action(sig) == signal::DefaultAction::Terminate
+                {
+                    terminate_current_process_for_signal(pid, task_id, sig);
+                    // Unreachable: task_exit never returns.
+                }
+                // Ignore / Stop / Continue: dropped; check the next.
+            }
+            return false;
+        }
     };
 
     let sig = match signal::take_deliverable(pid) {

@@ -12443,10 +12443,10 @@ fn sys_mknod_common(path: u64, mode_raw: u64) -> SyscallResult {
 //     checkpoint and wakes any pause()/signalfd/rt_sigtimedwait waiter.
 //     setitimer(VIRTUAL|PROF) still accepts cancellation and returns
 //     -ENOSYS on a non-zero arm.
-//     Known limitation: a process with NO SIGALRM handler is not terminated
-//     when the timer fires (the kernel's deliver_pending_signal only
-//     delivers to trampoline-registered processes); the dominant case
-//     (handler installed before arming) works end-to-end.
+//     A process with NO SIGALRM handler is terminated (exit 128+SIGALRM) at
+//     the next syscall-return checkpoint when the timer fires, matching
+//     Linux; the dominant case (handler installed before arming) delivers to
+//     the handler instead.
 //
 //   - alarm() is setitimer(ITIMER_REAL, it_value=seconds, it_interval=0):
 //     it arms the same shared real timer and returns the rounded-up seconds

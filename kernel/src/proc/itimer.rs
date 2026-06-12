@@ -30,17 +30,16 @@
 //! (callbacks fire outside that lock), so there is no `REAL_TIMERS ↔
 //! CPU_TIMERS` cycle.
 //!
-//! ## Known limitation
+//! ## No-handler behaviour
 //!
 //! If the process has **no** signal trampoline registered when `SIGALRM`
-//! fires, the signal is marked pending but never delivered — and because the
-//! kernel's `deliver_pending_signal` only delivers to trampoline-registered
-//! processes (and never terminates a no-handler process), `alarm()` with no
-//! `SIGALRM` handler will **not** terminate the process the way Linux does.
-//! This is the same pre-existing no-trampoline-default-fatal gap documented
-//! in `todo.txt`; it is not specific to itimers. The common case — a process
-//! that installs a `SIGALRM` handler before calling `alarm()` — works
-//! end-to-end.
+//! fires, the kernel applies the default action at the next syscall-return
+//! checkpoint: `SIGALRM`'s default is to terminate, so the process exits with
+//! status `128 + SIGALRM` (see `handlers::deliver_pending_signal` →
+//! `terminate_current_process_for_signal`). This matches Linux's behaviour
+//! for `alarm()` with no installed handler. The common case — a process that
+//! installs a `SIGALRM` handler before calling `alarm()` — delivers to that
+//! handler instead.
 
 use crate::error::{KernelError, KernelResult};
 use crate::hrtimer::{self, HrTimerHandle};

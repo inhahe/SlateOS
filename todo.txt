@@ -9422,11 +9422,9 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##     arm/get/replace/cancel, fire-path SIGALRM post + one-shot disarm +
 ##     no-spurious-repost, periodic re-arm bookkeeping).
 ##   * Built clean, clippy added no new warnings, boot-test PASSED.
-##   KNOWN LIMITATION (documented in itimer.rs + the setitimer comment): a
-##   process with NO SIGALRM handler is not terminated when the timer fires
-##   (deliver_pending_signal only delivers to trampoline-registered
-##   processes and never terminates no-handler ones — the pre-existing gap).
-##   The common case (handler installed before arming) works end-to-end.
+##   FOLLOW-UP (DONE 2026-06-12, see below): the no-trampoline default-fatal
+##   gap is now CLOSED — a process with no SIGALRM handler is terminated
+##   (exit 128+SIGALRM) at the next syscall-return checkpoint, matching Linux.
 ## (Original task writeup kept below for reference.)
 ## ---------------------------------------------------------------------------
 ## GOAL: make alarm(N) and setitimer(ITIMER_REAL, ...) actually fire SIGALRM
@@ -9494,11 +9492,18 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##   timer callback and the itimer module above is straightforward.
 ##   This irq-safe conversion ALSO unblocks future async signal sources
 ##   (keyboard ISR -> SIGINT, etc.), so it's foundational, not alarm-specific.
-## NOTE: the no-trampoline default-fatal case (alarm with no SIGALRM handler
-## should terminate the process after N s) still won't terminate — that's the
-## separate, pre-existing gap that deliver_pending_signal only delivers to
-## trampoline-registered processes and never terminates no-handler ones.
-## Document that as a known limitation when implementing; don't fake it.
+## NOTE: the no-trampoline default-fatal case is now CLOSED (2026-06-12).
+## handlers::deliver_pending_signal, for a process with no trampoline, applies
+## the kernel default action to each deliverable signal: a terminating default
+## kills the process (exit 128+sig) via terminate_current_process_for_signal
+## (mirrors sys_exit: set_exit_code + tear down sibling threads + task_exit),
+## while ignore/stop/continue defaults are consumed and dropped. So alarm()
+## with no SIGALRM handler now terminates the process, matching Linux; kill()
+## to a non-POSIX process already terminated synchronously via classify_post.
+## CANNOT be exercised in the single-threaded boot self-test (task_exit would
+## kill the boot CPU, and caller_pid()==None there anyway) — same constraint
+## as the pause()/rt_sigtimedwait blocking paths; verified by review + the
+## logic mirroring the proven sys_exit path + a clean boot-test (no regression).
 ## ===========================================================================
 ##
 ##  38. ACCESS / FACCESSAT / FACCESSAT2 — DONE as

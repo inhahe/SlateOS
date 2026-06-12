@@ -32,6 +32,7 @@ pub mod semaphore;
 pub mod service;
 pub mod service_limits;
 pub mod shm;
+pub mod signalfd;
 pub mod stats;
 pub mod stream_socket;
 pub mod timer;

@@ -562,6 +562,16 @@ extern "C" fn kernel_main() -> ! {
         cpu::halt_loop();
     }
 
+    // Step 15a (cont.): Signalfd subsystem.
+    // A signalfd object holds an acceptance mask; reads drain masked pending
+    // signals from the owning process.  This self-test exercises create with
+    // SIGKILL/SIGSTOP mask sanitization, mask get/set, and dup/close
+    // refcounting with a shared mask.
+    if let Err(e) = ipc::signalfd::self_test() {
+        serial_println!("FATAL: Signalfd self-test failed: {}", e);
+        cpu::halt_loop();
+    }
+
     // Step 15b: Memfd subsystem.
     // Anonymous in-memory regular file backing memfd_create(2).  Exercises
     // create/close/dup refcounting, read/write/seek, pread/pwrite,

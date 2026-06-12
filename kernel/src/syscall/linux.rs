@@ -23656,6 +23656,13 @@ fn sys_sched_setattr(args: &SyscallArgs) -> SyscallResult {
         buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
     ]);
     let priority = u32::from_le_bytes([buf[20], buf[21], buf[22], buf[23]]);
+    // sched_nice @ 16..20 (s32).  v6.6 sched_copy_attr clamps it to
+    // [MIN_NICE, MAX_NICE] = [-20, 19] unconditionally, before any
+    // policy/permission processing:
+    //   attr->sched_nice = clamp(attr->sched_nice, MIN_NICE, MAX_NICE);
+    // (Linux is deliberately lenient here — out-of-range nice saturates
+    // rather than erroring, mirroring setpriority.)
+    let nice_in = i32::from_le_bytes([buf[16], buf[17], buf[18], buf[19]]).clamp(-20, 19);
 
     // ## Batch 528 — SCHED_FLAG_KEEP_POLICY / KEEP_PARAMS semantics
     //
@@ -23756,6 +23763,21 @@ fn sys_sched_setattr(args: &SyscallArgs) -> SyscallResult {
     let cur_policy = target_pid.and_then(pcb::get_sched_policy);
     let cur_priority = target_pid.and_then(pcb::get_sched_priority);
     let cur_reset_on_fork = target_pid.and_then(pcb::get_sched_reset_on_fork);
+    let cur_nice = target_pid.and_then(pcb::get_nice);
+
+    // ## Batch 529 — get_params() KEEP_PARAMS substitution dispatches on
+    // the TASK's CURRENT scheduling class (not the requested policy):
+    //   if (task_has_dl_policy(p))      __getparam_dl(p, attr);
+    //   else if (task_has_rt_policy(p)) attr->sched_priority = p->rt_priority;
+    //   else                            attr->sched_nice = task_nice(p);
+    // So under KEEP_PARAMS an RT task pre-loads its rt_priority and a
+    // fair task pre-loads its nice — keyed on cur_policy.  (Batch 528
+    // keyed the priority substitution on effective_policy; corrected here
+    // to the task's current class so KEEP_PARAMS-with-policy-change
+    // matches v6.6 — a fair task keeping params while switching to RT
+    // keeps the user's priority, not a phantom zero.)
+    let cur_is_rt = cur_policy == Some(1) || cur_policy == Some(2);
+    let cur_is_fair = matches!(cur_policy, Some(0) | Some(3) | Some(5));
 
     // Policy resolution: under KEEP_POLICY the effective policy and
     // reset_on_fork are taken from the task (valid_policy skipped);
@@ -23841,15 +23863,13 @@ fn sys_sched_setattr(args: &SyscallArgs) -> SyscallResult {
     // Cap priority to i32 range before the shared validator; Linux
     // accepts priorities up to 99 so the truncation is harmless.  Under
     // KEEP_PARAMS, get_params() pre-loads the task's current rt_priority
-    // for an RT task (FIFO/RR) so the validity checks run against the
-    // existing value, not the (ignored) attr field.  For a fair task
-    // get_params loads nice instead — but our shared validator only
-    // gates on priority, and a fair task's stored priority is 0, so the
-    // attr priority is still required to be 0 by the rt_policy()==(prio!=0)
-    // invariant; KEEP_PARAMS does not relax that for the fair case.
+    // when the TASK is currently RT (FIFO/RR), so the validity checks run
+    // against the existing value, not the (ignored) attr field.  For a
+    // currently-fair task get_params loads nice instead (see
+    // effective_nice below) and leaves the attr priority as supplied.
     #[allow(clippy::cast_possible_wrap)]
     let mut sched_prio = priority as i32;
-    if keep_params && (effective_policy == 1 || effective_policy == 2) {
+    if keep_params && cur_is_rt {
         sched_prio = cur_priority.unwrap_or(sched_prio);
     }
     if let Err(e) = sched_priority_check_for_policy(u64::from(effective_policy), sched_prio) {
@@ -23862,18 +23882,48 @@ fn sys_sched_setattr(args: &SyscallArgs) -> SyscallResult {
         }
     }
 
+    // ## Batch 529 — effective nice for fair policies.  Under KEEP_PARAMS
+    // a currently-fair task pre-loads its current nice (get_params);
+    // otherwise the (already-clamped) attr nice is used.  The store below
+    // only writes nice for fair_policy(effective) ∈ {SCHED_NORMAL(0),
+    // SCHED_BATCH(3)} — v6.6 `fair_policy()` excludes SCHED_IDLE(5), so
+    // switching to IDLE leaves the prior nice untouched (and is still
+    // reported by getattr's non-RT branch).
+    let effective_nice = if keep_params && cur_is_fair {
+        cur_nice.unwrap_or(nice_in)
+    } else {
+        nice_in
+    };
+    // user_check_sched_setscheduler: lowering nice (raising priority)
+    // requires RLIMIT_NICE headroom.  Mirror setpriority's gate exactly
+    // (it writes the same PCB nice field) — only checked when we are
+    // actually going to store a fair nice and the value drops below the
+    // modelled baseline of 0.  Kernel-context callers bypass.
+    let stores_fair_nice = !keep_params && (effective_policy == 0 || effective_policy == 3);
+    if stores_fair_nice && effective_nice < 0 {
+        if let Err(e) = rlimit_nice_check_for_caller(effective_nice) {
+            return linux_err(e);
+        }
+    }
+
     // Persist into the PCB.  reset_on_fork is written unconditionally
     // (v6.6 sets `p->sched_reset_on_fork = reset_on_fork;` before the
-    // KEEP_PARAMS guard).  policy + priority are stored only when
-    // KEEP_PARAMS is clear (v6.6 skips __setscheduler_params under
-    // KEEP_PARAMS).  Under KEEP_POLICY the effective_policy already came
-    // from the task, so re-storing it is a no-op; storing keeps the two
-    // paths uniform.  target_pid / ESRCH were resolved up front.
+    // KEEP_PARAMS guard).  policy + priority (+ nice for fair policies)
+    // are stored only when KEEP_PARAMS is clear (v6.6 skips
+    // __setscheduler_params under KEEP_PARAMS).  Under KEEP_POLICY the
+    // effective_policy already came from the task, so re-storing it is a
+    // no-op; storing keeps the two paths uniform.  target_pid / ESRCH
+    // were resolved up front.
     if let Some(tp) = target_pid {
         let _ = pcb::set_sched_reset_on_fork(tp, reset_on_fork);
         if !keep_params {
             let _ = pcb::set_sched_policy(tp, effective_policy);
             let _ = pcb::set_sched_priority(tp, sched_prio);
+            // __setscheduler_params: fair_policy(policy) (NORMAL=0,
+            // BATCH=3 — NOT IDLE=5) writes static_prio from nice.
+            if stores_fair_nice {
+                let _ = pcb::set_nice(tp, effective_nice);
+            }
         }
     }
 
@@ -23988,6 +24038,29 @@ fn sys_sched_getattr(args: &SyscallArgs) -> SyscallResult {
     } else {
         0
     };
+    // ## Batch 529 — report the task's nice value in sched_nice.
+    //
+    // v6.6 kernel/sched/core.c::get_params() dispatches on the TARGET
+    // task's scheduling class:
+    //   static void get_params(struct task_struct *p, struct sched_attr *attr) {
+    //       if (task_has_dl_policy(p))      __getparam_dl(p, attr);
+    //       else if (task_has_rt_policy(p)) attr->sched_priority = p->rt_priority;
+    //       else                            attr->sched_nice = task_nice(p);
+    //   }
+    // i.e. nice is reported for every non-RT, non-DL task (SCHED_NORMAL=0,
+    // SCHED_BATCH=3, SCHED_IDLE=5); RT tasks (FIFO/RR) report priority and
+    // leave sched_nice at 0 (DL=6 is rejected before it can be stored).
+    // Our PCB tracks nice via setpriority (pcb::set_nice / get_nice).
+    // Pre-batch sched_getattr hardcoded the sched_nice field to 0, so a
+    // process that set its nice via setpriority and then read it back via
+    // sched_getattr (glibc's pthread_getattr_default_np, chrt/schedutils
+    // probes) saw 0 instead of its actual nice — inconsistent with
+    // getpriority, which reports the real value from the same PCB field.
+    let nice: i32 = if policy == 1 || policy == 2 {
+        0
+    } else {
+        target_pid.and_then(pcb::get_nice).unwrap_or(0)
+    };
     // ## Batch 527 — sched_flags reports SCHED_FLAG_RESET_ON_FORK (0x01)
     // when the target opted in.  Same PCB source as sched_getscheduler.
     let reset_on_fork = target_pid
@@ -24040,7 +24113,9 @@ fn sys_sched_getattr(args: &SyscallArgs) -> SyscallResult {
     // else 0 (batch 527).  Other flags stay 0 (no util_clamp / DL).
     let sched_flags_out: u64 = if reset_on_fork { 0x01 } else { 0 };
     buf[8..16].copy_from_slice(&sched_flags_out.to_le_bytes());
-    // sched_nice @ 16..20 = 0.
+    // sched_nice @ 16..20 — task_nice for non-RT policies (batch 529),
+    // else 0.
+    buf[16..20].copy_from_slice(&nice.to_le_bytes());
     buf[20..24].copy_from_slice(&priority.to_le_bytes());
     // sched_runtime @ 24..32, sched_deadline @ 32..40,
     // sched_period @ 40..48 = 0.
@@ -62244,6 +62319,171 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   sched_setattr SCHED_FLAG_KEEP_POLICY/KEEP_PARAMS semantics (batch 528): OK"
+        );
+
+        // Batch 529: nice round-trips through the sched_attr ABI.  v6.6
+        // get_params reports task_nice(p) in sched_nice for non-RT tasks
+        // (NORMAL/BATCH/IDLE), and __setscheduler_params stores nice from
+        // attr for fair_policy ∈ {NORMAL, BATCH} (not IDLE).  Exercise the
+        // full round-trip + KEEP_PARAMS preservation on a synthetic PCB.
+        {
+            let np = pcb::create("nice-b529", 0);
+            if np > i32::MAX as u64 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: nice-b529 test_pid too large ({})", np
+                );
+                pcb::destroy(np);
+                return Err(KernelError::InternalError);
+            }
+            // Helper closure: getattr -> (policy, nice, priority) read out
+            // of the v0 sched_attr buffer.
+            let read_attr = |pid: u64| -> (u32, i32, u32) {
+                let mut ga = [0u8; 48];
+                let ga_ptr = ga.as_mut_ptr() as u64;
+                let a = SyscallArgs { arg0: pid, arg1: ga_ptr, arg2: 48,
+                    arg3: 0, arg4: 0, arg5: 0 };
+                let _ = dispatch_linux(nr::SCHED_GETATTR, &a).value;
+                let pol = u32::from_le_bytes([ga[4], ga[5], ga[6], ga[7]]);
+                let nic = i32::from_le_bytes([ga[16], ga[17], ga[18], ga[19]]);
+                let pri = u32::from_le_bytes([ga[20], ga[21], ga[22], ga[23]]);
+                (pol, nic, pri)
+            };
+            // (a) setpriority(nice=10) -> sched_getattr reports nice=10,
+            // consistent with getpriority (same PCB field).
+            let a = SyscallArgs { arg0: 0, arg1: np, arg2: 10,
+                arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::SETPRIORITY, &a).value != 0 {
+                serial_println!("[syscall/linux]   FAIL: setpriority(10) want 0");
+                pcb::destroy(np);
+                return Err(KernelError::InternalError);
+            }
+            if read_attr(np).1 != 10 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: getattr nice after setpriority want 10 got {}",
+                    read_attr(np).1
+                );
+                pcb::destroy(np);
+                return Err(KernelError::InternalError);
+            }
+            // (b) setattr(NORMAL, nice=5) -> stores nice=5; getattr reports it.
+            let mut sa = [0u8; 48];
+            sa[0..4].copy_from_slice(&48u32.to_le_bytes());
+            // policy @4 = 0 (SCHED_NORMAL)
+            sa[16..20].copy_from_slice(&5i32.to_le_bytes());     // nice = 5
+            let sa_ptr = sa.as_ptr() as u64;
+            let a = SyscallArgs { arg0: np, arg1: sa_ptr, arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
+                serial_println!("[syscall/linux]   FAIL: setattr(NORMAL,nice=5) want 0");
+                pcb::destroy(np);
+                return Err(KernelError::InternalError);
+            }
+            if pcb::get_nice(np) != Some(5) || read_attr(np).1 != 5 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: setattr nice store want 5 got {:?}/{}",
+                    pcb::get_nice(np), read_attr(np).1
+                );
+                pcb::destroy(np);
+                return Err(KernelError::InternalError);
+            }
+            // (c) setattr(KEEP_PARAMS, NORMAL, nice=99): 99 clamps to 19,
+            // but KEEP_PARAMS pre-loads the current nice (5) and skips the
+            // store -> nice stays 5.
+            let mut sa = [0u8; 48];
+            sa[0..4].copy_from_slice(&48u32.to_le_bytes());
+            sa[8..16].copy_from_slice(&0x10u64.to_le_bytes());   // KEEP_PARAMS
+            sa[16..20].copy_from_slice(&99i32.to_le_bytes());    // nice = 99 (ignored)
+            let sa_ptr = sa.as_ptr() as u64;
+            let a = SyscallArgs { arg0: np, arg1: sa_ptr, arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
+                serial_println!("[syscall/linux]   FAIL: setattr(KEEP_PARAMS,nice) want 0");
+                pcb::destroy(np);
+                return Err(KernelError::InternalError);
+            }
+            if pcb::get_nice(np) != Some(5) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: KEEP_PARAMS must preserve nice=5 got {:?}",
+                    pcb::get_nice(np)
+                );
+                pcb::destroy(np);
+                return Err(KernelError::InternalError);
+            }
+            // (d) setattr(BATCH=3, nice=-3): stores negative nice; getattr
+            // reports it and policy=3.
+            let mut sa = [0u8; 48];
+            sa[0..4].copy_from_slice(&48u32.to_le_bytes());
+            sa[4..8].copy_from_slice(&3u32.to_le_bytes());       // policy = BATCH
+            sa[16..20].copy_from_slice(&(-3i32).to_le_bytes());  // nice = -3
+            let sa_ptr = sa.as_ptr() as u64;
+            let a = SyscallArgs { arg0: np, arg1: sa_ptr, arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
+                serial_println!("[syscall/linux]   FAIL: setattr(BATCH,nice=-3) want 0");
+                pcb::destroy(np);
+                return Err(KernelError::InternalError);
+            }
+            let (pol, nic, _) = read_attr(np);
+            if pcb::get_nice(np) != Some(-3) || nic != -3 || pol != 3 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: BATCH/nice=-3 want pol3/nice-3 got {}/{:?}/{}",
+                    pol, pcb::get_nice(np), nic
+                );
+                pcb::destroy(np);
+                return Err(KernelError::InternalError);
+            }
+            // (e) setattr(IDLE=5, prio=0): fair_policy() excludes IDLE, so
+            // nice is NOT re-stored (stays -3), yet getattr's non-RT
+            // branch still reports it.
+            let mut sa = [0u8; 48];
+            sa[0..4].copy_from_slice(&48u32.to_le_bytes());
+            sa[4..8].copy_from_slice(&5u32.to_le_bytes());       // policy = IDLE
+            sa[16..20].copy_from_slice(&8i32.to_le_bytes());     // nice = 8 (ignored for IDLE)
+            let sa_ptr = sa.as_ptr() as u64;
+            let a = SyscallArgs { arg0: np, arg1: sa_ptr, arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
+                serial_println!("[syscall/linux]   FAIL: setattr(IDLE) want 0");
+                pcb::destroy(np);
+                return Err(KernelError::InternalError);
+            }
+            let (pol, nic, _) = read_attr(np);
+            if pcb::get_nice(np) != Some(-3) || nic != -3 || pol != 5 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: IDLE must keep nice=-3 got pol{}/nice{:?}/attr{}",
+                    pol, pcb::get_nice(np), nic
+                );
+                pcb::destroy(np);
+                return Err(KernelError::InternalError);
+            }
+            // (f) setattr(FIFO=1, prio=10): RT task reports priority and
+            // leaves sched_nice at 0 (get_params RT branch); the stored
+            // nice field is untouched.
+            let mut sa = [0u8; 48];
+            sa[0..4].copy_from_slice(&48u32.to_le_bytes());
+            sa[4..8].copy_from_slice(&1u32.to_le_bytes());       // policy = FIFO
+            sa[20..24].copy_from_slice(&10u32.to_le_bytes());    // priority = 10
+            let sa_ptr = sa.as_ptr() as u64;
+            let a = SyscallArgs { arg0: np, arg1: sa_ptr, arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
+                serial_println!("[syscall/linux]   FAIL: setattr(FIFO,prio=10) want 0");
+                pcb::destroy(np);
+                return Err(KernelError::InternalError);
+            }
+            let (pol, nic, pri) = read_attr(np);
+            if pol != 1 || nic != 0 || pri != 10 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: FIFO want pol1/nice0/prio10 got {}/{}/{}",
+                    pol, nic, pri
+                );
+                pcb::destroy(np);
+                return Err(KernelError::InternalError);
+            }
+            pcb::destroy(np);
+        }
+        serial_println!(
+            "[syscall/linux]   sched_setattr/getattr nice round-trip (batch 529): OK"
         );
 
         // Batch 384: landlock_create_ruleset VERSION-query.  Pre-batch

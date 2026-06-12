@@ -51843,3 +51843,64 @@ stays false (bit ignored); (d) plain setattr RR/7 -> stores RR/7
 (regression guard the keep flags don't over-suppress).  Serial stamp:
 "sched_setattr SCHED_FLAG_KEEP_POLICY/KEEP_PARAMS semantics
 (batch 528): OK".  cargo build + clippy + boot-test all pass.
+
+================================================================
+Batch 529 — Linux ABI fidelity: nice round-trips through the
+   sched_attr ABI (sched_setattr / sched_getattr sched_nice field)
+================================================================
+Done 2026-06-12.  Source verbatim from v6.6 kernel/sched/core.c
+(fetched via gh api raw, as in batch 528).
+
+The gap: setpriority/getpriority already round-trip nice through the
+PCB (pcb::set_nice / get_nice), but the sched_attr ABI did not —
+sched_getattr hardcoded the sched_nice field (offset 16..20) to 0, and
+sched_setattr never read the nice field at all.  So a process that set
+its nice via setpriority saw 0 from sched_getattr (inconsistent with
+getpriority reading the same field), and sched_setattr(SCHED_NORMAL,
+nice=N) silently dropped N.  This was the loose end explicitly flagged
+in the batch 528 entry ("skip nice once nice is wired through setattr").
+
+What v6.6 does (verbatim-confirmed, kernel/sched/core.c):
+  * sched_copy_attr: attr->sched_nice = clamp(attr->sched_nice,
+    MIN_NICE, MAX_NICE)  -> [-20, 19], unconditional, lenient (saturate
+    not reject).
+  * get_params(p, attr) (used for KEEP_PARAMS pre-load AND by
+    sched_getattr): dispatches on the TASK's CURRENT class —
+      dl  -> __getparam_dl
+      rt  -> attr->sched_priority = p->rt_priority
+      else (fair: NORMAL/BATCH/IDLE) -> attr->sched_nice = task_nice(p)
+  * __setscheduler_params (the !KEEP_PARAMS store path):
+      fair_policy(policy) -> p->static_prio = NICE_TO_PRIO(nice)
+    where fair_policy() == (policy==SCHED_NORMAL || policy==SCHED_BATCH)
+    — NOTE it EXCLUDES SCHED_IDLE(5).  So switching to IDLE does NOT
+    overwrite the stored nice (and getattr's non-RT branch still
+    reports the prior nice).
+  * user_check_sched_setscheduler: fair task lowering nice without
+    privilege -> EPERM (RLIMIT_NICE / is_nice_reduction).
+
+Implementation (kernel/src/syscall/linux.rs):
+  sched_getattr: report nice = get_nice for non-RT policies {0,3,5};
+    0 for RT {1,2} (DL=6 never stored).  Write to buf[16..20] as i32.
+  sched_setattr: read+clamp nice@16 to [-20,19]; compute effective_nice
+    (KEEP_PARAMS pre-loads cur_nice for a currently-fair task);
+    RLIMIT_NICE gate when storing a fair nice that drops below 0 (same
+    gate setpriority applies — they write the same field); store via
+    set_nice only when !KEEP_PARAMS && effective_policy ∈ {0,3}.
+  ALSO corrected a batch-528 subtlety: the KEEP_PARAMS rt_priority
+    substitution now keys on the TASK's current class (cur_is_rt) rather
+    than the requested effective_policy, matching get_params' dispatch
+    on the task — so KEEP_PARAMS while switching a fair task to RT keeps
+    the user-supplied priority instead of a phantom zero.  (No behavior
+    change for the common KEEP_PARAMS-without-policy-change / KEEP_ALL
+    case where effective_policy == cur_policy; batch 528's self-tests
+    still pass.)
+
+Tests: boot self-test on synthetic PCB (nice-b529) — (a) setpriority
+nice=10 -> getattr reports 10 (setpriority/getattr consistency); (b)
+setattr(NORMAL,nice=5) stores 5; (c) setattr(KEEP_PARAMS,nice=99)
+preserves 5; (d) setattr(BATCH,nice=-3) stores negative; (e)
+setattr(IDLE) keeps nice=-3 (fair_policy excludes IDLE) yet getattr
+reports it; (f) setattr(FIFO,prio=10) -> getattr nice=0/prio=10 (RT
+branch).  Serial stamp "sched_setattr/getattr nice round-trip
+(batch 529): OK".  cargo build + clippy (baseline, no new warnings) +
+boot-test all pass.

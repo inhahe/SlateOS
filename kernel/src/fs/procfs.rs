@@ -2804,6 +2804,28 @@ fn gen_pid_io(task_id: u64) -> KernelResult<Vec<u8>> {
     Ok(render_pid_io(rchar, wchar, syscr, syscw))
 }
 
+/// Render the symlink target for `/proc/<pid>/fd/<n>` from its fd-table
+/// entry, mirroring Linux's magic fd links.
+///
+/// Every target is derived from the real fd entry — a regular file
+/// resolves to its VFS path, a pipe to `pipe:[id]`, and anonymous kernel
+/// objects (eventfd / pidfd / memfd) to Linux's `anon_inode:[type]`
+/// labels.  The console maps to `/dev/console`.  Nothing here is
+/// fabricated: if a File handle can no longer be resolved (it raced a
+/// close), we report `anon_inode:[file]` rather than inventing a path.
+fn fd_link_target(entry: &crate::proc::linux_fd::FdEntry) -> String {
+    use crate::proc::linux_fd::HandleKind;
+    match entry.kind {
+        HandleKind::Console => String::from("/dev/console"),
+        HandleKind::File => crate::fs::handle::handle_path(entry.raw_handle)
+            .unwrap_or_else(|_| String::from("anon_inode:[file]")),
+        HandleKind::Pipe => format!("pipe:[{}]", entry.raw_handle),
+        HandleKind::EventFd => String::from("anon_inode:[eventfd]"),
+        HandleKind::PidFd => String::from("anon_inode:[pidfd]"),
+        HandleKind::MemFd => String::from("anon_inode:[memfd]"),
+    }
+}
+
 /// The audit "unset" sentinel — `(uid_t)-1` / `(unsigned)-1`.
 ///
 /// Linux reports this for `loginuid`/`sessionid` on any task the audit
@@ -11609,6 +11631,10 @@ enum ProcPath<'a> {
     PidTaskTidDir(u64, u64),
     /// A file inside a thread directory, e.g. `/proc/<pid>/task/<tid>/comm`.
     PidTaskFile(u64, u64, &'a str),
+    /// The `/proc/<pid>/fd` directory listing the process's open fds.
+    PidFdDir(u64),
+    /// A `/proc/<pid>/fd/<n>` magic symlink to the backing object of fd `n`.
+    PidFdLink(u64, i32),
     NotFound,
 }
 
@@ -11672,6 +11698,22 @@ fn classify_path(rel: &str) -> ProcPath<'_> {
     // Symlink inside PID directory (cwd, root).
     if !rest.contains('/') && PID_LINKS.contains(&rest) {
         return ProcPath::PidLink(pid, rest);
+    }
+
+    // The `fd/` subtree: `<pid>/fd` (directory) and `<pid>/fd/<n>` (a
+    // magic symlink to fd n's backing object).  Only Linux-ABI processes
+    // have a kernel-visible fd table; for others the directory lists no
+    // entries and each `<n>` resolves to NotFound.
+    if rest == "fd" {
+        return ProcPath::PidFdDir(pid);
+    }
+    if let Some(sub) = rest.strip_prefix("fd/") {
+        if !sub.contains('/') {
+            if let Ok(n) = sub.parse::<i32>() {
+                return ProcPath::PidFdLink(pid, n);
+            }
+        }
+        return ProcPath::NotFound;
     }
 
     // The `task/` subtree: `<pid>/task`, `<pid>/task/<tid>`, and
@@ -11777,6 +11819,31 @@ impl FileSystem for ProcFs {
                     entry_type: EntryType::Directory,
                     size: 0,
                 });
+                // The `fd/` subdirectory (open file descriptors).
+                entries.push(DirEntry {
+                    name: String::from("fd"),
+                    entry_type: EntryType::Directory,
+                    size: 0,
+                });
+                Ok(entries)
+            }
+            ProcPath::PidFdDir(pid) => {
+                // `/proc/<pid>/fd` — one symlink per open fd.  Only
+                // Linux-ABI processes have a kernel-visible fd table; for a
+                // native process (fds live in userspace) the list is
+                // legitimately empty rather than fabricated.
+                if !task_exists(pid) {
+                    return Err(KernelError::NotFound);
+                }
+                let entries = crate::proc::pcb::linux_fd_list(pid)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(fd, _entry)| DirEntry {
+                        name: format!("{fd}"),
+                        entry_type: EntryType::Symlink,
+                        size: 0,
+                    })
+                    .collect();
                 Ok(entries)
             }
             ProcPath::PidTaskDir(pid) => {
@@ -11814,7 +11881,7 @@ impl FileSystem for ProcFs {
             }
             ProcPath::RootFile(_) | ProcPath::PidFile(_, _)
             | ProcPath::PidLink(_, _) | ProcPath::SelfLink
-            | ProcPath::PidTaskFile(_, _, _) => {
+            | ProcPath::PidTaskFile(_, _, _) | ProcPath::PidFdLink(_, _) => {
                 Err(KernelError::NotADirectory)
             }
             ProcPath::NotFound => Err(KernelError::NotFound),
@@ -11826,7 +11893,8 @@ impl FileSystem for ProcFs {
 
         match classify_path(rel) {
             ProcPath::Root | ProcPath::PidDir(_)
-            | ProcPath::PidTaskDir(_) | ProcPath::PidTaskTidDir(_, _) => {
+            | ProcPath::PidTaskDir(_) | ProcPath::PidTaskTidDir(_, _)
+            | ProcPath::PidFdDir(_) => {
                 Err(KernelError::IsADirectory)
             }
             ProcPath::RootFile(name) => generate(name),
@@ -11845,7 +11913,8 @@ impl FileSystem for ProcFs {
             // Reading a symlink's bytes directly is invalid; the VFS follows
             // it via readlink instead.  Mirrors Linux read() → EINVAL on a
             // symlink opened without O_PATH.
-            ProcPath::PidLink(_, _) | ProcPath::SelfLink => {
+            ProcPath::PidLink(_, _) | ProcPath::SelfLink
+            | ProcPath::PidFdLink(_, _) => {
                 Err(KernelError::InvalidArgument)
             }
             ProcPath::NotFound => Err(KernelError::NotFound),
@@ -11956,6 +12025,27 @@ impl FileSystem for ProcFs {
                     size,
                 })
             }
+            ProcPath::PidFdDir(pid) => {
+                if !task_exists(pid) {
+                    return Err(KernelError::NotFound);
+                }
+                Ok(DirEntry {
+                    name: String::from("fd"),
+                    entry_type: EntryType::Directory,
+                    size: 0,
+                })
+            }
+            ProcPath::PidFdLink(pid, fd) => {
+                // Only a currently-open fd is a valid symlink; an absent
+                // fd (or a process with no kernel fd table) is NotFound.
+                crate::proc::pcb::linux_fd_lookup(pid, fd)
+                    .ok_or(KernelError::NotFound)?;
+                Ok(DirEntry {
+                    name: format!("{fd}"),
+                    entry_type: EntryType::Symlink,
+                    size: 0,
+                })
+            }
             ProcPath::NotFound => Err(KernelError::NotFound),
         }
     }
@@ -11999,6 +12089,12 @@ impl FileSystem for ProcFs {
                 String::from_utf8(exe).map_err(|_| KernelError::InvalidArgument)
             }
             ProcPath::PidLink(_, _) => Err(KernelError::NotFound),
+            // `/proc/<pid>/fd/<n>` → the backing object of fd n.
+            ProcPath::PidFdLink(pid, fd) => {
+                let entry = crate::proc::pcb::linux_fd_lookup(pid, fd)
+                    .ok_or(KernelError::NotFound)?;
+                Ok(fd_link_target(&entry))
+            }
             // `/proc/self` → the caller's pid, as a relative target (Linux
             // returns the bare pid number, e.g. "7", resolved against /proc).
             ProcPath::SelfLink => Ok(format!("{}", crate::sched::current_task_id())),
@@ -12277,6 +12373,97 @@ pub fn self_test() -> KernelResult<()> {
             }
         }
         serial_println!("[procfs]   task/ directory: gating OK");
+    }
+
+    // --- fd/ path classification + link rendering ---
+    // The `fd/` subtree mirrors the `task/` router: `<pid>/fd` is a
+    // directory and `<pid>/fd/<n>` a magic symlink; malformed/nested fd
+    // paths fall through to NotFound.  fd_link_target is a pure renderer
+    // over the fd-table entry, so its output is deterministic per kind.
+    {
+        let cases: &[(&str, &str)] = &[
+            ("5/fd", "fddir"),
+            ("5/fd/0", "fdlink"),
+            ("5/fd/255", "fdlink"),
+            ("5/fd/abc", "notfound"),  // non-numeric fd
+            ("5/fd/0/x", "notfound"),  // nested beyond an fd
+        ];
+        for (path, want) in cases {
+            let got = match classify_path(path) {
+                ProcPath::PidFdDir(5) => "fddir",
+                ProcPath::PidFdLink(5, _) => "fdlink",
+                ProcPath::NotFound => "notfound",
+                _ => "other",
+            };
+            if got != *want {
+                serial_println!(
+                    "[procfs]   FAIL: classify_path({:?}) = {}, want {}",
+                    path, got, want
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // Pure link-target rendering, one per fd kind.
+        use crate::proc::linux_fd::FdEntry;
+        let renders: &[(FdEntry, &str)] = &[
+            (FdEntry::console(0), "/dev/console"),
+            (FdEntry::pipe(42, 0), "pipe:[42]"),
+            (FdEntry::eventfd(0, 0), "anon_inode:[eventfd]"),
+            (FdEntry::pidfd(7, 0), "anon_inode:[pidfd]"),
+            (FdEntry::memfd(0, 0), "anon_inode:[memfd]"),
+        ];
+        for (entry, want) in renders {
+            let got = fd_link_target(entry);
+            if got != *want {
+                serial_println!(
+                    "[procfs]   FAIL: fd_link_target = {:?}, want {:?}", got, want
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // A File entry whose handle cannot be resolved must fall back to the
+        // anon label, never an invented path and never empty/panic.
+        let file_target = fd_link_target(&FdEntry::file(u64::MAX, 0));
+        if file_target.is_empty() {
+            serial_println!("[procfs]   FAIL: File fd target empty");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[procfs]   fd/ classify: {} cases OK; link render OK", cases.len()
+        );
+    }
+
+    // --- fd/ directory, live ---
+    // Every PID directory now lists an `fd` subdirectory.  The bare
+    // scheduler task running the self-test has no kernel fd table, so its
+    // fd/ listing is legitimately empty and any `fd/<n>` link is NotFound —
+    // exercising the native-process path without a live Linux-ABI process.
+    {
+        let probe = crate::sched::current_task_id();
+        let dir_entries = fs.readdir(&format!("/{probe}"))?;
+        if !dir_entries.iter().any(|e| {
+            e.name == "fd" && e.entry_type == EntryType::Directory
+        }) {
+            serial_println!("[procfs]   FAIL: /{}/ missing `fd` subdirectory", probe);
+            return Err(KernelError::InternalError);
+        }
+        // fd/ readdir must succeed (empty for a process with no kernel fd
+        // table) rather than erroring.
+        let fds = fs.readdir(&format!("/{probe}/fd"))?;
+        serial_println!("[procfs]   /{}/fd: {} open fd(s) OK", probe, fds.len());
+        // A link for an fd that isn't open must be NotFound.
+        match fs.readlink(&format!("/{probe}/fd/0")) {
+            Err(KernelError::NotFound) => {}
+            other => {
+                serial_println!(
+                    "[procfs]   FAIL: /{}/fd/0 readlink = {:?}, want NotFound",
+                    probe, other
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        serial_println!("[procfs]   fd/ directory: gating OK");
     }
 
     // --- thread stat, live ---
@@ -12655,10 +12842,11 @@ pub fn self_test() -> KernelResult<()> {
     }
     serial_println!("[procfs]   stat {}: directory OK", pid_path);
 
-    // readdir on PID directory — PID_FILES + PID_LINKS, plus the one `task`
-    // subdirectory every PID directory exposes (the per-thread tree).
+    // readdir on PID directory — PID_FILES + PID_LINKS, plus the two
+    // subdirectories every PID directory exposes: `task` (per-thread tree)
+    // and `fd` (open file descriptors).
     let pid_entries = fs.readdir(&pid_path)?;
-    let expected_pid_entries = PID_FILES.len() + PID_LINKS.len() + 1;
+    let expected_pid_entries = PID_FILES.len() + PID_LINKS.len() + 2;
     if pid_entries.len() != expected_pid_entries {
         serial_println!(
             "[procfs]   FAIL: readdir {} returned {} entries, expected {}",
@@ -12666,12 +12854,20 @@ pub fn self_test() -> KernelResult<()> {
         );
         return Err(KernelError::InternalError);
     }
-    // The extra entry must be the `task` directory specifically.
+    // The extra entries must be the `task` and `fd` directories specifically.
     if !pid_entries.iter().any(|e| {
         e.name == "task" && e.entry_type == EntryType::Directory
     }) {
         serial_println!(
             "[procfs]   FAIL: readdir {} missing `task` subdirectory", pid_path
+        );
+        return Err(KernelError::InternalError);
+    }
+    if !pid_entries.iter().any(|e| {
+        e.name == "fd" && e.entry_type == EntryType::Directory
+    }) {
+        serial_println!(
+            "[procfs]   FAIL: readdir {} missing `fd` subdirectory", pid_path
         );
         return Err(KernelError::InternalError);
     }

@@ -3984,6 +3984,21 @@ pub fn linux_fd_get_owner(pid: ProcessId, fd: i32) -> KernelResult<i32> {
     fd_table.get_owner(fd)
 }
 
+/// Snapshot the open Linux fds of `pid` as ascending `(fd, entry)` pairs.
+///
+/// Returns `None` if the process does not exist or has no Linux fd table
+/// (i.e. it is a native-ABI process whose fd table lives in userspace and
+/// is therefore not kernel-visible).  Backs `/proc/<pid>/fd/`.
+#[must_use]
+pub fn linux_fd_list(
+    pid: ProcessId,
+) -> Option<alloc::vec::Vec<(i32, super::linux_fd::FdEntry)>> {
+    let table = PROCESS_TABLE.lock();
+    let proc = table.get(&pid)?;
+    let fd_table = proc.linux_fd_table.as_ref()?;
+    Some(fd_table.list_open())
+}
+
 /// Set the `fcntl(F_SETOWN)` value for `fd`.
 ///
 /// # Errors

@@ -263,6 +263,35 @@
 ## only sees result.value, not the written length).  Likewise read_bytes/
 ## write_bytes/cancelled_write_bytes stay 0 (no per-process block-layer attribution).
 ##
+## DONE (2026-06-11): real /proc/<pid>/fd/ directory + per-fd magic symlinks.
+## Backed by genuine kernel state, NOT fabricated.  Design as landed:
+##   - linux_fd::KernelFdTable gained list_open() -> Vec<(i32, FdEntry)> that
+##     walks its entries slot array and returns (fd_number, entry) for every
+##     occupied slot (kernel/src/proc/linux_fd.rs).
+##   - pcb::linux_fd_list(pid) snapshots that under PROCESS_TABLE lock (mirrors
+##     the existing pcb::linux_fd_lookup(pid, fd) used for stat/readlink).
+##   - procfs ProcPath gained PidFdDir(pid) and PidFdLink(pid, fd); classify_path
+##     routes "<pid>/fd" -> PidFdDir and "<pid>/fd/<n>" -> PidFdLink (rejecting
+##     non-numeric / nested paths as NotFound).  readdir lists the open fds as
+##     Symlink entries; stat reports Directory / Symlink (gated on task_exists +
+##     linux_fd_lookup); readlink resolves the target via fd_link_target().
+##   - fd_link_target(entry) renders Linux-style magic targets per HandleKind:
+##     File -> backing VFS path via fs::handle::handle_path (fallback
+##     anon_inode:[file] if the handle can't be resolved), Pipe -> pipe:[id],
+##     Console -> /dev/console, EventFd/PidFd/MemFd -> anon_inode:[type].
+##   - "fd" added to the PidDir readdir listing alongside "task"; the per-PID
+##     directory entry-count self-test bumped (PID_FILES + PID_LINKS + 2 for the
+##     two subdirs) with an fd-presence assertion.
+## HONEST LIMITATION (same spirit as the io block above): the directory is
+## EMPTY for NATIVE processes.  Native processes keep their fd table in
+## userspace (posix/src/fdtable.rs) — it is not kernel-visible — so
+## linux_fd_list returns None and /proc/<pid>/fd/ readdir yields zero entries
+## rather than inventing fds.  Only Linux-ABI processes (which use the
+## kernel-side KernelFdTable) get a populated fd/.  Self-tests: classify_path
+## (5 cases incl. reject), pure fd_link_target render for every HandleKind +
+## File fallback, and a live readdir/readlink against a probe pid (boot:
+## "[procfs]   fd/ classify ... OK" / "fd/ directory: gating OK").
+##
 ## FOLLOW-UP (2026-06-10): real /proc/<pid>/auxv + kernel-side saved_auxv
 ## /proc/<pid>/auxv is NOT yet served.  Implementing it properly requires
 ## the same kernel-side auxv storage that PR_GET_AUXV is already waiting

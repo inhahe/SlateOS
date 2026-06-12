@@ -308,6 +308,25 @@ impl KernelFdTable {
         self.entries[idx]
     }
 
+    /// Snapshot every open fd as an ascending `(fd_number, entry)` list.
+    ///
+    /// Used to render `/proc/<pid>/fd/` — the kernel-visible fd table is
+    /// the only truthful source for a Linux-ABI process's open
+    /// descriptors (native processes keep theirs in userspace and are not
+    /// visible here).
+    #[must_use]
+    pub fn list_open(&self) -> alloc::vec::Vec<(i32, FdEntry)> {
+        let mut out = alloc::vec::Vec::new();
+        for (idx, slot) in self.entries.iter().enumerate() {
+            if let Some(entry) = slot {
+                // `idx < MAX_FDS` (256) always fits in i32 without wrap.
+                #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+                out.push((idx as i32, *entry));
+            }
+        }
+        out
+    }
+
     /// Allocate the lowest-numbered free fd and store `entry` there.
     ///
     /// Returns the new fd number or `KernelError::TooManyOpenFiles` if

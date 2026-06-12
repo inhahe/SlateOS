@@ -12605,13 +12605,52 @@ fn sys_alarm(_args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(0)
 }
 
-/// `pause()` — refuse with ENOSYS; we have no signal-driven wakeup yet.
+/// `pause()` — block until a deliverable signal arrives, then return EINTR.
+///
+/// Linux's `pause()` suspends the caller until a signal is delivered that
+/// either runs a handler or terminates the process, then returns `-EINTR`.
+/// We realise that by parking on the same `signalfd` wait-queue the
+/// `signalfd`/`rt_sigtimedwait` paths use: register a waiter whose mask is
+/// the *unblocked* signals, `block_current`, and wake when `set_pending`
+/// marks a covered signal pending.  A blocked-but-pending signal does not
+/// interrupt `pause()` (matching Linux), so we test against
+/// `pending & !blocked`.  Signals whose default action terminates the
+/// process kill it via the normal delivery path (so `pause()` never
+/// returns), and ignored signals never call `set_pending`, so the park
+/// persists — both matching Linux.
+///
+/// An in-kernel caller (`caller_pid() == None`, including the boot
+/// self-test) has no signal queue to wait on and the boot CPU is
+/// single-threaded, so we keep the honest `ENOSYS` for that case.
+///
+/// Known limitation: unblocking an already-pending signal via
+/// `rt_sigprocmask` on another thread does not re-wake a paused thread
+/// (no `recalc_sigpending`-style wake on mask change); `pause()` is woken
+/// by signal *arrival* (`set_pending`), the dominant case.  Tracked in
+/// todo.txt.
 fn sys_pause(_args: &SyscallArgs) -> SyscallResult {
-    // Linux pause() returns -1 with errno=EINTR after a signal is
-    // delivered.  Without that machinery we cannot fulfil the contract;
-    // returning -ENOSYS lets userspace fall back gracefully rather than
-    // hanging forever in a kernel that will never wake it.
-    linux_err(errno::ENOSYS)
+    let caller = match caller_pid() {
+        Some(p) => p,
+        None => return linux_err(errno::ENOSYS),
+    };
+    let task = crate::sched::current_task_id();
+    loop {
+        // Deliverable = pending and not blocked.
+        let deliverable = !crate::proc::signal::blocked(caller);
+        if crate::proc::signal::has_pending_in_mask(caller, deliverable) {
+            return linux_err(errno::EINTR);
+        }
+        // Register-then-recheck so a signal posted in the gap before we
+        // park is not lost (set_pending wakes registered waiters whose
+        // mask covers the signal's bit).
+        crate::proc::signal::register_signalfd_waiter(caller, task, deliverable);
+        if crate::proc::signal::has_pending_in_mask(caller, deliverable) {
+            crate::proc::signal::deregister_signalfd_waiter(caller, task);
+            continue;
+        }
+        crate::sched::block_current();
+        crate::proc::signal::deregister_signalfd_waiter(caller, task);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -49900,7 +49939,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: alarm(5) not 0");
             return Err(KernelError::InternalError);
         }
-        // pause() -> ENOSYS.
+        // pause() in kernel/boot context (caller_pid()==None) -> ENOSYS.
+        // A real userspace caller instead parks on the signal wait-queue
+        // and returns EINTR on signal arrival; that blocking path needs a
+        // second runnable task to post the signal and so cannot be
+        // exercised on the single-threaded boot CPU.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::PAUSE, &a).value

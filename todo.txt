@@ -9380,6 +9380,22 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##           ("block until any signal") cannot be honoured
 ##           without signal-driven wakeup; returning ENOSYS lets
 ##           userspace fall back rather than hang.
+##           UPDATED (2026-06-12): pause() now BLOCKS for real.
+##           With the signalfd wait-queue in place (SIGNALFD_WAITERS
+##           + register_signalfd_waiter, woken by set_pending) it
+##           parks the caller on the unblocked-signal mask via
+##           block_current and returns EINTR when a deliverable
+##           (pending & !blocked) signal arrives; blocked-but-pending
+##           signals don't interrupt it, terminating-default signals
+##           kill via the normal delivery path (pause never returns),
+##           ignored signals never set_pending so the park persists —
+##           all matching Linux. An in-kernel caller (caller_pid()==
+##           None, incl. the boot self-test) keeps the honest ENOSYS
+##           since there's no signal queue to wait on. KNOWN LIMIT:
+##           unblocking an already-pending signal via rt_sigprocmask
+##           on another thread does not re-wake a paused thread (no
+##           recalc_sigpending-style wake on mask change); pause() is
+##           woken by signal arrival (set_pending), the dominant case.
 ##      Limitation: when SIGALRM / SIGVTALRM / SIGPROF delivery
 ##      lands, these must route through it; until then, programs
 ##      that rely on alarm() to interrupt blocking calls will

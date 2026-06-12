@@ -292,6 +292,34 @@
 ## File fallback, and a live readdir/readlink against a probe pid (boot:
 ## "[procfs]   fd/ classify ... OK" / "fd/ directory: gating OK").
 ##
+## DONE (2026-06-12): real /proc/<pid>/fdinfo/<n> — per-fd pos/flags, honest.
+## Built on the same kernel fd table as fd/ (pcb::linux_fd_list/lookup):
+##   - procfs ProcPath gained PidFdInfoDir(pid) and PidFdInfoFile(pid, fd);
+##     classify_path routes "<pid>/fdinfo" -> dir and "<pid>/fdinfo/<n>" ->
+##     a REGULAR FILE (not a symlink, unlike fd/<n>).  readdir lists the open
+##     fds as File entries; stat reports Directory / RegularFile; read_file
+##     serves gen_pid_fdinfo.
+##   - render_pid_fdinfo(pos, flags) emits Linux's fs/proc/fd.c shape
+##     "pos:\t<f_pos>\nflags:\t0<octal>\n".  pos is the open-file
+##     description's REAL f_pos for a File fd (new fs::handle::current_offset
+##     accessor — raw file.offset, no APPEND->EOF adjustment), and 0 for
+##     objects with no seek position (pipe/console/eventfd/pidfd/memfd) —
+##     which is exactly what Linux reports for those, NOT a fabricated value.
+##   - fdinfo_flags(entry) reproduces fs/proc/fd.c's cloexec handling: clear
+##     any stale O_CLOEXEC in status_flags, then re-add O_CLOEXEC iff the
+##     descriptor's FD_CLOEXEC is set (authoritative on the descriptor flag).
+## DELIBERATE OMISSION (same honesty stance as the io/fd blocks above): the
+## mnt_id: and ino: lines Linux also prints are NOT emitted.  We have no
+## per-fd mount id and no stable inode number to report; printing 0 would be
+## inventing data.  Tools that consume fdinfo (lsof, CRIU) look up pos:/flags:
+## by key, so the omission does not break them.  If a real ino is ever wanted
+## it must come from a genuine VFS inode number, not a placeholder.  The
+## directory is honestly EMPTY for native processes (fd table in userspace),
+## same as fd/.  Self-tests: classify_path (5 cases incl. reject), pure
+## render_pid_fdinfo body, fdinfo_flags cloexec folding (3 cases), and live
+## readdir/read gating (boot: "[procfs]   fdinfo/ classify ... OK" /
+## "fdinfo/ directory: gating OK").
+##
 ## FOLLOW-UP (2026-06-10): real /proc/<pid>/auxv + kernel-side saved_auxv
 ## /proc/<pid>/auxv is NOT yet served.  Implementing it properly requires
 ## the same kernel-side auxv storage that PR_GET_AUXV is already waiting

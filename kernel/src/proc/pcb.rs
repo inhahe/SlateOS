@@ -3377,6 +3377,9 @@ fn destroy_process_resources(
 
     // Drop any signal state (pending set, blocked mask, trampoline).
     crate::proc::signal::remove(pid);
+    // Cancel any armed ITIMER_REAL so it can never fire SIGALRM into a dead
+    // PID (the hrtimer handle would otherwise survive process teardown).
+    crate::proc::itimer::cancel_real(pid);
     // Drop any Linux per-signal sigaction state for this process.
     crate::syscall::linux::linux_sigaction_on_exit(pid);
 

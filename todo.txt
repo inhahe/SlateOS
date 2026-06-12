@@ -9402,8 +9402,33 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      not be interrupted.
 ##
 ## ===========================================================================
-## NEXT TASK (scoped + investigated 2026-06-12): real ITIMER_REAL / alarm()
+## DONE 2026-06-12: real ITIMER_REAL / alarm()  (kernel/src/proc/itimer.rs)
 ## ===========================================================================
+## IMPLEMENTED exactly as the design below specifies:
+##   * New module kernel/src/proc/itimer.rs: Mutex<BTreeMap<ProcessId,
+##     RealTimer{expiry_ns, interval_ns, handle: HrTimerHandle}>>, accessed
+##     through an IRQ-safe with_real() helper.  set_real/get_real/cancel_real
+##     + real_fire callback (posts SIGALRM via the now-IRQ-safe set_pending).
+##   * alarm() = set_real(pid, secs*1e9, 0), returns prev remaining secs
+##     (rounded up); setitimer(ITIMER_REAL) arms/disarms via set_real and
+##     reports old via get_real; getitimer(ITIMER_REAL) reports live state.
+##     ITIMER_VIRTUAL/PROF still cancel-or-ENOSYS (need per-task CPU-time
+##     accounting — separate task).
+##   * cancel_real wired into process EXIT (destroy_process_resources).  NOT
+##     on exec: POSIX preserves ITIMER_REAL across execve and the PID is
+##     unchanged, so the timer correctly survives (its trampoline is dropped
+##     by on_exec and re-registered by the new libc).
+##   * itimer::self_test() added to proc::self_test (4 groups: conversions,
+##     arm/get/replace/cancel, fire-path SIGALRM post + one-shot disarm +
+##     no-spurious-repost, periodic re-arm bookkeeping).
+##   * Built clean, clippy added no new warnings, boot-test PASSED.
+##   KNOWN LIMITATION (documented in itimer.rs + the setitimer comment): a
+##   process with NO SIGALRM handler is not terminated when the timer fires
+##   (deliver_pending_signal only delivers to trampoline-registered
+##   processes and never terminates no-handler ones — the pre-existing gap).
+##   The common case (handler installed before arming) works end-to-end.
+## (Original task writeup kept below for reference.)
+## ---------------------------------------------------------------------------
 ## GOAL: make alarm(N) and setitimer(ITIMER_REAL, ...) actually fire SIGALRM
 ## at the deadline (and getitimer report the remaining time), instead of the
 ## current always-0/ENOSYS stubs. This is the natural next step after the

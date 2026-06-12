@@ -12430,27 +12430,34 @@ fn sys_mknod_common(path: u64, mode_raw: u64) -> SyscallResult {
 // Interval timers (getitimer, setitimer) and the legacy alarm() / pause()
 //
 // Linux delivers ITIMER_REAL via SIGALRM, ITIMER_VIRTUAL via SIGVTALRM,
-// ITIMER_PROF via SIGPROF.  We have no signal-driven interval-timer
-// infrastructure yet, so:
+// ITIMER_PROF via SIGPROF.  We now back ITIMER_REAL with a real
+// hrtimer-driven per-process timer (see proc::itimer):
 //
-//   - getitimer always reports "no timer pending" (a zeroed
-//     struct itimerval).  This is a truthful answer when no timer
-//     is armed.
+//   - getitimer(ITIMER_REAL) reports the live remaining/interval.
+//     VIRTUAL and PROF still report a zeroed (disarmed) timer because they
+//     need per-task CPU-time accounting hooks we don't have yet.
 //
-//   - setitimer accepts cancellation (it_value == 0) silently.
-//     Arming a non-zero timer would require us to deliver a signal at
-//     some future time, which we cannot, so we return -ENOSYS.
-//     Programs that rely on setitimer have a documented fallback path.
+//   - setitimer(ITIMER_REAL) arms (or, for a zero it_value, disarms) the
+//     real timer; on expiry it posts SIGALRM via proc::signal::set_pending,
+//     which delivers to a registered handler at the next syscall-return
+//     checkpoint and wakes any pause()/signalfd/rt_sigtimedwait waiter.
+//     setitimer(VIRTUAL|PROF) still accepts cancellation and returns
+//     -ENOSYS on a non-zero arm.
+//     Known limitation: a process with NO SIGALRM handler is not terminated
+//     when the timer fires (the kernel's deliver_pending_signal only
+//     delivers to trampoline-registered processes); the dominant case
+//     (handler installed before arming) works end-to-end.
 //
-//   - alarm() is a deprecated wrapper around setitimer(ITIMER_REAL,...).
-//     The Linux ABI does not provide an error return; the only return
-//     is the unsigned seconds remaining of the previous alarm.  We
-//     always return 0 (no previous alarm pending) and document the
-//     missing fire as a known limitation.
+//   - alarm() is setitimer(ITIMER_REAL, it_value=seconds, it_interval=0):
+//     it arms the same shared real timer and returns the rounded-up seconds
+//     remaining of the previous alarm.
 //
-//   - pause() blocks until a signal is delivered, then returns -EINTR.
-//     Without signal-driven wakeup we cannot honour this; returning
-//     -ENOSYS lets userspace fall back rather than hang forever.
+//   - pause() blocks until a signal is delivered, then returns -EINTR
+//     (see sys_pause); an in-kernel caller gets -ENOSYS.
+//
+// In-kernel callers (caller_pid() == None, e.g. the boot self-test) have no
+// per-process timer context, so getitimer/setitimer/alarm fall back to the
+// zeroed/ENOSYS behaviour for them.
 //
 // struct itimerval layout (x86_64): two struct timevals back-to-back =
 // 4 longs = 32 bytes.
@@ -12458,7 +12465,28 @@ fn sys_mknod_common(path: u64, mode_raw: u64) -> SyscallResult {
 
 const ITIMERVAL_SIZE: usize = 32;
 
-/// `getitimer(which, value)` — write a zeroed itimerval (no timer pending).
+/// Write an `i64` into `buf[lo..hi]` (native byte order), silently doing
+/// nothing if the range is out of bounds. Used to lay out a `struct
+/// itimerval` (four 8-byte fields) without indexing-slice panics.
+fn itimerval_put_i64(buf: &mut [u8], lo: usize, hi: usize, v: i64) {
+    if let Some(slot) = buf.get_mut(lo..hi) {
+        slot.copy_from_slice(&v.to_ne_bytes());
+    }
+}
+
+/// Lay out a `(remaining_ns, interval_ns)` pair into a `struct itimerval`
+/// byte buffer: it_interval (sec,usec) then it_value (sec,usec).
+#[allow(clippy::cast_possible_wrap)]
+fn itimerval_fill(buf: &mut [u8; ITIMERVAL_SIZE], remaining_ns: u64, interval_ns: u64) {
+    let (i_sec, i_usec) = crate::proc::itimer::ns_to_timeval(interval_ns);
+    let (v_sec, v_usec) = crate::proc::itimer::ns_to_timeval(remaining_ns);
+    itimerval_put_i64(buf, 0, 8, i_sec as i64);
+    itimerval_put_i64(buf, 8, 16, i_usec as i64);
+    itimerval_put_i64(buf, 16, 24, v_sec as i64);
+    itimerval_put_i64(buf, 24, 32, v_usec as i64);
+}
+
+/// `getitimer(which, value)` — report the process's interval timer.
 fn sys_getitimer(args: &SyscallArgs) -> SyscallResult {
     // Linux signature: `SYSCALL_DEFINE2(getitimer, int, which,
     // struct __kernel_old_itimerval __user *, value)`.  `which` is
@@ -12485,7 +12513,17 @@ fn sys_getitimer(args: &SyscallArgs) -> SyscallResult {
         return linux_err(linux_errno_for(e));
     }
 
-    let buf = [0u8; ITIMERVAL_SIZE];
+    let mut buf = [0u8; ITIMERVAL_SIZE];
+    // ITIMER_REAL is implemented; report its remaining/interval. VIRTUAL(1)
+    // and PROF(2) need per-task CPU-time accounting we don't have, so they
+    // report a zeroed (disarmed) timer. An in-kernel caller has no
+    // per-process timer, so it also reports zero.
+    if which_i32 == 0 {
+        if let Some(pid) = caller_pid() {
+            let (remaining_ns, interval_ns) = crate::proc::itimer::get_real(pid);
+            itimerval_fill(&mut buf, remaining_ns, interval_ns);
+        }
+    }
     // SAFETY: validated as a writable ITIMERVAL_SIZE-byte range above.
     let r = unsafe {
         crate::mm::user::copy_to_user(buf.as_ptr(), value, ITIMERVAL_SIZE)
@@ -12496,8 +12534,7 @@ fn sys_getitimer(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(0)
 }
 
-/// `setitimer(which, new_value, old_value)` — accept cancellation;
-/// refuse arming with ENOSYS.
+/// `setitimer(which, new_value, old_value)` — arm/cancel the interval timer.
 fn sys_setitimer(args: &SyscallArgs) -> SyscallResult {
     // Linux signature: `SYSCALL_DEFINE3(setitimer, int, which,
     // struct __kernel_old_itimerval __user *, value,
@@ -12570,13 +12607,61 @@ fn sys_setitimer(args: &SyscallArgs) -> SyscallResult {
 
     let is_cancel = new_buf.iter().all(|&b| b == 0);
 
+    // ITIMER_REAL is fully implemented for a real userspace caller: arm (or,
+    // for a zero value, disarm) the shared per-process real timer and report
+    // the previous value. We arm first then copy the old value out, matching
+    // Linux's do_setitimer ordering (a faulting `old_value` returns EFAULT
+    // with the new timer already armed). `value_*`/`interval_*` were
+    // validated non-negative with usec in [0, 1e6) above.
+    if which_i32 == 0 {
+        if let Some(pid) = caller_pid() {
+            #[allow(clippy::cast_sign_loss)]
+            let value_ns = crate::proc::itimer::timeval_to_ns(
+                value_sec as u64,
+                value_usec as u64,
+            );
+            #[allow(clippy::cast_sign_loss)]
+            let interval_ns = crate::proc::itimer::timeval_to_ns(
+                interval_sec as u64,
+                interval_usec as u64,
+            );
+            let (prev_remaining_ns, prev_interval_ns) =
+                crate::proc::itimer::set_real(pid, value_ns, interval_ns);
+            if old_value != 0 {
+                if let Err(e) = crate::mm::user::validate_user_write(
+                    old_value,
+                    ITIMERVAL_SIZE,
+                ) {
+                    return linux_err(linux_errno_for(e));
+                }
+                let mut old_buf = [0u8; ITIMERVAL_SIZE];
+                itimerval_fill(&mut old_buf, prev_remaining_ns, prev_interval_ns);
+                // SAFETY: validated as a writable ITIMERVAL_SIZE-byte range.
+                let r = unsafe {
+                    crate::mm::user::copy_to_user(
+                        old_buf.as_ptr(),
+                        old_value,
+                        ITIMERVAL_SIZE,
+                    )
+                };
+                if let Err(e) = r {
+                    return linux_err(linux_errno_for(e));
+                }
+            }
+            return SyscallResult::ok(0);
+        }
+        // No per-process timer context (boot/kernel caller): fall through to
+        // the legacy cancel-only path below.
+    }
+
     if !is_cancel {
-        // We cannot arm a timer that will fire a signal later.  Refuse
-        // honestly so the caller knows to fall back.
+        // ITIMER_VIRTUAL/PROF need per-task CPU-time accounting we don't
+        // have yet (and an in-kernel ITIMER_REAL caller has no process timer
+        // to arm). Refuse honestly so the caller knows to fall back.
         return linux_err(errno::ENOSYS);
     }
 
-    // Cancel path: report previous timer as zero (we hold no timer state)
+    // Cancel path: report previous timer as zero (no state for these timers)
     // into old_value if it was provided.
     if old_value != 0 {
         if let Err(e) =
@@ -12596,13 +12681,32 @@ fn sys_setitimer(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(0)
 }
 
-/// `alarm(seconds)` — legacy wrapper.  Returns 0 (no previous alarm).
-fn sys_alarm(_args: &SyscallArgs) -> SyscallResult {
-    // alarm() has no error return — it just reports "seconds remaining
-    // of the previous alarm".  We never have a previous alarm, so 0 is
-    // correct.  We do not fire the new alarm either; that is the
-    // documented limitation tracked in todo.txt.
-    SyscallResult::ok(0)
+/// `alarm(seconds)` — arm a one-shot `ITIMER_REAL` that fires `SIGALRM`
+/// after `seconds`, returning the (rounded-up) seconds remaining on the
+/// previously-armed alarm (0 if none).
+///
+/// alarm() is exactly `setitimer(ITIMER_REAL, it_value=seconds,
+/// it_interval=0)` in Linux, so it shares the per-process real timer with
+/// `setitimer`. `seconds == 0` cancels any pending alarm. There is no error
+/// return — the value is always the previous remaining seconds.
+///
+/// An in-kernel caller (`caller_pid() == None`, e.g. the boot self-test)
+/// has no per-process timer context, so we report 0 and arm nothing.
+fn sys_alarm(args: &SyscallArgs) -> SyscallResult {
+    // alarm() takes `unsigned int seconds`; the ABI truncates to 32 bits.
+    #[allow(clippy::cast_possible_truncation)]
+    let seconds = args.arg0 as u32;
+    let Some(pid) = caller_pid() else {
+        return SyscallResult::ok(0);
+    };
+    let value_ns = crate::proc::itimer::timeval_to_ns(u64::from(seconds), 0);
+    let (prev_remaining_ns, _prev_interval) =
+        crate::proc::itimer::set_real(pid, value_ns, 0);
+    let prev_secs = crate::proc::itimer::ns_to_secs_ceil(prev_remaining_ns);
+    // Return value is `unsigned int`; clamp to u32 range.
+    #[allow(clippy::cast_possible_wrap)]
+    let ret = prev_secs.min(u64::from(u32::MAX)) as i64;
+    SyscallResult::ok(ret)
 }
 
 /// `pause()` — block until a deliverable signal arrives, then return EINTR.

@@ -37,6 +37,7 @@
 pub mod elf;
 pub mod exception;
 pub mod fork;
+pub mod itimer;
 pub mod linux_fd;
 pub mod linux_stack;
 pub mod pcb;
@@ -67,6 +68,8 @@ pub fn self_test() -> KernelResult<()> {
     exception::self_test()?;
     serial_println!("[proc] Running signal-shim self-test...");
     signal::self_test()?;
+    serial_println!("[proc] Running ITIMER_REAL self-test...");
+    itimer::self_test()?;
     serial_println!("[proc] Running fork self-test...");
     fork::self_test()?;
     serial_println!("[proc] Running Linux fd-table self-test...");

@@ -51686,6 +51686,11 @@ SIBLING-CONSISTENCY GAP (identified 2026-06-12, during batch 527):
    sched_setattr SCHED_FLAG_KEEP_POLICY / KEEP_PARAMS semantics
 ----------------------------------------------------------------
 
+Status: RESOLVED 2026-06-12 by Batch 528 (see the Batch 528 entry at
+the end of this file).  The deferral plan below was implemented with
+the verbatim v6.6 source in hand.  Left in place for the historical
+record of the gap and the analysis.
+
 Status: DEFERRED with plan (NOT yet implemented).  Found while doing
 batch 527 (RESET_ON_FORK) — the sibling-consistency obligation in the
 resolved "version-surface policy" (option ii) says when we honor one
@@ -51766,3 +51771,75 @@ session skips the fumbling:
   version where syscalls.c first exists (verify the exact tag), read
   the logic there, then confirm the KEEP_* lines are byte-identical to
   v6.6 core.c (the split was a mechanical move) before citing v6.6.
+
+================================================================
+Batch 528 — Linux ABI fidelity: sched_setattr SCHED_FLAG_KEEP_POLICY
+   (0x08) / SCHED_FLAG_KEEP_PARAMS (0x10) semantics
+================================================================
+Done 2026-06-12.  Resolves the "SIBLING-CONSISTENCY GAP" deferral
+above (companion bits to the RESET_ON_FORK bit batch 527 wired up).
+
+Source obtained verbatim this time: the source-access note above is
+now stale for the fetch method — `gh api -H "Accept:
+application/vnd.github.raw" repos/torvalds/linux/contents/kernel/sched/
+core.c?ref=v6.6` returns the FULL 12103-line core.c (WebFetch
+truncates; bootlin is JS-rendered).  In v6.6 the sched syscalls live
+in kernel/sched/core.c (the kernel/sched/syscalls.c split first
+appears in v6.11).  Grep can't read /tmp, so it was copied to
+build/v66_core.c (gitignored) to grep, then removed.
+
+What v6.6 does (kernel/sched/core.c, verbatim-confirmed):
+  SYSCALL_DEFINE3(sched_setattr):
+    if ((int)attr.sched_policy < 0) return -EINVAL;       // pre-gate
+    if (attr.sched_flags & SCHED_FLAG_KEEP_POLICY)
+        attr.sched_policy = SETPARAM_POLICY;   // = -1
+    ... find_process_by_pid (ESRCH) ...
+    if (likely(p)) {
+        if (attr.sched_flags & SCHED_FLAG_KEEP_PARAMS)
+            get_params(p, &attr);              // pre-loads current params
+        retval = sched_setattr(p, &attr);
+    }
+  get_params: RT task -> attr->sched_priority = p->rt_priority;
+              fair task -> attr->sched_nice = task_nice(p).
+  __sched_setscheduler recheck: policy<0 -> reset_on_fork =
+    p->sched_reset_on_fork; policy = p->policy (valid_policy skipped).
+    Else reset_on_fork = !!(attr RESET_ON_FORK bit); valid_policy req.
+    Store: p->sched_reset_on_fork = reset_on_fork (UNCONDITIONAL);
+    if (!KEEP_PARAMS) __setscheduler_params (writes policy + priority).
+
+Consequences reproduced in sys_sched_setattr (PCB bookkeeping; the
+kernel scheduler is priority-round-robin, these fields are ABI
+round-trip state read back by sched_get{scheduler,attr}):
+  * KEEP_POLICY: effective policy AND reset_on_fork come from the
+    TASK — the attr sched_policy value is discarded (only its >=0-ness
+    is checked by the pre-gate) and a same-call RESET_ON_FORK bit is
+    IGNORED.  valid_policy() is NOT re-checked.  The attr PRIORITY is
+    still used (KEEP_POLICY != KEEP_PARAMS), so a kept RT policy still
+    requires a valid RT priority in the attr.
+  * KEEP_PARAMS: get_params pre-loads the task's current rt_priority
+    (RT) before validity checks, and __setscheduler_params is skipped
+    so neither policy nor priority is stored (only reset_on_fork).
+  * Pre-batch (507) both flags were accepted by the sched_flags mask
+    but ignored: we always stored the input policy/priority and took
+    reset_on_fork from the attr bit — so e.g. a FIFO task doing
+    setattr(KEEP_POLICY, sched_policy=0, prio=5) was clobbered to
+    SCHED_NORMAL instead of staying FIFO.
+
+Implementation (kernel/src/syscall/linux.rs sys_sched_setattr):
+  restructured to v6.6 order — pre-gate ((int)policy<0 -> EINVAL) ->
+  resolve target pid + ESRCH up front -> fetch current
+  policy/priority/reset_on_fork -> KEEP_POLICY effective-policy /
+  reset_on_fork resolution -> DEADLINE EOPNOTSUPP concession (now keyed
+  on effective_policy) -> sched_flags mask gate (batch 507) ->
+  KEEP_PARAMS rt_priority pre-load -> priority validity (batch's shared
+  helper) against effective_policy -> RLIMIT_RTPRIO -> store
+  (reset_on_fork unconditional; policy+priority only when !KEEP_PARAMS).
+
+Tests: boot self-test on a synthetic PCB (kpkp-b528): seed FIFO
+prio=10 via setscheduler; (a) KEEP_PARAMS+FIFO+prio99 -> stays
+FIFO/prio10; (b) KEEP_POLICY+BATCH(ignored)+prio5 -> stays FIFO,
+prio updates to 5; (c) KEEP_POLICY|RESET_ON_FORK+prio5 -> reset_on_fork
+stays false (bit ignored); (d) plain setattr RR/7 -> stores RR/7
+(regression guard the keep flags don't over-suppress).  Serial stamp:
+"sched_setattr SCHED_FLAG_KEEP_POLICY/KEEP_PARAMS semantics
+(batch 528): OK".  cargo build + clippy + boot-test all pass.

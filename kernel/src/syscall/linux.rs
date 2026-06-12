@@ -23657,6 +23657,116 @@ fn sys_sched_setattr(args: &SyscallArgs) -> SyscallResult {
     ]);
     let priority = u32::from_le_bytes([buf[20], buf[21], buf[22], buf[23]]);
 
+    // ## Batch 528 — SCHED_FLAG_KEEP_POLICY / KEEP_PARAMS semantics
+    //
+    // Verbatim v6.6 (kernel/sched/core.c — these functions move to
+    // kernel/sched/syscalls.c only in v6.11; the code is identical):
+    //
+    //   SYSCALL_DEFINE3(sched_setattr, ...) {
+    //       ...
+    //       if ((int)attr.sched_policy < 0)
+    //           return -EINVAL;
+    //       if (attr.sched_flags & SCHED_FLAG_KEEP_POLICY)
+    //           attr.sched_policy = SETPARAM_POLICY;          // = -1
+    //       ... find_process_by_pid (ESRCH) ...
+    //       if (likely(p)) {
+    //           if (attr.sched_flags & SCHED_FLAG_KEEP_PARAMS)
+    //               get_params(p, &attr);
+    //           retval = sched_setattr(p, &attr);
+    //       }
+    //   }
+    //   static void get_params(struct task_struct *p, struct sched_attr *attr) {
+    //       if (task_has_dl_policy(p))      __getparam_dl(p, attr);
+    //       else if (task_has_rt_policy(p)) attr->sched_priority = p->rt_priority;
+    //       else                            attr->sched_nice = task_nice(p);
+    //   }
+    //   __sched_setscheduler(...) {
+    //       int oldpolicy = -1, policy = attr->sched_policy;
+    //   recheck:
+    //       if (policy < 0) {
+    //           reset_on_fork = p->sched_reset_on_fork;
+    //           policy = oldpolicy = p->policy;
+    //       } else {
+    //           reset_on_fork = !!(attr->sched_flags & SCHED_FLAG_RESET_ON_FORK);
+    //           if (!valid_policy(policy)) return -EINVAL;
+    //       }
+    //       if (attr->sched_flags & ~(SCHED_FLAG_ALL | SCHED_FLAG_SUGOV))
+    //           return -EINVAL;
+    //       if (attr->sched_priority > MAX_RT_PRIO-1) return -EINVAL;
+    //       if ((dl_policy(policy) && !__checkparam_dl(attr)) ||
+    //           (rt_policy(policy) != (attr->sched_priority != 0)))
+    //           return -EINVAL;
+    //       ...
+    //       p->sched_reset_on_fork = reset_on_fork;          // unconditional
+    //       if (!(attr->sched_flags & SCHED_FLAG_KEEP_PARAMS)) {
+    //           __setscheduler_params(p, attr);              // sets policy + prio
+    //           __setscheduler_prio(p, newprio);
+    //       }
+    //   }
+    //
+    // Consequences our PCB bookkeeping must reproduce (the kernel
+    // scheduler is priority-round-robin; policy/priority/reset_on_fork
+    // are pure ABI round-trip state read back by sched_get{scheduler,
+    // attr}):
+    //   * KEEP_POLICY: the effective policy AND reset_on_fork come from
+    //     the TASK, not from attr — so a same-call RESET_ON_FORK bit is
+    //     IGNORED and the input sched_policy value is discarded (only
+    //     its `>= 0`-ness is checked, by the pre-gate).  valid_policy()
+    //     is NOT re-checked.
+    //   * KEEP_PARAMS: get_params() pre-loads the task's current params
+    //     (rt_priority for an RT task, nice for a fair task) before the
+    //     validity checks, and __setscheduler_params is skipped — so
+    //     neither policy nor priority is stored (only reset_on_fork).
+    //   * Pre-batch (507) both flags were accepted by the mask but
+    //     ignored: we always stored the input policy/priority and took
+    //     reset_on_fork from the attr bit, so e.g. a FIFO task doing
+    //     setattr(KEEP_POLICY, sched_policy=0, prio=5) was clobbered to
+    //     SCHED_NORMAL instead of staying FIFO.
+    const SCHED_FLAG_KEEP_POLICY: u64 = 0x08;
+    const SCHED_FLAG_KEEP_PARAMS: u64 = 0x10;
+    const SCHED_FLAG_RESET_ON_FORK_BIT: u64 = 0x01;
+    let keep_policy = (sched_flags & SCHED_FLAG_KEEP_POLICY) != 0;
+    let keep_params = (sched_flags & SCHED_FLAG_KEEP_PARAMS) != 0;
+
+    // Pre-gate `(int)attr.sched_policy < 0` -> EINVAL.  Runs on the raw
+    // input policy field BEFORE the KEEP_POLICY substitution, so it
+    // fires even when KEEP_POLICY would otherwise discard the value.
+    #[allow(clippy::cast_possible_wrap)]
+    if (policy as i32) < 0 {
+        return linux_err(errno::EINVAL);
+    }
+
+    // find_process_by_pid (ESRCH) happens in the syscall BEFORE
+    // get_params and before __sched_setscheduler's validity checks, so
+    // resolve the target up front (the KEEP_* substitutions need the
+    // task's current params).  pid_i32 < 0 was already rejected by the
+    // combined EINVAL gate near the top.  Kernel-context pid==0 has no
+    // caller PCB (target None) and will not persist.
+    #[allow(clippy::cast_sign_loss)]
+    let pid_u = pid_i32 as u64;
+    if pid_i32 != 0 && pcb::state(pid_u).is_none() {
+        return linux_err(errno::ESRCH);
+    }
+    let target_pid = if pid_i32 == 0 { caller_pid() } else { Some(pid_u) };
+
+    // Current task params for the KEEP_* substitutions.  When there is
+    // no target PCB (kernel-context pid 0) the call cannot persist, so
+    // the fallbacks (input policy / attr flag bit) keep validation
+    // self-consistent without panicking.
+    let cur_policy = target_pid.and_then(pcb::get_sched_policy);
+    let cur_priority = target_pid.and_then(pcb::get_sched_priority);
+    let cur_reset_on_fork = target_pid.and_then(pcb::get_sched_reset_on_fork);
+
+    // Policy resolution: under KEEP_POLICY the effective policy and
+    // reset_on_fork are taken from the task (valid_policy skipped);
+    // otherwise from attr.
+    let effective_policy = if keep_policy { cur_policy.unwrap_or(policy) } else { policy };
+    let reset_on_fork = if keep_policy {
+        cur_reset_on_fork.unwrap_or((sched_flags & SCHED_FLAG_RESET_ON_FORK_BIT) != 0)
+    } else {
+        (sched_flags & SCHED_FLAG_RESET_ON_FORK_BIT) != 0
+    };
+
     // Reject SCHED_DEADLINE (a v6.6-defined class our kernel doesn't
     // implement) with -EOPNOTSUPP — the errno Linux uses when a
     // scheduling class is compiled out.
@@ -23678,7 +23788,7 @@ fn sys_sched_setattr(args: &SyscallArgs) -> SyscallResult {
     // the zero-priority bucket) and returns -EINVAL — matching v6.6
     // exactly.  Mirrors batch 505's tightening of sys_sched_setscheduler
     // gate 5 across the sister policy-install ABI.
-    if policy == SCHED_DEADLINE {
+    if effective_policy == SCHED_DEADLINE {
         return linux_err(errno::EOPNOTSUPP);
     }
     // ## Batch 507 — validate sched_flags against v6.6's mask
@@ -23729,41 +23839,42 @@ fn sys_sched_setattr(args: &SyscallArgs) -> SyscallResult {
         return linux_err(errno::EINVAL);
     }
     // Cap priority to i32 range before the shared validator; Linux
-    // accepts priorities up to 99 so the truncation is harmless.
+    // accepts priorities up to 99 so the truncation is harmless.  Under
+    // KEEP_PARAMS, get_params() pre-loads the task's current rt_priority
+    // for an RT task (FIFO/RR) so the validity checks run against the
+    // existing value, not the (ignored) attr field.  For a fair task
+    // get_params loads nice instead — but our shared validator only
+    // gates on priority, and a fair task's stored priority is 0, so the
+    // attr priority is still required to be 0 by the rt_policy()==(prio!=0)
+    // invariant; KEEP_PARAMS does not relax that for the fair case.
     #[allow(clippy::cast_possible_wrap)]
-    let sched_prio = priority as i32;
-    if let Err(e) = sched_priority_check_for_policy(u64::from(policy), sched_prio) {
+    let mut sched_prio = priority as i32;
+    if keep_params && (effective_policy == 1 || effective_policy == 2) {
+        sched_prio = cur_priority.unwrap_or(sched_prio);
+    }
+    if let Err(e) = sched_priority_check_for_policy(u64::from(effective_policy), sched_prio) {
         return linux_err(e);
     }
     // RLIMIT_RTPRIO gate for FIFO/RR.
-    if policy == 1 || policy == 2 {
+    if effective_policy == 1 || effective_policy == 2 {
         if let Err(e) = rlimit_rtprio_check_for_caller(sched_prio) {
             return linux_err(e);
         }
     }
 
-    // Resolve target pid and persist into the PCB.  Use the truncated
-    // pid_i32 (not raw args.arg0) so a probe like pid=0x1_0000_0000
-    // routes to the caller path the way Linux does, instead of falling
-    // through to a pcb::state(raw_u64) miss → ESRCH.  pid_i32 < 0 was
-    // already rejected by the combined EINVAL gate above, so the cast
-    // back to u64 is non-negative.
-    #[allow(clippy::cast_sign_loss)]
-    let pid_u = pid_i32 as u64;
-    if pid_i32 != 0 && pcb::state(pid_u).is_none() {
-        return linux_err(errno::ESRCH);
-    }
-    // ## Batch 527 — persist SCHED_FLAG_RESET_ON_FORK (0x01) from
-    // sched_flags so sched_getscheduler/sched_getattr report it back.
-    // The bit was already accepted by the SCHED_FLAG_ALL mask gate
-    // above (batch 507); we now actually record it.
-    const SCHED_FLAG_RESET_ON_FORK_BIT: u64 = 0x01;
-    let reset_on_fork = (sched_flags & SCHED_FLAG_RESET_ON_FORK_BIT) != 0;
-    let target_pid = if pid_i32 == 0 { caller_pid() } else { Some(pid_u) };
+    // Persist into the PCB.  reset_on_fork is written unconditionally
+    // (v6.6 sets `p->sched_reset_on_fork = reset_on_fork;` before the
+    // KEEP_PARAMS guard).  policy + priority are stored only when
+    // KEEP_PARAMS is clear (v6.6 skips __setscheduler_params under
+    // KEEP_PARAMS).  Under KEEP_POLICY the effective_policy already came
+    // from the task, so re-storing it is a no-op; storing keeps the two
+    // paths uniform.  target_pid / ESRCH were resolved up front.
     if let Some(tp) = target_pid {
-        let _ = pcb::set_sched_policy(tp, policy);
-        let _ = pcb::set_sched_priority(tp, sched_prio);
         let _ = pcb::set_sched_reset_on_fork(tp, reset_on_fork);
+        if !keep_params {
+            let _ = pcb::set_sched_policy(tp, effective_policy);
+            let _ = pcb::set_sched_priority(tp, sched_prio);
+        }
     }
 
     SyscallResult::ok(0)
@@ -61983,6 +62094,156 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   sched_{{set,get}}attr SCHED_FLAG_RESET_ON_FORK round-trip (batch 527): OK"
+        );
+
+        // Batch 528: SCHED_FLAG_KEEP_POLICY (0x08) / KEEP_PARAMS (0x10).
+        // v6.6 sched_setattr: under KEEP_POLICY the effective policy AND
+        // reset_on_fork are taken from the TASK (the attr policy value and
+        // a same-call RESET_ON_FORK bit are discarded); under KEEP_PARAMS
+        // get_params() pre-loads the task's current rt_priority and
+        // __setscheduler_params is skipped (policy+priority not stored).
+        // Exercise both on a synthetic PCB starting from FIFO prio=10.
+        {
+            let kp = pcb::create("kpkp-b528", 0);
+            if kp > i32::MAX as u64 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: kpkp test_pid too large ({})", kp
+                );
+                pcb::destroy(kp);
+                return Err(KernelError::InternalError);
+            }
+            // Seed FIFO prio=10 via sched_setscheduler.
+            let fifo_param = 10i32.to_ne_bytes();
+            let fifo_param_ptr = fifo_param.as_ptr() as u64;
+            let a = SyscallArgs { arg0: kp, arg1: 1, arg2: fifo_param_ptr,
+                arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::SCHED_SETSCHEDULER, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: seed setscheduler(FIFO,10) want 0 got {}",
+                    dispatch_linux(nr::SCHED_SETSCHEDULER, &a).value,
+                );
+                pcb::destroy(kp);
+                return Err(KernelError::InternalError);
+            }
+            // (a) KEEP_PARAMS with attr policy=1 (FIFO) priority=99: under
+            // v6.6 get_params() pre-loads the task's current rt_priority
+            // (10), the validity checks run against that, and
+            // __setscheduler_params is skipped — so the 99 is discarded
+            // and priority stays 10.  Pre-batch the 99 would have
+            // clobbered it.  policy is likewise not re-stored (stays FIFO).
+            let mut sa = [0u8; 48];
+            sa[0..4].copy_from_slice(&48u32.to_le_bytes());      // size
+            sa[4..8].copy_from_slice(&1u32.to_le_bytes());       // policy = FIFO
+            sa[8..16].copy_from_slice(&0x10u64.to_le_bytes());   // KEEP_PARAMS
+            sa[20..24].copy_from_slice(&99u32.to_le_bytes());    // priority = 99 (ignored)
+            let sa_ptr = sa.as_ptr() as u64;
+            let a = SyscallArgs { arg0: kp, arg1: sa_ptr, arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: setattr(KEEP_PARAMS) want 0 got {}",
+                    dispatch_linux(nr::SCHED_SETATTR, &a).value,
+                );
+                pcb::destroy(kp);
+                return Err(KernelError::InternalError);
+            }
+            if pcb::get_sched_priority(kp) != Some(10) || pcb::get_sched_policy(kp) != Some(1) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: KEEP_PARAMS must preserve FIFO/prio=10; got {:?}/{:?}",
+                    pcb::get_sched_policy(kp), pcb::get_sched_priority(kp)
+                );
+                pcb::destroy(kp);
+                return Err(KernelError::InternalError);
+            }
+            // (b) KEEP_POLICY keeps the task's policy (FIFO) but NOT its
+            // params: the attr sched_policy=3 (BATCH) is discarded, yet
+            // the attr priority IS used (KEEP_POLICY != KEEP_PARAMS), so
+            // a valid FIFO priority must be supplied.  Set priority=5;
+            // getscheduler stays FIFO (1) and priority updates to 5.
+            let mut sa = [0u8; 48];
+            sa[0..4].copy_from_slice(&48u32.to_le_bytes());
+            sa[4..8].copy_from_slice(&3u32.to_le_bytes());       // policy = BATCH (ignored)
+            sa[8..16].copy_from_slice(&0x08u64.to_le_bytes());   // KEEP_POLICY
+            sa[20..24].copy_from_slice(&5u32.to_le_bytes());     // priority = 5 (used)
+            let sa_ptr = sa.as_ptr() as u64;
+            let a = SyscallArgs { arg0: kp, arg1: sa_ptr, arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: setattr(KEEP_POLICY) want 0 got {}",
+                    dispatch_linux(nr::SCHED_SETATTR, &a).value,
+                );
+                pcb::destroy(kp);
+                return Err(KernelError::InternalError);
+            }
+            let a = SyscallArgs { arg0: kp, arg1: 0, arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0 };
+            let v = dispatch_linux(nr::SCHED_GETSCHEDULER, &a).value;
+            if v != 1 || pcb::get_sched_priority(kp) != Some(5) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: after KEEP_POLICY want FIFO(1)/prio=5 got {:#x}/{:?}",
+                    v, pcb::get_sched_priority(kp)
+                );
+                pcb::destroy(kp);
+                return Err(KernelError::InternalError);
+            }
+            // (c) KEEP_POLICY also ignores a same-call RESET_ON_FORK bit:
+            // reset_on_fork comes from the task (currently false), so it
+            // must stay false even though the attr sets the 0x01 bit.  A
+            // valid FIFO priority (5) is still required.
+            let mut sa = [0u8; 48];
+            sa[0..4].copy_from_slice(&48u32.to_le_bytes());
+            sa[8..16].copy_from_slice(&(0x08u64 | 0x01u64).to_le_bytes()); // KEEP_POLICY|RESET_ON_FORK
+            sa[20..24].copy_from_slice(&5u32.to_le_bytes());     // priority = 5
+            let sa_ptr = sa.as_ptr() as u64;
+            let a = SyscallArgs { arg0: kp, arg1: sa_ptr, arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: setattr(KEEP_POLICY|RESET_ON_FORK) want 0 got {}",
+                    dispatch_linux(nr::SCHED_SETATTR, &a).value,
+                );
+                pcb::destroy(kp);
+                return Err(KernelError::InternalError);
+            }
+            if pcb::get_sched_reset_on_fork(kp) != Some(false) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: KEEP_POLICY must ignore same-call RESET_ON_FORK; got {:?}",
+                    pcb::get_sched_reset_on_fork(kp)
+                );
+                pcb::destroy(kp);
+                return Err(KernelError::InternalError);
+            }
+            // (d) sanity: a plain setattr WITHOUT either keep flag DOES
+            // store policy+priority (regression guard the keep flags do
+            // not over-suppress).  policy=2 (RR) priority=7.
+            let mut sa = [0u8; 48];
+            sa[0..4].copy_from_slice(&48u32.to_le_bytes());
+            sa[4..8].copy_from_slice(&2u32.to_le_bytes());       // policy = RR
+            sa[20..24].copy_from_slice(&7u32.to_le_bytes());     // priority = 7
+            let sa_ptr = sa.as_ptr() as u64;
+            let a = SyscallArgs { arg0: kp, arg1: sa_ptr, arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: setattr(RR,7) want 0 got {}",
+                    dispatch_linux(nr::SCHED_SETATTR, &a).value,
+                );
+                pcb::destroy(kp);
+                return Err(KernelError::InternalError);
+            }
+            if pcb::get_sched_policy(kp) != Some(2) || pcb::get_sched_priority(kp) != Some(7) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: plain setattr must store RR/7; got {:?}/{:?}",
+                    pcb::get_sched_policy(kp), pcb::get_sched_priority(kp)
+                );
+                pcb::destroy(kp);
+                return Err(KernelError::InternalError);
+            }
+            pcb::destroy(kp);
+        }
+        serial_println!(
+            "[syscall/linux]   sched_setattr SCHED_FLAG_KEEP_POLICY/KEEP_PARAMS semantics (batch 528): OK"
         );
 
         // Batch 384: landlock_create_ruleset VERSION-query.  Pre-batch

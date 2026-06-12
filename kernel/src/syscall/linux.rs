@@ -31075,6 +31075,38 @@ fn test_waitid_scan() -> crate::error::KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
+    // --- siginfo_t on-wire byte layout (ABI contract) ---
+    // write_waitid_siginfo's field offsets (si_signo@0, si_code@8,
+    // si_pid@16, si_uid@20, si_status@24) are what ported Linux binaries
+    // read; a wrong offset would silently corrupt si_status for every
+    // caller.  The scan tests above only check the WaitidFound struct, so
+    // verify the actual bytes here.  write_waitid_siginfo does not itself
+    // validate the pointer (the syscall does), so a kernel stack buffer is
+    // a legal target in this context.
+    const _: () = assert!(core::mem::size_of::<WaitidSiginfo>() == 128);
+    let mut buf = [0u8; 128];
+    let probe = WaitidFound {
+        si_code: CLD_EXITED,
+        si_pid: 0x1234,
+        si_uid: 7,
+        si_status: 99,
+    };
+    write_waitid_siginfo(buf.as_mut_ptr() as u64, &probe);
+    let rd = |s: Option<&[u8]>| -> Option<i32> {
+        s.and_then(|b| <[u8; 4]>::try_from(b).ok())
+            .map(i32::from_ne_bytes)
+    };
+    if rd(buf.get(0..4)) != Some(17) // si_signo = SIGCHLD
+        || rd(buf.get(8..12)) != Some(CLD_EXITED) // si_code
+        || rd(buf.get(16..20)) != Some(0x1234) // si_pid
+        || rd(buf.get(20..24)) != Some(7) // si_uid
+        || rd(buf.get(24..28)) != Some(99)
+    // si_status
+    {
+        serial_println!("[syscall/linux]   FAIL: waitid siginfo byte layout");
+        return Err(KernelError::InternalError);
+    }
+
     serial_println!("[syscall/linux]   waitid scan/siginfo: OK");
     Ok(())
 }

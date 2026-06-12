@@ -1,4 +1,55 @@
 
+## FIXED (2026-06-12): boot-stack overflow from monolithic translation self-test → futex #UD (known-issues F10)
+## Was: after applying ABI batch 536, boot reached "[syscall/linux] Translation self-test PASSED"
+## then faulted on the FIRST context switch of ipc::futex::self_test()'s task 36:
+## EXCEPTION: Invalid Opcode (#UD) at 0xffffffff81133b0e, bytes 49 0f ae 20 = xsave64 [r8],
+## then FATAL: Unrecoverable kernel #UD. Never reached BOOT_OK. Deterministic with batch 536,
+## clean with it stashed — a pure layout-shift heisenbug (the batch-536 change is a translator-
+## only sys_fallocate gate not even reached by the futex test).
+##   ROOT CAUSE: boot-stack overflow. switch_context (sched/context.rs) dispatches the FPU save
+##   on global FPU_STRATEGY (0=FXSAVE,1=XSAVE,2=XSAVEOPT). Boot selected FXSAVE (QEMU has no XSAVE)
+##   yet the crash ran the XSAVE64 branch → FPU_STRATEGY was corrupted 0→1. The corruptor:
+##   syscall::linux::self_test() is one ~1.4 MB monolithic function that runs directly on the
+##   guardless boot stack; at opt-level=0 (no stack-slot coloring) its single frame is the SUM of
+##   every per-batch block's locals (~480 KiB, disasm: sub r11,0x75000 + probe loop + sub rsp,0x900).
+##   With the old 512 KiB boot stack minus kernel_main's frame, batch 536's extra locals tipped the
+##   frame past the stack bottom; the unoptimized stack-probe prologue (writes 0 to each 4 KiB page
+##   it descends) scribbled the adjacent .bss, flipping the FPU_STRATEGY byte. self_test never
+##   re-reads that byte, so it printed PASSED and returned; the poison only bit when the futex
+##   context switch trusted strategy=1 and ran xsave64 on a CPU without CR4.OSXSAVE → #UD. No guard
+##   page on the boot stack is what made the overflow silent instead of a clean fault.
+##   FIX SHIPPED (kernel/src/main.rs):
+##     1. KERNEL_BOOT_STACK_SIZE 512 KiB → 2 MiB (≈1000+ batches of runway).
+##     2. 64 KiB bottom redzone canary (BOOT_STACK_REDZONE / BOOT_STACK_CANARY=0xC7):
+##        init_boot_stack_canary() fills it early in kernel_main (RSP near top);
+##        check_boot_stack_canary() (called right after syscall::linux::self_test()) volatile-scans
+##        it and FATAL-halts with "boot stack overflow detected" if clobbered. The stack-probe
+##        prologue guarantees any frame that reaches the redzone trips the canary — future overruns
+##        become a clear diagnostic before they can corrupt .bss.
+##   VERIFIED: boot-test reaches BOOT_OK in 26s, serial runs to the `user>` shell prompt, canary
+##   scan clean, futex self-test passes. (One validation run hit the pre-existing intermittent
+##   OOM-self-test truncation tracked as W1 — unrelated; immediate re-run clean.)
+##   PROPER LONG-TERM FIX = TD4 (known-issues.md): split the monolithic self_test() into small
+##   #[inline(never)] sub-functions so no single boot-stack frame is large. Deferred (hand-split of
+##   one 39k-line 4-space block risks mis-scoping shared locals); the 2 MiB stack + canary make the
+##   system correct and self-diagnosing meanwhile. Frame grows ~1 KiB/batch, so TD4 is the real cap.
+##
+## DONE (2026-06-12): ABI batch 536 — fallocate FMODE_WRITE gate (sys_fallocate returns EBADF for read-only fd)
+## Linux v6.6 fs/open.c vfs_fallocate(): `if (!(file->f_mode & FMODE_WRITE)) return -EBADF;` — a
+## fallocate on a fd opened without write access fails EBADF, checked before the filesystem's
+## ->fallocate and before the mode/EOPNOTSUPP path. Our translator (kernel/src/syscall/linux.rs
+## sys_fallocate) previously skipped straight to the terminal EOPNOTSUPP/EINVAL handling without the
+## FMODE_WRITE check, so a read-only fd wrongly got EOPNOTSUPP/EINVAL instead of EBADF.
+##   FIX: added a gate after the UNSHARE gate / before terminal EOPNOTSUPP — if caller_pid() and the
+##   fd resolves in the per-process Linux fd table, reject with EBADF when
+##   !fd_access_is_writable(entry.status_flags). Translator-only; matches v6.6 ordering (FMODE_WRITE
+##   before the EINVAL mode validation, which our terminal arm still applies for writable fds).
+##   SELF-TEST (stamp "fallocate FMODE_WRITE gate (batch 536): OK", serial line 512): dispatches
+##   nr::FALLOCATE three times (mode 0x4000→EOPNOTSUPP, 0x80→EOPNOTSUPP, 0x09→EINVAL for a writable
+##   path) + asserts fd_access_is_writable(0)==false. The EBADF arm itself is not dispatch-testable
+##   in-kernel (caller_pid()==None at boot, so the fd-table gate is skipped — same caller-None
+##   pattern as the other fd-gated batches); the predicate is unit-asserted instead.
+##
 ## FIXED (2026-06-12): kernel-level signalfd blocking read now parks the caller
 ## Was: a read of a signalfd with no masked-pending signal returned EAGAIN even for a
 ## BLOCKING (non-SFD_NONBLOCK) fd, because this kernel had no signal-arrival wakeup path

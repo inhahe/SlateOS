@@ -178,7 +178,7 @@ mod workqueue;
 // Kernel entry point
 // ---------------------------------------------------------------------------
 
-/// Size of the dedicated kernel boot stack (512 KiB).
+/// Size of the dedicated kernel boot stack (2 MiB).
 ///
 /// Limine's default boot stack is only 64 KiB and lives in
 /// bootloader-reclaimable memory immediately above the page tables Limine
@@ -191,13 +191,95 @@ mod workqueue;
 /// damage until a later walk wedged the CPU).  We therefore switch to this
 /// dedicated stack, in the kernel's own `.bss` and far from any bootloader
 /// structures, before doing any real work.
-const KERNEL_BOOT_STACK_SIZE: usize = 512 * 1024;
+///
+/// **Sized at 2 MiB** because the boot-time self-tests run directly on this
+/// stack and one of them — `syscall::linux::self_test()` — is a single
+/// monolithic ~1.4 MB function whose unoptimized (`opt-level=0`, no
+/// stack-slot coloring) frame is already ~480 KiB and grows by ~1 KiB with
+/// every Linux-ABI fidelity batch.  At 512 KiB that frame overflowed the
+/// boot stack and silently scribbled the adjacent `.bss` (it flipped
+/// `sched::context::FPU_STRATEGY` from FXSAVE→XSAVE, which then `#UD`-faulted
+/// the first post-self-test context switch — a baffling crash far from the
+/// real cause).  See `known-issues.md`: the proper long-term fix is to split
+/// that monolithic function so no single frame is large; until then this
+/// stack is generously sized and the [`BOOT_STACK_REDZONE`] canary below
+/// turns any future overflow into a clear FATAL rather than silent
+/// corruption.
+const KERNEL_BOOT_STACK_SIZE: usize = 2 * 1024 * 1024;
+
+/// Bytes at the *bottom* (lowest addresses) of [`KERNEL_BOOT_STACK`] reserved
+/// as an overflow-detection redzone.  The usable stack is everything above
+/// this; the redzone is filled with [`BOOT_STACK_CANARY`] at boot and
+/// verified by [`check_boot_stack_canary`].  Because the unoptimized
+/// stack-probe prologue writes a zero to every 4 KiB page it descends
+/// through, any frame that reaches the redzone is guaranteed to clobber the
+/// canary pattern and be detected before the overflow can corrupt the
+/// `.bss` that lies below the stack array.
+const BOOT_STACK_REDZONE: usize = 64 * 1024;
+
+/// Magic byte written across the boot-stack redzone.  Chosen to be unlikely
+/// to appear as a legitimate stack value and easy to spot in a memory dump.
+const BOOT_STACK_CANARY: u8 = 0xC7;
+
+/// Usable boot-stack size in KiB (everything above the redzone), precomputed
+/// in a const context so the runtime diagnostic avoids a checked-arithmetic
+/// lint.
+const BOOT_STACK_USABLE_KIB: usize = (KERNEL_BOOT_STACK_SIZE - BOOT_STACK_REDZONE) / 1024;
 
 /// The dedicated kernel boot stack.  16-byte aligned for the System V ABI.
 #[repr(C, align(16))]
 struct KernelBootStack([u8; KERNEL_BOOT_STACK_SIZE]);
 
 static mut KERNEL_BOOT_STACK: KernelBootStack = KernelBootStack([0; KERNEL_BOOT_STACK_SIZE]);
+
+/// Fill the boot-stack redzone with the canary pattern.
+///
+/// Called once, very early in [`kernel_main`], while `RSP` is near the top
+/// of the stack so the bottom redzone is guaranteed unused.  Subsequent
+/// deep self-tests that overflow toward the bottom will overwrite this
+/// pattern, which [`check_boot_stack_canary`] then detects.
+///
+/// # Safety
+///
+/// Must be called with `RSP` above the redzone (i.e. before any deep call
+/// chain), so that writing the redzone does not clobber a live frame.
+unsafe fn init_boot_stack_canary() {
+    // SAFETY: `KERNEL_BOOT_STACK` is a dedicated static; we write only its
+    // lowest `BOOT_STACK_REDZONE` bytes, which are unused while RSP is near
+    // the top.  The range is in-bounds (`BOOT_STACK_REDZONE < SIZE`).
+    unsafe {
+        let base = core::ptr::addr_of_mut!(KERNEL_BOOT_STACK).cast::<u8>();
+        core::ptr::write_bytes(base, BOOT_STACK_CANARY, BOOT_STACK_REDZONE);
+    }
+}
+
+/// Verify the boot-stack redzone canary is intact; FATAL-halt if not.
+///
+/// A clobbered canary means a frame descended into the reserved redzone —
+/// i.e. the boot stack overflowed (or came within [`BOOT_STACK_REDZONE`]
+/// bytes of doing so).  Continuing would risk the exact silent-`.bss`-
+/// corruption class this guard exists to catch, so we report and halt.
+fn check_boot_stack_canary() {
+    // SAFETY: read-only scan of the dedicated static's lowest redzone bytes.
+    // `read_volatile` is required so the optimizer cannot prove the region
+    // still holds the canary (a stack overflow's writes are invisible to it)
+    // and elide the check.  `add`/range iteration avoid checked-arithmetic
+    // lints.
+    let corrupted = unsafe {
+        let base = core::ptr::addr_of!(KERNEL_BOOT_STACK).cast::<u8>();
+        (0..BOOT_STACK_REDZONE).any(|i| base.add(i).read_volatile() != BOOT_STACK_CANARY)
+    };
+    if corrupted {
+        serial_println!(
+            "FATAL: boot stack overflow detected — redzone canary clobbered. \
+             A boot-time self-test frame exceeded the {} KiB usable boot \
+             stack. Increase KERNEL_BOOT_STACK_SIZE or split the offending \
+             self-test (see known-issues.md).",
+            BOOT_STACK_USABLE_KIB,
+        );
+        cpu::halt_loop();
+    }
+}
 
 /// Kernel entry point, called by the Limine bootloader.
 ///
@@ -252,6 +334,18 @@ extern "C" fn kernel_main() -> ! {
 
     serial_println!("=== Kernel booting ===");
     boot_timing::mark(boot_timing::Milestone::KernelEntry);
+
+    // Lay down the boot-stack overflow canary now, while RSP is near the top
+    // of the stack and the bottom redzone is guaranteed unused.  The deep
+    // boot-time self-tests run later on this same stack; if any frame grows
+    // into the redzone, `check_boot_stack_canary()` (called after the heavy
+    // self-tests) will catch it as a clean FATAL instead of letting the
+    // overflow silently corrupt the adjacent `.bss`.
+    // SAFETY: we are at the top of `kernel_main`'s frame on the boot stack,
+    // so RSP is far above the redzone — writing it cannot clobber live data.
+    unsafe {
+        init_boot_stack_canary();
+    }
 
     // Step 2: Parse boot information from Limine.
     let Some(boot_info) = boot::parse_boot_info() else {
@@ -502,6 +596,12 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("FATAL: Linux ABI translation self-test failed: {}", e);
         cpu::halt_loop();
     }
+    // The translation self-test is the deepest single frame that runs on the
+    // boot stack (a monolithic function whose unoptimized frame is ~480 KiB
+    // and grows with each ABI batch).  Verify it did not breach the redzone;
+    // a clobbered canary means the boot stack overflowed and adjacent `.bss`
+    // may be corrupt, so halt with a clear diagnostic rather than limp on.
+    check_boot_stack_canary();
 
     // Step 12: Initialize futex subsystem.
     // Futexes enable fast userspace synchronization: the uncontended

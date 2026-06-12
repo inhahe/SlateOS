@@ -47,14 +47,28 @@ truncated serial, no failure serials to bisect.** This **meets the
 of **0/22**. Consistent with the "OOM self-test is the victim, not the
 cause" assessment: the single recorded truncation has not reproduced.
 
-**Status:** downgraded to passive monitoring. Not fully closed yet
-only to stay consistent with project precedent (F6/F7 were closed
-after 90 consecutive clean boots); 22 dedicated clean runs plus
-routine boot tests are accumulating toward that. **Closure condition:**
-close this item (move to Fixed/Closed as "likely cured incidentally,"
-like F6/F7) once the combined dedicated-soak + routine-boot clean
-streak passes ~90 with no recurrence. Re-open and bisect immediately
-if any run truncates mid-self-test again.
+**Recurrence 2026-06-12 (second recorded):** while boot-testing the F10
+boot-stack fix (`build/boottest-536-fixed.log`, run `brqckyayz`), one run
+again truncated mid-line at exactly `[sysctl] mm.oom_pol…` during
+`mm::oom::self_test()` and never reached `BOOT_OK` within 300s. The
+immediate identical-binary re-run (`bx59ud6x2`) reached `BOOT_OK` in 26s
+with the full OOM test passing (`[oom]   Callback registration and
+invocation: OK`) and the shell prompt. This is the **same fingerprint** as
+the original truncation (same self-test, same mid-line cut point), and it
+is **not** caused by the F10 boot-stack change — the fix only enlarges the
+boot stack / adds a redzone canary and is unrelated to the OOM self-test
+path, and the canary did not trip. This recurrence **resets the clean
+streak** that the 22/22 soak had been accumulating toward the ~90 closure
+bar.
+
+**Status:** passive monitoring, clean streak reset to 0 by the 2026-06-12
+recurrence. **Closure condition unchanged:** close this item (move to
+Fixed/Closed as "likely cured incidentally," like F6/F7) once a fresh
+combined dedicated-soak + routine-boot clean streak passes ~90 with no
+recurrence. Re-open and bisect immediately on the next mid-self-test
+truncation; given two recorded recurrences now, a finer-grained marker
+pass around the `mm::oom::self_test()` / `sysctl::set` lock window
+(per the F1/F4 method) is the priority diagnostic when next observed.
 
 _(No other active bugs.  The two prior watchlist items — accounting
 self-test hang and invariant self-test hang — went 90 consecutive
@@ -67,6 +81,75 @@ deny — are now fixed; see F8 and F9.)_
 ---
 
 ## Fixed Bugs
+
+### F10. Boot-stack overflow from monolithic translation self-test silently corrupted `.bss` (FPU_STRATEGY) → futex-test `#UD` — FIXED 2026-06-12
+
+**Where:** `kernel/src/main.rs` boot stack (`KERNEL_BOOT_STACK`, was 512 KiB)
+vs. `kernel/src/syscall/linux.rs::self_test()` (a single ~1.4 MB monolithic
+function). Crash surfaced in `kernel/src/sched/context.rs::switch_context`
+reading `sched::context::FPU_STRATEGY`.
+
+**Symptom:** Boot reached `[syscall/linux] Translation self-test PASSED`,
+then the very next subsystem — `ipc::futex::self_test()` — spawned task 36
+("futex-test") and the first context switch faulted:
+`EXCEPTION: Invalid Opcode (#UD) at 0xffffffff81133b0e`, instruction bytes
+`49 0f ae 20` (= `xsave64 [r8]`), then `FATAL: Unrecoverable kernel #UD`.
+The kernel never reached `BOOT_OK`, so boot-test could not pass. Appeared
+only after the batch-536 ABI change (a translator-only `sys_fallocate`
+gate not even exercised by the futex test) — a classic layout-shift
+heisenbug. Reproduced deterministically with batch 536 applied; passed
+deterministically with it stashed.
+
+**Root cause:** Boot-stack overflow. `switch_context` dispatches the FPU
+save on the global `FPU_STRATEGY` byte (0=FXSAVE, 1=XSAVE, 2=XSAVEOPT).
+Boot init selected **FXSAVE** (QEMU CPU reports no XSAVE; serial line 84:
+`strategy=FXSAVE`), yet the crashing switch executed the **XSAVE64**
+branch → `FPU_STRATEGY` had been corrupted 0→1. The corruptor: the
+monolithic `syscall::linux::self_test()` runs directly on the boot stack
+and, in the unoptimized debug build (`opt-level=0`, no stack-slot
+coloring), its frame is the *sum* of every per-batch block's locals —
+disassembly of the prologue showed a ~480 KiB frame (`sub r11, 0x75000` +
+probe loop + `sub rsp, 0x900`). With the 512 KiB boot stack (no guard
+page) minus `kernel_main`'s own frame, batch 536's extra locals tipped the
+frame past the stack bottom; the prologue's page-probe / frame writes
+scribbled the adjacent `.bss`, flipping the `FPU_STRATEGY` byte to 1. The
+self-test still completed (it never re-reads that byte), printed PASSED,
+and returned — the poison only bit later when the futex context switch
+trusted the corrupted strategy and ran `xsave64` on a CPU without
+`CR4.OSXSAVE` → `#UD`. The boot stack having **no guard page** is what made
+the overflow silent instead of a clean fault (same silent-`.bss`/page-table
+class noted in the `KERNEL_BOOT_STACK` doc comment for the original Limine
+stack).
+
+**Fix (`kernel/src/main.rs`):**
+1. Enlarged `KERNEL_BOOT_STACK_SIZE` 512 KiB → **2 MiB** so the boot-time
+   self-tests fit with generous headroom (~1000+ ABI batches of runway).
+2. Added a **64 KiB bottom redzone canary** (`BOOT_STACK_REDZONE`,
+   `BOOT_STACK_CANARY = 0xC7`): `init_boot_stack_canary()` fills it early in
+   `kernel_main` (RSP near top), `check_boot_stack_canary()` (called right
+   after `syscall::linux::self_test()`) volatile-scans it and FATAL-halts
+   with a clear "boot stack overflow detected" message if clobbered. The
+   unoptimized stack-probe prologue writes a zero to every 4 KiB page it
+   descends through, so any frame that reaches the redzone is guaranteed to
+   trip the canary — converting future silent overflows into clear
+   diagnostics before they can corrupt the `.bss` below the stack.
+
+**Proper long-term fix (tracked as TD4):** the real smell is the monolithic
+~1.4 MB `self_test()` with an unbounded per-batch frame. It should be split
+into many small `#[inline(never)]` sub-functions so no single frame is
+large. Deferred because the function is one giant 4-space enclosing block
+(~39 k lines, opens early / closes at line 75298) and a hand-split risks
+silently mis-scoping shared locals; the 2 MiB stack + canary make the
+system correct and self-diagnosing in the meantime.
+
+**Verification:** boot-test with batch 536 applied now reaches `BOOT_OK`
+in 26s (was deterministic `#UD` FATAL before `BOOT_OK`), with serial
+running through to the `user>` shell prompt; the redzone canary scan runs
+clean (no "boot stack overflow detected"), `[syscall/linux] Translation
+self-test PASSED`, and the futex self-test that previously faulted now
+completes normally. (One of the validation runs hit the pre-existing
+intermittent OOM-self-test truncation tracked as W1 — unrelated to this
+fix; the immediate re-run was clean.)
 
 ### F8. quota self-test Test 5: wrong inode expectation (test bug, not production) — FIXED 2026-06-10
 
@@ -357,6 +440,43 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 ---
 
 ## Technical Debt
+
+### TD4. Monolithic `syscall::linux::self_test()` has an unbounded boot-stack frame — OPEN 2026-06-12
+
+**What:** `kernel/src/syscall/linux.rs::self_test()` is a single ~1.4 MB
+function (~39 k lines, opens near line 35858, closes near line 75298) whose
+body is one giant 4-space enclosing block. Each ABI-fidelity batch (536 and
+counting) appends its own locals inside that block. In the unoptimized
+debug build (`opt-level=0`, no LLVM stack-slot coloring), the compiler does
+**not** reuse stack slots across the lexically-disjoint per-batch sub-blocks,
+so the function's single frame is the *sum* of every batch's locals
+(~480 KiB as of batch 536 and growing monotonically). It runs directly on
+the guardless boot stack — this is exactly what caused F10 (silent
+`.bss`/`FPU_STRATEGY` corruption when the frame overran the old 512 KiB
+stack).
+
+**Why it's debt, not a bug now:** F10's fix (2 MiB boot stack + 64 KiB
+redzone canary) gives ~1000+ batches of runway and converts any future
+overrun into a clean `FATAL: boot stack overflow detected` halt instead of
+silent corruption. So the system is correct and self-diagnosing. But the
+frame grows ~1 KiB/batch, so this only defers the wall; it does not remove
+it.
+
+**Proper fix:** split `self_test()` into many small `#[inline(never)]`
+sub-functions (e.g. one per batch or per logical group, `fn self_test_b536()
+-> Result<…>` …) called in sequence from a thin driver, so each sub-frame is
+allocated and freed around its call and no single frame is large. This caps
+the boot-stack frame regardless of batch count and is the real removal of
+the F10 failure class.
+
+**Why deferred:** the function is one giant 4-space block; a hand-split risks
+silently mis-scoping locals shared across batch boundaries (a local defined
+in an early batch and read in a later one would stop compiling, or worse,
+shadow). Doing it safely means iterating in small chunks with a build after
+each (~50 s/cycle), and the canary makes it non-urgent. **Trigger to do it
+properly:** before the boot-stack usage (reported by the canary scan / a
+future high-water mark print) crosses ~50 % of the 2 MiB stack, or
+opportunistically when next touching the self-test scaffolding.
 
 ### TD3. Prefix-boundary subtree checks: audit every site for trailing-slash correctness — RESOLVED 2026-06-10
 

@@ -51740,9 +51740,29 @@ Implementation plan (once verified):
      verify priority unchanged; verify KEEP_POLICY makes a same-call
      RESET_ON_FORK bit be ignored (taken from task instead).
 
-TRIGGER to implement: next time the v6.6 kernel/sched/syscalls.c
-source is in hand to quote verbatim (the campaign's citation bar),
-fold this into a batch alongside re-reading __sched_setscheduler's
-KEEP_PARAMS path.  Low user-visible urgency (no known program depends
-on KEEP_* against our OS yet); tracked here so it isn't re-discovered
-from scratch.
+TRIGGER to implement: next time the v6.6 sched-syscall source is in
+hand to quote verbatim (the campaign's citation bar), fold this into a
+batch alongside re-reading __sched_setscheduler's KEEP_PARAMS path.
+Low user-visible urgency (no known program depends on KEEP_* against
+our OS yet); tracked here so it isn't re-discovered from scratch.
+
+SOURCE-ACCESS NOTE (2026-06-12): attempted to pull the verbatim v6.6
+source via WebFetch and hit dead-ends — recording them so a future
+session skips the fumbling:
+  * In v6.6 these functions live in kernel/sched/core.c (NOT
+    syscalls.c — the kernel/sched/syscalls.c split is a LATER release;
+    the existing batch-507 note's "syscalls.c" path label is the
+    modern name, not the v6.6 location).
+  * raw.githubusercontent.com/torvalds/linux/v6.6/kernel/sched/core.c
+    is ~11k+ lines; WebFetch only delivers the file HEAD and truncates
+    before reaching __sched_setscheduler / sched_setattr (deep in the
+    file), so it can't quote them.
+  * elixir.bootlin.com source pages are JS-rendered — WebFetch gets
+    only the navigation chrome, not the code.
+  * v6.7 and v6.10 .../kernel/sched/syscalls.c both 404 at those tags
+    (split not present yet at those versions).
+  Better approach to try next: fetch the specific function from a
+  line-anchored cgit "plain" view of a SMALL range, or fetch the
+  version where syscalls.c first exists (verify the exact tag), read
+  the logic there, then confirm the KEEP_* lines are byte-identical to
+  v6.6 core.c (the split was a mechanical move) before citing v6.6.

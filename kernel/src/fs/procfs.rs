@@ -550,6 +550,7 @@ const PID_FILES: &[&str] = &[
     "statm",
     "limits",
     "environ",
+    "auxv",
     "mountinfo",
     "cgroup",
     "cpuset",
@@ -2161,6 +2162,30 @@ fn gen_pid_environ(task_id: u64) -> KernelResult<Vec<u8>> {
     Ok(data)
 }
 
+/// `/proc/<pid>/auxv` — the process's ELF auxiliary vector.
+///
+/// On Linux this is the raw `Elf64_auxv_t` byte stream the kernel placed
+/// on the process's initial stack: `(a_type, a_val)` `u64` pairs ending
+/// in an `AT_NULL` terminator.  glibc's `getauxval(3)` reads it as a
+/// fallback when `prctl(PR_GET_AUXV)` is unavailable, and tools like
+/// `LD_SHOW_AUXV`, `ldd`, and `pmap -X` parse it.
+///
+/// Only **Linux-ABI** processes have an auxv (built and persisted by
+/// `proc::linux_stack` at spawn/exec — see `pcb::linux_saved_auxv`).  A
+/// *native* process has none by design (design-decision #4: it gets
+/// argv/envp from `SYS_PROCESS_GET_ARGS` and never has a SysV stack), so
+/// the honest answer is an empty file — which is also what a real Linux
+/// kernel returns for a process whose auxv is unavailable.  Gated on
+/// process existence: an unknown pid yields `NotFound`.
+fn gen_pid_auxv(task_id: u64) -> KernelResult<Vec<u8>> {
+    // Confirm the process exists (so an unknown pid is NotFound, not an
+    // empty file) by probing a field every live process has.
+    if crate::proc::pcb::get_proc_envp(task_id).is_none() {
+        return Err(KernelError::NotFound);
+    }
+    Ok(crate::proc::pcb::linux_saved_auxv(task_id).unwrap_or_default())
+}
+
 /// `/proc/<pid>/stat` — single-line task statistics (Linux-compatible format).
 ///
 /// Emits the full 52-field `/proc/[pid]/stat` line in the exact field
@@ -3153,6 +3178,7 @@ fn generate_pid(task_id: u64, file_name: &str) -> KernelResult<Vec<u8>> {
         "statm" => gen_pid_statm(task_id),
         "limits" => gen_pid_limits(task_id),
         "environ" => gen_pid_environ(task_id),
+        "auxv" => gen_pid_auxv(task_id),
         "mountinfo" => gen_pid_mountinfo(task_id),
         "cgroup" => gen_pid_cgroup(task_id),
         "cpuset" => gen_pid_cpuset(task_id),

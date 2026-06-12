@@ -354,6 +354,23 @@ pub struct Process {
     /// table implementation and [`crate::syscall::linux`] for the
     /// callers.
     pub linux_fd_table: Option<alloc::boxed::Box<super::linux_fd::KernelFdTable>>,
+    /// Saved auxiliary vector for Linux-ABI processes, as the raw
+    /// little-endian `Elf64_auxv_t` byte stream (pairs of
+    /// `(a_type, a_val)` u64s) ending in an `AT_NULL` terminator.
+    ///
+    /// `None` for Native processes — they receive argv/envp from the
+    /// kernel via `SYS_PROCESS_GET_ARGS` and have no auxv at all by
+    /// design (the auxv is a Linux/SysV-ABI construct that must never
+    /// enter the native launch path — design-decision #4).  `Some` for
+    /// Linux-ABI processes: a verbatim copy of the auxv that
+    /// [`crate::proc::linux_stack::install_linux_stack`] wrote onto the
+    /// SysV initial stack, captured at spawn/exec time so it can be
+    /// served back from `prctl(PR_GET_AUXV)` and `/proc/<pid>/auxv`
+    /// without re-reading the user stack.  Replaced on `exec`; cleared
+    /// to `None` for native processes; **not** inherited across `fork`
+    /// in the sense of being rebuilt (a forked child shares the parent's
+    /// already-constructed stack, so the copy is cloned verbatim).
+    pub linux_saved_auxv: Option<alloc::vec::Vec<u8>>,
     /// Current working directory, stored as a canonical absolute path.
     ///
     /// Invariants maintained by [`set_cwd`]:
@@ -1013,6 +1030,7 @@ impl Process {
             proc_envp: Vec::new(),
             abi_mode: AbiMode::Native,
             linux_fd_table: None,
+            linux_saved_auxv: None,
             // Every process starts at the filesystem root.  `chdir`
             // changes this; `fork_create` clones the parent's value.
             cwd: alloc::vec![b'/'],
@@ -1238,6 +1256,7 @@ pub fn fork_create(
         vmas,
         abi_mode,
         linux_fd_table,
+        linux_saved_auxv,
         cwd,
         rlimits,
         linux_as_bytes,
@@ -1282,6 +1301,10 @@ pub fn fork_create(
             parent.vmas.clone(),
             parent.abi_mode,
             cloned_fd_table,
+            // A forked child shares the parent's already-built SysV
+            // initial stack via CoW, so it carries the same auxv until
+            // it execve's (which rebuilds it).
+            parent.linux_saved_auxv.clone(),
             parent.cwd.clone(),
             parent.rlimits,
             parent.linux_as_bytes,
@@ -1381,6 +1404,7 @@ pub fn fork_create(
         // forked child speaks the same ABI as its parent.
         abi_mode,
         linux_fd_table,
+        linux_saved_auxv,
         // POSIX: the child inherits the parent's cwd at the moment
         // of fork.  Subsequent chdirs in either process do not affect
         // the other (each owns its own Vec).
@@ -3713,6 +3737,61 @@ pub fn linux_fd_install_stdio(pid: ProcessId) -> KernelResult<()> {
         super::linux_fd::KernelFdTable::with_stdio(),
     ));
     Ok(())
+}
+
+/// Record the auxiliary-vector byte stream that the Linux SysV
+/// initial-stack builder wrote onto `pid`'s stack, so it can later be
+/// served from `prctl(PR_GET_AUXV)` and `/proc/<pid>/auxv` without
+/// re-reading user memory.
+///
+/// `auxv` is the verbatim little-endian `Elf64_auxv_t` stream produced
+/// by [`crate::proc::linux_stack::install_linux_stack`]: pairs of
+/// `(a_type, a_val)` `u64`s terminated by an `AT_NULL` (0, 0) entry.
+/// Replaces any prior saved auxv (e.g. across `execve`).
+///
+/// Only meaningful for Linux-ABI processes; native processes must never
+/// call this (they have no auxv by design — design-decision #4).
+///
+/// # Errors
+///
+/// - [`KernelError::NoSuchProcess`] if `pid` does not refer to a live
+///   process.
+pub fn set_linux_saved_auxv(
+    pid: ProcessId,
+    auxv: alloc::vec::Vec<u8>,
+) -> KernelResult<()> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+    proc.linux_saved_auxv = Some(auxv);
+    Ok(())
+}
+
+/// Return a copy of `pid`'s saved Linux auxiliary vector, or `None` if
+/// the process has none (native processes, or a Linux-ABI process whose
+/// stack has not yet been built).
+///
+/// The returned bytes are the raw `Elf64_auxv_t` stream — see
+/// [`set_linux_saved_auxv`].  Callers (`PR_GET_AUXV`, `/proc/<pid>/auxv`)
+/// copy it out under the process-table lock so the snapshot is
+/// consistent.
+#[must_use]
+pub fn linux_saved_auxv(pid: ProcessId) -> Option<alloc::vec::Vec<u8>> {
+    let table = PROCESS_TABLE.lock();
+    let proc = table.get(&pid)?;
+    proc.linux_saved_auxv.clone()
+}
+
+/// Drop `pid`'s saved Linux auxiliary vector, if any.
+///
+/// Called on `execve` into a *native* image: a native process has no
+/// auxv by design, so any auxv left over from a previous Linux-ABI image
+/// must not linger.  A no-op if `pid` has no saved auxv or does not
+/// refer to a live process.
+pub fn clear_linux_saved_auxv(pid: ProcessId) {
+    let mut table = PROCESS_TABLE.lock();
+    if let Some(proc) = table.get_mut(&pid) {
+        proc.linux_saved_auxv = None;
+    }
 }
 
 /// Walk `pid`'s Linux fd table, remove every entry whose `FD_CLOEXEC`

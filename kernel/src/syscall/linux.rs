@@ -7187,31 +7187,21 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
         //     short read by comparing the return value against
         //     the buffer length.
         //
-        // Our stance: no process has a saved auxv yet, so the
-        // truthful answer is "an auxv consisting of a single
-        // AT_NULL terminator" — 16 bytes of zeros (one
-        // elf_auxv_t with a_type = AT_NULL = 0, a_un.a_val = 0).
-        // A caller walking the result sees an immediately-
-        // terminated vector.
-        //
-        // IMPORTANT (corrected 2026-06-12): an earlier version of
-        // this comment claimed the ELF loader writes the auxv onto
-        // the user stack at exec and that getauxval's stack
-        // fallback therefore works.  That is FALSE — there is NO
-        // System V initial stack anywhere.  Native processes get
-        // argv/envp from the kernel via SYS_PROCESS_GET_ARGS (see
-        // posix/src/crt.rs) and have no auxv at all by design; the
-        // auxv is a Linux/SysV-ABI construct that must never enter
-        // the native launch path.  A real auxv will appear only for
-        // Linux-ABI processes, built by the (not-yet-existing)
-        // Linux compat ELF loader when it constructs a SysV initial
-        // stack, and stored in that process's Linux-ABI state.
-        //
-        // Known limitation: tracked in todo.txt (the
-        // "/proc/<pid>/auxv (Linux-ABI processes ONLY)" block).
-        // When that loader lands, this arm returns the per-process
-        // saved auxv for Linux-ABI pids and keeps the bare AT_NULL
-        // terminator for native pids.  No surface change required.
+        // Our stance (as of 2026-06-12): a Linux-ABI process *does*
+        // have a saved auxv — the SysV initial-stack builder
+        // (`proc::linux_stack`) writes argc/argv/envp/auxv onto the
+        // user stack at spawn/exec and persists a verbatim copy in the
+        // process's Linux-ABI PCB state (`pcb::linux_saved_auxv`).  This
+        // arm returns that real auxv.  A *native* process has no auxv at
+        // all by design — it gets argv/envp from the kernel via
+        // SYS_PROCESS_GET_ARGS (see posix/src/crt.rs) and the auxv is a
+        // Linux/SysV-ABI construct that must never enter the native
+        // launch path (design-decision #4).  For native pids (and any
+        // process whose stack has not yet been built) we fall back to
+        // the truthful minimum: an auxv consisting of a single AT_NULL
+        // terminator — 16 bytes of zeros (one elf_auxv_t with
+        // a_type = AT_NULL = 0, a_un.a_val = 0).  A caller walking
+        // either result sees a properly-terminated vector.
         0x4155_5856 => {
             if args.arg3 != 0 || args.arg4 != 0 {
                 return linux_err(errno::EINVAL);
@@ -7219,11 +7209,20 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
             let buf_ptr = args.arg1;
             let buf_len = args.arg2 as usize;
 
-            // Single AT_NULL entry = 2 * sizeof(unsigned long) =
-            // 16 bytes of zeros on x86_64.  This is the minimum
-            // valid auxv: a_type = AT_NULL, a_val = 0.
+            // The truthful auxv for the calling process: a Linux-ABI
+            // process has a real one persisted by the SysV initial-stack
+            // builder; a native process (or one whose stack has not yet
+            // been built) has none, so we report the minimum valid auxv —
+            // a single AT_NULL entry (16 zero bytes on x86_64:
+            // a_type = AT_NULL = 0, a_val = 0).  Callers walking either
+            // result see a properly-terminated vector.
             const AUXV_TERMINATOR_LEN: usize = 16;
-            let auxv: [u8; AUXV_TERMINATOR_LEN] = [0; AUXV_TERMINATOR_LEN];
+            let saved = caller_pid().and_then(crate::proc::pcb::linux_saved_auxv);
+            let auxv: &[u8] = match saved.as_deref() {
+                Some(bytes) if !bytes.is_empty() => bytes,
+                _ => &[0u8; AUXV_TERMINATOR_LEN],
+            };
+            let auxv_len = auxv.len();
 
             if buf_len > 0 {
                 // Linux's copy_to_user faults on a NULL buf when
@@ -7231,14 +7230,14 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
                 if buf_ptr == 0 {
                     return linux_err(errno::EFAULT);
                 }
-                let to_copy = buf_len.min(AUXV_TERMINATOR_LEN);
+                let to_copy = buf_len.min(auxv_len);
                 if let Err(e) = crate::mm::user::validate_user_write(buf_ptr, to_copy) {
                     return linux_err(linux_errno_for(e));
                 }
                 // SAFETY: validate_user_write above confirmed a
-                // `to_copy`-byte writable range at `buf_ptr`; we
-                // copy exactly that many bytes from a stack-local
-                // zero array.
+                // `to_copy`-byte writable range at `buf_ptr`; we copy
+                // exactly that many bytes (bounded by `auxv.len()`) from
+                // the auxv slice.
                 let r = unsafe {
                     crate::mm::user::copy_to_user(auxv.as_ptr(), buf_ptr, to_copy)
                 };
@@ -7249,7 +7248,7 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
             // Linux returns the full saved_auxv length regardless
             // of the buffer size — callers detect truncation by
             // comparing this return value against `buf_len`.
-            SyscallResult::ok(AUXV_TERMINATOR_LEN as i64)
+            SyscallResult::ok(auxv_len as i64)
         }
         // PR_GET_SECUREBITS (27) — return the per-task securebits
         // word.  capsh, libcap, and hardened-container init code

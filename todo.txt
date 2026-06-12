@@ -370,6 +370,24 @@
 ## gen_pid_auxv() (honestly-empty AT_NULL for native pids).  The build is
 ## done; only the save+serve plumbing is left.
 ##
+## RESOLVED (2026-06-12): the save+serve plumbing now exists.
+##   - pcb::Process gained `linux_saved_auxv: Option<Vec<u8>>` (None for
+##     native, Some for Linux-ABI), cloned across fork, cleared on exec
+##     into a native image.  Accessors: pcb::set_linux_saved_auxv /
+##     linux_saved_auxv / clear_linux_saved_auxv.
+##   - install_linux_stack now returns InstalledLinuxStack { rsp,
+##     auxv_bytes }; build_sysv_stack serializes the final auxv (incl.
+##     AT_RANDOM/AT_EXECFN/AT_NULL) into SysvStackImage::auxv_bytes.
+##     spawn_process + exec persist auxv_bytes via set_linux_saved_auxv.
+##   - PR_GET_AUXV (syscall/linux.rs) serves caller_pid()'s saved auxv
+##     when present, else the 16-byte AT_NULL terminator (native pids).
+##   - /proc/<pid>/auxv served by gen_pid_auxv (procfs.rs), added to
+##     PID_FILES: saved bytes for Linux-ABI pids, empty file for native.
+##   - Tests: spawn self-test verifies auxv persisted (16-byte-aligned,
+##     AT_NULL-terminated); existing PR_GET_AUXV batch-89 tests still pass
+##     (boot/native context has no saved auxv -> 16-byte fallback).
+## This auxv FOLLOW-UP block is now CLOSED.
+##
 ## SYSTEMIC FINDING (2026-06-11): fabricated demo data in fs:: diagnostic
 ## modules' init_defaults() — a whole FAMILY, not isolated incidents.
 ## ~250 modules under kernel/src/fs/ define an init_defaults().  Many of the

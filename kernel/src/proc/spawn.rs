@@ -498,12 +498,19 @@ pub fn spawn_process(
     // images.
     if is_linux_abi {
         match build_linux_initial_stack(pml4_phys, &elf_file, options.argv, options.envp) {
-            Ok(rsp) => {
+            Ok(installed) => {
                 serial_println!(
                     "[spawn] Built Linux SysV stack: rsp={:#x} (was {:#x})",
-                    rsp, user_rsp
+                    installed.rsp, user_rsp
                 );
-                user_rsp = rsp;
+                user_rsp = installed.rsp;
+                // Persist the auxv so PR_GET_AUXV / /proc/<pid>/auxv can
+                // serve the real vector for this Linux-ABI process.
+                if let Err(e) = pcb::set_linux_saved_auxv(pid, installed.auxv_bytes) {
+                    serial_println!("[spawn] Failed to save Linux auxv: {:?}", e);
+                    pcb::destroy(pid);
+                    return Err(e);
+                }
             }
             Err(e) => {
                 serial_println!("[spawn] Failed to build Linux SysV stack: {:?}", e);
@@ -921,12 +928,19 @@ pub fn exec_process(
     // Native images keep the bare stack from `setup_user_stack`.
     if new_abi_mode == pcb::AbiMode::Linux {
         match build_linux_initial_stack(pml4_phys, &elf_file, argv, envp) {
-            Ok(rsp) => {
+            Ok(installed) => {
                 serial_println!(
                     "[exec] Built Linux SysV stack: rsp={:#x} (was {:#x})",
-                    rsp, user_rsp
+                    installed.rsp, user_rsp
                 );
-                user_rsp = rsp;
+                user_rsp = installed.rsp;
+                // Replace any prior saved auxv with the freshly-built one
+                // (execve rebuilds the stack, so the auxv changes too).
+                if let Err(e) = pcb::set_linux_saved_auxv(pid, installed.auxv_bytes) {
+                    serial_println!("[exec] Failed to save Linux auxv: {:?}", e);
+                    let _ = pcb::set_exit_code(pid, KILLED_EXIT_CODE);
+                    return Err(e);
+                }
             }
             Err(e) => {
                 serial_println!("[exec] Failed to build Linux SysV stack: {:?}", e);
@@ -1020,6 +1034,11 @@ pub fn exec_process(
                 pid, e
             );
         }
+    } else {
+        // exec into a *native* image: a native process has no auxv by
+        // design (design-decision #4), so drop any auxv carried over
+        // from a previous Linux-ABI image.
+        pcb::clear_linux_saved_auxv(pid);
     }
 
     // Step 6: Store argv/envp in the PCB for the new process image.
@@ -1085,7 +1104,7 @@ pub fn exec_process(
 /// actual layout to [`crate::proc::linux_stack::install_linux_stack`],
 /// which writes argc/argv/envp/auxv into the already-mapped stack frames
 /// (`[USER_STACK_TOP - USER_STACK_SIZE, USER_STACK_TOP)`) and returns the
-/// aligned initial `%rsp`.
+/// aligned initial `%rsp` plus the serialized auxv to persist.
 ///
 /// This is **never** called for native processes — they get the bare
 /// stack from [`setup_user_stack`] and read argv via
@@ -1100,7 +1119,7 @@ fn build_linux_initial_stack(
     elf_file: &elf::ElfFile<'_>,
     argv: &[&[u8]],
     envp: &[&[u8]],
-) -> KernelResult<u64> {
+) -> KernelResult<crate::proc::linux_stack::InstalledLinuxStack> {
     let stack_bottom = USER_STACK_TOP
         .checked_sub(USER_STACK_SIZE)
         .ok_or(KernelError::Overflow)?;
@@ -1351,10 +1370,47 @@ fn test_spawn_linux_sysv_stack() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
+    // The auxv must have been persisted into the Linux-ABI PCB state so
+    // PR_GET_AUXV / /proc/<pid>/auxv can serve it.  Verify it is present,
+    // a whole number of 16-byte Elf64_auxv_t pairs, and AT_NULL-
+    // terminated (last pair = two zero u64s).
+    match pcb::linux_saved_auxv(result.pid) {
+        Some(auxv) if !auxv.is_empty() && auxv.len() % 16 == 0 => {
+            let tail = match auxv.len().checked_sub(16) {
+                Some(t) => t,
+                None => {
+                    serial_println!("[spawn]   FAIL: saved auxv length underflow");
+                    thread::on_thread_exit(result.task_id);
+                    pcb::destroy(result.pid);
+                    return Err(KernelError::InternalError);
+                }
+            };
+            if auxv.get(tail..).is_none_or(|t| t.iter().any(|&b| b != 0)) {
+                serial_println!(
+                    "[spawn]   FAIL: saved auxv not AT_NULL-terminated (len={})",
+                    auxv.len()
+                );
+                thread::on_thread_exit(result.task_id);
+                pcb::destroy(result.pid);
+                return Err(KernelError::InternalError);
+            }
+        }
+        other => {
+            serial_println!(
+                "[spawn]   FAIL: saved auxv missing/misaligned: {:?}",
+                other.as_ref().map(alloc::vec::Vec::len)
+            );
+            thread::on_thread_exit(result.task_id);
+            pcb::destroy(result.pid);
+            return Err(KernelError::InternalError);
+        }
+    }
+
     thread::on_thread_exit(result.task_id);
     pcb::destroy(result.pid);
 
     serial_println!("[spawn]   Linux SysV initial-stack delivery (exit(argc)): OK");
+    serial_println!("[spawn]   Linux auxv persisted for PR_GET_AUXV / procfs: OK");
     Ok(())
 }
 

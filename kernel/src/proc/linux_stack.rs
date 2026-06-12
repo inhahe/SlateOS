@@ -133,6 +133,13 @@ pub struct SysvStackImage {
     pub image: Vec<u8>,
     /// Initial user `%rsp` (points at `argc`), 16-byte aligned.
     pub rsp: u64,
+    /// The final auxiliary vector as a standalone little-endian
+    /// `Elf64_auxv_t` byte stream (`(a_type, a_val)` `u64` pairs ending
+    /// in `AT_NULL`), including the appended `AT_RANDOM`/`AT_EXECFN`
+    /// entries.  This is the same auxv embedded in `image`, extracted
+    /// here so the spawn/exec path can persist it for `PR_GET_AUXV` and
+    /// `/proc/<pid>/auxv` without re-parsing the stack.
+    pub auxv_bytes: Vec<u8>,
 }
 
 /// A byte blob to place in the info block, tracked until `%rsp` is known.
@@ -226,6 +233,14 @@ pub fn build_sysv_stack(
     }
     auxv.push(AuxEntry::new(AT_NULL, 0));
 
+    // Serialize the final auxv as a standalone byte stream (same layout
+    // as embedded in the stack image) so callers can persist it.
+    let mut auxv_bytes: Vec<u8> = Vec::with_capacity(auxv.len().saturating_mul(16));
+    for entry in &auxv {
+        auxv_bytes.extend_from_slice(&entry.a_type.to_le_bytes());
+        auxv_bytes.extend_from_slice(&entry.a_val.to_le_bytes());
+    }
+
     // ---- Phase 3: size the fixed lower part and align %rsp. ----
     //
     //   argc                        : 8
@@ -302,7 +317,7 @@ pub fn build_sysv_stack(
     }
     // [at, info_bottom) remains zero padding (already zeroed).
 
-    Ok(SysvStackImage { image, rsp })
+    Ok(SysvStackImage { image, rsp, auxv_bytes })
 }
 
 /// Compute the in-memory virtual address of the program-header table.
@@ -404,12 +419,24 @@ unsafe fn write_user_image(pml4_phys: u64, vaddr: u64, bytes: &[u8]) -> KernelRe
     Ok(())
 }
 
+/// Outcome of installing a Linux SysV initial stack: the entry `%rsp`
+/// and a standalone copy of the auxv to persist in the process's
+/// Linux-ABI state (for `PR_GET_AUXV` / `/proc/<pid>/auxv`).
+#[derive(Debug)]
+pub struct InstalledLinuxStack {
+    /// Aligned initial user `%rsp` (points at `argc`).
+    pub rsp: u64,
+    /// Raw `Elf64_auxv_t` byte stream — see [`SysvStackImage::auxv_bytes`].
+    pub auxv_bytes: Vec<u8>,
+}
+
 /// Build the System V initial stack for a Linux-ABI process and install
 /// it into the (already-mapped) user stack frames.
 ///
 /// Invoked **only** on the `AbiMode::Linux` branch of the spawn/exec
 /// path, after `setup_user_stack` has mapped the bare stack.  Returns the
-/// aligned initial `%rsp` to hand to the entry trampoline.
+/// aligned initial `%rsp` to hand to the entry trampoline, plus the
+/// serialized auxv for the caller to persist.
 ///
 /// * `stack_top` / `stack_limit` — bounds of the mapped user stack.
 /// * `elf` — the parsed executable (for the program-header auxv values).
@@ -428,7 +455,7 @@ pub fn install_linux_stack(
     argv: &[&[u8]],
     envp: &[&[u8]],
     random16: &[u8; 16],
-) -> KernelResult<u64> {
+) -> KernelResult<InstalledLinuxStack> {
     let aux = base_auxv(elf);
     let built = build_sysv_stack(stack_top, stack_limit, argv, envp, &aux, random16)?;
     // SAFETY: the stack frames [stack_limit, stack_top) were just mapped
@@ -438,7 +465,10 @@ pub fn install_linux_stack(
     unsafe {
         write_user_image(pml4_phys, built.rsp, &built.image)?;
     }
-    Ok(built.rsp)
+    Ok(InstalledLinuxStack {
+        rsp: built.rsp,
+        auxv_bytes: built.auxv_bytes,
+    })
 }
 
 // ---------------------------------------------------------------------------

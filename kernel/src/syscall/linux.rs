@@ -33448,9 +33448,11 @@ fn sys_prlimit64(args: &SyscallArgs) -> SyscallResult {
 /// `options`: `WNOHANG` (1) routes to the non-blocking
 /// [`pcb::try_reap`] / [`pcb::try_reap_any`]; the caller sees a
 /// "0 returned, no status written" result when no child is ready.
-/// `WUNTRACED` (2) / `WCONTINUED` (8) are accepted-but-ignored — we
-/// have no process-stop mechanism, so there are no stopped or
-/// continued children to report.  Any other options bits return
+/// `WUNTRACED` (2) reports a child that has been stopped for job control
+/// (status `(sig << 8) | 0x7f`, `WIFSTOPPED`) without reaping it;
+/// `WCONTINUED` (8) reports a stopped child that has since been resumed by
+/// `SIGCONT` (status `0xffff`, `WIFCONTINUED`).  Each transition is reported
+/// once (the `jc_report` is consumed).  Any other options bits return
 /// `-EINVAL`.
 ///
 /// `rusage`: optional pointer to a `struct rusage` (144 bytes on
@@ -33565,13 +33567,21 @@ fn sys_wait4(args: &SyscallArgs) -> SyscallResult {
     let parent_pid = caller_pid().unwrap_or(0);
     let task_id = crate::sched::current_task_id();
 
-    // Specific-pid vs any-child path mirrors sys_process_wait.
-    let (child_pid, info) = if pid_arg > 0 {
+    let want_stopped = (options & WUNTRACED) != 0;
+    let want_continued = (options & WCONTINUED) != 0;
+
+    // Specific-pid vs any-child path mirrors sys_process_wait.  Each loop
+    // breaks with the child PID and an already-encoded wstatus word, since a
+    // zombie exit and a job-control stop/continue report encode differently.
+    // wait4 has no WNOWAIT, so a reported job-control transition is always
+    // consumed (`consume = true`).
+    let (child_pid, wstatus): (u64, i32) = if pid_arg > 0 {
         #[allow(clippy::cast_sign_loss)]
         let target_pid = pid_arg as u64;
         loop {
+            // Zombie exit? (reaps the child)
             match pcb::try_reap(parent_pid, target_pid) {
-                Ok(Some(info)) => break (target_pid, info),
+                Ok(Some(info)) => break (target_pid, encode_linux_wstatus(&info)),
                 Ok(None) => {} // still running
                 Err(KernelError::PermissionDenied) | Err(KernelError::NoSuchProcess) => {
                     // Not our child / doesn't exist → ECHILD.
@@ -33579,22 +33589,51 @@ fn sys_wait4(args: &SyscallArgs) -> SyscallResult {
                 }
                 Err(e) => return linux_err(linux_errno_for(e)),
             }
+            // Stopped / continued for job control? (does not reap)
+            if want_stopped || want_continued {
+                match pcb::jc_report_for_child(
+                    parent_pid, target_pid, want_stopped, want_continued, true,
+                ) {
+                    Ok(Some(ev)) => break (target_pid, encode_jc_wstatus(&ev)),
+                    Ok(None) => {}
+                    Err(KernelError::PermissionDenied)
+                    | Err(KernelError::NoSuchProcess) => {
+                        return linux_err(errno::ECHILD);
+                    }
+                    Err(e) => return linux_err(linux_errno_for(e)),
+                }
+            }
             if nohang {
                 return SyscallResult::ok(0);
             }
-            // Block until the child exits (lost-wakeup-safe via
-            // set_wait_task + re-check, same pattern as sys_process_wait).
+            // Block until a state change (lost-wakeup-safe via set_wait_task +
+            // re-check).  A stop/continue wakes this task through the parent
+            // waiters that stop_process_for_signal/continue_process signal.
             if let Err(e) = pcb::set_wait_task(target_pid, task_id) {
                 return linux_err(linux_errno_for(e));
             }
             match pcb::try_reap(parent_pid, target_pid) {
-                Ok(Some(info)) => break (target_pid, info),
-                Ok(None) => crate::sched::block_current(),
+                Ok(Some(info)) => break (target_pid, encode_linux_wstatus(&info)),
+                Ok(None) => {}
                 Err(KernelError::PermissionDenied) | Err(KernelError::NoSuchProcess) => {
                     return linux_err(errno::ECHILD);
                 }
                 Err(e) => return linux_err(linux_errno_for(e)),
             }
+            if want_stopped || want_continued {
+                match pcb::jc_report_for_child(
+                    parent_pid, target_pid, want_stopped, want_continued, true,
+                ) {
+                    Ok(Some(ev)) => break (target_pid, encode_jc_wstatus(&ev)),
+                    Ok(None) => {}
+                    Err(KernelError::PermissionDenied)
+                    | Err(KernelError::NoSuchProcess) => {
+                        return linux_err(errno::ECHILD);
+                    }
+                    Err(e) => return linux_err(linux_errno_for(e)),
+                }
+            }
+            crate::sched::block_current();
         }
     } else {
         // pid <= 0: wait for any child.  Same register-before-check
@@ -33605,28 +33644,41 @@ fn sys_wait4(args: &SyscallArgs) -> SyscallResult {
                 pcb::clear_wait_any_task(parent_pid, task_id);
                 return linux_err(linux_errno_for(e));
             }
+            // Zombie exit of any child? (reaps)
             match pcb::try_reap_any(parent_pid) {
                 Ok(Some((cpid, info))) => {
                     pcb::clear_wait_any_task(parent_pid, task_id);
-                    break (cpid, info);
+                    break (cpid, encode_linux_wstatus(&info));
                 }
-                Ok(None) => {
-                    if nohang {
-                        pcb::clear_wait_any_task(parent_pid, task_id);
-                        return SyscallResult::ok(0);
-                    }
-                    crate::sched::block_current();
-                }
+                Ok(None) => {}
                 Err(e) => {
                     pcb::clear_wait_any_task(parent_pid, task_id);
                     return linux_err(linux_errno_for(e));
                 }
             }
+            // Stop/continue of any child? (does not reap)
+            if want_stopped || want_continued {
+                match pcb::jc_report_any_child(
+                    parent_pid, want_stopped, want_continued, true,
+                ) {
+                    Ok(Some((cpid, ev))) => {
+                        pcb::clear_wait_any_task(parent_pid, task_id);
+                        break (cpid, encode_jc_wstatus(&ev));
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        pcb::clear_wait_any_task(parent_pid, task_id);
+                        return linux_err(linux_errno_for(e));
+                    }
+                }
+            }
+            if nohang {
+                pcb::clear_wait_any_task(parent_pid, task_id);
+                return SyscallResult::ok(0);
+            }
+            crate::sched::block_current();
         }
     };
-
-    // Encode wstatus per the Linux <sys/wait.h> macros.
-    let wstatus: i32 = encode_linux_wstatus(&info);
 
     if wstatus_ptr != 0 {
         // SAFETY: validated as a writable user range of i32 size at the
@@ -33675,6 +33727,27 @@ fn encode_linux_wstatus(info: &crate::proc::pcb::ExitInfo) -> i32 {
         #[allow(clippy::cast_possible_wrap)]
         let s = (lo << 8) as i32;
         s
+    }
+}
+
+/// Encode a job-control transition as a Linux `wstatus` word.
+///
+/// * `Stopped(sig)` → `(sig << 8) | 0x7f` — `WIFSTOPPED` true, `WSTOPSIG`
+///   yields the stop signal.
+/// * `Continued` → `0xffff` — the value `WIFCONTINUED` tests for.
+///
+/// Pure function so the boot self-test can exercise both branches.
+fn encode_jc_wstatus(ev: &crate::proc::pcb::JobControlEvent) -> i32 {
+    use crate::proc::pcb::JobControlEvent;
+    match ev {
+        JobControlEvent::Stopped(sig) => {
+            #[allow(clippy::cast_possible_wrap)]
+            let s = sig & 0xff;
+            #[allow(clippy::cast_possible_wrap)]
+            let w = ((s << 8) | 0x7f) as i32;
+            w
+        }
+        JobControlEvent::Continued => 0xffff,
     }
 }
 
@@ -37867,6 +37940,36 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         if (s & 0x7f) != 11 {
             serial_println!(
                 "[syscall/linux]   FAIL: wstatus crash != SIGSEGV ({})", s
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Job-control wstatus encoding (WIFSTOPPED / WIFCONTINUED):
+    //   WIFSTOPPED(s)   -> (s & 0xff) == 0x7f
+    //   WSTOPSIG(s)     -> (s >> 8) & 0xff
+    //   WIFCONTINUED(s) -> s == 0xffff
+    {
+        use crate::proc::pcb::JobControlEvent;
+        // Stopped by SIGTSTP (20).
+        let s = encode_jc_wstatus(&JobControlEvent::Stopped(20));
+        if (s & 0xff) != 0x7f {
+            serial_println!(
+                "[syscall/linux]   FAIL: jc wstatus stop not WIFSTOPPED ({})", s
+            );
+            return Err(KernelError::InternalError);
+        }
+        if ((s >> 8) & 0xff) != 20 {
+            serial_println!(
+                "[syscall/linux]   FAIL: jc wstatus WSTOPSIG != 20 ({})", s
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Continued.
+        let s = encode_jc_wstatus(&JobControlEvent::Continued);
+        if s != 0xffff {
+            serial_println!(
+                "[syscall/linux]   FAIL: jc wstatus continued != 0xffff ({})", s
             );
             return Err(KernelError::InternalError);
         }

@@ -8808,12 +8808,34 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          self-stop at the syscall-return checkpoint).  classify_post
 ##          self-test extended (stop/continue/mutual-cancel/blocked cases);
 ##          12 signal tests + pcb job-control test pass; boot OK.
-##        [NEXT] (3) wait4/waitid reporting: honour WUNTRACED/WSTOPPED
-##          (report Stopped(sig) as status (sig<<8)|0x7f, do NOT reap) and
-##          WCONTINUED (status 0xffff).  Use peek_jc_report in the scan,
-##          take_jc_report on report (unless WNOWAIT).  Extend the
-##          reapable-child scan to treat a child with a jc_report matching
-##          the wait options as ready.
+##        [DONE] (3) wait4 reporting (commit pending): sys_wait4 now honours
+##          WUNTRACED (report a stopped child, status (sig<<8)|0x7f, WITHOUT
+##          reaping) and WCONTINUED (status 0xffff).  Both reaping loops
+##          (specific-pid and any-child) check pcb::jc_report_for_child /
+##          jc_report_any_child after the zombie try_reap; each loop now
+##          breaks with a pre-encoded wstatus (encode_linux_wstatus for an
+##          exit, encode_jc_wstatus for a stop/continue).  A stop/continue
+##          wakes a blocked wait4 via the parent waiters that
+##          stop_process_for_signal/continue_process already signal.  The
+##          jc_report is consumed on report (wait4 has no WNOWAIT, so the
+##          helpers are called with consume=true).  pcb job-control test
+##          extended (jc_report_for_child/any_child: match by option class,
+##          non-consuming peek, parent-mismatch PermissionDenied, ECHILD on
+##          no children); encode_jc_wstatus unit-tested in linux::self_test.
+##          Build + clippy clean; boots OK.
+##      DEFERRED — waitid job-control reporting: sys_waitid is still a
+##          REAPING STUB (validates the option/which/upid gates, then returns
+##          0 for WNOHANG or ECHILD — it does not reap zombies OR report
+##          stops at all, and never writes the siginfo_t).  Bolting
+##          WSTOPPED/WCONTINUED onto it in isolation would be inconsistent
+##          (it'd report stops while normal child exits still yield ECHILD).
+##          Implementing real waitid is a separate, larger task: P_ALL/P_PID/
+##          P_PGID/P_PIDFD child selection, 128-byte siginfo_t encoding
+##          (si_signo=SIGCHLD, si_code CLD_EXITED/KILLED/DUMPED/STOPPED/
+##          CONTINUED, si_pid/si_status/si_uid), WEXITED reaping, WNOWAIT
+##          peek, and the same jc_report_for_child/any_child reporting wait4
+##          now uses.  Trigger: when a ported program actually needs waitid
+##          (glibc posix_spawn pidfd path, some container runtimes).
 ##      DEFERRED (needs process groups): kill(-pgid, SIG) group routing;
 ##          Ctrl-Z sending SIGTSTP to the foreground process GROUP;
 ##          orphaned-process-group SIGHUP/SIGCONT on session leader exit.

@@ -2919,6 +2919,99 @@ pub fn take_jc_report(pid: ProcessId) -> Option<JobControlEvent> {
         .and_then(|p| p.jc_report.take())
 }
 
+/// Whether a `JobControlEvent` matches a caller's requested wait classes.
+///
+/// `want_stopped` selects `Stopped` reports (wait4 `WUNTRACED` / waitid
+/// `WSTOPPED`); `want_continued` selects `Continued` (`WCONTINUED`).
+#[inline]
+fn jc_event_matches(
+    ev: Option<JobControlEvent>,
+    want_stopped: bool,
+    want_continued: bool,
+) -> bool {
+    match ev {
+        Some(JobControlEvent::Stopped(_)) => want_stopped,
+        Some(JobControlEvent::Continued) => want_continued,
+        None => false,
+    }
+}
+
+/// Check `child_pid`'s job-control report against a parent's wait options.
+///
+/// Returns `Ok(Some(event))` if `child_pid` is a child of `parent_pid` and
+/// has an unconsumed `jc_report` matching the requested transition classes.
+/// When `consume` is true the report is cleared (so the same transition is
+/// not reported twice); `WNOWAIT` callers pass false to leave it for a
+/// subsequent wait.
+///
+/// `Ok(None)` if the child has no matching report. `Err(PermissionDenied)`
+/// if it is not the caller's child; `Err(NoSuchProcess)` if unknown —
+/// mirroring [`try_reap`] so the wait syscalls share error handling.
+pub fn jc_report_for_child(
+    parent_pid: ProcessId,
+    child_pid: ProcessId,
+    want_stopped: bool,
+    want_continued: bool,
+    consume: bool,
+) -> KernelResult<Option<JobControlEvent>> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&child_pid).ok_or(KernelError::NoSuchProcess)?;
+    if proc.parent != parent_pid {
+        return Err(KernelError::PermissionDenied);
+    }
+    if !jc_event_matches(proc.jc_report, want_stopped, want_continued) {
+        return Ok(None);
+    }
+    let ev = proc.jc_report;
+    if consume {
+        proc.jc_report = None;
+    }
+    Ok(ev)
+}
+
+/// Scan `parent_pid`'s children for one with a matching job-control report.
+///
+/// Like [`jc_report_for_child`] but for `waitpid(-1)` / `waitid(P_ALL)`.
+/// Returns the lowest-PID child with a matching unconsumed report
+/// (`BTreeMap` ascending order). `Err(NoChildProcess)` if the parent has no
+/// children at all (so the wait path can surface `ECHILD`); `Ok(None)` if it
+/// has children but none have a matching report. `consume` clears the
+/// chosen report unless this is a `WNOWAIT` peek.
+pub fn jc_report_any_child(
+    parent_pid: ProcessId,
+    want_stopped: bool,
+    want_continued: bool,
+    consume: bool,
+) -> KernelResult<Option<(ProcessId, JobControlEvent)>> {
+    let mut table = PROCESS_TABLE.lock();
+    let mut has_child = false;
+    let mut found: Option<ProcessId> = None;
+    for proc in table.values() {
+        if proc.parent == parent_pid && proc.pid != parent_pid {
+            has_child = true;
+            if jc_event_matches(proc.jc_report, want_stopped, want_continued) {
+                found = Some(proc.pid);
+                break;
+            }
+        }
+    }
+    if !has_child {
+        return Err(KernelError::NoChildProcess);
+    }
+    let Some(cpid) = found else {
+        return Ok(None);
+    };
+    // Re-borrow mutably now the scan's immutable borrow has ended.
+    let ev = table.get_mut(&cpid).and_then(|p| {
+        let e = p.jc_report;
+        if consume {
+            p.jc_report = None;
+        }
+        e
+    });
+    Ok(ev.map(|e| (cpid, e)))
+}
+
 /// Record crash information for a process killed by an unhandled exception.
 ///
 /// Sets the crash info and the exit code to a negative value derived
@@ -4460,6 +4553,79 @@ fn test_job_control_state() -> KernelResult<()> {
         serial_println!("[proc]   FAIL: record on unknown pid should error");
         return Err(KernelError::InternalError);
     }
+
+    // --- wait-reporting helpers (jc_report_for_child / jc_report_any_child) ---
+    let parent = create("jc-parent", 0);
+    set_running(parent)?;
+    let child = create("jc-child", parent);
+    set_running(child)?;
+
+    // No report yet → Ok(None) for both option sets.
+    if jc_report_for_child(parent, child, true, true, false)? != None {
+        serial_println!("[proc]   FAIL: jc_report_for_child false positive");
+        destroy(child);
+        destroy(parent);
+        return Err(KernelError::InternalError);
+    }
+
+    // Stop the child; a WUNTRACED waiter (want_stopped) should see it, a
+    // WCONTINUED-only waiter should not.
+    let _ = record_jc_stopped(child, 19)?;
+    if jc_report_for_child(parent, child, false, true, false)? != None {
+        serial_println!("[proc]   FAIL: stop matched continued-only wait");
+        destroy(child);
+        destroy(parent);
+        return Err(KernelError::InternalError);
+    }
+    // Peek (consume=false) leaves the report; report stays after.
+    if jc_report_for_child(parent, child, true, false, false)?
+        != Some(JobControlEvent::Stopped(19))
+        || peek_jc_report(child) != Some(JobControlEvent::Stopped(19))
+    {
+        serial_println!("[proc]   FAIL: non-consuming jc check cleared report");
+        destroy(child);
+        destroy(parent);
+        return Err(KernelError::InternalError);
+    }
+    // Wrong parent → PermissionDenied.
+    if jc_report_for_child(parent + 999, child, true, true, false).is_ok() {
+        serial_println!("[proc]   FAIL: jc check ignored parent mismatch");
+        destroy(child);
+        destroy(parent);
+        return Err(KernelError::InternalError);
+    }
+    // any-child scan finds the stopped child and consumes it.
+    match jc_report_any_child(parent, true, true, true)? {
+        Some((cpid, JobControlEvent::Stopped(19))) if cpid == child => {}
+        _ => {
+            serial_println!("[proc]   FAIL: jc_report_any_child missed stopped child");
+            destroy(child);
+            destroy(parent);
+            return Err(KernelError::InternalError);
+        }
+    }
+    if peek_jc_report(child).is_some() {
+        serial_println!("[proc]   FAIL: any-child scan did not consume report");
+        destroy(child);
+        destroy(parent);
+        return Err(KernelError::InternalError);
+    }
+    // No matching report now, but children exist → Ok(None), not ECHILD.
+    if jc_report_any_child(parent, true, true, false)? != None {
+        serial_println!("[proc]   FAIL: any-child scan false positive");
+        destroy(child);
+        destroy(parent);
+        return Err(KernelError::InternalError);
+    }
+    destroy(child);
+    // No children at all → NoChildProcess (ECHILD).
+    if jc_report_any_child(parent, true, true, false) != Err(KernelError::NoChildProcess)
+    {
+        serial_println!("[proc]   FAIL: childless any-child scan not ECHILD");
+        destroy(parent);
+        return Err(KernelError::InternalError);
+    }
+    destroy(parent);
 
     serial_println!("[proc]   job-control state model: OK");
     Ok(())

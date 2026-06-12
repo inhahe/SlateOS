@@ -9400,6 +9400,69 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      lands, these must route through it; until then, programs
 ##      that rely on alarm() to interrupt blocking calls will
 ##      not be interrupted.
+##
+## ===========================================================================
+## NEXT TASK (scoped + investigated 2026-06-12): real ITIMER_REAL / alarm()
+## ===========================================================================
+## GOAL: make alarm(N) and setitimer(ITIMER_REAL, ...) actually fire SIGALRM
+## at the deadline (and getitimer report the remaining time), instead of the
+## current always-0/ENOSYS stubs. This is the natural next step after the
+## signal-wait-queue work (signalfd/rt_sigtimedwait/pause): a fired SIGALRM
+## set_pending()s the process, which (a) delivers to a registered handler at
+## the next syscall-return checkpoint (handlers::deliver_pending_signal) and
+## (b) WAKES a pause()/signalfd waiter via the SIGNALFD_WAITERS registry — so
+## `alarm(1); pause();` would work end-to-end: timer fires -> set_pending ->
+## wakes pause -> EINTR -> handler runs. alarm() is in practice always used
+## with a SIGALRM handler, so the handler path is the common case.
+##
+## PROPER DESIGN (no band-aid — alarm() is just setitimer(ITIMER_REAL) in
+## Linux, so implement a SHARED per-process ITIMER_REAL, not alarm-only state):
+##   * New module (e.g. kernel/src/proc/itimer.rs) holding a
+##     Mutex<BTreeMap<ProcessId, RealTimer>> where RealTimer = {
+##       expiry_ns: u64 (absolute, in hrtimer::now_ns() domain; 0 = disarmed),
+##       interval_ns: u64, handle: Option<HrTimerHandle> }.
+##   * set_real(pid, value_ns, interval_ns) -> (prev_remaining_ns, prev_interval_ns):
+##     cancel old handle, compute remaining from hrtimer::now_ns(), then if
+##     value_ns>0 arm via hrtimer::schedule_repeating(value_ns, interval_ns,
+##     real_fire, pid) (one-shot = interval 0; the hrtimer layer re-arms
+##     periodic timers itself in process_expired, so NO re-arm in the callback).
+##   * get_real(pid) -> (remaining_ns, interval_ns) for getitimer.
+##   * cancel_real(pid) wired into process EXIT and EXEC teardown (must not
+##     leak a timer that fires SIGALRM into a dead/replaced pid — IMPORTANT).
+##   * alarm(N) = round-trip through set_real(pid, N*1e9, 0), returning prev
+##     remaining seconds (rounded UP, per Linux). N==0 just cancels.
+##   * setitimer/getitimer ITIMER_REAL call set_real/get_real; ITIMER_VIRTUAL
+##     and ITIMER_PROF stay ENOSYS/zero (they need per-task CPU-time accounting
+##     hooks — separate, larger task).
+##
+## *** BLOCKER FOUND — must fix FIRST (this is why it's not done yet): ***
+## The hrtimer callback (real_fire) runs in softirq/timer-ISR context, but
+## proc::signal::set_pending() locks SIGNAL_STATES, a plain spin::Mutex taken
+## all over signal.rs in SYSCALL (process) context WITH INTERRUPTS ENABLED.
+## If the APIC timer ISR fires on the same CPU while a syscall holds
+## SIGNAL_STATES and real_fire calls set_pending -> tries to lock it -> HARD
+## DEADLOCK. (The existing timerfd/eventfd hrtimer callbacks dodge this by
+## only touching sched try_wake/defer_wake, which ARE irq-safe; they never
+## touch a process-context spinlock.) So set_pending is NOT currently safe to
+## call from interrupt context.
+##   FIX (do this as its own commit FIRST): make every SIGNAL_STATES and
+##   SIGNALFD_WAITERS critical section IRQ-safe by wrapping the lock+work in
+##   crate::cpu::without_interrupts(|| ...). There are 16 *.lock() sites in
+##   signal.rs (grep "SIGNAL_STATES.lock\|SIGNALFD_WAITERS.lock"). The
+##   critical sections are short bitmap ops, so masking IRQs across them is
+##   cheap. Verify lock ordering still holds (set_pending already drops
+##   SIGNAL_STATES BEFORE taking SIGNALFD_WAITERS — keep that; both become
+##   irq-safe leaf locks). After that, set_pending becomes callable from the
+##   timer callback and the itimer module above is straightforward.
+##   This irq-safe conversion ALSO unblocks future async signal sources
+##   (keyboard ISR -> SIGINT, etc.), so it's foundational, not alarm-specific.
+## NOTE: the no-trampoline default-fatal case (alarm with no SIGALRM handler
+## should terminate the process after N s) still won't terminate — that's the
+## separate, pre-existing gap that deliver_pending_signal only delivers to
+## trampoline-registered processes and never terminates no-handler ones.
+## Document that as a known limitation when implementing; don't fake it.
+## ===========================================================================
+##
 ##  38. ACCESS / FACCESSAT / FACCESSAT2 — DONE as
 ##      ENOENT-after-validate stubs.  Mode bits validated against
 ##      R_OK|W_OK|X_OK; bogus bits -> EINVAL.  faccessat2 also

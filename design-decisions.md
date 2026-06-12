@@ -9,6 +9,11 @@ where a reasonable alternative exists and the operator might want to revisit.
 
 Format for each entry:
 
+- **Decided by** — who made the call: `Claude (autonomous)`, `Operator`, or a
+  mixed form like `Operator (Claude proposed; operator chose)` /
+  `Claude (operator-approved scope)`. An **Operator** decision is settled
+  policy and should not be silently revisited; a **Claude (autonomous)** one is
+  Claude's to revisit and the operator may want to overrule it.
 - **Context** — what problem forced a choice.
 - **Decision** — what was chosen.
 - **Rationale** — why.
@@ -21,6 +26,10 @@ Format for each entry:
 ## 1. Linux ABI version to target — baseline 6.6, "baseline + honored extras"
 
 **Date:** 2026-06-06 (policy) / 2026-06-10 (uname surface resolved)
+
+**Decided by:** Operator (Claude proposed the 6.6 baseline floor and surfaced
+the forward-compat question; the operator resolved the forward-compat policy —
+option (ii) "baseline + honored extras" — on 2026-06-10, per `todo.txt`).
 
 **Context:**
 The Linux compatibility layer (`kernel/src/syscall/linux.rs`) translates the
@@ -91,6 +100,9 @@ sibling-syscall consistency are coherent rather than ad hoc.
 
 **Date:** 2026-06-10
 
+**Decided by:** Claude (autonomous) — an implementation choice among three
+mechanisms, resolved while building `/proc/<pid>/cmdline` and `environ`.
+
 **Context:**
 `/proc/<pid>/cmdline` and `/proc/<pid>/environ` must report a process's argv
 and environment for the whole lifetime of the process. But the PCB's
@@ -147,6 +159,11 @@ procfs.
 ## 3. /proc/<pid> magic symlinks — cwd, root, and exe
 
 **Date:** 2026-06-10 (cwd/root landed) / exe approved same day
+
+**Decided by:** Claude (operator-approved scope) — the implementation design
+(real procfs symlinks via the VFS `readlink` path, the `exe_path` PCB field,
+fork/exec inheritance rules) was Claude's; the operator approved doing the
+`exe` increment specifically.
 
 **Context:**
 Linux exposes magic symlinks in `/proc/<pid>/`: `cwd` (current working
@@ -209,6 +226,10 @@ just needs to participate.
 ## 4. /proc/<pid>/auxv — do NOT touch the native process-launch path
 
 **Date:** 2026-06-12 (prompted by the operator)
+
+**Decided by:** Operator (Claude proposed the build-auxv-for-all shortcut; the
+operator caught that it would leak the Linux/SysV ABI into the native launch
+path and set the rule that the auxv is a Linux-ABI-only construct).
 
 **Context:**
 Linux exposes `/proc/<pid>/auxv`: the **auxiliary vector**, a list of
@@ -295,6 +316,9 @@ path is never modified to produce one.**
 
 **Date:** 2026-05-31 (predates this file; recorded retroactively 2026-06-12)
 
+**Decided by:** Claude (autonomous) — an implementation choice made while
+building the CoW fork path.
+
 **Context:**
 `fork()` clones the parent address space copy-on-write. A parent page that
 has been **evicted to swap** at fork time poses a question: the child must
@@ -348,6 +372,9 @@ re-registered as reclaimable so it can be evicted again later.
 ## 6. fork() / dup() file-descriptor inheritance — refcounted shared open-file descriptions
 
 **Date:** 2026-05-31 (fork) / 2026-06-01 (dup fix); recorded retroactively 2026-06-12
+
+**Decided by:** Claude (autonomous) — an implementation choice (and POSIX
+correctness fix) made while building fork fd inheritance.
 
 **Context:**
 On `fork()`, the child's userspace libc fd table is CoW-copied, so it
@@ -409,6 +436,9 @@ allocated a **new** id with an **independent cursor** (that is `dup()`-of-a-
 ## 7. waitpid(pid <= 0) — collapse all "any child" cases; single any-child waiter slot; reaped-pid via arg1
 
 **Date:** 2026-05-31 (predates this file; recorded retroactively 2026-06-12)
+
+**Decided by:** Claude (autonomous) — implementation choices made while
+building the wait-for-any-child path.
 
 **Context:**
 POSIX `waitpid` distinguishes four pid forms: `> 0` (that specific child),

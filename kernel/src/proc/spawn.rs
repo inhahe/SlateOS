@@ -1876,68 +1876,95 @@ pub fn self_test_linux_file_mmap() -> KernelResult<()> {
         return Ok(());
     }
 
-    // Step 2: spawn the mmap test program.  It must hold a File capability:
-    // open(2) → handlers::sys_fs_open requires require_cap_type(File, READ).
-    let exe_elf = elf::build_linux_mmap_test_elf(DATA_PATH_NUL, FILE_LEN as u32, READ_OFF as u32);
-    let argv: &[&[u8]] = &[b"mmapprog"];
-    let envp: &[&[u8]] = &[b"PATH=/bin"];
-    let caps = [(
-        ResourceType::File,
-        1u64,
-        Rights::READ | Rights::WRITE,
-    )];
-    let options = SpawnOptions {
-        name: "spawn-test-linux-mmap",
-        parent: 0,
-        priority: DEFAULT_PRIORITY,
-        capabilities: &caps,
-        fd_map: &[],
-        argv,
-        envp,
-        exe_path: None,
-    };
+    // Step 2: spawn the mmap test program(s).  Each must hold a File
+    // capability: open(2) → handlers::sys_fs_open requires
+    // require_cap_type(File, READ).
+    //
+    // `run_one` spawns a ring-3 program built by `build_linux_mmap_test_elf`,
+    // lets it run to completion, and asserts it exited with `SENTINEL` (the
+    // byte it read out of the mapping).  Any non-zombie state or wrong exit
+    // code means mmap mis-mapped the file (or returned an error and the
+    // process faulted dereferencing the bad base).  Returns `Err` on failure;
+    // the caller is responsible for removing the staged data file.
+    let run_one = |exe_elf: &[u8], label: &str| -> KernelResult<()> {
+        let argv: &[&[u8]] = &[b"mmapprog"];
+        let envp: &[&[u8]] = &[b"PATH=/bin"];
+        let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+        let options = SpawnOptions {
+            name: "spawn-test-linux-mmap",
+            parent: 0,
+            priority: DEFAULT_PRIORITY,
+            capabilities: &caps,
+            fd_map: &[],
+            argv,
+            envp,
+            exe_path: None,
+        };
 
-    let result = match spawn_process(&exe_elf, &options) {
-        Ok(r) => r,
-        Err(e) => {
-            let _ = crate::fs::Vfs::remove(DATA_PATH);
-            serial_println!("[spawn]   FAIL: mmap-test spawn returned {:?}", e);
-            return Err(e);
+        let result = match spawn_process(exe_elf, &options) {
+            Ok(r) => r,
+            Err(e) => {
+                serial_println!("[spawn]   FAIL: mmap-test ({label}) spawn returned {:?}", e);
+                return Err(e);
+            }
+        };
+
+        // Let the thread run: open → mmap → read mapped byte → exit(byte).
+        crate::sched::yield_now();
+        crate::sched::yield_now();
+
+        let state = pcb::state(result.pid);
+        let exit_code = pcb::exit_code(result.pid);
+
+        thread::on_thread_exit(result.task_id);
+        pcb::destroy(result.pid);
+
+        if state != Some(pcb::ProcessState::Zombie) {
+            serial_println!(
+                "[spawn]   FAIL: file mmap (ring 3, {label}) — expected Zombie, got {:?} \
+                 (a non-zombie state usually means mmap returned an error and the \
+                 process faulted dereferencing it)",
+                state
+            );
+            return Err(KernelError::InternalError);
         }
+
+        if exit_code != Some(i32::from(SENTINEL)) {
+            serial_println!(
+                "[spawn]   FAIL: file mmap (ring 3, {label}) — expected exit {} \
+                 (mapped sentinel byte), got {:?}",
+                SENTINEL, exit_code
+            );
+            return Err(KernelError::InternalError);
+        }
+        Ok(())
     };
 
-    // Let the thread run: open → mmap → read mapped byte → exit(byte).
-    crate::sched::yield_now();
-    crate::sched::yield_now();
+    // Case A: map the whole file at offset 0, read the sentinel that lives at
+    // the start of the **second** frame (multi-frame mapping coverage).
+    let elf_off0 =
+        elf::build_linux_mmap_test_elf(DATA_PATH_NUL, FILE_LEN as u32, READ_OFF as u32, 0);
+    // Case B: map starting at a **nonzero** file offset (the second frame), so
+    // the mapping's first byte is the file byte at FRAME — the sentinel.  This
+    // exercises mmap's `offset` argument end-to-end (ld.so maps PT_LOAD
+    // segments at nonzero p_offset, so this path matters for Path X).
+    let elf_offn =
+        elf::build_linux_mmap_test_elf(DATA_PATH_NUL, FRAME as u32, 0, READ_OFF as u32);
 
-    let state = pcb::state(result.pid);
-    let exit_code = pcb::exit_code(result.pid);
+    let res_a = run_one(&elf_off0, "offset 0, second-frame byte");
+    let res_b = if res_a.is_ok() {
+        run_one(&elf_offn, "nonzero offset, mapping base byte")
+    } else {
+        Ok(())
+    };
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
     let _ = crate::fs::Vfs::remove(DATA_PATH);
-
-    if state != Some(pcb::ProcessState::Zombie) {
-        serial_println!(
-            "[spawn]   FAIL: file mmap (ring 3) — expected Zombie, got {:?} \
-             (a non-zombie state usually means mmap returned an error and the \
-             process faulted dereferencing it)",
-            state
-        );
-        return Err(KernelError::InternalError);
-    }
-
-    if exit_code != Some(i32::from(SENTINEL)) {
-        serial_println!(
-            "[spawn]   FAIL: file mmap (ring 3) — expected exit {} (mapped \
-             second-frame byte), got {:?}",
-            SENTINEL, exit_code
-        );
-        return Err(KernelError::InternalError);
-    }
+    res_a?;
+    res_b?;
 
     serial_println!(
-        "[spawn]   Linux file-backed mmap (ring 3: open+mmap, second-frame byte == {}): OK",
+        "[spawn]   Linux file-backed mmap (ring 3: open+mmap at offset 0 and \
+         nonzero offset, mapped byte == {}): OK",
         SENTINEL
     );
     Ok(())

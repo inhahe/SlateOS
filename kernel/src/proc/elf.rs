@@ -1222,7 +1222,7 @@ pub fn build_linux_argc_exit_test_elf() -> alloc::vec::Vec<u8> {
 ///   mov  esi, <len>          ; length                       (BE ..)
 ///   mov  edx, 1              ; prot = PROT_READ             (BA 01 ..)
 ///   mov  r10d, 2             ; flags = MAP_PRIVATE          (41 BA 02 ..)
-///   xor  r9d, r9d            ; offset = 0                   (45 31 C9)
+///   mov  r9d, <offset>       ; mmap file offset             (41 B9 ..)
 ///   mov  eax, 9              ; Linux SYS_mmap               (B8 09 ..)
 ///   syscall                  ; rax = mapped base
 ///   movzx edi, byte [rax + <read_off>] ; rdi = mapped byte  (0F B6 B8 ..)
@@ -1238,6 +1238,11 @@ pub fn build_linux_argc_exit_test_elf() -> alloc::vec::Vec<u8> {
 /// faults rather than exiting with the sentinel), so the test still detects
 /// the failure.
 ///
+/// `map_offset` is the file offset passed to `mmap(2)` (must be frame-aligned
+/// for the mapping to land where expected); the byte read at `read_off` is
+/// relative to the returned mapping base, i.e. it reflects file byte
+/// `map_offset + read_off`.
+///
 /// `path_nul` must be NUL-terminated.  `read_off` must be `<= u32::MAX`.
 #[must_use]
 #[allow(
@@ -1247,7 +1252,12 @@ pub fn build_linux_argc_exit_test_elf() -> alloc::vec::Vec<u8> {
     clippy::cast_sign_loss,
     clippy::cast_possible_wrap
 )]
-pub fn build_linux_mmap_test_elf(path_nul: &[u8], mmap_len: u32, read_off: u32) -> alloc::vec::Vec<u8> {
+pub fn build_linux_mmap_test_elf(
+    path_nul: &[u8],
+    mmap_len: u32,
+    read_off: u32,
+    map_offset: u32,
+) -> alloc::vec::Vec<u8> {
     use alloc::vec;
 
     let phdr_offset: u64 = 64;
@@ -1255,7 +1265,7 @@ pub fn build_linux_mmap_test_elf(path_nul: &[u8], mmap_len: u32, read_off: u32) 
     let load_vaddr: u64 = 0x0000_0040_0000_0000;
 
     // Machine code, assembled below; the path string follows immediately.
-    let code: [u8; 64] = [
+    let code: [u8; 67] = [
         // lea rdi, [rip + disp32]  (disp filled in below at [3..7])
         0x48, 0x8D, 0x3D, 0x00, 0x00, 0x00, 0x00, // 0
         0x31, 0xF6, // xor esi, esi              (O_RDONLY)            7
@@ -1267,15 +1277,15 @@ pub fn build_linux_mmap_test_elf(path_nul: &[u8], mmap_len: u32, read_off: u32) 
         0xBE, 0x00, 0x00, 0x00, 0x00, // mov esi, imm32 (length)     23 (imm @24)
         0xBA, 0x01, 0x00, 0x00, 0x00, // mov edx, 1 (PROT_READ)      28
         0x41, 0xBA, 0x02, 0x00, 0x00, 0x00, // mov r10d, 2 (PRIVATE) 33
-        0x45, 0x31, 0xC9, // xor r9d, r9d        (offset 0)          39
-        0xB8, 0x09, 0x00, 0x00, 0x00, // mov eax, 9 (SYS_mmap)       42
-        0x0F, 0x05, // syscall                                       47
-        0x0F, 0xB6, 0xB8, 0x00, 0x00, 0x00, 0x00, // movzx edi,[rax+disp32] 49 (disp @52)
-        0xB8, 0x3C, 0x00, 0x00, 0x00, // mov eax, 60 (SYS_exit)      56
-        0x0F, 0x05, // syscall                                       61
-        0xCC, // int3                                                63
+        0x41, 0xB9, 0x00, 0x00, 0x00, 0x00, // mov r9d, imm32 (offset) 39 (imm @41)
+        0xB8, 0x09, 0x00, 0x00, 0x00, // mov eax, 9 (SYS_mmap)       45
+        0x0F, 0x05, // syscall                                       50
+        0x0F, 0xB6, 0xB8, 0x00, 0x00, 0x00, 0x00, // movzx edi,[rax+disp32] 52 (disp @55)
+        0xB8, 0x3C, 0x00, 0x00, 0x00, // mov eax, 60 (SYS_exit)      59
+        0x0F, 0x05, // syscall                                       64
+        0xCC, // int3                                                66
     ];
-    let code_len = code.len(); // 64
+    let code_len = code.len(); // 67
 
     let path_offset_in_seg = code_len; // path string starts after the code
     let seg_data_len = code_len + path_nul.len();
@@ -1330,8 +1340,11 @@ pub fn build_linux_mmap_test_elf(path_nul: &[u8], mmap_len: u32, read_off: u32) 
     // mov esi, imm32 (mmap length) — imm at seg-offset 24.
     write_u32(&mut buf, cs + 24, mmap_len);
 
-    // movzx edi, byte [rax + disp32] (read offset) — disp at seg-offset 52.
-    write_u32(&mut buf, cs + 52, read_off);
+    // mov r9d, imm32 (mmap file offset) — imm at seg-offset 41.
+    write_u32(&mut buf, cs + 41, map_offset);
+
+    // movzx edi, byte [rax + disp32] (read offset) — disp at seg-offset 55.
+    write_u32(&mut buf, cs + 55, read_off);
 
     // --- Path string immediately after the code ---
     let path_start = cs + path_offset_in_seg;

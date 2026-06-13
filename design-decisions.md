@@ -755,15 +755,67 @@ policy storage is built.
 
 ---
 
-## 11. /proc/sys/vm/overcommit_memory & the OuRoS memory-commit policy — option C now, Option 5 (both strategies, configurable) as the end-state
+## 11. /proc/sys/vm/overcommit_memory & the OuRoS memory-commit policy — build Option 5 (both strategies, configurable) now
 
-**Date:** 2026-06-13
+**Date:** 2026-06-13 (revised same day — see "Revision" below)
 
 **Decided by:** Operator (this was `open-questions.md` Q2; the operator chose
-"keep `vm/` omitted now, build the full configurable both-strategies model
-later," with the priority "maximize the number of programs that run without
-crashing; log noise is acceptable." Options 4 and 5 were the operator's own
-proposals).
+Option 5 — "build both strategies, make them configurable" — with the priority
+"maximize the number of programs that run without crashing; log noise is
+acceptable." Options 4 and 5 were the operator's own proposals. Initially the
+operator accepted a two-phase "C now, Option 5 later" plan; the operator then
+asked to **do Option 5 now if there's no good reason to defer** — and a code
+survey found most of the mechanism already exists, so the kernel core is being
+built now. See "Revision").
+
+**Revision (2026-06-13) — do Option 5 now; only the GUI front-end and
+capability-gated writes follow their dependencies.**
+A survey of the actual code (prompted by the operator asking whether Option 5
+could just be done now) found the mechanism is **~80% already built**, so there
+is no good reason to defer the kernel core:
+- **Both strategies already exist.** Native `mmap`
+  (`kernel/src/syscall/handlers.rs::sys_mmap`) supports eager-commit (default)
+  *and* demand-paged (`MAP_LAZY`); demand paging is fully implemented
+  (`kernel/src/mm/fault.rs`, `VmaKind::Anonymous`).
+- **A system-wide toggle already exists.** `sysctl PARAM_MM_LAZY_DEFAULT`
+  (`mm.lazy_default`, default 0 = committed on Desktop) flips the system default;
+  the per-workload profile presets already set it (Desktop/Dev/Gaming = committed,
+  Server = lazy).
+- **The advisory `OvercommitMode` enum** in `kernel/src/fs/mmtune.rs` is a second,
+  unwired surface for the same concept (no consumer in the commit path).
+- **What's genuinely missing (the now-doable, unblocked kernel work):**
+  1. **Per-program policy** — today the choice is system-wide only; add a
+     per-process override (PCB field consulted by both `mmap` paths).
+  2. **Linux programs don't default to lazy/overcommit.** The Linux `mmap`
+     (`kernel/src/syscall/linux.rs::sys_mmap`, ~line 4825) routes through the
+     native handler with flags=0, inheriting the *committed* desktop default —
+     with a now-stale comment claiming it's "demand-allocated." The operator's
+     "Linux default = overcommit" is **not actually implemented**; this is a
+     latent compat gap (Linux's idiom is large sparse mmaps that expect lazy
+     backing). Fix: Linux `mmap` should default to lazy unless a per-program
+     policy says otherwise. *(Partly forward-looking: per decision #4 there is no
+     Linux ELF loader yet, so no real Linux program runs today — which is why
+     this hasn't bitten. Fixing it now makes the path correct for when the loader
+     lands.)*
+  3. **Expose `/proc/sys/vm/overcommit_memory`** reading the active mode honestly
+     (committed ↔ report `2`; lazy ↔ report `0`), plus `overcommit_ratio`/
+     `overcommit_kbytes` for completeness.
+- **What still follows its dependency (not arbitrary deferral):**
+  - **Settings → Advanced GUI** — depends on the GUI/Settings app, which per
+    decision #9 comes *after* the terminal/dev phase. Build it when the GUI
+    exists; until then the policy is set via sysctl/config.
+  - **Capability-gated *writes* to `/proc/sys/vm/*`** (`admin.memory_policy`
+    enforcement) — depends on the capability framework (largely unbuilt). Until
+    then `/proc/sys` stays read-only and the policy is set via the kernel sysctl
+    mechanism.
+- **Design nuance noted (not blocking):** OuRoS "committed" currently means
+  *eager-populate* (allocate+map all frames at `mmap`), which satisfies "no
+  silent overcommit" trivially but costs up-front faulting/RAM for pages never
+  touched. Linux's `overcommit_memory=2` instead does *commit accounting* (reserve
+  charge against RAM+swap, still demand-page). Eager-populate is the current,
+  design-compliant behavior; a future refinement could switch "committed" to
+  accounting-style reservation for the same guarantee at lower cost. Out of scope
+  for the initial Option 5 build.
 
 **Context:**
 `design.txt`/CLAUDE.md mandate "Committed memory by default, **lazy allocation
@@ -783,14 +835,11 @@ OS-surfaced diagnosis, (5) implement **both** commit strategies and make the
 choice configurable system-wide *and* per-program for both Linux and native
 programs.
 
-**Decision — two phases:**
-- **Now: option C (keep `vm/` omitted).** It cannot cause the refuse-to-start
-  risk that A carries, and it doesn't lie like B. Under the operator's "max
-  programs run, log noise OK" priority, an absent sysctl is the lowest-risk
-  immediate state.
-- **End-state: Option 5 (build both strategies, make them configurable).** This
-  is the full realization of the existing design ("lazy allocation opt-in").
-  Scope:
+**Decision — build Option 5's kernel core now (see Revision above for why it's
+mostly already built); GUI front-end and capability-gated writes follow their
+dependencies.** Until the `/proc/sys/vm/overcommit_memory` surface lands, the
+`vm/` subtree stays omitted (the original option C), which is harmless. The full
+Option 5 scope:
   - Implement both **strict-commit** and **lazy/overcommit** allocation in the
     kernel (today only strict exists; the `OvercommitMode` enum in
     `kernel/src/fs/mmtune.rs` is advisory-only and **not wired into the commit

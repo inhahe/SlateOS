@@ -491,6 +491,39 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
+### TD20. Userspace crate verification & lint-cleanup gaps — DEBT 2026-06-13
+
+**Where:** `userspace/coreutils/` (and any userspace crate whose *test* code uses
+`std::os::unix`), and `gui/toolkit/` (guitk).
+
+**What it is:** two low-priority verification/lint gaps in userspace crates:
+- **coreutils host-test gap (2026-05-31):** coreutils unit tests cannot compile on
+  the Windows dev host (`x86_64-pc-windows-gnu`) because bins like `test.rs`/
+  `tar.rs` use `std::os::unix::fs::{PermissionsExt, MetadataExt}` (mode/uid/gid/
+  mtime), which only exist on unix-family targets. The slateos target (os=linux)
+  *has* them, so production compiles fine (`cargo build -p coreutils` for slateos
+  is clean), but slateos test binaries can't be *run* on this Windows box — so
+  coreutils' verification path is the slateos build, not host `cargo test`. Not a
+  code bug; a cross-platform host-testing gap that applies to any userspace crate
+  using `std::os::unix` in its test code.
+- **guitk pedantic deferral (2026-06-03):** guitk does not yet enable
+  `#![deny(clippy::pedantic)]`; a pedantic run emits ~1,232 warnings,
+  overwhelmingly doc-style (`missing_panics_doc`, `missing_errors_doc`,
+  `must_use_candidate`, `return_self_not_must_use`, `needless_pass_by_value`,
+  `similar_names`, `items_after_statements`). The crate is ~50k LOC; cleanup is a
+  multi-session sweep, deferred until core subsystems (kernel/mm/sched/ipc, fs,
+  drivers) reach a stable baseline — little value in extensive doc lints on
+  toolkit code while the syscall ABI is still in flux. (Related to TD19's
+  lint-policy conflict.)
+
+**Impact:** low — neither blocks feature work; both crates build for slateos.
+
+**Proper fix:** coreutils — gate the `std::os::unix` test code behind `#[cfg(unix)]`
+with inert host stubs (the pattern already used by `stat`/`stty`) so host
+`cargo test` at least compiles, or stand up a slateos test runner. guitk — a
+dedicated pedantic-cleanup sweep once the core ABI stabilizes, resolved together
+with the TD19 lint-policy decision.
+
 ### TD19. Crate-root `#![deny(clippy::pedantic)]` overrides the workspace lint allow-list — DEBT 2026-06-13 (needs operator policy call)
 
 **Where:** every crate carrying a crate-root `#![deny(clippy::all,

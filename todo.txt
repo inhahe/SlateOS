@@ -4505,15 +4505,7 @@
 ##   (`for i in 0..80 { ... w[i] }` → `for (i, &wi) in w.iter().enumerate()`) plus 2
 ##   trivial clippy autofixes. sha256sum clippy clean, 59/59 pass.
 ##
-## LIMITATION (noticed 2026-05-31): userspace/coreutils unit tests CANNOT compile on the
-##   Windows host target (x86_64-pc-windows-gnu): bins like test.rs and tar.rs use
-##   `std::os::unix::fs::{PermissionsExt,MetadataExt}` (mode/uid/gid/mtime), which only
-##   exist on unix-family targets. The slateos target (os=linux) has them, so PRODUCTION
-##   compiles fine — verified `cargo build -p coreutils` for slateos is clean. There is no
-##   way to RUN slateos test binaries on this Windows dev box, so coreutils host-testing is
-##   inherently unavailable; its verification path is the slateos build. Not a code bug —
-##   a cross-platform host-testing gap. Same caveat applies to any userspace crate that
-##   uses std::os::unix in its test code.
+## [migrated 2026-06-13 -> known-issues.md TD20] coreutils (and any crate using std::os::unix in test code) can't host-test on Windows; verification path is the slateos build. See TD20.
 ##
 ## BUG (noticed+FIXED 2026-05-31): apps/solitaire — `cargo clippy` failed on a
 ##   deny-by-default correctness lint (absurd_extreme_comparisons). At main.rs:1001
@@ -5108,15 +5100,7 @@
 ##   ~1,232 warnings (mostly missing_panics_doc / must_use_candidate / docs
 ##   items in 50k LOC of widget code). Tracked separately below.
 ##
-## LIMITATION (noticed 2026-06-03): guitk does not yet enable
-##   `#![deny(clippy::pedantic)]`. A pedantic run on the crate emits ~1,232
-##   warnings — overwhelmingly doc-style lints (missing_panics_doc,
-##   missing_errors_doc, must_use_candidate, return_self_not_must_use,
-##   needless_pass_by_value, similar_names, items_after_statements). The crate
-##   is ~50k LOC; cleaning these will be a multi-session sweep. Deferred until
-##   the core OS subsystems (kernel/mm/sched/ipc, fs, drivers) have reached a
-##   stable baseline — there is no value in extensive doc lints on toolkit
-##   code while the underlying syscall ABI is still in flux.
+## [migrated 2026-06-13 -> known-issues.md TD20] guitk pedantic-deny deferred (~1232 doc-style warnings, ~50k LOC); deferred until core subsystems stabilize. See TD20.
 ##
 ## BUG (noticed+FIXED 2026-05-31): vi search wrap-around landed on the cursor's
 ##   own position instead of the next/previous match. userspace/vi/:

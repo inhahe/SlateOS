@@ -1,4 +1,20 @@
 
+## DEFERRED (2026-06-12): membarrier PRIVATE_EXPEDITED issue without prior REGISTER -> -EPERM (known-issues TD8)
+## Linux v6.6 kernel/sched/membarrier.c membarrier_private_expedited(): when the issuing mm has not
+## set the matching MEMBARRIER_STATE_*_READY bit (i.e. never called the corresponding ..._REGISTER_*
+## command), it returns -EPERM, and that check runs BEFORE the single-CPU `return 0` shortcut. So even
+## on our uniprocessor an unregistered PRIVATE_EXPEDITED issue should be -EPERM, not 0. We return 0.
+## WHY DEFERRED: the READY bits live in mm->membarrier_state (per-mm, shared across the process's
+## threads). A per-task map would be WORSE — it would reject a cross-thread issue (thread A registers,
+## thread B issues) that Linux accepts. The correct home is a per-mm membarrier_state on the Process
+## struct (kernel/src/proc/pcb.rs). But the boot self-test (our only harness) runs in kernel context
+## where owner_process(current_task) == None, so the per-mm path cannot be exercised at boot. Chose to
+## document rather than ship untested process-model code.
+## PROPER FIX (when a userspace harness or boot owner-process shim exists): add per-mm
+## membarrier_state: AtomicU32 to Process; REGISTER arms OR-in the READY/PREPARE bits; issue arms test
+## the READY bit and return -EPERM when unset; GET_REGISTRATIONS reports the registered bitmask.
+## The sys_membarrier REGISTER arm carries a matching "KNOWN DIVERGENCE (known-issues TD8)" comment.
+
 ## DONE (2026-06-12): ABI batch 551 — set_mempolicy_home_node: restore v6.6 gate order (home_node before len/end)
 ## Linux v6.6 mm/mempolicy.c SYSCALL_DEFINE4(set_mempolicy_home_node) — verified verbatim against
 ## raw.githubusercontent.com torvalds/linux v6.6. Gate order:

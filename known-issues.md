@@ -462,6 +462,47 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
+### TD8. `membarrier` PRIVATE_EXPEDITED issue without prior REGISTER returns 0 where Linux returns `-EPERM` — APPROXIMATION 2026-06-12
+
+**What:** `sys_membarrier()` (`kernel/src/syscall/linux.rs`) accepts every
+issue command (`MEMBARRIER_CMD_PRIVATE_EXPEDITED`,
+`…_PRIVATE_EXPEDITED_SYNC_CORE`, `…_PRIVATE_EXPEDITED_RSEQ`,
+`…_GLOBAL_EXPEDITED`) and returns 0 unconditionally. Linux v6.6's
+`membarrier_private_expedited()` (and the GLOBAL_EXPEDITED issue path)
+first checks the issuing mm's `membarrier_state` and returns **`-EPERM`**
+when the matching `MEMBARRIER_STATE_*_READY` bit is not set — i.e. when the
+process never issued the corresponding `…_REGISTER_*` command. That EPERM
+check runs **before** the single-CPU `return 0` shortcut, so even on our
+uniprocessor an unregistered PRIVATE_EXPEDITED issue should be `-EPERM`,
+not 0. Symmetrically, our `…_REGISTER_*` commands are no-ops (they set no
+state) and `MEMBARRIER_CMD_GET_REGISTRATIONS` always reports 0.
+
+**Why we diverge:** matching this requires **per-mm** registration state
+(the READY bits live in `mm->membarrier_state`, shared across the
+process's threads). A per-task map would be *worse* than the status quo:
+it would wrongly reject a cross-thread issue (thread A registers, thread B
+issues) that Linux accepts, since both share one mm. Adding a per-mm
+`membarrier_state` field to the `Process` struct (`kernel/src/proc/pcb.rs`)
+is the right home, but our only test harness — the boot self-test — runs in
+kernel context where `owner_process(current_task)` returns `None` (no owner
+process), so the per-mm path cannot be exercised at boot. We chose to
+document the divergence rather than ship untested process-model code.
+
+**Impact:** negligible for correctness — well-behaved programs (glibc's
+`__rseq`/pthread setup, libc++ membarrier users) always REGISTER before
+issuing, so the common path returns 0 in both kernels. The divergence is
+only observable to a program that deliberately issues an expedited barrier
+*without* registering to probe for `-EPERM`. We are strictly *more*
+permissive (we accept what Linux rejects; we never reject what Linux
+accepts).
+
+**Proper fix:** add a per-mm `membarrier_state: AtomicU32` to `Process`;
+have the `…_REGISTER_*` arms OR-in the matching READY bit (and the
+PREPARE/global bits Linux sets); have the issue arms test the READY bit and
+return `-EPERM` when unset; have `GET_REGISTRATIONS` report the registered
+command bitmask. Gate the new self-tests on a userspace harness (or a boot
+shim that synthesises an owner process) since boot context has no mm.
+
 ### TD7. `set_mempolicy_home_node` returns 0 where Linux returns `-ENOENT`/`-EOPNOTSUPP` — APPROXIMATION 2026-06-12
 
 **What:** `sys_set_mempolicy_home_node()` (`kernel/src/syscall/linux.rs`)

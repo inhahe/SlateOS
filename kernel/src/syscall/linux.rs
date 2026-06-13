@@ -25652,9 +25652,20 @@ fn sys_membarrier(args: &SyscallArgs) -> SyscallResult {
         | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED
         | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE
         | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_RSEQ => {
-            // Per-task registration that says "I might call the
-            // corresponding barrier later."  No state needed; the
-            // barrier itself works without prior registration.
+            // KNOWN DIVERGENCE (known-issues TD8): Linux v6.6
+            // membarrier_private_expedited() returns -EPERM when the issuing
+            // mm has NOT first registered the matching command (the
+            // MEMBARRIER_STATE_*_READY bit in mm->membarrier_state), and that
+            // EPERM check runs BEFORE the single-CPU `return 0` shortcut — so
+            // even on our uniprocessor a PRIVATE_EXPEDITED issued without
+            // prior registration should be -EPERM, not 0.  Faithfully matching
+            // this requires per-mm registration state (shared across the
+            // process's threads); a per-task map would wrongly reject a
+            // cross-thread issue that Linux accepts.  Deferred because the
+            // boot self-test (our only harness) runs in kernel context with
+            // no owner process, so the per-mm path cannot be exercised there.
+            // We currently accept the REGISTER no-op and the issue paths
+            // unconditionally.
             SyscallResult::ok(0)
         }
         MEMBARRIER_CMD_GET_REGISTRATIONS => {

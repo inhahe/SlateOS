@@ -2699,10 +2699,8 @@ fn dispatch_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
             linux_err(errno::EINVAL)
         }
         // ALSA PCM playback substream — `write(2)` pushes interleaved frames
-        // to the mixer.  The actual routing (only valid in PREPARED/RUNNING,
-        // after HW_PARAMS) is wired in a later commit; until then a write to
-        // an unconfigured substream is rejected with EINVAL.
-        HandleKind::AlsaPcm => linux_err(errno::EINVAL),
+        // to the mixer (the byte-stream equivalent of `WRITEI_FRAMES`).
+        HandleKind::AlsaPcm => dispatch_alsa_pcm_write(entry, buf, len),
         HandleKind::MemFd => dispatch_memfd_write(entry, buf, len),
     }
 }
@@ -2887,11 +2885,10 @@ fn dispatch_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
         HandleKind::SignalFd => dispatch_signalfd_read(entry, buf, cap),
         HandleKind::Timerfd => dispatch_timerfd_read(entry, buf, cap),
         HandleKind::Inotify => dispatch_inotify_read(entry, buf, cap),
-        // ALSA PCM: capture substreams deliver frames via `read(2)`, but
-        // capture/read routing lands in a later commit.  A read of a playback
-        // substream is always EINVAL on Linux; until capture is wired, both
-        // directions reject reads.
-        HandleKind::AlsaPcm => linux_err(errno::EINVAL),
+        // ALSA PCM: a capture substream delivers frames via `read(2)` — the
+        // output-only mixer has no real capture source, so we hand back
+        // silence.  Reading a playback substream is EINVAL, matching Linux.
+        HandleKind::AlsaPcm => dispatch_alsa_pcm_read(entry, buf, cap),
     }
 }
 
@@ -6338,7 +6335,340 @@ fn sys_ioctl(args: &SyscallArgs) -> SyscallResult {
                 Err(e) => linux_err(linux_errno_for(e)),
             }
         }
+        _ => {
+            // Device-specific ioctls: route by handle kind.  An ALSA PCM
+            // substream answers the `SNDRV_PCM_IOCTL_*` family ('A' magic);
+            // everything else is an unsupported request on this fd → ENOTTY.
+            if let Some(entry) = pcb::linux_fd_lookup(pid, fd) {
+                if matches!(entry.kind, crate::proc::linux_fd::HandleKind::AlsaPcm) {
+                    return alsa_pcm_ioctl(&entry, request, args.arg2);
+                }
+            }
+            linux_err(errno::ENOTTY)
+        }
+    }
+}
+
+/// `write(2)` routing for an ALSA PCM playback substream.
+///
+/// Treats the user buffer as native-format interleaved PCM (S16_LE stereo at
+/// 48 kHz, 4 bytes/frame) and hands it to the mixer via
+/// [`crate::ipc::alsa_pcm::write_frames`].  The transfer is bounded to the
+/// mixer ring's capacity so a single `write` never allocates an unbounded
+/// kernel buffer; userspace loops (or `poll(POLLOUT)`s) for the remainder.
+/// Returns the number of bytes accepted.
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+fn dispatch_alsa_pcm_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
+    let h = crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(entry.raw_handle);
+
+    // Cap the copy to the mixer ring capacity and align down to whole frames:
+    // the write path is frame-granular, and the mixer accepts at most a ring's
+    // worth before reporting "full".
+    const RING_CAP: usize = 16384;
+    let want = (len.min(RING_CAP as u64) as usize) & !0b11usize;
+    if want == 0 {
+        // A sub-frame write transfers nothing but is not an error.
+        return SyscallResult::ok(0);
+    }
+
+    if crate::mm::user::validate_user_read(buf, want).is_err() {
+        return linux_err(errno::EFAULT);
+    }
+    let mut kbuf = alloc::vec![0u8; want];
+    // SAFETY: `kbuf` is a freshly-allocated kernel buffer of exactly `want`
+    // bytes; `copy_from_user` re-validates the user range and handles SMAP.
+    if unsafe { crate::mm::user::copy_from_user(buf, kbuf.as_mut_ptr(), want) }.is_err() {
+        return linux_err(errno::EFAULT);
+    }
+
+    match crate::ipc::alsa_pcm::write_frames(h, &kbuf) {
+        Ok(written) => SyscallResult::ok(written as i64),
+        Err(crate::error::KernelError::WouldBlock) => linux_err(errno::EAGAIN),
+        Err(_) => linux_err(errno::EINVAL),
+    }
+}
+
+/// `read(2)` routing for an ALSA PCM substream.
+///
+/// Playback substreams reject reads (`EINVAL`, as on Linux).  Capture
+/// substreams hand back silence: the mixer is output-only, so there is no real
+/// capture source, but returning zeroed frames keeps capture clients (level
+/// meters, loopback probes) running instead of erroring.
+#[allow(clippy::cast_possible_wrap)]
+fn dispatch_alsa_pcm_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
+    let h = crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(entry.raw_handle);
+    if !crate::ipc::alsa_pcm::readable(h) {
+        // Playback fd, or a stale instance — neither delivers read data.
+        return linux_err(errno::EINVAL);
+    }
+    const SILENCE_CAP: usize = 16384;
+    let want = (cap.min(SILENCE_CAP as u64) as usize) & !0b11usize;
+    if want == 0 {
+        return SyscallResult::ok(0);
+    }
+    if crate::mm::user::validate_user_write(buf, want).is_err() {
+        return linux_err(errno::EFAULT);
+    }
+    let zeros = alloc::vec![0u8; want];
+    // SAFETY: `zeros` is a kernel buffer of exactly `want` bytes; `copy_to_user`
+    // re-validates the destination range as writable and handles SMAP.
+    if unsafe { crate::mm::user::copy_to_user(zeros.as_ptr(), buf, want) }.is_err() {
+        return linux_err(errno::EFAULT);
+    }
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(want as i64)
+}
+
+/// Dispatch one `SNDRV_PCM_IOCTL_*` request against an ALSA PCM substream fd.
+///
+/// Reads/writes the request's payload struct from/to userspace, drives the
+/// per-open state machine in [`crate::ipc::alsa_pcm`], and translates the
+/// outcome to a Linux errno.  `argp` is the third `ioctl` argument (the user
+/// pointer to the payload, where one is carried).
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap, clippy::too_many_lines)]
+fn alsa_pcm_ioctl(entry: &FdEntry, request: u32, argp: u64) -> SyscallResult {
+    use crate::audio_alsa as alsa;
+    use crate::error::KernelError;
+
+    let h = crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(entry.raw_handle);
+
+    // Translate a state-machine Result into an ioctl return (0 on success).
+    let map = |r: crate::error::KernelResult<()>| -> SyscallResult {
+        match r {
+            Ok(()) => SyscallResult::ok(0),
+            Err(KernelError::InvalidHandle) => linux_err(errno::EBADF),
+            Err(KernelError::WouldBlock) => linux_err(errno::EAGAIN),
+            Err(_) => linux_err(errno::EINVAL),
+        }
+    };
+
+    match request {
+        alsa::SNDRV_PCM_IOCTL_PVERSION => {
+            // Report the ALSA protocol version (an `int` out-parameter).
+            if crate::mm::user::validate_user_write(argp, 4).is_err() {
+                return linux_err(errno::EFAULT);
+            }
+            let v = alsa::SNDRV_PCM_VERSION;
+            // SAFETY: argp validated writable for 4 bytes just above.
+            if unsafe { crate::mm::user::copy_to_user(core::ptr::addr_of!(v).cast::<u8>(), argp, 4) }
+                .is_err()
+            {
+                return linux_err(errno::EFAULT);
+            }
+            SyscallResult::ok(0)
+        }
+        alsa::SNDRV_PCM_IOCTL_INFO => alsa_pcm_ioctl_info(entry, argp),
+        alsa::SNDRV_PCM_IOCTL_HW_REFINE => {
+            // Probe: collapse the supplied config space onto native and echo
+            // it back without committing any state.
+            let mut hwp = match read_user_struct::<alsa::SndPcmHwParams>(argp) {
+                Ok(v) => v,
+                Err(e) => return linux_err(e),
+            };
+            alsa::refine_to_native(&mut hwp);
+            match write_user_struct(argp, &hwp) {
+                Ok(()) => SyscallResult::ok(0),
+                Err(e) => linux_err(e),
+            }
+        }
+        alsa::SNDRV_PCM_IOCTL_HW_PARAMS => {
+            // Commit: collapse onto native, drive OPEN->SETUP (reserving a
+            // mixer slot), and echo the chosen config back.
+            let mut hwp = match read_user_struct::<alsa::SndPcmHwParams>(argp) {
+                Ok(v) => v,
+                Err(e) => return linux_err(e),
+            };
+            alsa::refine_to_native(&mut hwp);
+            if let Err(e) = crate::ipc::alsa_pcm::hw_params(
+                h,
+                alsa::SNDRV_PCM_FORMAT_S16_LE,
+                alsa::MIXER_RATE,
+                alsa::MIXER_CHANNELS,
+            ) {
+                return match e {
+                    KernelError::InvalidHandle => linux_err(errno::EBADF),
+                    KernelError::WouldBlock => linux_err(errno::EBUSY),
+                    _ => linux_err(errno::EINVAL),
+                };
+            }
+            match write_user_struct(argp, &hwp) {
+                Ok(()) => SyscallResult::ok(0),
+                Err(e) => linux_err(e),
+            }
+        }
+        alsa::SNDRV_PCM_IOCTL_SW_PARAMS => {
+            // Accept software parameters unchanged: our fixed pipeline imposes
+            // no extra constraints, so we echo the client's request back.
+            let swp = match read_user_struct::<alsa::SndPcmSwParams>(argp) {
+                Ok(v) => v,
+                Err(e) => return linux_err(e),
+            };
+            if !crate::ipc::alsa_pcm::exists(h) {
+                return linux_err(errno::EBADF);
+            }
+            match write_user_struct(argp, &swp) {
+                Ok(()) => SyscallResult::ok(0),
+                Err(e) => linux_err(e),
+            }
+        }
+        alsa::SNDRV_PCM_IOCTL_HW_FREE => map(crate::ipc::alsa_pcm::hw_free(h)),
+        alsa::SNDRV_PCM_IOCTL_PREPARE => map(crate::ipc::alsa_pcm::prepare(h)),
+        alsa::SNDRV_PCM_IOCTL_START => map(crate::ipc::alsa_pcm::start(h)),
+        alsa::SNDRV_PCM_IOCTL_DROP => map(crate::ipc::alsa_pcm::drop_stream(h)),
+        alsa::SNDRV_PCM_IOCTL_DRAIN => map(crate::ipc::alsa_pcm::drain(h)),
+        alsa::SNDRV_PCM_IOCTL_RESET => map(crate::ipc::alsa_pcm::reset(h)),
+        alsa::SNDRV_PCM_IOCTL_PAUSE => {
+            // The pause flag is passed by value in the third ioctl arg (an
+            // `int`: non-zero = pause, zero = resume), not via a pointer.
+            map(crate::ipc::alsa_pcm::pause(h, argp != 0))
+        }
+        alsa::SNDRV_PCM_IOCTL_WRITEI_FRAMES => alsa_pcm_ioctl_writei(entry, argp),
+        // HWSYNC / RESUME / XRUN / LINK / UNLINK / TTSTAMP: position-sync and
+        // link operations that are no-ops on our software pipeline.  Accept
+        // them so clients that issue them during teardown do not error.
+        alsa::SNDRV_PCM_IOCTL_HWSYNC
+        | alsa::SNDRV_PCM_IOCTL_RESUME
+        | alsa::SNDRV_PCM_IOCTL_XRUN
+        | alsa::SNDRV_PCM_IOCTL_UNLINK
+        | alsa::SNDRV_PCM_IOCTL_TTSTAMP => {
+            if crate::ipc::alsa_pcm::exists(h) {
+                SyscallResult::ok(0)
+            } else {
+                linux_err(errno::EBADF)
+            }
+        }
+        // STATUS / SYNC_PTR / READI_FRAMES position reporting is not yet wired
+        // (the appl/hw-pointer accounting and its boundary handling land in the
+        // next commit); report ENOTTY so a client falls back rather than
+        // trusting bogus position data.
         _ => linux_err(errno::ENOTTY),
+    }
+}
+
+/// `SNDRV_PCM_IOCTL_INFO` — fill a `snd_pcm_info` describing our single
+/// virtual playback/capture device on card 0.
+#[allow(clippy::cast_possible_wrap)]
+fn alsa_pcm_ioctl_info(entry: &FdEntry, argp: u64) -> SyscallResult {
+    use crate::audio_alsa as alsa;
+    let h = crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(entry.raw_handle);
+    let capture = match crate::ipc::alsa_pcm::is_capture(h) {
+        Some(c) => c,
+        None => return linux_err(errno::EBADF),
+    };
+    // SAFETY: SndPcmInfo is a plain `#[repr(C)]` aggregate of integers and byte
+    // arrays with no padding/niche invariants, so an all-zero value is valid.
+    let mut info: alsa::SndPcmInfo = unsafe { core::mem::zeroed() };
+    info.device = 0;
+    info.subdevice = 0;
+    info.stream = if capture {
+        alsa::SNDRV_PCM_STREAM_CAPTURE as i32
+    } else {
+        alsa::SNDRV_PCM_STREAM_PLAYBACK as i32
+    };
+    info.card = 0;
+    info.subdevices_count = 1;
+    info.subdevices_avail = 0;
+    write_cstr_field(&mut info.id, b"OuRoS");
+    write_cstr_field(&mut info.name, b"OuRoS Virtual Audio");
+    write_cstr_field(&mut info.subname, b"subdevice #0");
+    match write_user_struct(argp, &info) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(e),
+    }
+}
+
+/// `SNDRV_PCM_IOCTL_WRITEI_FRAMES` — submit interleaved playback frames whose
+/// user buffer pointer and frame count are carried in a `snd_xferi`.
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+fn alsa_pcm_ioctl_writei(entry: &FdEntry, argp: u64) -> SyscallResult {
+    use crate::audio_alsa as alsa;
+    let h = crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(entry.raw_handle);
+    let mut xfer = match read_user_struct::<alsa::SndXferi>(argp) {
+        Ok(v) => v,
+        Err(e) => return linux_err(e),
+    };
+
+    // bytes = frames * 4 (native S16_LE stereo frame), bounded to the mixer
+    // ring so the kernel buffer is bounded; whole-frame aligned by construction.
+    const RING_CAP: usize = 16384;
+    const FRAME_BYTES: u64 = 4;
+    let req_bytes = xfer.frames.saturating_mul(FRAME_BYTES);
+    let want = req_bytes.min(RING_CAP as u64) as usize;
+    if want == 0 {
+        xfer.result = 0;
+        return match write_user_struct(argp, &xfer) {
+            Ok(()) => SyscallResult::ok(0),
+            Err(e) => linux_err(e),
+        };
+    }
+
+    if crate::mm::user::validate_user_read(xfer.buf, want).is_err() {
+        return linux_err(errno::EFAULT);
+    }
+    let mut kbuf = alloc::vec![0u8; want];
+    // SAFETY: `kbuf` is a freshly-allocated kernel buffer of exactly `want`
+    // bytes; `copy_from_user` re-validates the user range and handles SMAP.
+    if unsafe { crate::mm::user::copy_from_user(xfer.buf, kbuf.as_mut_ptr(), want) }.is_err() {
+        return linux_err(errno::EFAULT);
+    }
+
+    match crate::ipc::alsa_pcm::write_frames(h, &kbuf) {
+        Ok(written) => {
+            // Report the frame count actually accepted in `result`.
+            xfer.result = written
+                .checked_div(crate::audio_mixer::FRAME_SIZE_BYTES)
+                .unwrap_or(0) as i64;
+            match write_user_struct(argp, &xfer) {
+                Ok(()) => SyscallResult::ok(0),
+                Err(e) => linux_err(e),
+            }
+        }
+        Err(crate::error::KernelError::WouldBlock) => linux_err(errno::EAGAIN),
+        Err(crate::error::KernelError::InvalidHandle) => linux_err(errno::EBADF),
+        Err(_) => linux_err(errno::EINVAL),
+    }
+}
+
+/// Copy a fixed `#[repr(C)]` payload struct out of userspace by value.
+///
+/// Uses a byte copy (no alignment requirement on the user pointer), so it is
+/// safe even if the client passes a misaligned buffer.  Returns the Linux
+/// errno on a bad user pointer.
+fn read_user_struct<T: Copy>(argp: u64) -> Result<T, i32> {
+    let len = core::mem::size_of::<T>();
+    // SAFETY: `T` is a plain `#[repr(C)]` integer aggregate (the asound.h
+    // mirrors), so any byte pattern is a valid value; the storage is a properly
+    // aligned local and `copy_from_user` validates the user range.
+    let mut val: T = unsafe { core::mem::zeroed() };
+    // SAFETY: `&mut val` is a valid kernel buffer of exactly `len` bytes.
+    match unsafe {
+        crate::mm::user::copy_from_user(argp, core::ptr::addr_of_mut!(val).cast::<u8>(), len)
+    } {
+        Ok(()) => Ok(val),
+        Err(_) => Err(errno::EFAULT),
+    }
+}
+
+/// Copy a fixed `#[repr(C)]` payload struct into userspace by value.
+fn write_user_struct<T: Copy>(argp: u64, val: &T) -> Result<(), i32> {
+    let len = core::mem::size_of::<T>();
+    // SAFETY: `val` is a valid kernel `T` of exactly `len` bytes; `copy_to_user`
+    // validates the user destination as writable and handles SMAP.
+    match unsafe {
+        crate::mm::user::copy_to_user(core::ptr::addr_of!(*val).cast::<u8>(), argp, len)
+    } {
+        Ok(()) => Ok(()),
+        Err(_) => Err(errno::EFAULT),
+    }
+}
+
+/// Write `src` into a fixed-size, NUL-padded C string field, truncating to fit
+/// and always leaving at least one terminating NUL.
+fn write_cstr_field(dst: &mut [u8], src: &[u8]) {
+    dst.fill(0);
+    let n = src.len().min(dst.len().saturating_sub(1));
+    if let (Some(d), Some(s)) = (dst.get_mut(..n), src.get(..n)) {
+        d.copy_from_slice(s);
     }
 }
 
@@ -21329,11 +21659,18 @@ fn poll_revents_from_entry(
         }
         HandleKind::AlsaPcm => {
             // A playback substream becomes writable (POLLOUT) when its mixer
-            // slot has space; a capture substream becomes readable when frames
-            // are available.  Both depend on the mixer routing that lands in a
-            // later commit — until the substream can be configured and driven,
-            // it reports "not ready" rather than lying about readiness.
-            0
+            // ring has room for at least one frame; a capture substream is
+            // readable (POLLIN) whenever it is configured, since the
+            // output-only mixer synthesises silence on demand.
+            let h = crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(entry.raw_handle);
+            let mut bits = 0u16;
+            if crate::ipc::alsa_pcm::writable(h) {
+                bits |= poll_bits::POLLOUT | poll_bits::POLLWRNORM;
+            }
+            if crate::ipc::alsa_pcm::readable(h) {
+                bits |= poll_bits::POLLIN | poll_bits::POLLRDNORM;
+            }
+            bits
         }
     };
 

@@ -289,6 +289,318 @@ pub fn params(handle: AlsaPcmHandle) -> Option<(u32, u32, u32)> {
 }
 
 // ---------------------------------------------------------------------------
+// State-machine transitions (driven by the PCM ioctls)
+// ---------------------------------------------------------------------------
+//
+// These mutate the per-open state in response to `SNDRV_PCM_IOCTL_*`.  They
+// operate purely on the instance state and the mixer; the syscall layer owns
+// all user-memory copies and translates the returned `KernelError` to an errno.
+//
+// Lock discipline: any function that must touch the mixer first fetches the
+// mixer `StreamId` (and validates the transition) under the table lock, then
+// drops the lock before calling into [`crate::audio_mixer`].  No mixer call is
+// ever made while `ALSA_PCM_TABLE` is held (see the module "Lock ordering"
+// note), so the leaf-lock invariant holds.
+
+/// Commit a hardware configuration (`HW_PARAMS`): validate `(format, rate,
+/// channels)` against the mixer's native pipeline, reserve a mixer slot for a
+/// playback substream, and move it to `SETUP`.
+///
+/// Idempotent across repeated `HW_PARAMS` without an intervening `HW_FREE`: the
+/// already-reserved mixer slot is reused rather than leaked.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidHandle`] if the instance is stale.
+/// - [`KernelError::InvalidArgument`] if the configuration is not the mixer's
+///   native 48 kHz / S16_LE / stereo (the wiring advertises only that through
+///   `HW_REFINE`, so a conforming ALSA-lib never reaches this).
+/// - [`KernelError::WouldBlock`] if no mixer slot is free (propagated from
+///   [`crate::audio_mixer::open_stream`]).
+pub fn hw_params(
+    handle: AlsaPcmHandle,
+    format: u32,
+    rate: u32,
+    channels: u32,
+) -> KernelResult<()> {
+    if !crate::audio_alsa::mixer_accepts_directly(format, rate, channels) {
+        // Confirm the handle exists so a stale fd still reports InvalidHandle
+        // rather than masking it as a config error.
+        if !exists(handle) {
+            return Err(KernelError::InvalidHandle);
+        }
+        return Err(KernelError::InvalidArgument);
+    }
+
+    // Decide whether we still need to reserve a mixer slot, under the lock.
+    let (need_stream, capture) = {
+        let table = ALSA_PCM_TABLE.lock();
+        let pcm = table.get(&handle.id()).ok_or(KernelError::InvalidHandle)?;
+        (pcm.mixer_stream.is_none(), pcm.capture)
+    };
+
+    // Playback substreams feed the mixer; capture substreams have no mixer
+    // slot (the mixer is output-only — capture reads produce silence).
+    let new_stream = if need_stream && !capture {
+        Some(audio_mixer::open_stream("alsa-pcm")?)
+    } else {
+        None
+    };
+
+    // Re-acquire and apply.  If the instance vanished while the lock was
+    // dropped (a concurrent close), release any freshly-opened slot.
+    let mut table = ALSA_PCM_TABLE.lock();
+    let Some(pcm) = table.get_mut(&handle.id()) else {
+        drop(table);
+        if let Some(sid) = new_stream {
+            audio_mixer::close_stream(sid);
+        }
+        return Err(KernelError::InvalidHandle);
+    };
+    if let Some(sid) = new_stream {
+        pcm.mixer_stream = Some(sid);
+    }
+    pcm.format = Some(format);
+    pcm.rate = Some(rate);
+    pcm.channels = Some(channels);
+    pcm.state = STATE_SETUP;
+    pcm.frames_written = 0;
+    Ok(())
+}
+
+/// Release the hardware configuration (`HW_FREE`): drop the mixer slot and
+/// return the substream to `OPEN`.
+///
+/// The mixer slot is released after the table lock is dropped, preserving the
+/// leaf-lock invariant.
+///
+/// # Errors
+///
+/// [`KernelError::InvalidHandle`] if the instance is stale.
+pub fn hw_free(handle: AlsaPcmHandle) -> KernelResult<()> {
+    let mixer_to_free = {
+        let mut table = ALSA_PCM_TABLE.lock();
+        let pcm = table.get_mut(&handle.id()).ok_or(KernelError::InvalidHandle)?;
+        let stream = pcm.mixer_stream.take();
+        pcm.format = None;
+        pcm.rate = None;
+        pcm.channels = None;
+        pcm.state = STATE_OPEN;
+        pcm.frames_written = 0;
+        stream
+    };
+    if let Some(sid) = mixer_to_free {
+        audio_mixer::close_stream(sid);
+    }
+    Ok(())
+}
+
+/// Move the substream to `PREPARED` (`PREPARE`): valid from any configured
+/// state, it clears the mixer ring and resets the application pointer.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidHandle`] if the instance is stale.
+/// - [`KernelError::InvalidArgument`] if the substream has no committed
+///   configuration yet (still `OPEN`).
+pub fn prepare(handle: AlsaPcmHandle) -> KernelResult<()> {
+    let mixer_to_clear = {
+        let mut table = ALSA_PCM_TABLE.lock();
+        let pcm = table.get_mut(&handle.id()).ok_or(KernelError::InvalidHandle)?;
+        if pcm.state == STATE_OPEN {
+            return Err(KernelError::InvalidArgument);
+        }
+        pcm.state = STATE_PREPARED;
+        pcm.frames_written = 0;
+        pcm.mixer_stream
+    };
+    if let Some(sid) = mixer_to_clear {
+        audio_mixer::clear(sid);
+    }
+    Ok(())
+}
+
+/// Start the substream running (`START`): `PREPARED` → `RUNNING`.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidHandle`] if the instance is stale.
+/// - [`KernelError::InvalidArgument`] if the substream is not `PREPARED`
+///   (ALSA returns `-EBADFD` here; we surface it as `EINVAL`).
+pub fn start(handle: AlsaPcmHandle) -> KernelResult<()> {
+    let mut table = ALSA_PCM_TABLE.lock();
+    let pcm = table.get_mut(&handle.id()).ok_or(KernelError::InvalidHandle)?;
+    if pcm.state != STATE_PREPARED {
+        return Err(KernelError::InvalidArgument);
+    }
+    pcm.state = STATE_RUNNING;
+    Ok(())
+}
+
+/// Stop the substream immediately and discard buffered frames (`DROP`):
+/// any configured state → `SETUP`.
+///
+/// # Errors
+///
+/// [`KernelError::InvalidHandle`] if the instance is stale.
+pub fn drop_stream(handle: AlsaPcmHandle) -> KernelResult<()> {
+    let mixer_to_clear = {
+        let mut table = ALSA_PCM_TABLE.lock();
+        let pcm = table.get_mut(&handle.id()).ok_or(KernelError::InvalidHandle)?;
+        // DROP from OPEN is a no-op success in ALSA; only reconfigured states
+        // move to SETUP.
+        if pcm.state != STATE_OPEN {
+            pcm.state = STATE_SETUP;
+        }
+        pcm.frames_written = 0;
+        pcm.mixer_stream
+    };
+    if let Some(sid) = mixer_to_clear {
+        audio_mixer::clear(sid);
+    }
+    Ok(())
+}
+
+/// Drain the substream (`DRAIN`): stop accepting new frames and return to
+/// `SETUP` once the buffered frames have been consumed.
+///
+/// Our mixer pulls frames asynchronously, so we do a non-blocking drain: the
+/// already-buffered frames remain queued for the mixer and the state returns to
+/// `SETUP`.  (A blocking drain that waits for the ring to empty is a future
+/// refinement; non-blocking is correct for the `SND_PCM_NONBLOCK` path ALSA-lib
+/// uses for event-driven clients.)
+///
+/// # Errors
+///
+/// [`KernelError::InvalidHandle`] if the instance is stale.
+pub fn drain(handle: AlsaPcmHandle) -> KernelResult<()> {
+    let mut table = ALSA_PCM_TABLE.lock();
+    let pcm = table.get_mut(&handle.id()).ok_or(KernelError::InvalidHandle)?;
+    if pcm.state != STATE_OPEN {
+        pcm.state = STATE_SETUP;
+    }
+    Ok(())
+}
+
+/// Pause (`enable == true`) or resume (`enable == false`) a running substream.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidHandle`] if the instance is stale.
+/// - [`KernelError::InvalidArgument`] for an illegal pause/resume transition
+///   (pause requires `RUNNING`, resume requires `PAUSED`).
+pub fn pause(handle: AlsaPcmHandle, enable: bool) -> KernelResult<()> {
+    let mut table = ALSA_PCM_TABLE.lock();
+    let pcm = table.get_mut(&handle.id()).ok_or(KernelError::InvalidHandle)?;
+    match (enable, pcm.state) {
+        (true, STATE_RUNNING) => {
+            pcm.state = STATE_PAUSED;
+            Ok(())
+        }
+        (false, STATE_PAUSED) => {
+            pcm.state = STATE_RUNNING;
+            Ok(())
+        }
+        _ => Err(KernelError::InvalidArgument),
+    }
+}
+
+/// Reset the substream position (`RESET`): zero the application pointer and
+/// clear the mixer ring without changing the running state.
+///
+/// # Errors
+///
+/// [`KernelError::InvalidHandle`] if the instance is stale.
+pub fn reset(handle: AlsaPcmHandle) -> KernelResult<()> {
+    let mixer_to_clear = {
+        let mut table = ALSA_PCM_TABLE.lock();
+        let pcm = table.get_mut(&handle.id()).ok_or(KernelError::InvalidHandle)?;
+        pcm.frames_written = 0;
+        pcm.mixer_stream
+    };
+    if let Some(sid) = mixer_to_clear {
+        audio_mixer::clear(sid);
+    }
+    Ok(())
+}
+
+/// Submit interleaved playback frames (`WRITEI_FRAMES` / `write(2)`).
+///
+/// `data` is native-format PCM (S16_LE stereo at 48 kHz, 4 bytes/frame) already
+/// copied into the kernel by the caller.  A first write from `PREPARED`
+/// auto-starts the substream (`PREPARED` → `RUNNING`), mirroring ALSA's
+/// `start_threshold` behaviour for the common single-shot writer.  Returns the
+/// number of **bytes** accepted by the mixer (the caller converts to a frame
+/// count for the ioctl reply).
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidHandle`] if the instance is stale.
+/// - [`KernelError::InvalidArgument`] if this is a capture substream, has no
+///   committed configuration, or is in a state that cannot accept frames.
+/// - [`KernelError::WouldBlock`] if the mixer ring is full (no frame accepted);
+///   the caller maps this to `-EAGAIN` so userspace can `poll(POLLOUT)`.
+pub fn write_frames(handle: AlsaPcmHandle, data: &[u8]) -> KernelResult<usize> {
+    // Phase 1: validate the transition and fetch the mixer slot under the lock.
+    let mixer_id = {
+        let mut table = ALSA_PCM_TABLE.lock();
+        let pcm = table.get_mut(&handle.id()).ok_or(KernelError::InvalidHandle)?;
+        if pcm.capture {
+            return Err(KernelError::InvalidArgument);
+        }
+        let id = pcm.mixer_stream.ok_or(KernelError::InvalidArgument)?;
+        match pcm.state {
+            STATE_PREPARED => pcm.state = STATE_RUNNING, // auto-start
+            STATE_RUNNING | STATE_PAUSED => {}
+            _ => return Err(KernelError::InvalidArgument),
+        }
+        id
+    };
+
+    // Phase 2: push to the mixer with the table lock released.
+    let written = audio_mixer::write_pcm(mixer_id, data)?;
+    if written == 0 && !data.is_empty() {
+        return Err(KernelError::WouldBlock);
+    }
+
+    // Phase 3: advance the application pointer.
+    if let Some(pcm) = ALSA_PCM_TABLE.lock().get_mut(&handle.id()) {
+        let frames = written.checked_div(audio_mixer::FRAME_SIZE_BYTES).unwrap_or(0) as u64;
+        pcm.frames_written = pcm.frames_written.saturating_add(frames);
+    }
+    Ok(written)
+}
+
+/// Is a substream writable right now (does its mixer ring have room)?
+///
+/// Backs `POLLOUT` readiness.  Capture substreams are never writable; a
+/// playback substream without a mixer slot (still `OPEN`) reports writable so a
+/// poll before `HW_PARAMS` does not hang (matching ALSA, where an unconfigured
+/// fd is immediately ready to be configured).
+#[must_use]
+pub fn writable(handle: AlsaPcmHandle) -> bool {
+    let table = ALSA_PCM_TABLE.lock();
+    match table.get(&handle.id()) {
+        None => false,
+        Some(pcm) if pcm.capture => false,
+        Some(pcm) => match pcm.mixer_stream {
+            Some(sid) => audio_mixer::writable(sid),
+            None => true,
+        },
+    }
+}
+
+/// Is a capture substream readable right now?
+///
+/// The mixer is output-only, so capture produces synthesised silence and is
+/// always immediately readable once it has been opened.  Playback substreams
+/// are never readable.
+#[must_use]
+pub fn readable(handle: AlsaPcmHandle) -> bool {
+    ALSA_PCM_TABLE.lock().get(&handle.id()).is_some_and(|p| p.capture)
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 
@@ -327,6 +639,71 @@ pub fn self_test() -> KernelResult<()> {
     check!(exists(h), "still alive after one of two closes");
     close(h);
     check!(!exists(h), "freed after the second close");
+
+    // --- playback state machine ----------------------------------------
+    // Native config: S16_LE (2) / 48000 Hz / stereo.
+    let p = create(false);
+    check!(state(p) == Some(STATE_OPEN), "fresh playback OPEN");
+    // A non-native config is rejected without leaving SETUP.
+    check!(
+        hw_params(p, 2, 44100, 2) == Err(KernelError::InvalidArgument),
+        "non-native rate rejected"
+    );
+    check!(state(p) == Some(STATE_OPEN), "rejected hw_params leaves OPEN");
+    // Native config is accepted: OPEN -> SETUP, mixer slot reserved.
+    hw_params(p, 2, 48000, 2)?;
+    check!(state(p) == Some(STATE_SETUP), "hw_params -> SETUP");
+    check!(params(p) == Some((2, 48000, 2)), "params stored");
+    // PREPARE -> PREPARED, then a write auto-starts to RUNNING.
+    prepare(p)?;
+    check!(state(p) == Some(STATE_PREPARED), "prepare -> PREPARED");
+    let frame = [0u8; 8]; // two native frames
+    let n = write_frames(p, &frame)?;
+    check!(n == 8, "two frames accepted");
+    check!(state(p) == Some(STATE_RUNNING), "write auto-starts RUNNING");
+    check!(frames_written(p) == Some(2), "appl ptr advanced by 2 frames");
+    check!(writable(p), "running playback is writable");
+    check!(!readable(p), "playback is not readable");
+    // PAUSE / resume round-trip.
+    pause(p, true)?;
+    check!(state(p) == Some(STATE_PAUSED), "pause -> PAUSED");
+    check!(pause(p, true) == Err(KernelError::InvalidArgument), "double pause errors");
+    pause(p, false)?;
+    check!(state(p) == Some(STATE_RUNNING), "resume -> RUNNING");
+    // DRAIN -> SETUP, then re-prepare and START explicitly.
+    drain(p)?;
+    check!(state(p) == Some(STATE_SETUP), "drain -> SETUP");
+    prepare(p)?;
+    start(p)?;
+    check!(state(p) == Some(STATE_RUNNING), "explicit start -> RUNNING");
+    // DROP -> SETUP and resets the appl ptr.
+    drop_stream(p)?;
+    check!(state(p) == Some(STATE_SETUP), "drop -> SETUP");
+    check!(frames_written(p) == Some(0), "drop resets appl ptr");
+    // HW_FREE releases the slot and returns to OPEN.
+    hw_free(p)?;
+    check!(state(p) == Some(STATE_OPEN), "hw_free -> OPEN");
+    check!(params(p).is_none(), "hw_free clears params");
+    // A start from OPEN is illegal; a write without config is illegal.
+    check!(start(p) == Err(KernelError::InvalidArgument), "start from OPEN errors");
+    check!(
+        write_frames(p, &frame) == Err(KernelError::InvalidArgument),
+        "write without config errors"
+    );
+    close(p);
+    check!(!exists(p), "playback instance freed");
+
+    // --- capture substream ---------------------------------------------
+    let cap = create(true);
+    hw_params(cap, 2, 48000, 2)?;
+    check!(state(cap) == Some(STATE_SETUP), "capture hw_params -> SETUP");
+    check!(readable(cap), "configured capture is readable");
+    check!(!writable(cap), "capture is not writable");
+    check!(
+        write_frames(cap, &frame) == Err(KernelError::InvalidArgument),
+        "write to capture errors"
+    );
+    close(cap);
 
     // Capture direction round-trips.
     let c = create(true);

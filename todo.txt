@@ -32,12 +32,32 @@
 ##       through sys_openat so it's covered too. read/write/poll currently EINVAL/not-ready — the actual
 ##       ioctl/mixer routing + POLLOUT readiness lands in commit 4. Built clean, clippy 17462, BOOT_OK
 ##       (both [alsa] ABI and [alsa_pcm] instance self-tests PASS).
-##   [TODO commit 4] Per-open PCM state machine (OPEN->SETUP->PREPARED->RUNNING) keyed by the fd handle:
-##       HW_REFINE advertises only the native config (forces ALSA-lib to negotiate down to 48k/S16/2),
-##       HW_PARAMS validates+stores it and opens an audio_mixer stream, PREPARE/START/DROP/DRAIN drive
-##       the mixer stream, WRITEI_FRAMES (and write()) push frames via audio_mixer::write_pcm, STATUS/
-##       SYNC_PTR report avail/hw_ptr from audio_mixer::buffered. Route SNDRV_PCM_IOCTL_* through
-##       audio_alsa from sys_ioctl when the fd is HandleKind::AlsaPcm.
+##   [DONE commit 4] Per-open PCM state machine + ioctl/write routing to the mixer.
+##       ipc/alsa_pcm.rs gained the transition API (all leaf-lock-safe — mixer touched only after the
+##       table lock is dropped): hw_params (validate native via audio_alsa::mixer_accepts_directly,
+##       open a mixer slot for playback, OPEN->SETUP), hw_free (release slot -> OPEN), prepare (->PREPARED,
+##       clear ring), start (PREPARED->RUNNING), drop_stream/drain (->SETUP), pause (RUNNING<->PAUSED),
+##       reset, write_frames (auto-start PREPARED->RUNNING, push via audio_mixer::write_pcm, advance
+##       appl_ptr, EAGAIN/WouldBlock when the ring is full), writable/readable for poll. audio_alsa.rs
+##       gained refine_to_native() (collapses a snd_pcm_hw_params config space onto RW-interleaved /
+##       S16_LE / STD / 48k / stereo, fills cmask/info/msbits/exact-rate; period/buffer left free) +
+##       SNDRV_PCM_IOCTL_HW_FREE + SUBFORMAT_STD + a refine self-test. audio_mixer.rs gained
+##       space_available/writable/clear. syscall/linux.rs: sys_ioctl routes the 'A'-magic family to a new
+##       alsa_pcm_ioctl() (PVERSION, INFO, HW_REFINE, HW_PARAMS, SW_PARAMS echo, HW_FREE, PREPARE/START/
+##       DROP/DRAIN/RESET, PAUSE via int arg, WRITEI_FRAMES via snd_xferi; HWSYNC/RESUME/XRUN/UNLINK/
+##       TTSTAMP accepted as no-ops); write(2)->dispatch_alsa_pcm_write (frame-aligned, ring-capped),
+##       read(2)->dispatch_alsa_pcm_read (capture=silence, playback=EINVAL), POLLOUT/POLLIN readiness from
+##       alsa_pcm::writable/readable. Helpers read_user_struct/write_user_struct (byte-copy, no user-ptr
+##       alignment assumption) + write_cstr_field. Built clean, clippy 17462, BOOT_OK; the alsa_pcm
+##       boot self-test now drives the full state machine (hw_params/prepare/write/pause/drain/start/drop/
+##       hw_free + capture) and PASSES.
+##       [DEFERRED to commit 4b] STATUS / SYNC_PTR / READI_FRAMES position reporting returns ENOTTY for
+##       now. Proper hw_ptr/appl_ptr accounting needs the boundary stored from SW_PARAMS and a byte-exact
+##       snd_pcm_sync_ptr / snd_pcm_mmap_{status,control} layout (the time64 vs legacy-timespec variants
+##       flagged in commit 2's note). Without SYNC_PTR a real ALSA-lib client cannot run end-to-end, but
+##       there is no ALSA-lib in QEMU yet to test against — the state machine itself is fully self-tested.
+##       Also note: only RW_INTERLEAVED access is advertised (mmap-based clients unsupported); non-native
+##       formats/rates are rejected rather than converted (resampling/format conversion is future work).
 ##   [TODO commit 5] control device (controlC0): SNDRV_CTL_IOCTL_PVERSION/CARD_INFO/ELEM_* enough for
 ##       ALSA-lib to enumerate the card; mixer elements map to audio_mixer master volume/mute.
 ##   DESIGN NOTE (clearly-correct default, not blocking): ALSA-direct kernel interface chosen over a

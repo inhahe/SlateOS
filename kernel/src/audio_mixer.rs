@@ -263,6 +263,44 @@ pub fn buffered(id: StreamId) -> usize {
     STREAMS[idx].ring.lock().len()
 }
 
+/// Free space (in bytes) currently available in a stream's ring buffer.
+///
+/// Returns 0 for an out-of-range or inactive stream.  Used by the ALSA PCM
+/// shim to size a non-blocking transfer and to answer `POLLOUT` readiness.
+#[allow(dead_code)]
+pub fn space_available(id: StreamId) -> usize {
+    let Some(slot) = STREAMS.get(id as usize) else {
+        return 0;
+    };
+    if !slot.active.load(Ordering::Acquire) {
+        return 0;
+    }
+    // RING_BUFFER_SIZE is the fixed ring capacity; `len()` never exceeds it,
+    // so the subtraction cannot wrap.
+    RING_BUFFER_SIZE.saturating_sub(slot.ring.lock().len())
+}
+
+/// Is a stream writable — i.e. does it have room for at least one frame?
+///
+/// Backs `POLLOUT` readiness for a playback PCM substream: a poll reports the
+/// fd writable whenever the ring can accept a frame without blocking.
+#[allow(dead_code)]
+pub fn writable(id: StreamId) -> bool {
+    space_available(id) >= FRAME_SIZE_BYTES
+}
+
+/// Discard any buffered frames for a stream without deactivating it.
+///
+/// Mirrors the ALSA `PREPARE` / `DROP` semantics that reset the ring to empty
+/// while keeping the substream's mixer slot reserved (unlike [`close_stream`],
+/// which also frees the slot).
+#[allow(dead_code)]
+pub fn clear(id: StreamId) {
+    if let Some(slot) = STREAMS.get(id as usize) {
+        slot.ring.lock().clear();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Public API — Volume control
 // ---------------------------------------------------------------------------

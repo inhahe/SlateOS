@@ -94,6 +94,9 @@ pub const SNDRV_PCM_FORMAT_S32_BE: u32 = 11;
 /// 32-bit float, little-endian.
 pub const SNDRV_PCM_FORMAT_FLOAT_LE: u32 = 14;
 
+/// The only PCM subformat in general use — "standard" linear samples.
+pub const SNDRV_PCM_SUBFORMAT_STD: u32 = 0;
+
 // ---------------------------------------------------------------------------
 // PCM stream state (returned in snd_pcm_status; mirrored here for the
 // state machine the wiring layer will maintain per open stream)
@@ -184,6 +187,8 @@ pub const SNDRV_PCM_IOCTL_PVERSION: u32 = ior_int(0x00);
 pub const SNDRV_PCM_IOCTL_TTSTAMP: u32 = iow_int(0x03);
 /// Force a hardware-pointer sync point (no payload).
 pub const SNDRV_PCM_IOCTL_HWSYNC: u32 = io(0x22);
+/// Release a previously committed hardware configuration (no payload).
+pub const SNDRV_PCM_IOCTL_HW_FREE: u32 = io(0x12);
 /// Move the stream to the PREPARED state (no payload).
 pub const SNDRV_PCM_IOCTL_PREPARE: u32 = io(0x40);
 /// Reset the stream's position/state (no payload).
@@ -459,6 +464,97 @@ pub fn mixer_frames_to_bytes(frames: u32) -> Option<usize> {
 }
 
 // ---------------------------------------------------------------------------
+// HW_REFINE / HW_PARAMS configuration-space refinement
+// ---------------------------------------------------------------------------
+//
+// ALSA-lib negotiates a hardware configuration by sending a `snd_pcm_hw_params`
+// whose masks/intervals describe the *space* of configurations it can accept,
+// then asking the kernel to narrow that space (`HW_REFINE`) and finally to
+// commit a single point in it (`HW_PARAMS`).  Because our backend is the fixed
+// 48 kHz / S16_LE / stereo software mixer, every refine collapses the space to
+// exactly that one configuration; a conforming client then converges its own
+// parameters onto it.  [`refine_to_native`] performs that collapse in place.
+//
+// The masks index 0/1/2 are ACCESS / FORMAT / SUBFORMAT; the intervals array is
+// indexed by `SNDRV_PCM_HW_PARAM_<x> - SNDRV_PCM_HW_PARAM_SAMPLE_BITS`, so the
+// first four interval slots are SAMPLE_BITS / FRAME_BITS / CHANNELS / RATE.
+
+/// Interval slot for `SNDRV_PCM_HW_PARAM_SAMPLE_BITS` (bits per sample).
+const IV_SAMPLE_BITS: usize = 0;
+/// Interval slot for `SNDRV_PCM_HW_PARAM_FRAME_BITS` (bits per frame).
+const IV_FRAME_BITS: usize = 1;
+/// Interval slot for `SNDRV_PCM_HW_PARAM_CHANNELS`.
+const IV_CHANNELS: usize = 2;
+/// Interval slot for `SNDRV_PCM_HW_PARAM_RATE` (Hz).
+const IV_RATE: usize = 3;
+
+/// `snd_interval` flag bit marking the interval as integer-valued.
+const SNDRV_INTERVAL_INTEGER: u32 = 0b100;
+
+/// Capability flags we advertise for the substream (`SNDRV_PCM_INFO_*`):
+/// interleaved RW transfer, block (period) transfer, and pause support.
+/// `INTERLEAVED (0x100) | BLOCK_TRANSFER (0x10000) | PAUSE (0x80000)`.
+const PCM_INFO_NATIVE: u32 = 0x0009_0100;
+
+/// A `snd_mask` with exactly one candidate bit set.
+///
+/// `bit` is the enum value of the parameter (e.g. `SNDRV_PCM_FORMAT_S16_LE`).
+/// All values we set are well under 256, so the word index is always in range;
+/// an out-of-range bit yields an all-zero (empty) mask rather than panicking.
+fn mask_bit(bit: u32) -> SndMask {
+    let mut m = SndMask { bits: [0u32; 8] };
+    let word = (bit / 32) as usize;
+    let shift = bit % 32;
+    if let Some(w) = m.bits.get_mut(word) {
+        *w = 1u32 << shift;
+    }
+    m
+}
+
+/// Pin one numeric interval to a single integer value `[v, v]`.
+fn set_interval_fixed(params: &mut SndPcmHwParams, slot: usize, v: u32) {
+    if let Some(iv) = params.intervals.get_mut(slot) {
+        iv.min = v;
+        iv.max = v;
+        iv.flags = SNDRV_INTERVAL_INTEGER;
+    }
+}
+
+/// Collapse a `snd_pcm_hw_params` configuration space onto the mixer's native
+/// 48 kHz / S16_LE / stereo, interleaved-RW configuration, in place.
+///
+/// This is the shared core of both `HW_REFINE` (probe) and `HW_PARAMS`
+/// (commit): it fixes ACCESS to RW-interleaved, FORMAT to S16_LE, SUBFORMAT to
+/// STD, and the sample-bits / frame-bits / channels / rate intervals to their
+/// single native values, then fills the reply fields (`cmask`, `info`,
+/// `msbits`, exact rate).  Period- and buffer-sizing intervals are deliberately
+/// left untouched so the client picks them freely within its own bounds — our
+/// write path accepts whatever period/buffer geometry results.
+pub fn refine_to_native(params: &mut SndPcmHwParams) {
+    if let Some(m) = params.masks.get_mut(0) {
+        *m = mask_bit(SNDRV_PCM_ACCESS_RW_INTERLEAVED);
+    }
+    if let Some(m) = params.masks.get_mut(1) {
+        *m = mask_bit(SNDRV_PCM_FORMAT_S16_LE);
+    }
+    if let Some(m) = params.masks.get_mut(2) {
+        *m = mask_bit(SNDRV_PCM_SUBFORMAT_STD);
+    }
+    set_interval_fixed(params, IV_SAMPLE_BITS, 16);
+    set_interval_fixed(params, IV_FRAME_BITS, 32);
+    set_interval_fixed(params, IV_CHANNELS, MIXER_CHANNELS);
+    set_interval_fixed(params, IV_RATE, MIXER_RATE);
+    // Report that the refine touched the requested parameters and advertise
+    // the fixed exact rate and sample width.
+    params.cmask = params.rmask;
+    params.info = PCM_INFO_NATIVE;
+    params.msbits = 16;
+    params.rate_num = MIXER_RATE;
+    params.rate_den = 1;
+    params.fifo_size = 0;
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 
@@ -618,6 +714,46 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     check!(mixer_frames_to_bytes(0) == Some(0), "0 frames");
     check!(mixer_frames_to_bytes(1) == Some(4), "1 frame == 4 bytes");
     check!(mixer_frames_to_bytes(1024) == Some(4096), "1024 frames == 4096 bytes");
+
+    // --- HW_REFINE collapse onto native config --------------------------
+    // Start from a fully-open params (all-ones masks, wide intervals) as
+    // ALSA-lib's first refine pass would, then collapse it.
+    // SAFETY: SndPcmHwParams is a plain `#[repr(C)]` aggregate of integers and
+    // integer arrays with no padding invariants or niches, so an all-zero bit
+    // pattern is a valid, fully-initialised value.
+    let mut hwp: SndPcmHwParams = unsafe { core::mem::zeroed() };
+    for m in &mut hwp.masks {
+        m.bits = [0xffff_ffff; 8];
+    }
+    for iv in &mut hwp.intervals {
+        iv.min = 1;
+        iv.max = u32::MAX;
+        iv.flags = 0;
+    }
+    hwp.rmask = 0xffff_ffff;
+    refine_to_native(&mut hwp);
+    // Helper: a refined interval pinned to [v, v] and marked integer.
+    let interval_pinned = |slot: usize, v: u32| -> bool {
+        hwp.intervals.get(slot).is_some_and(|iv| {
+            iv.min == v && iv.max == v && iv.flags & SNDRV_INTERVAL_INTEGER != 0
+        })
+    };
+    let mask_is = |slot: usize, bit: u32| -> bool {
+        hwp.masks.get(slot).is_some_and(|m| m.bits == mask_bit(bit).bits)
+    };
+    check!(
+        mask_is(0, SNDRV_PCM_ACCESS_RW_INTERLEAVED),
+        "ACCESS collapsed to RW_INTERLEAVED"
+    );
+    check!(mask_is(1, SNDRV_PCM_FORMAT_S16_LE), "FORMAT collapsed to S16_LE");
+    check!(mask_is(2, SNDRV_PCM_SUBFORMAT_STD), "SUBFORMAT collapsed to STD");
+    check!(interval_pinned(IV_RATE, 48000), "RATE pinned to 48000 (integer)");
+    check!(interval_pinned(IV_CHANNELS, 2), "CHANNELS pinned to 2");
+    check!(interval_pinned(IV_SAMPLE_BITS, 16), "SAMPLE_BITS pinned to 16");
+    check!(interval_pinned(IV_FRAME_BITS, 32), "FRAME_BITS pinned to 32");
+    check!(hwp.cmask == 0xffff_ffff, "cmask echoes rmask");
+    check!(hwp.msbits == 16, "msbits = 16");
+    check!(hwp.rate_num == 48000 && hwp.rate_den == 1, "exact rate 48000/1");
 
     serial_println!("[alsa] ALSA PCM ABI self-test PASSED");
     Ok(())

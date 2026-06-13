@@ -462,6 +462,47 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
+### TD10. ALSA PCM shim has no position reporting (STATUS/SYNC_PTR) yet — DEBT 2026-06-13
+
+**What:** The ALSA PCM ioctl handler (`alsa_pcm_ioctl` in
+`kernel/src/syscall/linux.rs`) implements the configuration + transport
+ioctls (PVERSION, INFO, HW_REFINE, HW_PARAMS, SW_PARAMS, HW_FREE,
+PREPARE/START/DROP/DRAIN/RESET/PAUSE, WRITEI_FRAMES) and the `write(2)` /
+`read(2)` / `poll` paths, but returns **ENOTTY** for the position-query
+ioctls: `SNDRV_PCM_IOCTL_STATUS`, `SNDRV_PCM_IOCTL_SYNC_PTR`, and
+`SNDRV_PCM_IOCTL_READI_FRAMES`.
+
+**Why it's deferred, not done now:** Correct position reporting requires
+(a) tracking `appl_ptr` and `hw_ptr` modulo a **boundary** value that the
+client sets via `SW_PARAMS` (currently echoed but not stored), and (b)
+byte-exact `#[repr(C)]` mirrors of `snd_pcm_sync_ptr` /
+`snd_pcm_mmap_status` / `snd_pcm_mmap_control`, which embed `struct
+timespec` and therefore have the time64-vs-legacy layout ambiguity already
+flagged in the commit-2 note at the top of `todo.txt`. That is a coherent
+chunk of work (commit 4b) and there is no real ALSA-lib client in QEMU to
+test it against yet, so shipping the fully self-tested state machine first
+and adding position reporting next is the cleaner split.
+
+**Impact:** A real ALSA-lib playback client cannot run end-to-end yet —
+after START it calls SYNC_PTR to learn `hw_ptr` and will fail on ENOTTY.
+The in-kernel state machine itself is fully exercised by the
+`ipc::alsa_pcm::self_test()` boot self-test (hw_params → prepare → write →
+pause → drain → start → drop → hw_free, plus capture).
+
+**Proper fix (commit 4b):** Store `boundary` (and `avail_min`) from
+SW_PARAMS in the `PcmStream`; add `hw_ptr(handle)` =
+`frames_written − buffered_frames` and `appl_ptr(handle)` =
+`frames_written`, both reduced modulo `boundary`; add the
+`snd_pcm_sync_ptr` family structs to `audio_alsa.rs` with size asserts;
+implement SYNC_PTR (honour the APPL/HWSYNC/AVAIL_MIN flags) and STATUS,
+and READI_FRAMES for capture (zeroed frames).
+
+**Related limitations (not debt, intentional first-cut scope):** the shim
+advertises only `RW_INTERLEAVED` access (mmap-based clients unsupported)
+and only the mixer's native 48 kHz / S16_LE / stereo format (non-native
+configs are rejected by HW_PARAMS rather than resampled/converted).
+Resampling + format conversion + an mmap transfer path are future work.
+
 ### TD9. Linux program interpreter (ld.so) loaded at a fixed base — no ASLR — DEBT 2026-06-12
 
 **What:** The Linux dynamic-linker load path (`load_interpreter` in

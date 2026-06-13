@@ -1,4 +1,26 @@
 
+## IN PROGRESS (2026-06-13): PIE (ET_DYN) main-executable load basing — continues the Linux ABI loader
+## Modern Linux executables are PIE (ET_DYN, segments often at vaddr 0). spawn currently loads the main
+## executable at bias 0 and enters at the raw e_entry — for a PIE that maps the null page and gives wrong
+## AT_PHDR/AT_ENTRY. Fix: load PIE executables at a fixed base and report runtime addresses. Test ELFs are
+## ET_EXEC (is_pie()==false → bias 0), so they are unaffected; this is forward-looking infra like ld.so.
+##   [DONE 69907f218 commit A] linux_stack: base_auxv()/install_linux_stack() gained exec_load_bias;
+##       AT_ENTRY = e_entry+bias, AT_PHDR = phdr_vaddr+bias (saturating_add — sum already validated
+##       <= USER_SPACE_END at segment-load). spawn build_linux_initial_stack forwards it; spawn+exec pass 0
+##       for now (ET_EXEC bias is genuinely 0 → no behavior change). Self-test Test 9 verifies the deltas.
+##   [TODO commit B] spawn_process + exec: define LINUX_PIE_BASE (e.g. 0x0000_5555_5555_4000, well below
+##       LINUX_INTERP_BASE=0x7000_0000_0000 and the stack; classic Linux no-ASLR PIE base). Compute
+##       exec_load_bias = if elf.is_pie() { LINUX_PIE_BASE } else { 0 }. Load the executable via
+##       load_segments_with_bias(elf, pml4, exec_load_bias) instead of load_segments. Set the executable
+##       entry to exec_load_bias + e_entry (this becomes entry_rip when there's no interpreter; when there
+##       IS an interpreter, entry_rip stays the interp entry but AT_ENTRY must still be exec_load_bias+
+##       e_entry — already handled by commit A's plumbing). Pass exec_load_bias to build_linux_initial_stack.
+##       Applies to native PIE too (entry/segment bias is universally needed); auxv only built for Linux.
+##       No-ASLR fixed PIE base is the same clearly-correct default as the interpreter base (known-issues TD9).
+##       Boot self-test: needs a PIE variant of an argc-exit test ELF (position-independent entry stub) to
+##       prove end-to-end entry basing; if that stub is too costly this tick, at minimum unit-test the
+##       bias-selection + that a PIE ELF's segments land at the based vaddr via translate().
+##
 ## DONE (2026-06-12): Linux dynamic-linker (ld.so) load path — roadmap 5.1 remaining item
 ## The Linux ABI loader currently handles STATIC executables only: spawn_process maps the
 ## executable's PT_LOAD segments and enters at its e_entry. A dynamically-linked Linux binary

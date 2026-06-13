@@ -539,6 +539,33 @@ const ROOT_FILES: &[&str] = &[
     "properties",
 ];
 
+/// Files in the `/proc/sys` sysctl tree, keyed by their path *under*
+/// `/proc/sys` (e.g. `"kernel/osrelease"`).
+///
+/// Every value here mirrors real kernel state or a real ABI ceiling — the
+/// `kernel/{ostype,osrelease,version,hostname,domainname}` entries are the
+/// exact `uname(2)` surface (see [`crate::syscall::linux`]'s `sys_uname`),
+/// `kernel/pid_max` is the real PID ceiling, `fs/nr_open` the real per-process
+/// fd-table size, and `kernel/random/{uuid,boot_id}` are generated from the
+/// kernel CSPRNG per Linux semantics — so nothing is fabricated.  The tree is
+/// read-only (procfs only honours writes to `oom_score_adj`).
+const SYS_FILES: &[&str] = &[
+    "kernel/ostype",
+    "kernel/osrelease",
+    "kernel/version",
+    "kernel/hostname",
+    "kernel/domainname",
+    "kernel/pid_max",
+    "kernel/random/uuid",
+    "kernel/random/boot_id",
+    "fs/nr_open",
+];
+
+/// Directories in the `/proc/sys` tree, keyed by their path under `/proc/sys`
+/// (`""` denotes `/proc/sys` itself).  Used to answer `stat`/`readdir` on the
+/// interior directories of the sysctl tree.
+const SYS_DIRS: &[&str] = &["", "kernel", "kernel/random", "fs"];
+
 /// Names of virtual files inside each `/proc/<pid>/` directory.
 const PID_FILES: &[&str] = &[
     "status",
@@ -11759,7 +11786,149 @@ enum ProcPath<'a> {
     PidFdInfoDir(u64),
     /// A `/proc/<pid>/fdinfo/<n>` regular file describing fd `n` (pos/flags).
     PidFdInfoFile(u64, i32),
+    /// A directory in the `/proc/sys` sysctl tree.  The `&str` is the path
+    /// *under* `/proc/sys` (`""` is `/proc/sys` itself, `"kernel"` is
+    /// `/proc/sys/kernel`, etc.).
+    SysDir(&'a str),
+    /// A file in the `/proc/sys` sysctl tree.  The `&str` is the path under
+    /// `/proc/sys` (e.g. `"kernel/osrelease"`).
+    SysFile(&'a str),
     NotFound,
+}
+
+/// True if `candidate` is a *direct* child (one path component below) of the
+/// sysctl directory `parent` (both expressed as paths under `/proc/sys`,
+/// `""` being the root).  Returns the child's basename when so.
+///
+/// Used to enumerate a `/proc/sys` directory's immediate entries from the
+/// flat [`SYS_DIRS`] / [`SYS_FILES`] tables without a tree structure.
+fn sys_immediate_child<'a>(parent: &str, candidate: &'a str) -> Option<&'a str> {
+    if candidate.is_empty() {
+        // The root pseudo-entry ("") is never a child of anything.
+        return None;
+    }
+    let rest = if parent.is_empty() {
+        candidate
+    } else {
+        // Must sit strictly below `parent/`, not merely share a prefix
+        // (so "kernelfoo" is not treated as a child of "kernel").
+        candidate.strip_prefix(parent)?.strip_prefix('/')?
+    };
+    // A direct child has exactly one remaining component.
+    if rest.is_empty() || rest.contains('/') {
+        None
+    } else {
+        Some(rest)
+    }
+}
+
+/// The basename (last path component) of a `/proc/sys` relative path; `"sys"`
+/// for the empty root path.  Used to fill the `name` field of a `DirEntry`.
+fn sys_basename(rel: &str) -> &str {
+    if rel.is_empty() {
+        "sys"
+    } else {
+        rel.rsplit('/').next().unwrap_or(rel)
+    }
+}
+
+/// List the immediate children of the `/proc/sys` directory `dir` (a path
+/// under `/proc/sys`, `""` for the root) — its subdirectories followed by its
+/// files, derived from the flat [`SYS_DIRS`] / [`SYS_FILES`] tables.
+fn sys_children(dir: &str) -> Vec<DirEntry> {
+    let mut entries: Vec<DirEntry> = Vec::new();
+    for &d in SYS_DIRS {
+        if let Some(name) = sys_immediate_child(dir, d) {
+            entries.push(DirEntry {
+                name: String::from(name),
+                entry_type: EntryType::Directory,
+                size: 0,
+            });
+        }
+    }
+    for &f in SYS_FILES {
+        if let Some(name) = sys_immediate_child(dir, f) {
+            let size = gen_sys(f).map_or(0, |data| data.len() as u64);
+            entries.push(DirEntry {
+                name: String::from(name),
+                entry_type: EntryType::File,
+                size,
+            });
+        }
+    }
+    entries
+}
+
+/// Format 16 bytes as an RFC 4122 version-4 UUID string (lowercase,
+/// hyphenated `8-4-4-4-12`).  The version nibble and variant bits are forced
+/// per RFC 4122 §4.4 so the result is a well-formed v4 UUID regardless of the
+/// input bytes.  No indexing/`unwrap` — `char::from_digit` of a value < 16 is
+/// always `Some`, with `'0'` as an unreachable fallback.
+fn format_uuid_v4(bytes: [u8; 16]) -> String {
+    let mut s = String::with_capacity(36);
+    for (i, &raw) in bytes.iter().enumerate() {
+        let byte = match i {
+            6 => (raw & 0x0f) | 0x40, // version 4
+            8 => (raw & 0x3f) | 0x80, // RFC 4122 variant (10xx)
+            _ => raw,
+        };
+        if matches!(i, 4 | 6 | 8 | 10) {
+            s.push('-');
+        }
+        s.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('0'));
+        s.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap_or('0'));
+    }
+    s
+}
+
+/// The per-boot machine identifier reported by `/proc/sys/kernel/random/boot_id`.
+///
+/// Linux generates a random UUID once per boot and reports the same value for
+/// the lifetime of the boot (systemd, D-Bus and friends key session state off
+/// it).  We mirror that: generate from the kernel CSPRNG on first read and
+/// cache it for the rest of the boot.
+fn boot_id() -> &'static str {
+    static BOOT_ID: spin::Once<String> = spin::Once::new();
+    BOOT_ID.call_once(|| {
+        let mut bytes = [0u8; 16];
+        crate::rng::fill(&mut bytes);
+        format_uuid_v4(bytes)
+    })
+}
+
+/// Generate the contents of a `/proc/sys` file.
+///
+/// Values are real kernel state or real ABI ceilings (see [`SYS_FILES`]);
+/// `random/uuid` returns a fresh CSPRNG-derived UUID on every read (matching
+/// Linux, where each read of that file yields a new UUID), while `random/boot_id`
+/// is stable for the boot.  An unknown path is `NotFound`.
+fn gen_sys(rel: &str) -> KernelResult<Vec<u8>> {
+    let text: String = match rel {
+        // The uname(2) surface — must stay byte-consistent with sys_uname.
+        "kernel/ostype" => String::from("Linux\n"),
+        "kernel/osrelease" => String::from("6.6.0-ouros\n"),
+        "kernel/version" => String::from("#1 SMP\n"),
+        "kernel/hostname" => {
+            crate::fs::nameservice::init_defaults();
+            format!("{}\n", crate::fs::nameservice::get_hostname())
+        }
+        "kernel/domainname" => {
+            crate::fs::nameservice::init_defaults();
+            format!("{}\n", crate::fs::nameservice::get_domain())
+        }
+        // Real PID ceiling (the per-namespace process cap).
+        "kernel/pid_max" => format!("{}\n", crate::pidns::MAX_PIDS_PER_NS),
+        // Real per-process fd-table size.
+        "fs/nr_open" => format!("{}\n", crate::proc::linux_fd::MAX_FDS),
+        "kernel/random/uuid" => {
+            let mut bytes = [0u8; 16];
+            crate::rng::fill(&mut bytes);
+            format!("{}\n", format_uuid_v4(bytes))
+        }
+        "kernel/random/boot_id" => format!("{}\n", boot_id()),
+        _ => return Err(KernelError::NotFound),
+    };
+    Ok(text.into_bytes())
 }
 
 /// True if `tid` is a live thread of process `pid`.
@@ -11799,6 +11968,19 @@ fn classify_path(rel: &str) -> ProcPath<'_> {
     // pid's file via the alias below.
     if first == "self" && rest.is_empty() {
         return ProcPath::SelfLink;
+    }
+
+    // The `/proc/sys` sysctl tree.  Like per-PID `task/`, it has interior
+    // directories, so it is routed here (before the numeric-PID parse, since
+    // "sys" is not a number).  `rest` is the path under `/proc/sys`.
+    if first == "sys" {
+        if SYS_FILES.contains(&rest) {
+            return ProcPath::SysFile(rest);
+        }
+        if SYS_DIRS.contains(&rest) {
+            return ProcPath::SysDir(rest);
+        }
+        return ProcPath::NotFound;
     }
 
     // "self" is a magic alias for the current task's PID.
@@ -11915,6 +12097,13 @@ impl FileSystem for ProcFs {
                 entries.push(DirEntry {
                     name: String::from("self"),
                     entry_type: EntryType::Symlink,
+                    size: 0,
+                });
+
+                // "sys" — the sysctl tree (a directory, not in ROOT_FILES).
+                entries.push(DirEntry {
+                    name: String::from("sys"),
+                    entry_type: EntryType::Directory,
                     size: 0,
                 });
 
@@ -12048,10 +12237,11 @@ impl FileSystem for ProcFs {
                     .collect();
                 Ok(entries)
             }
+            ProcPath::SysDir(rel) => Ok(sys_children(rel)),
             ProcPath::RootFile(_) | ProcPath::PidFile(_, _)
             | ProcPath::PidLink(_, _) | ProcPath::SelfLink
             | ProcPath::PidTaskFile(_, _, _) | ProcPath::PidFdLink(_, _)
-            | ProcPath::PidFdInfoFile(_, _) => {
+            | ProcPath::PidFdInfoFile(_, _) | ProcPath::SysFile(_) => {
                 Err(KernelError::NotADirectory)
             }
             ProcPath::NotFound => Err(KernelError::NotFound),
@@ -12064,9 +12254,11 @@ impl FileSystem for ProcFs {
         match classify_path(rel) {
             ProcPath::Root | ProcPath::PidDir(_)
             | ProcPath::PidTaskDir(_) | ProcPath::PidTaskTidDir(_, _)
-            | ProcPath::PidFdDir(_) | ProcPath::PidFdInfoDir(_) => {
+            | ProcPath::PidFdDir(_) | ProcPath::PidFdInfoDir(_)
+            | ProcPath::SysDir(_) => {
                 Err(KernelError::IsADirectory)
             }
+            ProcPath::SysFile(rel) => gen_sys(rel),
             ProcPath::RootFile(name) => generate(name),
             ProcPath::PidFile(pid, file_name) => {
                 if !task_exists(pid) {
@@ -12237,6 +12429,19 @@ impl FileSystem for ProcFs {
                 let size = gen_pid_fdinfo(pid, fd)?.len() as u64;
                 Ok(DirEntry {
                     name: format!("{fd}"),
+                    entry_type: EntryType::File,
+                    size,
+                })
+            }
+            ProcPath::SysDir(rel) => Ok(DirEntry {
+                name: String::from(sys_basename(rel)),
+                entry_type: EntryType::Directory,
+                size: 0,
+            }),
+            ProcPath::SysFile(rel) => {
+                let size = gen_sys(rel).map_or(0, |d| d.len() as u64);
+                Ok(DirEntry {
+                    name: String::from(sys_basename(rel)),
                     entry_type: EntryType::File,
                     size,
                 })
@@ -14214,6 +14419,136 @@ pub fn self_test() -> KernelResult<()> {
             }
         }
         serial_println!("[procfs]   /buddyinfo: Linux frag_show layout OK ({} columns)", counts.len());
+    }
+
+    // --- /proc/sys sysctl tree ---
+    // The sysctl tree is the only nested-directory subtree besides per-PID
+    // `task/`/`fd/`.  Verify the router classifies its dirs/files/bogus paths,
+    // that directory listings reflect the flat tables, that the values are
+    // byte-consistent with the uname(2) surface and real ABI ceilings, and
+    // that the UUID formatter forces the v4/variant bits deterministically.
+    {
+        // 1. Path classification.
+        let cases: &[(&str, &str)] = &[
+            ("sys", "sysdir"),
+            ("sys/kernel", "sysdir"),
+            ("sys/kernel/random", "sysdir"),
+            ("sys/fs", "sysdir"),
+            ("sys/kernel/osrelease", "sysfile"),
+            ("sys/kernel/random/boot_id", "sysfile"),
+            ("sys/fs/nr_open", "sysfile"),
+            ("sys/bogus", "notfound"),             // unknown subdir
+            ("sys/kernel/bogus", "notfound"),      // unknown file
+            ("sys/kernel/osrelease/x", "notfound"),// nested beyond a file
+        ];
+        for (path, want) in cases {
+            let got = match classify_path(path) {
+                ProcPath::SysDir(_) => "sysdir",
+                ProcPath::SysFile(_) => "sysfile",
+                ProcPath::NotFound => "notfound",
+                _ => "other",
+            };
+            if got != *want {
+                serial_println!(
+                    "[procfs]   FAIL: classify_path({:?}) = {}, want {}",
+                    path, got, want
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // 2. stat: /proc/sys and an interior dir are directories.
+        for d in ["/sys", "/sys/kernel", "/sys/kernel/random", "/sys/fs"] {
+            if fs.stat(d)?.entry_type != EntryType::Directory {
+                serial_println!("[procfs]   FAIL: stat {} not a directory", d);
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // 3. readdir /proc/sys lists exactly the two interior dirs (no files
+        //    sit directly at the root) — order: dirs before files.
+        let root = fs.readdir("/sys")?;
+        for d in ["kernel", "fs"] {
+            if !root.iter().any(|e| e.name == d && e.entry_type == EntryType::Directory) {
+                serial_println!("[procfs]   FAIL: /sys missing dir {}", d);
+                return Err(KernelError::InternalError);
+            }
+        }
+        if root.iter().any(|e| e.entry_type == EntryType::File) {
+            serial_println!("[procfs]   FAIL: /sys has unexpected file entries");
+            return Err(KernelError::InternalError);
+        }
+
+        // 4. readdir /proc/sys/kernel: the `random` subdir + the six files.
+        let kern = fs.readdir("/sys/kernel")?;
+        if !kern.iter().any(|e| e.name == "random" && e.entry_type == EntryType::Directory) {
+            serial_println!("[procfs]   FAIL: /sys/kernel missing `random` subdir");
+            return Err(KernelError::InternalError);
+        }
+        for f in ["ostype", "osrelease", "version", "hostname", "domainname", "pid_max"] {
+            if !kern.iter().any(|e| e.name == f && e.entry_type == EntryType::File) {
+                serial_println!("[procfs]   FAIL: /sys/kernel missing file {}", f);
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // 5. Values: uname-surface consistency + parseable ceilings.
+        let osrelease = fs.read_file("/sys/kernel/osrelease")?;
+        if core::str::from_utf8(&osrelease).ok() != Some("6.6.0-ouros\n") {
+            serial_println!("[procfs]   FAIL: osrelease = {:?}", osrelease);
+            return Err(KernelError::InternalError);
+        }
+        let ostype = fs.read_file("/sys/kernel/ostype")?;
+        if core::str::from_utf8(&ostype).ok() != Some("Linux\n") {
+            serial_println!("[procfs]   FAIL: ostype != \"Linux\"");
+            return Err(KernelError::InternalError);
+        }
+        let nr_open = core::str::from_utf8(&fs.read_file("/sys/fs/nr_open")?)
+            .unwrap_or("").trim().parse::<usize>().ok();
+        if nr_open != Some(crate::proc::linux_fd::MAX_FDS) {
+            serial_println!("[procfs]   FAIL: fs/nr_open = {:?}, want {}",
+                nr_open, crate::proc::linux_fd::MAX_FDS);
+            return Err(KernelError::InternalError);
+        }
+        let pid_max = core::str::from_utf8(&fs.read_file("/sys/kernel/pid_max")?)
+            .unwrap_or("").trim().parse::<usize>().ok();
+        if pid_max != Some(crate::pidns::MAX_PIDS_PER_NS) {
+            serial_println!("[procfs]   FAIL: kernel/pid_max = {:?}, want {}",
+                pid_max, crate::pidns::MAX_PIDS_PER_NS);
+            return Err(KernelError::InternalError);
+        }
+
+        // 6. boot_id is stable across reads; uuid is well-formed v4.
+        let b1 = fs.read_file("/sys/kernel/random/boot_id")?;
+        let b2 = fs.read_file("/sys/kernel/random/boot_id")?;
+        if b1 != b2 || b1.len() != 37 {
+            serial_println!("[procfs]   FAIL: boot_id unstable or wrong length");
+            return Err(KernelError::InternalError);
+        }
+
+        // 7. Directory/file kind enforcement.
+        if fs.read_file("/sys/kernel") != Err(KernelError::IsADirectory) {
+            serial_println!("[procfs]   FAIL: read_file(/sys/kernel) not IsADirectory");
+            return Err(KernelError::InternalError);
+        }
+        if !matches!(fs.readdir("/sys/kernel/osrelease"), Err(KernelError::NotADirectory)) {
+            serial_println!("[procfs]   FAIL: readdir(/sys/kernel/osrelease) not NotADirectory");
+            return Err(KernelError::InternalError);
+        }
+
+        // 8. Deterministic UUID formatter: version nibble forced to 4, variant
+        //    bits to 10xx, regardless of input bytes.
+        let uuid = format_uuid_v4([
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+        ]);
+        if uuid != "01234567-89ab-4def-8123-456789abcdef" {
+            serial_println!("[procfs]   FAIL: format_uuid_v4 = {:?}", uuid);
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!("[procfs]   /proc/sys: {} classify cases, listings, values, UUID OK",
+            cases.len());
     }
 
     serial_println!("[procfs] Self-test PASSED");

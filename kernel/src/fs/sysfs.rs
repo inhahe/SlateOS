@@ -28,6 +28,7 @@
 //! │           ├── possible  Possible CPU range (read-only)
 //! │           ├── kernel_max Highest addressable CPU index (read-only)
 //! │           └── cpuN/                 One per present CPU
+//! │               ├── online            Online toggle, cpu1+ (read-only)
 //! │               └── topology/
 //! │                   ├── physical_package_id   Socket id (read-only)
 //! │                   ├── core_id               Core id within socket
@@ -119,6 +120,8 @@ enum SysPath<'a> {
     CpuFile(&'a str),
     /// A per-CPU directory: /sys/devices/system/cpu/cpuN/
     CpuN(usize),
+    /// A per-CPU online toggle: /sys/devices/system/cpu/cpuN/online (cpu1+ only).
+    CpuNOnline(usize),
     /// A per-CPU topology directory: /sys/devices/system/cpu/cpuN/topology/
     CpuNTopologyDir(usize),
     /// A per-CPU topology file: /sys/devices/system/cpu/cpuN/topology/core_id etc.
@@ -213,6 +216,11 @@ fn classify_cpu_tail(tail: &str) -> SysPath<'_> {
             }
             None => (rest, ""),
         };
+        // Per-CPU online toggle.  Linux omits it for the boot CPU (cpu0
+        // cannot be offlined), so we only expose it for cpu1+.
+        if sub == "online" && leaf.is_empty() && idx >= 1 {
+            return SysPath::CpuNOnline(idx);
+        }
         if sub == "topology" {
             if leaf.is_empty() {
                 return SysPath::CpuNTopologyDir(idx);
@@ -492,6 +500,17 @@ fn gen_cpu_topo_file(cpu_idx: usize, name: &str) -> KernelResult<Vec<u8>> {
     Ok(bytes)
 }
 
+/// Generate a per-CPU `online` file.  A present CPU whose index is below the
+/// online count is schedulable ("1"); a present-but-not-yet-online CPU reads
+/// "0".  We do not model runtime hot-plug, so this is read-only.
+fn gen_cpu_online_file(cpu_idx: usize) -> Vec<u8> {
+    if cpu_idx < crate::smp::cpu_count() {
+        b"1\n".to_vec()
+    } else {
+        b"0\n".to_vec()
+    }
+}
+
 fn gen_fs_file(name: &str) -> KernelResult<Vec<u8>> {
     match name {
         "cache_sectors" => {
@@ -654,14 +673,23 @@ impl FileSystem for SysFs {
                 }
                 Ok(entries)
             }
-            SysPath::CpuN(_) => {
+            SysPath::CpuN(idx) => {
                 // Each cpuN exposes a topology/ subdir (cache/ is omitted: no
-                // per-CPU cache share-maps are honestly available yet).
-                Ok(vec![DirEntry {
+                // per-CPU cache share-maps are honestly available yet) and,
+                // for cpu1+, an online toggle (cpu0 cannot be offlined).
+                let mut entries = vec![DirEntry {
                     name: String::from("topology"),
                     entry_type: EntryType::Directory,
                     size: 0,
-                }])
+                }];
+                if idx >= 1 {
+                    entries.push(DirEntry {
+                        name: String::from("online"),
+                        entry_type: EntryType::File,
+                        size: gen_cpu_online_file(idx).len() as u64,
+                    });
+                }
+                Ok(entries)
             }
             SysPath::CpuNTopologyDir(idx) => {
                 let entries = CPU_TOPOLOGY_FILES
@@ -719,6 +747,7 @@ impl FileSystem for SysFs {
             SysPath::PciDevice(bdf) => gen_pci_device(bdf),
             SysPath::FsFile(name) => gen_fs_file(name),
             SysPath::CpuFile(name) => gen_cpu_file(name),
+            SysPath::CpuNOnline(idx) => Ok(gen_cpu_online_file(idx)),
             SysPath::CpuTopoFile(idx, name) => gen_cpu_topo_file(idx, name),
             SysPath::NotFound => Err(KernelError::NotFound),
         }
@@ -803,6 +832,11 @@ impl FileSystem for SysFs {
                 entry_type: EntryType::Directory,
                 size: 0,
             }),
+            SysPath::CpuNOnline(idx) => Ok(DirEntry {
+                name: String::from("online"),
+                entry_type: EntryType::File,
+                size: gen_cpu_online_file(idx).len() as u64,
+            }),
             SysPath::CpuNTopologyDir(_) => Ok(DirEntry {
                 name: String::from("topology"),
                 entry_type: EntryType::Directory,
@@ -846,8 +880,9 @@ impl FileSystem for SysFs {
             | SysPath::FsFile(_)
             | SysPath::PciDevice(_)
             | SysPath::CpuFile(_)
+            | SysPath::CpuNOnline(_)
             | SysPath::CpuTopoFile(_, _) => {
-                // Read-only files.
+                // Read-only files (we do not model runtime CPU hot-plug).
                 Err(KernelError::NotSupported)
             }
             SysPath::Root
@@ -1204,8 +1239,32 @@ pub fn self_test() -> KernelResult<()> {
         // cpuN with a leading zero is not a valid Linux name.
         assert!(fs.stat("/devices/system/cpu/cpu00").is_err());
 
+        // Per-CPU online toggle: cpu0 never has one (boot CPU can't be
+        // offlined); cpu1.. expose a read-only "1"/"0".
+        assert!(
+            fs.stat("/devices/system/cpu/cpu0/online").is_err(),
+            "cpu0 must not expose an online file"
+        );
+        assert!(
+            !cpu0.iter().any(|e| e.name == "online"),
+            "cpu0 dir must not list 'online'"
+        );
+        if ncpu >= 2 {
+            let on = fs.read_file("/devices/system/cpu/cpu1/online")?;
+            let on_txt = core::str::from_utf8(&on).map_err(|_| KernelError::InternalError)?;
+            assert!(
+                on_txt == "1\n" || on_txt == "0\n",
+                "cpu1/online = {:?}, want 1 or 0",
+                on_txt
+            );
+            assert!(
+                fs.write_file("/devices/system/cpu/cpu1/online", b"0").is_err(),
+                "cpu1/online should reject writes (no hot-plug model)"
+            );
+        }
+
         serial_println!(
-            "[sysfs]   devices/system/cpu/cpuN/topology: OK ({} cpuN dirs)",
+            "[sysfs]   devices/system/cpu/cpuN/topology+online: OK ({} cpuN dirs)",
             ncpu
         );
     }

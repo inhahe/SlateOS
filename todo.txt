@@ -1,4 +1,25 @@
 
+## DONE (2026-06-12): ABI batch 552 — getcpu: attempt both writes, accumulate EFAULT (match v6.6)
+## Linux v6.6 kernel/sys.c SYSCALL_DEFINE3(getcpu) — verified verbatim against
+## raw.githubusercontent.com torvalds/linux v6.6:
+##   int err = 0; int cpu = raw_smp_processor_id();
+##   if (cpup)  err |= put_user(cpu, cpup);
+##   if (nodep) err |= put_user(cpu_to_node(cpu), nodep);
+##   return err ? -EFAULT : 0;
+## DIVERGENCE FIXED: both put_user writes are ATTEMPTED independently and errors accumulated; a fault
+## on cpup does NOT skip the nodep write. Pre-batch we returned EFAULT immediately on a failed cpup
+## write, so getcpu(faulting_cpup, valid_nodep, NULL) left *nodep unwritten where Linux writes it (and
+## still returns EFAULT). New code computes cpu_id + node_id(=0 on UMA), attempts each non-NULL write,
+## sets a `faulted` flag on any validate/copy failure, and returns EFAULT at the end iff faulted (since
+## put_user can only fail with EFAULT, any write error maps to EFAULT). Translator-only; no native API
+## or smp changes.
+## SELF-TEST: getcpu(&cpu,&node) writes both sentinels (cpu==current_cpu_index, node==0); getcpu(NULL,
+## &node) writes node only. The partial-fault accumulation path is NOT boot-testable — a genuinely-
+## faulting user pointer would be dereferenced under the kernel-context validate bypass and could fault
+## the kernel — so only valid-pointer success paths are exercised. Stamp "getcpu both-writes
+## accumulate-EFAULT (batch 552): OK".
+## VERIFIED: build clean; clippy 17462 (<= baseline 17463); boot BOOT_OK, EXIT=0, stamp present.
+
 ## DEFERRED (2026-06-12): membarrier PRIVATE_EXPEDITED issue without prior REGISTER -> -EPERM (known-issues TD8)
 ## Linux v6.6 kernel/sched/membarrier.c membarrier_private_expedited(): when the issuing mm has not
 ## set the matching MEMBARRIER_STATE_*_READY bit (i.e. never called the corresponding ..._REGISTER_*

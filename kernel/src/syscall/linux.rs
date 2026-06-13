@@ -11669,37 +11669,66 @@ fn sys_getcpu(args: &SyscallArgs) -> SyscallResult {
     let node_ptr = args.arg1;
     // arg2 (tcache) ignored: NULL is the documented modern usage.
 
+    // Linux v6.6 kernel/sys.c SYSCALL_DEFINE3(getcpu):
+    //
+    //   int err = 0;
+    //   int cpu = raw_smp_processor_id();
+    //   if (cpup)  err |= put_user(cpu, cpup);
+    //   if (nodep) err |= put_user(cpu_to_node(cpu), nodep);
+    //   return err ? -EFAULT : 0;
+    //
+    // Both writes are ATTEMPTED independently — a fault on `cpup` does
+    // NOT skip the `nodep` write — and the errors are accumulated, with
+    // a single -EFAULT returned if either failed.  Pre-batch we returned
+    // EFAULT immediately on a failed `cpup` write, so
+    // `getcpu(faulting_cpup, valid_nodep, NULL)` left `*nodep` unwritten
+    // where Linux writes it (and still returns EFAULT).  `put_user`
+    // can only fail with -EFAULT, so any write failure here maps to
+    // EFAULT regardless of the underlying access error.
+    #[allow(clippy::cast_possible_truncation)]
+    let cpu_id: u32 = crate::smp::current_cpu_index() as u32;
+    // cpu_to_node(cpu) == 0 on our single-node UMA system.
+    let node_id: u32 = 0;
+
+    let mut faulted = false;
+
     if cpu_ptr != 0 {
-        if let Err(e) = crate::mm::user::validate_user_write(cpu_ptr, 4) {
-            return linux_err(linux_errno_for(e));
-        }
-        #[allow(clippy::cast_possible_truncation)]
-        let cpu_id: u32 = crate::smp::current_cpu_index() as u32;
         let bytes = cpu_id.to_ne_bytes();
-        // SAFETY: validated as a writable 4-byte range above.
-        let r = unsafe {
-            crate::mm::user::copy_to_user(bytes.as_ptr(), cpu_ptr, 4)
-        };
-        if let Err(e) = r {
-            return linux_err(linux_errno_for(e));
+        if crate::mm::user::validate_user_write(cpu_ptr, 4).is_ok() {
+            // SAFETY: the 4-byte destination range was validated as a
+            // writable user mapping immediately above; copy_to_user
+            // reports a fault as Err rather than UB.
+            let r = unsafe {
+                crate::mm::user::copy_to_user(bytes.as_ptr(), cpu_ptr, 4)
+            };
+            if r.is_err() {
+                faulted = true;
+            }
+        } else {
+            faulted = true;
         }
     }
 
     if node_ptr != 0 {
-        if let Err(e) = crate::mm::user::validate_user_write(node_ptr, 4) {
-            return linux_err(linux_errno_for(e));
-        }
-        let node_id: u32 = 0;
         let bytes = node_id.to_ne_bytes();
-        // SAFETY: validated as a writable 4-byte range above.
-        let r = unsafe {
-            crate::mm::user::copy_to_user(bytes.as_ptr(), node_ptr, 4)
-        };
-        if let Err(e) = r {
-            return linux_err(linux_errno_for(e));
+        if crate::mm::user::validate_user_write(node_ptr, 4).is_ok() {
+            // SAFETY: the 4-byte destination range was validated as a
+            // writable user mapping immediately above; copy_to_user
+            // reports a fault as Err rather than UB.
+            let r = unsafe {
+                crate::mm::user::copy_to_user(bytes.as_ptr(), node_ptr, 4)
+            };
+            if r.is_err() {
+                faulted = true;
+            }
+        } else {
+            faulted = true;
         }
     }
 
+    if faulted {
+        return linux_err(errno::EFAULT);
+    }
     SyscallResult::ok(0)
 }
 
@@ -50727,6 +50756,50 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+        // Linux v6.6 attempts BOTH put_user writes independently and
+        // accumulates errors (err |= put_user); a fault on cpup does not
+        // skip the nodep write.  Verify the success path writes both
+        // sentinels (the partial-fault accumulation path is not
+        // boot-testable: a genuinely-faulting user pointer would be
+        // dereferenced under the kernel-context bypass and could fault
+        // the kernel, so we only exercise valid pointers here).  cpu is
+        // the current CPU index; node is 0 on our single-node UMA system.
+        #[allow(clippy::cast_possible_truncation)]
+        let want_cpu: u32 = crate::smp::current_cpu_index() as u32;
+        // Both pointers valid: cpu_buf and node_buf are both written.
+        let mut cpu_buf: u32 = 0xDEAD_BEEF;
+        let mut node_buf: u32 = 0xDEAD_BEEF;
+        let a = SyscallArgs {
+            arg0: (&raw mut cpu_buf) as u64,
+            arg1: (&raw mut node_buf) as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::GETCPU, &a).value != 0
+            || cpu_buf != want_cpu
+            || node_buf != 0
+        {
+            serial_println!(
+                "[syscall/linux]   FAIL: getcpu(&cpu,&node) didn't write both"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Only nodep supplied: node written, cpu pointer skipped.
+        let mut node_only: u32 = 0xDEAD_BEEF;
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: (&raw mut node_only) as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::GETCPU, &a).value != 0 || node_only != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: getcpu(NULL,&node) didn't write node"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   getcpu both-writes accumulate-EFAULT \
+             (batch 552): OK"
+        );
     }
 
     // statfs / fstatfs — NULL pointer validation.

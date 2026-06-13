@@ -1733,7 +1733,7 @@ fn update_load_average() {
 /// tuple is `(1-minute, 5-minute, 15-minute)`.  `/proc/loadavg` formats
 /// these with [`load_int`]/[`load_frac`] exactly as Linux does.
 #[must_use]
-#[allow(dead_code)] // Public API for procfs /proc/loadavg.
+// Public API: backs /proc/loadavg and the Linux `sysinfo(2)` loads[] field.
 pub fn load_averages_fixed() -> (u64, u64, u64) {
     (
         LOAD_AVG_1.load(Ordering::Relaxed),

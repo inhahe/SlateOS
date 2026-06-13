@@ -10392,6 +10392,36 @@ fn sys_sysinfo(args: &SyscallArgs) -> SyscallResult {
     let uptime_i: i64 = uptime_s as i64;
     buf[0..8].copy_from_slice(&uptime_i.to_ne_bytes());
 
+    // loads[3] at offset 8..32 (3 × ulong): the 1/5/15-minute load
+    // averages.  Linux `kernel/sys.c::do_sysinfo` (batch 553):
+    //
+    //     get_avenrun(info->loads, 0, SI_LOAD_SHIFT - FSHIFT);
+    //
+    // with `void get_avenrun(unsigned long *loads, unsigned long offset,
+    // int shift) { loads[i] = (avenrun[i] + offset) << shift; }`
+    // (kernel/sched/loadavg.c).  `avenrun[i]` are the kernel's load
+    // averages in `FSHIFT = 11`-bit fixed point (`include/linux/sched/
+    // loadavg.h`); `SI_LOAD_SHIFT = 16` (`include/uapi/linux/sysinfo.h`).
+    // So with offset 0, `loads[i] = avenrun[i] << (16 - 11) = avenrun[i]
+    // << 5`: the same fixed-point averages re-scaled from 11-bit to
+    // 16-bit precision.  Userspace divides by `1 << SI_LOAD_SHIFT`
+    // (= 65536) to recover the real load (procps `uptime`/`w`,
+    // libstatgrab, collectd's `load` plugin, Go's `gopsutil`).
+    //
+    // We source `avenrun[i]` from `sched::load_averages_fixed()` — the
+    // exact same `LOAD_AVG_{1,5,15}` statics (FSHIFT=11 fixed point,
+    // decayed with Linux's EXP_1/EXP_5/EXP_15) that back `/proc/loadavg`,
+    // so sysinfo and /proc/loadavg report consistent numbers.  Pre-batch
+    // we left loads[] zeroed, so every consumer saw a constant 0.00 load.
+    // `wrapping_shl(5)` matches C's overflow-dropping `<<` on unsigned
+    // long (realistic averages never approach the u64 ceiling anyway).
+    let (la1, la5, la15) = crate::sched::load_averages_fixed();
+    // SI_LOAD_SHIFT (16) - FSHIFT (11); see the derivation above.
+    const LOAD_RESCALE_SHIFT: u32 = 5;
+    buf[8..16].copy_from_slice(&la1.wrapping_shl(LOAD_RESCALE_SHIFT).to_ne_bytes());
+    buf[16..24].copy_from_slice(&la5.wrapping_shl(LOAD_RESCALE_SHIFT).to_ne_bytes());
+    buf[24..32].copy_from_slice(&la15.wrapping_shl(LOAD_RESCALE_SHIFT).to_ne_bytes());
+
     // RAM totals from the page allocator.  Best effort — if the
     // allocator can't report (uninitialised), leave zero.
     if let Some(s) = crate::mm::frame::stats() {
@@ -49580,6 +49610,59 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             }
             serial_println!(
                 "[syscall/linux]   sysinfo uptime uses tv_sec+(tv_nsec?1:0) ceiling (Linux: do_sysinfo round-up; pre-batch truncated): OK"
+            );
+        }
+
+        // Batch 553: sysinfo.loads[3] (offset 8..32) must report the
+        // 1/5/15-minute load averages as `avenrun[i] << (SI_LOAD_SHIFT -
+        // FSHIFT)` = `avenrun[i] << 5`, sourced from the SAME
+        // `sched::load_averages_fixed()` statics that back /proc/loadavg
+        // (Linux do_sysinfo: `get_avenrun(info->loads, 0, SI_LOAD_SHIFT -
+        // FSHIFT)`).  Pre-batch loads[] was left zeroed so every consumer
+        // saw a constant 0.00 load.  The averages only change every 5s
+        // (LOAD_FREQ); bracket the call with snapshots and accept either,
+        // so a tick landing mid-call cannot flake the test.
+        {
+            let mut lbuf = [0u8; 112];
+            let lptr = lbuf.as_mut_ptr() as u64;
+            let a = SyscallArgs { arg0: lptr, arg1: 0, arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0 };
+            let (b1, b5, b15) = crate::sched::load_averages_fixed();
+            if dispatch_linux(nr::SYSINFO, &a).value != 0 {
+                serial_println!("[syscall/linux]   FAIL: sysinfo(valid) not 0 for loads check");
+                return Err(KernelError::InternalError);
+            }
+            let (a1, a5, a15) = crate::sched::load_averages_fixed();
+            // Read the three reported loads[] longs.
+            let read_long = |off: usize| -> Result<u64, KernelError> {
+                let end = off.saturating_add(8);
+                match lbuf
+                    .get(off..end)
+                    .and_then(|s| <[u8; 8]>::try_from(s).ok())
+                {
+                    Some(bytes) => Ok(u64::from_ne_bytes(bytes)),
+                    None => {
+                        serial_println!("[syscall/linux]   FAIL: sysinfo loads slice");
+                        Err(KernelError::InternalError)
+                    }
+                }
+            };
+            let rep = [read_long(8)?, read_long(16)?, read_long(24)?];
+            let before = [b1.wrapping_shl(5), b5.wrapping_shl(5), b15.wrapping_shl(5)];
+            let after = [a1.wrapping_shl(5), a5.wrapping_shl(5), a15.wrapping_shl(5)];
+            for i in 0..3 {
+                // indexing 0..3 over 3-element arrays — bounds-safe.
+                #[allow(clippy::indexing_slicing)]
+                if rep[i] != before[i] && rep[i] != after[i] {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: sysinfo loads[{}]={} != avenrun<<5 (snapshot {} or {})",
+                        i, rep[i], before[i], after[i]
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            serial_println!(
+                "[syscall/linux]   sysinfo loads[3] = avenrun<<(SI_LOAD_SHIFT-FSHIFT) from /proc/loadavg source (batch 553; pre-batch zeroed): OK"
             );
         }
 

@@ -407,10 +407,20 @@ pub fn spawn_process(
         return Err(KernelError::InvalidExecutable);
     }
 
-    let entry_point = elf_file.entry_point();
+    // Choose the executable's load bias.  ET_EXEC binaries load at their
+    // absolute link-time vaddrs (bias 0); ET_DYN/PIE binaries are
+    // position-independent, so we place them at a fixed base (no ASLR yet
+    // — known-issues.md TD9).  The bias shifts every PT_LOAD segment, the
+    // entry point, and the AT_ENTRY/AT_PHDR auxv values uniformly.
+    let exec_load_bias: u64 = if elf_file.is_pie() { LINUX_PIE_BASE } else { 0 };
+    let raw_entry = elf_file.entry_point();
+    let entry_point = raw_entry.checked_add(exec_load_bias).ok_or_else(|| {
+        serial_println!("[spawn] executable entry point overflowed load bias");
+        KernelError::InvalidExecutable
+    })?;
     serial_println!(
-        "[spawn] ELF validated: {} segment(s), entry={:#x}, pie={}",
-        segment_count, entry_point, elf_file.is_pie()
+        "[spawn] ELF validated: {} segment(s), entry={:#x} (raw {:#x}, bias {:#x}), pie={}",
+        segment_count, entry_point, raw_entry, exec_load_bias, elf_file.is_pie()
     );
 
     // Detect whether this binary speaks the Linux x86_64 syscall ABI.
@@ -467,12 +477,13 @@ pub fn spawn_process(
             KernelError::OutOfMemory
         })?;
 
-    // Step 3: Load ELF segments into the process address space.
+    // Step 3: Load ELF segments into the process address space at the
+    // chosen load bias (0 for ET_EXEC, LINUX_PIE_BASE for ET_DYN/PIE).
     //
     // SAFETY: pml4_phys was freshly allocated by pcb::create with
     // kernel entries cloned from the boot PML4.  No other CPU is using
     // this address space yet.
-    if let Err(e) = unsafe { elf::load_segments(&elf_file, pml4_phys) } {
+    if let Err(e) = unsafe { elf::load_segments_with_bias(&elf_file, pml4_phys, exec_load_bias) } {
         serial_println!("[spawn] Failed to load ELF segments: {:?}", e);
         pcb::destroy(pid);
         return Err(e);
@@ -531,10 +542,9 @@ pub fn spawn_process(
     if is_linux_abi {
         // interp_base is Some(base) for a dynamically-linked binary (so
         // ld.so receives AT_BASE) and None for a static one.  exec_load_bias
-        // is 0 until PIE executable basing lands (Commit B); for the current
-        // ET_EXEC images the bias is genuinely 0, so AT_ENTRY/AT_PHDR are
-        // unchanged.
-        match build_linux_initial_stack(pml4_phys, &elf_file, options.argv, options.envp, interp_base, 0) {
+        // shifts AT_ENTRY/AT_PHDR to the executable's runtime addresses
+        // (non-zero only for a PIE image).
+        match build_linux_initial_stack(pml4_phys, &elf_file, options.argv, options.envp, interp_base, exec_load_bias) {
             Ok(installed) => {
                 serial_println!(
                     "[spawn] Built Linux SysV stack: rsp={:#x} (was {:#x})",
@@ -875,10 +885,19 @@ pub fn exec_process(
         return Err(KernelError::InvalidExecutable);
     }
 
-    let entry_point = elf_file.entry_point();
+    // Choose the executable's load bias (0 for ET_EXEC, LINUX_PIE_BASE
+    // for ET_DYN/PIE) and bias the entry point accordingly.  Computed
+    // before the old address space is torn down so a malformed bias/entry
+    // combination still bails out with the old image intact.
+    let exec_load_bias: u64 = if elf_file.is_pie() { LINUX_PIE_BASE } else { 0 };
+    let raw_entry = elf_file.entry_point();
+    let entry_point = raw_entry.checked_add(exec_load_bias).ok_or_else(|| {
+        serial_println!("[exec] executable entry point overflowed load bias");
+        KernelError::InvalidExecutable
+    })?;
     serial_println!(
-        "[exec] ELF validated for exec: {} segment(s), entry={:#x}",
-        segment_count, entry_point
+        "[exec] ELF validated for exec: {} segment(s), entry={:#x} (raw {:#x}, bias {:#x}), pie={}",
+        segment_count, entry_point, raw_entry, exec_load_bias, elf_file.is_pie()
     );
 
     // Re-detect ABI mode for the new image.  exec replaces the process
@@ -943,7 +962,7 @@ pub fn exec_process(
     // the old user_rip which no longer exists, causing an immediate #PF.
     // To make failure deterministic, we set the exit code and return
     // the error so the syscall handler knows to exit the thread cleanly.
-    if let Err(e) = unsafe { elf::load_segments(&elf_file, pml4_phys) } {
+    if let Err(e) = unsafe { elf::load_segments_with_bias(&elf_file, pml4_phys, exec_load_bias) } {
         serial_println!("[exec] Failed to load new ELF segments: {:?}", e);
         let _ = pcb::set_exit_code(pid, KILLED_EXIT_CODE);
         return Err(e);
@@ -993,9 +1012,9 @@ pub fn exec_process(
     // Native images keep the bare stack from `setup_user_stack`.
     if new_abi_mode == pcb::AbiMode::Linux {
         // interp_base is Some(base) for a dynamically-linked binary and
-        // None for a static one.  exec_load_bias is 0 until PIE basing
-        // lands (Commit B); ET_EXEC images have a genuine bias of 0.
-        match build_linux_initial_stack(pml4_phys, &elf_file, argv, envp, interp_base, 0) {
+        // None for a static one.  exec_load_bias shifts AT_ENTRY/AT_PHDR
+        // to the executable's runtime addresses (non-zero only for PIE).
+        match build_linux_initial_stack(pml4_phys, &elf_file, argv, envp, interp_base, exec_load_bias) {
             Ok(installed) => {
                 serial_println!(
                     "[exec] Built Linux SysV stack: rsp={:#x} (was {:#x})",
@@ -1182,6 +1201,25 @@ pub fn exec_process(
 /// `MAX_STACK_SIZE`).  A typical ld.so image is a few hundred KiB, so
 /// the gap above this base to the stack guard is ample.
 const LINUX_INTERP_BASE: u64 = 0x0000_7000_0000_0000;
+
+/// Fixed load base for a position-independent (`ET_DYN`/PIE) main
+/// executable.
+///
+/// Modern Linux executables are PIE: their `PT_LOAD` segments use small
+/// link-time vaddrs (often starting at 0), and the kernel must place the
+/// image at a chosen base.  Loading at bias 0 would map the null page and
+/// hand out an `AT_ENTRY`/`AT_PHDR` of essentially 0 — both wrong.  We
+/// load PIE executables at this fixed base (no ASLR yet — known-issues.md
+/// TD9) and report `e_entry + base` / `phdr_vaddr + base` through the
+/// auxv via [`crate::proc::linux_stack`]'s `exec_load_bias`.
+///
+/// `0x0000_5555_5555_4000` is the classic Linux no-ASLR PIE base
+/// (`ELF_ET_DYN_BASE`-derived).  It is 16 KiB-aligned (low 14 bits zero,
+/// so each `bias + p_vaddr` preserves page-offset congruence), sits far
+/// below the interpreter base (`LINUX_INTERP_BASE = 0x7000_0000_0000`)
+/// and the stack — a PIE image plus its brk/mmap growth has ample room
+/// before colliding with either.
+const LINUX_PIE_BASE: u64 = 0x0000_5555_5555_4000;
 
 /// Where a loaded program interpreter was placed and where to enter it.
 struct LoadedInterp {

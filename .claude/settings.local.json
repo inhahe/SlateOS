@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:invent.kde.org)",
+      "Bash(cp /mnt/hgfs/os/plasma-desktop/applets/taskmanager/main.xml /home/inhahe/kde-src/plasma-desktop/applets/taskmanager/main.xml)",
+      "Bash(cp /mnt/hgfs/os/plasma-desktop/applets/taskmanager/qml/main.qml /home/inhahe/kde-src/plasma-desktop/applets/taskmanager/qml/main.qml)",
+      "Bash(cp /mnt/hgfs/os/plasma-desktop/applets/taskmanager/qml/Task.qml /home/inhahe/kde-src/plasma-desktop/applets/taskmanager/qml/Task.qml)",
+      "Bash(cp /mnt/hgfs/os/plasma-desktop/applets/taskmanager/qml/ConfigBehavior.qml /home/inhahe/kde-src/plasma-desktop/applets/taskmanager/qml/ConfigBehavior.qml)",
+      "Bash(cp /mnt/hgfs/os/plasma-desktop/applets/taskmanager/qml/TaskList.qml /home/inhahe/kde-src/plasma-desktop/applets/taskmanager/qml/TaskList.qml)",
+      "Bash(dpkg -l)",
+      "Bash(apt-cache search:*)",
+      "Read(//home/inhahe/kde-src/plasma-desktop/build/**)",
+      "Bash(cmake .. -DCMAKE_INSTALL_PREFIX=/usr)",
+      "Bash(awk '{print $1}')"
+    ]
+  }
+}

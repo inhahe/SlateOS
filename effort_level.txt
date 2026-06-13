@@ -1,0 +1,29 @@
+you:      What effort mode should I use for the OS? Or should I use different effort modes for different parts? Options are
+     low, medium, high, max, and auto. I guess with max effort it would take longer time, and the OS is already going to
+     take a long time, but it will make better code?
+[init] session a3469190-266
+[#k1 -- /show k1]  (thinking)
+claude:         Use **max** for everything. Here's why:
+
+        The time difference between high and max effort per response is seconds to maybe a minute. The OS will take
+        months to years regardless. That extra thinking time is negligible in the total timeline. But the quality
+        difference matters a lot in your specific situation:
+
+        1. **You're not reviewing the code.** Every reasoning shortcut the model takes is a bug that ships. Max effort
+        means it's more likely to catch its own mistakes, think through edge cases, and get unsafe blocks right the
+        first time.
+
+        2. **Kernel bugs are expensive.** A subtle memory management bug or race condition that slips through because
+        the model didn't think hard enough could take hours or days to track down later. The extra 30 seconds of
+        reasoning up front is cheap insurance.
+
+        3. **You're on Max 20x accounts, not API billing.** Higher effort costs more tokens, but you're paying a flat
+        rate. You might as well use what you're paying for.
+
+        The only argument for lower effort would be if you were hitting usage limits and needed to stretch your quota.
+        If that becomes a problem, you could drop to **high** for routine tasks (writing tests, simple utilities,
+        boilerplate) and keep **max** for kernel code, unsafe blocks, and architecture work. But start with max across
+        the board and only back off if the usage cap forces it.
+
+        I wouldn't use **auto** — for an OS kernel with no human review, you don't want the model deciding "this looks
+        about."

@@ -1,4 +1,39 @@
 
+## DONE (2026-06-12): ABI batch 543 — mq_timedsend/mq_timedreceive: msg buffer untouched before fdget (EBADF preempts EFAULT)
+## Linux v6.6 ipc/mqueue.c (verified verbatim against raw.githubusercontent.com torvalds/linux v6.6):
+##   SYSCALL_DEFINE5(mq_timedsend): if(u_abs_timeout){prepare_timeout(...)}  // EFAULT then EINVAL
+##   prepare_timeout(): if(get_timespec64()) -EFAULT; if(!timespec64_valid()) -EINVAL;
+##   do_mq_timedsend() gate order:
+##     1. if(msg_prio >= MQ_PRIO_MAX) -EINVAL;
+##     2. (timeout already converted)
+##     3. f = fdget(mqdes); if(!f.file) -EBADF;
+##     4. if(f.file->f_op != &mqueue_file_operations) -EBADF;   // fd valid but not a queue
+##     5. if(!(f.file->f_mode & FMODE_WRITE)) -EBADF;
+##     6. msg_ptr = load_msg(u_msg_ptr, msg_len); if(IS_ERR) ...  // FIRST msg-buffer touch -> EFAULT
+##   do_mq_timedreceive(): timeout -> fdget EBADF -> f_op EBADF -> FMODE_READ EBADF ->
+##                         msg_len<mq_msgsize EMSGSIZE -> store_msg EFAULT -> prio write-back EFAULT.
+## DIVERGENCE: our translator validated the msg pointer (EFAULT) BEFORE the fd lookup, so a
+##   bad fd + unreadable/unwritable buffer returned EFAULT where Linux returns EBADF.  The
+##   userspace buffer is only touched by load_msg/store_msg at the LAST step, after fdget plus
+##   the f_op / FMODE gates (all EBADF for any non-mqueue fd).  We never model a real message
+##   queue, so every fd that survives validate_linux_fd is by definition not a queue and fails
+##   Linux's f_op check with EBADF before the buffer copy ever runs.
+## FIX (translator-only, kernel/src/syscall/linux.rs):
+##   - sys_mq_timedsend (~20691): removed the premature `arg1==0 -> EFAULT` + validate_user_read
+##     msg block; kept timeout -> msg_prio -> validate_linux_fd -> terminal EBADF.
+##   - sys_mq_timedreceive (~20770): removed the premature validate_user_write (msg buffer) and
+##     validate_user_write (prio pointer) blocks; kept timeout -> validate_linux_fd -> EBADF.
+##   - Updated both doc comments to the full 6-step / 5-step v6.6 gate orders.
+##   Self-tests updated (kernel ~60429+): mq_timedsend(NULL)/(prio=32767,NULL) and the three
+##   unsigned-int truncation cases (a,b,d) now expect EBADF not EFAULT; (c) prio>=MAX stays
+##   EINVAL (prio gate precedes fdget); mq_timedreceive(NULL) now EBADF.  Added a cross-check
+##   block: NULL buffer + VALID timespec -> EBADF for both send and receive (proves the buffer
+##   is never inspected ahead of fdget) with stamp "mq_timed{send,receive} msg buffer untouched
+##   before fdget (batch 543): OK".
+## VERIFIED: cargo build clean; clippy 17475 (unchanged baseline; new asserts use
+##   i64::from(errno::EBADF).wrapping_neg() to avoid arithmetic_side_effects); boot-test BOOT_OK
+##   EXIT=0, batch-543 stamp present in build/serial-test.txt, no SELF-TEST FAILURE.
+
 ## DONE (2026-06-12): ABI batch 542 — io_pgetevents timeout/sigset gate order + NULL-mask sigsetsize short-circuit
 ## Linux v6.6 fs/aio.c SYSCALL_DEFINE6(io_pgetevents) + kernel/signal.c set_user_sigmask (verified
 ## verbatim against raw.githubusercontent.com torvalds/linux v6.6):

@@ -20679,7 +20679,10 @@ fn validate_user_timespec64(ptr: u64) -> Result<(), SyscallResult> {
 ///      EFAULT on copy fail; EINVAL on bad value.
 ///   2. `do_mq_timedsend()`: `msg_prio >= MQ_PRIO_MAX` -> EINVAL.
 ///   3. `fdget(mqdes)` -> EBADF on bad fd.
-///   4. `copy_from_user(msg)` -> EFAULT on bad msg pointer.
+///   4. `f.file->f_op != &mqueue_file_operations` -> EBADF (fd is a
+///      valid file but not a message queue).
+///   5. `f.file->f_mode & FMODE_WRITE` missing -> EBADF.
+///   6. `load_msg(u_msg_ptr, msg_len)` -> EFAULT on bad msg pointer.
 ///
 /// `MQ_PRIO_MAX` is `32768` (15 bits) on Linux x86_64.
 ///
@@ -20688,6 +20691,18 @@ fn validate_user_timespec64(ptr: u64) -> Result<(), SyscallResult> {
 /// tv_nsec = 2_000_000_000) with a junk fd saw -EBADF where Linux
 /// returns -EINVAL.  Batch 198 adds the `timespec64_valid` gate
 /// ahead of the fd lookup.
+///
+/// Batch 543 removes a premature msg-pointer EFAULT check.  The
+/// message buffer is only touched by `load_msg` at step 6 — i.e.
+/// *after* a successful `fdget` and the `f_op`/`FMODE_WRITE` gates
+/// (steps 4-5) which both yield EBADF.  We never model a real
+/// message-queue fd, so every fd that survives `validate_linux_fd`
+/// is, by definition, not a queue and fails Linux's f_op check with
+/// EBADF before `load_msg` ever runs.  Validating the msg pointer
+/// ahead of the fd lookup therefore returned EFAULT where Linux
+/// returns EBADF (bad fd + unreadable buffer) — the unconditional
+/// EBADF after `validate_linux_fd` now models the f_op failure and
+/// the buffer EFAULT is correctly unreachable.
 fn sys_mq_timedsend(args: &SyscallArgs) -> SyscallResult {
     const MQ_PRIO_MAX: u32 = 32768;
     // 1. Validate abs_timeout shape ahead of any fd touch (Linux's
@@ -20714,16 +20729,12 @@ fn sys_mq_timedsend(args: &SyscallArgs) -> SyscallResult {
     if msg_prio >= MQ_PRIO_MAX {
         return linux_err(errno::EINVAL);
     }
-    if args.arg1 == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    let len = args.arg2 as usize;
-    if len > 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, len) {
-            return linux_err(linux_errno_for(e));
-        }
-    }
-    // 3. fd lookup.
+    // 3. fd lookup.  The message buffer (`load_msg`) is only touched
+    //    after the f_op / FMODE_WRITE gates, both of which yield EBADF
+    //    for any non-mqueue fd.  Since we never model a real queue, the
+    //    unconditional EBADF below stands in for that f_op failure and
+    //    the buffer EFAULT is unreachable — so we do NOT validate the
+    //    msg pointer here (doing so pre-empted Linux's EBADF).
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
     if let Err(r) = validate_linux_fd(fd) {
@@ -20739,6 +20750,23 @@ fn sys_mq_timedsend(args: &SyscallArgs) -> SyscallResult {
 /// `timespec64_valid(abs_timeout)` ahead of the fd lookup.  There
 /// is no priority validation on the receive path (the kernel writes
 /// the priority back to userspace; nothing to range-check on input).
+///
+/// `do_mq_timedreceive()` gate order after the timeout:
+///   1. `fdget(mqdes)` -> EBADF on bad fd.
+///   2. `f.file->f_op != &mqueue_file_operations` -> EBADF.
+///   3. `f.file->f_mode & FMODE_READ` missing -> EBADF.
+///   4. `msg_len < info->attr.mq_msgsize` -> EMSGSIZE.
+///   5. `store_msg(u_msg_ptr, ...)` -> EFAULT on bad buffer, then the
+///      priority is written back to `u_msg_prio` (EFAULT on bad ptr).
+///
+/// Batch 543 removes the premature msg-buffer / prio-pointer EFAULT
+/// checks for the same reason as [`sys_mq_timedsend`]: the userspace
+/// buffers are only touched at step 5, *after* the f_op / FMODE_READ
+/// EBADF gates (steps 2-3).  We never model a real message-queue fd,
+/// so the unconditional EBADF after `validate_linux_fd` models that
+/// f_op failure and the buffer EFAULT is unreachable.  Validating the
+/// buffers ahead of the fd lookup returned EFAULT where Linux returns
+/// EBADF (bad fd + unwritable buffer).
 fn sys_mq_timedreceive(args: &SyscallArgs) -> SyscallResult {
     // 1. Validate abs_timeout shape ahead of any fd touch.
     if args.arg4 != 0 {
@@ -20746,21 +20774,10 @@ fn sys_mq_timedreceive(args: &SyscallArgs) -> SyscallResult {
             return r;
         }
     }
-    if args.arg1 == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    let len = args.arg2 as usize;
-    if len > 0 {
-        if let Err(e) = crate::mm::user::validate_user_write(args.arg1, len) {
-            return linux_err(linux_errno_for(e));
-        }
-    }
-    if args.arg3 != 0 {
-        if let Err(e) = crate::mm::user::validate_user_write(args.arg3, 4) {
-            return linux_err(linux_errno_for(e));
-        }
-    }
-    // 2. fd lookup.
+    // 2. fd lookup.  The msg buffer (`store_msg`) and the priority
+    //    write-back are only touched after the f_op / FMODE_READ gates
+    //    (both EBADF for any non-mqueue fd), so the unconditional EBADF
+    //    below pre-empts them and we do NOT validate those pointers.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
     if let Err(r) = validate_linux_fd(fd) {
@@ -60409,12 +60426,17 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: mq_unlink not ENOENT");
             return Err(KernelError::InternalError);
         }
-        // mq_timedsend(NULL) -> EFAULT.
+        // Batch 543: mq_timedsend(NULL msg) -> EBADF, NOT EFAULT.
+        // Linux's do_mq_timedsend touches the message buffer
+        // (load_msg) only after fdget + the f_op / FMODE_WRITE gates,
+        // all of which yield EBADF for any non-mqueue fd.  We removed
+        // the premature msg-pointer EFAULT check, so a NULL msg now
+        // falls through to the fd lookup.  (prio=0 passes, no timeout.)
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::MQ_TIMEDSEND, &a).value
-            != -i64::from(errno::EFAULT) {
-            serial_println!("[syscall/linux]   FAIL: mq_timedsend(NULL) not EFAULT");
+            != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: mq_timedsend(NULL) not EBADF");
             return Err(KernelError::InternalError);
         }
         // mq_timedsend(_, _, _, prio=MQ_PRIO_MAX, _) -> EINVAL.
@@ -60436,14 +60458,15 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: mq_timedsend(prio=70000) not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // mq_timedsend(_, _, _, prio=32767, _) with NULL msg -> EFAULT
-        // (prio at the highest valid value passes the gate; NULL msg
-        // is then the next failure).
+        // mq_timedsend(_, _, _, prio=32767, _) with NULL msg -> EBADF
+        // (prio at the highest valid value passes the gate; the fd
+        // lookup is then the next failure — batch 543 dropped the
+        // premature NULL-msg EFAULT check).
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 32767,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::MQ_TIMEDSEND, &a).value
-            != -i64::from(errno::EFAULT) {
-            serial_println!("[syscall/linux]   FAIL: mq_timedsend(prio=32767, NULL) not EFAULT");
+            != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: mq_timedsend(prio=32767, NULL) not EBADF");
             return Err(KernelError::InternalError);
         }
         serial_println!("[syscall/linux]   mq_timedsend prio validation: OK");
@@ -60451,31 +60474,35 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // Batch 331: msg_prio is C `unsigned int`; high-half garbage
         // must be masked before the >= MQ_PRIO_MAX gate.  Pre-batch the
         // raw-u64 comparison rejected high-only values with EINVAL where
-        // Linux's truncated msg_prio advances to the msg-pointer check.
-        // (a) prio=0x1_0000_0000, msg=NULL -> EFAULT (truncates to 0,
-        //     prio gate passes, NULL msg check fires).
+        // Linux's truncated msg_prio advances past the prio gate to the
+        // fd lookup.  (Batch 543: a truncated-valid prio now falls
+        // through to the fd lookup -> EBADF, not the old NULL-msg
+        // EFAULT, since the msg buffer is untouched until after fdget.)
+        // (a) prio=0x1_0000_0000, msg=NULL -> EBADF (truncates to 0,
+        //     prio gate passes, fd lookup fires).
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1,
             arg3: 0x1_0000_0000, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::MQ_TIMEDSEND, &a).value
-            != -i64::from(errno::EFAULT) {
+            != -i64::from(errno::EBADF) {
             serial_println!(
-                "[syscall/linux]   FAIL: mq_timedsend(prio=0x1_0000_0000, NULL) not EFAULT (truncation)"
+                "[syscall/linux]   FAIL: mq_timedsend(prio=0x1_0000_0000, NULL) not EBADF (truncation)"
             );
             return Err(KernelError::InternalError);
         }
-        // (b) prio=0x1_0000_0001, msg=NULL -> EFAULT (truncates to 1
-        //     which is < MQ_PRIO_MAX; gate passes, NULL msg check fires).
+        // (b) prio=0x1_0000_0001, msg=NULL -> EBADF (truncates to 1
+        //     which is < MQ_PRIO_MAX; gate passes, fd lookup fires).
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1,
             arg3: 0x1_0000_0001, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::MQ_TIMEDSEND, &a).value
-            != -i64::from(errno::EFAULT) {
+            != -i64::from(errno::EBADF) {
             serial_println!(
-                "[syscall/linux]   FAIL: mq_timedsend(prio=0x1_0000_0001, NULL) not EFAULT (truncation)"
+                "[syscall/linux]   FAIL: mq_timedsend(prio=0x1_0000_0001, NULL) not EBADF (truncation)"
             );
             return Err(KernelError::InternalError);
         }
         // (c) prio=0x1_0000_8000 (high|MQ_PRIO_MAX), msg=NULL -> EINVAL
-        //     (truncates to 32768; gate still rejects values >= MAX).
+        //     (truncates to 32768; gate still rejects values >= MAX —
+        //     the prio gate precedes the fd lookup so this is unchanged).
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1,
             arg3: 0x1_0000_8000, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::MQ_TIMEDSEND, &a).value
@@ -60486,13 +60513,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         // (d) prio=0xFFFF_FFFF_0000_0000 (all-high, low=0), msg=NULL
-        //     -> EFAULT.  Independent confirmation of the truncation.
+        //     -> EBADF.  Independent confirmation of the truncation.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1,
             arg3: 0xFFFF_FFFF_0000_0000, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::MQ_TIMEDSEND, &a).value
-            != -i64::from(errno::EFAULT) {
+            != -i64::from(errno::EBADF) {
             serial_println!(
-                "[syscall/linux]   FAIL: mq_timedsend(prio=0xFFFF_FFFF_0000_0000, NULL) not EFAULT (truncation)"
+                "[syscall/linux]   FAIL: mq_timedsend(prio=0xFFFF_FFFF_0000_0000, NULL) not EBADF (truncation)"
             );
             return Err(KernelError::InternalError);
         }
@@ -60564,14 +60591,46 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "[syscall/linux]   mq_timed{{send,receive}} timespec64_valid: OK"
         );
 
-        // mq_timedreceive(NULL) -> EFAULT.
+        // Batch 543: mq_timedreceive(NULL msg) -> EBADF, NOT EFAULT.
+        // store_msg touches the buffer only after fdget + f_op /
+        // FMODE_READ (all EBADF for a non-mqueue fd), so the removed
+        // premature msg-pointer check no longer pre-empts the fd lookup.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::MQ_TIMEDRECEIVE, &a).value
-            != -i64::from(errno::EFAULT) {
-            serial_println!("[syscall/linux]   FAIL: mq_timedreceive(NULL) not EFAULT");
+            != -i64::from(errno::EBADF) {
+            serial_println!("[syscall/linux]   FAIL: mq_timedreceive(NULL) not EBADF");
             return Err(KernelError::InternalError);
         }
+        // Batch 543 cross-check: a NULL buffer with a *valid* timespec
+        // (so the timeout gate passes) must still reach the fd lookup
+        // and return EBADF for both send and receive.  This proves the
+        // userspace buffer is never inspected ahead of fdget — Linux's
+        // load_msg/store_msg run only after the f_op / FMODE gates.
+        // send: NULL msg, valid prio=0, good timespec -> EBADF.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0,
+            arg4: good_ts_ptr, arg5: 0 };
+        if dispatch_linux(nr::MQ_TIMEDSEND, &a).value
+            != i64::from(errno::EBADF).wrapping_neg() {
+            serial_println!(
+                "[syscall/linux]   FAIL: mq_timedsend(NULL, good ts) not EBADF"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // receive: NULL msg + NULL prio_ptr, good timespec -> EBADF.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0,
+            arg4: good_ts_ptr, arg5: 0 };
+        if dispatch_linux(nr::MQ_TIMEDRECEIVE, &a).value
+            != i64::from(errno::EBADF).wrapping_neg() {
+            serial_println!(
+                "[syscall/linux]   FAIL: mq_timedreceive(NULL, good ts) not EBADF"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   mq_timed{{send,receive}} msg buffer untouched \
+             before fdget (batch 543): OK"
+        );
         // mq_notify in kernel context (fd validation skipped) -> EBADF.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };

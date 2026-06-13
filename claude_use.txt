@@ -1,0 +1,34 @@
+you: How practical would it be to get two Claude Max 20x accounts and use them both simultaneously to develop the OS?
+     Or should I just switch to API keys? How much more would using API keys cost than using a max 20x account and using
+     all the usage it allows, for the same amount of usage? **Two Max 20x accounts simultaneously:**
+
+claude: Totally practical. You'd run two Claude Code sessions in separate terminals, each pointing at the same repo. The
+        main consideration is merge conflicts — if both sessions edit the same file, one will clobber the other. The
+        solution is to give each session a different area of the codebase:
+
+        - Session A: kernel core (scheduler, memory manager, IPC)
+        - Session B: userspace driver framework, POSIX layer
+
+        As long as they're working on different files, it works fine. Git worktrees (which Claude Code supports) would
+        make this even cleaner — each session works on its own branch.
+
+        The limitation is you, not the tool. You need to write good prompts for both sessions, review both outputs, and
+        coordinate what they're doing. Two parallel sessions means twice the supervisory load.
+
+        **API keys vs Max 20x cost:**
+
+        Heavy Claude Code usage burns tokens fast. A long session like the one we're in right now is probably in the
+        range of hundreds of thousands of input tokens (the conversation context grows with every exchange). An intense
+        day of OS development — multiple long sessions, large code generation, reading files, running builds — could
+        easily hit tens of millions of tokens.
+
+        At API rates, Opus (the model you'd want for complex OS work) costs $15/million input tokens and $75/million
+        output tokens. A single heavy day could cost $50-200+ depending on how much code generation and how much context
+        is being carried. Over a month of daily intensive use, API could easily run $1,000-3,000+.
+
+        Two Max 20x accounts at $400/month total is almost certainly cheaper for sustained heavy usage. API keys only
+        become cheaper if your usage is sporadic — a few hours per week rather than hours per day.
+
+        **My recommendation:** Start with one Max 20x account. See if you hit the usage limits. If you're consistently
+        running out, add the second account. Only consider API keys if you need more than two parallel sessions or need
+        programmatic access (like an automated build-test-fix loop).

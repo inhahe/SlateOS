@@ -1,0 +1,114 @@
+ Here's a rough taxonomy of the API surface an OS needs to provide, grouped by what depends on them:
+
+  1. Process & execution
+
+  - Process creation/termination (fork, exec, exit, wait, or your own equivalents)
+  - Threads (creation, joining, thread-local storage)
+  - Signals / async notification (or your alternative to POSIX signals, which are widely considered a mess)
+  - Process scheduling hints (priority, affinity)
+
+  2. Memory
+
+  - Virtual memory allocation (brk/mmap/munmap or equivalents)
+  - Memory protection (mprotect — marking pages read-only, no-execute, etc.)
+  - Shared memory between processes
+  - Memory-mapped files
+
+  3. File systems & I/O
+
+  - File open/read/write/close/seek
+  - Directory operations (create, list, remove)
+  - File metadata (stat, permissions, timestamps)
+  - Symlinks, hard links
+  - Mounting/unmounting filesystems
+  - ioctl — the catch-all for device-specific operations
+
+  4. Networking
+
+  - Socket creation, bind, listen, accept, connect
+  - Send/receive (stream and datagram)
+  - DNS resolution (usually a userspace library, but the OS provides the socket layer it runs on)
+  - Network interface configuration
+
+  5. I/O multiplexing & async
+
+  - Waiting on multiple file descriptors/sockets at once (select/poll/epoll/kqueue or your equivalent)
+  - Async I/O (io_uring on Linux — this is where the modern action is)
+  - Event notification (inotify for filesystem changes, etc.)
+
+  6. IPC (inter-process communication)
+
+  - Pipes (anonymous and named)
+  - Unix domain sockets
+  - Message queues
+  - Semaphores and mutexes (kernel-mediated)
+  - Shared memory (overlaps with memory section)
+
+  7. Device access
+
+  - Character and block device I/O
+  - Framebuffer / GPU interface
+  - Input devices (keyboard, mouse, touchscreen)
+  - Audio
+  - USB, Bluetooth, etc.
+  - The driver model — how third-party drivers plug in
+
+  8. Security & permissions
+
+  - User/group identity
+  - File permissions, ACLs
+  - Capabilities or privilege model (Linux capabilities, or something simpler)
+  - Namespaces / sandboxing (if you want container-like isolation)
+  - Cryptographic random (getrandom)
+
+  9. Time & clocks
+
+  - Wall clock time, monotonic clock
+  - Timers and sleep
+  - High-resolution timestamps
+
+  10. GUI / windowing
+
+  This is where you have a major architectural choice:
+
+  - Kernel-level windowing (classic Mac OS, Windows with win32k.sys) — window management is a syscall
+  - Userspace display server (X11, Wayland on Linux) — the kernel only provides the framebuffer/GPU interface, and a
+  userspace process handles windows, compositing, input routing
+  - Most modern OSes go with userspace, because a bug in the window manager shouldn't kernel panic the system
+
+  The GUI API covers: window creation/destruction, input events, drawing/compositing, clipboard, drag-and-drop,
+  accessibility.
+
+  What POSIX specifically covers
+
+  POSIX is a standard that spans most of categories 1–6 and 9. Roughly:
+
+  - Process management, signals, threads (pthreads)
+  - File I/O, directory operations, pipes
+  - Sockets (networking)
+  - Basic IPC (semaphores, shared memory, message queues)
+  - Time functions
+  - A defined C library interface (stdio, stdlib, string, math, etc.)
+
+  What POSIX does not cover: GUI, GPU, audio, modern async I/O, device driver model, sandboxing, or anything
+  hardware-specific. A C compiler and its toolchain (compiler, linker, make, shell) primarily needs POSIX categories 1–3
+   — process execution, memory, and file I/O.
+
+  The big design decision
+
+  You don't have to follow POSIX. The question is compatibility vs. clean design:
+
+  - Follow POSIX closely → you can port gcc, python, shells, and thousands of existing programs with minimal effort
+  - Design your own syscall interface → you can fix decades of mistakes (signals, ioctl, fork, the file descriptor
+  model) but you need to write or port a C library that translates POSIX calls to your syscalls, or accept that existing
+   software won't run without modification
+
+  Most hobby/research OSes either implement a POSIX compatibility layer on top of a cleaner internal API, or pick a
+  subset of POSIX (enough for a C toolchain and coreutils) and deviate elsewhere.
+
+✻ Churned for 33s
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+> 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ? for shortcuts

@@ -23195,6 +23195,139 @@ fn sanitize_mpol_flags(mode_raw: u32) -> Result<(u32, u32), i32> {
     Ok((mode, flags))
 }
 
+/// Port of Linux v6.6 `get_nodes` (mm/mempolicy.c) for a single-node (UMA)
+/// kernel.  Both `kernel_mbind` and `kernel_set_mempolicy` call `get_nodes`
+/// to read the user nodemask immediately after `sanitize_mpol_flags`, before
+/// any range/flag handling.  The verbatim logic is:
+///
+/// ```c
+/// --maxnode;
+/// nodes_clear(*nodes);
+/// if (maxnode == 0 || !nmask)
+///     return 0;                              // empty mask, success
+/// if (maxnode > PAGE_SIZE*BITS_PER_BYTE)
+///     return -EINVAL;
+/// ... copy the bitmap; bits above MAX_NUMNODES must be zero (else -EINVAL),
+///     and an unreadable mask is -EFAULT ...
+/// ```
+///
+/// Crucially a NULL `nmask` is **not** a fault — it yields an empty mask and
+/// success; the per-mode emptiness decision is left to `mpol_new_check`.
+///
+/// We collapse Linux's full nodemask down to the two facts a UMA kernel
+/// needs: whether the resolved mask is empty, and whether it names any node
+/// other than node 0 (`mask_has_extra_bits`).  On a single-node system the
+/// later `mpol_set_nodemask` intersection against `mems_allowed = {0}`
+/// turns any such "extra" node into an empty effective mask, i.e. -EINVAL;
+/// the caller applies that rule.  Returns `Ok((mask_empty, has_extra))` or
+/// the Linux errno.
+fn get_nodes_uma(nmask: u64, maxnode_arg: u64) -> Result<(bool, bool), i32> {
+    // `--maxnode` (unsigned wraparound mirrors the C decrement: a passed-in
+    // maxnode of 0 becomes u64::MAX, which fails the cap check below when a
+    // non-NULL mask is supplied — exactly as Linux does).
+    let maxnode = maxnode_arg.wrapping_sub(1);
+    if maxnode == 0 || nmask == 0 {
+        return Ok((true, false));
+    }
+    // PAGE_SIZE*BITS_PER_BYTE.  The x86_64 Linux ABI uses a 4 KiB page, so
+    // the nodemask bit cap is 4096*8 = 32768.  We honour the ABI value (as
+    // sys_mbind does for addr alignment) rather than our 16 KiB frame size.
+    const NODE_BITS_CAP: u64 = 4096 * 8;
+    if maxnode > NODE_BITS_CAP {
+        return Err(errno::EINVAL);
+    }
+    let bytes = maxnode.div_ceil(8) as usize;
+    if let Err(e) = crate::mm::user::validate_user_read(nmask, bytes) {
+        return Err(linux_errno_for(e));
+    }
+    // Heap scratch buffer, bounded by the 32768-bit (4 KiB) cap above.
+    let mut mask = alloc::vec![0u8; bytes];
+    // SAFETY: validate_user_read above confirmed the readable range;
+    // copy_from_user performs the SMAP-safe transfer.
+    let r = unsafe {
+        crate::mm::user::copy_from_user(nmask, mask.as_mut_ptr(), bytes)
+    };
+    if let Err(e) = r {
+        return Err(linux_errno_for(e));
+    }
+    // Mask off bits >= maxnode in the final byte: Linux's get_bitmap masks
+    // the final long down to `maxnode` bits, so bits beyond it in the user
+    // buffer are ignored (not faulted, not counted).  `maxnode & 7` is the
+    // bit offset of `maxnode` within its byte; 0 means the byte is fully
+    // valid.  (Bitwise mask avoids arithmetic on a runtime value.)
+    let keep: u8 = match maxnode & 7 {
+        1 => 0x01,
+        2 => 0x03,
+        3 => 0x07,
+        4 => 0x0F,
+        5 => 0x1F,
+        6 => 0x3F,
+        7 => 0x7F,
+        _ => 0xFF,
+    };
+    if let Some(last) = mask.last_mut() {
+        *last &= keep;
+    }
+    let empty = mask.iter().all(|&b| b == 0);
+    // node 0 lives in byte 0 bit 0; any other set bit names a node we do
+    // not have.
+    let bit0_cleared = mask.first().map_or(0u8, |&b| b & !1u8);
+    let extra = bit0_cleared != 0 || mask.iter().skip(1).any(|&b| b != 0);
+    Ok((empty, extra))
+}
+
+/// Per-mode / per-flag nodemask emptiness rules from Linux v6.6 `mpol_new`
+/// (mm/mempolicy.c).  Given the sanitized `mode`, the `flags` from
+/// `sanitize_mpol_flags`, and whether the resolved nodemask is empty,
+/// returns `Ok(())` if the combination is accepted or the Linux errno
+/// otherwise.  Verbatim rule set:
+///
+/// * `MPOL_DEFAULT`  — nodemask must be empty.
+/// * `MPOL_PREFERRED` — an empty mask is accepted only without
+///   `MPOL_F_STATIC_NODES` / `MPOL_F_RELATIVE_NODES` (Linux rewrites it to
+///   `MPOL_LOCAL`); with either flag set, an empty mask is `-EINVAL`.
+/// * `MPOL_LOCAL` — nodemask must be empty *and* carry neither STATIC nor
+///   RELATIVE flag.
+/// * `MPOL_BIND`, `MPOL_INTERLEAVE`, `MPOL_PREFERRED_MANY` — a non-empty
+///   nodemask is mandatory.
+///
+/// The "names a node other than node 0" rejection is applied separately by
+/// the caller (mirroring Linux's later `mpol_set_nodemask` intersection
+/// against `mems_allowed = {0}`).
+fn mpol_new_check(mode: u32, flags: u32, mask_empty: bool) -> Result<(), i32> {
+    const MPOL_DEFAULT: u32 = 0;
+    const MPOL_PREFERRED: u32 = 1;
+    const MPOL_LOCAL: u32 = 4;
+    const MPOL_F_STATIC_NODES: u32 = 1 << 15;
+    const MPOL_F_RELATIVE_NODES: u32 = 1 << 14;
+    let static_or_relative =
+        flags & (MPOL_F_STATIC_NODES | MPOL_F_RELATIVE_NODES) != 0;
+    match mode {
+        MPOL_DEFAULT => {
+            if !mask_empty {
+                return Err(errno::EINVAL);
+            }
+        }
+        MPOL_PREFERRED => {
+            if mask_empty && static_or_relative {
+                return Err(errno::EINVAL);
+            }
+        }
+        MPOL_LOCAL => {
+            if !mask_empty || static_or_relative {
+                return Err(errno::EINVAL);
+            }
+        }
+        // MPOL_BIND, MPOL_INTERLEAVE, MPOL_PREFERRED_MANY.
+        _ => {
+            if mask_empty {
+                return Err(errno::EINVAL);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// `mbind(addr, len, mode, nodemask*, maxnode, flags)` — set the NUMA
 /// memory policy for a virtual-address range.
 ///
@@ -23207,22 +23340,30 @@ fn sanitize_mpol_flags(mode_raw: u32) -> Result<(u32, u32), i32> {
 /// whether NUMA is "supported" and then expect `mbind` to follow the
 /// same answer.
 ///
-/// Linux's `do_mbind` semantics relevant to a one-node system:
-///   * mode bits 0..2 in 0..=5; only MPOL_F_STATIC_NODES (1<<15) and
-///     MPOL_F_RELATIVE_NODES (1<<14) accepted as mode-flag bits.
-///   * `flags` is the OR of MPOL_MF_MOVE (1) | MPOL_MF_MOVE_ALL (2) |
-///     MPOL_MF_STRICT (4).  No other bits.
-///   * `addr` must be page-aligned (Linux uses 4 KiB; we accept 4 KiB
-///     alignment because that's the ABI consumers' expectation, even
-///     though our internal frame size is 16 KiB).
-///   * If `maxnode > 0`, mask must be readable; any bit > 0 -> -EINVAL
-///     (no node > 0 exists on UMA — matches Linux's "not a subset of
-///     mems_allowed" rejection).
-///   * Per-mode emptiness:
-///       - DEFAULT, LOCAL   : empty mask required.
-///       - PREFERRED,
-///         PREFERRED_MANY   : empty or non-empty accepted.
-///       - BIND, INTERLEAVE : non-empty mask required.
+/// Linux's `kernel_mbind` -> `do_mbind` validation order on a one-node
+/// system (the order matters — EPERM vs EINVAL discriminators depend on
+/// it):
+///   1. `sanitize_mpol_flags(mode)` (see that helper).
+///   2. `get_nodes(nmask, maxnode)` (see `get_nodes_uma`): NULL mask is
+///      empty + success (not -EFAULT); over-cap maxnode -> -EINVAL;
+///      unreadable -> -EFAULT.  This runs BEFORE the flag/EPERM/addr
+///      checks below.
+///   3. `flags` is the OR of MPOL_MF_MOVE (1) | MPOL_MF_MOVE_ALL (2) |
+///      MPOL_MF_STRICT (4); any other bit -> -EINVAL.
+///   4. MPOL_MF_MOVE_ALL without CAP_SYS_NICE -> -EPERM.
+///   5. `addr` must be page-aligned (Linux uses 4 KiB; we accept 4 KiB
+///      alignment because that's the ABI consumers' expectation, even
+///      though our internal frame size is 16 KiB).
+///   6. `end = addr + PAGE_ALIGN(len)`; `end < addr` -> -EINVAL;
+///      `end == addr` (zero-length) -> success, returned BEFORE mpol_new
+///      (so the per-mode/extra checks are skipped for a 0-length range).
+///   7. `mpol_new` per-mode emptiness rules (see `mpol_new_check`):
+///        - DEFAULT: empty mask required.
+///        - PREFERRED: empty allowed only without STATIC/RELATIVE flags.
+///        - LOCAL: empty mask required AND no STATIC/RELATIVE flag.
+///        - BIND, INTERLEAVE, PREFERRED_MANY: non-empty mask required.
+///   8. `mpol_set_nodemask` intersects against mems_allowed = {0}; any
+///      node other than 0 -> -EINVAL.
 ///   * MPOL_MF_STRICT means "return -EIO if any page can't comply with
 ///     the new policy".  On UMA every page already lives on node 0,
 ///     so every page complies with every policy that includes node 0
@@ -23246,43 +23387,43 @@ fn sanitize_mpol_flags(mode_raw: u32) -> Result<(u32, u32), i32> {
 /// failures.  Cross-reference todo.txt entries 130 (get_mempolicy),
 /// 131 (set_mempolicy), and 132 (this entry).
 fn sys_mbind(args: &SyscallArgs) -> SyscallResult {
-    const MPOL_DEFAULT: u32 = 0;
-    const MPOL_PREFERRED: u32 = 1;
-    const MPOL_BIND: u32 = 2;
-    const MPOL_INTERLEAVE: u32 = 3;
-    const MPOL_LOCAL: u32 = 4;
-    const MPOL_PREFERRED_MANY: u32 = 5;
     // 4 KiB is the architectural page size that Linux ABI consumers
     // expect for address alignment.  Our internal frame size is 16 KiB
     // but accepting 4 KiB alignment matches what programs assume.
     const ABI_PAGE_SIZE: u64 = 4096;
+    const MPOL_MF_MOVE_ALL: u32 = 1 << 1;
 
-    // Linux do_mbind -> kernel_mbind splits/validates the packed mode word
-    // via sanitize_mpol_flags before any range or nodemask handling.
+    // kernel_mbind order: sanitize_mpol_flags -> get_nodes -> do_mbind.
     #[allow(clippy::cast_possible_truncation)]
     let mode_raw = args.arg2 as u32;
-    let (mode, _flags) = match sanitize_mpol_flags(mode_raw) {
+    let (mode, mode_flags) = match sanitize_mpol_flags(mode_raw) {
         Ok(v) => v,
         Err(e) => return linux_err(e),
     };
 
-    // mbind flags: MOVE | MOVE_ALL | STRICT (= 1 | 2 | 4).
-    const MPOL_MF_MOVE_ALL: u32 = 1 << 1;
+    // get_nodes() runs BEFORE do_mbind's flag/EPERM/addr checks.  A NULL
+    // nodemask is not a fault (it resolves to an empty mask); the cap and
+    // EFAULT-on-unreadable rules live here.  Doing this first matters: a
+    // probe with an over-cap maxnode and MPOL_MF_MOVE_ALL must see the
+    // get_nodes -EINVAL, not the do_mbind -EPERM.
+    let (mask_empty, mask_has_extra_bits) =
+        match get_nodes_uma(args.arg3, args.arg4) {
+            Ok(v) => v,
+            Err(e) => return linux_err(e),
+        };
+
+    // do_mbind: flag-bits sanity (MOVE | MOVE_ALL | STRICT = 1 | 2 | 4).
     #[allow(clippy::cast_possible_truncation)]
     let flags = args.arg5 as u32;
     if flags & !0x7 != 0 {
         return linux_err(errno::EINVAL);
     }
-    // Linux do_mbind: `(flags & MPOL_MF_MOVE_ALL) && !capable(CAP_SYS_NICE)
-    // -> -EPERM`, fired immediately after the flag-bits sanity check
-    // and ahead of `start & ~PAGE_MASK` (addr alignment).  Pre-batch
-    // we ran addr alignment first, so a probe passing
-    // (addr=unaligned, flags=MPOL_MF_MOVE_ALL) saw EINVAL where
-    // Linux returns EPERM.  We have no per-task capability set in
-    // the dispatch-time test context, so MOVE_ALL is always EPERM
-    // here (matches the unprivileged-task case on Linux).  When a
-    // real task lands with a credentials struct, swap this for a
-    // CAP_SYS_NICE check.
+    // `(flags & MPOL_MF_MOVE_ALL) && !capable(CAP_SYS_NICE) -> -EPERM`,
+    // fired after the flag-bits check and ahead of `start & ~PAGE_MASK`.
+    // We have no per-task capability set in the dispatch-time test
+    // context, so MOVE_ALL is always EPERM here (matches the
+    // unprivileged-task case on Linux).  When a real task lands with a
+    // credentials struct, swap this for a CAP_SYS_NICE check.
     if flags & MPOL_MF_MOVE_ALL != 0 {
         return linux_err(errno::EPERM);
     }
@@ -23293,73 +23434,25 @@ fn sys_mbind(args: &SyscallArgs) -> SyscallResult {
         return linux_err(errno::EINVAL);
     }
     let len = args.arg1;
-    // addr + len must not overflow (Linux's "is_negative_pte" check).
+    // addr + len must not overflow (Linux's `end < start` check).
     if addr.checked_add(len).is_none() {
         return linux_err(errno::EINVAL);
     }
-    // len == 0 is a no-op success on Linux.
+    // end == start (len rounds to 0) is a no-op success on Linux, returned
+    // BEFORE mpol_new — so the per-mode emptiness and extra-node checks are
+    // skipped entirely for a zero-length range.
     if len == 0 {
         return SyscallResult::ok(0);
     }
 
-    // Nodemask handling — required if maxnode > 0.
-    let maxnode = args.arg4;
-    let mask_ptr = args.arg3;
-    let (mask_empty, mask_has_extra_bits) = if maxnode > 0 {
-        if mask_ptr == 0 {
-            return linux_err(errno::EFAULT);
-        }
-        if maxnode > (1 << 23) {
-            return linux_err(errno::EINVAL);
-        }
-        let bytes = maxnode.div_ceil(8) as usize;
-        if let Err(e) = crate::mm::user::validate_user_read(mask_ptr, bytes) {
-            return linux_err(linux_errno_for(e));
-        }
-        let mut mask = alloc::vec![0u8; bytes];
-        // SAFETY: validate_user_read above confirmed the readable
-        // range; copy_from_user does the SMAP-safe transfer.
-        let r = unsafe {
-            crate::mm::user::copy_from_user(
-                mask_ptr,
-                mask.as_mut_ptr(),
-                bytes,
-            )
-        };
-        if let Err(e) = r {
-            return linux_err(linux_errno_for(e));
-        }
-        let empty = mask.iter().all(|&b| b == 0);
-        // x86_64 nodemask is a little-endian unsigned-long array;
-        // bit 0 (node 0) lives in byte 0 bit 0.  Any other set bit
-        // refers to a node we do not have.
-        let bit0_cleared = mask[0] & !1u8;
-        let extra = bit0_cleared != 0
-            || mask.iter().skip(1).any(|&b| b != 0);
-        (empty, extra)
-    } else {
-        (true, false)
-    };
-
+    // mpol_new per-mode/flag emptiness rules.
+    if let Err(e) = mpol_new_check(mode, mode_flags, mask_empty) {
+        return linux_err(e);
+    }
+    // mpol_set_nodemask intersects against mems_allowed = {0}; a node other
+    // than node 0 leaves an empty effective mask -> -EINVAL.
     if mask_has_extra_bits {
         return linux_err(errno::EINVAL);
-    }
-
-    match mode {
-        MPOL_DEFAULT | MPOL_LOCAL => {
-            if !mask_empty {
-                return linux_err(errno::EINVAL);
-            }
-        }
-        MPOL_PREFERRED | MPOL_PREFERRED_MANY => {
-            // Either empty or {0} is fine.
-        }
-        MPOL_BIND | MPOL_INTERLEAVE => {
-            if mask_empty {
-                return linux_err(errno::EINVAL);
-            }
-        }
-        _ => return linux_err(errno::EINVAL),
     }
 
     // Accepted.  Policy is silently dropped — see top-of-function
@@ -23378,24 +23471,29 @@ fn sys_mbind(args: &SyscallArgs) -> SyscallResult {
 /// returns a positive answer — callers that probe both directions
 /// observed an asymmetry ("get says NUMA works, set says ENOSYS").
 ///
-/// Linux semantics (mm/mempolicy.c::do_set_mempolicy) for a single-node
-/// system equivalent to ours:
-///   * MPOL_DEFAULT (0): nodemask must be empty.
-///   * MPOL_PREFERRED (1) / MPOL_PREFERRED_MANY (5): nodemask may be
-///     empty (= MPOL_LOCAL semantics) or contain bits that are a
-///     subset of `current->mems_allowed`.
-///   * MPOL_BIND (2) / MPOL_INTERLEAVE (3): nodemask must be non-empty,
-///     and every set bit must be in `current->mems_allowed`.
-///   * MPOL_LOCAL (4): nodemask must be empty.
-///   * `MPOL_F_STATIC_NODES` (1 << 15) and `MPOL_F_RELATIVE_NODES`
-///     (1 << 14) are accepted as mode-modifier flags affecting cpuset
-///     rebinding behaviour (irrelevant on UMA; we accept silently).
-///
-/// Our `mems_allowed` is exactly `{0}` (one node).  We therefore
-/// accept the call iff:
-///   * mode and mode-flag bits are valid;
-///   * if a nodemask is supplied, no bit above bit 0 is set;
-///   * the mode-specific emptiness rule (empty vs non-empty) is met.
+/// Linux semantics (mm/mempolicy.c::kernel_set_mempolicy -> get_nodes ->
+/// do_set_mempolicy -> mpol_new) for a single-node system equivalent to
+/// ours.  Validation runs in this exact order:
+///   1. `sanitize_mpol_flags` splits/validates the packed mode word (see
+///      that helper — covers MPOL_MAX, STATIC/RELATIVE exclusivity, and
+///      MPOL_F_NUMA_BALANCING-requires-BIND).
+///   2. `get_nodes` reads the nodemask (see `get_nodes_uma`).  A NULL
+///      pointer yields an empty mask + success — it is NOT -EFAULT; an
+///      over-cap `maxnode` is -EINVAL; an unreadable mask is -EFAULT.
+///   3. `mpol_new` per-mode emptiness rules (see `mpol_new_check`):
+///        * MPOL_DEFAULT (0): nodemask must be empty.
+///        * MPOL_PREFERRED (1): empty allowed only without STATIC/RELATIVE
+///          flags (Linux rewrites empty -> MPOL_LOCAL); else non-empty.
+///        * MPOL_BIND (2) / MPOL_INTERLEAVE (3) / MPOL_PREFERRED_MANY (5):
+///          nodemask must be non-empty.
+///        * MPOL_LOCAL (4): nodemask must be empty AND carry no
+///          STATIC/RELATIVE flag.
+///   4. `mpol_set_nodemask` intersects the mask against
+///      `current->mems_allowed` (= `{0}` here); any node other than 0
+///      leaves an empty effective mask -> -EINVAL.
+///   * `MPOL_F_STATIC_NODES` (1 << 15) / `MPOL_F_RELATIVE_NODES` (1 << 14)
+///     are otherwise accepted as cpuset-rebinding modifiers (irrelevant on
+///     UMA; we accept silently).
 ///
 /// We do not persist the chosen policy because we have no per-task
 /// policy storage and no policy enforcement path — every allocation
@@ -23406,98 +23504,31 @@ fn sys_mbind(args: &SyscallArgs) -> SyscallResult {
 /// also assumes MPOL_DEFAULT), so this asymmetry is acceptable.
 /// Documented as a limitation in todo.txt.
 fn sys_set_mempolicy(args: &SyscallArgs) -> SyscallResult {
-    const MPOL_DEFAULT: u32 = 0;
-    const MPOL_PREFERRED: u32 = 1;
-    const MPOL_BIND: u32 = 2;
-    const MPOL_INTERLEAVE: u32 = 3;
-    const MPOL_LOCAL: u32 = 4;
-    const MPOL_PREFERRED_MANY: u32 = 5;
-
-    // Linux set_mempolicy -> kernel_set_mempolicy validates the packed
-    // mode word via sanitize_mpol_flags before reading the nodemask.
+    // kernel_set_mempolicy order: sanitize_mpol_flags -> get_nodes ->
+    // do_set_mempolicy (-> mpol_new).
     #[allow(clippy::cast_possible_truncation)]
     let mode_raw = args.arg0 as u32;
-    let (mode, _flags) = match sanitize_mpol_flags(mode_raw) {
+    let (mode, mode_flags) = match sanitize_mpol_flags(mode_raw) {
         Ok(v) => v,
         Err(e) => return linux_err(e),
     };
-    let maxnode = args.arg2;
-    let mask_ptr = args.arg1;
 
-    // Read the nodemask (if any) so we can check both emptiness and
-    // whether any bit > 0 is set.  Linux requires the buffer be
-    // readable even for modes that ignore it (e.g. DEFAULT with
-    // maxnode > 0); we mirror that by validating first.
-    let (mask_empty, mask_has_extra_bits) = if maxnode > 0 {
-        if mask_ptr == 0 {
-            return linux_err(errno::EFAULT);
-        }
-        if maxnode > (1 << 23) {
-            return linux_err(errno::EINVAL);
-        }
-        let bytes = maxnode.div_ceil(8) as usize;
-        if let Err(e) = crate::mm::user::validate_user_read(mask_ptr, bytes) {
-            return linux_err(linux_errno_for(e));
-        }
-        // Heap scratch buffer, bounded by the (1 << 23)-bit cap above.
-        let mut mask = alloc::vec![0u8; bytes];
-        // SAFETY: validate_user_read above confirmed the readable
-        // range; copy_from_user does the SMAP-safe transfer.
-        let r = unsafe {
-            crate::mm::user::copy_from_user(
-                mask_ptr,
-                mask.as_mut_ptr(),
-                bytes,
-            )
+    // get_nodes(): NULL nodemask -> empty (not -EFAULT); over-cap maxnode
+    // -> -EINVAL; unreadable -> -EFAULT.
+    let (mask_empty, mask_has_extra_bits) =
+        match get_nodes_uma(args.arg1, args.arg2) {
+            Ok(v) => v,
+            Err(e) => return linux_err(e),
         };
-        if let Err(e) = r {
-            return linux_err(linux_errno_for(e));
-        }
-        let empty = mask.iter().all(|&b| b == 0);
-        // x86_64 nodemask is a little-endian unsigned-long array;
-        // bit 0 (node 0) lives in byte 0 bit 0.  Any other set bit
-        // refers to a node we do not have.
-        let bit0_cleared = mask[0] & !1u8;
-        let extra = bit0_cleared != 0
-            || mask.iter().skip(1).any(|&b| b != 0);
-        (empty, extra)
-    } else {
-        // No mask supplied -> treat as empty per Linux convention.
-        (true, false)
-    };
 
-    // No node beyond node 0 exists on our kernel.  Linux returns
-    // -EINVAL when the requested mask is not a subset of
-    // `mems_allowed`.
+    // mpol_new per-mode/flag emptiness rules.
+    if let Err(e) = mpol_new_check(mode, mode_flags, mask_empty) {
+        return linux_err(e);
+    }
+    // mpol_set_nodemask intersects against mems_allowed = {0}; a node other
+    // than node 0 leaves an empty effective mask -> -EINVAL.
     if mask_has_extra_bits {
         return linux_err(errno::EINVAL);
-    }
-
-    // Per-mode emptiness rules.
-    match mode {
-        MPOL_DEFAULT | MPOL_LOCAL => {
-            // Both demand an empty nodemask.
-            if !mask_empty {
-                return linux_err(errno::EINVAL);
-            }
-        }
-        MPOL_PREFERRED | MPOL_PREFERRED_MANY => {
-            // PREFERRED variants accept either an empty mask
-            // (which Linux turns into MPOL_LOCAL) or {0}.  No
-            // further validation needed here.
-        }
-        MPOL_BIND | MPOL_INTERLEAVE => {
-            // Both require a non-empty mask listing at least one
-            // allowed node.
-            if mask_empty {
-                return linux_err(errno::EINVAL);
-            }
-        }
-        _ => {
-            // Already filtered by the MPOL_MODE_MASK > 5 check; the
-            // match is exhaustive over the legal modes.
-            return linux_err(errno::EINVAL);
-        }
     }
 
     // Accepted.  Policy is silently dropped — see top-of-function
@@ -37404,15 +37435,18 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // Case 9: maxnode > 0 but nodemask NULL -> -EFAULT.
+        // Case 9: maxnode > 0 but nodemask NULL -> -EINVAL (NOT -EFAULT).
+        // Linux get_nodes treats a NULL nmask as an empty mask and returns
+        // success; the empty mask then fails BIND's non-empty rule in
+        // mpol_new -> -EINVAL.  (Pre-batch we returned -EFAULT here.)
         let a = SyscallArgs {
             arg0: 0, arg1: 0x1000, arg2: MPOL_BIND,
             arg3: 0, arg4: 64, arg5: 0,
         };
         let r = dispatch_linux(nr::MBIND, &a);
-        if r.value != -i64::from(errno::EFAULT) {
+        if r.value != i64::from(errno::EINVAL).wrapping_neg() {
             serial_println!(
-                "[syscall/linux]   FAIL: mbind(BIND,NULL,64) -> {} (expected -EFAULT)",
+                "[syscall/linux]   FAIL: mbind(BIND,NULL,64) -> {} (expected -EINVAL)",
                 r.value,
             );
             return Err(KernelError::InternalError);
@@ -37590,6 +37624,152 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         serial_println!(
             "[syscall/linux]   sanitize_mpol_flags NUMA_BALANCING bit + static/relative mutual-exclusion + numa-balancing-requires-BIND (batch 545): OK"
+        );
+    }
+
+    // (9g-546) Batch 546: get_nodes + mpol_new fidelity for mbind /
+    // set_mempolicy.  Three verbatim corrections vs Linux v6.6
+    // mm/mempolicy.c:
+    //   * get_nodes treats a NULL nmask as an EMPTY mask + success (not
+    //     -EFAULT); the per-mode emptiness rule then decides.
+    //   * the nodemask bit cap is PAGE_SIZE*BITS_PER_BYTE = 32768 (after
+    //     --maxnode), not our old 1<<23, and over-cap -> -EINVAL before
+    //     any user read.
+    //   * mpol_new requires a NON-empty mask for MPOL_PREFERRED_MANY (we
+    //     previously accepted empty), and rejects empty MPOL_PREFERRED /
+    //     any MPOL_LOCAL when MPOL_F_STATIC_NODES / RELATIVE_NODES is set.
+    {
+        const MPOL_DEFAULT: u64 = 0;
+        const MPOL_PREFERRED: u64 = 1;
+        const MPOL_BIND: u64 = 2;
+        const MPOL_LOCAL: u64 = 4;
+        const MPOL_PREFERRED_MANY: u64 = 5;
+        const MPOL_F_STATIC_NODES: u64 = 1 << 15;
+        let mask: u64 = 0x1; // node {0}
+
+        // set_mempolicy(PREFERRED_MANY, NULL, 0) -> -EINVAL.
+        // PREFERRED_MANY demands a non-empty mask (was wrongly accepted).
+        let a = SyscallArgs {
+            arg0: MPOL_PREFERRED_MANY, arg1: 0, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
+        if r.value != i64::from(errno::EINVAL).wrapping_neg() {
+            serial_println!(
+                "[syscall/linux]   FAIL: set_mempolicy(PREFERRED_MANY,empty) -> {} (expected -EINVAL)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // set_mempolicy(PREFERRED_MANY, {0}, 64) -> 0 (non-empty ok).
+        let a = SyscallArgs {
+            arg0: MPOL_PREFERRED_MANY,
+            arg1: (&raw const mask).addr() as u64,
+            arg2: 64, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
+        if r.value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: set_mempolicy(PREFERRED_MANY,{{0}}) -> {} (expected 0)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // set_mempolicy(DEFAULT, NULL, maxnode=64) -> 0.  A NULL mask with
+        // maxnode>0 is an empty mask (success), not -EFAULT.
+        let a = SyscallArgs {
+            arg0: MPOL_DEFAULT, arg1: 0, arg2: 64,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
+        if r.value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: set_mempolicy(DEFAULT,NULL,64) -> {} (expected 0)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // set_mempolicy(BIND, NULL, maxnode=64) -> -EINVAL (NULL=empty,
+        // BIND needs non-empty), NOT -EFAULT.
+        let a = SyscallArgs {
+            arg0: MPOL_BIND, arg1: 0, arg2: 64,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
+        if r.value != i64::from(errno::EINVAL).wrapping_neg() {
+            serial_println!(
+                "[syscall/linux]   FAIL: set_mempolicy(BIND,NULL,64) -> {} (expected -EINVAL)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // set_mempolicy(PREFERRED | STATIC_NODES, empty) -> -EINVAL.
+        // Empty PREFERRED is only legal without STATIC/RELATIVE flags.
+        let a = SyscallArgs {
+            arg0: MPOL_PREFERRED | MPOL_F_STATIC_NODES, arg1: 0, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
+        if r.value != i64::from(errno::EINVAL).wrapping_neg() {
+            serial_println!(
+                "[syscall/linux]   FAIL: set_mempolicy(PREFERRED|STATIC,empty) -> {} (expected -EINVAL)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // set_mempolicy(LOCAL | STATIC_NODES, empty) -> -EINVAL.
+        // LOCAL must carry no STATIC/RELATIVE flag.
+        let a = SyscallArgs {
+            arg0: MPOL_LOCAL | MPOL_F_STATIC_NODES, arg1: 0, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
+        if r.value != i64::from(errno::EINVAL).wrapping_neg() {
+            serial_println!(
+                "[syscall/linux]   FAIL: set_mempolicy(LOCAL|STATIC) -> {} (expected -EINVAL)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // set_mempolicy(BIND, {0}, maxnode=40000) -> -EINVAL via the
+        // 32768-bit cap (40000-1 = 39999 > 32768).  The cap fires before
+        // any user read, so the tiny stack mask is never over-read.
+        let a = SyscallArgs {
+            arg0: MPOL_BIND,
+            arg1: (&raw const mask).addr() as u64,
+            arg2: 40000, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
+        if r.value != i64::from(errno::EINVAL).wrapping_neg() {
+            serial_println!(
+                "[syscall/linux]   FAIL: set_mempolicy(BIND,{{0}},40000) -> {} (expected -EINVAL cap)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // mbind(PREFERRED_MANY, empty) over a 4 KiB range -> -EINVAL.
+        let a = SyscallArgs {
+            arg0: 0x1000, arg1: 0x1000, arg2: MPOL_PREFERRED_MANY,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::MBIND, &a);
+        if r.value != i64::from(errno::EINVAL).wrapping_neg() {
+            serial_println!(
+                "[syscall/linux]   FAIL: mbind(PREFERRED_MANY,empty) -> {} (expected -EINVAL)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   get_nodes NULL-mask=empty + 32768-bit cap + mpol_new PREFERRED_MANY/STATIC/RELATIVE rules (batch 546): OK"
         );
     }
 

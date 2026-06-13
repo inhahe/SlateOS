@@ -558,6 +558,8 @@ const SYS_FILES: &[&str] = &[
     "kernel/pid_max",
     "kernel/random/uuid",
     "kernel/random/boot_id",
+    "kernel/random/poolsize",
+    "kernel/random/entropy_avail",
     "fs/nr_open",
 ];
 
@@ -11926,6 +11928,18 @@ fn gen_sys(rel: &str) -> KernelResult<Vec<u8>> {
             format!("{}\n", format_uuid_v4(bytes))
         }
         "kernel/random/boot_id" => format!("{}\n", boot_id()),
+        // CSPRNG entropy surface.  Our RNG is a ChaCha20 CSPRNG keyed with 256
+        // bits of seed material; modern Linux likewise tops its entropy pool at
+        // POOL_BITS = 256 (random.c since ~5.18), so 256 is the honest ceiling.
+        "kernel/random/poolsize" => String::from("256\n"),
+        // Reports the full 256 bits once the CSPRNG has been seeded, 0 before
+        // init.  Mirrors Linux semantics where entropy_avail rises to poolsize
+        // once the pool is fully credited; userspace reads this to decide
+        // whether the random source is ready.
+        "kernel/random/entropy_avail" => {
+            let avail = if crate::rng::is_initialized() { 256 } else { 0 };
+            format!("{avail}\n")
+        }
         _ => return Err(KernelError::NotFound),
     };
     Ok(text.into_bytes())
@@ -14524,6 +14538,32 @@ pub fn self_test() -> KernelResult<()> {
         if b1 != b2 || b1.len() != 37 {
             serial_println!("[procfs]   FAIL: boot_id unstable or wrong length");
             return Err(KernelError::InternalError);
+        }
+
+        // 6b. CSPRNG entropy surface: poolsize is the fixed 256-bit ceiling;
+        //     entropy_avail is 0 or 256 and never exceeds poolsize.  Also check
+        //     /sys/kernel/random lists all four files.
+        let rnd = fs.readdir("/sys/kernel/random")?;
+        for f in ["uuid", "boot_id", "poolsize", "entropy_avail"] {
+            if !rnd.iter().any(|e| e.name == f && e.entry_type == EntryType::File) {
+                serial_println!("[procfs]   FAIL: /sys/kernel/random missing file {}", f);
+                return Err(KernelError::InternalError);
+            }
+        }
+        let poolsize = core::str::from_utf8(&fs.read_file("/sys/kernel/random/poolsize")?)
+            .unwrap_or("").trim().parse::<u32>().ok();
+        if poolsize != Some(256) {
+            serial_println!("[procfs]   FAIL: random/poolsize = {:?}, want 256", poolsize);
+            return Err(KernelError::InternalError);
+        }
+        let entropy = core::str::from_utf8(&fs.read_file("/sys/kernel/random/entropy_avail")?)
+            .unwrap_or("").trim().parse::<u32>().ok();
+        match entropy {
+            Some(e) if e == 0 || e == 256 => {}
+            _ => {
+                serial_println!("[procfs]   FAIL: random/entropy_avail = {:?}, want 0 or 256", entropy);
+                return Err(KernelError::InternalError);
+            }
         }
 
         // 7. Directory/file kind enforcement.

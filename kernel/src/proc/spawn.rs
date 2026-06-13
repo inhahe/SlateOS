@@ -1826,6 +1826,123 @@ pub fn self_test_linux_dynamic_interp() -> KernelResult<()> {
     Ok(())
 }
 
+/// VFS-dependent integration self-test: end-to-end **file-backed `mmap(2)`**
+/// from ring 3 through the real Linux syscall path.
+///
+/// The kernel-context `syscall::linux::self_test_file_mmap` drives
+/// `linux_file_mmap` directly (bypassing `caller_pid()`); this test instead
+/// runs an actual Linux-ABI process that issues `open(2)` + `mmap(2)` itself,
+/// so it covers the parts that helper cannot:
+///   - `open(2)` installing a Linux fd in the spawned process's fd table,
+///   - `mmap(2)` dispatching to `linux_file_mmap` with a live `caller_pid()`,
+///   - the mapped frames being readable from **ring 3**,
+///   - the file's bytes landing in the **second** 16 KiB frame (multi-frame
+///     file-backed mapping verified through the real path).
+///
+/// We seed a two-frame file whose byte at `READ_OFF` (start of the second
+/// frame) is a known sentinel, spawn a program that maps the file and
+/// `exit`s with that byte, and assert the zombie's exit code is the sentinel.
+///
+/// Skips gracefully (`Ok`) if the VFS write fails.  Must run **after**
+/// filesystem initialization (see `main.rs`).
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
+pub fn self_test_linux_file_mmap() -> KernelResult<()> {
+    use alloc::vec;
+
+    const DATA_PATH: &str = "/slateos-test-mmap.dat";
+    const DATA_PATH_NUL: &[u8] = b"/slateos-test-mmap.dat\0";
+    const FRAME: usize = 16 * 1024;
+    const READ_OFF: usize = FRAME; // first byte of the second frame
+    const SENTINEL: u8 = 0x5B; // 91 — distinct from the dynamic-interp test's 42
+    const FILE_LEN: usize = FRAME + 256; // spans into the second frame
+
+    serial_println!("[spawn] Running Linux file-backed mmap (ring 3) integration test...");
+
+    // Step 1: stage the data file.  Fill with a non-zero pattern so a stray
+    // zero byte can't masquerade as correct content, then stamp the sentinel
+    // at the offset the program will read.
+    let mut data = vec![0u8; FILE_LEN];
+    for (i, b) in data.iter_mut().enumerate() {
+        // Pattern is always non-zero and != SENTINEL except where we stamp it.
+        *b = (((i as u32).wrapping_mul(37).wrapping_add(3) & 0x7f) as u8) | 0x80;
+    }
+    data[READ_OFF] = SENTINEL;
+    if let Err(e) = crate::fs::Vfs::write_file(DATA_PATH, &data) {
+        serial_println!("[spawn]   Linux file mmap (ring 3): SKIP (VFS write failed: {:?})", e);
+        return Ok(());
+    }
+
+    // Step 2: spawn the mmap test program.  It must hold a File capability:
+    // open(2) → handlers::sys_fs_open requires require_cap_type(File, READ).
+    let exe_elf = elf::build_linux_mmap_test_elf(DATA_PATH_NUL, FILE_LEN as u32, READ_OFF as u32);
+    let argv: &[&[u8]] = &[b"mmapprog"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let caps = [(
+        ResourceType::File,
+        1u64,
+        Rights::READ | Rights::WRITE,
+    )];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-mmap",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = crate::fs::Vfs::remove(DATA_PATH);
+            serial_println!("[spawn]   FAIL: mmap-test spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Let the thread run: open → mmap → read mapped byte → exit(byte).
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(DATA_PATH);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: file mmap (ring 3) — expected Zombie, got {:?} \
+             (a non-zombie state usually means mmap returned an error and the \
+             process faulted dereferencing it)",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(i32::from(SENTINEL)) {
+        serial_println!(
+            "[spawn]   FAIL: file mmap (ring 3) — expected exit {} (mapped \
+             second-frame byte), got {:?}",
+            SENTINEL, exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   Linux file-backed mmap (ring 3: open+mmap, second-frame byte == {}): OK",
+        SENTINEL
+    );
+    Ok(())
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

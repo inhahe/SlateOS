@@ -1197,6 +1197,149 @@ pub fn build_linux_argc_exit_test_elf() -> alloc::vec::Vec<u8> {
     buf
 }
 
+/// Build a **Linux-ABI** test ELF that exercises the file-backed `mmap(2)`
+/// path end-to-end from ring 3.
+///
+/// This is the user-mode counterpart to the kernel-context
+/// `self_test_file_mmap` (which drives `linux_file_mmap` directly): it
+/// proves the *whole* real syscall path works for a Linux-ABI process —
+/// `open(2)` installing a Linux fd, `mmap(2)` routing to `linux_file_mmap`
+/// with a valid `caller_pid()`, the mapped pages being readable from ring 3,
+/// and the file's bytes being delivered into the **second** 16 KiB frame
+/// (so multi-frame file-backed mapping is verified through the real path,
+/// not just the kernel-context helper).
+///
+/// The code performs:
+///
+/// ```text
+///   lea  rdi, [rip + path]   ; rdi = absolute path string  (48 8D 3D ..)
+///   xor  esi, esi            ; flags = O_RDONLY (0)         (31 F6)
+///   xor  edx, edx            ; mode = 0                     (31 D2)
+///   mov  eax, 2              ; Linux SYS_open               (B8 02 ..)
+///   syscall                  ; rax = fd
+///   mov  r8, rax             ; r8 = fd (mmap arg5)          (49 89 C0)
+///   xor  edi, edi            ; addr = NULL                  (31 FF)
+///   mov  esi, <len>          ; length                       (BE ..)
+///   mov  edx, 1              ; prot = PROT_READ             (BA 01 ..)
+///   mov  r10d, 2             ; flags = MAP_PRIVATE          (41 BA 02 ..)
+///   xor  r9d, r9d            ; offset = 0                   (45 31 C9)
+///   mov  eax, 9              ; Linux SYS_mmap               (B8 09 ..)
+///   syscall                  ; rax = mapped base
+///   movzx edi, byte [rax + <read_off>] ; rdi = mapped byte  (0F B6 B8 ..)
+///   mov  eax, 60             ; Linux SYS_exit               (B8 3C ..)
+///   syscall                  ; exit(byte)
+///   int3                     ; unreachable trap
+/// ```
+///
+/// `read_off` is chosen by the caller to land in the second frame, so the
+/// resulting zombie's exit code equals the file byte at that offset — a
+/// value the test seeds to a known sentinel.  If `mmap` fails, `rax` holds a
+/// negative errno and the `movzx` dereferences a bad address (the process
+/// faults rather than exiting with the sentinel), so the test still detects
+/// the failure.
+///
+/// `path_nul` must be NUL-terminated.  `read_off` must be `<= u32::MAX`.
+#[must_use]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap
+)]
+pub fn build_linux_mmap_test_elf(path_nul: &[u8], mmap_len: u32, read_off: u32) -> alloc::vec::Vec<u8> {
+    use alloc::vec;
+
+    let phdr_offset: u64 = 64;
+    let code_offset: u64 = 120; // 64 (ehdr) + 56 (one phdr)
+    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+
+    // Machine code, assembled below; the path string follows immediately.
+    let code: [u8; 64] = [
+        // lea rdi, [rip + disp32]  (disp filled in below at [3..7])
+        0x48, 0x8D, 0x3D, 0x00, 0x00, 0x00, 0x00, // 0
+        0x31, 0xF6, // xor esi, esi              (O_RDONLY)            7
+        0x31, 0xD2, // xor edx, edx              (mode 0)             9
+        0xB8, 0x02, 0x00, 0x00, 0x00, // mov eax, 2 (SYS_open)       11
+        0x0F, 0x05, // syscall                                       16
+        0x49, 0x89, 0xC0, // mov r8, rax         (fd -> arg5)        18
+        0x31, 0xFF, // xor edi, edi              (addr = NULL)       21
+        0xBE, 0x00, 0x00, 0x00, 0x00, // mov esi, imm32 (length)     23 (imm @24)
+        0xBA, 0x01, 0x00, 0x00, 0x00, // mov edx, 1 (PROT_READ)      28
+        0x41, 0xBA, 0x02, 0x00, 0x00, 0x00, // mov r10d, 2 (PRIVATE) 33
+        0x45, 0x31, 0xC9, // xor r9d, r9d        (offset 0)          39
+        0xB8, 0x09, 0x00, 0x00, 0x00, // mov eax, 9 (SYS_mmap)       42
+        0x0F, 0x05, // syscall                                       47
+        0x0F, 0xB6, 0xB8, 0x00, 0x00, 0x00, 0x00, // movzx edi,[rax+disp32] 49 (disp @52)
+        0xB8, 0x3C, 0x00, 0x00, 0x00, // mov eax, 60 (SYS_exit)      56
+        0x0F, 0x05, // syscall                                       61
+        0xCC, // int3                                                63
+    ];
+    let code_len = code.len(); // 64
+
+    let path_offset_in_seg = code_len; // path string starts after the code
+    let seg_data_len = code_len + path_nul.len();
+    let file_size = code_offset as usize + seg_data_len;
+    let mut buf = vec![0u8; file_size];
+
+    // --- ELF header ---
+    buf[0] = 0x7F;
+    buf[1] = b'E';
+    buf[2] = b'L';
+    buf[3] = b'F';
+    buf[EI_CLASS] = ELFCLASS64;
+    buf[EI_DATA] = ELFDATA2LSB;
+    buf[EI_VERSION] = EV_CURRENT;
+    buf[EI_OSABI] = ELFOSABI_GNU; // tag Linux/GNU so detect_linux_abi() is true
+
+    write_u16(&mut buf, 16, ET_EXEC);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr); // e_entry
+    write_u64(&mut buf, 32, phdr_offset); // e_phoff
+    write_u64(&mut buf, 40, 0); // e_shoff
+    write_u32(&mut buf, 48, 0); // e_flags
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, 1); // e_phnum
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0);
+    write_u16(&mut buf, 62, 0);
+
+    // --- Program header (PT_LOAD: R+X covering code + path) ---
+    let ph = phdr_offset as usize;
+    write_u32(&mut buf, ph, PT_LOAD);
+    write_u32(&mut buf, ph + 4, PF_R | PF_X);
+    write_u64(&mut buf, ph + 8, code_offset);
+    write_u64(&mut buf, ph + 16, load_vaddr);
+    write_u64(&mut buf, ph + 24, 0);
+    write_u64(&mut buf, ph + 32, seg_data_len as u64);
+    write_u64(&mut buf, ph + 40, seg_data_len as u64);
+    write_u64(&mut buf, ph + 48, 0x1000);
+
+    // --- Copy the code, then patch the two operands ---
+    let cs = code_offset as usize;
+    buf[cs..cs + code_len].copy_from_slice(&code);
+
+    // lea rdi, [rip + disp32]: instruction at seg-offset 0, length 7, so the
+    // RIP used by the CPU is (load_vaddr + 7).  The path lives at
+    // (load_vaddr + path_offset_in_seg), so disp = path_offset_in_seg - 7.
+    let lea_disp = (path_offset_in_seg as i64) - 7;
+    write_u32(&mut buf, cs + 3, lea_disp as u32);
+
+    // mov esi, imm32 (mmap length) — imm at seg-offset 24.
+    write_u32(&mut buf, cs + 24, mmap_len);
+
+    // movzx edi, byte [rax + disp32] (read offset) — disp at seg-offset 52.
+    write_u32(&mut buf, cs + 52, read_off);
+
+    // --- Path string immediately after the code ---
+    let path_start = cs + path_offset_in_seg;
+    buf[path_start..path_start + path_nul.len()].copy_from_slice(path_nul);
+
+    buf
+}
+
 /// Build a "Hello from userspace!" ELF that calls SYS_CONSOLE_WRITE
 /// then SYS_EXIT(0).
 ///

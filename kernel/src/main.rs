@@ -1207,6 +1207,13 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: Linux file-backed mmap self-test failed: {:?}", e);
     }
 
+    // Ring-3 end-to-end counterpart of the above: a real Linux-ABI process
+    // issues open(2)+mmap(2) itself and exits with a mapped second-frame byte,
+    // proving the whole syscall path (fd install, caller_pid, ring-3 read).
+    if let Err(e) = proc::spawn::self_test_linux_file_mmap() {
+        serial_println!("WARNING: Linux file-backed mmap (ring 3) self-test failed: {:?}", e);
+    }
+
     boot_timing::mark(boot_timing::Milestone::Filesystem);
 
     // ProcFs self-test — constructs its own `ProcFs::new()` and reads live

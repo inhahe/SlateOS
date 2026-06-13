@@ -480,11 +480,28 @@ pub fn self_test() {
 
     TEST_FIRED.store(0, Ordering::Release);
     let before_scheduled = scheduled_count();
-    let _handle = schedule_ns(0, test_cb, 0xDEAD);
-
-    // The timer has a 0 ns delay, so it should fire on the next process_expired() call.
     let fired_before = fired_count();
-    let n = process_expired();
+
+    // Schedule the 0-delay timer and drain it with a single manual
+    // process_expired() call, both under without_interrupts().
+    //
+    // This is a test-only correctness fix for an intermittent boot
+    // panic: the self-test runs with interrupts ENABLED, and the
+    // periodic APIC timer ISR also calls process_expired().  If an APIC
+    // tick landed in the window between schedule_ns() and the manual
+    // process_expired() below, the ISR would fire our 0-delay timer
+    // first, so the manual call returned 0 and the `n >= 1` assertion
+    // panicked ("Timer with 0 delay didn't fire on process_expired()").
+    // The production code is correct — this only made the *test* racy.
+    // Closing the interrupt window makes the manual drain deterministic.
+    // (schedule_ns/process_expired disable interrupts internally too;
+    // nesting without_interrupts is a safe no-op for the inner calls.)
+    let n = crate::cpu::without_interrupts(|| {
+        let _handle = schedule_ns(0, test_cb, 0xDEAD);
+        // The timer has a 0 ns delay, so it expires immediately and
+        // fires on this process_expired() call.
+        process_expired()
+    });
     assert!(n >= 1, "Timer with 0 delay didn't fire on process_expired()");
     assert_eq!(
         TEST_FIRED.load(Ordering::Acquire),

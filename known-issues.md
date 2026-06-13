@@ -82,6 +82,27 @@ deny — are now fixed; see F8 and F9.)_
 
 ## Fixed Bugs
 
+### F11. hrtimer self-test Test 2 raced the APIC timer ISR → intermittent boot panic — FIXED 2026-06-12
+
+**Where:** `kernel/src/hrtimer.rs` self-test Test 2 (~lines 475-496).
+
+**Symptom:** Intermittent boot panic at `hrtimer.rs:488`
+`"Timer with 0 delay didn't fire on process_expired()"`. The panic blocked
+the boot gate for any batch whose validation run happened to lose the race,
+even though the code under test was correct.
+
+**Root cause:** The self-test runs with interrupts ENABLED. It scheduled a
+0-delay timer and then called `process_expired()` manually, expecting to
+drain it. But the periodic APIC timer ISR also calls `process_expired()`;
+when the ISR fired in the window between `schedule_ns` and the manual
+`process_expired()`, the ISR drained the 0-delay timer first, so the manual
+call returned `n == 0` and the `assert!(n >= 1, ...)` panicked.
+
+**Fix:** Wrap the `schedule_ns(0, ...)` + `process_expired()` pair in
+`crate::cpu::without_interrupts(|| { ... })` so the manual drain is
+deterministic — the ISR cannot steal the timer in between. Test-only
+correctness fix; the hrtimer subsystem itself was already correct.
+
 ### F10. Boot-stack overflow from monolithic translation self-test silently corrupted `.bss` (FPU_STRATEGY) → futex-test `#UD` — FIXED 2026-06-12
 
 **Where:** `kernel/src/main.rs` boot stack (`KERNEL_BOOT_STACK`, was 512 KiB)

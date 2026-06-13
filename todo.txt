@@ -1,4 +1,12 @@
 
+## DONE (2026-06-12): hrtimer self-test Test 2 — close interrupt-window race vs APIC ISR (known-issues F11)
+## Test 2 scheduled a 0-delay timer then called process_expired() manually with interrupts ENABLED.
+## The periodic APIC timer ISR also calls process_expired(); if it fired in the window between
+## schedule_ns and the manual drain, the ISR drained the 0-delay timer first -> manual call returned
+## n==0 -> assert!(n >= 1) panicked, intermittently blocking the boot gate for ANY batch.
+## Fix: wrap schedule_ns(0,..) + process_expired() in crate::cpu::without_interrupts(|| {..}) so the
+## manual drain is deterministic. Test-only fix; hrtimer subsystem was already correct.
+
 ## DONE (2026-06-12): ABI batch 549 — move_pages: per-page bad-node status = -ENODEV (was -EINVAL), matching do_pages_move (closes TD6)
 ## Linux v6.6 mm/migrate.c do_pages_move per-page node validation (verified verbatim against raw.githubusercontent.com torvalds/linux v6.6):
 ##   err = -ENODEV;

@@ -59,3 +59,46 @@ standalone per-tool crates are canonical; see `design-decisions.md` §8.)
   `sys_set_mempolicy_home_node`, `sys_mbind`, `sys_set_mempolicy`,
   `sys_get_mempolicy` (the empty-mask/default-policy answers).
 - **Status** — OPEN
+
+---
+
+### Q2. Should `/proc/sys/vm/overcommit_memory` (and the `vm/` tree) be exposed, and at what value?
+
+- **Question** — The new `/proc/sys` sysctl tree (procfs.rs, task 5092)
+  deliberately omits the `vm/` subtree. The first candidate is
+  `vm/overcommit_memory`. Should we expose it, and if so report which value?
+- **Background** — `design.txt`/CLAUDE.md mandate "Committed memory by default,
+  lazy allocation opt-in. No silent overcommit." That policy maps cleanly onto
+  Linux's `vm/overcommit_memory = 2` (strict accounting: total commit may not
+  exceed swap + RAM·ratio), **not** the Linux default `0` (heuristic
+  overcommit). So the *honest* value reflecting our design is `2`. The hesitation
+  is purely about second-order app behavior: some Linux apps read this file and
+  change strategy (e.g. Go/JVM/Electron/WINE allocate large sparse mappings
+  expecting lazy backing; on seeing strict accounting they may shrink arenas or
+  refuse to start). Our `/proc/sys` is read-only, so an app that tries to *write*
+  it (to request overcommit) gets a write error — which Linux apps generally
+  tolerate (the write needs CAP_SYS_ADMIN anyway).
+- **Options**
+  - **(A) Expose `vm/overcommit_memory = 2`** — pro: honest reflection of the
+    "no silent overcommit" design; apps that respect it allocate within real
+    limits. con: a minority of apps tuned for the Linux default-`0` world may
+    behave conservatively or warn; read-only means they can't flip it.
+  - **(B) Expose `vm/overcommit_memory = 0`** (advertise heuristic overcommit) —
+    pro: matches what most Linux desktop apps assume, maximizing drop-in
+    compatibility. con: a *lie* — we don't actually overcommit, so an app that
+    trusts `0` and over-allocates would hit commit failures our design intends
+    to surface up front; contradicts the design and the "never fabricate" rule.
+  - **(C) Keep `vm/` omitted** *(current)* — pro: an absent file makes glibc/apps
+    fall back to their built-in default assumptions rather than acting on a
+    value we're unsure about; no fabrication. con: some readers treat a missing
+    sysctl as an error or log noise; we forgo signalling our real policy.
+- **Claude's recommendation** — Lean **(A)** (`= 2`) on the merits — it's the
+  honest, design-faithful value and read-only exposure is harmless — but this is
+  a user-visible compatibility/behavior tradeoff, so deferring to the operator
+  rather than guessing. Staying on **(C)** (omitted) until decided. If (A) is
+  chosen, `vm/overcommit_ratio` (default 50) and `vm/overcommit_kbytes` (0)
+  would naturally follow for completeness.
+- **Where it bites** — `kernel/src/fs/procfs.rs`: `SYS_FILES`/`SYS_DIRS`
+  (add `"vm"` dir + `"vm/overcommit_memory"`), `gen_sys` (the value), and the
+  procfs self-test.
+- **Status** — OPEN

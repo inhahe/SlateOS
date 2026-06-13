@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ekiga-cli — SlateOS Ekiga VoIP softphone
+//! ekiga-cli — Slate OS Ekiga VoIP softphone
 //!
 //! Single personality: `ekiga`
 

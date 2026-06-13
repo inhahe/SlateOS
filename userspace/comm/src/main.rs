@@ -1,4 +1,4 @@
-//! SlateOS `comm` Utility -- Compare Two Sorted Files Line by Line
+//! Slate OS `comm` Utility -- Compare Two Sorted Files Line by Line
 //!
 //! Reads two sorted files and produces three-column output:
 //! - Column 1: lines unique to file1

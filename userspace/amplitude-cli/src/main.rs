@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! amplitude-cli — SlateOS Amplitude (product analytics, the category leader)
+//! amplitude-cli — Slate OS Amplitude (product analytics, the category leader)
 //!
 //! Single personality: `amplitude`
 

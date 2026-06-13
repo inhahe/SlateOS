@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! twinmotion-cli — SlateOS Twinmotion (Epic/Unreal-powered ArchViz)
+//! twinmotion-cli — Slate OS Twinmotion (Epic/Unreal-powered ArchViz)
 //!
 //! Single personality: `twinmotion`
 

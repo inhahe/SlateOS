@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! qt6ct-cli — SlateOS qt6ct Qt6 configuration tool
+//! qt6ct-cli — Slate OS qt6ct Qt6 configuration tool
 //!
 //! Single personality: `qt6ct`
 

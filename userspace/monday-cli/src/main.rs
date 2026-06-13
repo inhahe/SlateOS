@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! monday-cli — SlateOS monday.com CLI
+//! monday-cli — Slate OS monday.com CLI
 //!
 //! Single personality: `monday`
 

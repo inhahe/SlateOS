@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sqlserver-cli — SlateOS Microsoft SQL Server (sqlcmd + SSMS)
+//! sqlserver-cli — Slate OS Microsoft SQL Server (sqlcmd + SSMS)
 //!
 //! Single personality: `sqlserver`
 

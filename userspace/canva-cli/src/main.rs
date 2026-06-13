@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! canva-cli — SlateOS Canva (web-based design platform, AU-founded, now owns Affinity)
+//! canva-cli — Slate OS Canva (web-based design platform, AU-founded, now owns Affinity)
 //!
 //! Single personality: `canva`
 

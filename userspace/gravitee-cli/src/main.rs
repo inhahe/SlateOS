@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! gravitee-cli — SlateOS Gravitee.io open-source API platform personality CLI.
+//! gravitee-cli — Slate OS Gravitee.io open-source API platform personality CLI.
 
 use std::env;
 use std::process;

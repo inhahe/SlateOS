@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! baton-cli — SlateOS Baton identity connector
+//! baton-cli — Slate OS Baton identity connector
 //!
 //! Single personality: `baton`
 

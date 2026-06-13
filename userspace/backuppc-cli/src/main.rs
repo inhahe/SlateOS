@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! backuppc-cli — SlateOS BackupPC enterprise backup
+//! backuppc-cli — Slate OS BackupPC enterprise backup
 //!
 //! Multi-personality: `backuppc`, `backuppc-nightly`, `backuppc-servermesg`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! burp-cli — SlateOS BURP backup and restore program
+//! burp-cli — Slate OS BURP backup and restore program
 //!
 //! Multi-personality: `burp`, `burp-server`
 

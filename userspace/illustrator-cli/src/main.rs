@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! illustrator-cli — SlateOS Adobe Illustrator vector graphics
+//! illustrator-cli — Slate OS Adobe Illustrator vector graphics
 //!
 //! Single personality: `illustrator`
 

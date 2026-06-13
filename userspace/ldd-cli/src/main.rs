@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ldd-cli — SlateOS shared library dependency lister
+//! ldd-cli — Slate OS shared library dependency lister
 //!
 //! Multi-personality: `ldd`, `pldd`, `sprof`
 

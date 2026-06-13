@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mate-notification-cli — SlateOS MATE notification daemon
+//! mate-notification-cli — Slate OS MATE notification daemon
 //!
 //! Multi-personality: `mate-notification-daemon`, `mate-notification-properties`
 

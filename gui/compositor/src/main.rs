@@ -1,4 +1,4 @@
-//! SlateOS Compositor — Display Server
+//! Slate OS Compositor — Display Server
 //!
 //! The central display server for SlateOS. Manages windows, composites their
 //! contents onto a framebuffer, and routes input events to the appropriate
@@ -26,7 +26,7 @@
 //! - Window decorations drawn server-side (consistent look, secure close button).
 //! - Input routed by Z-order hit testing; keyboard follows focus, mouse follows cursor.
 //! - VSync-aware frame scheduling: target refresh rate, skip frames if behind.
-//! - Stub IPC layer ready for real SlateOS channel-based IPC when available.
+//! - Stub IPC layer ready for real Slate OS channel-based IPC when available.
 
 // Drawing primitives (fill_rect, stroke_rect, draw_text, draw_line) and the
 // renderer execute() pump take 8-9 args (framebuffer + geometry + color +
@@ -2936,7 +2936,7 @@ fn main() {
 
     // Main compositor event loop.
     // In production, this would:
-    // 1. Poll for IPC messages (client requests) via SlateOS channels
+    // 1. Poll for IPC messages (client requests) via Slate OS channels
     // 2. Poll for input events from the input driver
     // 3. Compose frames at the display refresh rate
     // 4. Send event notifications back to clients

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dasher-cli — SlateOS Dasher predictive text input
+//! dasher-cli — Slate OS Dasher predictive text input
 //!
 //! Single personality: `dasher`
 

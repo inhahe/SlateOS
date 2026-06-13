@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vals-cli — SlateOS vals secret reference resolver
+//! vals-cli — Slate OS vals secret reference resolver
 //!
 //! Single personality: `vals`
 

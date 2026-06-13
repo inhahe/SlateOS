@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lf — SlateOS terminal file manager (list files)
+//! lf — Slate OS terminal file manager (list files)
 //!
 //! Single personality: `lf`
 

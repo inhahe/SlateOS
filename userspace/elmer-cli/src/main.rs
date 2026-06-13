@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! elmer-cli — SlateOS Elmer FEM solver suite
+//! elmer-cli — Slate OS Elmer FEM solver suite
 //!
 //! Multi-personality: `ElmerSolver`, `ElmerGrid`, `ElmerGUI`
 

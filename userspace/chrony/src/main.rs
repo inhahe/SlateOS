@@ -6,7 +6,7 @@
 // implementation can drop in without reshaping the enum.
 #![allow(dead_code)]
 
-//! chrony — SlateOS NTP implementation
+//! chrony — Slate OS NTP implementation
 //!
 //! Multi-personality binary for time synchronization.
 //! Detected via argv[0]:

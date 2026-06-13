@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gradle-cli — SlateOS Gradle build system
+//! gradle-cli — Slate OS Gradle build system
 //!
 //! Multi-personality: `gradle`, `gradlew`
 

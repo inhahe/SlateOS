@@ -1,4 +1,4 @@
-//! SlateOS Hostname Utility — Display and Set the System Hostname
+//! Slate OS Hostname Utility — Display and Set the System Hostname
 //!
 //! Reads or writes the system hostname via `/proc/sys/kernel/hostname` and
 //! `/etc/hostname`. Supports FQDN resolution via `/etc/resolv.conf`, IP

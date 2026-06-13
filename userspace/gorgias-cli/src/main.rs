@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gorgias-cli — SlateOS Gorgias (e-commerce-native helpdesk built for Shopify)
+//! gorgias-cli — Slate OS Gorgias (e-commerce-native helpdesk built for Shopify)
 //!
 //! Single personality: `gorgias`
 

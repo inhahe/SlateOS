@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! openscad-cli — SlateOS OpenSCAD 3D CAD CLI
+//! openscad-cli — Slate OS OpenSCAD 3D CAD CLI
 //!
 //! Single personality: `openscad`
 

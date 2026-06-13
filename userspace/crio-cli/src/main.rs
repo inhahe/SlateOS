@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! crio-cli — SlateOS CRI-O container runtime
+//! crio-cli — Slate OS CRI-O container runtime
 //!
 //! Multi-personality: `crio`, `crictl`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nsenter-cli — SlateOS nsenter/lsns CLI
+//! nsenter-cli — Slate OS nsenter/lsns CLI
 //!
 //! Multi-personality: `nsenter`, `lsns`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! polaris-cli — SlateOS Polaris Kubernetes best practices
+//! polaris-cli — Slate OS Polaris Kubernetes best practices
 //!
 //! Single personality: `polaris`
 

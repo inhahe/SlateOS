@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! knot-cli — SlateOS Knot DNS server
+//! knot-cli — Slate OS Knot DNS server
 //!
 //! Multi-personality: `knotd`, `knotc`, `kdig`, `knsupdate`, `kzonecheck`
 

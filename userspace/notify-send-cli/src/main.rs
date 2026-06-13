@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! notify-send-cli — SlateOS notify-send desktop notification CLI
+//! notify-send-cli — Slate OS notify-send desktop notification CLI
 //!
 //! Single personality: `notify-send`
 

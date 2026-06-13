@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! azote-cli — SlateOS Azote wallpaper manager GUI
+//! azote-cli — Slate OS Azote wallpaper manager GUI
 //!
 //! Single personality: `azote`
 

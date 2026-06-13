@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nuxt-cli — SlateOS Nuxt.js CLI
+//! nuxt-cli — Slate OS Nuxt.js CLI
 //!
 //! Multi-personality: `nuxi`, `nuxt`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! duplicity-cli — SlateOS Duplicity CLI
+//! duplicity-cli — Slate OS Duplicity CLI
 //!
 //! Single personality: `duplicity`
 

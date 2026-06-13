@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! travisci-cli — SlateOS Travis CI (the OG hosted CI for open source)
+//! travisci-cli — Slate OS Travis CI (the OG hosted CI for open source)
 //!
 //! Single personality: `travisci`
 

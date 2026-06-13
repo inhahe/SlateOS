@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mapshaper-cli — SlateOS Mapshaper geometry editor
+//! mapshaper-cli — Slate OS Mapshaper geometry editor
 //!
 //! Single personality: `mapshaper`
 

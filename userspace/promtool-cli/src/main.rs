@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! promtool-cli — SlateOS Prometheus tooling
+//! promtool-cli — Slate OS Prometheus tooling
 //!
 //! Multi-personality: `promtool`, `prometheus`
 

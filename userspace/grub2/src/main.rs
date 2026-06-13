@@ -1,4 +1,4 @@
-//! SlateOS GRUB bootloader management utility.
+//! Slate OS GRUB bootloader management utility.
 //!
 //! Multi-personality binary providing:
 //! - **grub-install** (default) — install GRUB bootloader to a device

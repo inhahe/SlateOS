@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ada-cli — SlateOS GNAT Ada compiler
+//! ada-cli — Slate OS GNAT Ada compiler
 //!
 //! Multi-personality: `gnat`, `gnatmake`, `gprbuild`, `gnatls`
 

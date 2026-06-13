@@ -12,7 +12,7 @@
 #![allow(clippy::manual_range_contains)]
 #![allow(clippy::match_same_arms)]
 
-//! SlateOS Word Search — find hidden words in a grid of letters.
+//! Slate OS Word Search — find hidden words in a grid of letters.
 //!
 //! Features multiple difficulty levels (Easy 10x10, Medium 15x15, Hard 20x20),
 //! words placed in all 8 directions, five word categories (Animals, Colors,

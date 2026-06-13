@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! coinbase-cli — SlateOS Coinbase CLI
+//! coinbase-cli — Slate OS Coinbase CLI
 //!
 //! Single personality: `coinbase`
 

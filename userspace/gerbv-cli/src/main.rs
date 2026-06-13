@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gerbv-cli — SlateOS Gerber file viewer
+//! gerbv-cli — Slate OS Gerber file viewer
 //!
 //! Single personality: `gerbv`
 

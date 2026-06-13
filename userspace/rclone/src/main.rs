@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rclone — SlateOS cloud storage sync tool
+//! rclone — Slate OS cloud storage sync tool
 //!
 //! Single personality: `rclone`
 

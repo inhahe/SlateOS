@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! starship — SlateOS cross-shell prompt customization
+//! starship — Slate OS cross-shell prompt customization
 //!
 //! Single personality: `starship`
 

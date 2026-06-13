@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! affinityphoto-cli — SlateOS Serif Affinity Photo 2 (Canva-owned)
+//! affinityphoto-cli — Slate OS Serif Affinity Photo 2 (Canva-owned)
 //!
 //! Single personality: `affinityphoto`
 

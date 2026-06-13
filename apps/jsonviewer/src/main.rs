@@ -1,4 +1,4 @@
-//! `SlateOS` JSON Viewer & Editor
+//! `Slate OS` JSON Viewer & Editor
 //!
 //! A full-featured JSON data viewer and editor with:
 //! - Custom JSON parser supporting full JSON spec (RFC 8259)

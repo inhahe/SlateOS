@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! logicpro-cli — SlateOS Logic Pro (Apple pro DAW)
+//! logicpro-cli — Slate OS Logic Pro (Apple pro DAW)
 //!
 //! Single personality: `logicpro`
 

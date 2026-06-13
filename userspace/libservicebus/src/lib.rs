@@ -1,4 +1,4 @@
-//! SlateOS Service Bus Client Library (`libservicebus`)
+//! Slate OS Service Bus Client Library (`libservicebus`)
 //!
 //! A high-level client library for connecting to system services via the
 //! kernel's named service registry and communicating over IPC channels.

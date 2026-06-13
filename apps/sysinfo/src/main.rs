@@ -1,4 +1,4 @@
-//! SlateOS System Information Explorer
+//! Slate OS System Information Explorer
 //!
 //! Graphical application displaying hardware and OS information in a
 //! tree-navigable layout similar to Windows msinfo32. Features:
@@ -11,7 +11,7 @@
 //! - Export all information to text
 //!
 //! Uses the guitk library for UI rendering. Hardware data is gathered
-//! through SlateOS syscalls; stubbed with representative data for initial
+//! through Slate OS syscalls; stubbed with representative data for initial
 //! development.
 
 pub mod hwquery;

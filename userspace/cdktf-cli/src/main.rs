@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cdktf-cli — SlateOS CDK for Terraform CLI
+//! cdktf-cli — Slate OS CDK for Terraform CLI
 //!
 //! Multi-personality: `cdktf`
 

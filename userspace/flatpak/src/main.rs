@@ -1,4 +1,4 @@
-//! SlateOS Flatpak — sandboxed application management
+//! Slate OS Flatpak — sandboxed application management
 //!
 //! A multi-personality binary providing sandboxed application packaging,
 //! installation, and management for SlateOS. Implements the core flatpak

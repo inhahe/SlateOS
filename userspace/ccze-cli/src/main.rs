@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ccze-cli — SlateOS ccze log colorizer
+//! ccze-cli — Slate OS ccze log colorizer
 //!
 //! Single personality: `ccze`
 

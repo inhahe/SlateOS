@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xournalpp-cli — SlateOS Xournal++ handwriting note app
+//! xournalpp-cli — Slate OS Xournal++ handwriting note app
 //!
 //! Single personality: `xournalpp`
 

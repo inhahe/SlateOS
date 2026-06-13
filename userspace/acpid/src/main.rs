@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! acpid — SlateOS ACPI event daemon
+//! acpid — Slate OS ACPI event daemon
 //!
 //! Multi-personality binary for handling ACPI events (power button, lid,
 //! AC adapter, thermal, sleep/wake).

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ardour-cli — SlateOS Ardour digital audio workstation
+//! ardour-cli — Slate OS Ardour digital audio workstation
 //!
 //! Multi-personality: `ardour`, `ardour-export`
 

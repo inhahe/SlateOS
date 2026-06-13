@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pelican-cli — SlateOS Pelican static site generator
+//! pelican-cli — Slate OS Pelican static site generator
 //!
 //! Multi-personality: `pelican`, `pelican-quickstart`
 

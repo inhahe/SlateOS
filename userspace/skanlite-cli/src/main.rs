@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! skanlite-cli — SlateOS Skanlite KDE scanner application
+//! skanlite-cli — Slate OS Skanlite KDE scanner application
 //!
 //! Single personality: `skanlite`
 

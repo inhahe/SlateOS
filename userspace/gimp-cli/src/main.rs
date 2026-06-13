@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gimp-cli — SlateOS GIMP command-line interface
+//! gimp-cli — Slate OS GIMP command-line interface
 //!
 //! Single personality: `gimp`
 

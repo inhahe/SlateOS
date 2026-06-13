@@ -1,4 +1,4 @@
-//! SlateOS DNS resolution service and management utility.
+//! Slate OS DNS resolution service and management utility.
 //!
 //! Multi-personality binary providing:
 //! - **resolvectl** (default) -- DNS resolver management CLI

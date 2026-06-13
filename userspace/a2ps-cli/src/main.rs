@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! a2ps-cli — SlateOS a2ps/enscript text-to-PostScript CLI
+//! a2ps-cli — Slate OS a2ps/enscript text-to-PostScript CLI
 //!
 //! Single personality: `a2ps`
 

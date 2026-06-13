@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! syslog-ng-cli — SlateOS syslog-ng log management
+//! syslog-ng-cli — Slate OS syslog-ng log management
 //!
 //! Multi-personality: `syslog-ng`, `syslog-ng-ctl`
 

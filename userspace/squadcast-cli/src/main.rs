@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! squadcast-cli — SlateOS SquadCast remote podcast recording
+//! squadcast-cli — Slate OS SquadCast remote podcast recording
 //!
 //! Single personality: `squadcast`
 

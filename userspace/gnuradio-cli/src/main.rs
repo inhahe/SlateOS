@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gnuradio-cli — SlateOS GNU Radio SDR framework
+//! gnuradio-cli — Slate OS GNU Radio SDR framework
 //!
 //! Multi-personality: `gnuradio-companion`, `grcc`, `gr_modtool`
 

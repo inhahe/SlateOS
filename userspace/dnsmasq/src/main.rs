@@ -1,4 +1,4 @@
-//! SlateOS Lightweight DNS/DHCP/TFTP Server (dnsmasq)
+//! Slate OS Lightweight DNS/DHCP/TFTP Server (dnsmasq)
 //!
 //! Multi-personality binary providing:
 //! - **dnsmasq** (default) -- DNS forwarder + DHCP server + TFTP server

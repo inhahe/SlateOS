@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! podman-cli — SlateOS Podman rootless container CLI
+//! podman-cli — Slate OS Podman rootless container CLI
 //!
 //! Single personality: `podman`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mailcow-cli — SlateOS Mailcow mail server suite
+//! mailcow-cli — Slate OS Mailcow mail server suite
 //!
 //! Single personality: `mailcow`
 

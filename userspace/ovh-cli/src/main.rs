@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ovh-cli — SlateOS OVHcloud (French sovereign cloud, bare metal, Roubaix, ENXTPA:OVH)
+//! ovh-cli — Slate OS OVHcloud (French sovereign cloud, bare metal, Roubaix, ENXTPA:OVH)
 
 use std::env;
 use std::process;

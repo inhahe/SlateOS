@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! horst-cli — SlateOS horst wireless LAN analyzer
+//! horst-cli — Slate OS horst wireless LAN analyzer
 //!
 //! Single personality: `horst`
 

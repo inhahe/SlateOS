@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! audit-cli — SlateOS Linux audit framework tools
+//! audit-cli — Slate OS Linux audit framework tools
 //!
 //! Multi-personality: `auditctl`, `ausearch`, `aureport`, `auditd`, `autrace`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sweethome3d-cli — SlateOS Sweet Home 3D interior design
+//! sweethome3d-cli — Slate OS Sweet Home 3D interior design
 //!
 //! Single personality: `sweethome3d`
 

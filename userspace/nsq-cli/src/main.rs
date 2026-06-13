@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nsq-cli — SlateOS NSQ messaging tools
+//! nsq-cli — Slate OS NSQ messaging tools
 //!
 //! Multi-personality: `nsq_tail`, `nsq_to_file`, `nsqlookupd`, `nsqadmin`
 

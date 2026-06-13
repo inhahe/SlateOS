@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zoom-cli — SlateOS Zoom video conferencing
+//! zoom-cli — Slate OS Zoom video conferencing
 //!
 //! Single personality: `zoom`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bluez-tools-cli — SlateOS BlueZ command-line tools
+//! bluez-tools-cli — Slate OS BlueZ command-line tools
 //!
 //! Multi-personality: `bt-adapter`, `bt-agent`, `bt-device`, `bt-network`, `bt-obex`
 

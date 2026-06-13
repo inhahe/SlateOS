@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wrangler-cli — SlateOS Cloudflare Wrangler CLI
+//! wrangler-cli — Slate OS Cloudflare Wrangler CLI
 //!
 //! Multi-personality: `wrangler`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bacula-cli — SlateOS Bacula backup CLI
+//! bacula-cli — Slate OS Bacula backup CLI
 //!
 //! Multi-personality: `bconsole`, `bscan`, `bls`, `bextract`
 

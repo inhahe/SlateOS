@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fullstory-cli — SlateOS FullStory (session replay + digital experience intelligence)
+//! fullstory-cli — Slate OS FullStory (session replay + digital experience intelligence)
 //!
 //! Single personality: `fullstory`
 

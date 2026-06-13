@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kexec — SlateOS kexec tools for fast kernel replacement and kdump
+//! kexec — Slate OS kexec tools for fast kernel replacement and kdump
 //!
 //! Multi-personality binary for loading new kernels and crash dump setup.
 //! Detected via argv[0]:

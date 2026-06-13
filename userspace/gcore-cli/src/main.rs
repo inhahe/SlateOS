@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! gcore-cli — SlateOS Gcore (Luxembourg edge + ML inference) personality CLI.
+//! gcore-cli — Slate OS Gcore (Luxembourg edge + ML inference) personality CLI.
 
 use std::env;
 use std::process;

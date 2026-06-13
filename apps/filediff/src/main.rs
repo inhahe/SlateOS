@@ -1,4 +1,4 @@
-//! `SlateOS` File Diff/Compare Tool
+//! `Slate OS` File Diff/Compare Tool
 //!
 //! A desktop application for comparing files and directories with:
 //! - Myers diff algorithm for optimal edit scripts

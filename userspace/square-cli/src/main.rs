@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! square-cli — SlateOS Square CLI
+//! square-cli — Slate OS Square CLI
 //!
 //! Single personality: `square`
 

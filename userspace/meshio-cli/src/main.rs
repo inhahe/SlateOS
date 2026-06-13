@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! meshio-cli — SlateOS meshio mesh I/O converter
+//! meshio-cli — Slate OS meshio mesh I/O converter
 //!
 //! Multi-personality: `meshio`, `meshio-convert`, `meshio-info`
 

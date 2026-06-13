@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pingidentity-cli — SlateOS Ping Identity (federated enterprise IAM, ForgeRock merged in)
+//! pingidentity-cli — Slate OS Ping Identity (federated enterprise IAM, ForgeRock merged in)
 //!
 //! Single personality: `pingidentity`
 

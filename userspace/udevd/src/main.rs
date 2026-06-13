@@ -1,4 +1,4 @@
-//! SlateOS Device Manager Daemon (udevd / udevadm)
+//! Slate OS Device Manager Daemon (udevd / udevadm)
 //!
 //! Manages device nodes under `/dev/`, applies udev-style rules from
 //! `/etc/udev/rules.d/`, and maintains a device property database in

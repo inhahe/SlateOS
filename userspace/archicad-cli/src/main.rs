@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! archicad-cli — SlateOS Graphisoft Archicad BIM
+//! archicad-cli — Slate OS Graphisoft Archicad BIM
 //!
 //! Single personality: `archicad`
 

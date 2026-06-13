@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kalgebra-cli — SlateOS KAlgebra math expression evaluator
+//! kalgebra-cli — Slate OS KAlgebra math expression evaluator
 //!
 //! Single personality: `kalgebra`
 

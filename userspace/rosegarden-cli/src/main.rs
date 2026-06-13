@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rosegarden-cli — SlateOS Rosegarden MIDI sequencer
+//! rosegarden-cli — Slate OS Rosegarden MIDI sequencer
 //!
 //! Single personality: `rosegarden`
 

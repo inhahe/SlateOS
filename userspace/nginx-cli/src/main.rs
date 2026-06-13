@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nginx-cli — SlateOS Nginx web server
+//! nginx-cli — Slate OS Nginx web server
 //!
 //! Single personality: `nginx`
 

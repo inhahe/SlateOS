@@ -1,4 +1,4 @@
-//! SlateOS Container Management Tools (podman/buildah/skopeo)
+//! Slate OS Container Management Tools (podman/buildah/skopeo)
 //!
 //! Multi-personality binary providing:
 //! - **podman** (default) — container lifecycle management, pod orchestration,

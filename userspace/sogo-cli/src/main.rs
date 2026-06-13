@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sogo-cli — SlateOS SOGo groupware
+//! sogo-cli — Slate OS SOGo groupware
 //!
 //! Multi-personality: `sogo`, `sogo-tool`
 

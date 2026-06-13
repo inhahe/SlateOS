@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! joplin-cli — SlateOS Joplin note-taking
+//! joplin-cli — Slate OS Joplin note-taking
 //!
 //! Multi-personality: `joplin-desktop`, `joplin`
 

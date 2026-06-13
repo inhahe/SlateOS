@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! micro — SlateOS modern terminal text editor
+//! micro — Slate OS modern terminal text editor
 //!
 //! Single personality: `micro`
 

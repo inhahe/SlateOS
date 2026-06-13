@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! softether-cli — SlateOS SoftEther VPN
+//! softether-cli — Slate OS SoftEther VPN
 //!
 //! Multi-personality: `vpnserver`, `vpnclient`, `vpncmd`
 

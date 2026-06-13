@@ -1,4 +1,4 @@
-//! SlateOS Network Port Scanner (nmap)
+//! Slate OS Network Port Scanner (nmap)
 //!
 //! A network reconnaissance tool that supports TCP connect scanning,
 //! host discovery via ICMP ping, service version detection via banner
@@ -54,7 +54,7 @@ const SYS_ICMP_RECV: u64 = 831;
 const SYS_DNS_RESOLVE: u64 = 820;
 /// nanosleep-style sleep: arg1=milliseconds.
 const SYS_SLEEP: u64 = 11;
-/// Native SlateOS monotonic clock (kernel syscall/number.rs); no-arg, returns
+/// Native Slate OS monotonic clock (kernel syscall/number.rs); no-arg, returns
 /// boot-relative nanoseconds in rax.  Used only for elapsed-time (RTT)
 /// measurement, so monotonic — not realtime — is the correct clock.
 /// (Syscall 40 is SYS_PORT_READ; the old SYS_CLOCK_GETTIME=40 was wrong.)
@@ -62,7 +62,7 @@ const SYS_CLOCK_MONOTONIC: u64 = 10;
 
 // NOTE: file descriptor I/O (stdout/stderr writes, the -oN output file) and
 // process exit go through std (std::io, std::fs, std::process::exit), which is
-// backed by the SlateOS libc/posix layer and issues the correct native FS
+// backed by the Slate OS libc/posix layer and issues the correct native FS
 // syscalls.  An earlier version hand-rolled these with Linux syscall numbers
 // (write=1, open=2, close=3, exit=60) — on the native ABI those map to
 // SYS_EXIT, SYS_TASK_ID, an unimplemented slot, and SYS_SYSCTL_GET, so writing
@@ -248,7 +248,7 @@ fn sleep_ms(ms: u64) {
 
 /// Exit the process with `code`.
 ///
-/// Delegates to `std::process::exit`, which runs through the SlateOS libc and
+/// Delegates to `std::process::exit`, which runs through the Slate OS libc and
 /// issues the correct native `SYS_EXIT`.
 fn exit(code: i32) -> ! {
     std::process::exit(code)

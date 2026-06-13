@@ -1,4 +1,4 @@
-//! SlateOS Power Management Utility
+//! Slate OS Power Management Utility
 //!
 //! Controls system power state: shutdown, reboot, suspend, hibernate.
 //! Communicates with the service manager via IPC for orderly shutdown
@@ -35,7 +35,7 @@ const SYS_CHANNEL_RECV: u64 = 202;
 /// Close an IPC channel handle.
 const SYS_CHANNEL_CLOSE: u64 = 204;
 
-// NOTE: SlateOS exposes NO userspace power-management syscall (there is no
+// NOTE: Slate OS exposes NO userspace power-management syscall (there is no
 // SYS_SHUTDOWN / SYS_REBOOT / suspend syscall in kernel/src/syscall/number.rs).
 // System power state changes go through the service manager over IPC (the
 // orderly_* path below).  The "direct" fallbacks therefore use the only
@@ -49,7 +49,7 @@ const SYS_CHANNEL_CLOSE: u64 = 204;
 
 /// Issue a three-argument syscall using the x86-64 `syscall` instruction.
 ///
-/// Register mapping follows the SlateOS syscall ABI:
+/// Register mapping follows the Slate OS syscall ABI:
 ///   rax = syscall number, rdi = arg1, rsi = arg2, rdx = arg3
 ///   Return value in rax. rcx and r11 are clobbered by the CPU.
 #[cfg(target_arch = "x86_64")]
@@ -336,7 +336,7 @@ fn try_sync_filesystems() {
 
 /// Power off the machine directly when the service manager is unreachable.
 ///
-/// SlateOS has no power-off syscall, so the only non-IPC mechanism is the ACPI
+/// Slate OS has no power-off syscall, so the only non-IPC mechanism is the ACPI
 /// control file (if procfs exposes it).  If the machine powers off, this
 /// process never returns; otherwise we report that no mechanism worked.
 fn direct_shutdown() -> ! {
@@ -370,7 +370,7 @@ fn direct_reboot() -> ! {
 
 /// Enter ACPI S3 suspend directly when the service manager is unreachable.
 fn direct_suspend() {
-    // SlateOS has no suspend syscall; the only direct path is an ACPI sleep
+    // Slate OS has no suspend syscall; the only direct path is an ACPI sleep
     // control file, if procfs/sysfs exposes one.
     if fs::write("/proc/acpi/sleep", "S3").is_err() && fs::write("/sys/power/state", "mem").is_err()
     {
@@ -386,7 +386,7 @@ fn direct_suspend() {
 fn direct_hibernate() {
     try_sync_filesystems();
 
-    // SlateOS has no hibernate syscall; the only direct path is an ACPI sleep
+    // Slate OS has no hibernate syscall; the only direct path is an ACPI sleep
     // control file, if procfs/sysfs exposes one.
     if fs::write("/proc/acpi/sleep", "S4").is_err()
         && fs::write("/sys/power/state", "disk").is_err()

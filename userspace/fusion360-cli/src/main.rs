@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fusion360-cli — SlateOS Autodesk Fusion 360 cloud CAD/CAM/CAE
+//! fusion360-cli — Slate OS Autodesk Fusion 360 cloud CAD/CAM/CAE
 //!
 //! Single personality: `fusion360`
 

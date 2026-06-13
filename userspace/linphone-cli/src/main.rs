@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! linphone-cli — SlateOS Linphone SIP/VoIP client
+//! linphone-cli — Slate OS Linphone SIP/VoIP client
 //!
 //! Multi-personality: `linphone`, `linphonec`
 

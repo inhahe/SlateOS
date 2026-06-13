@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! insightly-cli — SlateOS Insightly (CRM + Project Management for SMB)
+//! insightly-cli — Slate OS Insightly (CRM + Project Management for SMB)
 //!
 //! Single personality: `insightly`
 

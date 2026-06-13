@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sonic-cli — SlateOS Sonic search backend
+//! sonic-cli — Slate OS Sonic search backend
 //!
 //! Single personality: `sonic`
 

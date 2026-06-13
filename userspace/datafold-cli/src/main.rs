@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! datafold-cli — SlateOS Datafold (data diff + data-aware CI for dbt, NYC)
+//! datafold-cli — Slate OS Datafold (data diff + data-aware CI for dbt, NYC)
 
 use std::env;
 use std::process;

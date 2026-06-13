@@ -1,4 +1,4 @@
-//! SlateOS Tape Archive Utility
+//! Slate OS Tape Archive Utility
 //!
 //! Creates, extracts, and lists POSIX ustar tar archives.
 //!

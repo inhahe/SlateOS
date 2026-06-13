@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! acpi-cli — SlateOS ACPI information tools
+//! acpi-cli — Slate OS ACPI information tools
 //!
 //! Multi-personality: `acpi`, `acpid`, `acpi_listen`
 

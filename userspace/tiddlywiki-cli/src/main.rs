@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tiddlywiki-cli — SlateOS TiddlyWiki personal wiki
+//! tiddlywiki-cli — Slate OS TiddlyWiki personal wiki
 //!
 //! Single personality: `tiddlywiki`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dvc-cli — SlateOS DVC (Data Version Control) CLI
+//! dvc-cli — Slate OS DVC (Data Version Control) CLI
 //!
 //! Single personality: `dvc`
 

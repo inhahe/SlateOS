@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! obsidian-cli — SlateOS Obsidian knowledge base
+//! obsidian-cli — Slate OS Obsidian knowledge base
 //!
 //! Single personality: `obsidian`
 

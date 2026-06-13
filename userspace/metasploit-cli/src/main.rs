@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! metasploit-cli — SlateOS Metasploit Framework
+//! metasploit-cli — Slate OS Metasploit Framework
 //!
 //! Multi-personality: `msfconsole`, `msfvenom`, `msfrpcd`
 

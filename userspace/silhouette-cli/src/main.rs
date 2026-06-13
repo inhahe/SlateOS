@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! silhouette-cli — SlateOS Boris FX Silhouette rotoscoping & paint
+//! silhouette-cli — Slate OS Boris FX Silhouette rotoscoping & paint
 //!
 //! Single personality: `silhouette`
 

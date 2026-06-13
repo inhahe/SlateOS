@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! displaycal-cli — SlateOS DisplayCAL display calibration
+//! displaycal-cli — Slate OS DisplayCAL display calibration
 //!
 //! Multi-personality: `displaycal`, `displaycal-apply-profiles`
 

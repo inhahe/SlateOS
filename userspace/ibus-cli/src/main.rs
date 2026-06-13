@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ibus-cli — SlateOS IBus input method framework CLI
+//! ibus-cli — Slate OS IBus input method framework CLI
 //!
 //! Multi-personality: `ibus`, `ibus-daemon`, `ibus-setup`
 

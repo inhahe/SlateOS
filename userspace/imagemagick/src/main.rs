@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! imagemagick — SlateOS image processing suite
+//! imagemagick — Slate OS image processing suite
 //!
 //! Multi-personality binary detected via argv[0]:
 //!

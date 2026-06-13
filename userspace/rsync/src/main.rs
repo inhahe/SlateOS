@@ -1,4 +1,4 @@
-//! SlateOS File Synchronization Utility (rsync / scp)
+//! Slate OS File Synchronization Utility (rsync / scp)
 //!
 //! Multi-personality binary providing:
 //! - **rsync** -- file synchronization with delta transfer
@@ -80,7 +80,7 @@ const COPY_BUF_SIZE: usize = 64 * 1024;
 /// Adler32 modulus.
 const ADLER_MOD: u32 = 65521;
 
-/// Native SlateOS monotonic clock (kernel syscall/number.rs); no-arg, returns
+/// Native Slate OS monotonic clock (kernel syscall/number.rs); no-arg, returns
 /// boot-relative nanoseconds in rax.  (Syscall 30 is SYS_IRQ_REGISTER.)
 const SYS_CLOCK_MONOTONIC: u64 = 10;
 

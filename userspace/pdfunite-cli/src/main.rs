@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pdfunite-cli — SlateOS pdfunite PDF merger
+//! pdfunite-cli — Slate OS pdfunite PDF merger
 //!
 //! Single personality: `pdfunite`
 

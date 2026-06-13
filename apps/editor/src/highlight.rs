@@ -1,4 +1,4 @@
-//! Syntax highlighting engine for the SlateOS text editor.
+//! Syntax highlighting engine for the Slate OS text editor.
 //!
 //! Provides token-based syntax highlighting for common programming languages.
 //! Each language is implemented as a simple state machine that scans lines

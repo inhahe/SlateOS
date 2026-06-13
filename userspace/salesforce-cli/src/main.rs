@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! salesforce-cli — SlateOS Salesforce CRM platform (sf / sfdx CLI)
+//! salesforce-cli — Slate OS Salesforce CRM platform (sf / sfdx CLI)
 //!
 //! Single personality: `salesforce`
 

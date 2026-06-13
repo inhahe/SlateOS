@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! opentofu-cli — SlateOS OpenTofu infrastructure as code
+//! opentofu-cli — Slate OS OpenTofu infrastructure as code
 //!
 //! Single personality: `tofu`
 

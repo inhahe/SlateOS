@@ -1,4 +1,4 @@
-//! SlateOS Process Grep / Kill Utility
+//! Slate OS Process Grep / Kill Utility
 //!
 //! Multi-personality binary: detects its invocation name from `argv[0]` to
 //! act as either `pgrep` (find processes by pattern) or `pkill` (send signals
@@ -90,7 +90,7 @@ fn detect_mode(argv0: &str) -> Mode {
 }
 
 // ============================================================================
-// Signal mapping (SlateOS uses IPC, not Unix signals -- names kept for
+// Signal mapping (Slate OS uses IPC, not Unix signals -- names kept for
 // familiarity)
 // ============================================================================
 
@@ -127,7 +127,7 @@ struct SignalDef {
     action: SignalAction,
 }
 
-/// Compatibility signal table mapping POSIX names/numbers to SlateOS actions.
+/// Compatibility signal table mapping POSIX names/numbers to Slate OS actions.
 const SIGNALS: &[SignalDef] = &[
     SignalDef {
         number: 1,

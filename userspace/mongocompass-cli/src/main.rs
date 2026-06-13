@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mongocompass-cli — SlateOS MongoDB Compass GUI
+//! mongocompass-cli — Slate OS MongoDB Compass GUI
 //!
 //! Single personality: `mongocompass`
 

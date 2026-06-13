@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fastapi-cli — SlateOS FastAPI CLI tools
+//! fastapi-cli — Slate OS FastAPI CLI tools
 //!
 //! Multi-personality: `fastapi`, `uvicorn`
 

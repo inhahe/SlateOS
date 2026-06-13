@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fluentd-cli — SlateOS Fluentd log collector
+//! fluentd-cli — Slate OS Fluentd log collector
 //!
 //! Single personality: `fluentd`
 

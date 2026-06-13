@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dogtail-cli — SlateOS Dogtail GUI test framework
+//! dogtail-cli — Slate OS Dogtail GUI test framework
 //!
 //! Single personality: `dogtail`
 

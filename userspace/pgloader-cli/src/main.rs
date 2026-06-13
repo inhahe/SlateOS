@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pgloader-cli — SlateOS pgloader CLI
+//! pgloader-cli — Slate OS pgloader CLI
 //!
 //! Single personality: `pgloader`
 

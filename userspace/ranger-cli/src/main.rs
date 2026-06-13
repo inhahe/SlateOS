@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ranger-cli — SlateOS Ranger file manager
+//! ranger-cli — Slate OS Ranger file manager
 //!
 //! Multi-personality: `ranger`, `rifle`
 

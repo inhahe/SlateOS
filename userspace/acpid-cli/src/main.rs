@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! acpid-cli — SlateOS acpid ACPI event daemon
+//! acpid-cli — Slate OS acpid ACPI event daemon
 //!
 //! Multi-personality: `acpid`, `acpi_listen`
 

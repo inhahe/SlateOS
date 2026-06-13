@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! astrometry-cli — SlateOS Astrometry.net plate solver
+//! astrometry-cli — Slate OS Astrometry.net plate solver
 //!
 //! Multi-personality: `solve-field`, `image2xy`, `wcs-xy2rd`, `wcs-rd2xy`
 

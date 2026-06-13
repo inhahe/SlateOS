@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! keepassxc-cli — SlateOS KeePassXC password manager
+//! keepassxc-cli — Slate OS KeePassXC password manager
 //!
 //! Multi-personality: `keepassxc`, `keepassxc-cli`
 

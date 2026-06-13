@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! resend-cli — SlateOS Resend modern developer-first email API personality CLI.
+//! resend-cli — Slate OS Resend modern developer-first email API personality CLI.
 
 use std::env;
 use std::process;

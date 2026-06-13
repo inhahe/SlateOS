@@ -10,7 +10,7 @@
 #![allow(clippy::fn_params_excessive_bools)]
 #![allow(unused_imports)]
 
-//! SlateOS Chess — a full chess game with AI opponent.
+//! Slate OS Chess — a full chess game with AI opponent.
 //!
 //! Features a complete chess engine with legal move generation (including
 //! castling, en passant, pawn promotion), check/checkmate/stalemate detection,

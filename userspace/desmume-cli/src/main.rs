@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! desmume-cli — SlateOS DeSmuME Nintendo DS emulator
+//! desmume-cli — Slate OS DeSmuME Nintendo DS emulator
 //!
 //! Single personality: `desmume`
 

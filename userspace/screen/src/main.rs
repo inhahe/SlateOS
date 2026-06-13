@@ -1,4 +1,4 @@
-//! SlateOS Terminal Multiplexer
+//! Slate OS Terminal Multiplexer
 //!
 //! Manage multiple terminal windows within a single console session.
 //! Similar to GNU screen / tmux.
@@ -227,7 +227,7 @@ impl Session {
         let id = self.next_window_id;
         self.next_window_id += 1;
         let mut win = Window::new(id, title);
-        win.add_line(&format!("SlateOS Screen — Window {} ({})", id, title));
+        win.add_line(&format!("Slate OS Screen — Window {} ({})", id, title));
         win.add_line("Type commands here. Use Ctrl+A ? for help.");
         win.add_line("");
         self.windows.push(win);
@@ -315,13 +315,13 @@ fn render_status_bar(session: &Session) {
 
     let title = if let Some(win) = session.active() {
         format!(
-            " SlateOS Screen — {} [{}/{}]",
+            " Slate OS Screen — {} [{}/{}]",
             win.title,
             session.active_window + 1,
             session.windows.len()
         )
     } else {
-        " SlateOS Screen".to_string()
+        " Slate OS Screen".to_string()
     };
 
     let mut title_bar = title;
@@ -369,7 +369,7 @@ fn render_window(session: &Session) {
 fn render_help() {
     term_clear();
     console_write("\x1b[1;33m");
-    console_write("  SlateOS Screen — Key Bindings\r\n");
+    console_write("  Slate OS Screen — Key Bindings\r\n");
     console_write("\x1b[0m\r\n");
     console_write("  All commands use Ctrl+A as prefix key.\r\n\r\n");
     console_write("  \x1b[1mWindow Management:\x1b[0m\r\n");
@@ -950,7 +950,7 @@ fn run_session(session: &mut Session) {
 // ============================================================================
 
 fn print_usage() {
-    println!("SlateOS Screen — Terminal Multiplexer v0.1.0");
+    println!("Slate OS Screen — Terminal Multiplexer v0.1.0");
     println!();
     println!("USAGE:");
     println!("  screen                 Start new session");
@@ -987,7 +987,7 @@ fn main() {
                 return;
             }
             "--version" => {
-                println!("screen (SlateOS) 0.1.0");
+                println!("screen (Slate OS) 0.1.0");
                 return;
             }
             "-S" => {

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! montecarlo-cli — SlateOS Monte Carlo Data (data observability category creator, SF)
+//! montecarlo-cli — Slate OS Monte Carlo Data (data observability category creator, SF)
 
 use std::env;
 use std::process;

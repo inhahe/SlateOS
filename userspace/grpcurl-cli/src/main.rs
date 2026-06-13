@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! grpcurl-cli — SlateOS gRPC command-line client
+//! grpcurl-cli — Slate OS gRPC command-line client
 //!
 //! Multi-personality: `grpcurl`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cartes-du-ciel-cli — SlateOS Cartes du Ciel / SkyChart
+//! cartes-du-ciel-cli — Slate OS Cartes du Ciel / SkyChart
 //!
 //! Single personality: `skychart`
 

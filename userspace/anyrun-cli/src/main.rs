@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! anyrun-cli — SlateOS anyrun Wayland runner
+//! anyrun-cli — Slate OS anyrun Wayland runner
 //!
 //! Single personality: `anyrun`
 

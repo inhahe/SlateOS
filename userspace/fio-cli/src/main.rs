@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fio-cli — SlateOS fio flexible I/O tester
+//! fio-cli — Slate OS fio flexible I/O tester
 //!
 //! Single personality: `fio`
 

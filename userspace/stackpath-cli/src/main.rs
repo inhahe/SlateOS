@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! stackpath-cli — SlateOS StackPath / Webscale exit personality CLI.
+//! stackpath-cli — Slate OS StackPath / Webscale exit personality CLI.
 
 use std::env;
 use std::process;

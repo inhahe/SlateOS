@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! iverilog-cli — SlateOS Icarus Verilog simulator
+//! iverilog-cli — Slate OS Icarus Verilog simulator
 //!
 //! Multi-personality: `iverilog`, `vvp`
 

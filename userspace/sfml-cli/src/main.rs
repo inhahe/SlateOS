@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sfml-cli — SlateOS SFML config tool
+//! sfml-cli — Slate OS SFML config tool
 //!
 //! Multi-personality: `sfml-config`
 

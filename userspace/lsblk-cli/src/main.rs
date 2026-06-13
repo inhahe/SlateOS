@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lsblk-cli — SlateOS block device lister
+//! lsblk-cli — Slate OS block device lister
 //!
 //! Multi-personality: `lsblk`, `blkid`
 

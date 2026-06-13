@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lsusb-cli — SlateOS USB device lister
+//! lsusb-cli — Slate OS USB device lister
 //!
 //! Multi-personality: `lsusb`, `usb-devices`
 

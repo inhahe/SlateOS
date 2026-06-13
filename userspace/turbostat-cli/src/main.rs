@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! turbostat-cli — SlateOS turbostat CPU frequency & power monitor
+//! turbostat-cli — Slate OS turbostat CPU frequency & power monitor
 //!
 //! Single personality: `turbostat`
 

@@ -1,4 +1,4 @@
-//! SlateOS `locale` / `localedef` / `getconf` -- locale and system configuration.
+//! Slate OS `locale` / `localedef` / `getconf` -- locale and system configuration.
 //!
 //! Multi-personality binary that behaves as one of three POSIX utilities
 //! depending on `argv[0]`:
@@ -1688,7 +1688,7 @@ mod tests {
     fn test_getconf_page_size() {
         let table = build_conf_table();
         let entry = table.iter().find(|v| v.name == "PAGE_SIZE").unwrap();
-        // SlateOS uses 16 KiB pages.
+        // Slate OS uses 16 KiB pages.
         assert_eq!(entry.value.display(), "16384");
     }
 

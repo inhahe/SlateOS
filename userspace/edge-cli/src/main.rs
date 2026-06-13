@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! edge-cli — SlateOS Microsoft Edge browser (Chromium-based)
+//! edge-cli — Slate OS Microsoft Edge browser (Chromium-based)
 //!
 //! Single personality: `edge`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! conmon-cli — SlateOS conmon container monitor
+//! conmon-cli — Slate OS conmon container monitor
 //!
 //! Single personality: `conmon`
 

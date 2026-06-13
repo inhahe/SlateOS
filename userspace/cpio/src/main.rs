@@ -1,4 +1,4 @@
-//! SlateOS cpio Archive Utility
+//! Slate OS cpio Archive Utility
 //!
 //! Creates, extracts, lists, and copies files using the cpio newc (SVR4/new
 //! ASCII) archive format.

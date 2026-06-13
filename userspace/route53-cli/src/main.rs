@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! route53-cli — SlateOS personality CLI for Amazon Route 53, AWS's managed DNS.
+//! route53-cli — Slate OS personality CLI for Amazon Route 53, AWS's managed DNS.
 
 use std::env;
 use std::process;

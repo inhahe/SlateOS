@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lua-cli — SlateOS Lua interpreter
+//! lua-cli — Slate OS Lua interpreter
 //!
 //! Multi-personality: `lua`, `luac`, `lua5.4`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! weaviate-cli — SlateOS Weaviate (open-source vector + AI-native database, Amsterdam, private)
+//! weaviate-cli — Slate OS Weaviate (open-source vector + AI-native database, Amsterdam, private)
 
 use std::env;
 use std::process;

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! weave-cli — SlateOS Weave Net container networking
+//! weave-cli — Slate OS Weave Net container networking
 //!
 //! Multi-personality: `weave`, `weaveutil`
 

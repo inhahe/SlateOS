@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! statuspage-cli — SlateOS Atlassian Statuspage
+//! statuspage-cli — Slate OS Atlassian Statuspage
 //!
 //! Single personality: `statuspage`
 

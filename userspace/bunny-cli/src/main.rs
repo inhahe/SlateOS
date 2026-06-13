@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! bunny-cli — SlateOS Bunny.net / BunnyCDN personality CLI.
+//! bunny-cli — Slate OS Bunny.net / BunnyCDN personality CLI.
 
 use std::env;
 use std::process;

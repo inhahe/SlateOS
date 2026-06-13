@@ -1,4 +1,4 @@
-//! SlateOS System Log Daemon (`syslogd`)
+//! Slate OS System Log Daemon (`syslogd`)
 //!
 //! A JSON-lines log aggregation service that collects structured log messages
 //! from all system services, stores them in rotating log files, and provides

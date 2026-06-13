@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rivery-cli — SlateOS Rivery (Israeli all-in-one ELT + orchestration platform)
+//! rivery-cli — Slate OS Rivery (Israeli all-in-one ELT + orchestration platform)
 
 use std::env;
 use std::process;

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! git-branchless — SlateOS suite of tools for high-velocity git workflows
+//! git-branchless — Slate OS suite of tools for high-velocity git workflows
 //!
 //! Single personality: `git-branchless`
 

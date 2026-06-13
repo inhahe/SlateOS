@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wtype-cli — SlateOS wtype Wayland keyboard/mouse input simulator
+//! wtype-cli — Slate OS wtype Wayland keyboard/mouse input simulator
 //!
 //! Single personality: `wtype`
 

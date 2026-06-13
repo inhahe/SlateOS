@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! honeycomb-cli — SlateOS Honeycomb.io (Charity Majors' observability platform, high-cardinality events)
+//! honeycomb-cli — Slate OS Honeycomb.io (Charity Majors' observability platform, high-cardinality events)
 //!
 //! Single personality: `honeycomb`
 

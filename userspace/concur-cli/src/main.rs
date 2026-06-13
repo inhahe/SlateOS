@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! concur-cli — SlateOS SAP Concur (enterprise T&E — travel + expense + invoice)
+//! concur-cli — Slate OS SAP Concur (enterprise T&E — travel + expense + invoice)
 //!
 //! Single personality: `concur`
 

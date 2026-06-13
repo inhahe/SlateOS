@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dbmate-cli — SlateOS dbmate database migration tool
+//! dbmate-cli — Slate OS dbmate database migration tool
 //!
 //! Single personality: `dbmate`
 

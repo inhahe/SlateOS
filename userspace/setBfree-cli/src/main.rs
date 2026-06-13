@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! setBfree-cli — SlateOS setBfree tonewheel organ emulator
+//! setBfree-cli — Slate OS setBfree tonewheel organ emulator
 //!
 //! Single personality: `setBfree`
 

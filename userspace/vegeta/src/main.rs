@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vegeta — SlateOS HTTP load testing tool
+//! vegeta — Slate OS HTTP load testing tool
 //!
 //! Single personality: `vegeta`
 

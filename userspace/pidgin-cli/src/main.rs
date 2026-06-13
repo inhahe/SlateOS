@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pidgin-cli — SlateOS Pidgin multi-protocol IM client
+//! pidgin-cli — Slate OS Pidgin multi-protocol IM client
 //!
 //! Multi-personality: `pidgin`, `purple-remote`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! enchant-cli — SlateOS Enchant spell checking library CLI
+//! enchant-cli — Slate OS Enchant spell checking library CLI
 //!
 //! Multi-personality: `enchant-2`, `enchant-lsmod-2`
 

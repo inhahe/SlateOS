@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! op5monitor-cli — SlateOS OP5 Monitor
+//! op5monitor-cli — Slate OS OP5 Monitor
 //!
 //! Single personality: `op5`
 

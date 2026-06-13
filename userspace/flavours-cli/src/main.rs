@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! flavours-cli — SlateOS flavours Base16 scheme manager
+//! flavours-cli — Slate OS flavours Base16 scheme manager
 //!
 //! Single personality: `flavours`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sysbench-cli — SlateOS sysbench system benchmark
+//! sysbench-cli — Slate OS sysbench system benchmark
 //!
 //! Single personality: `sysbench`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! discord-cli — SlateOS Discord bot/management CLI
+//! discord-cli — Slate OS Discord bot/management CLI
 //!
 //! Single personality: `discord`
 

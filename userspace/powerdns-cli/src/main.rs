@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! powerdns-cli — SlateOS PowerDNS server
+//! powerdns-cli — Slate OS PowerDNS server
 //!
 //! Multi-personality: `pdns_server`, `pdnsutil`, `pdns_control`
 

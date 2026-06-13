@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! trendmicro-cli — SlateOS Trend Micro Maximum Security
+//! trendmicro-cli — Slate OS Trend Micro Maximum Security
 //!
 //! Single personality: `trendmicro`
 

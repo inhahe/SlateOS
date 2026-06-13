@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tuned — SlateOS system tuning daemon
+//! tuned — Slate OS system tuning daemon
 //!
 //! Multi-personality binary for system performance tuning profiles.
 //! Detected via argv[0]:

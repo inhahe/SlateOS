@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! laminar-cli — SlateOS Laminar CI
+//! laminar-cli — Slate OS Laminar CI
 //!
 //! Multi-personality: `laminard`, `laminarc`
 

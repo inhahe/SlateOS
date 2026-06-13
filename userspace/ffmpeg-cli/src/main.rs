@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ffmpeg-cli — SlateOS FFmpeg-compatible media transcoding CLI
+//! ffmpeg-cli — Slate OS FFmpeg-compatible media transcoding CLI
 //!
 //! Multi-personality: `ffmpeg`, `ffprobe`, `ffplay`
 

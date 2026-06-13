@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mesa-cli — SlateOS Mesa 3D graphics library tools CLI
+//! mesa-cli — Slate OS Mesa 3D graphics library tools CLI
 //!
 //! Multi-personality: `eglinfo`, `es2_info`, `es2gears`
 

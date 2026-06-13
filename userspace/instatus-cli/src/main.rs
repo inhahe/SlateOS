@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! instatus-cli — SlateOS Instatus status page
+//! instatus-cli — Slate OS Instatus status page
 //!
 //! Single personality: `instatus`
 

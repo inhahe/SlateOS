@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! webots-cli — SlateOS Webots robot simulator
+//! webots-cli — Slate OS Webots robot simulator
 //!
 //! Single personality: `webots`
 

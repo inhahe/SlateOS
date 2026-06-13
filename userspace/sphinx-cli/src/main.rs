@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sphinx-cli — SlateOS Sphinx documentation generator
+//! sphinx-cli — Slate OS Sphinx documentation generator
 //!
 //! Multi-personality: `sphinx-build`, `sphinx-quickstart`, `sphinx-apidoc`
 

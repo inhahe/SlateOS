@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sile-cli — SlateOS SILE typesetter
+//! sile-cli — Slate OS SILE typesetter
 //!
 //! Single personality: `sile`
 

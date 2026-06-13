@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! azuredevops-cli — SlateOS Azure DevOps (Microsoft's enterprise dev suite, formerly VSTS/TFS)
+//! azuredevops-cli — Slate OS Azure DevOps (Microsoft's enterprise dev suite, formerly VSTS/TFS)
 //!
 //! Single personality: `azuredevops`
 

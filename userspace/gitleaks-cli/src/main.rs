@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gitleaks-cli — SlateOS Gitleaks secret scanner
+//! gitleaks-cli — Slate OS Gitleaks secret scanner
 //!
 //! Multi-personality: `gitleaks`
 

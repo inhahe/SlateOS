@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xdg-desktop-portal-cli — SlateOS xdg-desktop-portal service
+//! xdg-desktop-portal-cli — Slate OS xdg-desktop-portal service
 //!
 //! Single personality: `xdg-desktop-portal`
 

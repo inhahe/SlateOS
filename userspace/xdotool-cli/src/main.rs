@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xdotool-cli — SlateOS xdotool X11 automation CLI
+//! xdotool-cli — Slate OS xdotool X11 automation CLI
 //!
 //! Single personality: `xdotool`
 

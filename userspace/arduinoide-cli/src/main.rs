@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! arduinoide-cli — SlateOS Arduino IDE 2.x
+//! arduinoide-cli — Slate OS Arduino IDE 2.x
 //!
 //! Single personality: `arduinoide`
 

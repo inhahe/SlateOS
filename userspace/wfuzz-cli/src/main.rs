@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wfuzz-cli — SlateOS wfuzz web fuzzer
+//! wfuzz-cli — Slate OS wfuzz web fuzzer
 //!
 //! Single personality: `wfuzz`
 

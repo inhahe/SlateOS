@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! alloy-cli — SlateOS Grafana Alloy telemetry collector
+//! alloy-cli — Slate OS Grafana Alloy telemetry collector
 //!
 //! Single personality: `alloy`
 

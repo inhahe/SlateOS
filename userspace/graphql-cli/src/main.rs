@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! graphql-cli — SlateOS GraphQL CLI tools
+//! graphql-cli — Slate OS GraphQL CLI tools
 //!
 //! Multi-personality: `graphql`, `gql`
 

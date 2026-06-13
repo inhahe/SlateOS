@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! luigi-cli — SlateOS Luigi workflow CLI
+//! luigi-cli — Slate OS Luigi workflow CLI
 //!
 //! Multi-personality: `luigi`, `luigid`
 

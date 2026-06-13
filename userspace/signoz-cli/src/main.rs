@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! signoz-cli — SlateOS SigNoz (open-source OpenTelemetry-native observability, Bangalore + SF)
+//! signoz-cli — Slate OS SigNoz (open-source OpenTelemetry-native observability, Bangalore + SF)
 
 use std::env;
 use std::process;

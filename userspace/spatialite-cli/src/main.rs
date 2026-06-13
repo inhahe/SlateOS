@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! spatialite-cli — SlateOS SpatiaLite spatial SQLite extension
+//! spatialite-cli — Slate OS SpatiaLite spatial SQLite extension
 //!
 //! Multi-personality: `spatialite`, `spatialite_tool`
 

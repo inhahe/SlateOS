@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ps2pdf-cli — SlateOS PostScript/PDF conversion tools
+//! ps2pdf-cli — Slate OS PostScript/PDF conversion tools
 //!
 //! Multi-personality: `ps2pdf`, `pdf2ps`, `ps2eps`
 

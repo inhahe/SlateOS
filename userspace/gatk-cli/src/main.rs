@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gatk-cli — SlateOS GATK Genome Analysis Toolkit
+//! gatk-cli — Slate OS GATK Genome Analysis Toolkit
 //!
 //! Multi-personality: `gatk`
 

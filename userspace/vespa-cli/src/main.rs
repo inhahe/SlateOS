@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vespa-cli — SlateOS Vespa (Yahoo-origin big-data search + ranking + vector platform, Trondheim NO)
+//! vespa-cli — Slate OS Vespa (Yahoo-origin big-data search + ranking + vector platform, Trondheim NO)
 
 use std::env;
 use std::process;

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! geneanet-cli — SlateOS Geneanet client tools
+//! geneanet-cli — Slate OS Geneanet client tools
 //!
 //! Single personality: `geneanet`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mailgun-cli — SlateOS Mailgun email CLI
+//! mailgun-cli — Slate OS Mailgun email CLI
 //!
 //! Single personality: `mailgun`
 

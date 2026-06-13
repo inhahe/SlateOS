@@ -1,4 +1,4 @@
-//! SlateOS Virtual Memory Statistics Utility
+//! Slate OS Virtual Memory Statistics Utility
 //!
 //! Reports virtual memory, CPU, and I/O system statistics by reading
 //! `/proc/stat`, `/proc/meminfo`, `/proc/vmstat`, and `/proc/diskstats`.
@@ -1044,7 +1044,7 @@ fn run_disk_summary(config: &Config) -> i32 {
 
 /// Print slab/heap allocator information.
 ///
-/// On SlateOS, this reads from `/proc/slabinfo` if available. Falls back to
+/// On Slate OS, this reads from `/proc/slabinfo` if available. Falls back to
 /// a "not available" message, which is expected during early OS bring-up.
 fn run_slabs(config: &Config) -> i32 {
     let content = match read_file("/proc/slabinfo") {

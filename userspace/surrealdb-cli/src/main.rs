@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! surrealdb-cli — SlateOS SurrealDB CLI
+//! surrealdb-cli — Slate OS SurrealDB CLI
 //!
 //! Multi-personality: `surreal`
 

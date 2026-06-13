@@ -1,4 +1,4 @@
-//! SlateOS Mount/Umount Utility
+//! Slate OS Mount/Umount Utility
 //!
 //! Manages filesystem mount points. Lists current mounts, mounts new
 //! filesystems, and unmounts existing ones.
@@ -25,7 +25,7 @@ use std::process;
 // DESIGN GAP -- mount/umount have no kernel ABI yet
 // ============================================================================
 //
-// The SlateOS kernel does **not** expose mount(2) or umount(2) syscalls. There
+// The Slate OS kernel does **not** expose mount(2) or umount(2) syscalls. There
 // is no SYS_MOUNT or SYS_UMOUNT in kernel/src/syscall/number.rs.
 //
 // An earlier version of this file hardcoded SYS_MOUNT=620 and SYS_UMOUNT=621

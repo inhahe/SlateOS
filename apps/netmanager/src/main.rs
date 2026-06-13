@@ -1,4 +1,4 @@
-//! SlateOS Network Connections Manager
+//! Slate OS Network Connections Manager
 //!
 //! GUI application for managing network interfaces, connections, and
 //! configuration. Provides:
@@ -13,7 +13,7 @@
 //! - Adapter enable/disable
 //!
 //! Uses the guitk library for UI rendering with Catppuccin Mocha dark theme.
-//! Network I/O is performed through SlateOS syscalls; simulated with
+//! Network I/O is performed through Slate OS syscalls; simulated with
 //! representative data for initial development.
 
 #[allow(unused_imports)]

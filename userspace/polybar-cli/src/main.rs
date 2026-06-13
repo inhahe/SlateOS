@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! polybar-cli — SlateOS Polybar status bar
+//! polybar-cli — Slate OS Polybar status bar
 //!
 //! Multi-personality: `polybar`, `polybar-msg`
 

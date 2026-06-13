@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! materialize-cli — SlateOS Materialize (streaming SQL via incremental view maintenance, NYC, private)
+//! materialize-cli — Slate OS Materialize (streaming SQL via incremental view maintenance, NYC, private)
 
 use std::env;
 use std::process;

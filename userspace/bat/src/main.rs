@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bat — SlateOS cat clone with syntax highlighting
+//! bat — Slate OS cat clone with syntax highlighting
 //!
 //! Single personality: `bat`
 

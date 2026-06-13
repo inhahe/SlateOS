@@ -1,4 +1,4 @@
-//! SlateOS extended attributes utility.
+//! Slate OS extended attributes utility.
 //!
 //! Multi-personality binary providing:
 //! - **getfattr** — get extended attributes of files

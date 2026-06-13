@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sas-cli — SlateOS SAS analytics platform
+//! sas-cli — Slate OS SAS analytics platform
 //!
 //! Single personality: `sas`
 

@@ -1,4 +1,4 @@
-// SlateOS taskset - CPU affinity and scheduling tools
+// Slate OS taskset - CPU affinity and scheduling tools
 //
 // Multi-personality binary:
 //   taskset  - set/get process CPU affinity

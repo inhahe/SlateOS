@@ -8,7 +8,7 @@
 //! cargo test runner fail with "os error 740: requires elevation". Embedding an
 //! explicit `asInvoker` manifest opts the binary out of that heuristic.
 //!
-//! The manifest is only relevant on Windows hosts; the SlateOS target triple
+//! The manifest is only relevant on Windows hosts; the Slate OS target triple
 //! matches no Windows ABI, so this is a no-op when cross-compiling.
 
 fn main() {

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mailchimp-cli — SlateOS Intuit Mailchimp marketing automation
+//! mailchimp-cli — Slate OS Intuit Mailchimp marketing automation
 //!
 //! Single personality: `mailchimp`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! qdrant-cli — SlateOS Qdrant (open-source Rust vector DB, Berlin, private)
+//! qdrant-cli — Slate OS Qdrant (open-source Rust vector DB, Berlin, private)
 
 use std::env;
 use std::process;

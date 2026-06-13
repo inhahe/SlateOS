@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! winetricks-cli — SlateOS Winetricks Wine helper
+//! winetricks-cli — Slate OS Winetricks Wine helper
 //!
 //! Single personality: `winetricks`
 

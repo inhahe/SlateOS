@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vault-cli — SlateOS HashiCorp Vault secrets manager CLI
+//! vault-cli — Slate OS HashiCorp Vault secrets manager CLI
 //!
 //! Single personality: `vault`
 

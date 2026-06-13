@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! webtrees-cli — SlateOS webtrees genealogy web application
+//! webtrees-cli — Slate OS webtrees genealogy web application
 //!
 //! Single personality: `webtrees`
 

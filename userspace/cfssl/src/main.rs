@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cfssl — SlateOS CloudFlare PKI/TLS toolkit
+//! cfssl — Slate OS CloudFlare PKI/TLS toolkit
 //!
 //! Multi-personality: `cfssl`, `cfssljson`, `mkbundle`, `multirootca`
 

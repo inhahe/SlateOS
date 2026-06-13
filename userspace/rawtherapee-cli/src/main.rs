@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rawtherapee-cli — SlateOS RawTherapee RAW photo processor
+//! rawtherapee-cli — Slate OS RawTherapee RAW photo processor
 //!
 //! Single personality: `rawtherapee-cli`
 

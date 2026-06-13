@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! graywolf-cli — SlateOS GrayWolf placement tool
+//! graywolf-cli — Slate OS GrayWolf placement tool
 //!
 //! Single personality: `graywolf`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mousetweaks-cli — SlateOS mouse accessibility enhancements
+//! mousetweaks-cli — Slate OS mouse accessibility enhancements
 //!
 //! Single personality: `mousetweaks`
 

@@ -1,4 +1,4 @@
-//! SlateOS ELF Binary Inspector
+//! Slate OS ELF Binary Inspector
 //!
 //! Parses and displays information from ELF32 and ELF64 binary files.
 //! Supports both little-endian and big-endian ELF files.
@@ -79,7 +79,7 @@ const EM_RISCV: u16 = 243;
 const ELFOSABI_NONE: u8 = 0;
 const ELFOSABI_LINUX: u8 = 3;
 const ELFOSABI_FREEBSD: u8 = 9;
-const ELFOSABI_SLATEOS: u8 = 255; // SlateOS custom ABI marker
+const ELFOSABI_SLATEOS: u8 = 255; // Slate OS custom ABI marker
 
 // Program header types (p_type)
 const PT_NULL: u32 = 0;

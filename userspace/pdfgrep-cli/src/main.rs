@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pdfgrep-cli — SlateOS pdfgrep PDF text search
+//! pdfgrep-cli — Slate OS pdfgrep PDF text search
 //!
 //! Single personality: `pdfgrep`
 

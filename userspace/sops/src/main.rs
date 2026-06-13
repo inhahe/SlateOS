@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sops — SlateOS secrets OPerationS (encrypted file editor)
+//! sops — Slate OS secrets OPerationS (encrypted file editor)
 //!
 //! Single personality: `sops`
 

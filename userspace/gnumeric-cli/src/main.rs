@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gnumeric-cli — SlateOS Gnumeric spreadsheet
+//! gnumeric-cli — Slate OS Gnumeric spreadsheet
 //!
 //! Multi-personality: `gnumeric`, `ssconvert`
 

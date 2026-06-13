@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dmenu-cli — SlateOS dmenu dynamic menu
+//! dmenu-cli — Slate OS dmenu dynamic menu
 //!
 //! Multi-personality: `dmenu`, `dmenu_run`, `dmenu_path`
 

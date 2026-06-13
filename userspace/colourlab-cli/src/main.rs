@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! colourlab-cli — SlateOS FilmLight ColourLab Ai look management
+//! colourlab-cli — Slate OS FilmLight ColourLab Ai look management
 //!
 //! Single personality: `colourlab`
 

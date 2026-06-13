@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fivetran-cli — SlateOS Fivetran CLI
+//! fivetran-cli — Slate OS Fivetran CLI
 //!
 //! Multi-personality: `fivetran`
 

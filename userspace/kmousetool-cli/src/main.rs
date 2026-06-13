@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kmousetool-cli — SlateOS automatic mouse click tool
+//! kmousetool-cli — Slate OS automatic mouse click tool
 //!
 //! Single personality: `kmousetool`
 

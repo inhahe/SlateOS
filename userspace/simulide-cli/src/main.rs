@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! simulide-cli — SlateOS SimulIDE electronic circuit simulator
+//! simulide-cli — Slate OS SimulIDE electronic circuit simulator
 //!
 //! Single personality: `simulide`
 

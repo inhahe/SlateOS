@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! inventor-cli — SlateOS Autodesk Inventor 3D mechanical CAD
+//! inventor-cli — Slate OS Autodesk Inventor 3D mechanical CAD
 //!
 //! Single personality: `inventor`
 

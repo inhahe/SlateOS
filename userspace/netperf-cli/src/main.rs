@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! netperf-cli — SlateOS netperf network performance benchmark
+//! netperf-cli — Slate OS netperf network performance benchmark
 //!
 //! Multi-personality: `netperf`, `netserver`
 

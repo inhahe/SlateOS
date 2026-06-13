@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! meson — SlateOS Meson build system
+//! meson — Slate OS Meson build system
 //!
 //! Multi-personality binary detected via argv[0]:
 //!

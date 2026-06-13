@@ -10,7 +10,7 @@
 //! issue a sequence of `ioctl(DRM_IOCTL_*)` calls to learn the driver
 //! version and capabilities, enumerate KMS resources (connectors, CRTCs,
 //! planes), allocate buffers, and program scanout.  Providing this
-//! interface lets those clients drive the SlateOS native [`crate::drm`]
+//! interface lets those clients drive the Slate OS native [`crate::drm`]
 //! subsystem without modification, exactly as the ALSA shim
 //! ([`crate::audio_alsa`]) lets Linux audio clients drive the software
 //! mixer.

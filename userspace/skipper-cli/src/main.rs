@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! skipper-cli — SlateOS Skipper HTTP router
+//! skipper-cli — Slate OS Skipper HTTP router
 //!
 //! Single personality: `skipper`
 

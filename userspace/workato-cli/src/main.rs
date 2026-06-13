@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! workato-cli — SlateOS Workato (modern iPaaS + automation, Mountain View CA, private unicorn)
+//! workato-cli — Slate OS Workato (modern iPaaS + automation, Mountain View CA, private unicorn)
 
 use std::env;
 use std::process;

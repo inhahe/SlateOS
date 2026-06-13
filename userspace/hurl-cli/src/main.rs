@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hurl-cli — SlateOS Hurl HTTP testing tool
+//! hurl-cli — Slate OS Hurl HTTP testing tool
 //!
 //! Multi-personality: `hurl`, `hurlfmt`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! maxima-cli — SlateOS Maxima computer algebra system CLI
+//! maxima-cli — Slate OS Maxima computer algebra system CLI
 //!
 //! Single personality: `maxima`
 

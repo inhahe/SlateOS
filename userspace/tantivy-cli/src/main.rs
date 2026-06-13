@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tantivy-cli — SlateOS Tantivy search engine library CLI
+//! tantivy-cli — Slate OS Tantivy search engine library CLI
 //!
 //! Single personality: `tantivy`
 

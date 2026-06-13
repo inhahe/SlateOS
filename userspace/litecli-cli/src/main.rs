@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! litecli-cli — SlateOS litecli enhanced SQLite client
+//! litecli-cli — Slate OS litecli enhanced SQLite client
 //!
 //! Multi-personality: `litecli`
 

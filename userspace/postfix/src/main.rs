@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! postfix — SlateOS mail transfer agent (MTA)
+//! postfix — Slate OS mail transfer agent (MTA)
 //!
 //! Multi-personality: `postfix` (control), `postconf` (config), `postqueue` (queue),
 //!   `postsuper` (queue admin), `sendmail` (compatibility)

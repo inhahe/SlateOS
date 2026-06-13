@@ -1,4 +1,4 @@
-//! SlateOS EFI boot manager control.
+//! Slate OS EFI boot manager control.
 //!
 //! Multi-personality binary providing:
 //! - **bootctl** — control the boot loader (systemd-boot)

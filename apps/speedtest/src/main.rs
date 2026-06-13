@@ -1,4 +1,4 @@
-//! SlateOS Network Speed Test
+//! Slate OS Network Speed Test
 //!
 //! Graphical network speed test utility with:
 //! - Download, upload, and latency measurement
@@ -11,7 +11,7 @@
 //! - Dark theme (Catppuccin Mocha)
 //!
 //! Uses the guitk library for UI rendering. Network I/O is
-//! performed through SlateOS syscalls; simulated with representative
+//! performed through Slate OS syscalls; simulated with representative
 //! data for initial development.
 
 #[allow(unused_imports)]
@@ -1859,7 +1859,7 @@ impl Default for SpeedTestUI {
 }
 
 // ============================================================================
-// Entry point (placeholder for SlateOS)
+// Entry point (placeholder for Slate OS)
 // ============================================================================
 
 fn main() {}

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! aerc-cli — SlateOS aerc terminal email client
+//! aerc-cli — Slate OS aerc terminal email client
 //!
 //! Single personality: `aerc`
 

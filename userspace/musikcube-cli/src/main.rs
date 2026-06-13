@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! musikcube-cli — SlateOS musikcube music player
+//! musikcube-cli — Slate OS musikcube music player
 //!
 //! Multi-personality: `musikcube`, `musikcubed`
 

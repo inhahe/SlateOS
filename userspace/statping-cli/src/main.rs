@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! statping-cli — SlateOS Statping-ng status page
+//! statping-cli — Slate OS Statping-ng status page
 //!
 //! Single personality: `statping`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nmap-cli — SlateOS network scanner
+//! nmap-cli — Slate OS network scanner
 //!
 //! Single personality: `nmap`
 

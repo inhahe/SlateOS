@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! singer-cli — SlateOS Singer tap/target runner
+//! singer-cli — Slate OS Singer tap/target runner
 //!
 //! Multi-personality: `tap`, `target`
 

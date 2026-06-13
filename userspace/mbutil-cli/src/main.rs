@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mbutil-cli — SlateOS MBTiles utility
+//! mbutil-cli — Slate OS MBTiles utility
 //!
 //! Single personality: `mbutil`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ldap-cli — SlateOS LDAP client tools
+//! ldap-cli — Slate OS LDAP client tools
 //!
 //! Multi-personality: `ldapsearch`, `ldapadd`, `ldapmodify`, `ldapdelete`, `ldapwhoami`, `ldappasswd`
 

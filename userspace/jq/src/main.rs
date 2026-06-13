@@ -1,4 +1,4 @@
-//! jq — SlateOS JSON processor
+//! jq — Slate OS JSON processor
 //!
 //! A subset of jq's functionality: JSON parsing, pretty printing, and
 //! filter expressions for querying and transforming JSON data.
@@ -13,7 +13,7 @@ use std::io::{self, Read as _, Write as _};
 // Output helpers
 // ============================================================================
 //
-// These route through std, which reaches the native SlateOS write syscall via
+// These route through std, which reaches the native Slate OS write syscall via
 // the posix libc layer.  (Previously they hand-rolled `syscall(1, ...)` using
 // the Linux write number — but native syscall 1 is SYS_EXIT, so every write
 // terminated the process.)

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! csound-cli — SlateOS Csound audio programming
+//! csound-cli — Slate OS Csound audio programming
 //!
 //! Multi-personality: `csound`
 

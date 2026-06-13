@@ -1,4 +1,4 @@
-// SlateOS lvm - Logical Volume Manager utilities
+// Slate OS lvm - Logical Volume Manager utilities
 //
 // Multi-personality binary:
 //   pvcreate  - initialize physical volume

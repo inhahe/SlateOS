@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fiddler-cli — SlateOS Fiddler web debugging proxy
+//! fiddler-cli — Slate OS Fiddler web debugging proxy
 //!
 //! Single personality: `fiddler`
 

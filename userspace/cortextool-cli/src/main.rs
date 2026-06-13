@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cortextool-cli — SlateOS Cortex metrics management tool
+//! cortextool-cli — Slate OS Cortex metrics management tool
 //!
 //! Single personality: `cortextool`
 

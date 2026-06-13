@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! census-cli — SlateOS Census (the OG reverse-ETL, Hightouch's main rival)
+//! census-cli — Slate OS Census (the OG reverse-ETL, Hightouch's main rival)
 
 use std::env;
 use std::process;

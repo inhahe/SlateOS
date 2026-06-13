@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! geotiff-cli — SlateOS libgeotiff tools
+//! geotiff-cli — Slate OS libgeotiff tools
 //!
 //! Multi-personality: `listgeo`, `geotifcp`, `applygeo`
 

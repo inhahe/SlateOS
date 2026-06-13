@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! octanerender-cli — SlateOS OTOY Octane Render (GPU path tracer)
+//! octanerender-cli — Slate OS OTOY Octane Render (GPU path tracer)
 //!
 //! Single personality: `octane`
 

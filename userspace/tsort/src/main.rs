@@ -1,4 +1,4 @@
-//! tsort — topological sort for SlateOS
+//! tsort — topological sort for Slate OS
 //!
 //! Reads pairs of strings from input and produces a topological
 //! ordering. Reports cycles to stderr.

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nuclei-cli — SlateOS Nuclei vulnerability scanner
+//! nuclei-cli — Slate OS Nuclei vulnerability scanner
 //!
 //! Multi-personality: `nuclei`
 

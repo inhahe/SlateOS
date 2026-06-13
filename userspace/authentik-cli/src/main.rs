@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! authentik-cli — SlateOS authentik identity provider
+//! authentik-cli — Slate OS authentik identity provider
 //!
 //! Single personality: `authentik`
 

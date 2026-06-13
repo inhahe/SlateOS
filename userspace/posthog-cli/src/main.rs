@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! posthog-cli — SlateOS PostHog (open-source product analytics — the Amplitude killer)
+//! posthog-cli — Slate OS PostHog (open-source product analytics — the Amplitude killer)
 //!
 //! Single personality: `posthog`
 

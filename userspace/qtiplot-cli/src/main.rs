@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! qtiplot-cli — SlateOS QtiPlot scientific graphing
+//! qtiplot-cli — Slate OS QtiPlot scientific graphing
 //!
 //! Single personality: `qtiplot`
 

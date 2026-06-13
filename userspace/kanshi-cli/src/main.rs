@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kanshi-cli — SlateOS kanshi dynamic output configuration
+//! kanshi-cli — Slate OS kanshi dynamic output configuration
 //!
 //! Single personality: `kanshi`
 

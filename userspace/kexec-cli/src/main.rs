@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kexec-cli — SlateOS fast kernel reboot tool
+//! kexec-cli — Slate OS fast kernel reboot tool
 //!
 //! Multi-personality: `kexec`, `kdump-config`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sox — SlateOS Sound eXchange audio processor
+//! sox — Slate OS Sound eXchange audio processor
 //!
 //! Multi-personality: `sox`, `soxi`, `play`, `rec`
 

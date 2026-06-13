@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kopano-cli — SlateOS Kopano groupware
+//! kopano-cli — Slate OS Kopano groupware
 //!
 //! Multi-personality: `kopano-server`, `kopano-admin`, `kopano-gateway`
 

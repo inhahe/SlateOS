@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tigerbeetle-cli — SlateOS TigerBeetle financial transactions database
+//! tigerbeetle-cli — Slate OS TigerBeetle financial transactions database
 //!
 //! Single personality: `tigerbeetle`
 

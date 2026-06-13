@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! logtool-cli — SlateOS logtool log file analysis
+//! logtool-cli — Slate OS logtool log file analysis
 //!
 //! Single personality: `logtool`
 

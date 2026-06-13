@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dovecot-cli — SlateOS Dovecot IMAP/POP3 server CLI
+//! dovecot-cli — Slate OS Dovecot IMAP/POP3 server CLI
 //!
 //! Multi-personality: `dovecot`, `doveconf`, `doveadm`
 

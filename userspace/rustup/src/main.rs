@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rustup — SlateOS Rust toolchain installer and manager
+//! rustup — Slate OS Rust toolchain installer and manager
 //!
 //! Multi-personality binary detected via argv[0]:
 //!

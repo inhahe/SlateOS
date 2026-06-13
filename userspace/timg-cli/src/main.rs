@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! timg-cli — SlateOS timg terminal image/video viewer
+//! timg-cli — Slate OS timg terminal image/video viewer
 //!
 //! Single personality: `timg`
 

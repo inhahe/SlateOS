@@ -1,4 +1,4 @@
-//! SlateOS 2048 Game
+//! Slate OS 2048 Game
 //!
 //! A tile-merging puzzle game where the player slides numbered tiles on a 4×4
 //! grid, combining identical tiles to reach the 2048 tile and beyond.

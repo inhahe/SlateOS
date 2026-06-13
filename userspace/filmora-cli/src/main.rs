@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! filmora-cli — SlateOS Wondershare Filmora (consumer video editor)
+//! filmora-cli — Slate OS Wondershare Filmora (consumer video editor)
 //!
 //! Single personality: `filmora`
 

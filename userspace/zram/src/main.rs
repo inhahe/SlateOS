@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zram — SlateOS compressed RAM block device management
+//! zram — Slate OS compressed RAM block device management
 //!
 //! Multi-personality binary for managing zram (compressed swap in RAM).
 //! Detected via argv[0]:

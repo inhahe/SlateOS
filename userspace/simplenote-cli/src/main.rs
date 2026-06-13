@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! simplenote-cli — SlateOS Simplenote minimal notes
+//! simplenote-cli — Slate OS Simplenote minimal notes
 //!
 //! Single personality: `simplenote`
 

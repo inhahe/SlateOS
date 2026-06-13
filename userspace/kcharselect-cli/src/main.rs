@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kcharselect-cli — SlateOS KDE Character Selector
+//! kcharselect-cli — Slate OS KDE Character Selector
 //!
 //! Single personality: `kcharselect`
 

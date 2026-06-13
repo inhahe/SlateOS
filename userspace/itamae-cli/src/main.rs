@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! itamae-cli — SlateOS Itamae configuration management
+//! itamae-cli — Slate OS Itamae configuration management
 //!
 //! Single personality: `itamae`
 

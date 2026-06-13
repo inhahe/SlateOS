@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gping — SlateOS ping with a graph
+//! gping — Slate OS ping with a graph
 //!
 //! Single personality: `gping`
 

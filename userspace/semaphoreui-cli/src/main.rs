@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! semaphoreui-cli — SlateOS Semaphore UI for Ansible/Terraform
+//! semaphoreui-cli — Slate OS Semaphore UI for Ansible/Terraform
 //!
 //! Single personality: `semaphore`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! minikube-cli — SlateOS Minikube local Kubernetes tool
+//! minikube-cli — Slate OS Minikube local Kubernetes tool
 //!
 //! Single personality: `minikube`
 

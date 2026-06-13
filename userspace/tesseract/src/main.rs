@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tesseract — SlateOS OCR engine
+//! tesseract — Slate OS OCR engine
 //!
 //! Single personality: `tesseract`
 

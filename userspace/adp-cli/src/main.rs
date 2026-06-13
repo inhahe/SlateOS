@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! adp-cli — SlateOS ADP (Automatic Data Processing — the largest US payroll provider)
+//! adp-cli — Slate OS ADP (Automatic Data Processing — the largest US payroll provider)
 //!
 //! Single personality: `adp`
 

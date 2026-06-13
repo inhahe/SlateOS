@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cdist-cli — SlateOS cdist configuration management
+//! cdist-cli — Slate OS cdist configuration management
 //!
 //! Single personality: `cdist`
 

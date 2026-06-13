@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! traefik-cli — SlateOS Traefik reverse proxy/load balancer
+//! traefik-cli — Slate OS Traefik reverse proxy/load balancer
 //!
 //! Multi-personality: `traefik`
 

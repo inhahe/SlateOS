@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! eset-cli — SlateOS ESET HOME / NOD32 security
+//! eset-cli — Slate OS ESET HOME / NOD32 security
 //!
 //! Single personality: `eset`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! signal-desktop-cli — SlateOS Signal Desktop messenger
+//! signal-desktop-cli — Slate OS Signal Desktop messenger
 //!
 //! Single personality: `signal-desktop`
 

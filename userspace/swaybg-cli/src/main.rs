@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! swaybg-cli — SlateOS swaybg wallpaper daemon
+//! swaybg-cli — Slate OS swaybg wallpaper daemon
 //!
 //! Single personality: `swaybg`
 

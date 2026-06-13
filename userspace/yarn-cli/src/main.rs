@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! yarn-cli — SlateOS Yarn package manager
+//! yarn-cli — Slate OS Yarn package manager
 //!
 //! Multi-personality: `yarn`, `yarnpkg`
 

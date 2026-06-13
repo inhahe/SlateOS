@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! asciidoctor-cli — SlateOS Asciidoctor document processor
+//! asciidoctor-cli — Slate OS Asciidoctor document processor
 //!
 //! Multi-personality: `asciidoctor`, `asciidoctor-pdf`
 

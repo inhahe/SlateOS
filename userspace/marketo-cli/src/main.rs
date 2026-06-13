@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! marketo-cli — SlateOS Marketo Engage (Adobe-owned enterprise B2B marketing automation)
+//! marketo-cli — Slate OS Marketo Engage (Adobe-owned enterprise B2B marketing automation)
 //!
 //! Single personality: `marketo`
 

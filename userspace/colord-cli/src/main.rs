@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! colord-cli — SlateOS colord display color management
+//! colord-cli — Slate OS colord display color management
 //!
 //! Single personality: `colormgr`
 

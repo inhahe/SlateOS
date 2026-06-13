@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! yuzu-cli — SlateOS Yuzu Nintendo Switch emulator
+//! yuzu-cli — Slate OS Yuzu Nintendo Switch emulator
 //!
 //! Multi-personality: `yuzu`, `yuzu-cmd`
 

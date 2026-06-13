@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! affinity-cli — SlateOS Affinity creative suite
+//! affinity-cli — Slate OS Affinity creative suite
 //!
 //! Single personality: `affinity`
 

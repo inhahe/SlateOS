@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ramp-cli — SlateOS Ramp (corporate cards + spend mgmt, fastest-growing fintech)
+//! ramp-cli — Slate OS Ramp (corporate cards + spend mgmt, fastest-growing fintech)
 //!
 //! Single personality: `ramp`
 

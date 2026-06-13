@@ -1,4 +1,4 @@
-//! SlateOS Multi-Personality Utility: mktemp / id / groups / whoami
+//! Slate OS Multi-Personality Utility: mktemp / id / groups / whoami
 //!
 //! A single binary that determines its behavior based on `argv[0]`:
 //!

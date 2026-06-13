@@ -1,4 +1,4 @@
-// SlateOS fdisk - Multi-personality disk partitioning utility
+// Slate OS fdisk - Multi-personality disk partitioning utility
 //
 // Personalities detected via argv[0] basename:
 //   fdisk     - MBR/GPT interactive partition editor
@@ -2391,7 +2391,7 @@ fn print_gdisk_listing(out: &mut OutBuf, dev: &[u8], label: &DiskLabel,
 // ── partprobe: Inform Kernel ─────────────────────────────────────────
 
 fn do_partprobe(out: &mut OutBuf, dev: &[u8]) {
-    // In SlateOS this would issue a syscall to re-read partition tables.
+    // In Slate OS this would issue a syscall to re-read partition tables.
     // For now, print what we would do and report success.
     out.push(dev);
     out.push(b": partition table re-read requested");
@@ -2546,7 +2546,7 @@ fn print_version(out: &mut OutBuf, personality: Personality) {
 // ── Simulated Disk Data for Testing ──────────────────────────────────
 
 /// Build a minimal simulated disk image for listing (when no real device is available).
-/// In a real SlateOS environment, we would read from /dev/sdX. This provides a
+/// In a real Slate OS environment, we would read from /dev/sdX. This provides a
 /// fallback that shows the tool is functional.
 fn build_test_gpt_disk() -> ([u8; 17408], u64, u64) {
     let mut disk = [0u8; 17408]; // 34 sectors * 512
@@ -2665,7 +2665,7 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
         _ => {}
     }
 
-    // For listing/display, we need a disk image. In SlateOS we would read from
+    // For listing/display, we need a disk image. In Slate OS we would read from
     // the actual device. Here we detect the personality and dispatch.
     let dev = opts.device_bytes();
 
@@ -2708,7 +2708,7 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
         return 0;
     }
 
-    // Try to read the device. On real SlateOS we read /dev/sdX.
+    // Try to read the device. On real Slate OS we read /dev/sdX.
     // For now, use simulated data when the device read fails.
     let sector_size: u64 = 512;
     let hw_sector_size: u64 = 512;

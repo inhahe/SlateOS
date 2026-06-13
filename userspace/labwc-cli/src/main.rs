@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! labwc-cli — SlateOS labwc Wayland stacking compositor
+//! labwc-cli — Slate OS labwc Wayland stacking compositor
 //!
 //! Single personality: `labwc`
 

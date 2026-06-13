@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wl-gammactl-cli — SlateOS wl-gammactl gamma/brightness/contrast
+//! wl-gammactl-cli — Slate OS wl-gammactl gamma/brightness/contrast
 //!
 //! Single personality: `wl-gammactl`
 

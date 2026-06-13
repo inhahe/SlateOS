@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! qlik-cli — SlateOS Qlik Sense / QlikView analytics
+//! qlik-cli — Slate OS Qlik Sense / QlikView analytics
 //!
 //! Single personality: `qlik`
 

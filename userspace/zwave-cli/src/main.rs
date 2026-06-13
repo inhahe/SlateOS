@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zwave-cli — SlateOS Z-Wave home automation
+//! zwave-cli — Slate OS Z-Wave home automation
 //!
 //! Multi-personality: `zwave-js`, `zwcli`
 

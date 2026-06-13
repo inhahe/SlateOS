@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sveltekit-cli — SlateOS SvelteKit web framework CLI
+//! sveltekit-cli — Slate OS SvelteKit web framework CLI
 //!
 //! Single personality: `sveltekit`
 

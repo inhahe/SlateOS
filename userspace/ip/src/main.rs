@@ -1,4 +1,4 @@
-//! SlateOS Network Configuration Utility
+//! Slate OS Network Configuration Utility
 //!
 //! Configure network interfaces, IP addresses, routes, and DNS.
 //! Reads live state from /proc/net/ and /sys/class/net/, writes

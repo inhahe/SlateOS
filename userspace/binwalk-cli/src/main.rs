@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! binwalk-cli — SlateOS binwalk firmware analysis tool
+//! binwalk-cli — Slate OS binwalk firmware analysis tool
 //!
 //! Single personality: `binwalk`
 

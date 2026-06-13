@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! atril-cli — SlateOS MATE Atril document viewer
+//! atril-cli — Slate OS MATE Atril document viewer
 //!
 //! Single personality: `atril`
 

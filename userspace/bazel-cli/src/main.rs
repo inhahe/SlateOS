@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bazel-cli — SlateOS Bazel build system CLI
+//! bazel-cli — Slate OS Bazel build system CLI
 //!
 //! Single personality: `bazel`
 

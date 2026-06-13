@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! marble-cli — SlateOS KDE Marble virtual globe
+//! marble-cli — Slate OS KDE Marble virtual globe
 //!
 //! Single personality: `marble`
 

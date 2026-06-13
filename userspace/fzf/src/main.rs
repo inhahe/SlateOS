@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fzf — SlateOS command-line fuzzy finder
+//! fzf — Slate OS command-line fuzzy finder
 //!
 //! Single personality: `fzf`
 

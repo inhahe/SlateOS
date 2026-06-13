@@ -1,7 +1,7 @@
-//! SlateOS `ldd` — Shared Library Dependency Lister
+//! Slate OS `ldd` — Shared Library Dependency Lister
 //!
 //! Parses ELF binaries and lists their shared-library dependencies, following
-//! the same resolution order as the SlateOS dynamic linker:
+//! the same resolution order as the Slate OS dynamic linker:
 //!
 //!   1. `RPATH` embedded in the binary (deprecated but honoured)
 //!   2. `LD_LIBRARY_PATH` environment variable

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! prometheus — SlateOS monitoring and alerting toolkit
+//! prometheus — Slate OS monitoring and alerting toolkit
 //!
 //! Multi-personality: `prometheus` (server), `promtool` (CLI tool)
 

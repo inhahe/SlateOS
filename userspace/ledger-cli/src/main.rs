@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ledger-cli — SlateOS Ledger hardware wallet manager
+//! ledger-cli — Slate OS Ledger hardware wallet manager
 //!
 //! Single personality: `ledger-live`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! klayout-cli — SlateOS KLayout IC layout viewer
+//! klayout-cli — Slate OS KLayout IC layout viewer
 //!
 //! Single personality: `klayout`
 

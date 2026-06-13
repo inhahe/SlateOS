@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bigeye-cli — SlateOS Bigeye (data observability, Uber data team alumni)
+//! bigeye-cli — Slate OS Bigeye (data observability, Uber data team alumni)
 
 use std::env;
 use std::process;

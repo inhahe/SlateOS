@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! solr-cli — SlateOS Apache Solr search platform
+//! solr-cli — Slate OS Apache Solr search platform
 //!
 //! Single personality: `solr`
 

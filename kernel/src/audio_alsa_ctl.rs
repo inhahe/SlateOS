@@ -283,7 +283,7 @@ pub const SNDRV_CTL_IOCTL_ELEM_WRITE: u32 = ioc(
 // Our card's control-element model
 // ---------------------------------------------------------------------------
 //
-// The SlateOS virtual card exposes the two controls every mixer UI expects: a
+// The Slate OS virtual card exposes the two controls every mixer UI expects: a
 // "Master Playback Volume" integer (0..100, matching audio_mixer's scale) and
 // a "Master Playback Switch" boolean (the mute toggle, inverted: 1 = unmuted).
 // The numids are stable 1-based identifiers, as Linux assigns them.

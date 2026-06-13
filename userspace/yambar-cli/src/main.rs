@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! yambar-cli — SlateOS yambar modular status bar
+//! yambar-cli — Slate OS yambar modular status bar
 //!
 //! Single personality: `yambar`
 

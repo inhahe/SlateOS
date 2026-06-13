@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cubase-cli — SlateOS Steinberg Cubase DAW
+//! cubase-cli — Slate OS Steinberg Cubase DAW
 //!
 //! Single personality: `cubase`
 

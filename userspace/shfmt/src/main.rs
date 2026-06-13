@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! shfmt — SlateOS shell script formatter
+//! shfmt — Slate OS shell script formatter
 //!
 //! Single personality: `shfmt`
 

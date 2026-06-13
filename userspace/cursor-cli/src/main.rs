@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cursor-cli — SlateOS Cursor (AI-first VS Code fork by Anysphere)
+//! cursor-cli — Slate OS Cursor (AI-first VS Code fork by Anysphere)
 //!
 //! Single personality: `cursor`
 

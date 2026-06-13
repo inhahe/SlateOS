@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! postfix-cli — SlateOS Postfix mail server CLI
+//! postfix-cli — Slate OS Postfix mail server CLI
 //!
 //! Multi-personality: `postfix`, `postconf`, `postqueue`, `postsuper`, `postalias`, `postmap`
 

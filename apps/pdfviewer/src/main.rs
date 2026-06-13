@@ -1,4 +1,4 @@
-//! SlateOS PDF Viewer
+//! Slate OS PDF Viewer
 //!
 //! Graphical PDF document viewer with:
 //! - PDF document model (pages, metadata, bookmarks/outline)

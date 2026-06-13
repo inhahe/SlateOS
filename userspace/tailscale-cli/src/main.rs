@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tailscale-cli — SlateOS Tailscale mesh VPN tools
+//! tailscale-cli — Slate OS Tailscale mesh VPN tools
 //!
 //! Multi-personality: `tailscale`, `tailscaled`
 

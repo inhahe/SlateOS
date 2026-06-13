@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rfkill-cli — SlateOS radio kill switch tool
+//! rfkill-cli — Slate OS radio kill switch tool
 //!
 //! Multi-personality: `rfkill`
 

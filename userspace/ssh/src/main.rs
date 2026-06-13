@@ -1,4 +1,4 @@
-//! SlateOS SSH-2 Client
+//! Slate OS SSH-2 Client
 //!
 //! A simplified SSH-2 protocol client for SlateOS. Supports password
 //! authentication, interactive shell sessions, and remote command execution.
@@ -2110,7 +2110,7 @@ impl SshSession {
     }
 
     /// Read a password from stdin with echo disabled.
-    /// On SlateOS, we write to stderr to prompt, then read a line from stdin.
+    /// On Slate OS, we write to stderr to prompt, then read a line from stdin.
     /// Real echo suppression requires ioctl — here we just do a basic read.
     fn read_password(&self) -> Result<String, SshError> {
         eprint!("{}@{}'s password: ", self.config.user, self.config.hostname);

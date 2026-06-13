@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! river-cli — SlateOS River Wayland compositor
+//! river-cli — Slate OS River Wayland compositor
 //!
 //! Multi-personality: `river`, `riverctl`, `rivertile`
 

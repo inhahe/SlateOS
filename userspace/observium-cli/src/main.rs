@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! observium-cli — SlateOS Observium network monitoring
+//! observium-cli — Slate OS Observium network monitoring
 //!
 //! Single personality: `observium`
 

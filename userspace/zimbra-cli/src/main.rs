@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zimbra-cli — SlateOS Zimbra collaboration suite
+//! zimbra-cli — Slate OS Zimbra collaboration suite
 //!
 //! Multi-personality: `zmcontrol`, `zmcertmgr`, `zmhsm`
 

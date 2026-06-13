@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pg-dump-cli — SlateOS pg_dump/pg_restore CLI
+//! pg-dump-cli — Slate OS pg_dump/pg_restore CLI
 //!
 //! Multi-personality: `pg_dump`, `pg_restore`, `pg_dumpall`
 

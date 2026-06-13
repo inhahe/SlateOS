@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! stride-cli — SlateOS Stride game engine
+//! stride-cli — Slate OS Stride game engine
 //!
 //! Single personality: `stride`
 

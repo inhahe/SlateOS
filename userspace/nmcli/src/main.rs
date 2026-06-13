@@ -1,4 +1,4 @@
-//! SlateOS `nmcli` — NetworkManager multi-personality binary.
+//! Slate OS `nmcli` — NetworkManager multi-personality binary.
 //!
 //! Multi-personality binary providing:
 //! - **NetworkManager** — network management daemon: manages connection profiles,
@@ -2114,7 +2114,7 @@ fn run(args: &[String], out: &mut dyn Write) -> i32 {
 }
 
 // ============================================================================
-// Entry point (SlateOS)
+// Entry point (Slate OS)
 // ============================================================================
 
 #[cfg(not(test))]

@@ -1,4 +1,4 @@
-//! SlateOS ELF Object File Analysis Tools
+//! Slate OS ELF Object File Analysis Tools
 //!
 //! Multi-personality binary that acts as `objdump`, `nm`, or `size` depending
 //! on the name used to invoke it (detected via `argv[0]`).

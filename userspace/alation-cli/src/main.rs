@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! alation-cli — SlateOS Alation (data catalog category leader, Redwood City)
+//! alation-cli — Slate OS Alation (data catalog category leader, Redwood City)
 
 use std::env;
 use std::process;

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! twilio-cli — SlateOS Twilio CLI
+//! twilio-cli — Slate OS Twilio CLI
 //!
 //! Single personality: `twilio`
 

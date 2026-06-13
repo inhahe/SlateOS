@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pcsx2-cli — SlateOS PCSX2 PlayStation 2 emulator
+//! pcsx2-cli — Slate OS PCSX2 PlayStation 2 emulator
 //!
 //! Multi-personality: `pcsx2`, `pcsx2-qt`
 

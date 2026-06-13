@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zotero-cli — SlateOS Zotero reference manager
+//! zotero-cli — Slate OS Zotero reference manager
 //!
 //! Single personality: `zotero`
 

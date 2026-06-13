@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! svox-cli — SlateOS SVOX pico text-to-speech engine
+//! svox-cli — Slate OS SVOX pico text-to-speech engine
 //!
 //! Single personality: `pico2wave`
 

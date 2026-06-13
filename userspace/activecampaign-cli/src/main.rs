@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! activecampaign-cli — SlateOS ActiveCampaign (SMB marketing automation + CRM)
+//! activecampaign-cli — Slate OS ActiveCampaign (SMB marketing automation + CRM)
 //!
 //! Single personality: `activecampaign`
 

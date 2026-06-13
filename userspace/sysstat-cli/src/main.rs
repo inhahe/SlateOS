@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sysstat-cli — SlateOS sysstat system performance tools
+//! sysstat-cli — Slate OS sysstat system performance tools
 //!
 //! Multi-personality: `sar`, `iostat`, `mpstat`, `pidstat`, `cifsiostat`
 

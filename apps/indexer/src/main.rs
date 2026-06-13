@@ -1,4 +1,4 @@
-//! indexer — SlateOS background file indexer service.
+//! indexer — Slate OS background file indexer service.
 //!
 //! Builds and maintains a searchable index of the filesystem, enabling
 //! near-instant file search by name, glob pattern, path, or content.
@@ -1170,7 +1170,7 @@ fn cmd_stop() {
         Ok(pid_str) => {
             let pid = pid_str.trim();
             println!("Stopping indexer service (PID {})...", pid);
-            // On SlateOS, we'd send an IPC shutdown message. For now, remove PID file.
+            // On Slate OS, we'd send an IPC shutdown message. For now, remove PID file.
             if let Err(e) = fs::remove_file(PID_FILE) {
                 eprintln!("warning: could not remove PID file: {}", e);
             }

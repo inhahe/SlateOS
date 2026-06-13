@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! veusz-cli — SlateOS Veusz scientific plotting
+//! veusz-cli — Slate OS Veusz scientific plotting
 //!
 //! Single personality: `veusz`
 

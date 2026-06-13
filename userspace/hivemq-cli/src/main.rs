@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hivemq-cli — SlateOS HiveMQ MQTT tools
+//! hivemq-cli — Slate OS HiveMQ MQTT tools
 //!
 //! Multi-personality: `hivemq`, `mqtt-cli`
 

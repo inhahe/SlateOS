@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! iperf3-cli — SlateOS iPerf3 network bandwidth tester
+//! iperf3-cli — Slate OS iPerf3 network bandwidth tester
 //!
 //! Single personality: `iperf3`
 

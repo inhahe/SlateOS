@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! seqkit-cli — SlateOS SeqKit sequence manipulation
+//! seqkit-cli — Slate OS SeqKit sequence manipulation
 //!
 //! Single personality: `seqkit`
 

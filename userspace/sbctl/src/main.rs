@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sbctl — SlateOS Secure Boot key management
+//! sbctl — Slate OS Secure Boot key management
 //!
 //! Multi-personality binary for UEFI Secure Boot key enrollment and management.
 //! Detected via argv[0]:

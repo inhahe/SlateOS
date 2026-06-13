@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! reason-cli — SlateOS Reason Studios Reason DAW/rack
+//! reason-cli — Slate OS Reason Studios Reason DAW/rack
 //!
 //! Single personality: `reason`
 

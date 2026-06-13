@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ppsspp-cli — SlateOS PPSSPP PSP emulator
+//! ppsspp-cli — Slate OS PPSSPP PSP emulator
 //!
 //! Multi-personality: `ppsspp`, `ppsspp-headless`
 

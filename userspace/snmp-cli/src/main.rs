@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! snmp-cli — SlateOS SNMP management tools
+//! snmp-cli — Slate OS SNMP management tools
 //!
 //! Multi-personality: `snmpget`, `snmpwalk`, `snmpset`, `snmptrap`, `snmpbulkwalk`, `snmptranslate`
 

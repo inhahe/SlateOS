@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! capnp-cli — SlateOS Cap'n Proto schema compiler
+//! capnp-cli — Slate OS Cap'n Proto schema compiler
 //!
 //! Multi-personality: `capnp`, `capnpc`
 

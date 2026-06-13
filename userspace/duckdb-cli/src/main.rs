@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! duckdb-cli — SlateOS DuckDB analytical database
+//! duckdb-cli — Slate OS DuckDB analytical database
 //!
 //! Single personality: `duckdb`
 

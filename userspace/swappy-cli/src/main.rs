@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! swappy-cli — SlateOS Swappy screenshot editor
+//! swappy-cli — Slate OS Swappy screenshot editor
 //!
 //! Single personality: `swappy`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! airflow-cli — SlateOS Apache Airflow CLI
+//! airflow-cli — Slate OS Apache Airflow CLI
 //!
 //! Multi-personality: `airflow`
 

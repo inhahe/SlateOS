@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! restclient-cli — SlateOS REST client tool
+//! restclient-cli — Slate OS REST client tool
 //!
 //! Single personality: `restclient`
 

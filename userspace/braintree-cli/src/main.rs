@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! braintree-cli — SlateOS Braintree payment CLI
+//! braintree-cli — Slate OS Braintree payment CLI
 //!
 //! Single personality: `braintree`
 

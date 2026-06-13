@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! grbl-cli — SlateOS GRBL CNC controller
+//! grbl-cli — Slate OS GRBL CNC controller
 //!
 //! Multi-personality: `grbl`, `grbl-send`
 

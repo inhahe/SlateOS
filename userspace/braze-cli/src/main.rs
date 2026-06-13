@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! braze-cli — SlateOS Braze (B2C customer engagement, NASDAQ:BRZE)
+//! braze-cli — Slate OS Braze (B2C customer engagement, NASDAQ:BRZE)
 //!
 //! Single personality: `braze`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pdfcpu-cli — SlateOS pdfcpu PDF processor
+//! pdfcpu-cli — Slate OS pdfcpu PDF processor
 //!
 //! Single personality: `pdfcpu`
 

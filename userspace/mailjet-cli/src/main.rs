@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! mailjet-cli — SlateOS Mailjet (Sinch Email) personality CLI.
+//! mailjet-cli — Slate OS Mailjet (Sinch Email) personality CLI.
 
 use std::env;
 use std::process;

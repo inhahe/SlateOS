@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pinot-cli — SlateOS Apache Pinot OLAP datastore
+//! pinot-cli — Slate OS Apache Pinot OLAP datastore
 //!
 //! Single personality: `pinot-admin`
 

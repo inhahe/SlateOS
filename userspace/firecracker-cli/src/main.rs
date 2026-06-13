@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! firecracker-cli — SlateOS Firecracker microVM CLI
+//! firecracker-cli — Slate OS Firecracker microVM CLI
 //!
 //! Multi-personality: `firecracker`, `jailer`
 

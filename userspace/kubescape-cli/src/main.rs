@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kubescape-cli — SlateOS Kubescape Kubernetes security scanner
+//! kubescape-cli — Slate OS Kubescape Kubernetes security scanner
 //!
 //! Single personality: `kubescape`
 

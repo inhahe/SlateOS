@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bill-cli — SlateOS BILL (formerly Bill.com — accounts payable/receivable automation)
+//! bill-cli — Slate OS BILL (formerly Bill.com — accounts payable/receivable automation)
 //!
 //! Single personality: `bill`
 

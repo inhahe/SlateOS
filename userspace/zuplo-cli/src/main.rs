@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! zuplo-cli — SlateOS Zuplo programmable edge API gateway personality CLI.
+//! zuplo-cli — Slate OS Zuplo programmable edge API gateway personality CLI.
 
 use std::env;
 use std::process;

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! matplotlib-cli — SlateOS Matplotlib plotting library
+//! matplotlib-cli — Slate OS Matplotlib plotting library
 //!
 //! Multi-personality: `matplotlib`
 

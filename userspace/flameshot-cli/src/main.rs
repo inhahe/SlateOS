@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! flameshot-cli — SlateOS Flameshot screenshot tool
+//! flameshot-cli — Slate OS Flameshot screenshot tool
 //!
 //! Single personality: `flameshot`
 

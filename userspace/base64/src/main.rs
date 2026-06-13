@@ -1,4 +1,4 @@
-//! SlateOS base64/base32/uuencode/uudecode — encoding/decoding tools
+//! Slate OS base64/base32/uuencode/uudecode — encoding/decoding tools
 //!
 //! Multi-personality binary detected via argv[0]:
 //! - `base64`: RFC 4648 Base64 encode/decode

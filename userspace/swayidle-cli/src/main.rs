@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! swayidle-cli — SlateOS swayidle idle management daemon
+//! swayidle-cli — Slate OS swayidle idle management daemon
 //!
 //! Single personality: `swayidle`
 

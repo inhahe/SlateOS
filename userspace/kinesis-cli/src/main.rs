@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kinesis-cli — SlateOS AWS Kinesis (real-time data streaming on AWS, Seattle WA)
+//! kinesis-cli — Slate OS AWS Kinesis (real-time data streaming on AWS, Seattle WA)
 
 use std::env;
 use std::process;

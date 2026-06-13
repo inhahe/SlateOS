@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! virt-cli — SlateOS virt-manager CLI tools
+//! virt-cli — Slate OS virt-manager CLI tools
 //!
 //! Multi-personality: `virt-install`, `virt-clone`, `virt-viewer`, `virt-xml`
 

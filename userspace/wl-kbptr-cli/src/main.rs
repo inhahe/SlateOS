@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wl-kbptr-cli — SlateOS wl-kbptr keyboard-driven pointer control
+//! wl-kbptr-cli — Slate OS wl-kbptr keyboard-driven pointer control
 //!
 //! Single personality: `wl-kbptr`
 

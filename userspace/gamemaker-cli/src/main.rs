@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gamemaker-cli — SlateOS GameMaker Studio (Opera-owned indie 2D engine)
+//! gamemaker-cli — Slate OS GameMaker Studio (Opera-owned indie 2D engine)
 //!
 //! Single personality: `gamemaker`
 

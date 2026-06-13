@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! netlify-cli — SlateOS Netlify CLI
+//! netlify-cli — Slate OS Netlify CLI
 //!
 //! Single personality: `netlify`
 

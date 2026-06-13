@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! drill-cli — SlateOS Drill HTTP load testing tool
+//! drill-cli — Slate OS Drill HTTP load testing tool
 //!
 //! Single personality: `drill`
 

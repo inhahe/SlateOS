@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tig — SlateOS text-mode interface for git
+//! tig — Slate OS text-mode interface for git
 //!
 //! Single personality: `tig`
 

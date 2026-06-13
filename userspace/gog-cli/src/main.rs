@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gog-cli — SlateOS GOG Galaxy 2.0 (DRM-free game store by CD Projekt)
+//! gog-cli — Slate OS GOG Galaxy 2.0 (DRM-free game store by CD Projekt)
 //!
 //! Single personality: `gog`
 

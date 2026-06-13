@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cron-cli — SlateOS cron job scheduler
+//! cron-cli — Slate OS cron job scheduler
 //!
 //! Multi-personality: `crontab`, `crond`, `anacron`, `at`, `atq`, `atrm`, `batch`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! opensta-cli — SlateOS OpenSTA static timing analyzer
+//! opensta-cli — Slate OS OpenSTA static timing analyzer
 //!
 //! Single personality: `sta`
 

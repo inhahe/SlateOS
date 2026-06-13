@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! postcard-cli — SlateOS postcard serialization inspector
+//! postcard-cli — Slate OS postcard serialization inspector
 //!
 //! Single personality: `postcard-inspect`
 

@@ -14,7 +14,7 @@
 #![allow(clippy::indexing_slicing)]
 #![allow(clippy::arithmetic_side_effects)]
 
-//! SlateOS Hangman -- classic word guessing game.
+//! Slate OS Hangman -- classic word guessing game.
 //!
 //! Features 100+ words across 5 categories (animals, fruits, countries,
 //! sports, technology), 3 difficulty levels, progressive hangman figure

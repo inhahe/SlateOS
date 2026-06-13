@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mergerfs-cli — SlateOS mergerfs union filesystem
+//! mergerfs-cli — Slate OS mergerfs union filesystem
 //!
 //! Single personality: `mergerfs`
 

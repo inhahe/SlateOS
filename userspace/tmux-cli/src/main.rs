@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tmux-cli — SlateOS tmux CLI
+//! tmux-cli — Slate OS tmux CLI
 //!
 //! Single personality: `tmux`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! python3 — SlateOS Python interpreter
+//! python3 — Slate OS Python interpreter
 //!
 //! Multi-personality binary detected via argv[0]:
 //!

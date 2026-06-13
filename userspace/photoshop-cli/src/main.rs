@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! photoshop-cli — SlateOS Adobe Photoshop raster image editor
+//! photoshop-cli — Slate OS Adobe Photoshop raster image editor
 //!
 //! Single personality: `photoshop`
 

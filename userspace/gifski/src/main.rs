@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gifski — SlateOS high-quality GIF encoder
+//! gifski — Slate OS high-quality GIF encoder
 //!
 //! Single personality: `gifski`
 

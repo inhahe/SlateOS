@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mimir-cli — SlateOS Grafana Mimir CLI tools
+//! mimir-cli — Slate OS Grafana Mimir CLI tools
 //!
 //! Multi-personality: `mimirtool`
 

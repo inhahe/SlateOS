@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pulumi — SlateOS Infrastructure as Code
+//! pulumi — Slate OS Infrastructure as Code
 //!
 //! Single personality: `pulumi`
 

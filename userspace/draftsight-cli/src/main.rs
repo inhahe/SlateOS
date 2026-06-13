@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! draftsight-cli — SlateOS Dassault DraftSight 2D drafting
+//! draftsight-cli — Slate OS Dassault DraftSight 2D drafting
 //!
 //! Single personality: `draftsight`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! krita-cli — SlateOS Krita digital painting (open source)
+//! krita-cli — Slate OS Krita digital painting (open source)
 //!
 //! Single personality: `krita`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! squid-cli — SlateOS web proxy/caching tools
+//! squid-cli — Slate OS web proxy/caching tools
 //!
 //! Multi-personality: `squid`, `squidclient`, `purge`
 

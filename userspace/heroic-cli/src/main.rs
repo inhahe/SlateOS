@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! heroic-cli — SlateOS Heroic Games Launcher
+//! heroic-cli — Slate OS Heroic Games Launcher
 //!
 //! Single personality: `heroic`
 

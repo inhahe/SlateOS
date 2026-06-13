@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! brlcad-cli — SlateOS BRL-CAD solid modeling system
+//! brlcad-cli — Slate OS BRL-CAD solid modeling system
 //!
 //! Multi-personality: `mged`, `archer`, `rt`, `nirt`
 

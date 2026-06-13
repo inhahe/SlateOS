@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zendesksell-cli — SlateOS Zendesk Sell (formerly Base CRM, acquired 2018)
+//! zendesksell-cli — Slate OS Zendesk Sell (formerly Base CRM, acquired 2018)
 //!
 //! Single personality: `zsell`
 

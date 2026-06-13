@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! virsh-cli — SlateOS virsh libvirt shell
+//! virsh-cli — Slate OS virsh libvirt shell
 //!
 //! Single personality: `virsh`
 

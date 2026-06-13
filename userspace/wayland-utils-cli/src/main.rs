@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wayland-utils-cli — SlateOS Wayland utility collection
+//! wayland-utils-cli — Slate OS Wayland utility collection
 //!
 //! Multi-personality: `wl-info`, `wl-registry`
 

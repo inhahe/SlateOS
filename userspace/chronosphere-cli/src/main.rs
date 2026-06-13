@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! chronosphere-cli — SlateOS Chronosphere (cloud-native observability for K8s, NYC, private unicorn)
+//! chronosphere-cli — Slate OS Chronosphere (cloud-native observability for K8s, NYC, private unicorn)
 
 use std::env;
 use std::process;

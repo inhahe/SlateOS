@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pam-cli — SlateOS PAM authentication tools
+//! pam-cli — Slate OS PAM authentication tools
 //!
 //! Multi-personality: `pam_tally2`, `faillock`, `pam-auth-update`, `pwscore`
 

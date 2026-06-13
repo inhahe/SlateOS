@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! appdynamics-cli — SlateOS AppDynamics (Cisco's enterprise APM, business transaction model)
+//! appdynamics-cli — Slate OS AppDynamics (Cisco's enterprise APM, business transaction model)
 //!
 //! Single personality: `appdynamics`
 

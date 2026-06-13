@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! stapler-cli — SlateOS stapler PDF manipulation
+//! stapler-cli — Slate OS stapler PDF manipulation
 //!
 //! Single personality: `stapler`
 

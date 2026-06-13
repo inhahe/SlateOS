@@ -1,4 +1,4 @@
-//! SlateOS Desktop Shell
+//! Slate OS Desktop Shell
 //!
 //! Window manager and desktop environment providing:
 //! - Window management (move, resize, minimize, maximize, close)

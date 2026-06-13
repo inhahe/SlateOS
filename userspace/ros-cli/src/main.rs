@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ros-cli — SlateOS ROS 2 robotics middleware
+//! ros-cli — Slate OS ROS 2 robotics middleware
 //!
 //! Multi-personality: `ros2`, `colcon`, `rosdep`
 

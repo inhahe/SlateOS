@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! cdn77-cli — SlateOS CDN77 Czech CDN personality CLI.
+//! cdn77-cli — Slate OS CDN77 Czech CDN personality CLI.
 
 use std::env;
 use std::process;

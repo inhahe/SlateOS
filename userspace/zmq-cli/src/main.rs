@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zmq-cli — SlateOS ZeroMQ CLI tool
+//! zmq-cli — Slate OS ZeroMQ CLI tool
 //!
 //! Single personality: `zmq`
 

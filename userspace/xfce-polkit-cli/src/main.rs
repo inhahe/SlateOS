@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xfce-polkit-cli — SlateOS Xfce PolicyKit authentication agent
+//! xfce-polkit-cli — Slate OS Xfce PolicyKit authentication agent
 //!
 //! Single personality: `xfce-polkit`
 

@@ -11,7 +11,7 @@
 #![allow(clippy::needless_range_loop)]
 #![allow(unused_imports)]
 
-//! SlateOS Asteroids -- classic space shooter arcade game.
+//! Slate OS Asteroids -- classic space shooter arcade game.
 //!
 //! The player controls a triangular ship in the center of a wraparound
 //! playfield. Asteroids of three sizes drift across the screen; shooting

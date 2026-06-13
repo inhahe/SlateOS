@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mtr-cli — SlateOS mtr CLI
+//! mtr-cli — Slate OS mtr CLI
 //!
 //! Single personality: `mtr`
 

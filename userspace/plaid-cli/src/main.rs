@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! plaid-cli — SlateOS Plaid financial CLI
+//! plaid-cli — Slate OS Plaid financial CLI
 //!
 //! Single personality: `plaid`
 

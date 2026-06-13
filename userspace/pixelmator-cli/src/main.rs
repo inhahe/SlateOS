@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pixelmator-cli — SlateOS Pixelmator Pro (Apple-acquired) image editor
+//! pixelmator-cli — Slate OS Pixelmator Pro (Apple-acquired) image editor
 //!
 //! Single personality: `pixelmator`
 

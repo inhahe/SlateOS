@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ode-cli — SlateOS Open Dynamics Engine tool
+//! ode-cli — Slate OS Open Dynamics Engine tool
 //!
 //! Single personality: `ode-test`
 

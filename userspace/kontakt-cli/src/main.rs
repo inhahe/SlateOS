@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kontakt-cli — SlateOS Native Instruments Kontakt sampler
+//! kontakt-cli — Slate OS Native Instruments Kontakt sampler
 //!
 //! Single personality: `kontakt`
 

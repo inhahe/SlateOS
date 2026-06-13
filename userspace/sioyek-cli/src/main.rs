@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sioyek-cli — SlateOS Sioyek PDF viewer for research
+//! sioyek-cli — Slate OS Sioyek PDF viewer for research
 //!
 //! Single personality: `sioyek`
 

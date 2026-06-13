@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! just-cli — SlateOS just command runner
+//! just-cli — Slate OS just command runner
 //!
 //! Single personality: `just`
 

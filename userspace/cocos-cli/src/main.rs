@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cocos-cli — SlateOS Cocos Creator (open-source 2D/3D engine, big in China)
+//! cocos-cli — Slate OS Cocos Creator (open-source 2D/3D engine, big in China)
 //!
 //! Single personality: `cocos`
 

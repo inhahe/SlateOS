@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! terragrunt-cli — SlateOS Terragrunt CLI
+//! terragrunt-cli — Slate OS Terragrunt CLI
 //!
 //! Multi-personality: `terragrunt`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xcircuit-cli — SlateOS XCircuit schematic editor
+//! xcircuit-cli — Slate OS XCircuit schematic editor
 //!
 //! Single personality: `xcircuit`
 

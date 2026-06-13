@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! herbe-cli — SlateOS herbe minimal notification daemon
+//! herbe-cli — Slate OS herbe minimal notification daemon
 //!
 //! Single personality: `herbe`
 

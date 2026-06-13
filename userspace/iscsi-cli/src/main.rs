@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! iscsi-cli — SlateOS iSCSI initiator/target tools
+//! iscsi-cli — Slate OS iSCSI initiator/target tools
 //!
 //! Multi-personality: `iscsiadm`, `tgtadm`, `targetcli`
 

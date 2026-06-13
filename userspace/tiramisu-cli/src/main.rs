@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tiramisu-cli — SlateOS tiramisu notification daemon
+//! tiramisu-cli — Slate OS tiramisu notification daemon
 //!
 //! Single personality: `tiramisu`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! syncthing-cli — SlateOS Syncthing CLI
+//! syncthing-cli — Slate OS Syncthing CLI
 //!
 //! Multi-personality: `syncthing`, `stcli`
 

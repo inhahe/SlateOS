@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dirvish-cli — SlateOS Dirvish rsync-based backup
+//! dirvish-cli — Slate OS Dirvish rsync-based backup
 //!
 //! Multi-personality: `dirvish`, `dirvish-runall`, `dirvish-expire`, `dirvish-locate`
 

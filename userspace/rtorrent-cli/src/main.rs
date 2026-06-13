@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rtorrent-cli — SlateOS rTorrent terminal BitTorrent client
+//! rtorrent-cli — Slate OS rTorrent terminal BitTorrent client
 //!
 //! Single personality: `rtorrent`
 

@@ -1,4 +1,4 @@
-//! SlateOS DNS resolution management utility.
+//! Slate OS DNS resolution management utility.
 //!
 //! Multi-personality binary providing:
 //! - **resolvectl** — DNS resolution control and diagnostics

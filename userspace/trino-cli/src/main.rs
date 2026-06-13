@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! trino-cli — SlateOS Trino (open-source distributed SQL query engine, ex-PrestoSQL)
+//! trino-cli — Slate OS Trino (open-source distributed SQL query engine, ex-PrestoSQL)
 
 use std::env;
 use std::process;

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! logseq-cli — SlateOS Logseq outliner knowledge base
+//! logseq-cli — Slate OS Logseq outliner knowledge base
 //!
 //! Single personality: `logseq`
 

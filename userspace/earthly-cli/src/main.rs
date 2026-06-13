@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! earthly-cli — SlateOS Earthly CI/CD CLI
+//! earthly-cli — Slate OS Earthly CI/CD CLI
 //!
 //! Multi-personality: `earthly`
 

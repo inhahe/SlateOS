@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! treasuredata-cli — SlateOS Treasure Data (enterprise CDP, MV + Tokyo, Arm-owned then SoftBank)
+//! treasuredata-cli — Slate OS Treasure Data (enterprise CDP, MV + Tokyo, Arm-owned then SoftBank)
 
 use std::env;
 use std::process;

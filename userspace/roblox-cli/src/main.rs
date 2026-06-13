@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! roblox-cli — SlateOS Roblox + Roblox Studio (UGC mega-platform)
+//! roblox-cli — Slate OS Roblox + Roblox Studio (UGC mega-platform)
 //!
 //! Single personality: `roblox`
 

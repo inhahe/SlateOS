@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ngspice-cli — SlateOS ngspice circuit simulator
+//! ngspice-cli — Slate OS ngspice circuit simulator
 //!
 //! Multi-personality: `ngspice`
 

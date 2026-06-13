@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! stellarium-cli — SlateOS Stellarium planetarium
+//! stellarium-cli — Slate OS Stellarium planetarium
 //!
 //! Single personality: `stellarium`
 

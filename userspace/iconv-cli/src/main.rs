@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! iconv-cli — SlateOS iconv character encoding conversion CLI
+//! iconv-cli — Slate OS iconv character encoding conversion CLI
 //!
 //! Single personality: `iconv`
 

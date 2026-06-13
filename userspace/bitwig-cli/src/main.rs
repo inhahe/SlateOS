@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bitwig-cli — SlateOS Bitwig Studio DAW
+//! bitwig-cli — Slate OS Bitwig Studio DAW
 //!
 //! Single personality: `bitwig`
 

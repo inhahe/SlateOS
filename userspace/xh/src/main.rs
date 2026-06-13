@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xh — SlateOS friendly and fast HTTP client (HTTPie-compatible)
+//! xh — Slate OS friendly and fast HTTP client (HTTPie-compatible)
 //!
 //! Multi-personality: `xh`, `xhs` (HTTPS default)
 

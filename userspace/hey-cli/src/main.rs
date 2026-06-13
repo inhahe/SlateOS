@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hey-cli — SlateOS hey HTTP load generator
+//! hey-cli — Slate OS hey HTTP load generator
 //!
 //! Multi-personality: `hey`
 

@@ -1,4 +1,4 @@
-//! SlateOS `gdb` -- GDB-like debugger and gdbserver
+//! Slate OS `gdb` -- GDB-like debugger and gdbserver
 //!
 //! Multi-personality binary that acts as `gdb` or `gdbserver` depending on
 //! the name used to invoke it (detected via `argv[0]`).

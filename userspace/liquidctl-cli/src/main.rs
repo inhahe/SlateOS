@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! liquidctl-cli — SlateOS liquid cooler control
+//! liquidctl-cli — Slate OS liquid cooler control
 //!
 //! Single personality: `liquidctl`
 

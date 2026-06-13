@@ -1,4 +1,4 @@
-//! SlateOS Monitor/Display Control Utility
+//! Slate OS Monitor/Display Control Utility
 //!
 //! Control display power state, brightness, and DPMS settings.
 //! Similar to `xset dpms` or Windows `nircmd monitor off`.
@@ -33,9 +33,9 @@ use std::process;
 //   * DPMS power state: /sys/class/drm/<connector>/dpms
 //   * Backlight:        /sys/class/backlight/<dev>/brightness (+ max_brightness)
 //
-// The previous version issued a "DRM ioctl" via syscall 850 — which on SlateOS
+// The previous version issued a "DRM ioctl" via syscall 850 — which on Slate OS
 // is SYS_TCP_SET_NODELAY, NOT a display call. There is no DPMS or backlight
-// syscall in the SlateOS ABI (the SYS_DRM_* family, 1000-1060, exposes only the
+// syscall in the Slate OS ABI (the SYS_DRM_* family, 1000-1060, exposes only the
 // compositor's GEM/framebuffer/mode-info primitives). Calling 850 to control a
 // monitor was meaningless and potentially harmful, so the raw-syscall path has
 // been removed; sysfs is the sole control mechanism. DPMS *policy* (idle-timeout
@@ -350,7 +350,7 @@ fn cmd_dpms(args: &[String]) {
 
     // DPMS *policy* — whether the display server blanks the screen after an
     // idle timeout, and the standby/suspend/off thresholds — is owned by the
-    // display server (compositor), not the kernel. SlateOS exposes no syscall or
+    // display server (compositor), not the kernel. Slate OS exposes no syscall or
     // sysfs node for it, so these subcommands report that clearly rather than
     // pretending to succeed. Immediate power-state changes (on/off/standby/
     // suspend) are available as the top-level commands and go through sysfs.

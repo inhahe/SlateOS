@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! accerciser-cli — SlateOS accessibility explorer
+//! accerciser-cli — Slate OS accessibility explorer
 //!
 //! Single personality: `accerciser`
 

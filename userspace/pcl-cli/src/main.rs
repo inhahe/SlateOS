@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pcl-cli — SlateOS Point Cloud Library tools
+//! pcl-cli — Slate OS Point Cloud Library tools
 //!
 //! Multi-personality: `pcl_viewer`, `pcl_pcd2ply`, `pcl_ply2pcd`, `pcl_mesh_sampling`
 

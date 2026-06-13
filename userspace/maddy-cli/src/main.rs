@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! maddy-cli — SlateOS Maddy mail server
+//! maddy-cli — Slate OS Maddy mail server
 //!
 //! Single personality: `maddy`
 

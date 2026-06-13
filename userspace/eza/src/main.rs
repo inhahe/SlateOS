@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! eza — SlateOS modern ls replacement
+//! eza — Slate OS modern ls replacement
 //!
 //! Single personality: `eza`
 

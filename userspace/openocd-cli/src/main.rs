@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! openocd-cli — SlateOS on-chip debugger
+//! openocd-cli — Slate OS on-chip debugger
 //!
 //! Multi-personality: `openocd`, `st-flash`, `st-info`
 

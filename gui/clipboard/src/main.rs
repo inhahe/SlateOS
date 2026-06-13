@@ -1,4 +1,4 @@
-//! `SlateOS` Clipboard Service
+//! `Slate OS` Clipboard Service
 //!
 //! System-wide clipboard manager providing multi-format copy/paste with history.
 //! All applications communicate with this service via IPC messages to share

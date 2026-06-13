@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lancedb-cli — SlateOS LanceDB (multi-modal Rust vector DB on Lance columnar format, SF, private)
+//! lancedb-cli — Slate OS LanceDB (multi-modal Rust vector DB on Lance columnar format, SF, private)
 
 use std::env;
 use std::process;

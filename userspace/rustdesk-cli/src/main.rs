@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rustdesk-cli — SlateOS RustDesk remote desktop
+//! rustdesk-cli — Slate OS RustDesk remote desktop
 //!
 //! Single personality: `rustdesk`
 

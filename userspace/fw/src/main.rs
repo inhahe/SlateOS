@@ -1,4 +1,4 @@
-//! SlateOS Firewall Management CLI (`fw`)
+//! Slate OS Firewall Management CLI (`fw`)
 //!
 //! Manages the kernel's packet-filtering firewall rules.  Rules are persisted
 //! to `/etc/fw.rules` and applied via `SYS_NET_IOCTL` (syscall 810) with

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! metalog-cli — SlateOS Metalog syslog daemon
+//! metalog-cli — Slate OS Metalog syslog daemon
 //!
 //! Single personality: `metalog`
 

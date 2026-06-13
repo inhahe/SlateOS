@@ -1,4 +1,4 @@
-//! SlateOS install — copy files and set attributes
+//! Slate OS install — copy files and set attributes
 //!
 //! GNU coreutils-compatible `install` command for copying files
 //! with specified permissions, ownership, and directory creation.
@@ -617,7 +617,7 @@ fn create_directory_with_parents(path: &Path, mode: u32, verbose: bool) -> Resul
         println!("install: creating directory '{}'", path.display());
     }
 
-    // Set mode on SlateOS
+    // Set mode on Slate OS
     sys_chmod(&path.to_string_lossy(), mode)
         .map_err(|e| format!("cannot set mode on '{}': {e}", path.display()))?;
 
@@ -699,7 +699,7 @@ fn install_file(src: &Path, dst: &Path, args: &Args) -> Result<(), String> {
 
     // Preserve timestamps
     if args.preserve_timestamps {
-        // On SlateOS we'd copy atime/mtime from source via syscall.
+        // On Slate OS we'd copy atime/mtime from source via syscall.
         // For now, this is a placeholder that will work when the
         // utimensat syscall is available.
         #[cfg(target_os = "slateos")]

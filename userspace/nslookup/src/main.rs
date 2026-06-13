@@ -1,4 +1,4 @@
-//! SlateOS DNS Lookup Utility
+//! Slate OS DNS Lookup Utility
 //!
 //! Queries DNS servers for domain name records using raw UDP packets
 //! constructed per RFC 1035. Supports common record types (A, AAAA,

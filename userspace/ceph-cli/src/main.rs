@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ceph-cli — SlateOS Ceph distributed storage tools
+//! ceph-cli — Slate OS Ceph distributed storage tools
 //!
 //! Multi-personality: `ceph`, `rados`, `rbd`, `ceph-fuse`
 

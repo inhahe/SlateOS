@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zabbix-cli — SlateOS Zabbix monitoring agent & tools
+//! zabbix-cli — Slate OS Zabbix monitoring agent & tools
 //!
 //! Multi-personality: `zabbix_agentd`, `zabbix_sender`, `zabbix_get`
 

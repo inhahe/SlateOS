@@ -1,4 +1,4 @@
-//! SlateOS getopt/cksum/sync/printenv — shell scripting helpers
+//! Slate OS getopt/cksum/sync/printenv — shell scripting helpers
 //!
 //! Multi-personality binary detected via argv[0]:
 //! - `getopt`: Parse command-line options for shell scripts

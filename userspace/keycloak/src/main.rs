@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! keycloak — SlateOS identity and access management
+//! keycloak — Slate OS identity and access management
 //!
 //! Single personality: `kc` (Keycloak admin CLI)
 

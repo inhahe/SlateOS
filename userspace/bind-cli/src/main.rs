@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bind-cli — SlateOS BIND DNS server tools
+//! bind-cli — Slate OS BIND DNS server tools
 //!
 //! Multi-personality: `named`, `rndc`, `dig`, `nslookup`, `host`, `named-checkconf`, `named-checkzone`
 

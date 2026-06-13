@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! eigen-cli — SlateOS Eigen C++ linear algebra info
+//! eigen-cli — Slate OS Eigen C++ linear algebra info
 //!
 //! Single personality: `eigen-info`
 

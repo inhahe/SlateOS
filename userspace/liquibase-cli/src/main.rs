@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! liquibase-cli — SlateOS Liquibase CLI
+//! liquibase-cli — Slate OS Liquibase CLI
 //!
 //! Single personality: `liquibase`
 

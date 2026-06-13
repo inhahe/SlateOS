@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! prometheus-cli — SlateOS Prometheus monitoring CLI (promtool)
+//! prometheus-cli — Slate OS Prometheus monitoring CLI (promtool)
 //!
 //! Single personality: `promtool`
 

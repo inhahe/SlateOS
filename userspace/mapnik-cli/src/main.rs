@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mapnik-cli — SlateOS Mapnik map rendering toolkit
+//! mapnik-cli — Slate OS Mapnik map rendering toolkit
 //!
 //! Multi-personality: `mapnik-render`, `mapnik-index`, `mapnik-config`
 

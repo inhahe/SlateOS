@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xzoom-cli — SlateOS screen magnifier
+//! xzoom-cli — Slate OS screen magnifier
 //!
 //! Single personality: `xzoom`
 

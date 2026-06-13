@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xdg-desktop-portal-wlr-cli — SlateOS wlr portal backend
+//! xdg-desktop-portal-wlr-cli — Slate OS wlr portal backend
 //!
 //! Single personality: `xdg-desktop-portal-wlr`
 

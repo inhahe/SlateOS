@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zypper-cli — SlateOS openSUSE Zypper package manager
+//! zypper-cli — Slate OS openSUSE Zypper package manager
 //!
 //! Multi-personality: `zypper`
 

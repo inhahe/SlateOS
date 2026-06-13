@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! prefect-cli — SlateOS Prefect workflow orchestration CLI
+//! prefect-cli — Slate OS Prefect workflow orchestration CLI
 //!
 //! Multi-personality: `prefect`
 

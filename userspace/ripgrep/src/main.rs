@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ripgrep — SlateOS recursively search directories for a regex pattern
+//! ripgrep — Slate OS recursively search directories for a regex pattern
 //!
 //! Single personality: `rg`
 

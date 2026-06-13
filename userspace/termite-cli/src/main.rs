@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! termite-cli — SlateOS Termite terminal emulator
+//! termite-cli — Slate OS Termite terminal emulator
 //!
 //! Single personality: `termite`
 

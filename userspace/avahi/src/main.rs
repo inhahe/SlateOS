@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 #![allow(dead_code)]
-//! SlateOS mDNS/DNS-SD Service Discovery Utility
+//! Slate OS mDNS/DNS-SD Service Discovery Utility
 //!
 //! Multi-personality binary for mDNS (multicast DNS) and DNS-SD (DNS-based
 //! Service Discovery) operations. The personality is selected via the

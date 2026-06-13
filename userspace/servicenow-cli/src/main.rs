@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! servicenow-cli — SlateOS ServiceNow Now Platform
+//! servicenow-cli — Slate OS ServiceNow Now Platform
 //!
 //! Single personality: `servicenow`
 

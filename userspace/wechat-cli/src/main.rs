@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wechat-cli — SlateOS Tencent WeChat super-app
+//! wechat-cli — Slate OS Tencent WeChat super-app
 //!
 //! Single personality: `wechat`
 

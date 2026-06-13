@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! acronis-cli — SlateOS Acronis Cyber Protect backup/security
+//! acronis-cli — Slate OS Acronis Cyber Protect backup/security
 //!
 //! Single personality: `acronis`
 

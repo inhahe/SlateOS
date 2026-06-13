@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! segger-cli — SlateOS SEGGER Embedded Studio
+//! segger-cli — Slate OS SEGGER Embedded Studio
 //!
 //! Single personality: `segger`
 

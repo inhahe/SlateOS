@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gcloud-cli — SlateOS Google Cloud SDK CLI
+//! gcloud-cli — Slate OS Google Cloud SDK CLI
 //!
 //! Single personality: `gcloud`
 

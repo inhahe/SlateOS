@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xsplit-cli — SlateOS XSplit Broadcaster streaming app
+//! xsplit-cli — Slate OS XSplit Broadcaster streaming app
 //!
 //! Single personality: `xsplit`
 

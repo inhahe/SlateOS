@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bruno-cli — SlateOS Bruno API client CLI
+//! bruno-cli — Slate OS Bruno API client CLI
 //!
 //! Multi-personality: `bru`
 

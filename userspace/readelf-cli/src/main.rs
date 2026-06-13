@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! readelf-cli — SlateOS ELF file reader
+//! readelf-cli — Slate OS ELF file reader
 //!
 //! Multi-personality: `readelf`, `elfedit`
 

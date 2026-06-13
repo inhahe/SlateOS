@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! desktop-file-utils-cli — SlateOS desktop file utilities
+//! desktop-file-utils-cli — Slate OS desktop file utilities
 //!
 //! Multi-personality: `desktop-file-validate`, `desktop-file-install`, `update-desktop-database`
 

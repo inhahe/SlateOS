@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sloth-cli — SlateOS Sloth SLO generator
+//! sloth-cli — Slate OS Sloth SLO generator
 //!
 //! Single personality: `sloth`
 

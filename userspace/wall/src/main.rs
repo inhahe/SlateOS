@@ -1,4 +1,4 @@
-//! wall/write/mesg — terminal messaging utilities for SlateOS
+//! wall/write/mesg — terminal messaging utilities for Slate OS
 //!
 //! Multi-personality binary detected via argv[0]:
 //! - `wall`: broadcast message to all logged-in users
@@ -381,7 +381,7 @@ fn run_mesg(args: &[String]) -> i32 {
     match args[0].as_str() {
         "y" | "Y" | "yes" => {
             // Enable messages: chmod g+w on terminal
-            // On SlateOS, this would use a chmod syscall
+            // On Slate OS, this would use a chmod syscall
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;

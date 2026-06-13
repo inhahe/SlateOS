@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xsane-cli — SlateOS XSane graphical scanner frontend
+//! xsane-cli — Slate OS XSane graphical scanner frontend
 //!
 //! Single personality: `xsane`
 

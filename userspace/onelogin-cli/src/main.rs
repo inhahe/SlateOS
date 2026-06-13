@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! onelogin-cli — SlateOS OneLogin (Workforce IAM, now part of One Identity / Quest Software)
+//! onelogin-cli — Slate OS OneLogin (Workforce IAM, now part of One Identity / Quest Software)
 //!
 //! Single personality: `onelogin`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! djvu-cli — SlateOS DjVu tools CLI
+//! djvu-cli — Slate OS DjVu tools CLI
 //!
 //! Multi-personality: `djvused`, `djvudump`, `djvutxt`, `djvups`, `ddjvu`, `c44`, `cjb2`
 

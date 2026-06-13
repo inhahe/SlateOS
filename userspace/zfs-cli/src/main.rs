@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zfs-cli — SlateOS ZFS filesystem tools
+//! zfs-cli — Slate OS ZFS filesystem tools
 //!
 //! Multi-personality: `zfs`, `zpool`
 

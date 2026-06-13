@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! git — SlateOS distributed version control system
+//! git — Slate OS distributed version control system
 //!
 //! Single personality: `git`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! apisix-cli — SlateOS Apache APISIX API gateway
+//! apisix-cli — Slate OS Apache APISIX API gateway
 //!
 //! Single personality: `apisix`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! qpdf-cli — SlateOS QPDF PDF transformation tool
+//! qpdf-cli — Slate OS QPDF PDF transformation tool
 //!
 //! Single personality: `qpdf`
 

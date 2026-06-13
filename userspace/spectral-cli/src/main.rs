@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! spectral-cli — SlateOS Spectral API linter
+//! spectral-cli — Slate OS Spectral API linter
 //!
 //! Multi-personality: `spectral`
 

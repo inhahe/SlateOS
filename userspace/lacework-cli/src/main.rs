@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lacework-cli — SlateOS Lacework (cloud security, San Jose, acquired by Fortinet 2024)
+//! lacework-cli — Slate OS Lacework (cloud security, San Jose, acquired by Fortinet 2024)
 
 use std::env;
 use std::process;

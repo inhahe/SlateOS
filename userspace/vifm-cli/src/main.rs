@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vifm-cli — SlateOS Vifm file manager
+//! vifm-cli — Slate OS Vifm file manager
 //!
 //! Multi-personality: `vifm`, `vifm-pause`, `vifm-convert-dircolors`
 

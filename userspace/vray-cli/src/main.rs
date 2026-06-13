@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vray-cli — SlateOS V-Ray (Chaos Group production renderer)
+//! vray-cli — Slate OS V-Ray (Chaos Group production renderer)
 //!
 //! Single personality: `vray`
 

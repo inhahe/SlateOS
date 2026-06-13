@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pint-cli — SlateOS pint Prometheus rule linter
+//! pint-cli — Slate OS pint Prometheus rule linter
 //!
 //! Single personality: `pint`
 

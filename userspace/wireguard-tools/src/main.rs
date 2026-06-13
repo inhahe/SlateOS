@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wireguard-tools — SlateOS WireGuard VPN utilities
+//! wireguard-tools — Slate OS WireGuard VPN utilities
 //!
 //! Multi-personality: `wg` (WireGuard tool), `wg-quick` (quick setup)
 

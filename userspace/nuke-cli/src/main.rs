@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nuke-cli — SlateOS Foundry Nuke node-based compositing
+//! nuke-cli — Slate OS Foundry Nuke node-based compositing
 //!
 //! Single personality: `nuke`
 

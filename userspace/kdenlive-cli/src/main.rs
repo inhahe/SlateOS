@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kdenlive-cli — SlateOS Kdenlive KDE video editor
+//! kdenlive-cli — Slate OS Kdenlive KDE video editor
 //!
 //! Single personality: `kdenlive`
 

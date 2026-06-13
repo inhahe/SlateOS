@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! notion-cli — SlateOS Notion CLI
+//! notion-cli — Slate OS Notion CLI
 //!
 //! Single personality: `notion`
 

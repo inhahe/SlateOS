@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cockroachdb — SlateOS distributed SQL database
+//! cockroachdb — Slate OS distributed SQL database
 //!
 //! Single personality: `cockroach`
 

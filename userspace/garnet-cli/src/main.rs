@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! garnet-cli — SlateOS Microsoft Garnet cache store
+//! garnet-cli — Slate OS Microsoft Garnet cache store
 //!
 //! Single personality: `garnet-server`
 

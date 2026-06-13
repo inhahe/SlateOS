@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mediainfo — SlateOS media file information tool
+//! mediainfo — Slate OS media file information tool
 //!
 //! Single personality: `mediainfo`
 

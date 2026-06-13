@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! solana-cli — SlateOS Solana CLI
+//! solana-cli — Slate OS Solana CLI
 //!
 //! Single personality: `solana`
 

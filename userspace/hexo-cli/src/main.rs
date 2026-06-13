@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hexo-cli — SlateOS Hexo blog framework
+//! hexo-cli — Slate OS Hexo blog framework
 //!
 //! Single personality: `hexo`
 

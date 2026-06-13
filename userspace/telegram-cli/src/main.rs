@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! telegram-cli — SlateOS Telegram bot CLI
+//! telegram-cli — Slate OS Telegram bot CLI
 //!
 //! Single personality: `tg`
 

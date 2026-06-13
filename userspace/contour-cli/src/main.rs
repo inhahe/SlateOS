@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! contour-cli — SlateOS Contour terminal emulator
+//! contour-cli — Slate OS Contour terminal emulator
 //!
 //! Single personality: `contour`
 

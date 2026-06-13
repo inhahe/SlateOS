@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mixbus-cli — SlateOS Harrison Mixbus analog-modeling DAW
+//! mixbus-cli — Slate OS Harrison Mixbus analog-modeling DAW
 //!
 //! Single personality: `mixbus`
 

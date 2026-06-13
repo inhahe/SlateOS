@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bombardier-cli — SlateOS Bombardier HTTP benchmarking tool
+//! bombardier-cli — Slate OS Bombardier HTTP benchmarking tool
 //!
 //! Multi-personality: `bombardier`
 

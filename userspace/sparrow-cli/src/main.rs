@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sparrow-cli — SlateOS Sparrow Bitcoin wallet
+//! sparrow-cli — Slate OS Sparrow Bitcoin wallet
 //!
 //! Single personality: `sparrow`
 

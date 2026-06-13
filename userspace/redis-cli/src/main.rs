@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! redis-cli — SlateOS Redis command-line interface
+//! redis-cli — Slate OS Redis command-line interface
 //!
 //! Single personality: `redis-cli`
 

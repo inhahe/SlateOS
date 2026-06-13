@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! protonup-cli — SlateOS ProtonUp-Qt Proton manager
+//! protonup-cli — Slate OS ProtonUp-Qt Proton manager
 //!
 //! Multi-personality: `protonup-qt`, `protonup`
 

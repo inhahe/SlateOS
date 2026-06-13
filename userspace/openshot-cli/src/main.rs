@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! openshot-cli — SlateOS OpenShot video editor
+//! openshot-cli — Slate OS OpenShot video editor
 //!
 //! Single personality: `openshot`
 

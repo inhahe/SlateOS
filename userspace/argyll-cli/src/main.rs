@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! argyll-cli — SlateOS ArgyllCMS color management
+//! argyll-cli — Slate OS ArgyllCMS color management
 //!
 //! Multi-personality: `dispwin`, `colprof`, `spotread`
 

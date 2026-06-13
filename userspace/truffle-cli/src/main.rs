@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! truffle-cli — SlateOS Truffle Ethereum dev suite
+//! truffle-cli — Slate OS Truffle Ethereum dev suite
 //!
 //! Single personality: `truffle`
 

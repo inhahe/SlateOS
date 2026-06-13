@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! linux-notification-center-cli — SlateOS Linux Notification Center
+//! linux-notification-center-cli — Slate OS Linux Notification Center
 //!
 //! Multi-personality: `deadd-notification-center`, `notification-center`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gtkwave-cli — SlateOS GTKWave waveform viewer
+//! gtkwave-cli — Slate OS GTKWave waveform viewer
 //!
 //! Multi-personality: `gtkwave`, `vcd2fst`, `fst2vcd`, `fstminer`
 

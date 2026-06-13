@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dbeaver-cli — SlateOS DBeaver database manager CLI
+//! dbeaver-cli — Slate OS DBeaver database manager CLI
 //!
 //! Single personality: `dbeaver`
 

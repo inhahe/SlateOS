@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wikijs-cli — SlateOS Wiki.js wiki engine
+//! wikijs-cli — Slate OS Wiki.js wiki engine
 //!
 //! Single personality: `wikijs`
 

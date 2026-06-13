@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dunst-cli — SlateOS Dunst notification daemon
+//! dunst-cli — Slate OS Dunst notification daemon
 //!
 //! Multi-personality: `dunst`, `dunstify`, `dunstctl`
 

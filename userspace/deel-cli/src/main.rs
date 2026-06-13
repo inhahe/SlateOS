@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! deel-cli — SlateOS Deel (global hiring / EOR / contractor payments)
+//! deel-cli — Slate OS Deel (global hiring / EOR / contractor payments)
 //!
 //! Single personality: `deel`
 

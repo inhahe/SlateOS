@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gprof-cli — SlateOS GNU profiler
+//! gprof-cli — Slate OS GNU profiler
 //!
 //! Multi-personality: `gprof`, `gcov`
 

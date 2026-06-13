@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! graylog-cli — SlateOS Graylog log management
+//! graylog-cli — Slate OS Graylog log management
 //!
 //! Multi-personality: `graylog-server`, `graylog-ctl`
 

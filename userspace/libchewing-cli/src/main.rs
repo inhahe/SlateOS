@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! libchewing-cli — SlateOS libchewing Chinese (Zhuyin) input
+//! libchewing-cli — Slate OS libchewing Chinese (Zhuyin) input
 //!
 //! Single personality: `chewing`
 

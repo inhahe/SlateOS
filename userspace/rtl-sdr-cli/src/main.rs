@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rtl-sdr-cli — SlateOS RTL-SDR tools
+//! rtl-sdr-cli — Slate OS RTL-SDR tools
 //!
 //! Multi-personality: `rtl_sdr`, `rtl_fm`, `rtl_power`, `rtl_test`, `rtl_tcp`
 

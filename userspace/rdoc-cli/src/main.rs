@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rdoc-cli — SlateOS Ruby documentation tools
+//! rdoc-cli — Slate OS Ruby documentation tools
 //!
 //! Multi-personality: `rdoc`, `ri`
 

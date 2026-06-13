@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! watchexec — SlateOS execute commands in response to file modifications
+//! watchexec — Slate OS execute commands in response to file modifications
 //!
 //! Single personality: `watchexec`
 

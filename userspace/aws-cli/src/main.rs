@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! aws-cli — SlateOS AWS command-line interface
+//! aws-cli — Slate OS AWS command-line interface
 //!
 //! Single personality: `aws`
 

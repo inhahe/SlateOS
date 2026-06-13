@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! journalctl-cli — SlateOS journalctl CLI
+//! journalctl-cli — Slate OS journalctl CLI
 //!
 //! Single personality: `journalctl`
 

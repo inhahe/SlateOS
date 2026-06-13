@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ltspice-cli — SlateOS LTspice circuit simulator
+//! ltspice-cli — Slate OS LTspice circuit simulator
 //!
 //! Multi-personality: `ltspice`
 

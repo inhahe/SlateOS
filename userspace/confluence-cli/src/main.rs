@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! confluence-cli — SlateOS Confluence (Atlassian wiki + docs, NASDAQ:TEAM)
+//! confluence-cli — Slate OS Confluence (Atlassian wiki + docs, NASDAQ:TEAM)
 
 use std::env;
 use std::process;

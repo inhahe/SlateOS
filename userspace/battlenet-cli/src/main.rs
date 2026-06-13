@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! battlenet-cli — SlateOS Battle.net (Blizzard/Activision launcher)
+//! battlenet-cli — Slate OS Battle.net (Blizzard/Activision launcher)
 //!
 //! Single personality: `battlenet`
 

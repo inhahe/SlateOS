@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! topgrade — SlateOS upgrade everything at once
+//! topgrade — Slate OS upgrade everything at once
 //!
 //! Single personality: `topgrade`
 

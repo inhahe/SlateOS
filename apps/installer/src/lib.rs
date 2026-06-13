@@ -1,7 +1,7 @@
-//! SlateOS Installer — unattended and interactive installation library.
+//! Slate OS Installer — unattended and interactive installation library.
 //!
 //! Provides YAML-based configuration parsing, validation, and install plan
-//! generation for automated SlateOS installations. The installer reads a YAML
+//! generation for automated Slate OS installations. The installer reads a YAML
 //! config file describing disk layout, users, network, packages, and services,
 //! validates the configuration, and produces an ordered sequence of install
 //! steps that the runtime executor can carry out.
@@ -1446,7 +1446,7 @@ pub enum InstallStep {
     FormatPartition { label: String, fs: String },
     /// Mount a partition at a path.
     MountPartition { label: String, mount_point: String },
-    /// Copy the base SlateOS system files.
+    /// Copy the base Slate OS system files.
     CopyBaseSystem,
     /// Install additional packages from the package manager.
     InstallPackages { packages: Vec<String> },

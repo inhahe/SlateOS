@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gocd-cli — SlateOS GoCD continuous delivery
+//! gocd-cli — Slate OS GoCD continuous delivery
 //!
 //! Multi-personality: `gocd-server`, `gocd-agent`
 

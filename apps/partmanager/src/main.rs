@@ -1,4 +1,4 @@
-//! SlateOS Partition Manager
+//! Slate OS Partition Manager
 //!
 //! Graphical disk partition manager for creating, deleting, resizing,
 //! formatting, and managing disk partitions. Features:
@@ -12,7 +12,7 @@
 //! - Human-readable size formatting with binary units
 //!
 //! Uses the guitk library for UI rendering. Disk data is gathered through
-//! SlateOS syscalls; stubbed with representative data for initial development.
+//! Slate OS syscalls; stubbed with representative data for initial development.
 
 #![allow(dead_code)]
 

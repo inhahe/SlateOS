@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! melodyne-cli — SlateOS Celemony Melodyne pitch editing
+//! melodyne-cli — Slate OS Celemony Melodyne pitch editing
 //!
 //! Single personality: `melodyne`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! systemd-cli — SlateOS systemd-like service manager tools
+//! systemd-cli — Slate OS systemd-like service manager tools
 //!
 //! Multi-personality: `systemctl`, `journalctl`, `hostnamectl`, `timedatectl`,
 //! `loginctl`, `localectl`

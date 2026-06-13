@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! informatica-cli — SlateOS Informatica (IDMC platform, Redwood City CA, NYSE:INFA — Salesforce acq 2025)
+//! informatica-cli — Slate OS Informatica (IDMC platform, Redwood City CA, NYSE:INFA — Salesforce acq 2025)
 
 use std::env;
 use std::process;

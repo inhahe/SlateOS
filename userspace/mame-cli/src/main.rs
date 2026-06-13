@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mame-cli — SlateOS MAME arcade machine emulator
+//! mame-cli — Slate OS MAME arcade machine emulator
 //!
 //! Single personality: `mame`
 

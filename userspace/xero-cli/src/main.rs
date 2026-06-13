@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xero-cli — SlateOS Xero (NZ-founded cloud accounting, QuickBooks rival outside US)
+//! xero-cli — Slate OS Xero (NZ-founded cloud accounting, QuickBooks rival outside US)
 //!
 //! Single personality: `xero`
 

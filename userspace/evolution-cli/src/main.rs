@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! evolution-cli — SlateOS GNOME Evolution groupware suite
+//! evolution-cli — Slate OS GNOME Evolution groupware suite
 //!
 //! Multi-personality: `evolution`, `evolution-data-server`
 

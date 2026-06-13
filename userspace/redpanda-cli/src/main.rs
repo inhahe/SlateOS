@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! redpanda-cli — SlateOS Redpanda streaming tools
+//! redpanda-cli — Slate OS Redpanda streaming tools
 //!
 //! Multi-personality: `rpk`
 

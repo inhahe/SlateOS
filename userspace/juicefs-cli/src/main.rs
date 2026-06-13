@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! juicefs-cli — SlateOS JuiceFS distributed POSIX filesystem
+//! juicefs-cli — Slate OS JuiceFS distributed POSIX filesystem
 //!
 //! Single personality: `juicefs`
 

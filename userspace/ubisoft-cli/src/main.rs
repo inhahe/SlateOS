@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ubisoft-cli — SlateOS Ubisoft Connect (replaced Uplay)
+//! ubisoft-cli — Slate OS Ubisoft Connect (replaced Uplay)
 //!
 //! Single personality: `ubisoft`
 

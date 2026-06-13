@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mutt-cli — SlateOS Mutt/NeoMutt email client CLI
+//! mutt-cli — Slate OS Mutt/NeoMutt email client CLI
 //!
 //! Multi-personality: `mutt`, `neomutt`
 

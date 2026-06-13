@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! chef-cli — SlateOS Chef configuration management
+//! chef-cli — Slate OS Chef configuration management
 //!
 //! Multi-personality: `knife`, `chef-client`, `chef-solo`, `ohai`
 

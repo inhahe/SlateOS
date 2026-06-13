@@ -1,4 +1,4 @@
-//! logger — send messages to the system log for SlateOS
+//! logger — send messages to the system log for Slate OS
 //!
 //! Compatible with POSIX/BSD logger(1). Writes log entries to
 //! the system log via /dev/log socket or direct file append.

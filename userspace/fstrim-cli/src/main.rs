@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fstrim-cli — SlateOS fstrim/blkdiscard/lsblk CLI
+//! fstrim-cli — Slate OS fstrim/blkdiscard/lsblk CLI
 //!
 //! Multi-personality: `fstrim`, `blkdiscard`, `lsblk`, `blkid`
 

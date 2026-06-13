@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! geda-cli — SlateOS gEDA electronic design suite
+//! geda-cli — Slate OS gEDA electronic design suite
 //!
 //! Multi-personality: `gschem`, `gnetlist`, `gattrib`, `gsch2pcb`
 

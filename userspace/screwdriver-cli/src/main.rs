@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! screwdriver-cli — SlateOS Screwdriver CD platform
+//! screwdriver-cli — Slate OS Screwdriver CD platform
 //!
 //! Single personality: `screwdriver`
 

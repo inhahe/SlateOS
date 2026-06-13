@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! insomnia-cli — SlateOS Insomnia CLI (Inso)
+//! insomnia-cli — Slate OS Insomnia CLI (Inso)
 //!
 //! Multi-personality: `inso`
 

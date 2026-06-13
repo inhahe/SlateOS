@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gazebo-cli — SlateOS Gazebo robotics simulator
+//! gazebo-cli — Slate OS Gazebo robotics simulator
 //!
 //! Multi-personality: `gz`, `ign`
 

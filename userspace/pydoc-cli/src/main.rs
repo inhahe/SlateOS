@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pydoc-cli — SlateOS Python documentation tools
+//! pydoc-cli — Slate OS Python documentation tools
 //!
 //! Multi-personality: `pydoc`, `pydoc3`
 

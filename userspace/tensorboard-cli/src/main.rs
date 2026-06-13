@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tensorboard-cli — SlateOS TensorBoard CLI
+//! tensorboard-cli — Slate OS TensorBoard CLI
 //!
 //! Single personality: `tensorboard`
 

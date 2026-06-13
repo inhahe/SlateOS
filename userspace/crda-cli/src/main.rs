@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! crda-cli — SlateOS CRDA wireless regulatory domain agent
+//! crda-cli — Slate OS CRDA wireless regulatory domain agent
 //!
 //! Multi-personality: `crda`, `regdbdump`
 

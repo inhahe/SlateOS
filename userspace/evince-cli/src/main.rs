@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! evince-cli — SlateOS Evince GNOME document viewer
+//! evince-cli — Slate OS Evince GNOME document viewer
 //!
 //! Multi-personality: `evince`, `evince-previewer`, `evince-thumbnailer`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! qpdfview-cli — SlateOS qpdfview tabbed PDF viewer
+//! qpdfview-cli — Slate OS qpdfview tabbed PDF viewer
 //!
 //! Single personality: `qpdfview`
 

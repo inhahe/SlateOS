@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! timeshift — SlateOS system restore tool
+//! timeshift — Slate OS system restore tool
 //!
 //! Single personality: `timeshift`
 

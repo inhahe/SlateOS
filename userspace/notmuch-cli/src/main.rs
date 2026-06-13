@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! notmuch-cli — SlateOS notmuch email indexer/search CLI
+//! notmuch-cli — Slate OS notmuch email indexer/search CLI
 //!
 //! Single personality: `notmuch`
 

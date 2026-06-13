@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tuned-cli — SlateOS TuneD system tuning daemon
+//! tuned-cli — Slate OS TuneD system tuning daemon
 //!
 //! Multi-personality: `tuned`, `tuned-adm`
 

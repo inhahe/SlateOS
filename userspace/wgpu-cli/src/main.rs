@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wgpu-cli — SlateOS wgpu graphics info/test tool
+//! wgpu-cli — Slate OS wgpu graphics info/test tool
 //!
 //! Single personality: `wgpu`
 

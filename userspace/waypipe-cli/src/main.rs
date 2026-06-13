@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! waypipe-cli — SlateOS waypipe remote Wayland display
+//! waypipe-cli — Slate OS waypipe remote Wayland display
 //!
 //! Single personality: `waypipe`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! logstash-cli — SlateOS Logstash data processing pipeline
+//! logstash-cli — Slate OS Logstash data processing pipeline
 //!
 //! Single personality: `logstash`
 

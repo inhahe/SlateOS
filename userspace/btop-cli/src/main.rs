@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! btop-cli — SlateOS btop++ system monitor
+//! btop-cli — Slate OS btop++ system monitor
 //!
 //! Single personality: `btop`
 

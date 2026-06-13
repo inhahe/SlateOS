@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sdr-cli — SlateOS SDR++ receiver
+//! sdr-cli — Slate OS SDR++ receiver
 //!
 //! Single personality: `sdrpp`
 

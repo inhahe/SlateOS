@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xclip-cli — SlateOS xclip clipboard CLI
+//! xclip-cli — Slate OS xclip clipboard CLI
 //!
 //! Single personality: `xclip`
 

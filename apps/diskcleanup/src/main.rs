@@ -1,4 +1,4 @@
-//! diskcleanup -- SlateOS Disk Cleanup Utility
+//! diskcleanup -- Slate OS Disk Cleanup Utility
 //!
 //! Scans the filesystem for temporary files, caches, logs, recycle bin
 //! contents, and other reclaimable space.  Presents a GUI (via guitk) that

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! typesense-cli — SlateOS Typesense search engine
+//! typesense-cli — Slate OS Typesense search engine
 //!
 //! Single personality: `typesense-server`
 

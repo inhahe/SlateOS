@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xh-cli — SlateOS xh friendly HTTP client
+//! xh-cli — Slate OS xh friendly HTTP client
 //!
 //! Single personality: `xh`
 

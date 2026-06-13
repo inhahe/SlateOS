@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! redshift-cli — SlateOS Maxon Redshift (biased GPU production renderer)
+//! redshift-cli — Slate OS Maxon Redshift (biased GPU production renderer)
 //!
 //! Single personality: `redshift`
 

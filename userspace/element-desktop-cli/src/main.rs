@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! element-desktop-cli — SlateOS Element Matrix client
+//! element-desktop-cli — Slate OS Element Matrix client
 //!
 //! Single personality: `element-desktop`
 

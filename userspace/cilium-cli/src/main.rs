@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cilium-cli — SlateOS Cilium eBPF networking
+//! cilium-cli — Slate OS Cilium eBPF networking
 //!
 //! Multi-personality: `cilium`, `hubble`
 

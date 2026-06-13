@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! upptime-cli — SlateOS Upptime GitHub-based uptime monitor
+//! upptime-cli — Slate OS Upptime GitHub-based uptime monitor
 //!
 //! Single personality: `upptime`
 

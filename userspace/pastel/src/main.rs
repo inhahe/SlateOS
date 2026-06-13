@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pastel — SlateOS command-line tool for working with colors
+//! pastel — Slate OS command-line tool for working with colors
 //!
 //! Single personality: `pastel`
 

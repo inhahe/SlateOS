@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mysql-cli — SlateOS MySQL/MariaDB client
+//! mysql-cli — Slate OS MySQL/MariaDB client
 //!
 //! Multi-personality: `mysql`, `mysqldump`, `mysqladmin`
 

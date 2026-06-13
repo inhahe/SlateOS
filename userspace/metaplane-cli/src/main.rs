@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! metaplane-cli — SlateOS Metaplane (data observability, Boston, acquired by Datadog 2024)
+//! metaplane-cli — Slate OS Metaplane (data observability, Boston, acquired by Datadog 2024)
 
 use std::env;
 use std::process;

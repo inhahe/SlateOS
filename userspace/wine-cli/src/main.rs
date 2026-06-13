@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wine-cli — SlateOS Wine Windows compatibility layer CLI
+//! wine-cli — Slate OS Wine Windows compatibility layer CLI
 //!
 //! Multi-personality: `wine`, `wine64`, `wineserver`, `wineboot`, `winecfg`, `winepath`, `regedit`
 

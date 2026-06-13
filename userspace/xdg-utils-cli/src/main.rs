@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xdg-utils-cli — SlateOS xdg-utils desktop integration
+//! xdg-utils-cli — Slate OS xdg-utils desktop integration
 //!
 //! Multi-personality: `xdg-open`, `xdg-mime`, `xdg-settings`, `xdg-email`
 

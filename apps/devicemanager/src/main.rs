@@ -1,4 +1,4 @@
-//! SlateOS Device Manager
+//! Slate OS Device Manager
 //!
 //! Graphical hardware device manager inspired by Windows Device Manager.
 //! Features:
@@ -17,7 +17,7 @@
 //! - Export hardware report
 //!
 //! Uses the guitk library for UI rendering. Hardware data is gathered
-//! through SlateOS syscalls; stubbed with representative data for initial
+//! through Slate OS syscalls; stubbed with representative data for initial
 //! development.
 
 #[allow(unused_imports)]
@@ -3038,7 +3038,7 @@ fn is_node_visible(state: &DeviceManagerState, index: usize) -> bool {
 // ============================================================================
 
 fn main() {
-    // Placeholder: in a real SlateOS environment, this would create a window,
+    // Placeholder: in a real Slate OS environment, this would create a window,
     // enter the event loop, and call render() / handle_event() each frame.
 }
 

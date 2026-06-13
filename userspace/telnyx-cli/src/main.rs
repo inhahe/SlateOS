@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! telnyx-cli — SlateOS personality CLI for Telnyx, the owned-network CPaaS.
+//! telnyx-cli — Slate OS personality CLI for Telnyx, the owned-network CPaaS.
 
 use std::env;
 use std::process;

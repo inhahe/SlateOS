@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! linkerd-cli — SlateOS Linkerd service mesh CLI
+//! linkerd-cli — Slate OS Linkerd service mesh CLI
 //!
 //! Single personality: `linkerd`
 

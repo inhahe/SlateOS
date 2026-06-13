@@ -1,4 +1,4 @@
-//! SlateOS Remote Desktop Viewer/Client
+//! Slate OS Remote Desktop Viewer/Client
 //!
 //! GUI application for viewing and controlling remote desktops over RDP, VNC,
 //! and SSH protocols. Provides:
@@ -17,7 +17,7 @@
 //! - Fullscreen mode with configurable escape hotkey
 //!
 //! Uses the guitk library for UI rendering with Catppuccin Mocha dark theme.
-//! Network I/O is performed through SlateOS syscalls; simulated with
+//! Network I/O is performed through Slate OS syscalls; simulated with
 //! representative data for initial development.
 
 #[allow(unused_imports)]

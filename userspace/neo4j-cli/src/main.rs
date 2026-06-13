@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! neo4j-cli — SlateOS Neo4j CLI (cypher-shell)
+//! neo4j-cli — Slate OS Neo4j CLI (cypher-shell)
 //!
 //! Multi-personality: `cypher-shell`, `neo4j-admin`
 

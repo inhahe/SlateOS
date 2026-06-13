@@ -1,4 +1,4 @@
-//! SlateOS File Type Identifier
+//! Slate OS File Type Identifier
 //!
 //! Determines file types by examining file contents (magic numbers and byte
 //! patterns) rather than relying on file extensions. Modeled after the Unix

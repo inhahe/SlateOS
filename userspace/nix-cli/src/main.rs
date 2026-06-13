@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nix-cli — SlateOS Nix package manager
+//! nix-cli — Slate OS Nix package manager
 //!
 //! Multi-personality: `nix`, `nix-build`, `nix-shell`, `nix-env`, `nix-store`
 

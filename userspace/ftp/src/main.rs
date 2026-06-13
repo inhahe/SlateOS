@@ -1,6 +1,6 @@
-//! `SlateOS` FTP Client
+//! `Slate OS` FTP Client
 //!
-//! A full-featured interactive FTP client for `SlateOS`. Implements the FTP
+//! A full-featured interactive FTP client for `Slate OS`. Implements the FTP
 //! protocol (RFC 959) over the kernel's TCP syscall interface with support
 //! for both active and passive data connections, ASCII and binary transfer
 //! modes, glob-based multi-file transfers, and anonymous login.
@@ -84,9 +84,9 @@ use std::process;
 // Syscall numbers (from kernel/src/syscall/ tables)
 // ============================================================================
 //
-// Networking goes through the native SlateOS TCP/DNS syscalls.  Local file I/O
+// Networking goes through the native Slate OS TCP/DNS syscalls.  Local file I/O
 // (open/read/write/stat/getcwd/chdir/readdir) is handled entirely through
-// `std::fs`/`std::env`, which the SlateOS libc routes to the correct native
+// `std::fs`/`std::env`, which the Slate OS libc routes to the correct native
 // syscalls — the previous raw Linux syscall numbers (0/1/2/3/4/78/79/80) did
 // not exist on this OS (0 and 1 are SYS_YIELD/SYS_EXIT here).
 

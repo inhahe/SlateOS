@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sqitch-cli — SlateOS Sqitch database change management
+//! sqitch-cli — Slate OS Sqitch database change management
 //!
 //! Single personality: `sqitch`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! librecad-cli — SlateOS LibreCAD 2D CAD application
+//! librecad-cli — Slate OS LibreCAD 2D CAD application
 //!
 //! Single personality: `librecad`
 

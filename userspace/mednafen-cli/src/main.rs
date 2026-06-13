@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mednafen-cli — SlateOS Mednafen multi-system emulator
+//! mednafen-cli — Slate OS Mednafen multi-system emulator
 //!
 //! Single personality: `mednafen`
 

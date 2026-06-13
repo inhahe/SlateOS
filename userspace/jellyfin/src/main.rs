@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! jellyfin — SlateOS media server
+//! jellyfin — Slate OS media server
 //!
 //! Single personality: `jellyfin`
 

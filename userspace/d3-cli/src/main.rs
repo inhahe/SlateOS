@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! d3-cli — SlateOS D3.js data visualization CLI
+//! d3-cli — Slate OS D3.js data visualization CLI
 //!
 //! Single personality: `d3`
 

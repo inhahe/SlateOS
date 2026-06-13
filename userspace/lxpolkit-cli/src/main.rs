@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lxpolkit-cli — SlateOS LXPolkit lightweight PolicyKit agent
+//! lxpolkit-cli — Slate OS LXPolkit lightweight PolicyKit agent
 //!
 //! Single personality: `lxpolkit`
 

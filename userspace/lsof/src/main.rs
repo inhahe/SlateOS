@@ -1,4 +1,4 @@
-//! SlateOS `lsof` — list open files utility.
+//! Slate OS `lsof` — list open files utility.
 //!
 //! Reads `/proc/<pid>/fd/`, `/proc/<pid>/fdinfo/`, `/proc/<pid>/stat`,
 //! and `/proc/<pid>/status` to enumerate open file descriptors across

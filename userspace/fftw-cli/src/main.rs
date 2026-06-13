@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fftw-cli — SlateOS FFTW benchmark/info tool
+//! fftw-cli — Slate OS FFTW benchmark/info tool
 //!
 //! Multi-personality: `fftw-wisdom`, `fftw-bench`
 

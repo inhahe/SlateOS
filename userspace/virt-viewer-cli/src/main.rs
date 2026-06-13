@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! virt-viewer-cli — SlateOS virt-viewer VM display client
+//! virt-viewer-cli — Slate OS virt-viewer VM display client
 //!
 //! Multi-personality: `virt-viewer`, `remote-viewer`
 

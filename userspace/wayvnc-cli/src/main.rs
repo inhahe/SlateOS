@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wayvnc-cli — SlateOS wayvnc VNC server for Wayland
+//! wayvnc-cli — Slate OS wayvnc VNC server for Wayland
 //!
 //! Multi-personality: `wayvnc`, `wayvncctl`
 

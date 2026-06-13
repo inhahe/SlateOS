@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! psql-cli — SlateOS PostgreSQL client
+//! psql-cli — Slate OS PostgreSQL client
 //!
 //! Multi-personality: `psql`, `pg_dump`, `pg_restore`, `createdb`, `dropdb`
 

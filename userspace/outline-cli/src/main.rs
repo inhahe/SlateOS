@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! outline-cli — SlateOS Outline team wiki
+//! outline-cli — Slate OS Outline team wiki
 //!
 //! Single personality: `outline`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! glogg-cli — SlateOS glogg fast log explorer
+//! glogg-cli — Slate OS glogg fast log explorer
 //!
 //! Single personality: `glogg`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! stress-cli — SlateOS stress system stress tester
+//! stress-cli — Slate OS stress system stress tester
 //!
 //! Multi-personality: `stress`, `stress-ng`
 

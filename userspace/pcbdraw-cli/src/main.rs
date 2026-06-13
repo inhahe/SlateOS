@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pcbdraw-cli — SlateOS PcbDraw PCB rendering tool
+//! pcbdraw-cli — Slate OS PcbDraw PCB rendering tool
 //!
 //! Single personality: `pcbdraw`
 

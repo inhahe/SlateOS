@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gitea-cli — SlateOS Gitea (self-hosted lightweight Git service, Go)
+//! gitea-cli — Slate OS Gitea (self-hosted lightweight Git service, Go)
 //!
 //! Single personality: `gitea`
 

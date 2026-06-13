@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! coqui-cli — SlateOS Coqui TTS neural speech synthesis
+//! coqui-cli — Slate OS Coqui TTS neural speech synthesis
 //!
 //! Single personality: `coqui-tts`
 

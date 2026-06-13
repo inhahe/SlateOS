@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nextcloud — SlateOS self-hosted cloud platform
+//! nextcloud — Slate OS self-hosted cloud platform
 //!
 //! Single personality: `occ` (Nextcloud command-line interface)
 

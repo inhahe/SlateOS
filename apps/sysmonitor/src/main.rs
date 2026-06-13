@@ -1,4 +1,4 @@
-//! `SlateOS` System Monitor / Dashboard
+//! `Slate OS` System Monitor / Dashboard
 //!
 //! A comprehensive system monitoring application combining Task Manager
 //! and Resource Monitor functionality. Features:
@@ -14,7 +14,7 @@
 //! - Auto-refresh with configurable interval
 //!
 //! Uses the guitk library for UI rendering. All data is gathered
-//! through `SlateOS` syscalls; the structs here define the presentation
+//! through `Slate OS` syscalls; the structs here define the presentation
 //! layer while the OS provides the actual system information.
 
 // Lint policy is inherited from the workspace (`[lints] workspace = true`):
@@ -669,7 +669,7 @@ impl SysMonitorState {
 
     /// Refresh all data from the OS.
     ///
-    /// In production this calls `SlateOS` syscalls. The data vectors
+    /// In production this calls `Slate OS` syscalls. The data vectors
     /// are populated externally or via `load_demo_data()` for testing.
     pub fn refresh(&mut self) {
         self.rebuild_visible_list();

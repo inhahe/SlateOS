@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mongodb-cli — SlateOS MongoDB shell & tools
+//! mongodb-cli — Slate OS MongoDB shell & tools
 //!
 //! Multi-personality: `mongosh`, `mongodump`, `mongorestore`, `mongostat`
 

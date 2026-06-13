@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pkgconf — SlateOS package configuration tool
+//! pkgconf — Slate OS package configuration tool
 //!
 //! Multi-personality binary detected via argv[0]:
 //!

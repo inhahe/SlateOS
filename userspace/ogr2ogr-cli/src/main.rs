@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ogr2ogr-cli — SlateOS OGR vector data converter
+//! ogr2ogr-cli — Slate OS OGR vector data converter
 //!
 //! Multi-personality: `ogr2ogr`, `ogrinfo`
 

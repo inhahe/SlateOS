@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! auphonic-cli — SlateOS Auphonic audio post-production
+//! auphonic-cli — Slate OS Auphonic audio post-production
 //!
 //! Single personality: `auphonic`
 

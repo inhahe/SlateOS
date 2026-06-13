@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bemenu-cli — SlateOS bemenu dynamic menu
+//! bemenu-cli — Slate OS bemenu dynamic menu
 //!
 //! Multi-personality: `bemenu`, `bemenu-run`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! musescore-cli — SlateOS MuseScore music notation
+//! musescore-cli — Slate OS MuseScore music notation
 //!
 //! Multi-personality: `musescore`, `mscore`
 

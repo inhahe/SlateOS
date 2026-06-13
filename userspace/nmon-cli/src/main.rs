@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nmon-cli — SlateOS nmon performance monitor
+//! nmon-cli — Slate OS nmon performance monitor
 //!
 //! Single personality: `nmon`
 

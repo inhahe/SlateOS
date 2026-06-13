@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ipp-usb-cli — SlateOS IPP-over-USB proxy
+//! ipp-usb-cli — Slate OS IPP-over-USB proxy
 //!
 //! Single personality: `ipp-usb`
 

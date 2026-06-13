@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! houdini-cli — SlateOS SideFX Houdini procedural 3D
+//! houdini-cli — Slate OS SideFX Houdini procedural 3D
 //!
 //! Single personality: `houdini`
 

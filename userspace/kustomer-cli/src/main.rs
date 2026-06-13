@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kustomer-cli — SlateOS Kustomer (customer-centric CRM/support, Meta acquired 2022)
+//! kustomer-cli — Slate OS Kustomer (customer-centric CRM/support, Meta acquired 2022)
 //!
 //! Single personality: `kustomer`
 

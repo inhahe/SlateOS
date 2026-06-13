@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lightgbm-cli — SlateOS LightGBM gradient boosting
+//! lightgbm-cli — Slate OS LightGBM gradient boosting
 //!
 //! Single personality: `lightgbm`
 

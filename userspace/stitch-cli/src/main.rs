@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! stitch-cli — SlateOS Stitch data loader
+//! stitch-cli — Slate OS Stitch data loader
 //!
 //! Single personality: `stitch`
 

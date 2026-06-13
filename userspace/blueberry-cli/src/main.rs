@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! blueberry-cli — SlateOS Blueberry Bluetooth config tool (Cinnamon)
+//! blueberry-cli — Slate OS Blueberry Bluetooth config tool (Cinnamon)
 //!
 //! Single personality: `blueberry`
 

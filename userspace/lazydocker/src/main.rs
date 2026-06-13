@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lazydocker — SlateOS terminal UI for Docker
+//! lazydocker — Slate OS terminal UI for Docker
 //!
 //! Single personality: `lazydocker`
 

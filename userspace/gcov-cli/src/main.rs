@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gcov-cli — SlateOS code coverage tools
+//! gcov-cli — Slate OS code coverage tools
 //!
 //! Multi-personality: `gcovr`, `lcov`, `genhtml`, `geninfo`
 

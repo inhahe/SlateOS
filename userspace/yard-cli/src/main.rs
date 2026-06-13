@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! yard-cli — SlateOS YARD Ruby documentation generator
+//! yard-cli — Slate OS YARD Ruby documentation generator
 //!
 //! Multi-personality: `yard`, `yardoc`, `yri`
 

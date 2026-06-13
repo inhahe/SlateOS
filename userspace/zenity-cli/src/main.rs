@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zenity-cli — SlateOS Zenity dialog CLI
+//! zenity-cli — Slate OS Zenity dialog CLI
 //!
 //! Multi-personality: `zenity`, `kdialog`
 

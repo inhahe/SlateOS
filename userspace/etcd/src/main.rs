@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! etcd — SlateOS distributed key-value store
+//! etcd — Slate OS distributed key-value store
 //!
 //! Multi-personality: `etcd` (server), `etcdctl` (CLI), `etcdutl` (utilities)
 

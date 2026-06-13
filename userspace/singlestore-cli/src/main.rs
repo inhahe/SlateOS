@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! singlestore-cli — SlateOS SingleStore (formerly MemSQL, real-time HTAP, San Francisco, private)
+//! singlestore-cli — Slate OS SingleStore (formerly MemSQL, real-time HTAP, San Francisco, private)
 
 use std::env;
 use std::process;

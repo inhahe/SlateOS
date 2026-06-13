@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! eeschema-cli — SlateOS KiCad Eeschema schematic editor
+//! eeschema-cli — Slate OS KiCad Eeschema schematic editor
 //!
 //! Multi-personality: `eeschema`, `pcbnew`, `gerbview`
 

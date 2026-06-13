@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! modprobe-cli — SlateOS kernel module tools
+//! modprobe-cli — Slate OS kernel module tools
 //!
 //! Multi-personality: `modprobe`, `insmod`, `rmmod`, `lsmod`, `modinfo`, `depmod`
 

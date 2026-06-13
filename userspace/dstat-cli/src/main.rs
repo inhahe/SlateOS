@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dstat-cli — SlateOS dstat system resource statistics
+//! dstat-cli — Slate OS dstat system resource statistics
 //!
 //! Single personality: `dstat`
 

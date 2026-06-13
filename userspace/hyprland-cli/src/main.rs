@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hyprland-cli — SlateOS Hyprland compositor tools
+//! hyprland-cli — Slate OS Hyprland compositor tools
 //!
 //! Multi-personality: `hyprctl`, `hyprpm`
 

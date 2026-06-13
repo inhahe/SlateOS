@@ -9,7 +9,7 @@
 #![allow(clippy::struct_excessive_bools)]
 #![allow(clippy::fn_params_excessive_bools)]
 
-//! SlateOS Connect Four — classic two-player connection game with AI opponent.
+//! Slate OS Connect Four — classic two-player connection game with AI opponent.
 //!
 //! Features a 7-column by 6-row grid, gravity-based piece dropping,
 //! alternating Red/Yellow turns, four-in-a-row win detection (horizontal,

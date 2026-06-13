@@ -1,4 +1,4 @@
-//! SlateOS Disk Partition Editor
+//! Slate OS Disk Partition Editor
 //!
 //! Multi-personality binary that acts as `parted`, `partprobe`, or `partx`
 //! depending on the name used to invoke it (detected via `argv[0]`).
@@ -2753,7 +2753,7 @@ fn run_partprobe(args: &[String]) -> i32 {
             // For now, show the format.
             println!("{}: unknown partition table", device);
         } else {
-            // Silently inform kernel - on SlateOS this would be an IPC message
+            // Silently inform kernel - on Slate OS this would be an IPC message
             // to the block device service
             println!("Informing kernel about changes to {}", device);
         }

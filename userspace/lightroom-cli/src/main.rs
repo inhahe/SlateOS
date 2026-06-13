@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lightroom-cli — SlateOS Adobe Lightroom Classic photo workflow
+//! lightroom-cli — Slate OS Adobe Lightroom Classic photo workflow
 //!
 //! Single personality: `lightroom`
 

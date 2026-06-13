@@ -1,4 +1,4 @@
-//! SlateOS User Switching Utility (`su` / `sudo`)
+//! Slate OS User Switching Utility (`su` / `sudo`)
 //!
 //! Switch to another user's identity and optionally run a command.
 //! When invoked as `sudo` (detected via `argv[0]`), runs a single command
@@ -563,7 +563,7 @@ fn parse_su_args(args: &[String]) -> Result<SuOptions, i32> {
                 return Err(0);
             }
             "-V" | "--version" => {
-                println!("su (SlateOS) 0.1.0");
+                println!("su (Slate OS) 0.1.0");
                 return Err(0);
             }
             other => {
@@ -587,7 +587,7 @@ fn parse_su_args(args: &[String]) -> Result<SuOptions, i32> {
 }
 
 fn print_su_help() {
-    println!("SlateOS User Switch (su) v0.1.0");
+    println!("Slate OS User Switch (su) v0.1.0");
     println!();
     println!("Switch to another user account.");
     println!();
@@ -727,7 +727,7 @@ fn parse_sudo_args(args: &[String]) -> Result<SudoOptions, i32> {
                 return Err(0);
             }
             "-V" | "--version" => {
-                println!("sudo (SlateOS) 0.1.0");
+                println!("sudo (Slate OS) 0.1.0");
                 return Err(0);
             }
             _ => {
@@ -749,7 +749,7 @@ fn parse_sudo_args(args: &[String]) -> Result<SudoOptions, i32> {
 }
 
 fn print_sudo_help() {
-    println!("SlateOS Sudo v0.1.0");
+    println!("Slate OS Sudo v0.1.0");
     println!();
     println!("Run a command as another user (default: root).");
     println!();

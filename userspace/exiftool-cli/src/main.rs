@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! exiftool-cli — SlateOS ExifTool CLI
+//! exiftool-cli — Slate OS ExifTool CLI
 //!
 //! Single personality: `exiftool`
 

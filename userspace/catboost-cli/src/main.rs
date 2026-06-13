@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! catboost-cli — SlateOS CatBoost gradient boosting
+//! catboost-cli — Slate OS CatBoost gradient boosting
 //!
 //! Single personality: `catboost`
 

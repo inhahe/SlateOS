@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mise-cli — SlateOS mise polyglot dev tool manager
+//! mise-cli — Slate OS mise polyglot dev tool manager
 //!
 //! Single personality: `mise`
 

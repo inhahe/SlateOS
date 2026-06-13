@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! birdfont-cli — SlateOS BirdFont font editor
+//! birdfont-cli — Slate OS BirdFont font editor
 //!
 //! Single personality: `birdfont`
 

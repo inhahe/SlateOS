@@ -1,4 +1,4 @@
-//! SlateOS Routing Table Management
+//! Slate OS Routing Table Management
 //!
 //! Display and manage the kernel IP routing table.
 //! Similar to the classic `route` command on Linux/BSD.

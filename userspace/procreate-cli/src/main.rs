@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! procreate-cli — SlateOS Procreate digital illustration
+//! procreate-cli — Slate OS Procreate digital illustration
 //!
 //! Single personality: `procreate`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rdiff-backup-cli — SlateOS rdiff-backup CLI
+//! rdiff-backup-cli — Slate OS rdiff-backup CLI
 //!
 //! Single personality: `rdiff-backup`
 

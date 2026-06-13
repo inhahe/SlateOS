@@ -1,4 +1,4 @@
-// SlateOS login — user login program
+// Slate OS login — user login program
 //
 // Authenticates users and starts their login session. Called by getty(8)
 // after a username is entered, or directly for console login.

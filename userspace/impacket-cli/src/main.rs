@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! impacket-cli — SlateOS Impacket network protocol tools
+//! impacket-cli — Slate OS Impacket network protocol tools
 //!
 //! Multi-personality: `psexec`, `smbclient`, `secretsdump`, `ntlmrelayx`, `wmiexec`, `dcomexec`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nats — SlateOS high-performance messaging system
+//! nats — Slate OS high-performance messaging system
 //!
 //! Multi-personality: `nats-server` (server), `nats` (CLI client)
 

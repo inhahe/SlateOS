@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vivaldi-cli — SlateOS Vivaldi browser (power user)
+//! vivaldi-cli — Slate OS Vivaldi browser (power user)
 //!
 //! Single personality: `vivaldi`
 

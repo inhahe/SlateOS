@@ -1,7 +1,7 @@
 //! Pseudo-terminal (PTY) abstraction for SlateOS.
 //!
 //! This module implements a PTY layer that connects the graphical terminal
-//! emulator to child processes. Unlike Unix, SlateOS does not have kernel-level
+//! emulator to child processes. Unlike Unix, Slate OS does not have kernel-level
 //! PTY devices. Instead, we build the PTY abstraction in userspace using
 //! bidirectional byte channels (the OS's primary IPC primitive).
 //!

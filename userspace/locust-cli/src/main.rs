@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! locust-cli — SlateOS Locust load testing tool
+//! locust-cli — Slate OS Locust load testing tool
 //!
 //! Multi-personality: `locust`
 

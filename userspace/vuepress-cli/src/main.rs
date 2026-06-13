@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vuepress-cli — SlateOS VuePress CLI
+//! vuepress-cli — Slate OS VuePress CLI
 //!
 //! Multi-personality: `vuepress`
 

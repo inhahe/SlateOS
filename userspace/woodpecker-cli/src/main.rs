@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! woodpecker-cli — SlateOS Woodpecker CI CLI
+//! woodpecker-cli — Slate OS Woodpecker CI CLI
 //!
 //! Multi-personality: `woodpecker-cli`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! samtools-cli — SlateOS SAMtools sequence alignment tools
+//! samtools-cli — Slate OS SAMtools sequence alignment tools
 //!
 //! Multi-personality: `samtools`, `htsfile`, `tabix`, `bgzip`
 

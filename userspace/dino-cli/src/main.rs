@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dino-cli — SlateOS Dino XMPP/Jabber client
+//! dino-cli — Slate OS Dino XMPP/Jabber client
 //!
 //! Single personality: `dino`
 

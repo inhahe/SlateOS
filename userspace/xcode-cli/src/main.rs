@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xcode-cli — SlateOS Xcode (Apple's IDE for macOS/iOS/iPadOS/watchOS/tvOS/visionOS)
+//! xcode-cli — Slate OS Xcode (Apple's IDE for macOS/iOS/iPadOS/watchOS/tvOS/visionOS)
 //!
 //! Single personality: `xcode`
 

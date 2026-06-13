@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! freetype-cli — SlateOS FreeType font inspection tool
+//! freetype-cli — Slate OS FreeType font inspection tool
 //!
 //! Single personality: `freetype-info`
 

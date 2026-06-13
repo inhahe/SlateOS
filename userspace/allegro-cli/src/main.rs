@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! allegro-cli — SlateOS Cadence Allegro high-speed PCB design
+//! allegro-cli — Slate OS Cadence Allegro high-speed PCB design
 //!
 //! Single personality: `allegro`
 

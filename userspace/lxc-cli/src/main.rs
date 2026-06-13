@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lxc-cli — SlateOS LXC/LXD container CLI
+//! lxc-cli — Slate OS LXC/LXD container CLI
 //!
 //! Multi-personality: `lxc`, `lxc-create`, `lxc-start`, `lxc-stop`, `lxc-ls`, `lxc-info`
 

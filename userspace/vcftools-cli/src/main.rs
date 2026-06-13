@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vcftools-cli — SlateOS VCFtools variant call format tools
+//! vcftools-cli — Slate OS VCFtools variant call format tools
 //!
 //! Single personality: `vcftools`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bandwhich-cli — SlateOS bandwhich network utilization monitor
+//! bandwhich-cli — Slate OS bandwhich network utilization monitor
 //!
 //! Single personality: `bandwhich`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! basecamp-cli — SlateOS Basecamp (37signals' opinionated PM, also where Rails was born)
+//! basecamp-cli — Slate OS Basecamp (37signals' opinionated PM, also where Rails was born)
 
 use std::env;
 use std::process;

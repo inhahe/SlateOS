@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rabbitmq — SlateOS message broker
+//! rabbitmq — Slate OS message broker
 //!
 //! Multi-personality: `rabbitmq-server`, `rabbitmqctl`, `rabbitmq-plugins`, `rabbitmq-diagnostics`
 

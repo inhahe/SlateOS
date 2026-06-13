@@ -1,4 +1,4 @@
-//! SlateOS Memory Information Display
+//! Slate OS Memory Information Display
 //!
 //! Displays system memory and swap usage by reading `/proc/meminfo`.
 //! Similar to Linux `free` command.
@@ -106,7 +106,7 @@ fn read_meminfo() -> Option<MemInfo> {
     let shmem = get_meminfo_value(&content, "Shmem");
     let s_reclaimable = get_meminfo_value(&content, "SReclaimable");
 
-    // If MemAvailable is missing (older kernels / early SlateOS builds),
+    // If MemAvailable is missing (older kernels / early Slate OS builds),
     // estimate it as free + buffers + cached.
     let mem_available = if mem_available == 0 && mem_free > 0 {
         mem_free.saturating_add(buffers).saturating_add(cached)

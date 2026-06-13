@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dvips-cli — SlateOS DVI to PostScript converter & DVI tools
+//! dvips-cli — Slate OS DVI to PostScript converter & DVI tools
 //!
 //! Multi-personality: `dvips`, `dvipdfmx`, `dvisvgm`
 

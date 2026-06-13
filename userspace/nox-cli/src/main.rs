@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nox-cli — SlateOS Nox test automation tool
+//! nox-cli — Slate OS Nox test automation tool
 //!
 //! Multi-personality: `nox`
 

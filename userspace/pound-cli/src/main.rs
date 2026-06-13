@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pound-cli — SlateOS Pound reverse proxy
+//! pound-cli — Slate OS Pound reverse proxy
 //!
 //! Multi-personality: `pound`, `poundctl`
 

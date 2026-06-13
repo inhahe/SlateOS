@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! alteryx-cli — SlateOS Alteryx Analytics automation
+//! alteryx-cli — Slate OS Alteryx Analytics automation
 //!
 //! Single personality: `alteryx`
 

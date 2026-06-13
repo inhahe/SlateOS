@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! attune-cli — SlateOS Attune automation
+//! attune-cli — Slate OS Attune automation
 //!
 //! Single personality: `attune`
 

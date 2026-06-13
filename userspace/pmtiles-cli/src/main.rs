@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pmtiles-cli — SlateOS PMTiles archive tool
+//! pmtiles-cli — Slate OS PMTiles archive tool
 //!
 //! Single personality: `pmtiles`
 

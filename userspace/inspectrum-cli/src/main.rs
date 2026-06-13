@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! inspectrum-cli — SlateOS inspectrum signal analyzer
+//! inspectrum-cli — Slate OS inspectrum signal analyzer
 //!
 //! Single personality: `inspectrum`
 

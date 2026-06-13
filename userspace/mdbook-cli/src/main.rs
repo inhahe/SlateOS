@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mdbook-cli — SlateOS mdBook CLI
+//! mdbook-cli — Slate OS mdBook CLI
 //!
 //! Multi-personality: `mdbook`
 

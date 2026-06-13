@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dehancer-cli — SlateOS Dehancer film emulation plug-in
+//! dehancer-cli — Slate OS Dehancer film emulation plug-in
 //!
 //! Single personality: `dehancer`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! multitail-cli — SlateOS MultiTail multi-log viewer
+//! multitail-cli — Slate OS MultiTail multi-log viewer
 //!
 //! Single personality: `multitail`
 

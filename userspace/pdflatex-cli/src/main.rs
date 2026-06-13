@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pdflatex-cli — SlateOS pdfLaTeX/pdfTeX engine
+//! pdflatex-cli — Slate OS pdfLaTeX/pdfTeX engine
 //!
 //! Multi-personality: `pdflatex`, `pdftex`
 

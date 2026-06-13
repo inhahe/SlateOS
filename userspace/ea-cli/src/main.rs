@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ea-cli — SlateOS EA app (Electronic Arts, replaced Origin)
+//! ea-cli — Slate OS EA app (Electronic Arts, replaced Origin)
 //!
 //! Single personality: `ea`
 

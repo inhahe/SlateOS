@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sqlfluff-cli — SlateOS SQLFluff SQL linter
+//! sqlfluff-cli — Slate OS SQLFluff SQL linter
 //!
 //! Single personality: `sqlfluff`
 

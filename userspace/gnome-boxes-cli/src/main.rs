@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gnome-boxes-cli — SlateOS GNOME Boxes VM manager
+//! gnome-boxes-cli — Slate OS GNOME Boxes VM manager
 //!
 //! Single personality: `gnome-boxes`
 

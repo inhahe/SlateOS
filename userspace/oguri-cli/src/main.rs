@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! oguri-cli — SlateOS oguri animated wallpaper daemon
+//! oguri-cli — Slate OS oguri animated wallpaper daemon
 //!
 //! Multi-personality: `oguri`, `ogurictl`
 

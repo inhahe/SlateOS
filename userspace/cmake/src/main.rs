@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cmake — SlateOS CMake build system generator
+//! cmake — Slate OS CMake build system generator
 //!
 //! Multi-personality binary detected via argv[0]:
 //!

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fontconfig — SlateOS font configuration and discovery
+//! fontconfig — Slate OS font configuration and discovery
 //!
 //! Multi-personality binary for font management.
 //! Detected via argv[0]:

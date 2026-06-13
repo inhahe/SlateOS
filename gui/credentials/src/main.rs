@@ -1,4 +1,4 @@
-//! SlateOS Credential Manager Service
+//! Slate OS Credential Manager Service
 //!
 //! A system-wide password and credential storage service analogous to Windows
 //! Credential Manager or GNOME Keyring. Credentials are encrypted at rest using

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zipkin-cli — SlateOS Zipkin distributed tracing CLI
+//! zipkin-cli — Slate OS Zipkin distributed tracing CLI
 //!
 //! Single personality: `zipkin`
 

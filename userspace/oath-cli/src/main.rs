@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! oath-cli — SlateOS OATH/OTP authentication tools
+//! oath-cli — Slate OS OATH/OTP authentication tools
 //!
 //! Multi-personality: `oathtool`, `ykman`, `pamu2fcfg`
 

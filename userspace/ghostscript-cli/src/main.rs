@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ghostscript-cli — SlateOS Ghostscript CLI
+//! ghostscript-cli — Slate OS Ghostscript CLI
 //!
 //! Multi-personality: `gs`, `ghostscript`, `ps2pdf`, `pdf2ps`
 

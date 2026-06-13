@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! swaylock-cli — SlateOS swaylock screen locker
+//! swaylock-cli — Slate OS swaylock screen locker
 //!
 //! Single personality: `swaylock`
 

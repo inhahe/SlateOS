@@ -1,4 +1,4 @@
-//! SlateOS filesystem signature wiping utility.
+//! Slate OS filesystem signature wiping utility.
 //!
 //! Multi-personality binary providing:
 //! - **wipefs** — wipe filesystem/RAID/partition-table signatures

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rpcs3-cli — SlateOS RPCS3 PlayStation 3 emulator
+//! rpcs3-cli — Slate OS RPCS3 PlayStation 3 emulator
 //!
 //! Multi-personality: `rpcs3`
 

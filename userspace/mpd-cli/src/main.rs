@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mpd-cli — SlateOS MPD music player daemon + mpc client
+//! mpd-cli — Slate OS MPD music player daemon + mpc client
 //!
 //! Multi-personality: `mpd`, `mpc`
 

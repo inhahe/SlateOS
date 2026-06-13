@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! svelte-cli — SlateOS SvelteKit CLI
+//! svelte-cli — Slate OS SvelteKit CLI
 //!
 //! Multi-personality: `sv`
 

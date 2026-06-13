@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! geogebra-cli — SlateOS GeoGebra dynamic mathematics
+//! geogebra-cli — Slate OS GeoGebra dynamic mathematics
 //!
 //! Single personality: `geogebra`
 

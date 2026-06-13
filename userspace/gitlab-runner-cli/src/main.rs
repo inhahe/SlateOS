@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gitlab-runner-cli — SlateOS GitLab Runner
+//! gitlab-runner-cli — Slate OS GitLab Runner
 //!
 //! Single personality: `gitlab-runner`
 

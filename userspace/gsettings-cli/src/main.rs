@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gsettings-cli — SlateOS GSettings CLI
+//! gsettings-cli — Slate OS GSettings CLI
 //!
 //! Single personality: `gsettings`
 

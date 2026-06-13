@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! promql-cli — SlateOS PromQL CLI tool
+//! promql-cli — Slate OS PromQL CLI tool
 //!
 //! Single personality: `promql`
 

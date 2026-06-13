@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! indesign-cli — SlateOS Adobe InDesign desktop publishing
+//! indesign-cli — Slate OS Adobe InDesign desktop publishing
 //!
 //! Single personality: `indesign`
 

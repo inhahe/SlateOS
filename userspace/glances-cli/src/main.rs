@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! glances-cli — SlateOS Glances system monitor
+//! glances-cli — Slate OS Glances system monitor
 //!
 //! Single personality: `glances`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! elastic-cli — SlateOS Elastic (Elasticsearch + Kibana + ELK Stack, Mountain View + Amsterdam, NYSE:ESTC)
+//! elastic-cli — Slate OS Elastic (Elasticsearch + Kibana + ELK Stack, Mountain View + Amsterdam, NYSE:ESTC)
 
 use std::env;
 use std::process;

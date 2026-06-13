@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! glxinfo-cli — SlateOS glxinfo/glxgears OpenGL tools CLI
+//! glxinfo-cli — Slate OS glxinfo/glxgears OpenGL tools CLI
 //!
 //! Multi-personality: `glxinfo`, `glxgears`
 

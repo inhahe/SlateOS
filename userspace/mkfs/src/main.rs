@@ -1,4 +1,4 @@
-//! SlateOS mkfs -- Create Filesystems
+//! Slate OS mkfs -- Create Filesystems
 //!
 //! Creates filesystems on disk devices or image files. Supports ext4, FAT32,
 //! and tmpfs via the kernel's `SYS_FS_FORMAT` syscall (number 651 in the

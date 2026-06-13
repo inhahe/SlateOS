@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! k3s-cli — SlateOS K3s lightweight Kubernetes
+//! k3s-cli — Slate OS K3s lightweight Kubernetes
 //!
 //! Single personality: `k3s`
 

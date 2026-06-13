@@ -4,7 +4,7 @@
 // items: `missing_panics_doc`, `must_use_candidate`, etc.). Tracked as a
 // separate LIMITATION in `todo.txt`.
 
-//! guitk — SlateOS GUI Toolkit Library
+//! guitk — Slate OS GUI Toolkit Library
 //!
 //! Provides a widget library with a Flexbox/Grid-inspired layout engine,
 //! a simple styling system, and event dispatch. Rendering-backend-agnostic:

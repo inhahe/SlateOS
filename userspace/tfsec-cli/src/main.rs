@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tfsec-cli — SlateOS tfsec Terraform security scanner
+//! tfsec-cli — Slate OS tfsec Terraform security scanner
 //!
 //! Single personality: `tfsec`
 

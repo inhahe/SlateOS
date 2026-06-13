@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! keyshot-cli — SlateOS KeyShot (Luxion product visualization renderer)
+//! keyshot-cli — Slate OS KeyShot (Luxion product visualization renderer)
 //!
 //! Single personality: `keyshot`
 

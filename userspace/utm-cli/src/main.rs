@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! utm-cli — SlateOS UTM (QEMU GUI for macOS/iOS)
+//! utm-cli — Slate OS UTM (QEMU GUI for macOS/iOS)
 //!
 //! Single personality: `utm`
 

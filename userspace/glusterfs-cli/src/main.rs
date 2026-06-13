@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! glusterfs-cli — SlateOS GlusterFS distributed filesystem
+//! glusterfs-cli — Slate OS GlusterFS distributed filesystem
 //!
 //! Multi-personality: `gluster`, `glusterd`, `glusterfsd`
 

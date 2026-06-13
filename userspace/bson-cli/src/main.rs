@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bson-cli — SlateOS BSON inspection tool
+//! bson-cli — Slate OS BSON inspection tool
 //!
 //! Single personality: `bsondump`
 

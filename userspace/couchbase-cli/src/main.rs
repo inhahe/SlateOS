@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! couchbase-cli — SlateOS Couchbase Server distributed NoSQL
+//! couchbase-cli — Slate OS Couchbase Server distributed NoSQL
 //!
 //! Single personality: `couchbase`
 

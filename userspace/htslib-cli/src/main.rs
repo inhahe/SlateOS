@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! htslib-cli — SlateOS HTSlib utilities
+//! htslib-cli — Slate OS HTSlib utilities
 //!
 //! Multi-personality: `htsfile`, `bgzip`, `tabix`
 

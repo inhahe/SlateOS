@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vorbis-tools — SlateOS Ogg Vorbis audio tools
+//! vorbis-tools — Slate OS Ogg Vorbis audio tools
 //!
 //! Multi-personality: `oggenc`, `oggdec`, `ogginfo`, `vorbiscomment`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! statsd-cli — SlateOS StatsD CLI
+//! statsd-cli — Slate OS StatsD CLI
 //!
 //! Single personality: `statsd`
 

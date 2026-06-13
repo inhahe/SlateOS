@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! allplan-cli — SlateOS Nemetschek Allplan BIM for architects/engineers
+//! allplan-cli — Slate OS Nemetschek Allplan BIM for architects/engineers
 //!
 //! Single personality: `allplan`
 

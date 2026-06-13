@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! broot — SlateOS interactive tree explorer and file manager
+//! broot — Slate OS interactive tree explorer and file manager
 //!
 //! Single personality: `broot` (alias: `br`)
 

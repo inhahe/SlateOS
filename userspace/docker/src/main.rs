@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! docker — SlateOS container management tool
+//! docker — Slate OS container management tool
 //!
 //! Multi-personality binary detected via argv[0]:
 //!

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wayland-logout-cli — SlateOS wayland-logout session terminator
+//! wayland-logout-cli — Slate OS wayland-logout session terminator
 //!
 //! Single personality: `wayland-logout`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! polkit-cli — SlateOS PolicyKit authorization framework
+//! polkit-cli — Slate OS PolicyKit authorization framework
 //!
 //! Multi-personality: `polkitd`, `pkaction`, `pkcheck`, `pkexec`, `pkttyagent`
 

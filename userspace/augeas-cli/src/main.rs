@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! augeas-cli — SlateOS Augeas configuration editing tool
+//! augeas-cli — Slate OS Augeas configuration editing tool
 //!
 //! Multi-personality: `augtool`, `augparse`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! socat-cli — SlateOS socat CLI
+//! socat-cli — Slate OS socat CLI
 //!
 //! Single personality: `socat`
 

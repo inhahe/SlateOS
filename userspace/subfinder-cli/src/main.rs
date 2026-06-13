@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! subfinder-cli — SlateOS subfinder subdomain discovery
+//! subfinder-cli — Slate OS subfinder subdomain discovery
 //!
 //! Single personality: `subfinder`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! filmconvert-cli — SlateOS FilmConvert film emulation
+//! filmconvert-cli — Slate OS FilmConvert film emulation
 //!
 //! Single personality: `filmconvert`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! btmgmt-cli — SlateOS btmgmt Bluetooth management interface
+//! btmgmt-cli — Slate OS btmgmt Bluetooth management interface
 //!
 //! Single personality: `btmgmt`
 

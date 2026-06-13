@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! msgpack-cli — SlateOS MessagePack tools
+//! msgpack-cli — Slate OS MessagePack tools
 //!
 //! Multi-personality: `msgpack`, `msgpack2json`, `json2msgpack`
 

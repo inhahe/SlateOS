@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kyverno-cli — SlateOS Kyverno Kubernetes policy engine
+//! kyverno-cli — Slate OS Kyverno Kubernetes policy engine
 //!
 //! Single personality: `kyverno`
 

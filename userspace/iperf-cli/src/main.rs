@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! iperf-cli — SlateOS iperf3 CLI
+//! iperf-cli — Slate OS iperf3 CLI
 //!
 //! Multi-personality: `iperf3`, `iperf`
 

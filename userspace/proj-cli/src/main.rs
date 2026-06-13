@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! proj-cli — SlateOS PROJ coordinate transformation
+//! proj-cli — Slate OS PROJ coordinate transformation
 //!
 //! Multi-personality: `proj`, `cs2cs`, `projinfo`, `cct`, `geod`
 

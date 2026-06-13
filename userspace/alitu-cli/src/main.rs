@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! alitu-cli — SlateOS Alitu podcast maker
+//! alitu-cli — Slate OS Alitu podcast maker
 //!
 //! Single personality: `alitu`
 

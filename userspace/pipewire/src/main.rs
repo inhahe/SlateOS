@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pipewire — SlateOS PipeWire multimedia framework
+//! pipewire — Slate OS PipeWire multimedia framework
 //!
 //! Multi-personality binary for PipeWire audio/video management.
 //! Detected via argv[0] basename (strip path separators and `.exe` suffix):

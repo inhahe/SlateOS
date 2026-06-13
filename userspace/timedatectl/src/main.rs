@@ -1,4 +1,4 @@
-// SlateOS timedatectl - system configuration managers
+// Slate OS timedatectl - system configuration managers
 //
 // Multi-personality binary:
 //   timedatectl  - query and change system time/date settings

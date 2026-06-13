@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nwg-look-cli — SlateOS nwg-look GTK settings editor
+//! nwg-look-cli — Slate OS nwg-look GTK settings editor
 //!
 //! Single personality: `nwg-look`
 

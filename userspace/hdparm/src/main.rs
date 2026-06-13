@@ -1,4 +1,4 @@
-// SlateOS hdparm - disk parameter configuration tool
+// Slate OS hdparm - disk parameter configuration tool
 //
 // Multi-personality binary:
 //   hdparm  - get/set SATA/IDE disk parameters

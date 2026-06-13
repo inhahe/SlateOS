@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pgbouncer — SlateOS lightweight PostgreSQL connection pooler
+//! pgbouncer — Slate OS lightweight PostgreSQL connection pooler
 //!
 //! Single personality: `pgbouncer`
 

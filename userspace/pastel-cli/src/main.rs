@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pastel-cli — SlateOS pastel color tool
+//! pastel-cli — Slate OS pastel color tool
 //!
 //! Single personality: `pastel`
 

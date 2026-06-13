@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wpaperd-cli — SlateOS wpaperd wallpaper daemon with slideshow
+//! wpaperd-cli — Slate OS wpaperd wallpaper daemon with slideshow
 //!
 //! Multi-personality: `wpaperd`, `wpaperctl`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! act-cli — SlateOS local GitHub Actions runner
+//! act-cli — Slate OS local GitHub Actions runner
 //!
 //! Single personality: `act`
 

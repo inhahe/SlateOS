@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! matrix-cli — SlateOS Matrix messaging CLI
+//! matrix-cli — Slate OS Matrix messaging CLI
 //!
 //! Single personality: `matrix`
 

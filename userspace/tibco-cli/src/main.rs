@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tibco-cli — SlateOS TIBCO Software (the integration giant, Rendezvous + EMS heritage, Palo Alto CA)
+//! tibco-cli — Slate OS TIBCO Software (the integration giant, Rendezvous + EMS heritage, Palo Alto CA)
 
 use std::env;
 use std::process;

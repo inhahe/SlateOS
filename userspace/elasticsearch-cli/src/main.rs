@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! elasticsearch-cli — SlateOS Elasticsearch search engine tools
+//! elasticsearch-cli — Slate OS Elasticsearch search engine tools
 //!
 //! Multi-personality: `elasticsearch`, `elasticsearch-keystore`, `elasticsearch-plugin`
 

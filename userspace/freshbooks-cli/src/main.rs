@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! freshbooks-cli — SlateOS FreshBooks (Toronto-founded invoicing & accounting for freelancers/agencies)
+//! freshbooks-cli — Slate OS FreshBooks (Toronto-founded invoicing & accounting for freelancers/agencies)
 //!
 //! Single personality: `freshbooks`
 

@@ -1,4 +1,4 @@
-//! SlateOS XDG File Association Tools
+//! Slate OS XDG File Association Tools
 //!
 //! Multi-personality binary providing `xdg-open`, `xdg-mime`, and `mimeopen`
 //! functionality. The active mode is determined by `argv[0]`:
@@ -1100,7 +1100,7 @@ fn run_xdg_open(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("xdg-open 0.1.0 (SlateOS)");
+                println!("xdg-open 0.1.0 (Slate OS)");
                 return 0;
             }
             other => {
@@ -1222,7 +1222,7 @@ fn run_xdg_mime(args: &[String]) -> i32 {
             0
         }
         "--version" => {
-            println!("xdg-mime 0.1.0 (SlateOS)");
+            println!("xdg-mime 0.1.0 (Slate OS)");
             0
         }
         other => {
@@ -1359,7 +1359,7 @@ fn run_mimeopen(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("mimeopen 0.1.0 (SlateOS)");
+                println!("mimeopen 0.1.0 (Slate OS)");
                 return 0;
             }
             other => {

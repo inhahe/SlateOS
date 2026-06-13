@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! earlyoom — SlateOS early OOM (Out-of-Memory) daemon
+//! earlyoom — Slate OS early OOM (Out-of-Memory) daemon
 //!
 //! Monitors memory and swap usage, kills memory-hogging processes before
 //! the kernel OOM killer triggers (which often kills the wrong process).

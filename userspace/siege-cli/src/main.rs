@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! siege-cli — SlateOS Siege HTTP load testing tool
+//! siege-cli — Slate OS Siege HTTP load testing tool
 //!
 //! Multi-personality: `siege`
 

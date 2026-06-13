@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! duply-cli — SlateOS Duply (Duplicity wrapper) CLI
+//! duply-cli — Slate OS Duply (Duplicity wrapper) CLI
 //!
 //! Single personality: `duply`
 

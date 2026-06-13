@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! memcached-cli — SlateOS memcached CLI
+//! memcached-cli — Slate OS memcached CLI
 //!
 //! Single personality: `memcached`
 

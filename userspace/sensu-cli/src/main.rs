@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sensu-cli — SlateOS Sensu monitoring
+//! sensu-cli — Slate OS Sensu monitoring
 //!
 //! Multi-personality: `sensuctl`, `sensu-agent`, `sensu-backend`
 

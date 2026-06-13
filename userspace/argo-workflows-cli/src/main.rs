@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! argo-workflows-cli — SlateOS Argo Workflows
+//! argo-workflows-cli — Slate OS Argo Workflows
 //!
 //! Single personality: `argo`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ibmmq-cli — SlateOS IBM MQ (formerly MQSeries, the granddaddy of messaging, launched 1993)
+//! ibmmq-cli — Slate OS IBM MQ (formerly MQSeries, the granddaddy of messaging, launched 1993)
 
 use std::env;
 use std::process;

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hevea-cli — SlateOS HeVeA LaTeX to HTML converter
+//! hevea-cli — Slate OS HeVeA LaTeX to HTML converter
 //!
 //! Multi-personality: `hevea`, `hacha`, `imagen`
 

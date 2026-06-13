@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cortex-cli — SlateOS Cortex tools
+//! cortex-cli — Slate OS Cortex tools
 //!
 //! Multi-personality: `cortextool`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! opus-tools — SlateOS Opus audio codec tools
+//! opus-tools — Slate OS Opus audio codec tools
 //!
 //! Multi-personality: `opusenc`, `opusdec`, `opusinfo`
 

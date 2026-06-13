@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! serum-cli — SlateOS Xfer Records Serum wavetable synthesizer
+//! serum-cli — Slate OS Xfer Records Serum wavetable synthesizer
 //!
 //! Single personality: `serum`
 

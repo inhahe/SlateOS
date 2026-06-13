@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wine-mono-cli — SlateOS Wine Mono .NET runtime for Wine
+//! wine-mono-cli — Slate OS Wine Mono .NET runtime for Wine
 //!
 //! Single personality: `wine-mono`
 

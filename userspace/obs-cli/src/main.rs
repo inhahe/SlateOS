@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! obs-cli — SlateOS OBS Studio command-line controller
+//! obs-cli — Slate OS OBS Studio command-line controller
 //!
 //! Single personality: `obs-cli`
 

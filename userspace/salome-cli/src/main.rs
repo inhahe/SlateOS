@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! salome-cli — SlateOS SALOME platform for CAE
+//! salome-cli — Slate OS SALOME platform for CAE
 //!
 //! Multi-personality: `salome`, `salome-mesh`, `salome-geom`
 

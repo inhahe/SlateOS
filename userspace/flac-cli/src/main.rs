@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! flac-cli — SlateOS FLAC encoder/decoder CLI
+//! flac-cli — Slate OS FLAC encoder/decoder CLI
 //!
 //! Multi-personality: `flac`, `metaflac`
 

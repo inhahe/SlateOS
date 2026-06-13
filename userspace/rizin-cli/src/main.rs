@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rizin-cli — SlateOS Rizin reverse engineering framework
+//! rizin-cli — Slate OS Rizin reverse engineering framework
 //!
 //! Multi-personality: `rizin`, `rz-bin`, `rz-asm`, `rz-hash`, `rz-diff`, `rz-find`
 

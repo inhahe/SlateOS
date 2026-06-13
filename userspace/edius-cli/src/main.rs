@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! edius-cli — SlateOS Grass Valley EDIUS broadcast NLE
+//! edius-cli — Slate OS Grass Valley EDIUS broadcast NLE
 //!
 //! Single personality: `edius`
 

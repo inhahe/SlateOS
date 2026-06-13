@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nextpnr-cli — SlateOS nextpnr FPGA place-and-route
+//! nextpnr-cli — Slate OS nextpnr FPGA place-and-route
 //!
 //! Multi-personality: `nextpnr-ice40`, `nextpnr-ecp5`, `nextpnr-gowin`
 

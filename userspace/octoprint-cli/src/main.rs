@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! octoprint-cli — SlateOS OctoPrint 3D printer management
+//! octoprint-cli — Slate OS OctoPrint 3D printer management
 //!
 //! Multi-personality: `octoprint`, `octoprint-cli`
 

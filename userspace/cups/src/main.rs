@@ -1,4 +1,4 @@
-//! SlateOS CUPS Printing System
+//! Slate OS CUPS Printing System
 //!
 //! Multi-personality binary implementing the CUPS printing subsystem.
 //! Personality is detected via `argv[0]` basename (stripping path separators

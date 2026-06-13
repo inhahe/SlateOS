@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! finalcut-cli — SlateOS Final Cut Pro (Apple pro video editor)
+//! finalcut-cli — Slate OS Final Cut Pro (Apple pro video editor)
 //!
 //! Single personality: `finalcut`
 

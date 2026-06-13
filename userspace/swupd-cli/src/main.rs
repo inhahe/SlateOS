@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! swupd-cli — SlateOS Clear Linux swupd software updater
+//! swupd-cli — Slate OS Clear Linux swupd software updater
 //!
 //! Multi-personality: `swupd`
 

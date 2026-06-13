@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lemur-cli — SlateOS Lemur certificate manager
+//! lemur-cli — Slate OS Lemur certificate manager
 //!
 //! Single personality: `lemur`
 

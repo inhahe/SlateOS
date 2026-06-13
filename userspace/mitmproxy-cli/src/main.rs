@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mitmproxy-cli — SlateOS mitmproxy HTTP/HTTPS proxy
+//! mitmproxy-cli — Slate OS mitmproxy HTTP/HTTPS proxy
 //!
 //! Three personalities: `mitmproxy`, `mitmdump`, `mitmweb`
 

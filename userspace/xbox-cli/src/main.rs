@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xbox-cli — SlateOS Xbox app (Microsoft Game Pass + xCloud)
+//! xbox-cli — Slate OS Xbox app (Microsoft Game Pass + xCloud)
 //!
 //! Single personality: `xbox`
 

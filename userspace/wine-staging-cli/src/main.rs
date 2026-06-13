@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wine-staging-cli — SlateOS Wine Staging patched Wine build
+//! wine-staging-cli — Slate OS Wine Staging patched Wine build
 //!
 //! Single personality: `wine-staging`
 

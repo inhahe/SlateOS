@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! onefetch — SlateOS command-line Git information tool
+//! onefetch — Slate OS command-line Git information tool
 //!
 //! Single personality: `onefetch`
 

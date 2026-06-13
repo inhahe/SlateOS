@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! shutter-cli — SlateOS Shutter screenshot with editing
+//! shutter-cli — Slate OS Shutter screenshot with editing
 //!
 //! Single personality: `shutter`
 

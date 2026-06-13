@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mdcat — SlateOS render Markdown in the terminal
+//! mdcat — Slate OS render Markdown in the terminal
 //!
 //! Single personality: `mdcat`
 

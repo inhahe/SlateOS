@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rclone-backup-cli — SlateOS rclone backup wrapper
+//! rclone-backup-cli — Slate OS rclone backup wrapper
 //!
 //! Single personality: `rclone-backup`
 

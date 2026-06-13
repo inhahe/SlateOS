@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! atuin — SlateOS magical shell history with sync and search
+//! atuin — Slate OS magical shell history with sync and search
 //!
 //! Single personality: `atuin`
 

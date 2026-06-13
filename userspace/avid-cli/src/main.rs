@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! avid-cli — SlateOS Avid Media Composer NLE
+//! avid-cli — Slate OS Avid Media Composer NLE
 //!
 //! Single personality: `avid`
 

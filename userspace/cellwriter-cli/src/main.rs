@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cellwriter-cli — SlateOS handwriting recognition input
+//! cellwriter-cli — Slate OS handwriting recognition input
 //!
 //! Single personality: `cellwriter`
 

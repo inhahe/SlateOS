@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! avizo-cli — SlateOS Avizo OSD notification daemon
+//! avizo-cli — Slate OS Avizo OSD notification daemon
 //!
 //! Multi-personality: `avizo-service`, `volumectl`, `lightctl`
 

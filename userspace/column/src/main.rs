@@ -1,4 +1,4 @@
-//! SlateOS `column` Utility -- Columnate Text Formatter
+//! Slate OS `column` Utility -- Columnate Text Formatter
 //!
 //! Formats input text into neatly aligned columns. Supports two primary modes:
 //!

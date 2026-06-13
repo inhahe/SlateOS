@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pgcli — SlateOS PostgreSQL CLI with autocomplete and syntax highlighting
+//! pgcli — Slate OS PostgreSQL CLI with autocomplete and syntax highlighting
 //!
 //! Single personality: `pgcli`
 

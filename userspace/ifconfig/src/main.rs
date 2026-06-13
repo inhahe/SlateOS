@@ -1,4 +1,4 @@
-//! SlateOS `ifconfig` -- classic network interface configuration utility.
+//! Slate OS `ifconfig` -- classic network interface configuration utility.
 //!
 //! Displays and configures network interfaces using the traditional `ifconfig`
 //! command syntax. Reads live state from `/sys/class/net/` and `/proc/net/`,

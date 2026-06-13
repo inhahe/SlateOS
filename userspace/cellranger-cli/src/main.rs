@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cellranger-cli — SlateOS Cell Ranger single-cell analysis
+//! cellranger-cli — Slate OS Cell Ranger single-cell analysis
 //!
 //! Single personality: `cellranger`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xrdp — SlateOS RDP server
+//! xrdp — Slate OS RDP server
 //!
 //! Multi-personality: `xrdp`, `xrdp-sesman`, `xrdp-keygen`, `xrdp-sesrun`
 

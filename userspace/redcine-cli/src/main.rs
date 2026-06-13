@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! redcine-cli — SlateOS RED REDCINE-X PRO raw workflow
+//! redcine-cli — Slate OS RED REDCINE-X PRO raw workflow
 //!
 //! Single personality: `redcine`
 

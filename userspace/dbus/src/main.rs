@@ -1,4 +1,4 @@
-//! SlateOS D-Bus Message Bus Daemon
+//! Slate OS D-Bus Message Bus Daemon
 //!
 //! A multi-personality binary providing:
 //! - `dbus-daemon`: The message bus daemon that routes D-Bus messages between clients

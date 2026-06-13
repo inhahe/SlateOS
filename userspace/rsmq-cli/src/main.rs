@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rsmq-cli — SlateOS RSMQ Redis simple message queue CLI
+//! rsmq-cli — Slate OS RSMQ Redis simple message queue CLI
 //!
 //! Single personality: `rsmq`
 

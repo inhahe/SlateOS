@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! soda-cli — SlateOS Soda (open-source data quality, Belgium)
+//! soda-cli — Slate OS Soda (open-source data quality, Belgium)
 
 use std::env;
 use std::process;

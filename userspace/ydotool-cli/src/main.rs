@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ydotool-cli — SlateOS ydotool generic input automation
+//! ydotool-cli — Slate OS ydotool generic input automation
 //!
 //! Multi-personality: `ydotool`, `ydotoold`
 

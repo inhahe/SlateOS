@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tk-cli — SlateOS Tk toolkit / Wish interpreter
+//! tk-cli — Slate OS Tk toolkit / Wish interpreter
 //!
 //! Multi-personality: `wish`, `wish8.6`
 

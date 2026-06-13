@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nixops-cli — SlateOS NixOps deployment tool
+//! nixops-cli — Slate OS NixOps deployment tool
 //!
 //! Single personality: `nixops`
 

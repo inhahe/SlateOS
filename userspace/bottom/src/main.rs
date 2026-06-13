@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bottom — SlateOS graphical system/process monitor (btm)
+//! bottom — Slate OS graphical system/process monitor (btm)
 //!
 //! Single personality: `btm`
 

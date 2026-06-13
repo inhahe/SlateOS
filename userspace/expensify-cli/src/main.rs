@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! expensify-cli — SlateOS Expensify (SmartScan receipts, NewDot New Expensify, politically loud)
+//! expensify-cli — Slate OS Expensify (SmartScan receipts, NewDot New Expensify, politically loud)
 //!
 //! Single personality: `expensify`
 

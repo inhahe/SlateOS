@@ -1,4 +1,4 @@
-//! SlateOS Performance Monitoring and Analysis Tool
+//! Slate OS Performance Monitoring and Analysis Tool
 //!
 //! Multi-personality binary providing Linux-perf-compatible performance
 //! analysis.  Personality is detected from `argv[0]`:
@@ -487,7 +487,7 @@ struct StatOpts {
     system_wide: bool,
     pid: Option<u32>,
     repeat: u32,
-    /// Command to execute and measure (used on SlateOS with process spawning).
+    /// Command to execute and measure (used on Slate OS with process spawning).
     #[allow(dead_code)]
     command: Vec<String>,
 }
@@ -682,7 +682,7 @@ struct RecordOpts {
     pid: Option<u32>,
     system_wide: bool,
     output: String,
-    /// Command to execute and record (used on SlateOS with process spawning).
+    /// Command to execute and record (used on Slate OS with process spawning).
     #[allow(dead_code)]
     command: Vec<String>,
 }

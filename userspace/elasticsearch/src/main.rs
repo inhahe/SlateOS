@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! elasticsearch — SlateOS distributed search and analytics engine
+//! elasticsearch — Slate OS distributed search and analytics engine
 //!
 //! Multi-personality: `elasticsearch` (server), `elasticsearch-plugin` (plugin manager)
 

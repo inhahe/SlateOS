@@ -1,4 +1,4 @@
-//! SlateOS File Explorer
+//! Slate OS File Explorer
 //!
 //! Graphical file manager with:
 //! - Directory tree sidebar

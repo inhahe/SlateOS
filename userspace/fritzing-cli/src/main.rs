@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fritzing-cli — SlateOS Fritzing electronics prototyping
+//! fritzing-cli — Slate OS Fritzing electronics prototyping
 //!
 //! Single personality: `fritzing`
 

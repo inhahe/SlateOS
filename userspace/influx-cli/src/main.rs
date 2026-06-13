@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! influx-cli — SlateOS InfluxDB CLI client
+//! influx-cli — Slate OS InfluxDB CLI client
 //!
 //! Multi-personality: `influx`
 

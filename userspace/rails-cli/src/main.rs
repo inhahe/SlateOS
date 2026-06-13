@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rails-cli — SlateOS Ruby on Rails CLI
+//! rails-cli — Slate OS Ruby on Rails CLI
 //!
 //! Multi-personality: `rails`
 

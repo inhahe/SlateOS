@@ -1,4 +1,4 @@
-//! `SlateOS` DNS Resolver Library
+//! `Slate OS` DNS Resolver Library
 //!
 //! Provides hostname-to-IP-address resolution via the DNS protocol (RFC 1035).
 //! Includes a caching resolver, hosts file support, and full DNS message
@@ -1247,7 +1247,7 @@ impl Resolver {
     /// is non-breaking.
     #[allow(clippy::unused_self)]
     fn current_time(&self) -> u64 {
-        // TODO: integrate with SlateOS monotonic clock
+        // TODO: integrate with Slate OS monotonic clock
         0
     }
 }

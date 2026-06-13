@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sfwbar-cli — SlateOS sfwbar flexible Wayland taskbar
+//! sfwbar-cli — Slate OS sfwbar flexible Wayland taskbar
 //!
 //! Single personality: `sfwbar`
 

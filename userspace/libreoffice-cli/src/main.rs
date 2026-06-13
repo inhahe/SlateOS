@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! libreoffice-cli — SlateOS LibreOffice suite
+//! libreoffice-cli — Slate OS LibreOffice suite
 //!
 //! Multi-personality: `libreoffice`, `lowriter`, `localc`, `loimpress`, `lodraw`, `lobase`
 

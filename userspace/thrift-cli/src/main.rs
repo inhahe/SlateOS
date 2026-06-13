@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! thrift-cli — SlateOS Apache Thrift compiler
+//! thrift-cli — Slate OS Apache Thrift compiler
 //!
 //! Multi-personality: `thrift`
 

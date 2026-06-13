@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! artillery-cli — SlateOS Artillery load testing CLI
+//! artillery-cli — Slate OS Artillery load testing CLI
 //!
 //! Single personality: `artillery`
 

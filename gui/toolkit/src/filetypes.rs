@@ -1185,7 +1185,7 @@ struct MagicSignature {
 /// Known magic-byte patterns, checked in order (longest / most specific
 /// first where ambiguity exists).
 const MAGIC_TABLE: &[MagicSignature] = &[
-    // SlateOS native formats
+    // Slate OS native formats
     MagicSignature {
         bytes: b"\x4fNXE",
         offset: 0,
@@ -1311,7 +1311,7 @@ const MAGIC_TABLE: &[MagicSignature] = &[
         offset: 0,
         extension: FileExtension::Mkv,
     },
-    // ELF — not an SlateOS format but useful for detection
+    // ELF — not an Slate OS format but useful for detection
     MagicSignature {
         bytes: b"\x7fELF",
         offset: 0,

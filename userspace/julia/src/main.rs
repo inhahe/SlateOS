@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! julia — SlateOS Julia programming language
+//! julia — Slate OS Julia programming language
 //!
 //! Single personality: `julia`
 

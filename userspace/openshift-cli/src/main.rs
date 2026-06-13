@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! openshift-cli — SlateOS Red Hat OpenShift Container Platform (oc)
+//! openshift-cli — Slate OS Red Hat OpenShift Container Platform (oc)
 //!
 //! Single personality: `openshift`
 

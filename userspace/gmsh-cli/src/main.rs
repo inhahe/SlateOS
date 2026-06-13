@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gmsh-cli — SlateOS Gmsh finite element mesh generator
+//! gmsh-cli — Slate OS Gmsh finite element mesh generator
 //!
 //! Single personality: `gmsh`
 

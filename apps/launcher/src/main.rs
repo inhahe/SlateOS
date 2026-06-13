@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-//! SlateOS App Launcher
+//! Slate OS App Launcher
 //!
 //! A Spotlight/Alfred-style application launcher providing:
 //! - As-you-type fuzzy search across installed applications and system commands

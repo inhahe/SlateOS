@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mproxy-cli — SlateOS mproxy multi-protocol proxy
+//! mproxy-cli — Slate OS mproxy multi-protocol proxy
 //!
 //! Single personality: `mproxy`
 

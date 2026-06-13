@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ansible-cli — SlateOS Ansible automation CLI
+//! ansible-cli — Slate OS Ansible automation CLI
 //!
 //! Multi-personality: `ansible`, `ansible-playbook`, `ansible-galaxy`, `ansible-vault`
 

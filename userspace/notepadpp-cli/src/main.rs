@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! notepadpp-cli — SlateOS Notepad++ (Don Ho's Windows-only free editor)
+//! notepadpp-cli — Slate OS Notepad++ (Don Ho's Windows-only free editor)
 //!
 //! Single personality: `notepadpp`
 

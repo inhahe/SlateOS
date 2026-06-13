@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! crontab-cli — SlateOS crontab CLI
+//! crontab-cli — Slate OS crontab CLI
 //!
 //! Single personality: `crontab`
 

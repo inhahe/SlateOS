@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! argocd — SlateOS Argo CD GitOps controller
+//! argocd — Slate OS Argo CD GitOps controller
 //!
 //! Single personality: `argocd`
 

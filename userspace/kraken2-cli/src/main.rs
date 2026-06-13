@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kraken2-cli — SlateOS Kraken2 taxonomic classifier
+//! kraken2-cli — Slate OS Kraken2 taxonomic classifier
 //!
 //! Multi-personality: `kraken2`, `kraken2-build`, `kraken2-inspect`
 

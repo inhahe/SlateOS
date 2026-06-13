@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! waves-cli — SlateOS Waves Audio plug-in suite
+//! waves-cli — Slate OS Waves Audio plug-in suite
 //!
 //! Single personality: `waves`
 

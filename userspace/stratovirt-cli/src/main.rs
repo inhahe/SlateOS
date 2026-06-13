@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! stratovirt-cli — SlateOS StratoVirt lightweight VMM
+//! stratovirt-cli — Slate OS StratoVirt lightweight VMM
 //!
 //! Single personality: `stratovirt`
 

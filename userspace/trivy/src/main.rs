@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! trivy — SlateOS vulnerability scanner
+//! trivy — Slate OS vulnerability scanner
 //!
 //! Single personality: `trivy`
 

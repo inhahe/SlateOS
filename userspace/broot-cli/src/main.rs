@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! broot-cli — SlateOS Broot file manager/navigator
+//! broot-cli — Slate OS Broot file manager/navigator
 //!
 //! Single personality: `broot`
 

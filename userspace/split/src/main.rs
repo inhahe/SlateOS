@@ -1,4 +1,4 @@
-//! SlateOS `split` Utility -- Split a File into Pieces
+//! Slate OS `split` Utility -- Split a File into Pieces
 //!
 //! Splits a file into fixed-size pieces by line count, byte count, or number
 //! of output chunks.  Modeled after POSIX/GNU `split`.

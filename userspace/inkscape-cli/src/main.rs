@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! inkscape-cli — SlateOS Inkscape SVG editor CLI
+//! inkscape-cli — Slate OS Inkscape SVG editor CLI
 //!
 //! Single personality: `inkscape`
 

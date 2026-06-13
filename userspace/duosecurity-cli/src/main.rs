@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! duosecurity-cli — SlateOS Duo Security (the green push button MFA, Ann Arbor MI, Cisco $2.35B 2018)
+//! duosecurity-cli — Slate OS Duo Security (the green push button MFA, Ann Arbor MI, Cisco $2.35B 2018)
 
 use std::env;
 use std::process;

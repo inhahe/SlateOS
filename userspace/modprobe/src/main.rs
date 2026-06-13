@@ -1,4 +1,4 @@
-// SlateOS modprobe - kernel module management tools
+// Slate OS modprobe - kernel module management tools
 //
 // Multi-personality binary:
 //   modprobe  - load/unload kernel modules with dependency resolution

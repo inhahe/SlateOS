@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ejbca-cli — SlateOS EJBCA enterprise PKI
+//! ejbca-cli — Slate OS EJBCA enterprise PKI
 //!
 //! Single personality: `ejbca`
 

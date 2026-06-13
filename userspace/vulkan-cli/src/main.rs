@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vulkan-cli — SlateOS Vulkan tools CLI
+//! vulkan-cli — Slate OS Vulkan tools CLI
 //!
 //! Multi-personality: `vulkaninfo`, `vkcube`, `vkvia`
 

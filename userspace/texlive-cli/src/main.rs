@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! texlive-cli — SlateOS TeX Live manager
+//! texlive-cli — Slate OS TeX Live manager
 //!
 //! Multi-personality: `tlmgr`, `texhash`, `fmtutil`, `updmap`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! silicon — SlateOS create beautiful code screenshots from terminal
+//! silicon — Slate OS create beautiful code screenshots from terminal
 //!
 //! Single personality: `silicon`
 

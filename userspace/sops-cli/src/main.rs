@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sops-cli — SlateOS SOPS (Secrets OPerationS) CLI
+//! sops-cli — Slate OS SOPS (Secrets OPerationS) CLI
 //!
 //! Single personality: `sops`
 

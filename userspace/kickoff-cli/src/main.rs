@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kickoff-cli — SlateOS Kickoff minimalist launcher
+//! kickoff-cli — Slate OS Kickoff minimalist launcher
 //!
 //! Single personality: `kickoff`
 

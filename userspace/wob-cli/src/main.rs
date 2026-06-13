@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wob-cli — SlateOS wob Wayland overlay bar
+//! wob-cli — Slate OS wob Wayland overlay bar
 //!
 //! Single personality: `wob`
 

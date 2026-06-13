@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! seccomp-cli — SlateOS seccomp/sandbox tools
+//! seccomp-cli — Slate OS seccomp/sandbox tools
 //!
 //! Multi-personality: `scmp_sys_resolver`, `firejail`, `bwrap`
 

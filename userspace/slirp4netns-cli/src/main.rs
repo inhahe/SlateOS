@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! slirp4netns-cli — SlateOS slirp4netns user-mode networking
+//! slirp4netns-cli — Slate OS slirp4netns user-mode networking
 //!
 //! Single personality: `slirp4netns`
 

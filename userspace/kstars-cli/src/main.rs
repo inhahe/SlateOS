@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kstars-cli — SlateOS KStars astronomy software
+//! kstars-cli — Slate OS KStars astronomy software
 //!
 //! Single personality: `kstars`
 

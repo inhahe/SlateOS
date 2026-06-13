@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mixpanel-cli — SlateOS Mixpanel (the OG event analytics — predates Amplitude)
+//! mixpanel-cli — Slate OS Mixpanel (the OG event analytics — predates Amplitude)
 //!
 //! Single personality: `mixpanel`
 

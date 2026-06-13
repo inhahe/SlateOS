@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mapserver-cli — SlateOS MapServer map rendering
+//! mapserver-cli — Slate OS MapServer map rendering
 //!
 //! Multi-personality: `mapserv`, `shp2img`, `legend`, `scalebar`
 

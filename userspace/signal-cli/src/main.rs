@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! signal-cli — SlateOS Signal end-to-end encrypted messenger
+//! signal-cli — Slate OS Signal end-to-end encrypted messenger
 //!
 //! Single personality: `signal`
 

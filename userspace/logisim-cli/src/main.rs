@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! logisim-cli — SlateOS Logisim digital logic simulator
+//! logisim-cli — Slate OS Logisim digital logic simulator
 //!
 //! Single personality: `logisim`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! falco-cli — SlateOS Falco runtime security tool
+//! falco-cli — Slate OS Falco runtime security tool
 //!
 //! Two personalities: `falco`, `falcoctl`
 

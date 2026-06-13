@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bitbucket-cli — SlateOS Bitbucket (Atlassian's Git host)
+//! bitbucket-cli — Slate OS Bitbucket (Atlassian's Git host)
 //!
 //! Single personality: `bitbucket`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zola-cli — SlateOS Zola static site generator
+//! zola-cli — Slate OS Zola static site generator
 //!
 //! Single personality: `zola`
 

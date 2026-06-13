@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sealed-secrets-cli — SlateOS Bitnami Sealed Secrets tool
+//! sealed-secrets-cli — Slate OS Bitnami Sealed Secrets tool
 //!
 //! Single personality: `kubeseal`
 

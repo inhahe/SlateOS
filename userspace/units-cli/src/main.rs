@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! units-cli — SlateOS GNU Units CLI
+//! units-cli — Slate OS GNU Units CLI
 //!
 //! Single personality: `units`
 

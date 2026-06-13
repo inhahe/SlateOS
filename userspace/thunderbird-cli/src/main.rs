@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! thunderbird-cli — SlateOS Thunderbird email client
+//! thunderbird-cli — Slate OS Thunderbird email client
 //!
 //! Single personality: `thunderbird`
 

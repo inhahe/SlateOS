@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! flame-cli — SlateOS Autodesk Flame VFX & finishing
+//! flame-cli — Slate OS Autodesk Flame VFX & finishing
 //!
 //! Single personality: `flame`
 

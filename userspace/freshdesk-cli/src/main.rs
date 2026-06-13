@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! freshdesk-cli — SlateOS Freshdesk (Freshworks helpdesk, Zendesk's main SMB competitor)
+//! freshdesk-cli — Slate OS Freshdesk (Freshworks helpdesk, Zendesk's main SMB competitor)
 //!
 //! Single personality: `freshdesk`
 

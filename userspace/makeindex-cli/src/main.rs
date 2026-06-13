@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! makeindex-cli — SlateOS TeX indexing and bibliography tools
+//! makeindex-cli — Slate OS TeX indexing and bibliography tools
 //!
 //! Multi-personality: `makeindex`, `xindy`, `splitindex`, `texindy`
 

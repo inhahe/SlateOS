@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sophos-cli — SlateOS Sophos Home / Intercept X / Central
+//! sophos-cli — Slate OS Sophos Home / Intercept X / Central
 //!
 //! Single personality: `sophos`
 

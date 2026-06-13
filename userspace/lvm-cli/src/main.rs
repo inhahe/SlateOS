@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lvm-cli — SlateOS LVM2 CLI tools
+//! lvm-cli — Slate OS LVM2 CLI tools
 //!
 //! Multi-personality: `pvcreate`, `vgcreate`, `lvcreate`, `pvs`, `vgs`, `lvs`, `pvdisplay`, `vgdisplay`, `lvdisplay`
 

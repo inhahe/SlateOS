@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! crosvm-cli — SlateOS crosvm Chrome OS VMM
+//! crosvm-cli — Slate OS crosvm Chrome OS VMM
 //!
 //! Single personality: `crosvm`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! slurp-cli — SlateOS slurp region selector
+//! slurp-cli — Slate OS slurp region selector
 //!
 //! Single personality: `slurp`
 

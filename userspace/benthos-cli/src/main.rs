@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! benthos-cli — SlateOS Benthos/Redpanda Connect stream processor
+//! benthos-cli — Slate OS Benthos/Redpanda Connect stream processor
 //!
 //! Multi-personality: `benthos`, `rpk-connect`
 

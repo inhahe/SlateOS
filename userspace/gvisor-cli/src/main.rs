@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gvisor-cli — SlateOS gVisor sandbox runtime
+//! gvisor-cli — Slate OS gVisor sandbox runtime
 //!
 //! Single personality: `runsc`
 

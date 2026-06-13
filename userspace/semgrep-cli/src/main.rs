@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! semgrep-cli — SlateOS Semgrep static analysis tool
+//! semgrep-cli — Slate OS Semgrep static analysis tool
 //!
 //! Multi-personality: `semgrep`
 

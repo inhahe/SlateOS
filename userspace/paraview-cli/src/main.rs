@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! paraview-cli — SlateOS ParaView scientific visualization
+//! paraview-cli — Slate OS ParaView scientific visualization
 //!
 //! Multi-personality: `paraview`, `pvserver`, `pvbatch`, `pvpython`
 

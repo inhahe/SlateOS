@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! virtualbox-cli — SlateOS VirtualBox management
+//! virtualbox-cli — Slate OS VirtualBox management
 //!
 //! Multi-personality: `VBoxManage`, `VBoxHeadless`, `VBoxSDL`
 

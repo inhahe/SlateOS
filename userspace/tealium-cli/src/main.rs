@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tealium-cli — SlateOS Tealium (CDP + tag management, San Diego, bootstrapped-ish)
+//! tealium-cli — Slate OS Tealium (CDP + tag management, San Diego, bootstrapped-ish)
 
 use std::env;
 use std::process;

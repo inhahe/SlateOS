@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mpv — SlateOS media player
+//! mpv — Slate OS media player
 //!
 //! Single personality: `mpv`
 

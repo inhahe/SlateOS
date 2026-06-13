@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! abduco-cli — SlateOS abduco session manager
+//! abduco-cli — Slate OS abduco session manager
 //!
 //! Single personality: `abduco`
 

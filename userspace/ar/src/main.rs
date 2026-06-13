@@ -1,4 +1,4 @@
-//! SlateOS Archive and Object File Tools
+//! Slate OS Archive and Object File Tools
 //!
 //! Multi-personality binary that acts as `ar`, `ranlib`, or `strip` depending
 //! on the name used to invoke it (detected via `argv[0]`).
@@ -1282,7 +1282,7 @@ fn ar_replace(opts: &ArOptions, archive_path: &str, member_files: &[String]) -> 
             header: ArHeader {
                 name: member_name.clone(),
                 mtime: file_mtime,
-                // SlateOS `ar` always normalises ownership/mode: uid/gid are written
+                // Slate OS `ar` always normalises ownership/mode: uid/gid are written
                 // as 0 and mode as 0o100644 regardless of the `-U` (non-deterministic)
                 // flag.  Preserving the file's real uid/gid/mode in non-deterministic
                 // mode is not yet implemented (see todo.txt), so these are constants.
@@ -1646,7 +1646,7 @@ fn run_strip(args: &[String]) -> Result<(), String> {
             .map_err(|e| format!("cannot write '{output_path}': {e}"))?;
 
         // Restore timestamps if requested
-        // Note: standard Rust doesn't provide set_file_times; on SlateOS this
+        // Note: standard Rust doesn't provide set_file_times; on Slate OS this
         // would use a platform-specific API. For now we accept this limitation.
     }
 

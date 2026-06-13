@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wsk-cli — SlateOS Apache OpenWhisk serverless CLI
+//! wsk-cli — Slate OS Apache OpenWhisk serverless CLI
 //!
 //! Single personality: `wsk`
 

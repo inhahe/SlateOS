@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! paddle-cli — SlateOS Paddle Merchant-of-Record SaaS billing personality CLI.
+//! paddle-cli — Slate OS Paddle Merchant-of-Record SaaS billing personality CLI.
 
 use std::env;
 use std::process;

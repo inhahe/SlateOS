@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tigervnc — SlateOS VNC server and client
+//! tigervnc — Slate OS VNC server and client
 //!
 //! Multi-personality: `vncserver`, `vncviewer`, `vncpasswd`, `vncconfig`, `x0vncserver`
 

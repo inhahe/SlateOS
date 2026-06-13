@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! snowflake-cli — SlateOS Snowflake cloud data platform
+//! snowflake-cli — Slate OS Snowflake cloud data platform
 //!
 //! Single personality: `snowflake`
 

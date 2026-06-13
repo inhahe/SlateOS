@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! libhangul-cli — SlateOS libhangul Korean input method
+//! libhangul-cli — Slate OS libhangul Korean input method
 //!
 //! Single personality: `hangul`
 

@@ -1,4 +1,4 @@
-//! SlateOS Kernel Message Buffer Viewer
+//! Slate OS Kernel Message Buffer Viewer
 //!
 //! Reads and displays kernel log messages from /proc/kmsg or /var/log/kernel.
 //! Similar to Linux `dmesg` — essential for boot diagnostics and driver debugging.

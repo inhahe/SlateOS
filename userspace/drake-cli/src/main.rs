@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! drake-cli — SlateOS Drake robotics toolbox
+//! drake-cli — Slate OS Drake robotics toolbox
 //!
 //! Single personality: `drake`
 

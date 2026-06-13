@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lf-cli — SlateOS lf file manager
+//! lf-cli — Slate OS lf file manager
 //!
 //! Single personality: `lf`
 

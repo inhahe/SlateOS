@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rippling-cli — SlateOS Rippling (Parker Conrad's HR+IT+Finance super-platform)
+//! rippling-cli — Slate OS Rippling (Parker Conrad's HR+IT+Finance super-platform)
 //!
 //! Single personality: `rippling`
 

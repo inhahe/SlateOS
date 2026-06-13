@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mypy-cli — SlateOS mypy CLI
+//! mypy-cli — Slate OS mypy CLI
 //!
 //! Single personality: `mypy`
 

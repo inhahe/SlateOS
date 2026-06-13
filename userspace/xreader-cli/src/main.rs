@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xreader-cli — SlateOS X-Apps document reader
+//! xreader-cli — Slate OS X-Apps document reader
 //!
 //! Single personality: `xreader`
 

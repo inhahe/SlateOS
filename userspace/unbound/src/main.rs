@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! unbound — SlateOS validating, recursive DNS resolver
+//! unbound — Slate OS validating, recursive DNS resolver
 //!
 //! Multi-personality: `unbound` (daemon), `unbound-control` (remote control),
 //!   `unbound-checkconf` (config check), `unbound-host` (DNS lookup)

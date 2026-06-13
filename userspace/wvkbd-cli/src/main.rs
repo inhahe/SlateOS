@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wvkbd-cli — SlateOS wvkbd virtual keyboard
+//! wvkbd-cli — Slate OS wvkbd virtual keyboard
 //!
 //! Single personality: `wvkbd`
 

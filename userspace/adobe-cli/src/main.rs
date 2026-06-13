@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! adobe-cli — SlateOS Adobe Experience Platform (enterprise CDP + experience cloud, San Jose)
+//! adobe-cli — Slate OS Adobe Experience Platform (enterprise CDP + experience cloud, San Jose)
 
 use std::env;
 use std::process;

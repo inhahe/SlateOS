@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sketchup-cli — SlateOS Trimble SketchUp 3D modeling
+//! sketchup-cli — Slate OS Trimble SketchUp 3D modeling
 //!
 //! Single personality: `sketchup`
 

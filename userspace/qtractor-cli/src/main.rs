@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! qtractor-cli — SlateOS Qtractor audio/MIDI DAW
+//! qtractor-cli — Slate OS Qtractor audio/MIDI DAW
 //!
 //! Single personality: `qtractor`
 

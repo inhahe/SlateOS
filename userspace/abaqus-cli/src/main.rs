@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! abaqus-cli — SlateOS Dassault Abaqus FEA
+//! abaqus-cli — Slate OS Dassault Abaqus FEA
 //!
 //! Single personality: `abaqus`
 

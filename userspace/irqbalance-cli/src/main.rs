@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! irqbalance-cli — SlateOS IRQ balancing daemon
+//! irqbalance-cli — Slate OS IRQ balancing daemon
 //!
 //! Single personality: `irqbalance`
 

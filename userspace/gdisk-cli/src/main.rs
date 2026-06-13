@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gdisk-cli — SlateOS gdisk GPT partition tool
+//! gdisk-cli — Slate OS gdisk GPT partition tool
 //!
 //! Multi-personality: `gdisk`, `sgdisk`, `cgdisk`, `fixparts`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! scribus-cli — SlateOS Scribus DTP CLI
+//! scribus-cli — Slate OS Scribus DTP CLI
 //!
 //! Single personality: `scribus`
 

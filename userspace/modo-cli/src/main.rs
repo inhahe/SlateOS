@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! modo-cli — SlateOS Foundry Modo 3D modeling
+//! modo-cli — Slate OS Foundry Modo 3D modeling
 //!
 //! Single personality: `modo`
 

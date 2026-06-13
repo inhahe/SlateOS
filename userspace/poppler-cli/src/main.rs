@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! poppler-cli — SlateOS Poppler PDF utilities
+//! poppler-cli — Slate OS Poppler PDF utilities
 //!
 //! Multi-personality: `pdfinfo`, `pdfimages`, `pdfseparate`, `pdfunite`, `pdfattach`
 

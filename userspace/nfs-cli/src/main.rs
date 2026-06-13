@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nfs-cli — SlateOS NFS client/server tools
+//! nfs-cli — Slate OS NFS client/server tools
 //!
 //! Multi-personality: `showmount`, `exportfs`, `nfsstat`, `rpcinfo`, `nfsd`
 

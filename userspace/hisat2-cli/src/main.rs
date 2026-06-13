@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hisat2-cli — SlateOS HISAT2 RNA-seq aligner
+//! hisat2-cli — Slate OS HISAT2 RNA-seq aligner
 //!
 //! Multi-personality: `hisat2`, `hisat2-build`, `hisat2-inspect`
 

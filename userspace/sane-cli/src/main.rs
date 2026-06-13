@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sane-cli — SlateOS SANE scanner tools
+//! sane-cli — Slate OS SANE scanner tools
 //!
 //! Multi-personality: `scanimage`, `sane-find-scanner`, `scanadf`
 

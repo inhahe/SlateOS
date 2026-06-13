@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vault — SlateOS secrets management
+//! vault — Slate OS secrets management
 //!
 //! Single personality: `vault`
 

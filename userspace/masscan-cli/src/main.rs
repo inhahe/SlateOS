@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! masscan-cli — SlateOS masscan CLI
+//! masscan-cli — Slate OS masscan CLI
 //!
 //! Single personality: `masscan`
 

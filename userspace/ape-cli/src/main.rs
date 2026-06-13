@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ape-cli — SlateOS Ape Framework smart contract tool
+//! ape-cli — Slate OS Ape Framework smart contract tool
 //!
 //! Single personality: `ape`
 

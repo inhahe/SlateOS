@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! krdc-cli — SlateOS KRDC KDE remote desktop client
+//! krdc-cli — Slate OS KRDC KDE remote desktop client
 //!
 //! Single personality: `krdc`
 

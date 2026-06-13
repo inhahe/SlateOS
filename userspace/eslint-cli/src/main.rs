@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! eslint-cli — SlateOS ESLint CLI
+//! eslint-cli — Slate OS ESLint CLI
 //!
 //! Single personality: `eslint`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rudderstack-cli — SlateOS RudderStack (warehouse-native open-source CDP, SF + Bangalore)
+//! rudderstack-cli — Slate OS RudderStack (warehouse-native open-source CDP, SF + Bangalore)
 
 use std::env;
 use std::process;

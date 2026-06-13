@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! graphviz-cli — SlateOS Graphviz graph visualization
+//! graphviz-cli — Slate OS Graphviz graph visualization
 //!
 //! Multi-personality: `dot`, `neato`, `fdp`, `sfdp`, `circo`, `twopi`
 

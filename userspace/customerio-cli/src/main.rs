@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! customerio-cli — SlateOS Customer.io (event-triggered messaging for developers)
+//! customerio-cli — Slate OS Customer.io (event-triggered messaging for developers)
 //!
 //! Single personality: `customerio`
 

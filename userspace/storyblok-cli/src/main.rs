@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! storyblok-cli — SlateOS personality CLI for Storyblok, the visual-editing headless CMS.
+//! storyblok-cli — Slate OS personality CLI for Storyblok, the visual-editing headless CMS.
 
 use std::env;
 use std::process;

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sqlx-cli — SlateOS SQLx database migration and management CLI
+//! sqlx-cli — Slate OS SQLx database migration and management CLI
 //!
 //! Single personality: `sqlx`
 

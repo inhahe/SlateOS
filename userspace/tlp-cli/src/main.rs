@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tlp-cli — SlateOS TLP power management
+//! tlp-cli — Slate OS TLP power management
 //!
 //! Multi-personality: `tlp`, `tlp-stat`
 

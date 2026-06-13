@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! activemq-cli — SlateOS Apache ActiveMQ message broker
+//! activemq-cli — Slate OS Apache ActiveMQ message broker
 //!
 //! Single personality: `activemq`
 

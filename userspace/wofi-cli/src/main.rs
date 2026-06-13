@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wofi-cli — SlateOS Wofi application launcher
+//! wofi-cli — Slate OS Wofi application launcher
 //!
 //! Single personality: `wofi`
 

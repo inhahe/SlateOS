@@ -1,4 +1,4 @@
-// SlateOS upower -- power information and management
+// Slate OS upower -- power information and management
 //
 // Multi-personality binary:
 //   upower  -- query power device information

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! opus-cli — SlateOS opus-tools CLI
+//! opus-cli — Slate OS opus-tools CLI
 //!
 //! Multi-personality: `opusenc`, `opusdec`, `opusinfo`
 

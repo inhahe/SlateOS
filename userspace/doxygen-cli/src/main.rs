@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! doxygen-cli — SlateOS Doxygen documentation generator
+//! doxygen-cli — Slate OS Doxygen documentation generator
 //!
 //! Multi-personality: `doxygen`, `doxyindexer`, `doxysearch.cgi`
 

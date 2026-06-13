@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! iw-cli — SlateOS wireless configuration tool
+//! iw-cli — Slate OS wireless configuration tool
 //!
 //! Multi-personality: `iw`, `iwconfig`, `iwlist`
 

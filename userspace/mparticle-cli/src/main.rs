@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mparticle-cli — SlateOS mParticle (enterprise CDP, NYC, acquired by Rokt 2024)
+//! mparticle-cli — Slate OS mParticle (enterprise CDP, NYC, acquired by Rokt 2024)
 
 use std::env;
 use std::process;

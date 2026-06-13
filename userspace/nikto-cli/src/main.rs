@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nikto-cli — SlateOS Nikto web scanner CLI
+//! nikto-cli — Slate OS Nikto web scanner CLI
 //!
 //! Single personality: `nikto`
 

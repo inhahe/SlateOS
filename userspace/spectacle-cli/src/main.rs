@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! spectacle-cli — SlateOS KDE Spectacle screenshot tool
+//! spectacle-cli — Slate OS KDE Spectacle screenshot tool
 //!
 //! Single personality: `spectacle`
 

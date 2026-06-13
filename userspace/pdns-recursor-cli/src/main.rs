@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pdns-recursor-cli — SlateOS PowerDNS Recursor
+//! pdns-recursor-cli — Slate OS PowerDNS Recursor
 //!
 //! Multi-personality: `pdns_recursor`, `rec_control`
 

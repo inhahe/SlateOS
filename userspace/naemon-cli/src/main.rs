@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! naemon-cli — SlateOS Naemon monitoring engine
+//! naemon-cli — Slate OS Naemon monitoring engine
 //!
 //! Single personality: `naemon`
 

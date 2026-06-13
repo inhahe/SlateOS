@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! virt-manager-cli — SlateOS Virtual Machine Manager
+//! virt-manager-cli — Slate OS Virtual Machine Manager
 //!
 //! Single personality: `virt-manager`
 

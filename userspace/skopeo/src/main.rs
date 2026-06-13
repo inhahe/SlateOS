@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! skopeo — SlateOS container image operations
+//! skopeo — Slate OS container image operations
 //!
 //! Single personality: `skopeo`
 

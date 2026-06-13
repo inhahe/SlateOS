@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vegeta-cli — SlateOS Vegeta HTTP load testing tool
+//! vegeta-cli — Slate OS Vegeta HTTP load testing tool
 //!
 //! Multi-personality: `vegeta`
 

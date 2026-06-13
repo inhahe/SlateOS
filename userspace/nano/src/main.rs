@@ -127,7 +127,7 @@ fn reset_attr() {
 }
 
 /// Enable raw mode by setting the terminal via stty-equivalent ioctls.
-/// On SlateOS we use the libc termios interface.
+/// On Slate OS we use the libc termios interface.
 fn enable_raw_mode() -> Option<RawModeGuard> {
     // We use the POSIX termios interface through std's libc bindings.
     // On our custom target this goes through the POSIX compatibility layer.

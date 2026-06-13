@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! neutron-cli — SlateOS iZotope Neutron mixing suite
+//! neutron-cli — Slate OS iZotope Neutron mixing suite
 //!
 //! Single personality: `neutron`
 

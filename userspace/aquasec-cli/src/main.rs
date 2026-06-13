@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! aquasec-cli — SlateOS Aqua Security (container/Kubernetes security, Israel + Burlington MA)
+//! aquasec-cli — Slate OS Aqua Security (container/Kubernetes security, Israel + Burlington MA)
 
 use std::env;
 use std::process;

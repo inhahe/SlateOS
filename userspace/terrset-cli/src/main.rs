@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! terrset-cli — SlateOS TerrSet geospatial monitoring
+//! terrset-cli — Slate OS TerrSet geospatial monitoring
 //!
 //! Single personality: `terrset`
 

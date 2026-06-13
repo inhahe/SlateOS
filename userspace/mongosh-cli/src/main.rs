@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mongosh-cli — SlateOS MongoDB Shell CLI
+//! mongosh-cli — Slate OS MongoDB Shell CLI
 //!
 //! Single personality: `mongosh`
 

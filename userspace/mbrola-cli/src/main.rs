@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mbrola-cli — SlateOS MBROLA speech synthesizer
+//! mbrola-cli — Slate OS MBROLA speech synthesizer
 //!
 //! Single personality: `mbrola`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! buildbox-cli — SlateOS Buildbox (no-code mobile game maker)
+//! buildbox-cli — Slate OS Buildbox (no-code mobile game maker)
 //!
 //! Single personality: `buildbox`
 

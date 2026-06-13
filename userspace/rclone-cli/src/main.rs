@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rclone-cli — SlateOS rclone CLI
+//! rclone-cli — Slate OS rclone CLI
 //!
 //! Single personality: `rclone`
 

@@ -1,4 +1,4 @@
-//! look — display lines beginning with a given string for SlateOS
+//! look — display lines beginning with a given string for Slate OS
 //!
 //! Searches for lines in a sorted file that begin with the given
 //! prefix string. Uses binary search for efficiency.

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sejda-cli — SlateOS Sejda PDF manipulation
+//! sejda-cli — Slate OS Sejda PDF manipulation
 //!
 //! Single personality: `sejda-console`
 

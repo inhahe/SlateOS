@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xdg-user-dirs-cli — SlateOS xdg-user-dirs user directory management
+//! xdg-user-dirs-cli — Slate OS xdg-user-dirs user directory management
 //!
 //! Multi-personality: `xdg-user-dirs-update`, `xdg-user-dir`
 

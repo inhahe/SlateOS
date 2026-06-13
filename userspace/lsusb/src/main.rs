@@ -1,4 +1,4 @@
-//! SlateOS USB Device Lister
+//! Slate OS USB Device Lister
 //!
 //! Lists USB devices by reading from `/sys/bus/usb/devices/` or
 //! `/proc/usb/devices`. Includes a built-in vendor/device ID database

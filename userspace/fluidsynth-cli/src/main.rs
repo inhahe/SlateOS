@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fluidsynth-cli — SlateOS FluidSynth software synthesizer
+//! fluidsynth-cli — Slate OS FluidSynth software synthesizer
 //!
 //! Single personality: `fluidsynth`
 

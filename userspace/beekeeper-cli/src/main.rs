@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! beekeeper-cli — SlateOS Beekeeper Studio database manager
+//! beekeeper-cli — Slate OS Beekeeper Studio database manager
 //!
 //! Single personality: `beekeeper-studio`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nheko-cli — SlateOS Nheko Matrix client
+//! nheko-cli — Slate OS Nheko Matrix client
 //!
 //! Single personality: `nheko`
 

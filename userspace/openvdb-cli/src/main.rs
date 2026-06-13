@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! openvdb-cli — SlateOS OpenVDB volumetric data tool
+//! openvdb-cli — Slate OS OpenVDB volumetric data tool
 //!
 //! Single personality: `vdb_print` (multi: vdb_print, vdb_render)
 

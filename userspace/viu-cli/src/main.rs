@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! viu-cli — SlateOS viu terminal image viewer
+//! viu-cli — Slate OS viu terminal image viewer
 //!
 //! Single personality: `viu`
 

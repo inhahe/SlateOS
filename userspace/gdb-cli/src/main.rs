@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gdb-cli — SlateOS GNU Debugger
+//! gdb-cli — Slate OS GNU Debugger
 //!
 //! Multi-personality: `gdb`, `gdbserver`
 

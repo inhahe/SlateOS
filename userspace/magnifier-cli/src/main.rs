@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! magnifier-cli — SlateOS screen magnifier
+//! magnifier-cli — Slate OS screen magnifier
 //!
 //! Single personality: `magnifier`
 

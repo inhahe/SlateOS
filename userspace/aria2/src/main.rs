@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! aria2 — SlateOS lightweight multi-protocol download utility
+//! aria2 — Slate OS lightweight multi-protocol download utility
 //!
 //! Single personality: `aria2c`
 

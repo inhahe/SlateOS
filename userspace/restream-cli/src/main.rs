@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! restream-cli — SlateOS Restream multistreaming platform
+//! restream-cli — Slate OS Restream multistreaming platform
 //!
 //! Single personality: `restream`
 

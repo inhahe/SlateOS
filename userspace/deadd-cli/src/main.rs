@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! deadd-cli — SlateOS deadd notification center
+//! deadd-cli — Slate OS deadd notification center
 //!
 //! Multi-personality: `deadd-notification-center`, `deadd-notification-center-ctl`
 

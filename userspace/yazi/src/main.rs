@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! yazi — SlateOS blazing fast terminal file manager
+//! yazi — Slate OS blazing fast terminal file manager
 //!
 //! Single personality: `yazi`
 

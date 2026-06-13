@@ -1,4 +1,4 @@
-//! SlateOS `crontab` — per-user cron schedule management
+//! Slate OS `crontab` — per-user cron schedule management
 //!
 //! User-facing companion to the `crond` daemon. Manages crontab files stored
 //! in `/var/spool/cron/<username>`. After any modification the tool signals
@@ -304,7 +304,7 @@ fn current_username() -> String {
             return user;
         }
     // Fallback: use the numeric UID as the "username" so we at least have a
-    // unique spool path. On a real SlateOS system this would call getuid().
+    // unique spool path. On a real Slate OS system this would call getuid().
     format!("uid{}", std::process::id())
 }
 

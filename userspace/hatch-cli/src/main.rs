@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hatch-cli — SlateOS Hatch Python project manager
+//! hatch-cli — Slate OS Hatch Python project manager
 //!
 //! Multi-personality: `hatch`, `hatchling`
 

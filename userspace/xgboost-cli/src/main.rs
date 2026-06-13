@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xgboost-cli — SlateOS XGBoost gradient boosting
+//! xgboost-cli — Slate OS XGBoost gradient boosting
 //!
 //! Single personality: `xgboost`
 

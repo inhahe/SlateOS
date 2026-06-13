@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! garage-cli — SlateOS Garage S3-compatible storage
+//! garage-cli — Slate OS Garage S3-compatible storage
 //!
 //! Multi-personality: `garage`, `garage-server`
 

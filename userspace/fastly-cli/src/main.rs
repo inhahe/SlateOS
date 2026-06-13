@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fastly-cli — SlateOS Fastly (edge cloud + Compute@Edge Wasm, San Francisco, NYSE:FSLY)
+//! fastly-cli — Slate OS Fastly (edge cloud + Compute@Edge Wasm, San Francisco, NYSE:FSLY)
 
 use std::env;
 use std::process;

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sui-cli — SlateOS Sui Move blockchain tool
+//! sui-cli — Slate OS Sui Move blockchain tool
 //!
 //! Single personality: `sui`
 

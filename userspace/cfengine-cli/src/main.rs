@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cfengine-cli — SlateOS CFEngine configuration management
+//! cfengine-cli — Slate OS CFEngine configuration management
 //!
 //! Multi-personality: `cf-agent`, `cf-promises`, `cf-key`
 

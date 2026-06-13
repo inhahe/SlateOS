@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ping-cli — SlateOS Ping Identity (enterprise IDaaS, Denver CO, Thoma Bravo, merged with ForgeRock 2023)
+//! ping-cli — Slate OS Ping Identity (enterprise IDaaS, Denver CO, Thoma Bravo, merged with ForgeRock 2023)
 
 use std::env;
 use std::process;

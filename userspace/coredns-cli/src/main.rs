@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! coredns-cli — SlateOS CoreDNS server
+//! coredns-cli — Slate OS CoreDNS server
 //!
 //! Single personality: `coredns`
 

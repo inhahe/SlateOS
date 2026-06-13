@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lumion-cli — SlateOS Lumion (architectural visualization in real time)
+//! lumion-cli — Slate OS Lumion (architectural visualization in real time)
 //!
 //! Single personality: `lumion`
 

@@ -1,4 +1,4 @@
-//! SlateOS FTP Server Daemon (`ftpd`)
+//! Slate OS FTP Server Daemon (`ftpd`)
 //!
 //! A comprehensive RFC 959 FTP server for SlateOS. Supports both active (PORT)
 //! and passive (PASV) data transfer modes, ASCII and binary transfer types,
@@ -372,7 +372,7 @@ impl Default for Config {
 /// anonymous_only = no
 /// anon_root = /srv/ftp
 /// chroot_users = yes
-/// banner = Welcome to SlateOS FTP
+/// banner = Welcome to Slate OS FTP
 /// server_ip = 0.0.0.0
 /// ```
 fn parse_config_file(path: &str) -> Result<Config, FtpdError> {

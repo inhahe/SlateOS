@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bowtie2-cli — SlateOS Bowtie2 short read aligner
+//! bowtie2-cli — Slate OS Bowtie2 short read aligner
 //!
 //! Multi-personality: `bowtie2`, `bowtie2-build`, `bowtie2-inspect`
 

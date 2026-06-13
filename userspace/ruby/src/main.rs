@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ruby — SlateOS Ruby interpreter
+//! ruby — Slate OS Ruby interpreter
 //!
 //! Multi-personality binary detected via argv[0]:
 //!

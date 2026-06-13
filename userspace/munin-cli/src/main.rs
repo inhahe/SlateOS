@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! munin-cli — SlateOS Munin network monitoring
+//! munin-cli — Slate OS Munin network monitoring
 //!
 //! Multi-personality: `munin-node`, `munin-run`, `munin-cron`, `munin-update`
 

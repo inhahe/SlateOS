@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! waypoint-cli — SlateOS HashiCorp Waypoint application deployment
+//! waypoint-cli — Slate OS HashiCorp Waypoint application deployment
 //!
 //! Multi-personality: `waypoint`
 

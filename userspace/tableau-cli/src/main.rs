@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tableau-cli — SlateOS Salesforce Tableau data visualization
+//! tableau-cli — Slate OS Salesforce Tableau data visualization
 //!
 //! Single personality: `tableau`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! iar-cli — SlateOS IAR Embedded Workbench
+//! iar-cli — Slate OS IAR Embedded Workbench
 //!
 //! Single personality: `iar`
 

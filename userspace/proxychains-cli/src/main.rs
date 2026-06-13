@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! proxychains-cli — SlateOS proxy chain/SOCKS tools
+//! proxychains-cli — Slate OS proxy chain/SOCKS tools
 //!
 //! Multi-personality: `proxychains`, `tsocks`, `redsocks`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mariadb-cli — SlateOS MariaDB client tools
+//! mariadb-cli — Slate OS MariaDB client tools
 //!
 //! Multi-personality: `mariadb`, `mariadb-dump`, `mariadb-admin`, `mariadb-check`
 

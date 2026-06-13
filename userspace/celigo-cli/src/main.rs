@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! celigo-cli — SlateOS Celigo (NetSuite-centric iPaaS, San Mateo CA, private)
+//! celigo-cli — Slate OS Celigo (NetSuite-centric iPaaS, San Mateo CA, private)
 
 use std::env;
 use std::process;

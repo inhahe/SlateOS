@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! irssi-cli — SlateOS Irssi IRC client CLI
+//! irssi-cli — Slate OS Irssi IRC client CLI
 //!
 //! Single personality: `irssi`
 

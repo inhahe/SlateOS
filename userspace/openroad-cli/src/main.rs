@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! openroad-cli — SlateOS OpenROAD ASIC physical design
+//! openroad-cli — Slate OS OpenROAD ASIC physical design
 //!
 //! Single personality: `openroad`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zencastr-cli — SlateOS Zencastr remote podcast recording
+//! zencastr-cli — Slate OS Zencastr remote podcast recording
 //!
 //! Single personality: `zencastr`
 

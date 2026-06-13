@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! chroot-cli — SlateOS chroot CLI
+//! chroot-cli — Slate OS chroot CLI
 //!
 //! Multi-personality: `chroot`, `unshare`, `pivot_root`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pyinfra-cli — SlateOS pyinfra infrastructure automation
+//! pyinfra-cli — Slate OS pyinfra infrastructure automation
 //!
 //! Single personality: `pyinfra`
 

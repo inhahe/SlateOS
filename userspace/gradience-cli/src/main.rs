@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gradience-cli — SlateOS Gradience GNOME/libadwaita theming
+//! gradience-cli — Slate OS Gradience GNOME/libadwaita theming
 //!
 //! Single personality: `gradience`
 

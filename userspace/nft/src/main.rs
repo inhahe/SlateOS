@@ -1,4 +1,4 @@
-//! SlateOS `nft` — nftables firewall configuration utility.
+//! Slate OS `nft` — nftables firewall configuration utility.
 //!
 //! Multi-personality binary providing:
 //! - **nft** — nftables rule language (add/delete/list/flush tables, chains,
@@ -71,7 +71,7 @@ const NFT_COUNTER_ADD: u64 = 250;
 #[cfg(all(target_arch = "x86_64", not(test)))]
 unsafe fn syscall4(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
     let ret: i64;
-    // SAFETY: Arguments validated by caller; standard x86_64 SlateOS syscall ABI.
+    // SAFETY: Arguments validated by caller; standard x86_64 Slate OS syscall ABI.
     unsafe {
         core::arch::asm!(
             "syscall",

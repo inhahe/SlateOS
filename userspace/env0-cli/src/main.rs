@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! env0-cli — SlateOS env0 environment automation
+//! env0-cli — Slate OS env0 environment automation
 //!
 //! Single personality: `env0`
 

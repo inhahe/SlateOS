@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! calligra-cli — SlateOS Calligra KDE office suite
+//! calligra-cli — Slate OS Calligra KDE office suite
 //!
 //! Multi-personality: `calligrawords`, `calligrasheets`, `calligrastage`, `karbon`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bigcommerce-cli — SlateOS BigCommerce (NASDAQ:BIGC, open-platform e-commerce)
+//! bigcommerce-cli — Slate OS BigCommerce (NASDAQ:BIGC, open-platform e-commerce)
 
 use std::env;
 use std::process;

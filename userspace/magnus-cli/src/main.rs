@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! magnus-cli — SlateOS Magnus screen magnifier
+//! magnus-cli — Slate OS Magnus screen magnifier
 //!
 //! Single personality: `magnus`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! clerk-cli — SlateOS Clerk (modern React-first auth + user mgmt, SF, founded 2019)
+//! clerk-cli — Slate OS Clerk (modern React-first auth + user mgmt, SF, founded 2019)
 
 use std::env;
 use std::process;

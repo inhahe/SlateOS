@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! argocd-cli — SlateOS Argo CD GitOps tools
+//! argocd-cli — Slate OS Argo CD GitOps tools
 //!
 //! Multi-personality: `argocd`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! miniserve — SlateOS small self-contained HTTP file server
+//! miniserve — Slate OS small self-contained HTTP file server
 //!
 //! Single personality: `miniserve`
 

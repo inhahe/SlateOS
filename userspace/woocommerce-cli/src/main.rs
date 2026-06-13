@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! woocommerce-cli — SlateOS WooCommerce (the WordPress e-commerce plugin)
+//! woocommerce-cli — Slate OS WooCommerce (the WordPress e-commerce plugin)
 
 use std::env;
 use std::process;

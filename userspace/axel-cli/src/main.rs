@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! axel-cli — SlateOS Axel accelerated downloader
+//! axel-cli — Slate OS Axel accelerated downloader
 //!
 //! Single personality: `axel`
 

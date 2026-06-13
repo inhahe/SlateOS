@@ -6,7 +6,7 @@
 //!   - `kpartx`   — create device maps from partition tables
 //!
 //! Provides simulated device mapper state for userspace testing and
-//! integration with SlateOS's block-device subsystem.
+//! integration with Slate OS's block-device subsystem.
 
 #![deny(clippy::all)]
 // Many items (partition parsers, kpartx data-path functions, MBR/GPT constants)

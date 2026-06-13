@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mistika-cli — SlateOS SGO Mistika Boutique color & VFX
+//! mistika-cli — Slate OS SGO Mistika Boutique color & VFX
 //!
 //! Single personality: `mistika`
 

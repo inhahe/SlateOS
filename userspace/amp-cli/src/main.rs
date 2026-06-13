@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! amp-cli — SlateOS Amp text editor
+//! amp-cli — Slate OS Amp text editor
 //!
 //! Single personality: `amp`
 

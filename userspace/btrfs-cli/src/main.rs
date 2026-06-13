@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! btrfs-cli — SlateOS Btrfs filesystem tools
+//! btrfs-cli — Slate OS Btrfs filesystem tools
 //!
 //! Multi-personality: `btrfs`, `mkfs.btrfs`, `btrfs-convert`
 

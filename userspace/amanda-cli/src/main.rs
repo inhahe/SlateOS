@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! amanda-cli — SlateOS Amanda backup CLI
+//! amanda-cli — Slate OS Amanda backup CLI
 //!
 //! Multi-personality: `amdump`, `amcheck`, `amrecover`, `amrestore`, `amstatus`, `amreport`
 

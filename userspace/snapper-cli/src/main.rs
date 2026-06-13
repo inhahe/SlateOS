@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! snapper-cli — SlateOS Snapper filesystem snapshot manager
+//! snapper-cli — Slate OS Snapper filesystem snapshot manager
 //!
 //! Multi-personality: `snapper`, `snapperd`
 

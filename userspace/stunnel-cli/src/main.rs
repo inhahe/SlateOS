@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! stunnel-cli — SlateOS SSL/TLS tunneling tools
+//! stunnel-cli — Slate OS SSL/TLS tunneling tools
 //!
 //! Multi-personality: `stunnel`, `socat`, `ncat`
 

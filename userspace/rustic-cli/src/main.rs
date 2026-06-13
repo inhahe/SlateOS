@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rustic-cli — SlateOS Rustic fast backup tool
+//! rustic-cli — Slate OS Rustic fast backup tool
 //!
 //! Single personality: `rustic`
 

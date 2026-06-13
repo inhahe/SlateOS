@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! astropy-cli — SlateOS Astropy toolkit CLI
+//! astropy-cli — Slate OS Astropy toolkit CLI
 //!
 //! Single personality: `astropy`
 

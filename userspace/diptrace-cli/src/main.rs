@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! diptrace-cli — SlateOS Novarm DipTrace PCB EDA
+//! diptrace-cli — Slate OS Novarm DipTrace PCB EDA
 //!
 //! Single personality: `diptrace`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! grim-cli — SlateOS grim Wayland screenshot tool
+//! grim-cli — Slate OS grim Wayland screenshot tool
 //!
 //! Single personality: `grim`
 

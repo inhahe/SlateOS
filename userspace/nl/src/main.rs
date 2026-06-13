@@ -1,4 +1,4 @@
-//! SlateOS `nl` Utility -- Number Lines of Files
+//! Slate OS `nl` Utility -- Number Lines of Files
 //!
 //! Numbers lines of files according to configurable numbering styles, section
 //! delimiters, and formatting options. Supports logical page sections (header,

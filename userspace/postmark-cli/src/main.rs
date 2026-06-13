@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! postmark-cli — SlateOS Postmark transactional email personality CLI.
+//! postmark-cli — Slate OS Postmark transactional email personality CLI.
 
 use std::env;
 use std::process;

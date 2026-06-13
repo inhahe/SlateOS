@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vercel-cli — SlateOS Vercel CLI
+//! vercel-cli — Slate OS Vercel CLI
 //!
 //! Single personality: `vercel`
 

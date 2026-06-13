@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rockstar-cli — SlateOS Rockstar Games Launcher
+//! rockstar-cli — Slate OS Rockstar Games Launcher
 //!
 //! Single personality: `rockstar`
 

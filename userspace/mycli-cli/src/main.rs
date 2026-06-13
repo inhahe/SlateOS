@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mycli-cli — SlateOS mycli enhanced MySQL client
+//! mycli-cli — Slate OS mycli enhanced MySQL client
 //!
 //! Multi-personality: `mycli`
 

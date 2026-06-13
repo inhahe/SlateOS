@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! livechat-cli — SlateOS LiveChat (Polish-listed pure-play live chat platform)
+//! livechat-cli — Slate OS LiveChat (Polish-listed pure-play live chat platform)
 //!
 //! Single personality: `livechat`
 

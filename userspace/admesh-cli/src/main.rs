@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! admesh-cli — SlateOS ADMesh STL mesh processor
+//! admesh-cli — Slate OS ADMesh STL mesh processor
 //!
 //! Single personality: `admesh`
 

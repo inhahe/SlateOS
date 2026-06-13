@@ -1,4 +1,4 @@
-//! SlateOS `fold` Utility -- Wrap Input Lines to Fit a Specified Width
+//! Slate OS `fold` Utility -- Wrap Input Lines to Fit a Specified Width
 //!
 //! Reads input and wraps long lines so they fit within a column width,
 //! writing the result to standard output. Modeled after POSIX/GNU `fold`.

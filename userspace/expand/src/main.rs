@@ -1,4 +1,4 @@
-//! SlateOS `expand` / `unexpand` Utility -- Tab/Space Conversion
+//! Slate OS `expand` / `unexpand` Utility -- Tab/Space Conversion
 //!
 //! Converts tabs to spaces (`expand`) or spaces to tabs (`unexpand`),
 //! depending on the name used to invoke the program (argv[0]).

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ninja — SlateOS Ninja build system
+//! ninja — Slate OS Ninja build system
 //!
 //! Multi-personality binary detected via argv[0]:
 //!

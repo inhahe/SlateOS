@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! valkey-cli — SlateOS Valkey (Redis fork) CLI
+//! valkey-cli — Slate OS Valkey (Redis fork) CLI
 //!
 //! Multi-personality: `valkey-cli`, `valkey-server`, `valkey-benchmark`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! memcached — SlateOS distributed memory caching system
+//! memcached — Slate OS distributed memory caching system
 //!
 //! Single personality: `memcached`
 

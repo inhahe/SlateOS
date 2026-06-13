@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! havoc-cli — SlateOS Havoc minimal Wayland terminal
+//! havoc-cli — Slate OS Havoc minimal Wayland terminal
 //!
 //! Single personality: `havoc`
 

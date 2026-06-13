@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! duplicity — SlateOS encrypted bandwidth-efficient backup
+//! duplicity — Slate OS encrypted bandwidth-efficient backup
 //!
 //! Single personality: `duplicity`
 

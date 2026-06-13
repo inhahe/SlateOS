@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gpg — SlateOS GnuPG encryption and signing tool
+//! gpg — Slate OS GnuPG encryption and signing tool
 //!
 //! Multi-personality binary detected via argv[0]:
 //!

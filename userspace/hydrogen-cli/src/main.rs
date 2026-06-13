@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hydrogen-cli — SlateOS Hydrogen drum machine
+//! hydrogen-cli — Slate OS Hydrogen drum machine
 //!
 //! Single personality: `hydrogen`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bedtools-cli — SlateOS BEDTools genome analysis
+//! bedtools-cli — Slate OS BEDTools genome analysis
 //!
 //! Multi-personality: `bedtools`
 

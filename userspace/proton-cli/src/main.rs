@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! proton-cli — SlateOS Proton/Steam compatibility CLI
+//! proton-cli — Slate OS Proton/Steam compatibility CLI
 //!
 //! Multi-personality: `proton`, `steam`
 

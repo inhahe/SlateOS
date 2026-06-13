@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! d-cli — SlateOS D programming language tools
+//! d-cli — Slate OS D programming language tools
 //!
 //! Multi-personality: `dmd`, `dub`, `rdmd`
 

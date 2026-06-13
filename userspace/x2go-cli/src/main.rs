@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! x2go-cli — SlateOS X2Go remote desktop
+//! x2go-cli — Slate OS X2Go remote desktop
 //!
 //! Multi-personality: `x2goclient`, `x2goserver`
 

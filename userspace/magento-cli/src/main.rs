@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! magento-cli — SlateOS Adobe Commerce / Magento (enterprise self-hosted e-commerce)
+//! magento-cli — Slate OS Adobe Commerce / Magento (enterprise self-hosted e-commerce)
 
 use std::env;
 use std::process;

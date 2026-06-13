@@ -1,4 +1,4 @@
-//! `SlateOS` System Log Viewer
+//! `Slate OS` System Log Viewer
 //!
 //! A log viewing and analysis tool with:
 //! - JSON-lines log format parsing (the OS's native log format)

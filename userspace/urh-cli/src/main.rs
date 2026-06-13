@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! urh-cli — SlateOS Universal Radio Hacker
+//! urh-cli — Slate OS Universal Radio Hacker
 //!
 //! Single personality: `urh`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! geoserver-cli — SlateOS GeoServer geospatial server
+//! geoserver-cli — Slate OS GeoServer geospatial server
 //!
 //! Single personality: `geoserver`
 

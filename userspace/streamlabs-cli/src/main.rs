@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! streamlabs-cli — SlateOS Streamlabs Desktop streaming app
+//! streamlabs-cli — Slate OS Streamlabs Desktop streaming app
 //!
 //! Single personality: `streamlabs`
 

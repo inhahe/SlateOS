@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cargo-nextest — SlateOS next-generation test runner for Rust
+//! cargo-nextest — Slate OS next-generation test runner for Rust
 //!
 //! Single personality: `cargo-nextest`
 

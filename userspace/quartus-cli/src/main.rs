@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! quartus-cli — SlateOS Intel/Altera Quartus Prime FPGA toolchain
+//! quartus-cli — Slate OS Intel/Altera Quartus Prime FPGA toolchain
 //!
 //! Single personality: `quartus`
 

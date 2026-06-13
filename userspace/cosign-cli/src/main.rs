@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cosign-cli — SlateOS Sigstore container signing CLI
+//! cosign-cli — Slate OS Sigstore container signing CLI
 //!
 //! Single personality: `cosign`
 

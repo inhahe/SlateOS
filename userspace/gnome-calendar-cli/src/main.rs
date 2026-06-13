@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gnome-calendar-cli — SlateOS GNOME Calendar
+//! gnome-calendar-cli — Slate OS GNOME Calendar
 //!
 //! Single personality: `gnome-calendar`
 

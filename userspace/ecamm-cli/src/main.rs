@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ecamm-cli — SlateOS Ecamm Live streaming app (macOS)
+//! ecamm-cli — Slate OS Ecamm Live streaming app (macOS)
 //!
 //! Single personality: `ecamm`
 

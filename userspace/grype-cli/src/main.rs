@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! grype-cli — SlateOS Grype vulnerability scanner
+//! grype-cli — Slate OS Grype vulnerability scanner
 //!
 //! Multi-personality: `grype`
 

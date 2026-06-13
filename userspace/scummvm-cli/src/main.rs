@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! scummvm-cli — SlateOS ScummVM adventure game engine
+//! scummvm-cli — Slate OS ScummVM adventure game engine
 //!
 //! Multi-personality: `scummvm`
 

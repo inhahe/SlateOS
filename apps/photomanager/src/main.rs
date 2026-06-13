@@ -1,4 +1,4 @@
-//! SlateOS Photo Manager
+//! Slate OS Photo Manager
 //!
 //! A photo library management application with:
 //! - Photo library with albums, collections, and smart albums

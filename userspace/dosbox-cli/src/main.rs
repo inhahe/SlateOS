@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dosbox-cli — SlateOS DOSBox emulator CLI
+//! dosbox-cli — Slate OS DOSBox emulator CLI
 //!
 //! Multi-personality: `dosbox`, `dosbox-x`
 

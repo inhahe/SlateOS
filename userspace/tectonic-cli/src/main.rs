@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tectonic-cli — SlateOS Tectonic TeX/LaTeX engine
+//! tectonic-cli — Slate OS Tectonic TeX/LaTeX engine
 //!
 //! Single personality: `tectonic`
 

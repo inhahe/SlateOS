@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! duf-cli — SlateOS duf disk usage utility
+//! duf-cli — Slate OS duf disk usage utility
 //!
 //! Single personality: `duf`
 

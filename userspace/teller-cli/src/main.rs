@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! teller-cli — SlateOS Teller universal secret manager
+//! teller-cli — Slate OS Teller universal secret manager
 //!
 //! Single personality: `teller`
 

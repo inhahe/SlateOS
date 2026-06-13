@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sakura-cli — SlateOS Sakura terminal emulator
+//! sakura-cli — Slate OS Sakura terminal emulator
 //!
 //! Single personality: `sakura`
 

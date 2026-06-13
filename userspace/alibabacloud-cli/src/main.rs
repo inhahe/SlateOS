@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! alibabacloud-cli — SlateOS Alibaba Cloud (Aliyun, China's #1 cloud, AI/Qwen, Hangzhou, NYSE:BABA)
+//! alibabacloud-cli — Slate OS Alibaba Cloud (Aliyun, China's #1 cloud, AI/Qwen, Hangzhou, NYSE:BABA)
 
 use std::env;
 use std::process;

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bamboo-cli — SlateOS Bamboo (Atlassian's on-prem CI/CD, complement to Bitbucket)
+//! bamboo-cli — Slate OS Bamboo (Atlassian's on-prem CI/CD, complement to Bitbucket)
 //!
 //! Single personality: `bamboo`
 

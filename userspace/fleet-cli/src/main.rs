@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fleet-cli — SlateOS Fleet device management
+//! fleet-cli — Slate OS Fleet device management
 //!
 //! Single personality: `fleetctl`
 

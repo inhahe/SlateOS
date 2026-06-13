@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! angr-cli — SlateOS angr binary analysis platform
+//! angr-cli — Slate OS angr binary analysis platform
 //!
 //! Single personality: `angr`
 

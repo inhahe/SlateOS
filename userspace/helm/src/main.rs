@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! helm — SlateOS Kubernetes package manager
+//! helm — Slate OS Kubernetes package manager
 //!
 //! Single personality: `helm`
 

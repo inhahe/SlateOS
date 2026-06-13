@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dconf-cli — SlateOS dconf configuration system CLI
+//! dconf-cli — Slate OS dconf configuration system CLI
 //!
 //! Single personality: `dconf`
 

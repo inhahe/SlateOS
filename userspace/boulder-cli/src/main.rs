@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! boulder-cli — SlateOS Boulder ACME CA server
+//! boulder-cli — Slate OS Boulder ACME CA server
 //!
 //! Single personality: `boulder`
 

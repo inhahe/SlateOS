@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! otel-cli — SlateOS OpenTelemetry CLI tools
+//! otel-cli — Slate OS OpenTelemetry CLI tools
 //!
 //! Multi-personality: `otel-cli`, `otelcol`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! root-cli — SlateOS ROOT data analysis framework (CERN)
+//! root-cli — Slate OS ROOT data analysis framework (CERN)
 //!
 //! Multi-personality: `root`, `rootcling`, `hadd`, `rootls`, `rootcp`, `rootmv`, `rootrm`, `rootprint`
 

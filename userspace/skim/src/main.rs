@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! skim — SlateOS fuzzy finder in Rust (fzf alternative)
+//! skim — Slate OS fuzzy finder in Rust (fzf alternative)
 //!
 //! Single personality: `sk`
 

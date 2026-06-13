@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! logwatch-cli — SlateOS Logwatch log monitoring
+//! logwatch-cli — Slate OS Logwatch log monitoring
 //!
 //! Single personality: `logwatch`
 

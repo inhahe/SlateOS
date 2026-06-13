@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wlogout-cli — SlateOS wlogout session logout menu
+//! wlogout-cli — Slate OS wlogout session logout menu
 //!
 //! Single personality: `wlogout`
 

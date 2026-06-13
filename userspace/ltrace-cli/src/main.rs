@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ltrace-cli — SlateOS library call tracer
+//! ltrace-cli — Slate OS library call tracer
 //!
 //! Multi-personality: `ltrace`
 

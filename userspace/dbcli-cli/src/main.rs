@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dbcli-cli — SlateOS generic database CLI tool
+//! dbcli-cli — Slate OS generic database CLI tool
 //!
 //! Single personality: `dbcli`
 

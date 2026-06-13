@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! scheme-cli — SlateOS Scheme interpreters
+//! scheme-cli — Slate OS Scheme interpreters
 //!
 //! Multi-personality: `guile`, `chicken`, `chez`, `gambit`
 

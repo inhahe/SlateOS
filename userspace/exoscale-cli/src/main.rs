@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! exoscale-cli — SlateOS Exoscale cloud CLI
+//! exoscale-cli — Slate OS Exoscale cloud CLI
 //!
 //! Multi-personality: `exo`
 

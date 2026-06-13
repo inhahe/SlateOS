@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bigquery-cli — SlateOS Google BigQuery (serverless petabyte-scale data warehouse, part of GCP, NASDAQ:GOOGL)
+//! bigquery-cli — Slate OS Google BigQuery (serverless petabyte-scale data warehouse, part of GCP, NASDAQ:GOOGL)
 
 use std::env;
 use std::process;

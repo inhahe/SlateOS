@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! magic-cli — SlateOS Magic VLSI layout tool
+//! magic-cli — Slate OS Magic VLSI layout tool
 //!
 //! Single personality: `magic`
 

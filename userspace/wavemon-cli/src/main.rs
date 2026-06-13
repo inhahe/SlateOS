@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wavemon-cli — SlateOS wavemon wireless monitor
+//! wavemon-cli — Slate OS wavemon wireless monitor
 //!
 //! Single personality: `wavemon`
 

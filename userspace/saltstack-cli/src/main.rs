@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! saltstack-cli — SlateOS SaltStack configuration management
+//! saltstack-cli — Slate OS SaltStack configuration management
 //!
 //! Multi-personality: `salt`, `salt-key`, `salt-call`, `salt-run`
 

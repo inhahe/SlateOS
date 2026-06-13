@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! protobuf — SlateOS Protocol Buffers compiler and tools
+//! protobuf — Slate OS Protocol Buffers compiler and tools
 //!
 //! Multi-personality: `protoc`, `protoc-gen-rust`, `protoc-gen-go`
 

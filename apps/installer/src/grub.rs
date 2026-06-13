@@ -1,7 +1,7 @@
 //! GRUB integration for dual-boot scenarios.
 //!
 //! Detects existing GRUB installations and adds/removes/updates a menu entry
-//! for SlateOS alongside any existing Linux (or other) entries. The module never
+//! for Slate OS alongside any existing Linux (or other) entries. The module never
 //! modifies `grub.cfg` directly — it writes a numbered script in `/etc/grub.d/`
 //! and then invokes `update-grub` (or `grub2-mkconfig`) to regenerate the
 //! master configuration.
@@ -30,9 +30,9 @@ pub enum GrubError {
     GrubNotFound,
     /// The GRUB configuration directory or file is not writable.
     ConfigNotWritable(String),
-    /// An SlateOS entry already exists when trying to install a new one.
+    /// An Slate OS entry already exists when trying to install a new one.
     EntryAlreadyExists,
-    /// No SlateOS entry exists when trying to update or remove one.
+    /// No Slate OS entry exists when trying to update or remove one.
     EntryNotFound,
     /// Running `update-grub` / `grub2-mkconfig` failed.
     UpdateFailed(String),
@@ -116,7 +116,7 @@ pub struct GrubConfig {
 // Menu entry types
 // ============================================================================
 
-/// Strategy for booting SlateOS from GRUB.
+/// Strategy for booting Slate OS from GRUB.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GrubEntryType {
     /// Chainload the Limine EFI bootloader (recommended for UEFI systems).
@@ -457,7 +457,7 @@ pub fn extract_uuid(text: &str) -> Option<&str> {
 // GrubInstaller — entry lifecycle management
 // ============================================================================
 
-/// Manages the lifecycle of the SlateOS GRUB menu entry.
+/// Manages the lifecycle of the Slate OS GRUB menu entry.
 ///
 /// All mutations go through a numbered script in `/etc/grub.d/` (default:
 /// `40_slateos`).  The installer never modifies `grub.cfg` directly.
@@ -509,7 +509,7 @@ impl GrubInstaller {
         Ok(())
     }
 
-    /// Remove the SlateOS GRUB entry.
+    /// Remove the Slate OS GRUB entry.
     ///
     /// Fails with [`GrubError::EntryNotFound`] if the script does not exist.
     pub fn uninstall(&self) -> Result<(), GrubError> {
@@ -521,7 +521,7 @@ impl GrubInstaller {
         Ok(())
     }
 
-    /// Update an existing SlateOS entry with new parameters.
+    /// Update an existing Slate OS entry with new parameters.
     ///
     /// Fails with [`GrubError::EntryNotFound`] if the script does not exist.
     pub fn update(&self, entry: &GrubEntry) -> Result<(), GrubError> {
@@ -535,7 +535,7 @@ impl GrubInstaller {
         Ok(())
     }
 
-    /// Check whether our custom-script file exists and contains the SlateOS
+    /// Check whether our custom-script file exists and contains the Slate OS
     /// marker.
     pub fn verify(&self) -> Result<bool, GrubError> {
         let path = self.script_path();

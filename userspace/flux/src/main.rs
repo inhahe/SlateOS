@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! flux — SlateOS Flux CD GitOps toolkit
+//! flux — Slate OS Flux CD GitOps toolkit
 //!
 //! Single personality: `flux`
 

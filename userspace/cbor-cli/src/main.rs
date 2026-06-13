@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cbor-cli — SlateOS CBOR diagnostic tool
+//! cbor-cli — Slate OS CBOR diagnostic tool
 //!
 //! Single personality: `cbor-diag`
 

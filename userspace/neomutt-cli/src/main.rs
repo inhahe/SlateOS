@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! neomutt-cli — SlateOS NeoMutt email client
+//! neomutt-cli — Slate OS NeoMutt email client
 //!
 //! Single personality: `neomutt`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xephem-cli — SlateOS XEphem interactive planetarium
+//! xephem-cli — Slate OS XEphem interactive planetarium
 //!
 //! Single personality: `xephem`
 

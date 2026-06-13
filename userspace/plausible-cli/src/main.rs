@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! plausible-cli — SlateOS Plausible (lightweight, privacy-first, GA alternative)
+//! plausible-cli — Slate OS Plausible (lightweight, privacy-first, GA alternative)
 //!
 //! Single personality: `plausible`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fontconfig-cli — SlateOS Fontconfig font configuration
+//! fontconfig-cli — Slate OS Fontconfig font configuration
 //!
 //! Multi-personality: `fc-list`, `fc-match`, `fc-cache`, `fc-query`, `fc-scan`
 

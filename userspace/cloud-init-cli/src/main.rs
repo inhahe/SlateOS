@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cloud-init-cli — SlateOS cloud-init CLI
+//! cloud-init-cli — Slate OS cloud-init CLI
 //!
 //! Single personality: `cloud-init`
 

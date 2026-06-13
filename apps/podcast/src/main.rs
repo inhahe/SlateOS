@@ -1,4 +1,4 @@
-//! SlateOS Podcast Manager
+//! Slate OS Podcast Manager
 //!
 //! A full-featured podcast manager application providing:
 //! - Podcast subscription management via RSS URL with metadata

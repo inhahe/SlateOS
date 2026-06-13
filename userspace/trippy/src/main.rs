@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! trippy — SlateOS network diagnostic tool (mtr alternative)
+//! trippy — Slate OS network diagnostic tool (mtr alternative)
 //!
 //! Single personality: `trip`
 

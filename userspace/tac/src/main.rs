@@ -1,4 +1,4 @@
-//! tac/rev — reverse line printer and character reverser for SlateOS
+//! tac/rev — reverse line printer and character reverser for Slate OS
 //!
 //! Multi-personality binary:
 //! - `tac`: concatenate and print files in reverse line order

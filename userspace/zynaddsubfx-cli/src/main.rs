@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zynaddsubfx-cli — SlateOS ZynAddSubFX synthesizer
+//! zynaddsubfx-cli — Slate OS ZynAddSubFX synthesizer
 //!
 //! Single personality: `zynaddsubfx`
 

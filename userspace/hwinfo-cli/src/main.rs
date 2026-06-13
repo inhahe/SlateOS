@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hwinfo-cli — SlateOS hardware information tool
+//! hwinfo-cli — Slate OS hardware information tool
 //!
 //! Multi-personality: `hwinfo`, `lshw`
 

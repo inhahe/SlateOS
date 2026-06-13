@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! loki — SlateOS log aggregation system
+//! loki — Slate OS log aggregation system
 //!
 //! Multi-personality: `loki`, `logcli`, `promtail`
 

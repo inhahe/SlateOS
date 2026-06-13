@@ -1,4 +1,4 @@
-// SlateOS chpasswd — batch password change utility
+// Slate OS chpasswd — batch password change utility
 //
 // Multi-personality binary:
 //   chpasswd — batch change user passwords (from stdin or file)

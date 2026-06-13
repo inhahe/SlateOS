@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! poetry-cli — SlateOS Poetry Python dependency manager
+//! poetry-cli — Slate OS Poetry Python dependency manager
 //!
 //! Multi-personality: `poetry`
 

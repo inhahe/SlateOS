@@ -1,4 +1,4 @@
-//! SlateOS Password Management Utility
+//! Slate OS Password Management Utility
 //!
 //! Manages user passwords and password aging policies via the `/etc/shadow`
 //! file. Validates users against `/etc/passwd`.
@@ -463,13 +463,13 @@ fn check_password_strength(password: &str) -> StrengthResult {
 // ============================================================================
 
 /// Read a password from stdin without echoing.
-/// On SlateOS, we disable echo via ioctl on /dev/tty.
+/// On Slate OS, we disable echo via ioctl on /dev/tty.
 /// Falls back to normal line read if terminal control is unavailable.
 fn read_password_no_echo(prompt: &str) -> Result<String, String> {
     eprint!("{prompt}");
     let _ = io::stderr().flush();
 
-    // Attempt to disable echo. On SlateOS this would use termios ioctls.
+    // Attempt to disable echo. On Slate OS this would use termios ioctls.
     // For now, just read a line — the real echo-disable will be done
     // via the POSIX termios layer when the kernel supports it.
     let mut line = String::new();

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! virtualenv-cli — SlateOS Python virtual environment creator
+//! virtualenv-cli — Slate OS Python virtual environment creator
 //!
 //! Multi-personality: `virtualenv`, `venv`
 

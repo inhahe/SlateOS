@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! materialx-cli — SlateOS MaterialX material tool
+//! materialx-cli — Slate OS MaterialX material tool
 //!
 //! Single personality: `materialx`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! headscale-cli — SlateOS Headscale coordination server
+//! headscale-cli — Slate OS Headscale coordination server
 //!
 //! Single personality: `headscale`
 

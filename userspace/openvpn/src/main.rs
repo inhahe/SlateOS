@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! openvpn — SlateOS VPN solution
+//! openvpn — Slate OS VPN solution
 //!
 //! Single personality: `openvpn`
 

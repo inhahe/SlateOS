@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tox-cli — SlateOS tox test automation tool
+//! tox-cli — Slate OS tox test automation tool
 //!
 //! Multi-personality: `tox`
 

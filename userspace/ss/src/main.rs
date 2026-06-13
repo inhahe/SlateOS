@@ -1,4 +1,4 @@
-// SlateOS ss — socket statistics
+// Slate OS ss — socket statistics
 //
 // Multi-personality binary:
 //   ss       — display socket statistics (like Linux ss, replaces netstat)

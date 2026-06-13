@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! confd-cli — SlateOS confd template-based config management
+//! confd-cli — Slate OS confd template-based config management
 //!
 //! Single personality: `confd`
 

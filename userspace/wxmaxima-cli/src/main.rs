@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wxmaxima-cli — SlateOS wxMaxima CAS frontend
+//! wxmaxima-cli — Slate OS wxMaxima CAS frontend
 //!
 //! Single personality: `wxmaxima`
 

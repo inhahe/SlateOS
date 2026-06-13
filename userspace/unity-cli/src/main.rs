@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! unity-cli — SlateOS Unity Hub CLI
+//! unity-cli — Slate OS Unity Hub CLI
 //!
 //! Multi-personality: `unity-hub`
 

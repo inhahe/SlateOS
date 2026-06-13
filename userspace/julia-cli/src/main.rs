@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! julia-cli — SlateOS Julia language
+//! julia-cli — Slate OS Julia language
 //!
 //! Multi-personality: `julia`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! picocom-cli — SlateOS minimal serial terminal
+//! picocom-cli — Slate OS minimal serial terminal
 //!
 //! Multi-personality: `picocom`, `cu`
 

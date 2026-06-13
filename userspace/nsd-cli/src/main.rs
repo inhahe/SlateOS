@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nsd-cli — SlateOS NSD authoritative DNS server
+//! nsd-cli — Slate OS NSD authoritative DNS server
 //!
 //! Multi-personality: `nsd`, `nsd-control`, `nsd-checkzone`, `nsd-checkconf`
 

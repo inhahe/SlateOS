@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ocserv-cli — SlateOS OpenConnect VPN server
+//! ocserv-cli — Slate OS OpenConnect VPN server
 //!
 //! Multi-personality: `ocserv`, `occtl`
 

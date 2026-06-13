@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ffplay-cli — SlateOS ffplay media player
+//! ffplay-cli — Slate OS ffplay media player
 //!
 //! Single personality: `ffplay`
 

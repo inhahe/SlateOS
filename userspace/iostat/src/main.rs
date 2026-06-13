@@ -1,4 +1,4 @@
-//! SlateOS I/O Statistics Utility
+//! Slate OS I/O Statistics Utility
 //!
 //! Reports CPU utilization and I/O device statistics, similar to Linux `iostat`.
 //! Reads from `/proc/stat`, `/proc/diskstats`, and `/sys/block/` for live data.

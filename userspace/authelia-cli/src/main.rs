@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! authelia-cli — SlateOS Authelia authentication server
+//! authelia-cli — Slate OS Authelia authentication server
 //!
 //! Single personality: `authelia`
 

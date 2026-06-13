@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! trilium-cli — SlateOS Trilium Notes knowledge base
+//! trilium-cli — Slate OS Trilium Notes knowledge base
 //!
 //! Single personality: `trilium`
 

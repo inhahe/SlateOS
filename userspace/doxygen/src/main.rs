@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! doxygen — SlateOS documentation generator for C/C++/Rust
+//! doxygen — Slate OS documentation generator for C/C++/Rust
 //!
 //! Single personality: `doxygen`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! phoronix-cli — SlateOS Phoronix Test Suite
+//! phoronix-cli — Slate OS Phoronix Test Suite
 //!
 //! Single personality: `phoronix-test-suite`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! omnisphere-cli — SlateOS Spectrasonics Omnisphere flagship synth
+//! omnisphere-cli — Slate OS Spectrasonics Omnisphere flagship synth
 //!
 //! Single personality: `omnisphere`
 

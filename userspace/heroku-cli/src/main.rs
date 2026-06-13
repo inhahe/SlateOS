@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! heroku-cli — SlateOS Heroku CLI
+//! heroku-cli — Slate OS Heroku CLI
 //!
 //! Single personality: `heroku`
 

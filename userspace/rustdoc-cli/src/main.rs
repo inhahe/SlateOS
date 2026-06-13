@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rustdoc-cli — SlateOS Rust documentation generator
+//! rustdoc-cli — Slate OS Rust documentation generator
 //!
 //! Multi-personality: `rustdoc`, `cargo-doc`
 

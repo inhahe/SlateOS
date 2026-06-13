@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! opencolorio-cli — SlateOS OpenColorIO color management
+//! opencolorio-cli — Slate OS OpenColorIO color management
 //!
 //! Multi-personality: `ociocheck`, `ocioconvert`, `ociodisplay`
 

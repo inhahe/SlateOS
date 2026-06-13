@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ollama-cli — SlateOS Ollama CLI
+//! ollama-cli — Slate OS Ollama CLI
 //!
 //! Single personality: `ollama`
 

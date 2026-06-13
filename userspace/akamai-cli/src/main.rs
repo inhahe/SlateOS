@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! akamai-cli — SlateOS Akamai (original CDN + edge security + cloud compute, Cambridge MA, NASDAQ:AKAM)
+//! akamai-cli — Slate OS Akamai (original CDN + edge security + cloud compute, Cambridge MA, NASDAQ:AKAM)
 
 use std::env;
 use std::process;

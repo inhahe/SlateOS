@@ -1,4 +1,4 @@
-//! SlateOS `join` Utility -- Join Lines of Two Sorted Files on a Common Field
+//! Slate OS `join` Utility -- Join Lines of Two Sorted Files on a Common Field
 //!
 //! Reads two sorted files and joins lines that share a common join field,
 //! similar to an SQL inner join. Both input files must be sorted on the

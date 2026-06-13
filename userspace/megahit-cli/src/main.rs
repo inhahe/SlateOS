@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! megahit-cli — SlateOS MEGAHIT metagenome assembler
+//! megahit-cli — Slate OS MEGAHIT metagenome assembler
 //!
 //! Single personality: `megahit`
 

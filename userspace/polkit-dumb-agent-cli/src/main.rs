@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! polkit-dumb-agent-cli — SlateOS minimal Polkit agent for sway/wlroots
+//! polkit-dumb-agent-cli — Slate OS minimal Polkit agent for sway/wlroots
 //!
 //! Single personality: `polkit-dumb-agent`
 

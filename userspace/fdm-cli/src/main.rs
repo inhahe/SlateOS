@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fdm-cli — SlateOS fdm mail fetching/delivery
+//! fdm-cli — Slate OS fdm mail fetching/delivery
 //!
 //! Single personality: `fdm`
 

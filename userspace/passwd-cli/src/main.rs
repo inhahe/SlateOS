@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! passwd-cli — SlateOS passwd/chage CLI
+//! passwd-cli — Slate OS passwd/chage CLI
 //!
 //! Multi-personality: `passwd`, `chage`, `chsh`, `chfn`
 

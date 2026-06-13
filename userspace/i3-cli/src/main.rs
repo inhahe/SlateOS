@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! i3-cli — SlateOS i3 window manager tools
+//! i3-cli — Slate OS i3 window manager tools
 //!
 //! Multi-personality: `i3-msg`, `i3-nagbar`, `i3-input`
 

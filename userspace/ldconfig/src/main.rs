@@ -1,4 +1,4 @@
-//! SlateOS shared library cache management.
+//! Slate OS shared library cache management.
 //!
 //! Multi-personality binary providing:
 //! - **ldconfig** — configure dynamic linker run-time bindings

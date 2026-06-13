@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tdengine-cli — SlateOS TDengine time-series database
+//! tdengine-cli — Slate OS TDengine time-series database
 //!
 //! Multi-personality: `taosd`, `taos`
 

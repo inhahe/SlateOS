@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wayland-info-cli — SlateOS wayland-info compositor information
+//! wayland-info-cli — Slate OS wayland-info compositor information
 //!
 //! Single personality: `wayland-info`
 

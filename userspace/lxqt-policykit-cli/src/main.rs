@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lxqt-policykit-cli — SlateOS LXQt PolicyKit agent
+//! lxqt-policykit-cli — Slate OS LXQt PolicyKit agent
 //!
 //! Single personality: `lxqt-policykit-agent`
 

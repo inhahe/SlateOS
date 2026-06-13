@@ -1,4 +1,4 @@
-//! SlateOS Whiteboard
+//! Slate OS Whiteboard
 //!
 //! A collaborative drawing and diagramming application featuring:
 //! - Drawing tools: Pen (freehand), Line, Rectangle, Ellipse, Arrow, Text, Eraser

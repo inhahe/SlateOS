@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wireshark-cli — SlateOS Wireshark CLI tools (tshark/editcap/mergecap)
+//! wireshark-cli — Slate OS Wireshark CLI tools (tshark/editcap/mergecap)
 //!
 //! Multi-personality: `tshark`, `editcap`, `mergecap`, `capinfos`
 

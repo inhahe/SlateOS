@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vivado-cli — SlateOS AMD Xilinx Vivado FPGA toolchain
+//! vivado-cli — Slate OS AMD Xilinx Vivado FPGA toolchain
 //!
 //! Single personality: `vivado`
 

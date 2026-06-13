@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mathematica-cli — SlateOS Wolfram Mathematica symbolic/numeric computing
+//! mathematica-cli — Slate OS Wolfram Mathematica symbolic/numeric computing
 //!
 //! Single personality: `mathematica`
 

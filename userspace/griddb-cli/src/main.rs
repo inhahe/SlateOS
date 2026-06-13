@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! griddb-cli — SlateOS GridDB IoT database
+//! griddb-cli — Slate OS GridDB IoT database
 //!
 //! Multi-personality: `gridstore`, `gs_admin`
 

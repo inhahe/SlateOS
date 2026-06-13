@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! badblocks-cli — SlateOS badblocks disk checker
+//! badblocks-cli — Slate OS badblocks disk checker
 //!
 //! Single personality: `badblocks`
 

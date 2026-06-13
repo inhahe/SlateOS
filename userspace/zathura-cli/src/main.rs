@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zathura-cli — SlateOS Zathura document viewer
+//! zathura-cli — Slate OS Zathura document viewer
 //!
 //! Single personality: `zathura`
 

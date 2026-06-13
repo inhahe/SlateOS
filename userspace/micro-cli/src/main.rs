@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! micro-cli — SlateOS Micro editor
+//! micro-cli — Slate OS Micro editor
 //!
 //! Single personality: `micro`
 

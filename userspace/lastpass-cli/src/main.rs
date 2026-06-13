@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lastpass-cli — SlateOS LastPass password manager
+//! lastpass-cli — Slate OS LastPass password manager
 //!
 //! Single personality: `lastpass`
 

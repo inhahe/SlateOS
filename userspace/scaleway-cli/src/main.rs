@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! scaleway-cli — SlateOS Scaleway cloud CLI
+//! scaleway-cli — Slate OS Scaleway cloud CLI
 //!
 //! Multi-personality: `scw`
 

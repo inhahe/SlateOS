@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! inxi-cli — SlateOS inxi system information
+//! inxi-cli — Slate OS inxi system information
 //!
 //! Single personality: `inxi`
 

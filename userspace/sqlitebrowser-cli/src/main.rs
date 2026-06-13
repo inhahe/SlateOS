@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sqlitebrowser-cli — SlateOS DB Browser for SQLite
+//! sqlitebrowser-cli — Slate OS DB Browser for SQLite
 //!
 //! Single personality: `sqlitebrowser`
 

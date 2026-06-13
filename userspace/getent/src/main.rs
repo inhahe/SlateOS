@@ -1,4 +1,4 @@
-//! SlateOS name service lookup utility.
+//! Slate OS name service lookup utility.
 //!
 //! Multi-personality binary providing:
 //! - **getent** — get entries from Name Service Switch databases

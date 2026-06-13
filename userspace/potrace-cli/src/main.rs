@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! potrace-cli — SlateOS Potrace/mkbitmap bitmap tracing CLI
+//! potrace-cli — Slate OS Potrace/mkbitmap bitmap tracing CLI
 //!
 //! Multi-personality: `potrace`, `mkbitmap`
 

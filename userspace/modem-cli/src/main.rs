@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! modem-cli — SlateOS modem/mobile broadband tools
+//! modem-cli — Slate OS modem/mobile broadband tools
 //!
 //! Multi-personality: `mmcli`, `nmcli` (ModemManager / NetworkManager)
 

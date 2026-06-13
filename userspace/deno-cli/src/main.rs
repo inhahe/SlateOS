@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! deno-cli — SlateOS Deno JavaScript/TypeScript runtime
+//! deno-cli — Slate OS Deno JavaScript/TypeScript runtime
 //!
 //! Multi-personality: `deno`
 

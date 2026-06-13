@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wps-cli — SlateOS WPS Office (Kingsoft) productivity suite
+//! wps-cli — Slate OS WPS Office (Kingsoft) productivity suite
 //!
 //! Single personality: `wps`
 

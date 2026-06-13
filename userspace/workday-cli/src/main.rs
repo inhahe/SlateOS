@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! workday-cli — SlateOS Workday HCM + Financials
+//! workday-cli — Slate OS Workday HCM + Financials
 //!
 //! Single personality: `workday`
 

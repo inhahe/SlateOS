@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! forgejo-cli — SlateOS Forgejo (Codeberg-backed copyleft fork of Gitea)
+//! forgejo-cli — Slate OS Forgejo (Codeberg-backed copyleft fork of Gitea)
 //!
 //! Single personality: `forgejo`
 

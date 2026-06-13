@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! overskride-cli — SlateOS Overskride Bluetooth/WiFi manager
+//! overskride-cli — Slate OS Overskride Bluetooth/WiFi manager
 //!
 //! Single personality: `overskride`
 

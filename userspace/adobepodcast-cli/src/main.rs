@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! adobepodcast-cli — SlateOS Adobe Podcast (formerly Project Shasta)
+//! adobepodcast-cli — Slate OS Adobe Podcast (formerly Project Shasta)
 //!
 //! Single personality: `adobepodcast`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! minio-cli — SlateOS MinIO CLI
+//! minio-cli — Slate OS MinIO CLI
 //!
 //! Single personality: `mc` (MinIO Client)
 

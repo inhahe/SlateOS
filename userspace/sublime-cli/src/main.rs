@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sublime-cli — SlateOS Sublime Text (Jon Skinner's classic fast editor)
+//! sublime-cli — Slate OS Sublime Text (Jon Skinner's classic fast editor)
 //!
 //! Single personality: `sublime`
 

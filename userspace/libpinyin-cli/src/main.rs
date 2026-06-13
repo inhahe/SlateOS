@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! libpinyin-cli — SlateOS libpinyin Chinese input method
+//! libpinyin-cli — Slate OS libpinyin Chinese input method
 //!
 //! Single personality: `pinyin`
 

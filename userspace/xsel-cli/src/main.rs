@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xsel-cli — SlateOS xsel clipboard CLI
+//! xsel-cli — Slate OS xsel clipboard CLI
 //!
 //! Single personality: `xsel`
 

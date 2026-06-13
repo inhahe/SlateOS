@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! eww-cli — SlateOS Eww widget system
+//! eww-cli — Slate OS Eww widget system
 //!
 //! Single personality: `eww`
 

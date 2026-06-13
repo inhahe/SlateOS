@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! solace-cli — SlateOS Solace PubSub+ (Canadian event broker + event mesh, Kanata ON, founded 2001)
+//! solace-cli — Slate OS Solace PubSub+ (Canadian event broker + event mesh, Kanata ON, founded 2001)
 
 use std::env;
 use std::process;

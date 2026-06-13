@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lxappearance-cli — SlateOS LXAppearance GTK theme switcher
+//! lxappearance-cli — Slate OS LXAppearance GTK theme switcher
 //!
 //! Single personality: `lxappearance`
 

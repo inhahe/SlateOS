@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zincsearch-cli — SlateOS ZincSearch lightweight search engine
+//! zincsearch-cli — Slate OS ZincSearch lightweight search engine
 //!
 //! Single personality: `zincsearch`
 

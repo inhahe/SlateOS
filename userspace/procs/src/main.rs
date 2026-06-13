@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! procs — SlateOS modern replacement for ps written in Rust
+//! procs — Slate OS modern replacement for ps written in Rust
 //!
 //! Single personality: `procs`
 

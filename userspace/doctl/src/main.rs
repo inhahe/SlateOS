@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! doctl — SlateOS DigitalOcean CLI
+//! doctl — Slate OS DigitalOcean CLI
 //!
 //! Single personality: `doctl`
 

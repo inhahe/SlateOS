@@ -1,4 +1,4 @@
-//! SlateOS IP Subnet Calculator (`ipcalc`)
+//! Slate OS IP Subnet Calculator (`ipcalc`)
 //!
 //! A comprehensive network calculator supporting IPv4 and IPv6 address
 //! analysis, CIDR notation, subnet splitting, supernetting, and detailed

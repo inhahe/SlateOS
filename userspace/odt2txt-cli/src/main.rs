@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! odt2txt-cli — SlateOS OpenDocument to text converter
+//! odt2txt-cli — Slate OS OpenDocument to text converter
 //!
 //! Single personality: `odt2txt`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! freeipa-cli — SlateOS FreeIPA identity management
+//! freeipa-cli — Slate OS FreeIPA identity management
 //!
 //! Multi-personality: `ipa`, `ipa-server-install`
 

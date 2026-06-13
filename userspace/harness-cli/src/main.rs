@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! harness-cli — SlateOS Harness CI/CD CLI
+//! harness-cli — Slate OS Harness CI/CD CLI
 //!
 //! Multi-personality: `harness`
 

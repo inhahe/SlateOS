@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! icc-cli — SlateOS ICC profile inspector
+//! icc-cli — Slate OS ICC profile inspector
 //!
 //! Single personality: `iccinfo`
 

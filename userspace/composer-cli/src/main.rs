@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! composer-cli — SlateOS PHP Composer dependency manager
+//! composer-cli — Slate OS PHP Composer dependency manager
 //!
 //! Multi-personality: `composer`
 

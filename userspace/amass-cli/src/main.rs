@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! amass-cli — SlateOS OWASP Amass attack surface mapper
+//! amass-cli — Slate OS OWASP Amass attack surface mapper
 //!
 //! Single personality: `amass`
 

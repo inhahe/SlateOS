@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! latex2html-cli — SlateOS LaTeX to HTML converter
+//! latex2html-cli — Slate OS LaTeX to HTML converter
 //!
 //! Single personality: `latex2html`
 

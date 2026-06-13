@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! revolt-cli — SlateOS Revolt chat client
+//! revolt-cli — Slate OS Revolt chat client
 //!
 //! Single personality: `revolt-desktop`
 

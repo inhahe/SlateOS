@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! swagger-cli — SlateOS OpenAPI/Swagger CLI
+//! swagger-cli — Slate OS OpenAPI/Swagger CLI
 //!
 //! Single personality: `swagger`
 

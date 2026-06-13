@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! splunk-cli — SlateOS Splunk (the original log/SIEM platform)
+//! splunk-cli — Slate OS Splunk (the original log/SIEM platform)
 //!
 //! Single personality: `splunk`
 

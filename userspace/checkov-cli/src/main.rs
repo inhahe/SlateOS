@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! checkov-cli — SlateOS Checkov infrastructure as code scanner
+//! checkov-cli — Slate OS Checkov infrastructure as code scanner
 //!
 //! Multi-personality: `checkov`
 

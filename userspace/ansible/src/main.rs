@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ansible — SlateOS IT automation tool
+//! ansible — Slate OS IT automation tool
 //!
 //! Multi-personality binary detected via argv[0]:
 //!

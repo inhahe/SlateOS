@@ -1,4 +1,4 @@
-//! SlateOS System Benchmark
+//! Slate OS System Benchmark
 //!
 //! Graphical performance benchmarking application with:
 //! - CPU benchmark (integer arithmetic, floating point, prime sieve, matrix multiply)
@@ -15,7 +15,7 @@
 //! - Dark theme (Catppuccin Mocha)
 //!
 //! Uses the guitk library for UI rendering. Actual hardware benchmarks are
-//! simulated with representative computation; on real SlateOS hardware the
+//! simulated with representative computation; on real Slate OS hardware the
 //! stubs would be replaced with timed kernel/driver calls.
 
 #[allow(unused_imports)]
@@ -671,7 +671,7 @@ impl Default for ProgressTracker {
 // Simulated Benchmark Runners
 // ============================================================================
 
-// In a real SlateOS environment, these functions would use precise timing
+// In a real Slate OS environment, these functions would use precise timing
 // (rdtsc, kernel timers) to measure actual hardware performance.  For
 // initial development we compute deterministic scores that exercise the
 // scoring/aggregation/rendering pipeline.
@@ -2437,7 +2437,7 @@ fn category_color(name: &str) -> Color {
 }
 
 // ============================================================================
-// Entry point (placeholder for SlateOS)
+// Entry point (placeholder for Slate OS)
 // ============================================================================
 
 fn main() {}

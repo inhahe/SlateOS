@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! temporal-cli — SlateOS Temporal CLI
+//! temporal-cli — Slate OS Temporal CLI
 //!
 //! Single personality: `temporal`
 

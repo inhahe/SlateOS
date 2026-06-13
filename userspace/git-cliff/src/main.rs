@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! git-cliff — SlateOS changelog generator using conventional commits
+//! git-cliff — Slate OS changelog generator using conventional commits
 //!
 //! Single personality: `git-cliff`
 

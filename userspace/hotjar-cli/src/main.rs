@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hotjar-cli — SlateOS Hotjar (the affordable heatmaps + session replay tool — now part of Contentsquare)
+//! hotjar-cli — Slate OS Hotjar (the affordable heatmaps + session replay tool — now part of Contentsquare)
 //!
 //! Single personality: `hotjar`
 

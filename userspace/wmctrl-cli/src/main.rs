@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wmctrl-cli — SlateOS wmctrl window manager control CLI
+//! wmctrl-cli — Slate OS wmctrl window manager control CLI
 //!
 //! Single personality: `wmctrl`
 

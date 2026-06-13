@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! evernote-cli — SlateOS Evernote note-taking app
+//! evernote-cli — Slate OS Evernote note-taking app
 //!
 //! Single personality: `evernote`
 

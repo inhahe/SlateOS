@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rake-cli — SlateOS Ruby Rake build tool
+//! rake-cli — Slate OS Ruby Rake build tool
 //!
 //! Multi-personality: `rake`
 

@@ -1,4 +1,4 @@
-//! SlateOS Interactive Process Monitor
+//! Slate OS Interactive Process Monitor
 //!
 //! Real-time display of system processes, CPU, and memory usage.
 //! Similar to Linux `top` or `htop` — reads from /proc for live data.

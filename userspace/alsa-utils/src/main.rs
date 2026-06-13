@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! alsa-utils — SlateOS ALSA sound utilities
+//! alsa-utils — Slate OS ALSA sound utilities
 //!
 //! Multi-personality: `aplay`, `arecord`, `amixer`, `alsamixer`, `alsactl`, `speaker-test`
 

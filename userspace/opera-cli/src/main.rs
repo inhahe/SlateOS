@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! opera-cli — SlateOS Opera browser
+//! opera-cli — Slate OS Opera browser
 //!
 //! Single personality: `opera`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vega-cli — SlateOS Vega/Vega-Lite visualization CLI
+//! vega-cli — Slate OS Vega/Vega-Lite visualization CLI
 //!
 //! Multi-personality: `vg2png`, `vg2svg`, `vg2pdf`, `vl2vg`
 

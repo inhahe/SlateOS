@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! conda-cli — SlateOS Conda package/environment manager
+//! conda-cli — Slate OS Conda package/environment manager
 //!
 //! Multi-personality: `conda`, `mamba`
 

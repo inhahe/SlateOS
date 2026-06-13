@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! angle-grinder-cli — SlateOS log query tool
+//! angle-grinder-cli — Slate OS log query tool
 //!
 //! Single personality: `agrind`
 

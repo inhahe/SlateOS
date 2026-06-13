@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! yazi-cli — SlateOS Yazi file manager
+//! yazi-cli — Slate OS Yazi file manager
 //!
 //! Multi-personality: `yazi`, `ya`
 

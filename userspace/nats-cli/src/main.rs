@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nats-cli — SlateOS NATS CLI
+//! nats-cli — Slate OS NATS CLI
 //!
 //! Single personality: `nats`
 

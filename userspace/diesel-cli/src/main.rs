@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! diesel-cli — SlateOS Diesel ORM CLI
+//! diesel-cli — Slate OS Diesel ORM CLI
 //!
 //! Single personality: `diesel`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ox-cli — SlateOS Ox editor
+//! ox-cli — Slate OS Ox editor
 //!
 //! Single personality: `ox`
 

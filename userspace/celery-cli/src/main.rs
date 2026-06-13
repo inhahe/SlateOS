@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! celery-cli — SlateOS Celery CLI
+//! celery-cli — Slate OS Celery CLI
 //!
 //! Single personality: `celery`
 

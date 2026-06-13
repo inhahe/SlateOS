@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! brex-cli — SlateOS Brex (corporate card for startups, the original challenger)
+//! brex-cli — Slate OS Brex (corporate card for startups, the original challenger)
 //!
 //! Single personality: `brex`
 

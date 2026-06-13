@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pulumi-cli — SlateOS Pulumi infrastructure as code
+//! pulumi-cli — Slate OS Pulumi infrastructure as code
 //!
 //! Multi-personality: `pulumi`
 

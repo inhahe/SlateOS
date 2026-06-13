@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! netgen-cli — SlateOS NETGEN mesh generator
+//! netgen-cli — Slate OS NETGEN mesh generator
 //!
 //! Single personality: `netgen`
 

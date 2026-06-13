@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! memphis-cli — SlateOS Memphis event streaming CLI
+//! memphis-cli — Slate OS Memphis event streaming CLI
 //!
 //! Single personality: `memphis`
 

@@ -1,4 +1,4 @@
-// SlateOS getty — virtual terminal login manager
+// Slate OS getty — virtual terminal login manager
 //
 // Multi-personality binary:
 //   getty / agetty  — open a terminal, set its mode, prompt for login name, invoke login(1)

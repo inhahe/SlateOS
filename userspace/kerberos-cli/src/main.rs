@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kerberos-cli — SlateOS Kerberos authentication tools
+//! kerberos-cli — Slate OS Kerberos authentication tools
 //!
 //! Multi-personality: `kinit`, `klist`, `kdestroy`, `kpasswd`, `kadmin`, `ktutil`
 

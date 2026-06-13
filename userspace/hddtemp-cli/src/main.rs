@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hddtemp-cli — SlateOS hard drive temperature monitor
+//! hddtemp-cli — Slate OS hard drive temperature monitor
 //!
 //! Single personality: `hddtemp`
 

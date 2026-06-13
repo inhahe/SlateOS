@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! erlang-cli — SlateOS Erlang/OTP tools
+//! erlang-cli — Slate OS Erlang/OTP tools
 //!
 //! Multi-personality: `erl`, `erlc`, `escript`, `dialyzer`
 

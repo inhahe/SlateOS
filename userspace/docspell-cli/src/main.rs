@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! docspell-cli — SlateOS Docspell document organizer
+//! docspell-cli — Slate OS Docspell document organizer
 //!
 //! Single personality: `docspell`
 

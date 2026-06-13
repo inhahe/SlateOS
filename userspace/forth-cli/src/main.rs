@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! forth-cli — SlateOS Forth language tools
+//! forth-cli — Slate OS Forth language tools
 //!
 //! Multi-personality: `gforth`, `forth`
 

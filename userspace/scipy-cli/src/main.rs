@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! scipy-cli — SlateOS SciPy scientific computing
+//! scipy-cli — Slate OS SciPy scientific computing
 //!
 //! Multi-personality: `scipy`
 

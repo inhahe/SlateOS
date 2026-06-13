@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! qualys-cli — SlateOS Qualys (original SaaS vuln scanner, Foster City CA, NASDAQ:QLYS)
+//! qualys-cli — Slate OS Qualys (original SaaS vuln scanner, Foster City CA, NASDAQ:QLYS)
 
 use std::env;
 use std::process;

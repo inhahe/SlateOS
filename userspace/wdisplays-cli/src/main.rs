@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wdisplays-cli — SlateOS wdisplays graphical output configurator
+//! wdisplays-cli — Slate OS wdisplays graphical output configurator
 //!
 //! Single personality: `wdisplays`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! atlas-cli — SlateOS Atlas schema management tool
+//! atlas-cli — Slate OS Atlas schema management tool
 //!
 //! Single personality: `atlas`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! black-cli — SlateOS Black Python formatter
+//! black-cli — Slate OS Black Python formatter
 //!
 //! Single personality: `black`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ghostty-cli — SlateOS Ghostty terminal emulator
+//! ghostty-cli — Slate OS Ghostty terminal emulator
 //!
 //! Single personality: `ghostty`
 

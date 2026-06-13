@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wl-screencast-cli — SlateOS wl-screencast PipeWire-based screen sharing
+//! wl-screencast-cli — Slate OS wl-screencast PipeWire-based screen sharing
 //!
 //! Single personality: `wl-screencast`
 

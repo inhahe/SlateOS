@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! woff2 — SlateOS WOFF2 font compression/decompression
+//! woff2 — Slate OS WOFF2 font compression/decompression
 //!
 //! Multi-personality: `woff2_compress`, `woff2_decompress`, `woff2_info`
 

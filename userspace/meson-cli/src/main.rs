@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! meson-cli — SlateOS Meson build system CLI
+//! meson-cli — Slate OS Meson build system CLI
 //!
 //! Single personality: `meson`
 

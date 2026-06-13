@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! oxipng-cli — SlateOS oxipng PNG optimizer
+//! oxipng-cli — Slate OS oxipng PNG optimizer
 //!
 //! Single personality: `oxipng`
 

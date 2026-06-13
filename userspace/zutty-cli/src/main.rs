@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zutty-cli — SlateOS Zutty GPU terminal emulator
+//! zutty-cli — Slate OS Zutty GPU terminal emulator
 //!
 //! Single personality: `zutty`
 

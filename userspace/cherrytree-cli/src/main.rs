@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cherrytree-cli — SlateOS CherryTree hierarchical notes
+//! cherrytree-cli — Slate OS CherryTree hierarchical notes
 //!
 //! Single personality: `cherrytree`
 

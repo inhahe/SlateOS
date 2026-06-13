@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xmagnify-cli — SlateOS xmagnify simple magnifier
+//! xmagnify-cli — Slate OS xmagnify simple magnifier
 //!
 //! Single personality: `xmagnify`
 

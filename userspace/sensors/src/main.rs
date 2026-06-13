@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sensors — SlateOS hardware sensor monitoring (lm-sensors)
+//! sensors — Slate OS hardware sensor monitoring (lm-sensors)
 //!
 //! Multi-personality binary detected via argv[0]:
 //!

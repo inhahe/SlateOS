@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zigbee-cli — SlateOS Zigbee/Thread mesh networking
+//! zigbee-cli — Slate OS Zigbee/Thread mesh networking
 //!
 //! Multi-personality: `zigbee2mqtt`, `zbcli`
 

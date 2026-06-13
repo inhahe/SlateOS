@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wiz-cli — SlateOS Wiz (CNAPP, fastest-growing SaaS startup, NYC, Google acquiring 2025 $32B)
+//! wiz-cli — Slate OS Wiz (CNAPP, fastest-growing SaaS startup, NYC, Google acquiring 2025 $32B)
 
 use std::env;
 use std::process;

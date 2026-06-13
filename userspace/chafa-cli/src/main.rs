@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! chafa-cli — SlateOS Chafa image-to-text converter
+//! chafa-cli — Slate OS Chafa image-to-text converter
 //!
 //! Single personality: `chafa`
 

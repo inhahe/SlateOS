@@ -1,4 +1,4 @@
-//! SlateOS file/socket process identification utility.
+//! Slate OS file/socket process identification utility.
 //!
 //! Multi-personality binary providing:
 //! - **fuser** — identify processes using files or sockets

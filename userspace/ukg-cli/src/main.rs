@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ukg-cli — SlateOS UKG (Ultimate Kronos Group — merged UltiPro + Kronos, enterprise HCM)
+//! ukg-cli — Slate OS UKG (Ultimate Kronos Group — merged UltiPro + Kronos, enterprise HCM)
 //!
 //! Single personality: `ukg`
 

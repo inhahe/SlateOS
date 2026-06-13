@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! certbot-cli — SlateOS Let's Encrypt certificate manager
+//! certbot-cli — Slate OS Let's Encrypt certificate manager
 //!
 //! Single personality: `certbot`
 

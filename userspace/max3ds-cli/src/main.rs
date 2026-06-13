@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! max3ds-cli — SlateOS Autodesk 3ds Max 3D modeling
+//! max3ds-cli — Slate OS Autodesk 3ds Max 3D modeling
 //!
 //! Single personality: `3dsmax`
 

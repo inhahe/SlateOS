@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cassandra-cli — SlateOS Cassandra CLI
+//! cassandra-cli — Slate OS Cassandra CLI
 //!
 //! Multi-personality: `cqlsh` and `nodetool`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! picotts-cli — SlateOS Pico TTS command-line interface
+//! picotts-cli — Slate OS Pico TTS command-line interface
 //!
 //! Single personality: `picotts`
 

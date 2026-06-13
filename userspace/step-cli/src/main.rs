@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! step-cli — SlateOS Smallstep certificate management
+//! step-cli — Slate OS Smallstep certificate management
 //!
 //! Multi-personality: `step`, `step-ca`
 

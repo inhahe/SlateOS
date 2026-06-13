@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xfs-cli — SlateOS XFS filesystem tools
+//! xfs-cli — Slate OS XFS filesystem tools
 //!
 //! Multi-personality: `mkfs.xfs`, `xfs_repair`, `xfs_info`, `xfs_growfs`, `xfs_admin`, `xfs_db`
 

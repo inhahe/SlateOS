@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! redoc-cli — SlateOS Redoc CLI for API documentation
+//! redoc-cli — Slate OS Redoc CLI for API documentation
 //!
 //! Multi-personality: `redoc-cli`, `redocly`
 

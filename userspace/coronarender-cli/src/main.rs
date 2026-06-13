@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! coronarender-cli — SlateOS Corona Renderer (Chaos Group, ArchViz favorite)
+//! coronarender-cli — Slate OS Corona Renderer (Chaos Group, ArchViz favorite)
 //!
 //! Single personality: `corona`
 

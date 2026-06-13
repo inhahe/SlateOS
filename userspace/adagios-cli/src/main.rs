@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! adagios-cli — SlateOS Adagios Nagios configuration
+//! adagios-cli — Slate OS Adagios Nagios configuration
 //!
 //! Single personality: `adagios`
 

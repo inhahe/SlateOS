@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dotenvx-cli — SlateOS dotenvx encrypted env manager
+//! dotenvx-cli — Slate OS dotenvx encrypted env manager
 //!
 //! Single personality: `dotenvx`
 

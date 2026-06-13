@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! microsoft365-cli — SlateOS Microsoft 365 / Office productivity suite
+//! microsoft365-cli — Slate OS Microsoft 365 / Office productivity suite
 //!
 //! Single personality: `microsoft365`
 

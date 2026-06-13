@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! arc-cli — SlateOS The Browser Company's Arc browser
+//! arc-cli — Slate OS The Browser Company's Arc browser
 //!
 //! Single personality: `arc`
 

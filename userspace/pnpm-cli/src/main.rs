@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pnpm-cli — SlateOS pnpm package manager
+//! pnpm-cli — Slate OS pnpm package manager
 //!
 //! Multi-personality: `pnpm`, `pnpx`
 

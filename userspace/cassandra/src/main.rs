@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cassandra — SlateOS distributed NoSQL database
+//! cassandra — Slate OS distributed NoSQL database
 //!
 //! Multi-personality: `cassandra` (server), `cqlsh` (CQL shell), `nodetool` (admin)
 

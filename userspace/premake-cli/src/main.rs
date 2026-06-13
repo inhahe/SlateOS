@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! premake-cli — SlateOS Premake build configuration
+//! premake-cli — Slate OS Premake build configuration
 //!
 //! Multi-personality: `premake5`, `premake4`
 

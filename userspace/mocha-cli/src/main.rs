@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mocha-cli — SlateOS Boris FX Mocha Pro planar tracking
+//! mocha-cli — Slate OS Boris FX Mocha Pro planar tracking
 //!
 //! Single personality: `mocha`
 

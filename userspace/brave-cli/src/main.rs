@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! brave-cli — SlateOS Brave Browser (privacy + crypto)
+//! brave-cli — Slate OS Brave Browser (privacy + crypto)
 //!
 //! Single personality: `brave`
 

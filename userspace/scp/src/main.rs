@@ -1,4 +1,4 @@
-//! SlateOS Secure File Copy (scp)
+//! Slate OS Secure File Copy (scp)
 //!
 //! Copies files between hosts over SSH (simplified). The initial version fully
 //! supports local file copy with SSH-style syntax parsing. Remote transport
@@ -58,7 +58,7 @@ const VERSION: &str = "0.1.0";
 /// Buffer size for file I/O (64 KiB).
 const COPY_BUF_SIZE: usize = 64 * 1024;
 
-/// Native SlateOS monotonic clock (kernel syscall/number.rs); no-arg, returns
+/// Native Slate OS monotonic clock (kernel syscall/number.rs); no-arg, returns
 /// boot-relative nanoseconds in rax.  (Syscall 30 is SYS_IRQ_REGISTER.)
 const SYS_CLOCK_MONOTONIC: u64 = 10;
 
@@ -651,7 +651,7 @@ fn read_preserved_meta(meta: &Metadata) -> PreservedMeta {
         })
     });
 
-    // On SlateOS we'd read the actual Unix permission bits. For now we store
+    // On Slate OS we'd read the actual Unix permission bits. For now we store
     // the read-only flag as a simplified approximation.
     let permissions = if meta.permissions().readonly() {
         Some(0o444u32)
@@ -667,7 +667,7 @@ fn read_preserved_meta(meta: &Metadata) -> PreservedMeta {
 
 /// Apply preserved metadata to a destination path.
 ///
-/// This uses std::fs operations. On SlateOS, a future version could use
+/// This uses std::fs operations. On Slate OS, a future version could use
 /// syscalls for utimensat and chmod equivalents for higher fidelity.
 fn apply_preserved_meta(path: &Path, meta: &PreservedMeta) {
     // Apply modification time if we have it.

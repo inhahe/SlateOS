@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! prolog-cli — SlateOS Prolog language tools
+//! prolog-cli — Slate OS Prolog language tools
 //!
 //! Multi-personality: `swipl`, `gprolog`
 

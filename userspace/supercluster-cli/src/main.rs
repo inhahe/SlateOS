@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! supercluster-cli — SlateOS Supercluster point clustering tool
+//! supercluster-cli — Slate OS Supercluster point clustering tool
 //!
 //! Single personality: `supercluster`
 

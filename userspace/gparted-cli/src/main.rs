@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gparted-cli — SlateOS GParted partition editor
+//! gparted-cli — Slate OS GParted partition editor
 //!
 //! Single personality: `gparted`
 

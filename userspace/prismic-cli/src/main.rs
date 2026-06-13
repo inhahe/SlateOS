@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! prismic-cli — SlateOS personality CLI for Prismic, the slice-based headless CMS.
+//! prismic-cli — Slate OS personality CLI for Prismic, the slice-based headless CMS.
 
 use std::env;
 use std::process;

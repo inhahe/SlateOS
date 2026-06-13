@@ -1,4 +1,4 @@
-//! SlateOS RSS/Atom Feed Reader Application
+//! Slate OS RSS/Atom Feed Reader Application
 //!
 //! A full-featured feed reader providing:
 //! - RSS 2.0 and Atom 1.0 XML parsing (built-in, no external crates)

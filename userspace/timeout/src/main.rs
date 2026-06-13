@@ -1,5 +1,5 @@
 #![allow(unexpected_cfgs)]
-//! timeout/nohup/nice/renice — process control utilities for SlateOS
+//! timeout/nohup/nice/renice — process control utilities for Slate OS
 //!
 //! Multi-personality binary detected via argv[0]:
 //! - `timeout`: run a command with a time limit
@@ -475,7 +475,7 @@ fn run_nohup(args: &[String]) -> i32 {
         Stdio::inherit()
     };
 
-    // Spawn the child — on real SlateOS, we'd ignore SIGHUP for this process
+    // Spawn the child — on real Slate OS, we'd ignore SIGHUP for this process
     let mut child = match Command::new(program)
         .args(child_args)
         .stdin(Stdio::inherit())

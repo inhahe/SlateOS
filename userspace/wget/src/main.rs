@@ -1,4 +1,4 @@
-//! SlateOS HTTP File Download Utility
+//! Slate OS HTTP File Download Utility
 //!
 //! Downloads files from HTTP URLs using the kernel's TCP syscall interface.
 //! Supports chunked transfer encoding, redirect following, resume, and

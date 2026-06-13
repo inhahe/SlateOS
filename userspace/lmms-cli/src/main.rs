@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lmms-cli — SlateOS LMMS music production
+//! lmms-cli — Slate OS LMMS music production
 //!
 //! Multi-personality: `lmms`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lutris-cli — SlateOS Lutris game manager
+//! lutris-cli — Slate OS Lutris game manager
 //!
 //! Single personality: `lutris`
 

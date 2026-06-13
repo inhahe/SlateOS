@@ -1,4 +1,4 @@
-//! SlateOS disk management service.
+//! Slate OS disk management service.
 //!
 //! Multi-personality binary providing:
 //! - **udisksctl** — command-line client for disk management

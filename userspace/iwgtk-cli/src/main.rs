@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! iwgtk-cli — SlateOS iwgtk iwd wireless GUI
+//! iwgtk-cli — Slate OS iwgtk iwd wireless GUI
 //!
 //! Single personality: `iwgtk`
 

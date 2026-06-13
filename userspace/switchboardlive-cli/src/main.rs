@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! switchboardlive-cli — SlateOS Switchboard Live multi-streaming
+//! switchboardlive-cli — Slate OS Switchboard Live multi-streaming
 //!
 //! Single personality: `switchboardlive`
 

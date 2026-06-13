@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! waybar-cli — SlateOS Waybar status bar for Wayland
+//! waybar-cli — Slate OS Waybar status bar for Wayland
 //!
 //! Single personality: `waybar`
 

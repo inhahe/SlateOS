@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! trivy-cli — SlateOS container security scanner
+//! trivy-cli — Slate OS container security scanner
 //!
 //! Single personality: `trivy`
 

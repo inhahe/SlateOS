@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! duplicati-cli — SlateOS Duplicati cloud backup
+//! duplicati-cli — Slate OS Duplicati cloud backup
 //!
 //! Multi-personality: `duplicati-cli`, `duplicati-server`
 

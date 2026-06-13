@@ -1,4 +1,4 @@
-//! SlateOS Typing Tutor
+//! Slate OS Typing Tutor
 //!
 //! A typing practice application with multiple lesson types, WPM tracking,
 //! accuracy statistics, and progressive difficulty levels.

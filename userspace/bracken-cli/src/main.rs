@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bracken-cli — SlateOS Bracken abundance estimation
+//! bracken-cli — Slate OS Bracken abundance estimation
 //!
 //! Single personality: `bracken`
 

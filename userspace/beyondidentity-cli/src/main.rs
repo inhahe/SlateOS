@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! beyondidentity-cli — SlateOS Beyond Identity (passwordless phishing-resistant MFA, Netscape co-founders)
+//! beyondidentity-cli — Slate OS Beyond Identity (passwordless phishing-resistant MFA, Netscape co-founders)
 
 use std::env;
 use std::process;

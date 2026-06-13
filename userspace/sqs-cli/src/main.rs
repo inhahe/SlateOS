@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sqs-cli — SlateOS AWS SQS (the original cloud queue — Amazon's first-ever AWS service, 2004)
+//! sqs-cli — Slate OS AWS SQS (the original cloud queue — Amazon's first-ever AWS service, 2004)
 
 use std::env;
 use std::process;

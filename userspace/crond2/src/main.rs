@@ -1,4 +1,4 @@
-//! SlateOS Cron Daemon (`crond2`) with anacron support
+//! Slate OS Cron Daemon (`crond2`) with anacron support
 //!
 //! A multi-personality daemon for scheduled task execution:
 //!
@@ -1140,7 +1140,7 @@ fn log_msg(level: u32, msg: &str) {
             bt.year, bt.month, bt.day, bt.hour, bt.minute, msg
         );
     } else {
-        // Syslog: on SlateOS, write to /dev/log or use the syslog utility.
+        // Syslog: on Slate OS, write to /dev/log or use the syslog utility.
         // For now, write to stderr as a fallback.
         let bt = unix_to_broken(now_secs());
         eprintln!(

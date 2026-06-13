@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! qgis-cli — SlateOS QGIS geographic information system
+//! qgis-cli — Slate OS QGIS geographic information system
 //!
 //! Multi-personality: `qgis`, `qgis_process`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! logfmt-cli — SlateOS logfmt parser/formatter
+//! logfmt-cli — Slate OS logfmt parser/formatter
 //!
 //! Single personality: `logfmt`
 

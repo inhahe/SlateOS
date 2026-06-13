@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! keepass-cli — SlateOS KeePass open-source password manager
+//! keepass-cli — Slate OS KeePass open-source password manager
 //!
 //! Single personality: `keepass`
 

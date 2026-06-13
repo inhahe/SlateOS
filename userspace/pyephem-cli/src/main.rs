@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pyephem-cli — SlateOS PyEphem astronomical computations
+//! pyephem-cli — Slate OS PyEphem astronomical computations
 //!
 //! Single personality: `ephem`
 

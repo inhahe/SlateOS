@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! stalwart-cli — SlateOS Stalwart Mail Server
+//! stalwart-cli — Slate OS Stalwart Mail Server
 //!
 //! Single personality: `stalwart-mail`
 

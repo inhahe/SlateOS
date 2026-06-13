@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wev-cli — SlateOS wev Wayland event viewer
+//! wev-cli — Slate OS wev Wayland event viewer
 //!
 //! Single personality: `wev`
 

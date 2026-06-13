@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! shared-mime-info-cli — SlateOS shared MIME info database
+//! shared-mime-info-cli — Slate OS shared MIME info database
 //!
 //! Single personality: `update-mime-database`
 

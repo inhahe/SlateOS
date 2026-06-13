@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gephi-cli — SlateOS Gephi graph visualization platform
+//! gephi-cli — Slate OS Gephi graph visualization platform
 //!
 //! Single personality: `gephi`
 

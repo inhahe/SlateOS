@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! partclone-cli — SlateOS Partclone partition imaging
+//! partclone-cli — Slate OS Partclone partition imaging
 //!
 //! Multi-personality: `partclone.ext4`, `partclone.ntfs`, `partclone.fat32`,
 //! `partclone.btrfs`, `partclone.restore`, `partclone.dd`

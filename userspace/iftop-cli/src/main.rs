@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! iftop-cli — SlateOS iftop network bandwidth monitor
+//! iftop-cli — Slate OS iftop network bandwidth monitor
 //!
 //! Single personality: `iftop`
 

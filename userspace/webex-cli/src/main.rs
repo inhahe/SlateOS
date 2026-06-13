@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! webex-cli — SlateOS Cisco Webex collaboration suite
+//! webex-cli — Slate OS Cisco Webex collaboration suite
 //!
 //! Single personality: `webex`
 

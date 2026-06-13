@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! oracle-cli — SlateOS Oracle Database (SQL*Plus + sqlcl)
+//! oracle-cli — Slate OS Oracle Database (SQL*Plus + sqlcl)
 //!
 //! Single personality: `oracle`
 

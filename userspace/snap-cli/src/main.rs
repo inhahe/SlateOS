@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! snap-cli — SlateOS Snap package manager
+//! snap-cli — Slate OS Snap package manager
 //!
 //! Multi-personality: `snap`
 

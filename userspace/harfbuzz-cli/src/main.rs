@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! harfbuzz-cli — SlateOS HarfBuzz text shaping tool
+//! harfbuzz-cli — Slate OS HarfBuzz text shaping tool
 //!
 //! Multi-personality: `hb-shape`, `hb-view`, `hb-subset`
 

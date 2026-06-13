@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! jitsi-cli — SlateOS Jitsi Meet video conferencing
+//! jitsi-cli — Slate OS Jitsi Meet video conferencing
 //!
 //! Multi-personality: `jitsi-meet`, `jitsi-videobridge`
 

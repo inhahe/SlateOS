@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! valgrind-cli — SlateOS Valgrind memory debugging suite
+//! valgrind-cli — Slate OS Valgrind memory debugging suite
 //!
 //! Multi-personality: `valgrind`, `callgrind_annotate`, `cachegrind_annotate`,
 //! `cg_annotate`, `ms_print`

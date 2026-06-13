@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! docker-cli — SlateOS Docker-compatible container CLI
+//! docker-cli — Slate OS Docker-compatible container CLI
 //!
 //! Single personality: `docker`
 

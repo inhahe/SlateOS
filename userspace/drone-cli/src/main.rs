@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! drone-cli — SlateOS Drone CI CLI
+//! drone-cli — Slate OS Drone CI CLI
 //!
 //! Multi-personality: `drone`
 

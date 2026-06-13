@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! opentelemetry-cli — SlateOS OpenTelemetry Collector CLI (otelcol)
+//! opentelemetry-cli — Slate OS OpenTelemetry Collector CLI (otelcol)
 //!
 //! Single personality: `otelcol`
 

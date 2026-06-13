@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! adyen-cli — SlateOS Adyen unified commerce personality CLI.
+//! adyen-cli — Slate OS Adyen unified commerce personality CLI.
 
 use std::env;
 use std::process;

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! clickup-cli — SlateOS ClickUp CLI
+//! clickup-cli — Slate OS ClickUp CLI
 //!
 //! Single personality: `clickup`
 

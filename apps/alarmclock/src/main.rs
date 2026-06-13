@@ -1,4 +1,4 @@
-//! SlateOS Alarm Clock
+//! Slate OS Alarm Clock
 //!
 //! Combined alarm clock, timer, and stopwatch utility with:
 //! - **Alarms**: Create/edit/delete alarms with hour, minute, label, repeat days,

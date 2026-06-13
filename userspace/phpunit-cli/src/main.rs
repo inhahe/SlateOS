@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! phpunit-cli — SlateOS PHPUnit test runner
+//! phpunit-cli — Slate OS PHPUnit test runner
 //!
 //! Multi-personality: `phpunit`
 

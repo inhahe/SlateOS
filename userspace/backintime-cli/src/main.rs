@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! backintime-cli — SlateOS Back In Time snapshot backup
+//! backintime-cli — Slate OS Back In Time snapshot backup
 //!
 //! Multi-personality: `backintime`, `backintime-qt`
 

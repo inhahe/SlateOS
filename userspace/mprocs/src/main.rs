@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mprocs — SlateOS run multiple commands in parallel with TUI
+//! mprocs — Slate OS run multiple commands in parallel with TUI
 //!
 //! Single personality: `mprocs`
 

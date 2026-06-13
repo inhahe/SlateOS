@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mdbook — SlateOS create books from Markdown files
+//! mdbook — Slate OS create books from Markdown files
 //!
 //! Single personality: `mdbook`
 

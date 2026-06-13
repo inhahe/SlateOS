@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sccache — SlateOS shared compilation cache
+//! sccache — Slate OS shared compilation cache
 //!
 //! Multi-personality: `sccache`, `sccache-dist`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! phpstan-cli — SlateOS PHPStan static analysis tool
+//! phpstan-cli — Slate OS PHPStan static analysis tool
 //!
 //! Multi-personality: `phpstan`
 

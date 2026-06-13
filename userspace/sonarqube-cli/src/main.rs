@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sonarqube-cli — SlateOS SonarQube Scanner CLI
+//! sonarqube-cli — Slate OS SonarQube Scanner CLI
 //!
 //! Multi-personality: `sonar-scanner`
 

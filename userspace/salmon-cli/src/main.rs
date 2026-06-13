@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! salmon-cli — SlateOS Salmon transcript quantification
+//! salmon-cli — Slate OS Salmon transcript quantification
 //!
 //! Single personality: `salmon`
 

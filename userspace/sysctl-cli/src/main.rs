@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sysctl-cli — SlateOS kernel parameter tool
+//! sysctl-cli — Slate OS kernel parameter tool
 //!
 //! Multi-personality: `sysctl`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! boundary-cli — SlateOS HashiCorp Boundary identity-based access
+//! boundary-cli — Slate OS HashiCorp Boundary identity-based access
 //!
 //! Multi-personality: `boundary`
 

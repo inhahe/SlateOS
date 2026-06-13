@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zoho-cli — SlateOS Zoho One business operating system
+//! zoho-cli — Slate OS Zoho One business operating system
 //!
 //! Single personality: `zoho`
 

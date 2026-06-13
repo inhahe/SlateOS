@@ -225,7 +225,7 @@ impl HttpResponse {
 // ---------------------------------------------------------------------------
 // Networking abstraction
 // ---------------------------------------------------------------------------
-// In the real SlateOS environment, these would use socket syscalls (connect, send,
+// In the real Slate OS environment, these would use socket syscalls (connect, send,
 // recv). For now we use std::net::TcpStream which can be swapped out later.
 
 mod net {

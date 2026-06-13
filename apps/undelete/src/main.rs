@@ -1,4 +1,4 @@
-//! `SlateOS` File Recovery / Undelete Utility
+//! `Slate OS` File Recovery / Undelete Utility
 //!
 //! A comprehensive file recovery application that:
 //! - Scans ext4 filesystem inode tables and directory entries for deleted files

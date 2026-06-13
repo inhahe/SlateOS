@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! battery-cli — SlateOS battery monitoring tool
+//! battery-cli — Slate OS battery monitoring tool
 //!
 //! Single personality: `battery`
 

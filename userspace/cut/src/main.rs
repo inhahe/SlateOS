@@ -1,4 +1,4 @@
-//! SlateOS `cut` Utility -- Remove Sections From Lines of Files
+//! Slate OS `cut` Utility -- Remove Sections From Lines of Files
 //!
 //! Removes sections from each line of input, keeping only selected fields,
 //! characters, or bytes. Modeled after POSIX/GNU coreutils `cut`.

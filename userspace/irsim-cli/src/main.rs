@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! irsim-cli — SlateOS IRSIM switch-level simulator
+//! irsim-cli — Slate OS IRSIM switch-level simulator
 //!
 //! Single personality: `irsim`
 

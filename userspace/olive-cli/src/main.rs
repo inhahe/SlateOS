@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! olive-cli — SlateOS Olive Editor open-source NLE
+//! olive-cli — Slate OS Olive Editor open-source NLE
 //!
 //! Single personality: `olive`
 

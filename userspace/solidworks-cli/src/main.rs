@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! solidworks-cli — SlateOS Dassault Systèmes SOLIDWORKS
+//! solidworks-cli — Slate OS Dassault Systèmes SOLIDWORKS
 //!
 //! Single personality: `solidworks`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hetzner-cli — SlateOS Hetzner Cloud CLI
+//! hetzner-cli — Slate OS Hetzner Cloud CLI
 //!
 //! Single personality: `hcloud`
 

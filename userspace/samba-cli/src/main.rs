@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! samba-cli — SlateOS Samba/SMB tools
+//! samba-cli — Slate OS Samba/SMB tools
 //!
 //! Multi-personality: `smbclient`, `smbstatus`, `testparm`, `nmblookup`, `pdbedit`
 

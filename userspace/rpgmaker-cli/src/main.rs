@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rpgmaker-cli — SlateOS RPG Maker (Kadokawa JRPG-style engine)
+//! rpgmaker-cli — Slate OS RPG Maker (Kadokawa JRPG-style engine)
 //!
 //! Single personality: `rpgmaker`
 

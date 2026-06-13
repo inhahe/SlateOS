@@ -1,4 +1,4 @@
-//! SlateOS gzip/gunzip/zcat compression utility.
+//! Slate OS gzip/gunzip/zcat compression utility.
 //!
 //! Multi-personality binary: detects operating mode from `argv[0]`.
 //!

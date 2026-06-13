@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lottie-player — SlateOS Lottie animation renderer/converter
+//! lottie-player — Slate OS Lottie animation renderer/converter
 //!
 //! Single personality: `lottie-player`
 

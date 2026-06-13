@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! squid — SlateOS caching proxy server
+//! squid — Slate OS caching proxy server
 //!
 //! Multi-personality: `squid` (proxy server), `squidclient` (HTTP client)
 

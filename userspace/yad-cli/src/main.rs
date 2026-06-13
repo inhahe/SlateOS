@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! yad-cli — SlateOS YAD (Yet Another Dialog) display
+//! yad-cli — Slate OS YAD (Yet Another Dialog) display
 //!
 //! Single personality: `yad`
 

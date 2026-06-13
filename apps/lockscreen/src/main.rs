@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-//! SlateOS Lock Screen
+//! Slate OS Lock Screen
 //!
 //! Graphical lock screen application providing:
 //! - Large clock display (HH:MM) with date below

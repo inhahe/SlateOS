@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! deepin-screenshot-cli — SlateOS Deepin Screenshot
+//! deepin-screenshot-cli — Slate OS Deepin Screenshot
 //!
 //! Single personality: `deepin-screenshot`
 

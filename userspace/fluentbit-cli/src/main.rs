@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fluentbit-cli — SlateOS Fluent Bit log processor
+//! fluentbit-cli — Slate OS Fluent Bit log processor
 //!
 //! Single personality: `fluent-bit`
 

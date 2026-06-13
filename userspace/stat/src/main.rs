@@ -1,4 +1,4 @@
-//! SlateOS Multi-Personality File Operations Utility
+//! Slate OS Multi-Personality File Operations Utility
 //!
 //! A single binary that determines its behavior based on `argv[0]`:
 //!
@@ -82,11 +82,11 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 // ============================================================================
-// libc bindings (SlateOS posix layer)
+// libc bindings (Slate OS posix layer)
 // ============================================================================
 //
 // std::fs covers stat/lstat/readlink/link/symlink/unlink/rename, all of which
-// route through the posix libc layer to native SlateOS syscalls.  The three
+// route through the posix libc layer to native Slate OS syscalls.  The three
 // operations std does not expose — statvfs, mkfifo, and utimensat — are called
 // directly through their C ABI symbols, which the posix crate implements as
 // `extern "C"` functions backed by native syscalls.
@@ -153,7 +153,7 @@ fn nonneg_u64(v: i64) -> u64 {
 // Kernel data structures
 // ============================================================================
 
-/// Matches the SlateOS kernel stat buffer layout (128 bytes).
+/// Matches the Slate OS kernel stat buffer layout (128 bytes).
 /// All fields are little-endian u64 for simplicity on x86-64.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -176,7 +176,7 @@ struct KernelStat {
     st_ctime_nsec: u64,
 }
 
-/// Matches the SlateOS kernel statfs buffer layout.
+/// Matches the Slate OS kernel statfs buffer layout.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct KernelStatFs {
@@ -378,7 +378,7 @@ fn is_leap_year(y: u64) -> bool {
 // ============================================================================
 
 /// Populate a [`KernelStat`] from a `std::fs::Metadata`, which routes through
-/// the posix libc layer to the native SlateOS `stat`/`lstat` syscalls.
+/// the posix libc layer to the native Slate OS `stat`/`lstat` syscalls.
 #[cfg(unix)]
 fn metadata_to_kernel_stat(meta: &fs::Metadata) -> KernelStat {
     use std::os::unix::fs::MetadataExt;

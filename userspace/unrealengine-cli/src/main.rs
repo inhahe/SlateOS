@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! unrealengine-cli — SlateOS Unreal Engine (Epic's AAA game engine)
+//! unrealengine-cli — Slate OS Unreal Engine (Epic's AAA game engine)
 //!
 //! Single personality: `unrealengine`
 

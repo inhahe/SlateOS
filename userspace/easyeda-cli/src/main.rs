@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! easyeda-cli — SlateOS JLC EasyEDA cloud schematic + PCB
+//! easyeda-cli — Slate OS JLC EasyEDA cloud schematic + PCB
 //!
 //! Single personality: `easyeda`
 

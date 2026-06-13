@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fontforge-cli — SlateOS FontForge font editor CLI
+//! fontforge-cli — Slate OS FontForge font editor CLI
 //!
 //! Single personality: `fontforge`
 

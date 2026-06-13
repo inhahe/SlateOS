@@ -1,4 +1,4 @@
-//! SlateOS `yacc` -- LALR(1) parser generator
+//! Slate OS `yacc` -- LALR(1) parser generator
 //!
 //! A yacc/bison-compatible parser generator that reads grammar files in the
 //! standard yacc format and produces C source code containing parse tables and

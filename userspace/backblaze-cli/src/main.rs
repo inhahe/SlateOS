@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! backblaze-cli — SlateOS Backblaze Personal Backup + B2 Cloud Storage
+//! backblaze-cli — Slate OS Backblaze Personal Backup + B2 Cloud Storage
 //!
 //! Single personality: `backblaze`
 

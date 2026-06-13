@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ttfautohint-cli — SlateOS ttfautohint font hinting
+//! ttfautohint-cli — Slate OS ttfautohint font hinting
 //!
 //! Single personality: `ttfautohint`
 

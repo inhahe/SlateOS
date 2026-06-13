@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! elixir-cli — SlateOS Elixir language tools
+//! elixir-cli — Slate OS Elixir language tools
 //!
 //! Multi-personality: `elixir`, `elixirc`, `iex`, `mix`
 

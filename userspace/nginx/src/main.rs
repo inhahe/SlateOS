@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nginx — SlateOS high-performance web server and reverse proxy
+//! nginx — Slate OS high-performance web server and reverse proxy
 //!
 //! Single personality: `nginx`
 

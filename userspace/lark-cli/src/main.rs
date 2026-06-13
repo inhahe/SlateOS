@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lark-cli — SlateOS Lark (ByteDance super-app: chat + docs + sheets + video + email)
+//! lark-cli — Slate OS Lark (ByteDance super-app: chat + docs + sheets + video + email)
 
 use std::env;
 use std::process;

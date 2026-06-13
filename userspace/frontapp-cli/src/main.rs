@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! frontapp-cli — SlateOS Front (shared inbox / customer ops hybrid email-and-helpdesk)
+//! frontapp-cli — Slate OS Front (shared inbox / customer ops hybrid email-and-helpdesk)
 //!
 //! Single personality: `front`
 

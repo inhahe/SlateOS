@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! orcad-cli — SlateOS Cadence OrCAD PCB EDA
+//! orcad-cli — Slate OS Cadence OrCAD PCB EDA
 //!
 //! Single personality: `orcad`
 

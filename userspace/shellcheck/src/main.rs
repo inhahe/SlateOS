@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! shellcheck — SlateOS shell script static analysis tool
+//! shellcheck — Slate OS shell script static analysis tool
 //!
 //! Single personality: `shellcheck`
 

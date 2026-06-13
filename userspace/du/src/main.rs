@@ -1,7 +1,7 @@
-//! SlateOS Disk Usage Utility
+//! Slate OS Disk Usage Utility
 //!
 //! Estimates file and directory space usage by recursively walking directory
-//! trees. Reports either disk usage (size rounded up to the SlateOS 16 KiB block
+//! trees. Reports either disk usage (size rounded up to the Slate OS 16 KiB block
 //! size) or apparent size (actual file bytes).
 //!
 //! # Usage
@@ -38,7 +38,7 @@ use std::time::SystemTime;
 // Constants
 // ============================================================================
 
-/// SlateOS uses 16 KiB pages, so disk usage rounds up to this block size.
+/// Slate OS uses 16 KiB pages, so disk usage rounds up to this block size.
 const BLOCK_SIZE: u64 = 16_384;
 
 // ============================================================================
@@ -639,7 +639,7 @@ fn json_escape(s: &str) -> String {
 // Metadata helpers
 // ============================================================================
 
-/// Portable inode/device extraction. On Unix-like systems (including SlateOS) we
+/// Portable inode/device extraction. On Unix-like systems (including Slate OS) we
 /// use `std::os::unix::fs::MetadataExt`. On non-Unix build hosts we fall back
 /// to stubs so the code still compiles for testing.
 #[cfg(unix)]

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! optuna-cli — SlateOS Optuna hyperparameter optimization
+//! optuna-cli — Slate OS Optuna hyperparameter optimization
 //!
 //! Single personality: `optuna`
 

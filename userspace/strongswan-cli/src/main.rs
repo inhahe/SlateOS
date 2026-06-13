@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! strongswan-cli — SlateOS strongSwan IPsec VPN
+//! strongswan-cli — Slate OS strongSwan IPsec VPN
 //!
 //! Multi-personality: `ipsec`, `swanctl`, `charon`
 

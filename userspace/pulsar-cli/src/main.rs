@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pulsar-cli — SlateOS Apache Pulsar CLI
+//! pulsar-cli — Slate OS Apache Pulsar CLI
 //!
 //! Single personality: `pulsar-admin`
 

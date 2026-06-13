@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pdfarranger-cli — SlateOS PDF Arranger page manager
+//! pdfarranger-cli — Slate OS PDF Arranger page manager
 //!
 //! Single personality: `pdfarranger`
 

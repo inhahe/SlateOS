@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! snapper2 — SlateOS filesystem snapshot management
+//! snapper2 — Slate OS filesystem snapshot management
 //!
 //! Single personality: `snapper2` (avoiding conflict with existing `snapper` crate)
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! auth0-cli — SlateOS Auth0 (developer-friendly CIAM, now Okta Customer Identity Cloud)
+//! auth0-cli — Slate OS Auth0 (developer-friendly CIAM, now Okta Customer Identity Cloud)
 //!
 //! Single personality: `auth0`
 

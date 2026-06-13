@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! steam-cli — SlateOS Steam client launcher
+//! steam-cli — Slate OS Steam client launcher
 //!
 //! Single personality: `steam`
 

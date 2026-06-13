@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! digitalocean-cli — SlateOS DigitalOcean (developer-first cloud, NYC, NYSE:DOCN)
+//! digitalocean-cli — Slate OS DigitalOcean (developer-first cloud, NYC, NYSE:DOCN)
 
 use std::env;
 use std::process;

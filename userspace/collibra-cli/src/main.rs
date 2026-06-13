@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! collibra-cli — SlateOS Collibra (data intelligence + governance, Brussels + NYC)
+//! collibra-cli — Slate OS Collibra (data intelligence + governance, Brussels + NYC)
 
 use std::env;
 use std::process;

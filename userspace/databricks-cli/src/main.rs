@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! databricks-cli — SlateOS Databricks Data Intelligence Platform
+//! databricks-cli — Slate OS Databricks Data Intelligence Platform
 //!
 //! Single personality: `databricks`
 

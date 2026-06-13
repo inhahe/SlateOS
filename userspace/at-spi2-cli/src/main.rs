@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! at-spi2-cli — SlateOS AT-SPI2 accessibility toolkit
+//! at-spi2-cli — Slate OS AT-SPI2 accessibility toolkit
 //!
 //! Multi-personality: `at-spi2-registryd`, `at-spi2-bus-launcher`
 

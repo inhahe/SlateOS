@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! keycdn-cli — SlateOS KeyCDN Swiss personality CLI.
+//! keycdn-cli — Slate OS KeyCDN Swiss personality CLI.
 
 use std::env;
 use std::process;

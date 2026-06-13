@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gespeaker-cli — SlateOS GTK frontend for speech synthesis
+//! gespeaker-cli — Slate OS GTK frontend for speech synthesis
 //!
 //! Single personality: `gespeaker`
 

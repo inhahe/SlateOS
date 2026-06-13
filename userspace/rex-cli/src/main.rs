@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rex-cli — SlateOS Rex remote execution framework
+//! rex-cli — Slate OS Rex remote execution framework
 //!
 //! Single personality: `rex`
 

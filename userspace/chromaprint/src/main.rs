@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! chromaprint — SlateOS audio fingerprinting
+//! chromaprint — Slate OS audio fingerprinting
 //!
 //! Single personality: `fpcalc`
 

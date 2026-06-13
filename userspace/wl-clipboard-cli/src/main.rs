@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wl-clipboard-cli — SlateOS wl-clipboard Wayland clipboard
+//! wl-clipboard-cli — Slate OS wl-clipboard Wayland clipboard
 //!
 //! Multi-personality: `wl-copy`, `wl-paste`
 

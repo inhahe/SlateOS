@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! icinga-cli — SlateOS Icinga2 monitoring system
+//! icinga-cli — Slate OS Icinga2 monitoring system
 //!
 //! Multi-personality: `icinga2`, `icinga2-check`, `icinga2-api`
 

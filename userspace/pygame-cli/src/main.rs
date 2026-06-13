@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pygame-cli — SlateOS Pygame game framework
+//! pygame-cli — Slate OS Pygame game framework
 //!
 //! Single personality: `pygame`
 

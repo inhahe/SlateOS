@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! borgbackup — SlateOS deduplicating backup
+//! borgbackup — Slate OS deduplicating backup
 //!
 //! Single personality: `borg`
 

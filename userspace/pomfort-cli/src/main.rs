@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pomfort-cli — SlateOS Pomfort on-set workflow tools
+//! pomfort-cli — Slate OS Pomfort on-set workflow tools
 //!
 //! Single personality: `pomfort`
 

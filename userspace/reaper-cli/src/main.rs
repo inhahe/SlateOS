@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! reaper-cli — SlateOS REAPER digital audio workstation
+//! reaper-cli — Slate OS REAPER digital audio workstation
 //!
 //! Single personality: `reaper`
 

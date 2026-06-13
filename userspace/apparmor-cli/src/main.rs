@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! apparmor-cli — SlateOS AppArmor profile management tools
+//! apparmor-cli — Slate OS AppArmor profile management tools
 //!
 //! Multi-personality: `aa-status`, `aa-enforce`, `aa-complain`, `aa-disable`,
 //! `aa-genprof`, `aa-logprof`, `apparmor_parser`

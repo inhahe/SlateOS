@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sphinx-doc — SlateOS documentation generator
+//! sphinx-doc — Slate OS documentation generator
 //!
 //! Multi-personality: `sphinx-build`, `sphinx-quickstart`, `sphinx-apidoc`, `sphinx-autogen`
 

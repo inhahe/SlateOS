@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! anvil-cli — SlateOS Foundry anvil local Ethereum node
+//! anvil-cli — Slate OS Foundry anvil local Ethereum node
 //!
 //! Single personality: `anvil`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dar-cli — SlateOS DAR disk archive tool
+//! dar-cli — Slate OS DAR disk archive tool
 //!
 //! Multi-personality: `dar`, `dar_manager`, `dar_xform`
 

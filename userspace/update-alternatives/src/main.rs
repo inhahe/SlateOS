@@ -1,4 +1,4 @@
-//! SlateOS alternatives management system.
+//! Slate OS alternatives management system.
 //!
 //! Multi-personality binary providing:
 //! - **update-alternatives** — maintain symlinks for default commands

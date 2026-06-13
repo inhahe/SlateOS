@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! star-cli — SlateOS STAR RNA-seq aligner
+//! star-cli — Slate OS STAR RNA-seq aligner
 //!
 //! Single personality: `STAR`
 

@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! ambassador-cli — SlateOS Ambassador Labs Edge Stack personality CLI.
+//! ambassador-cli — Slate OS Ambassador Labs Edge Stack personality CLI.
 
 use std::env;
 use std::process;

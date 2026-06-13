@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! beets — SlateOS music library manager
+//! beets — Slate OS music library manager
 //!
 //! Single personality: `beet`
 

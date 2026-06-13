@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zbrush-cli — SlateOS Maxon ZBrush digital sculpting
+//! zbrush-cli — Slate OS Maxon ZBrush digital sculpting
 //!
 //! Single personality: `zbrush`
 

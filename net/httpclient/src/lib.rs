@@ -1,6 +1,6 @@
-//! # `SlateOS` HTTP Client Library
+//! # `Slate OS` HTTP Client Library
 //!
-//! A native HTTP/1.1 client library for `SlateOS`. Provides URL parsing, request building,
+//! A native HTTP/1.1 client library for `Slate OS`. Provides URL parsing, request building,
 //! response parsing, cookie handling, and HTTP protocol serialization/deserialization.
 //!
 //! This library is used by the package manager and other applications for network fetching.

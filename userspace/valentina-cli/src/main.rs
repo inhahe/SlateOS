@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! valentina-cli — SlateOS Valentina Studio database IDE
+//! valentina-cli — Slate OS Valentina Studio database IDE
 //!
 //! Single personality: `valentina-studio`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fscrypt — SlateOS filesystem-level encryption
+//! fscrypt — Slate OS filesystem-level encryption
 //!
 //! Multi-personality binary for managing filesystem encryption policies.
 //! Detected via argv[0]:

@@ -1,4 +1,4 @@
-//! SlateOS AppArmor mandatory access control utilities.
+//! Slate OS AppArmor mandatory access control utilities.
 //!
 //! Multi-personality binary providing:
 //! - **aa-status** (default) — show AppArmor status and loaded profiles

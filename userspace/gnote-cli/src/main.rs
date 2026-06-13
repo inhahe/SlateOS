@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gnote-cli — SlateOS Gnote GNOME note-taking
+//! gnote-cli — Slate OS Gnote GNOME note-taking
 //!
 //! Single personality: `gnote`
 

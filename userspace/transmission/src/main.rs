@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! transmission — SlateOS BitTorrent client
+//! transmission — Slate OS BitTorrent client
 //!
 //! Multi-personality: `transmission-daemon`, `transmission-cli`, `transmission-remote`
 

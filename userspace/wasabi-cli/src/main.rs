@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wasabi-cli — SlateOS Wasabi privacy Bitcoin wallet
+//! wasabi-cli — Slate OS Wasabi privacy Bitcoin wallet
 //!
 //! Single personality: `wasabi`
 

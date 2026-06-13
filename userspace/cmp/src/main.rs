@@ -1,4 +1,4 @@
-//! SlateOS `cmp` Utility -- Byte-by-Byte File Comparison
+//! Slate OS `cmp` Utility -- Byte-by-Byte File Comparison
 //!
 //! Compares two files byte by byte and reports the first difference, or all
 //! differences with `-l`. Supports reading from stdin via `-`, skip offsets,

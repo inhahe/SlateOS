@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vectorworks-cli — SlateOS Nemetschek Vectorworks design/BIM
+//! vectorworks-cli — Slate OS Nemetschek Vectorworks design/BIM
 //!
 //! Single personality: `vectorworks`
 

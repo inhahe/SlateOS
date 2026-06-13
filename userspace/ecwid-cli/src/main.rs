@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ecwid-cli — SlateOS Ecwid by Lightspeed (embeddable e-commerce widget)
+//! ecwid-cli — Slate OS Ecwid by Lightspeed (embeddable e-commerce widget)
 
 use std::env;
 use std::process;

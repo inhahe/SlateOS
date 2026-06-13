@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! defold-cli — SlateOS Defold game engine
+//! defold-cli — Slate OS Defold game engine
 //!
 //! Single personality: `defold`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! concourse-cli — SlateOS Concourse CI CLI (fly)
+//! concourse-cli — Slate OS Concourse CI CLI (fly)
 //!
 //! Multi-personality: `fly`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! onepassword-cli — SlateOS 1Password (AgileBits) password manager
+//! onepassword-cli — Slate OS 1Password (AgileBits) password manager
 //!
 //! Personalities: `onepassword`, `1password`, `op`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! aftereffects-cli — SlateOS Adobe After Effects motion graphics
+//! aftereffects-cli — Slate OS Adobe After Effects motion graphics
 //!
 //! Single personality: `aftereffects`
 

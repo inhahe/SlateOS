@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! whatsapp-cli — SlateOS Meta WhatsApp messaging
+//! whatsapp-cli — Slate OS Meta WhatsApp messaging
 //!
 //! Single personality: `whatsapp`
 

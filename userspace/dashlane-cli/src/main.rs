@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dashlane-cli — SlateOS Dashlane password manager
+//! dashlane-cli — Slate OS Dashlane password manager
 //!
 //! Single personality: `dashlane`
 

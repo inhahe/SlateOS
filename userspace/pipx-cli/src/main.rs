@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pipx-cli — SlateOS pipx tool for installing Python apps in isolated envs
+//! pipx-cli — Slate OS pipx tool for installing Python apps in isolated envs
 //!
 //! Multi-personality: `pipx`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! notary — SlateOS Notary v2 content signing
+//! notary — Slate OS Notary v2 content signing
 //!
 //! Single personality: `notation`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pkg-cli — SlateOS FreeBSD pkg package manager
+//! pkg-cli — Slate OS FreeBSD pkg package manager
 //!
 //! Multi-personality: `pkg`
 

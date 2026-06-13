@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! yoshimi-cli — SlateOS Yoshimi software synthesizer
+//! yoshimi-cli — Slate OS Yoshimi software synthesizer
 //!
 //! Single personality: `yoshimi`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fastfetch-cli — SlateOS Fastfetch system information
+//! fastfetch-cli — Slate OS Fastfetch system information
 //!
 //! Multi-personality: `fastfetch`, `flashfetch`
 

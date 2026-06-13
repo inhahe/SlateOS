@@ -1,4 +1,4 @@
-//! SlateOS tput/reset/clear — terminal capability tools
+//! Slate OS tput/reset/clear — terminal capability tools
 //!
 //! Multi-personality binary detected via argv[0]:
 //! - `tput`: Query and set terminal capabilities
@@ -208,7 +208,7 @@ fn get_terminal_cols() -> i32 {
             return n;
         }
 
-    // Try ioctl on SlateOS
+    // Try ioctl on Slate OS
     #[cfg(target_os = "slateos")]
     {
         if let Some(size) = get_terminal_size_ioctl() {
@@ -239,7 +239,7 @@ fn get_terminal_lines() -> i32 {
 #[cfg(target_os = "slateos")]
 #[allow(dead_code)]
 fn get_terminal_size_ctl() -> Option<(i32, i32)> {
-    // SlateOS ioctl to get terminal size
+    // Slate OS ioctl to get terminal size
     // Returns (cols, lines) or None
     let mut cols: u16 = 0;
     let mut lines: u16 = 0;

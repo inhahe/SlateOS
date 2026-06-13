@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! supercollider-cli — SlateOS SuperCollider audio synthesis
+//! supercollider-cli — Slate OS SuperCollider audio synthesis
 //!
 //! Multi-personality: `sclang`, `scsynth`, `scide`
 

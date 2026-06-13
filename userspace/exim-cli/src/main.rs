@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! exim-cli — SlateOS Exim mail transfer agent
+//! exim-cli — Slate OS Exim mail transfer agent
 //!
 //! Single personality: `exim`
 

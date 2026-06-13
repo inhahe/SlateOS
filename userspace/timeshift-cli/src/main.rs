@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! timeshift-cli — SlateOS Timeshift system snapshot CLI
+//! timeshift-cli — Slate OS Timeshift system snapshot CLI
 //!
 //! Single personality: `timeshift`
 

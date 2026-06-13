@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! intercom-cli — SlateOS Intercom (conversational support, AI-first under Fin)
+//! intercom-cli — Slate OS Intercom (conversational support, AI-first under Fin)
 //!
 //! Single personality: `intercom`
 

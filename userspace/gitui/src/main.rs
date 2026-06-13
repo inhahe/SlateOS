@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gitui — SlateOS blazing fast terminal UI for git
+//! gitui — Slate OS blazing fast terminal UI for git
 //!
 //! Single personality: `gitui`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! make-cli — SlateOS Make.com (visual automation, Prague + global, Notion Capital backed)
+//! make-cli — Slate OS Make.com (visual automation, Prague + global, Notion Capital backed)
 
 use std::env;
 use std::process;

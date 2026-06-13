@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cqlsh-cli — SlateOS Apache Cassandra CQL shell
+//! cqlsh-cli — Slate OS Apache Cassandra CQL shell
 //!
 //! Multi-personality: `cqlsh`, `nodetool`
 

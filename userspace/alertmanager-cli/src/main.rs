@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! alertmanager-cli — SlateOS Prometheus Alertmanager
+//! alertmanager-cli — Slate OS Prometheus Alertmanager
 //!
 //! Multi-personality: `alertmanager`, `amtool`
 

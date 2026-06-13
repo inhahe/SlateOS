@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! convertkit-cli — SlateOS ConvertKit / Kit (creator-focused email marketing)
+//! convertkit-cli — Slate OS ConvertKit / Kit (creator-focused email marketing)
 //!
 //! Single personality: `convertkit` (also responds to `kit`)
 

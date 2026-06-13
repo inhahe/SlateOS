@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! geojson-cli — SlateOS GeoJSON processing tool
+//! geojson-cli — Slate OS GeoJSON processing tool
 //!
 //! Single personality: `geojson`
 

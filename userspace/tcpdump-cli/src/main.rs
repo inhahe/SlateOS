@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tcpdump-cli — SlateOS tcpdump CLI
+//! tcpdump-cli — Slate OS tcpdump CLI
 //!
 //! Single personality: `tcpdump`
 

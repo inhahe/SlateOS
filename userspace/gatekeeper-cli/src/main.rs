@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gatekeeper-cli — SlateOS OPA Gatekeeper policy tool
+//! gatekeeper-cli — Slate OS OPA Gatekeeper policy tool
 //!
 //! Single personality: `gatekeeper`
 

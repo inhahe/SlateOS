@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cockroach-cli — SlateOS CockroachDB CLI client
+//! cockroach-cli — Slate OS CockroachDB CLI client
 //!
 //! Multi-personality: `cockroach`
 

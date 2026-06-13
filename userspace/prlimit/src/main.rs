@@ -1,4 +1,4 @@
-//! SlateOS process resource limits utility.
+//! Slate OS process resource limits utility.
 //!
 //! Multi-personality binary providing:
 //! - **prlimit** — get/set process resource limits

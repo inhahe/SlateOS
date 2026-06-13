@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! polkit-gnome-cli — SlateOS GNOME PolicyKit authentication agent
+//! polkit-gnome-cli — Slate OS GNOME PolicyKit authentication agent
 //!
 //! Single personality: `polkit-gnome-authentication-agent-1`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! renpy-cli — SlateOS Ren'Py (FOSS visual novel engine)
+//! renpy-cli — Slate OS Ren'Py (FOSS visual novel engine)
 //!
 //! Single personality: `renpy`
 

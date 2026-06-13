@@ -7,7 +7,7 @@
 //!   - `getpcaps` — get process capabilities from /proc
 //!   - `captest`  — test capability support on the running system
 //!
-//! SlateOS uses capability-based security; this toolset provides the POSIX/Linux
+//! Slate OS uses capability-based security; this toolset provides the POSIX/Linux
 //! compatibility layer for inspecting and manipulating capabilities.
 
 #![deny(clippy::all)]
@@ -1359,7 +1359,7 @@ fn run_captest(args: &[String]) -> i32 {
     println!("=== Capability Support Test ===");
     println!();
 
-    // On SlateOS, we test against the simulated process capability state.
+    // On Slate OS, we test against the simulated process capability state.
     // In a real deployment this would use actual syscalls.
     let caps = ProcessCaps::new_full();
 

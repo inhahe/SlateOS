@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fd-find — SlateOS fast alternative to find
+//! fd-find — Slate OS fast alternative to find
 //!
 //! Single personality: `fd`
 

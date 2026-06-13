@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! stripe-cli — SlateOS Stripe CLI
+//! stripe-cli — Slate OS Stripe CLI
 //!
 //! Single personality: `stripe`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! varnish-cli — SlateOS Varnish HTTP cache
+//! varnish-cli — Slate OS Varnish HTTP cache
 //!
 //! Multi-personality: `varnishd`, `varnishlog`, `varnishstat`, `varnishadm`
 

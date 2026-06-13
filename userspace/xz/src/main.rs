@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xz — SlateOS XZ/LZMA compression utility
+//! xz — Slate OS XZ/LZMA compression utility
 //!
 //! Multi-personality binary detected via argv[0]:
 //!

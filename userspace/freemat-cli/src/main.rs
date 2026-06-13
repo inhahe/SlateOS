@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! freemat-cli — SlateOS FreeMat numerical computing environment
+//! freemat-cli — Slate OS FreeMat numerical computing environment
 //!
 //! Single personality: `freemat`
 

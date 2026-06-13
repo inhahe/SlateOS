@@ -1,4 +1,4 @@
-//! SlateOS DHCP Client Daemon (`dhcpcd`)
+//! Slate OS DHCP Client Daemon (`dhcpcd`)
 //!
 //! Implements the DHCP protocol (RFC 2131/RFC 2132) to dynamically obtain
 //! network configuration from a DHCP server. Manages the full DORA exchange
@@ -1671,7 +1671,7 @@ fn release_lease(cfg: &Config) -> Result<(), String> {
 /// Kill a running dhcpcd daemon.
 fn kill_daemon() -> Result<(), String> {
     let pid = read_pid_file().ok_or("no PID file found; daemon may not be running")?;
-    // On SlateOS we send a termination IPC message; for now use the kill syscall.
+    // On Slate OS we send a termination IPC message; for now use the kill syscall.
     // Process termination is done via the standard POSIX interface.
     eprintln!("dhcpcd: sending SIGTERM to PID {pid}");
     // We cannot directly send signals in this stub; print the PID for manual action.

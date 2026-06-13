@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nomad-cli — SlateOS HashiCorp Nomad workload orchestrator CLI
+//! nomad-cli — Slate OS HashiCorp Nomad workload orchestrator CLI
 //!
 //! Single personality: `nomad`
 

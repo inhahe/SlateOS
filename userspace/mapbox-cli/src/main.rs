@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mapbox-cli — SlateOS Mapbox CLI tools
+//! mapbox-cli — Slate OS Mapbox CLI tools
 //!
 //! Single personality: `mapbox`
 

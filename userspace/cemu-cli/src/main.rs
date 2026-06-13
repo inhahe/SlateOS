@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cemu-cli — SlateOS Cemu Wii U emulator
+//! cemu-cli — Slate OS Cemu Wii U emulator
 //!
 //! Single personality: `cemu`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! freshsales-cli — SlateOS Freshsales (Freshworks CRM with built-in Freddy AI)
+//! freshsales-cli — Slate OS Freshsales (Freshworks CRM with built-in Freddy AI)
 //!
 //! Single personality: `freshsales`
 

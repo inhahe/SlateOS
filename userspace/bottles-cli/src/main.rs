@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bottles-cli — SlateOS Bottles Wine prefix manager
+//! bottles-cli — Slate OS Bottles Wine prefix manager
 //!
 //! Single personality: `bottles`
 

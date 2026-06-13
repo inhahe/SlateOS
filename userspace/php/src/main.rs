@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! php — SlateOS PHP interpreter
+//! php — Slate OS PHP interpreter
 //!
 //! Multi-personality: `php`, `php-fpm`, `composer`
 

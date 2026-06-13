@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pybullet-cli — SlateOS PyBullet Python physics tool
+//! pybullet-cli — Slate OS PyBullet Python physics tool
 //!
 //! Single personality: `pybullet`
 

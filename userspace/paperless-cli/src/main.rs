@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! paperless-cli — SlateOS Paperless-ngx document management
+//! paperless-cli — Slate OS Paperless-ngx document management
 //!
 //! Single personality: `paperless`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cargo-make-cli — SlateOS cargo-make CLI
+//! cargo-make-cli — Slate OS cargo-make CLI
 //!
 //! Single personality: `makers` (also `cargo-make`)
 

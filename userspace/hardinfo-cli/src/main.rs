@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hardinfo-cli — SlateOS HardInfo system profiler
+//! hardinfo-cli — Slate OS HardInfo system profiler
 //!
 //! Single personality: `hardinfo`
 

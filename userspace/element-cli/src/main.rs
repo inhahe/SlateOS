@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! element-cli — SlateOS Element Matrix client (open federated chat)
+//! element-cli — Slate OS Element Matrix client (open federated chat)
 //!
 //! Single personality: `element`
 

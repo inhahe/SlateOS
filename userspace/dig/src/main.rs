@@ -1,8 +1,8 @@
-//! SlateOS DNS Lookup Utility (`dig`)
+//! Slate OS DNS Lookup Utility (`dig`)
 //!
 //! A feature-rich DNS lookup tool modelled after ISC's `dig`. Builds DNS query
 //! packets from scratch per RFC 1035 and parses wire-format responses including
-//! compression pointers. Communicates with DNS servers via SlateOS kernel syscalls
+//! compression pointers. Communicates with DNS servers via Slate OS kernel syscalls
 //! (UDP and TCP).
 //!
 //! # Usage
@@ -36,7 +36,7 @@ use std::time::Instant;
 // Syscall numbers
 // ============================================================================
 
-// Native SlateOS syscall numbers (kernel/src/syscall/number.rs). These were
+// Native Slate OS syscall numbers (kernel/src/syscall/number.rs). These were
 // previously wrong: the UDP block used 820/821/822 (820 is DNS_RESOLVE, not
 // UDP_BIND), and the TCP block was off by one (802/803/804 collided with
 // TCP_RECV/CLOSE and an unassigned slot). Corrected to the real ABI.
@@ -47,7 +47,7 @@ const SYS_TCP_CONNECT: u64 = 800;
 const SYS_TCP_SEND: u64 = 801;
 const SYS_TCP_RECV: u64 = 802;
 const SYS_TCP_CLOSE: u64 = 803;
-// Native SlateOS monotonic clock (kernel syscall/number.rs); no-arg, returns
+// Native Slate OS monotonic clock (kernel syscall/number.rs); no-arg, returns
 // boot-relative nanoseconds in rax.  (Syscall 30 is SYS_IRQ_REGISTER.)
 const SYS_CLOCK_MONOTONIC: u64 = 10;
 

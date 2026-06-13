@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fwupd-cli — SlateOS fwupd firmware update daemon
+//! fwupd-cli — Slate OS fwupd firmware update daemon
 //!
 //! Multi-personality: `fwupdmgr`, `fwupdtool`
 

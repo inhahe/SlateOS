@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! espeak-cli — SlateOS eSpeak-NG text-to-speech CLI
+//! espeak-cli — Slate OS eSpeak-NG text-to-speech CLI
 //!
 //! Multi-personality: `espeak`, `espeak-ng`
 

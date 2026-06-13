@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! starburst-cli — SlateOS Starburst (commercial Trino/Presto data lakehouse query engine)
+//! starburst-cli — Slate OS Starburst (commercial Trino/Presto data lakehouse query engine)
 
 use std::env;
 use std::process;

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! netdata-cli — SlateOS Netdata real-time monitoring
+//! netdata-cli — Slate OS Netdata real-time monitoring
 //!
 //! Multi-personality: `netdata`, `netdatacli`, `netdata-claim`
 

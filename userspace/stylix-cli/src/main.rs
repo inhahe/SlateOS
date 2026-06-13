@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! stylix-cli — SlateOS Stylix system-wide color scheme manager
+//! stylix-cli — Slate OS Stylix system-wide color scheme manager
 //!
 //! Single personality: `stylix`
 

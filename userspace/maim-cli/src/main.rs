@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! maim-cli — SlateOS maim screenshot utility
+//! maim-cli — Slate OS maim screenshot utility
 //!
 //! Single personality: `maim`
 

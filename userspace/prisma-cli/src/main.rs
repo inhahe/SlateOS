@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! prisma-cli — SlateOS Prisma CLI
+//! prisma-cli — Slate OS Prisma CLI
 //!
 //! Single personality: `prisma`
 

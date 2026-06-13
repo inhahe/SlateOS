@@ -11,7 +11,7 @@
 #![allow(clippy::needless_range_loop)]
 #![allow(unused_imports)]
 
-//! SlateOS Sokoban -- classic box-pushing puzzle game.
+//! Slate OS Sokoban -- classic box-pushing puzzle game.
 //!
 //! The player pushes crates onto target positions in a warehouse. Features
 //! 15 built-in levels of increasing difficulty, a level select screen,

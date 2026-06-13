@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pgadmin-cli — SlateOS pgAdmin PostgreSQL management
+//! pgadmin-cli — Slate OS pgAdmin PostgreSQL management
 //!
 //! Single personality: `pgadmin`
 

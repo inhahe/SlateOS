@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! apigee-cli — SlateOS Google Apigee API management personality CLI.
+//! apigee-cli — Slate OS Google Apigee API management personality CLI.
 
 use std::env;
 use std::process;

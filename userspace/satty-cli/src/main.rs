@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! satty-cli — SlateOS Satty screenshot annotation
+//! satty-cli — Slate OS Satty screenshot annotation
 //!
 //! Single personality: `satty`
 

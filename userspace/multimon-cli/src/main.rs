@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! multimon-cli — SlateOS multimon-ng digital signal decoder
+//! multimon-cli — Slate OS multimon-ng digital signal decoder
 //!
 //! Single personality: `multimon-ng`
 

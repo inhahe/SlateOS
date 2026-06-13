@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! redis — SlateOS Redis in-memory data store
+//! redis — Slate OS Redis in-memory data store
 //!
 //! Multi-personality: `redis-server`, `redis-cli`, `redis-benchmark`
 

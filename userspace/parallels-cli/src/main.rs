@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! parallels-cli — SlateOS Parallels Desktop for Mac
+//! parallels-cli — Slate OS Parallels Desktop for Mac
 //!
 //! Single personality: `parallels`
 

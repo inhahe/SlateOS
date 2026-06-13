@@ -1,4 +1,4 @@
-//! SlateOS `xargs` Utility -- Build and Execute Command Lines from Standard Input
+//! Slate OS `xargs` Utility -- Build and Execute Command Lines from Standard Input
 //!
 //! Reads items from standard input (delimited by whitespace, newlines, NUL
 //! bytes, or a custom delimiter) and appends them as arguments to a specified
@@ -873,7 +873,7 @@ fn json_escape(s: &str) -> String {
 // ============================================================================
 
 fn print_help() {
-    println!("SlateOS xargs v{VERSION}");
+    println!("Slate OS xargs v{VERSION}");
     println!();
     println!("Build and execute command lines from standard input.");
     println!();

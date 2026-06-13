@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! howdoi — SlateOS instant coding answers from the command line
+//! howdoi — Slate OS instant coding answers from the command line
 //!
 //! Single personality: `howdoi`
 

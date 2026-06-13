@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! k6-cli — SlateOS k6 load testing CLI
+//! k6-cli — Slate OS k6 load testing CLI
 //!
 //! Single personality: `k6`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mcfly — SlateOS fly through your shell history with smart search
+//! mcfly — Slate OS fly through your shell history with smart search
 //!
 //! Single personality: `mcfly`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! abiword-cli — SlateOS AbiWord word processor
+//! abiword-cli — Slate OS AbiWord word processor
 //!
 //! Single personality: `abiword`
 

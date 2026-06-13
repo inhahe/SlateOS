@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! monogame-cli — SlateOS MonoGame (open-source XNA successor)
+//! monogame-cli — Slate OS MonoGame (open-source XNA successor)
 //!
 //! Single personality: `monogame`
 

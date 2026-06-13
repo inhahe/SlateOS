@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dracut-cli — SlateOS initramfs generator (dracut)
+//! dracut-cli — Slate OS initramfs generator (dracut)
 //!
 //! Multi-personality: `dracut`, `lsinitrd`
 

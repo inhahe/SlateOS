@@ -1,4 +1,4 @@
-// SlateOS iw - wireless network tools
+// Slate OS iw - wireless network tools
 //
 // Multi-personality binary:
 //   iw       - nl80211-based wireless config tool

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! shotcut-cli — SlateOS Shotcut open-source video editor
+//! shotcut-cli — Slate OS Shotcut open-source video editor
 //!
 //! Single personality: `shotcut`
 

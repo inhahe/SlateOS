@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! qalc-cli — SlateOS Qalculate CLI
+//! qalc-cli — Slate OS Qalculate CLI
 //!
 //! Single personality: `qalc`
 

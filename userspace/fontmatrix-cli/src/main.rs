@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fontmatrix-cli — SlateOS Fontmatrix font manager
+//! fontmatrix-cli — Slate OS Fontmatrix font manager
 //!
 //! Single personality: `fontmatrix`
 

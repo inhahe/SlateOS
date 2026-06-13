@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tofi-cli — SlateOS tofi tiny dynamic menu
+//! tofi-cli — Slate OS tofi tiny dynamic menu
 //!
 //! Multi-personality: `tofi`, `tofi-run`, `tofi-drun`
 

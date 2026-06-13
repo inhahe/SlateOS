@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! delta — SlateOS syntax-highlighting pager for git, diff, and grep output
+//! delta — Slate OS syntax-highlighting pager for git, diff, and grep output
 //!
 //! Single personality: `delta`
 

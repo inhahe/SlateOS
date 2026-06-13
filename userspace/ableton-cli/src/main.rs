@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ableton-cli — SlateOS Ableton Live DAW
+//! ableton-cli — Slate OS Ableton Live DAW
 //!
 //! Single personality: `ableton`
 

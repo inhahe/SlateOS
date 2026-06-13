@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nvme — SlateOS NVMe drive management CLI
+//! nvme — Slate OS NVMe drive management CLI
 //!
 //! Multi-personality binary for managing NVMe solid-state drives.
 //! Detected via argv[0]:

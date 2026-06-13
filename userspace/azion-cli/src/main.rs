@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! azion-cli — SlateOS Azion (Brazilian edge platform) personality CLI.
+//! azion-cli — Slate OS Azion (Brazilian edge platform) personality CLI.
 
 use std::env;
 use std::process;

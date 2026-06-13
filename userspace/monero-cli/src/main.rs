@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! monero-cli — SlateOS Monero wallet CLI
+//! monero-cli — Slate OS Monero wallet CLI
 //!
 //! Single personality: `monero-wallet-cli`
 

@@ -1,4 +1,4 @@
-//! SlateOS Pipes Puzzle
+//! Slate OS Pipes Puzzle
 //!
 //! A pipe-connection puzzle game where the player rotates pipe segments
 //! to connect a water source to a drain, forming a continuous path.

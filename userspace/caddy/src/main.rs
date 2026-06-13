@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! caddy — SlateOS web server with automatic HTTPS
+//! caddy — Slate OS web server with automatic HTTPS
 //!
 //! Single personality: `caddy`
 

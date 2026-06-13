@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fastqc-cli — SlateOS FastQC sequencing quality control
+//! fastqc-cli — Slate OS FastQC sequencing quality control
 //!
 //! Single personality: `fastqc`
 

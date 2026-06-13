@@ -1,4 +1,4 @@
-//! SlateOS doas -- Lightweight Privilege Elevation
+//! Slate OS doas -- Lightweight Privilege Elevation
 //!
 //! A doas(1) implementation modelled on OpenBSD's design. Reads policy rules
 //! from `/etc/doas.conf` and, when permitted, executes commands as another
@@ -799,7 +799,7 @@ fn set_env_var(env_map: &mut Vec<(String, String)>, key: &str, value: &str) {
 
 /// Execute a command as the target user.
 ///
-/// On SlateOS, `setuid`/`setgid` are actual syscalls that change the process
+/// On Slate OS, `setuid`/`setgid` are actual syscalls that change the process
 /// identity. For now we set the UID/GID environment hints and invoke the
 /// command. The real privilege change will use the kernel's capability system
 /// once the POSIX exec layer supports `setuid`/`setgid` syscalls.

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gscan2pdf-cli — SlateOS gscan2pdf scan-to-PDF tool
+//! gscan2pdf-cli — Slate OS gscan2pdf scan-to-PDF tool
 //!
 //! Single personality: `gscan2pdf`
 

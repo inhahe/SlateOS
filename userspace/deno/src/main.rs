@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! deno — SlateOS Deno JavaScript/TypeScript runtime
+//! deno — Slate OS Deno JavaScript/TypeScript runtime
 //!
 //! Single personality: `deno`
 

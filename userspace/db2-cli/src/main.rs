@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! db2-cli — SlateOS IBM Db2 database
+//! db2-cli — Slate OS IBM Db2 database
 //!
 //! Single personality: `db2`
 

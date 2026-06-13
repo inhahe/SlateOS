@@ -1,4 +1,4 @@
-// SlateOS smartctl - SMART disk monitoring tool
+// Slate OS smartctl - SMART disk monitoring tool
 //
 // Provides S.M.A.R.T. (Self-Monitoring, Analysis and Reporting Technology)
 // disk health monitoring for ATA and SCSI devices.

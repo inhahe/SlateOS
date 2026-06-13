@@ -1,4 +1,4 @@
-//! SlateOS Journal Log Viewer (`journalctl`)
+//! Slate OS Journal Log Viewer (`journalctl`)
 //!
 //! Reads, filters, and manages structured JSON-lines log files stored under
 //! `/var/log/journal/`. Compatible with our syslogd's output format.

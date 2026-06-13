@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! celestia-cli — SlateOS Celestia space simulator
+//! celestia-cli — Slate OS Celestia space simulator
 //!
 //! Single personality: `celestia`
 

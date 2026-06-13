@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pihole-cli — SlateOS Pi-hole DNS sinkhole
+//! pihole-cli — Slate OS Pi-hole DNS sinkhole
 //!
 //! Single personality: `pihole`
 

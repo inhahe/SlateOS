@@ -1,4 +1,4 @@
-//! SlateOS CPU information display utility.
+//! Slate OS CPU information display utility.
 //!
 //! Multi-personality binary providing:
 //! - **lscpu** — display CPU architecture information

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dust-cli — SlateOS dust disk usage tool
+//! dust-cli — Slate OS dust disk usage tool
 //!
 //! Single personality: `dust`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lout-cli — SlateOS Lout document formatter
+//! lout-cli — Slate OS Lout document formatter
 //!
 //! Single personality: `lout`
 

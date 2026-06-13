@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wine-gecko-cli — SlateOS Wine Gecko HTML rendering for Wine
+//! wine-gecko-cli — Slate OS Wine Gecko HTML rendering for Wine
 //!
 //! Single personality: `wine-gecko`
 

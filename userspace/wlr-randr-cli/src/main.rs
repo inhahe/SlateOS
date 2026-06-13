@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wlr-randr-cli — SlateOS wlr-randr output configuration
+//! wlr-randr-cli — Slate OS wlr-randr output configuration
 //!
 //! Single personality: `wlr-randr`
 

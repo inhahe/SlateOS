@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nessus-cli — SlateOS Tenable Nessus vulnerability scanner
+//! nessus-cli — Slate OS Tenable Nessus vulnerability scanner
 //!
 //! Single personality: `nessus`
 

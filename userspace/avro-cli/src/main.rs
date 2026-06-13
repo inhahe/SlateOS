@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! avro-cli — SlateOS Apache Avro tools
+//! avro-cli — Slate OS Apache Avro tools
 //!
 //! Multi-personality: `avro`, `avro-tools`
 

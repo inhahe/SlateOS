@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hindenburg-cli — SlateOS Hindenburg PRO podcast editor
+//! hindenburg-cli — Slate OS Hindenburg PRO podcast editor
 //!
 //! Single personality: `hindenburg`
 

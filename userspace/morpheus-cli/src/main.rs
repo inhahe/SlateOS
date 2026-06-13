@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! morpheus-cli — SlateOS Morpheus cloud management
+//! morpheus-cli — Slate OS Morpheus cloud management
 //!
 //! Single personality: `morpheus`
 

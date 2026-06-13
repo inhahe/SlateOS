@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! infisical-cli — SlateOS Infisical secrets management
+//! infisical-cli — Slate OS Infisical secrets management
 //!
 //! Single personality: `infisical`
 

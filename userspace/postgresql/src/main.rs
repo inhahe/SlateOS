@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! postgresql — SlateOS PostgreSQL relational database
+//! postgresql — Slate OS PostgreSQL relational database
 //!
 //! Multi-personality: `postgres` (server), `psql` (client), `pg_dump`, `pg_restore`,
 //!                    `createdb`, `dropdb`, `pg_isready`, `initdb`

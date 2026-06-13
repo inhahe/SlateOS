@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mvn-cli — SlateOS Apache Maven build system
+//! mvn-cli — Slate OS Apache Maven build system
 //!
 //! Multi-personality: `mvn`, `mvnw`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! civo-cli — SlateOS Civo cloud CLI
+//! civo-cli — Slate OS Civo cloud CLI
 //!
 //! Multi-personality: `civo`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! jmeter-cli — SlateOS Apache JMeter CLI
+//! jmeter-cli — Slate OS Apache JMeter CLI
 //!
 //! Multi-personality: `jmeter`
 

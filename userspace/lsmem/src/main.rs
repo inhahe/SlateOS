@@ -1,4 +1,4 @@
-//! SlateOS memory information display utility.
+//! Slate OS memory information display utility.
 //!
 //! Multi-personality binary providing:
 //! - **lsmem** — list the ranges of available memory with their online status

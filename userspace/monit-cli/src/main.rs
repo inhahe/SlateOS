@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! monit-cli — SlateOS Monit process supervisor & monitor
+//! monit-cli — Slate OS Monit process supervisor & monitor
 //!
 //! Single personality: `monit`
 

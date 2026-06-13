@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! spinnaker-cli — SlateOS Spinnaker continuous delivery
+//! spinnaker-cli — Slate OS Spinnaker continuous delivery
 //!
 //! Single personality: `spin`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mgba-cli — SlateOS mGBA Game Boy Advance emulator
+//! mgba-cli — Slate OS mGBA Game Boy Advance emulator
 //!
 //! Single personality: `mgba`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zitadel-cli — SlateOS ZITADEL identity infrastructure
+//! zitadel-cli — Slate OS ZITADEL identity infrastructure
 //!
 //! Single personality: `zitadel`
 

@@ -1,6 +1,6 @@
-//! SlateOS `stty` — Terminal Settings Utility
+//! Slate OS `stty` — Terminal Settings Utility
 //!
-//! Reads and writes terminal (termios) settings for SlateOS userspace processes.
+//! Reads and writes terminal (termios) settings for Slate OS userspace processes.
 //! Communicates with the kernel tty driver via ioctl syscalls.
 //!
 //! # Usage
@@ -227,7 +227,7 @@ struct Winsize {
 // libc bindings
 // ============================================================================
 //
-// Terminal settings go through the SlateOS posix libc `ioctl()` symbol, which
+// Terminal settings go through the Slate OS posix libc `ioctl()` symbol, which
 // dispatches TCGETS/TCSETS/TIOCGWINSZ/TIOCSWINSZ to the kernel tty path.  We
 // must NOT hand-roll a raw `syscall` here: the native ABI has no SYS_IOCTL —
 // syscall number 16 is SYS_CLOCK_ADJTIME, so a raw `ioctl` would step the

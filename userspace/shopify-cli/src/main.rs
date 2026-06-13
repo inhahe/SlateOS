@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! shopify-cli — SlateOS Shopify (NYSE/TSX:SHOP, the de-facto e-commerce platform)
+//! shopify-cli — Slate OS Shopify (NYSE/TSX:SHOP, the de-facto e-commerce platform)
 
 use std::env;
 use std::process;

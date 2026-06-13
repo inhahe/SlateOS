@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! otter-cli — SlateOS Otter infrastructure automation
+//! otter-cli — Slate OS Otter infrastructure automation
 //!
 //! Single personality: `otter`
 

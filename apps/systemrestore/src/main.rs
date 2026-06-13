@@ -1,4 +1,4 @@
-//! systemrestore -- SlateOS System Restore / Snapshot Manager
+//! systemrestore -- Slate OS System Restore / Snapshot Manager
 //!
 //! A graphical application for creating, managing, and restoring system
 //! snapshots. Supports a tree-based snapshot model (branching like VirtualBox),

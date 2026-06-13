@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dbmate — SlateOS lightweight database migration tool
+//! dbmate — Slate OS lightweight database migration tool
 //!
 //! Single personality: `dbmate`
 

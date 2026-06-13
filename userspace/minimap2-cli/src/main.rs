@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! minimap2-cli — SlateOS minimap2 sequence aligner
+//! minimap2-cli — Slate OS minimap2 sequence aligner
 //!
 //! Single personality: `minimap2`
 

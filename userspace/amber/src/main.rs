@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! amber — SlateOS code search and replace tool
+//! amber — Slate OS code search and replace tool
 //!
 //! Single personality: `amber` (ambr for replace mode)
 

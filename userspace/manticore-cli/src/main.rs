@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! manticore-cli — SlateOS Manticore Search
+//! manticore-cli — Slate OS Manticore Search
 //!
 //! Multi-personality: `searchd`, `indexer`, `indextool`
 

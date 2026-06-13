@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! picard-cli — SlateOS Picard genomics tools
+//! picard-cli — Slate OS Picard genomics tools
 //!
 //! Multi-personality: `picard`
 

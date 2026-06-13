@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wkhtmltopdf-cli — SlateOS HTML to PDF/image converter
+//! wkhtmltopdf-cli — Slate OS HTML to PDF/image converter
 //!
 //! Multi-personality: `wkhtmltopdf`, `wkhtmltoimage`
 

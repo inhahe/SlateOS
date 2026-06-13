@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! norton-cli — SlateOS Gen Digital Norton 360
+//! norton-cli — Slate OS Gen Digital Norton 360
 //!
 //! Single personality: `norton`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! iperf3 — SlateOS network throughput testing tool
+//! iperf3 — Slate OS network throughput testing tool
 //!
 //! Single personality: `iperf3`
 

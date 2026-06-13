@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! opentelemetry — SlateOS OpenTelemetry Collector
+//! opentelemetry — Slate OS OpenTelemetry Collector
 //!
 //! Multi-personality: `otelcol`, `otelcol-contrib`
 

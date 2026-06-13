@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! twitchstudio-cli — SlateOS Twitch Studio streaming app
+//! twitchstudio-cli — Slate OS Twitch Studio streaming app
 //!
 //! Single personality: `twitchstudio`
 

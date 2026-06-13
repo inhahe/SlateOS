@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! django-cli — SlateOS Django management tools
+//! django-cli — Slate OS Django management tools
 //!
 //! Multi-personality: `django-admin`, `manage.py`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! svgcleaner — SlateOS SVG optimizer/cleaner
+//! svgcleaner — Slate OS SVG optimizer/cleaner
 //!
 //! Single personality: `svgcleaner`
 

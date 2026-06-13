@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! go — SlateOS Go programming language toolchain
+//! go — Slate OS Go programming language toolchain
 //!
 //! Multi-personality binary detected via argv[0]:
 //!

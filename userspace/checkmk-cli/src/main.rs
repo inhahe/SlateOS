@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! checkmk-cli — SlateOS Checkmk monitoring
+//! checkmk-cli — Slate OS Checkmk monitoring
 //!
 //! Multi-personality: `cmk`, `check_mk_agent`
 

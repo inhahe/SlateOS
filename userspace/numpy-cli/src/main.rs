@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! numpy-cli — SlateOS NumPy numerical computing
+//! numpy-cli — Slate OS NumPy numerical computing
 //!
 //! Multi-personality: `numpy`, `f2py`
 

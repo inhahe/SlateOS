@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! scons-cli — SlateOS SCons build system
+//! scons-cli — Slate OS SCons build system
 //!
 //! Multi-personality: `scons`, `sconsign`
 

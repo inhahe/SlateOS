@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! soundtoys-cli — SlateOS Soundtoys creative effects bundle
+//! soundtoys-cli — Slate OS Soundtoys creative effects bundle
 //!
 //! Single personality: `soundtoys`
 

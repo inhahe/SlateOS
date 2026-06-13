@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! jupyter-cli — SlateOS Jupyter notebook CLI
+//! jupyter-cli — Slate OS Jupyter notebook CLI
 //!
 //! Single personality: `jupyter`
 

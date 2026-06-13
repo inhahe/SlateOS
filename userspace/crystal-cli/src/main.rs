@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! crystal-cli — SlateOS Crystal language tools
+//! crystal-cli — Slate OS Crystal language tools
 //!
 //! Multi-personality: `crystal`, `shards`
 

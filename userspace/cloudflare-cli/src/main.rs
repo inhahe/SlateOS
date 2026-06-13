@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cloudflare-cli — SlateOS Cloudflare (edge + security + Workers + R2 + AI, San Francisco, NYSE:NET)
+//! cloudflare-cli — Slate OS Cloudflare (edge + security + Workers + R2 + AI, San Francisco, NYSE:NET)
 
 use std::env;
 use std::process;

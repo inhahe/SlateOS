@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kata-cli — SlateOS Kata Containers runtime
+//! kata-cli — Slate OS Kata Containers runtime
 //!
 //! Multi-personality: `kata-runtime`, `kata-monitor`
 

@@ -1,4 +1,4 @@
-//! SlateOS Bridge, Traffic Control, and Ethernet Bridge Filtering Utility
+//! Slate OS Bridge, Traffic Control, and Ethernet Bridge Filtering Utility
 //!
 //! Multi-personality binary providing:
 //! - **bridge** -- bridge management (link, fdb, mdb, vlan, monitor)

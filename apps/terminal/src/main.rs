@@ -1,4 +1,4 @@
-//! SlateOS Terminal Emulator
+//! Slate OS Terminal Emulator
 //!
 //! Graphical VT100/xterm-compatible terminal emulator featuring:
 //! - Full CSI escape sequence parsing (cursor movement, erase, scroll, modes)
@@ -2239,7 +2239,7 @@ fn main() {
     // For now, demonstrate basic functionality:
 
     // Simulate some input to prove the terminal works
-    let demo_text = b"\x1b[1;32mWelcome to SlateOS Terminal\x1b[0m\r\n$ ";
+    let demo_text = b"\x1b[1;32mWelcome to Slate OS Terminal\x1b[0m\r\n$ ";
     terminal.feed(demo_text);
 
     // Render a frame

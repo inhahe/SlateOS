@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dxvk-cli — SlateOS DXVK Vulkan-based DirectX translation
+//! dxvk-cli — Slate OS DXVK Vulkan-based DirectX translation
 //!
 //! Multi-personality: `dxvk`, `dxvk-setup`
 

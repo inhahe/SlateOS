@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! stm32cubeide-cli — SlateOS STMicroelectronics STM32CubeIDE
+//! stm32cubeide-cli — Slate OS STMicroelectronics STM32CubeIDE
 //!
 //! Single personality: `stm32cubeide`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! roam-cli — SlateOS Roam Research networked-thought tool
+//! roam-cli — Slate OS Roam Research networked-thought tool
 //!
 //! Single personality: `roam`
 

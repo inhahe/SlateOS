@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! qemu-cli — SlateOS QEMU emulator CLI
+//! qemu-cli — Slate OS QEMU emulator CLI
 //!
 //! Multi-personality: `qemu-system-x86_64`, `qemu-img`, `qemu-nbd`
 

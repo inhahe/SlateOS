@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! crowdstrike-cli — SlateOS CrowdStrike Falcon EDR/XDR
+//! crowdstrike-cli — Slate OS CrowdStrike Falcon EDR/XDR
 //!
 //! Single personality: `crowdstrike`
 

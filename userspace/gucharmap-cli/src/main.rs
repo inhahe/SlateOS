@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gucharmap-cli — SlateOS GNOME Character Map
+//! gucharmap-cli — Slate OS GNOME Character Map
 //!
 //! Single personality: `gucharmap`
 

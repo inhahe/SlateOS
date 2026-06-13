@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bcfg2-cli — SlateOS Bcfg2 configuration management
+//! bcfg2-cli — Slate OS Bcfg2 configuration management
 //!
 //! Multi-personality: `bcfg2`, `bcfg2-server`, `bcfg2-info`
 

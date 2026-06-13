@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fusion-cli — SlateOS Blackmagic Fusion compositing
+//! fusion-cli — Slate OS Blackmagic Fusion compositing
 //!
 //! Single personality: `fusion`
 

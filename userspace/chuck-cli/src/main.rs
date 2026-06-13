@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! chuck-cli — SlateOS ChucK audio programming language
+//! chuck-cli — Slate OS ChucK audio programming language
 //!
 //! Single personality: `chuck`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rhvoice-cli — SlateOS RHVoice speech synthesizer
+//! rhvoice-cli — Slate OS RHVoice speech synthesizer
 //!
 //! Single personality: `rhvoice`
 

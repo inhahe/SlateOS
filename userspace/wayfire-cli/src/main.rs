@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wayfire-cli — SlateOS Wayfire 3D Wayland compositor
+//! wayfire-cli — Slate OS Wayfire 3D Wayland compositor
 //!
 //! Multi-personality: `wayfire`, `wf-msg`
 

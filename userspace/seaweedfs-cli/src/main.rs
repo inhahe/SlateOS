@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! seaweedfs-cli — SlateOS SeaweedFS distributed storage
+//! seaweedfs-cli — Slate OS SeaweedFS distributed storage
 //!
 //! Multi-personality: `weed`, `weed-master`, `weed-volume`
 

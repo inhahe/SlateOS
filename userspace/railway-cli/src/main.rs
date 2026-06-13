@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! railway-cli — SlateOS Railway CLI
+//! railway-cli — Slate OS Railway CLI
 //!
 //! Single personality: `railway`
 

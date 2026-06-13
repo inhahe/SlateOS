@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gatling-cli — SlateOS Gatling load testing tool
+//! gatling-cli — Slate OS Gatling load testing tool
 //!
 //! Single personality: `gatling`
 

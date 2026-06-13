@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! polkit-kde-cli — SlateOS KDE PolicyKit authentication agent
+//! polkit-kde-cli — Slate OS KDE PolicyKit authentication agent
 //!
 //! Single personality: `polkit-kde-authentication-agent-1`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! unoconv-cli — SlateOS universal document converter
+//! unoconv-cli — Slate OS universal document converter
 //!
 //! Single personality: `unoconv`
 

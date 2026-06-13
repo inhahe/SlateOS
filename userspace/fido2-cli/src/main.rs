@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fido2-cli — SlateOS FIDO2/WebAuthn tools
+//! fido2-cli — Slate OS FIDO2/WebAuthn tools
 //!
 //! Multi-personality: `fido2-token`, `fido2-cred`, `fido2-assert`, `fido2-info`
 

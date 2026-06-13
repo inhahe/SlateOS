@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! f3d-cli — SlateOS F3D 3D model viewer
+//! f3d-cli — Slate OS F3D 3D model viewer
 //!
 //! Single personality: `f3d`
 

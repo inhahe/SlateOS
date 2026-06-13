@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rocketchat-cli — SlateOS Rocket.Chat self-hosted team chat
+//! rocketchat-cli — Slate OS Rocket.Chat self-hosted team chat
 //!
 //! Single personality: `rocketchat`
 

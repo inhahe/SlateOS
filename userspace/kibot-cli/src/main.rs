@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kibot-cli — SlateOS KiBot KiCad automation
+//! kibot-cli — Slate OS KiBot KiCad automation
 //!
 //! Single personality: `kibot`
 

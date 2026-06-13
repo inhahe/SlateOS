@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! deja-dup-cli — SlateOS Deja Dup backup tool
+//! deja-dup-cli — Slate OS Deja Dup backup tool
 //!
 //! Multi-personality: `deja-dup`, `deja-dup-monitor`
 

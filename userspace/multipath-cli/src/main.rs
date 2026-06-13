@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! multipath-cli — SlateOS device-mapper multipath tools
+//! multipath-cli — Slate OS device-mapper multipath tools
 //!
 //! Multi-personality: `multipath`, `multipathd`, `kpartx`
 

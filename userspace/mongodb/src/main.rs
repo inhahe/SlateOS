@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mongodb — SlateOS document database
+//! mongodb — Slate OS document database
 //!
 //! Multi-personality: `mongod` (server), `mongos` (router), `mongosh` (shell)
 

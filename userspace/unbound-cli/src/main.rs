@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! unbound-cli — SlateOS Unbound recursive DNS resolver
+//! unbound-cli — Slate OS Unbound recursive DNS resolver
 //!
 //! Multi-personality: `unbound`, `unbound-control`, `unbound-host`, `unbound-checkconf`
 

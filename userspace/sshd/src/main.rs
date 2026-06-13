@@ -1,6 +1,6 @@
-//! `SlateOS` SSH Server Daemon (sshd)
+//! `Slate OS` SSH Server Daemon (sshd)
 //!
-//! An SSH-2 protocol server for `SlateOS`. Listens for incoming SSH connections,
+//! An SSH-2 protocol server for `Slate OS`. Listens for incoming SSH connections,
 //! authenticates users, and spawns interactive shell sessions or executes
 //! commands on behalf of authenticated users.
 //!

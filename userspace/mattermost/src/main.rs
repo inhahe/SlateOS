@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mattermost — SlateOS team collaboration platform
+//! mattermost — Slate OS team collaboration platform
 //!
 //! Multi-personality: `mattermost` (server), `mmctl` (CLI admin)
 

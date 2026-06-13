@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! keycloak-cli — SlateOS Keycloak identity management
+//! keycloak-cli — Slate OS Keycloak identity management
 //!
 //! Multi-personality: `keycloak`, `kcadm`
 

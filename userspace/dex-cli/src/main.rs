@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dex-cli — SlateOS Dex OIDC identity provider
+//! dex-cli — Slate OS Dex OIDC identity provider
 //!
 //! Single personality: `dex`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! calibre-cli — SlateOS Calibre e-book management
+//! calibre-cli — Slate OS Calibre e-book management
 //!
 //! Multi-personality: `calibre`, `calibredb`, `ebook-convert`, `ebook-meta`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rspec-cli — SlateOS RSpec testing framework
+//! rspec-cli — Slate OS RSpec testing framework
 //!
 //! Multi-personality: `rspec`
 

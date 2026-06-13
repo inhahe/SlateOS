@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! logzio-cli — SlateOS Logz.io (open-source-based observability, Tel Aviv + Boston, private)
+//! logzio-cli — Slate OS Logz.io (open-source-based observability, Tel Aviv + Boston, private)
 
 use std::env;
 use std::process;

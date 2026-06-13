@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! camtasia-cli — SlateOS TechSmith Camtasia (screen-recording + editor)
+//! camtasia-cli — Slate OS TechSmith Camtasia (screen-recording + editor)
 //!
 //! Single personality: `camtasia`
 

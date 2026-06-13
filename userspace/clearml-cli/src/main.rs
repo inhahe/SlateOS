@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! clearml-cli — SlateOS ClearML CLI
+//! clearml-cli — Slate OS ClearML CLI
 //!
 //! Multi-personality: `clearml-init`, `clearml-task`, `clearml-data`
 

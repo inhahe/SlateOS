@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hugo-cli — SlateOS Hugo static site generator
+//! hugo-cli — Slate OS Hugo static site generator
 //!
 //! Multi-personality: `hugo`
 

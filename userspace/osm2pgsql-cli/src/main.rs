@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! osm2pgsql-cli — SlateOS osm2pgsql OpenStreetMap importer
+//! osm2pgsql-cli — Slate OS osm2pgsql OpenStreetMap importer
 //!
 //! Single personality: `osm2pgsql`
 

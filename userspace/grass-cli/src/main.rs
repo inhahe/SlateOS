@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! grass-cli — SlateOS GRASS GIS
+//! grass-cli — Slate OS GRASS GIS
 //!
 //! Multi-personality: `grass`, `grass_cmd`
 

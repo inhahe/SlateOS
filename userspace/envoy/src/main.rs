@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! envoy — SlateOS L7 proxy and communication bus
+//! envoy — Slate OS L7 proxy and communication bus
 //!
 //! Single personality: `envoy`
 

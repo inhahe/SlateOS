@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nnn — SlateOS terminal file manager (n³)
+//! nnn — Slate OS terminal file manager (n³)
 //!
 //! Single personality: `nnn`
 

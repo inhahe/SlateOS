@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! perl — SlateOS Perl interpreter
+//! perl — Slate OS Perl interpreter
 //!
 //! Multi-personality: `perl`, `cpan`, `perldoc`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! alacritty-cli — SlateOS Alacritty terminal emulator
+//! alacritty-cli — Slate OS Alacritty terminal emulator
 //!
 //! Multi-personality: `alacritty`, `alacritty-msg`
 

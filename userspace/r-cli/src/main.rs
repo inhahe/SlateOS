@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! r-cli — SlateOS R language CLI
+//! r-cli — Slate OS R language CLI
 //!
 //! Multi-personality: `R`, `Rscript`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! imply-cli — SlateOS Imply (Apache Druid commercial — Polaris cloud, real-time analytics, Burlingame, private)
+//! imply-cli — Slate OS Imply (Apache Druid commercial — Polaris cloud, real-time analytics, Burlingame, private)
 
 use std::env;
 use std::process;

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! msmtp-cli — SlateOS msmtp SMTP client
+//! msmtp-cli — Slate OS msmtp SMTP client
 //!
 //! Single personality: `msmtp`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fwupd — SlateOS firmware update daemon
+//! fwupd — Slate OS firmware update daemon
 //!
 //! Multi-personality binary for firmware update management.
 //! Detected via argv[0]:

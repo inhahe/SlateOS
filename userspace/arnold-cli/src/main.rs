@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! arnold-cli — SlateOS Autodesk Arnold (Oscar-winning production renderer)
+//! arnold-cli — Slate OS Autodesk Arnold (Oscar-winning production renderer)
 //!
 //! Single personality: `arnold`
 

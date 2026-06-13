@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! verilator-cli — SlateOS Verilator Verilog/SystemVerilog simulator
+//! verilator-cli — Slate OS Verilator Verilog/SystemVerilog simulator
 //!
 //! Multi-personality: `verilator`
 

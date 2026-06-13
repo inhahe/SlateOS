@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! macroquad-cli — SlateOS Macroquad game framework helper
+//! macroquad-cli — Slate OS Macroquad game framework helper
 //!
 //! Single personality: `macroquad`
 

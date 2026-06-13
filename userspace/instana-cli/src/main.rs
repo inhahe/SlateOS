@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! instana-cli — SlateOS IBM Instana (APM + observability, IBM subsidiary since 2020)
+//! instana-cli — Slate OS IBM Instana (APM + observability, IBM subsidiary since 2020)
 
 use std::env;
 use std::process;

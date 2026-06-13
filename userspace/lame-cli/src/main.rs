@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lame-cli — SlateOS LAME MP3 encoder CLI
+//! lame-cli — Slate OS LAME MP3 encoder CLI
 //!
 //! Single personality: `lame`
 

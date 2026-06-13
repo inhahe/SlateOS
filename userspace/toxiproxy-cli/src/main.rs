@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! toxiproxy-cli — SlateOS Toxiproxy fault injection proxy
+//! toxiproxy-cli — Slate OS Toxiproxy fault injection proxy
 //!
 //! Two personalities: `toxiproxy-server`, `toxiproxy-cli`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! litecli — SlateOS SQLite CLI with autocomplete and syntax highlighting
+//! litecli — Slate OS SQLite CLI with autocomplete and syntax highlighting
 //!
 //! Single personality: `litecli`
 

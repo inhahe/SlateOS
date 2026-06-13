@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! curlie-cli — SlateOS curlie (curl + HTTPie friendliness)
+//! curlie-cli — Slate OS curlie (curl + HTTPie friendliness)
 //!
 //! Single personality: `curlie`
 

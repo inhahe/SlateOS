@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! atlan-cli — SlateOS Atlan (modern active metadata + data catalog, Bangalore)
+//! atlan-cli — Slate OS Atlan (modern active metadata + data catalog, Bangalore)
 
 use std::env;
 use std::process;

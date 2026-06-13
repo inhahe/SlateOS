@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! task-cli — SlateOS Task (Taskfile) runner
+//! task-cli — Slate OS Task (Taskfile) runner
 //!
 //! Single personality: `task`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xen-cli — SlateOS Xen Project hypervisor
+//! xen-cli — Slate OS Xen Project hypervisor
 //!
 //! Single personality: `xen`
 

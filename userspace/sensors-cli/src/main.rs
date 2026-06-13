@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sensors-cli — SlateOS hardware monitoring sensors
+//! sensors-cli — Slate OS hardware monitoring sensors
 //!
 //! Multi-personality: `sensors`, `sensors-detect`, `pwmconfig`, `fancontrol`
 

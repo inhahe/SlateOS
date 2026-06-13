@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! openresty-cli — SlateOS OpenResty web platform
+//! openresty-cli — Slate OS OpenResty web platform
 //!
 //! Multi-personality: `openresty`, `resty`
 

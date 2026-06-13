@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! abstruse-cli — SlateOS Abstruse CI/CD
+//! abstruse-cli — Slate OS Abstruse CI/CD
 //!
 //! Single personality: `abstruse`
 

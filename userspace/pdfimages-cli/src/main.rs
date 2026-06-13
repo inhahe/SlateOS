@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pdfimages-cli — SlateOS pdfimages image extractor
+//! pdfimages-cli — Slate OS pdfimages image extractor
 //!
 //! Single personality: `pdfimages`
 

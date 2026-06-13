@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cpupower-cli — SlateOS CPU frequency/power tools
+//! cpupower-cli — Slate OS CPU frequency/power tools
 //!
 //! Multi-personality: `cpupower`, `cpufreq-info`, `cpufreq-set`, `turbostat`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! puppet-cli — SlateOS Puppet configuration management
+//! puppet-cli — Slate OS Puppet configuration management
 //!
 //! Multi-personality: `puppet`, `facter`, `hiera`
 

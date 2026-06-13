@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cosign — SlateOS container signing and verification
+//! cosign — Slate OS container signing and verification
 //!
 //! Single personality: `cosign`
 

@@ -1,4 +1,4 @@
-//! SlateOS block device control utility.
+//! Slate OS block device control utility.
 //!
 //! Multi-personality binary providing:
 //! - **blockdev** — call block device ioctls

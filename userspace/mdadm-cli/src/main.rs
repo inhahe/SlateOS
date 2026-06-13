@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mdadm-cli — SlateOS mdadm RAID management CLI
+//! mdadm-cli — Slate OS mdadm RAID management CLI
 //!
 //! Single personality: `mdadm`
 

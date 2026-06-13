@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! moc-cli — SlateOS MOC (Music on Console) player
+//! moc-cli — Slate OS MOC (Music on Console) player
 //!
 //! Multi-personality: `mocp`, `mocp-server`
 

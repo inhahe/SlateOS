@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! context-cli — SlateOS ConTeXt typesetting system
+//! context-cli — Slate OS ConTeXt typesetting system
 //!
 //! Single personality: `context`
 

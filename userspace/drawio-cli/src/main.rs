@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! drawio-cli — SlateOS draw.io diagram editor
+//! drawio-cli — Slate OS draw.io diagram editor
 //!
 //! Single personality: `drawio`
 

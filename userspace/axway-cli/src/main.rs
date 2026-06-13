@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! axway-cli — SlateOS Axway Amplify Platform personality CLI.
+//! axway-cli — Slate OS Axway Amplify Platform personality CLI.
 
 use std::env;
 use std::process;

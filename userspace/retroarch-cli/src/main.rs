@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! retroarch-cli — SlateOS RetroArch multi-system emulator
+//! retroarch-cli — Slate OS RetroArch multi-system emulator
 //!
 //! Multi-personality: `retroarch`
 

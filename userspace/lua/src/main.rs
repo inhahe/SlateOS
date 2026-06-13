@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lua — SlateOS Lua scripting language
+//! lua — Slate OS Lua scripting language
 //!
 //! Multi-personality: `lua`, `luac`, `luarocks`
 

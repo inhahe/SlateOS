@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! jless — SlateOS command-line JSON viewer/explorer
+//! jless — Slate OS command-line JSON viewer/explorer
 //!
 //! Single personality: `jless`
 

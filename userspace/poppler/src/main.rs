@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! poppler — SlateOS PDF rendering library utilities
+//! poppler — Slate OS PDF rendering library utilities
 //!
 //! Multi-personality: `pdftotext`, `pdfinfo`, `pdftohtml`, `pdftoppm`, `pdfimages`, `pdfseparate`, `pdfunite`
 

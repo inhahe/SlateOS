@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! amtool-cli — SlateOS Alertmanager CLI tool
+//! amtool-cli — Slate OS Alertmanager CLI tool
 //!
 //! Single personality: `amtool`
 

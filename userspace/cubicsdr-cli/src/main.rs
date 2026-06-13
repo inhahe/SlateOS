@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cubicsdr-cli — SlateOS CubicSDR receiver
+//! cubicsdr-cli — Slate OS CubicSDR receiver
 //!
 //! Single personality: `CubicSDR`
 

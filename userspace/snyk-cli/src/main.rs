@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! snyk-cli — SlateOS Snyk security CLI
+//! snyk-cli — Slate OS Snyk security CLI
 //!
 //! Multi-personality: `snyk`
 

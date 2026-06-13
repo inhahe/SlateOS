@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cantor-cli — SlateOS Cantor math notebook
+//! cantor-cli — Slate OS Cantor math notebook
 //!
 //! Single personality: `cantor`
 

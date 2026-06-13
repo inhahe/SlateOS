@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! conjur-cli — SlateOS CyberArk Conjur secrets management
+//! conjur-cli — Slate OS CyberArk Conjur secrets management
 //!
 //! Single personality: `conjur`
 

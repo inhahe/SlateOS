@@ -1,4 +1,4 @@
-//! SlateOS cgroup management utility.
+//! Slate OS cgroup management utility.
 //!
 //! Multi-personality binary providing:
 //! - **cgcreate** — create cgroups

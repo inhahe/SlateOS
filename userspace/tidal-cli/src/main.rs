@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tidal-cli — SlateOS TidalCycles live coding pattern language
+//! tidal-cli — Slate OS TidalCycles live coding pattern language
 //!
 //! Single personality: `tidal`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fuse-overlayfs-cli — SlateOS fuse-overlayfs filesystem
+//! fuse-overlayfs-cli — Slate OS fuse-overlayfs filesystem
 //!
 //! Single personality: `fuse-overlayfs`
 

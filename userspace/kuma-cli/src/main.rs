@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kuma-cli — SlateOS Kuma service mesh
+//! kuma-cli — Slate OS Kuma service mesh
 //!
 //! Multi-personality: `kuma-cp`, `kuma-dp`, `kumactl`
 

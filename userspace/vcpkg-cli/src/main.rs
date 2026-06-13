@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vcpkg-cli — SlateOS vcpkg CLI
+//! vcpkg-cli — Slate OS vcpkg CLI
 //!
 //! Single personality: `vcpkg`
 

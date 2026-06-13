@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! victoriametrics-cli — SlateOS VictoriaMetrics CLI tools
+//! victoriametrics-cli — Slate OS VictoriaMetrics CLI tools
 //!
 //! Two personalities: `vmctl`, `vmbackup`
 

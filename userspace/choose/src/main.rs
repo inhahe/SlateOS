@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! choose — SlateOS human-friendly alternative to awk/cut
+//! choose — Slate OS human-friendly alternative to awk/cut
 //!
 //! Single personality: `choose`
 

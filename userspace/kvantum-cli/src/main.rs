@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kvantum-cli — SlateOS Kvantum Qt SVG theme engine
+//! kvantum-cli — Slate OS Kvantum Qt SVG theme engine
 //!
 //! Multi-personality: `kvantummanager`, `kvantumpreview`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zig — SlateOS Zig programming language
+//! zig — Slate OS Zig programming language
 //!
 //! Single personality: `zig`
 

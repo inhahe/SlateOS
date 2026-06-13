@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! himalaya-cli — SlateOS Himalaya CLI email client
+//! himalaya-cli — Slate OS Himalaya CLI email client
 //!
 //! Single personality: `himalaya`
 

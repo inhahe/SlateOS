@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tenable-cli — SlateOS Tenable (Nessus creator, exposure management, Columbia MD, NASDAQ:TENB)
+//! tenable-cli — Slate OS Tenable (Nessus creator, exposure management, Columbia MD, NASDAQ:TENB)
 
 use std::env;
 use std::process;

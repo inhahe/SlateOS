@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! festival-cli — SlateOS Festival/Flite TTS CLI
+//! festival-cli — Slate OS Festival/Flite TTS CLI
 //!
 //! Multi-personality: `festival`, `flite`, `text2wave`
 

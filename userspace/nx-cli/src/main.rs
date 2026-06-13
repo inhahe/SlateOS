@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nx-cli — SlateOS Siemens NX integrated CAD/CAM/CAE
+//! nx-cli — Slate OS Siemens NX integrated CAD/CAM/CAE
 //!
 //! Single personality: `nx`
 

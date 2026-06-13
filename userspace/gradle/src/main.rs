@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gradle — SlateOS Gradle build automation tool
+//! gradle — Slate OS Gradle build automation tool
 //!
 //! Single personality: `gradle` (also `gradlew`)
 

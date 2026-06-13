@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! borgmatic — SlateOS simple BorgBackup wrapper and scheduler
+//! borgmatic — Slate OS simple BorgBackup wrapper and scheduler
 //!
 //! Single personality: `borgmatic`
 

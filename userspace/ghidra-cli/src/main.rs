@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ghidra-cli — SlateOS Ghidra reverse engineering suite
+//! ghidra-cli — Slate OS Ghidra reverse engineering suite
 //!
 //! Multi-personality: `ghidra`, `analyzeHeadless`
 

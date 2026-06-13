@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pdfpc-cli — SlateOS pdfpc PDF presenter console
+//! pdfpc-cli — Slate OS pdfpc PDF presenter console
 //!
 //! Single personality: `pdfpc`
 

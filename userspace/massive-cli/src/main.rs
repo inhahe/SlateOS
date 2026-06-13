@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! massive-cli — SlateOS Native Instruments Massive synthesizer
+//! massive-cli — Slate OS Native Instruments Massive synthesizer
 //!
 //! Single personality: `massive`
 

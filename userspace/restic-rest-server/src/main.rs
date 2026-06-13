@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! restic-rest-server — SlateOS REST backend for restic
+//! restic-rest-server — Slate OS REST backend for restic
 //!
 //! Single personality: `rest-server`
 

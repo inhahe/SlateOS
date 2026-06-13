@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! upcloud-cli — SlateOS UpCloud CLI
+//! upcloud-cli — Slate OS UpCloud CLI
 //!
 //! Multi-personality: `upctl`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! comsol-cli — SlateOS COMSOL Multiphysics simulation
+//! comsol-cli — Slate OS COMSOL Multiphysics simulation
 //!
 //! Single personality: `comsol`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kube-bench-cli — SlateOS kube-bench CIS Kubernetes benchmark
+//! kube-bench-cli — Slate OS kube-bench CIS Kubernetes benchmark
 //!
 //! Single personality: `kube-bench`
 

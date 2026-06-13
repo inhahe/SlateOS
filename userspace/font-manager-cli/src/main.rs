@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! font-manager-cli — SlateOS Font Manager
+//! font-manager-cli — Slate OS Font Manager
 //!
 //! Single personality: `font-manager`
 

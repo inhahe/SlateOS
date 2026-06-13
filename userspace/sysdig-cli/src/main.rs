@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sysdig-cli — SlateOS Sysdig (Falco creator, runtime security + monitoring, Davis CA)
+//! sysdig-cli — Slate OS Sysdig (Falco creator, runtime security + monitoring, Davis CA)
 
 use std::env;
 use std::process;

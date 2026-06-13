@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! teamcity-cli — SlateOS JetBrains TeamCity CI/CD
+//! teamcity-cli — Slate OS JetBrains TeamCity CI/CD
 //!
 //! Single personality: `teamcity`
 

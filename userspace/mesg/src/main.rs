@@ -1,4 +1,4 @@
-// SlateOS mesg — control and send terminal messages
+// Slate OS mesg — control and send terminal messages
 //
 // Multi-personality binary:
 //   mesg   — control write access to your terminal

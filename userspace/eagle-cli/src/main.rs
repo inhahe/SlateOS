@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! eagle-cli — SlateOS EAGLE PCB design (open-source compatible)
+//! eagle-cli — Slate OS EAGLE PCB design (open-source compatible)
 //!
 //! Single personality: `eagle`
 

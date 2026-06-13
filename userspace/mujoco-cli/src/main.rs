@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mujoco-cli — SlateOS MuJoCo physics simulator
+//! mujoco-cli — Slate OS MuJoCo physics simulator
 //!
 //! Multi-personality: `mujoco`, `simulate`
 

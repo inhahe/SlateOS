@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gqrx-cli — SlateOS Gqrx SDR receiver
+//! gqrx-cli — Slate OS Gqrx SDR receiver
 //!
 //! Single personality: `gqrx`
 

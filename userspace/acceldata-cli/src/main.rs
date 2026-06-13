@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! acceldata-cli — SlateOS Acceldata (multi-layered data observability, Campbell CA + Bangalore)
+//! acceldata-cli — Slate OS Acceldata (multi-layered data observability, Campbell CA + Bangalore)
 
 use std::env;
 use std::process;

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cypress-cli — SlateOS Cypress testing CLI
+//! cypress-cli — Slate OS Cypress testing CLI
 //!
 //! Single personality: `cypress`
 

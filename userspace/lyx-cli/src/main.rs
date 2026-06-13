@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lyx-cli — SlateOS LyX document processor
+//! lyx-cli — Slate OS LyX document processor
 //!
 //! Multi-personality: `lyx`, `lyxclient`
 

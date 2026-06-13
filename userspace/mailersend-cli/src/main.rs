@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! mailersend-cli — SlateOS MailerSend transactional email personality CLI.
+//! mailersend-cli — Slate OS MailerSend transactional email personality CLI.
 
 use std::env;
 use std::process;

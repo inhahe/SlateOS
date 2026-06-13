@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mozc-cli — SlateOS Mozc Japanese input method
+//! mozc-cli — Slate OS Mozc Japanese input method
 //!
 //! Multi-personality: `mozc_server`, `mozc_tool`
 

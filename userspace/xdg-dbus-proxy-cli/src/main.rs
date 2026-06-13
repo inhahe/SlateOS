@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xdg-dbus-proxy-cli — SlateOS xdg-dbus-proxy D-Bus filtering proxy
+//! xdg-dbus-proxy-cli — Slate OS xdg-dbus-proxy D-Bus filtering proxy
 //!
 //! Single personality: `xdg-dbus-proxy`
 

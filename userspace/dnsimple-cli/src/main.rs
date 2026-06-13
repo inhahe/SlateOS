@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! dnsimple-cli — SlateOS personality CLI for DNSimple, the developer-friendly DNS + domain registrar.
+//! dnsimple-cli — Slate OS personality CLI for DNSimple, the developer-friendly DNS + domain registrar.
 
 use std::env;
 use std::process;

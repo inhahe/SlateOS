@@ -1,4 +1,4 @@
-//! SlateOS Network Scanner
+//! Slate OS Network Scanner
 //!
 //! Graphical network scanner / discovery application with:
 //! - IP range scanning (CIDR, individual, custom ranges)
@@ -16,7 +16,7 @@
 //! - Simulated traceroute
 //!
 //! Uses the guitk library for UI rendering. Network I/O is
-//! performed through SlateOS syscalls; simulated with representative
+//! performed through Slate OS syscalls; simulated with representative
 //! data for initial development.
 
 #![allow(dead_code)]

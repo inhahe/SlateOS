@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! schemacrawler-cli — SlateOS SchemaCrawler database schema discovery
+//! schemacrawler-cli — Slate OS SchemaCrawler database schema discovery
 //!
 //! Single personality: `schemacrawler`
 

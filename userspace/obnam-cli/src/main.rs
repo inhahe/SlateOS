@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! obnam-cli — SlateOS Obnam backup program
+//! obnam-cli — Slate OS Obnam backup program
 //!
 //! Single personality: `obnam`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! matillion-cli — SlateOS Matillion data productivity
+//! matillion-cli — Slate OS Matillion data productivity
 //!
 //! Single personality: `matillion`
 

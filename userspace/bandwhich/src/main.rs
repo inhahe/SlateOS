@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bandwhich — SlateOS terminal bandwidth utilization tool
+//! bandwhich — Slate OS terminal bandwidth utilization tool
 //!
 //! Single personality: `bandwhich`
 

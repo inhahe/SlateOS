@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! collectd-cli — SlateOS collectd system statistics daemon
+//! collectd-cli — Slate OS collectd system statistics daemon
 //!
 //! Multi-personality: `collectd`, `collectdctl`, `collectdmon`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ytdlp — SlateOS video/audio downloader (yt-dlp compatible)
+//! ytdlp — Slate OS video/audio downloader (yt-dlp compatible)
 //!
 //! Single personality: `yt-dlp`
 

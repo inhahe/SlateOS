@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vitepress-cli — SlateOS VitePress documentation generator
+//! vitepress-cli — Slate OS VitePress documentation generator
 //!
 //! Single personality: `vitepress`
 

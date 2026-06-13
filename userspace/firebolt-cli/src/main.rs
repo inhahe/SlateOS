@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! firebolt-cli — SlateOS Firebolt (cloud DW for data-intensive apps + sub-second BI, Tel Aviv/NYC, private)
+//! firebolt-cli — Slate OS Firebolt (cloud DW for data-intensive apps + sub-second BI, Tel Aviv/NYC, private)
 
 use std::env;
 use std::process;

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mupen64plus-cli — SlateOS Mupen64Plus N64 emulator
+//! mupen64plus-cli — Slate OS Mupen64Plus N64 emulator
 //!
 //! Single personality: `mupen64plus`
 

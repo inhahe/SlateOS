@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fenics-cli — SlateOS FEniCS finite element framework
+//! fenics-cli — Slate OS FEniCS finite element framework
 //!
 //! Multi-personality: `dolfin-run`, `ffc`, `dolfin-convert`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! creo-cli — SlateOS PTC Creo parametric 3D CAD
+//! creo-cli — Slate OS PTC Creo parametric 3D CAD
 //!
 //! Single personality: `creo`
 

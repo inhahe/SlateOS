@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! jenkins-cli — SlateOS Jenkins CI/CD tools
+//! jenkins-cli — Slate OS Jenkins CI/CD tools
 //!
 //! Multi-personality: `jenkins-cli`
 

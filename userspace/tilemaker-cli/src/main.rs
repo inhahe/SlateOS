@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tilemaker-cli — SlateOS Tilemaker OSM tile builder
+//! tilemaker-cli — Slate OS Tilemaker OSM tile builder
 //!
 //! Single personality: `tilemaker`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hyperv-cli — SlateOS Microsoft Hyper-V hypervisor
+//! hyperv-cli — Slate OS Microsoft Hyper-V hypervisor
 //!
 //! Single personality: `hyperv`
 

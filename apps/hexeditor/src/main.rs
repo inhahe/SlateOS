@@ -1,4 +1,4 @@
-//! SlateOS Hex Editor
+//! Slate OS Hex Editor
 //!
 //! Binary file hex editor with:
 //! - Multi-tab document support

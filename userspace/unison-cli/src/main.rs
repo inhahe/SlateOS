@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! unison-cli — SlateOS Unison file synchronizer CLI
+//! unison-cli — Slate OS Unison file synchronizer CLI
 //!
 //! Single personality: `unison`
 

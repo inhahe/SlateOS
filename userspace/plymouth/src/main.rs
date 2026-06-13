@@ -1,4 +1,4 @@
-//! SlateOS boot splash system.
+//! Slate OS boot splash system.
 //!
 //! Multi-personality binary providing:
 //! - **plymouth** — boot splash client

@@ -1,4 +1,4 @@
-//! `SlateOS` Regex Tester & Debugger
+//! `Slate OS` Regex Tester & Debugger
 //!
 //! An interactive regex testing tool with:
 //! - Custom regex engine supporting common regex features

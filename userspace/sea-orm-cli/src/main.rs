@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sea-orm-cli — SlateOS SeaORM code generation and migration CLI
+//! sea-orm-cli — Slate OS SeaORM code generation and migration CLI
 //!
 //! Single personality: `sea-orm-cli`
 

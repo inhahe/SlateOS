@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! minuet-cli — SlateOS Minuet music education
+//! minuet-cli — Slate OS Minuet music education
 //!
 //! Single personality: `minuet`
 

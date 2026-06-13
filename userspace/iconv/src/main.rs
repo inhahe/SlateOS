@@ -1,4 +1,4 @@
-//! SlateOS iconv -- character encoding conversion utility.
+//! Slate OS iconv -- character encoding conversion utility.
 //!
 //! Converts text from one character encoding to another.  Reads input from
 //! files (or stdin), decodes bytes into Unicode codepoints, then re-encodes

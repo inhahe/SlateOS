@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! simple-scan-cli — SlateOS Simple Scan document scanner
+//! simple-scan-cli — Slate OS Simple Scan document scanner
 //!
 //! Single personality: `simple-scan`
 

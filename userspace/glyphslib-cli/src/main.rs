@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! glyphslib-cli — SlateOS GlyphsLib font source tool
+//! glyphslib-cli — Slate OS GlyphsLib font source tool
 //!
 //! Single personality: `glyphslib`
 

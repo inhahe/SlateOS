@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! strace-cli — SlateOS system call tracer
+//! strace-cli — Slate OS system call tracer
 //!
 //! Multi-personality: `strace`
 

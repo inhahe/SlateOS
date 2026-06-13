@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! unreal-cli — SlateOS Unreal Engine CLI tools
+//! unreal-cli — Slate OS Unreal Engine CLI tools
 //!
 //! Multi-personality: `uat`, `unreal-build`
 

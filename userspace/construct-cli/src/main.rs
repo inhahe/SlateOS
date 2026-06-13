@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! construct-cli — SlateOS Construct 3 game maker
+//! construct-cli — Slate OS Construct 3 game maker
 //!
 //! Single personality: `construct`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! spotify-tui — SlateOS Spotify terminal client
+//! spotify-tui — Slate OS Spotify terminal client
 //!
 //! Single personality: `spt`
 

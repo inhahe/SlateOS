@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hightouch-cli — SlateOS Hightouch (the reverse-ETL category creator)
+//! hightouch-cli — Slate OS Hightouch (the reverse-ETL category creator)
 
 use std::env;
 use std::process;

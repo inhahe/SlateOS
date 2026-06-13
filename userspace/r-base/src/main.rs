@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! r-base — SlateOS R statistical computing
+//! r-base — Slate OS R statistical computing
 //!
 //! Multi-personality: `R`, `Rscript`
 

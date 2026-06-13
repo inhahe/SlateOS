@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! jaeger-cli — SlateOS Jaeger distributed tracing query CLI
+//! jaeger-cli — Slate OS Jaeger distributed tracing query CLI
 //!
 //! Single personality: `jaeger-cli`
 

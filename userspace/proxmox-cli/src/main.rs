@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! proxmox-cli — SlateOS Proxmox VE / Backup Server / Mail Gateway
+//! proxmox-cli — Slate OS Proxmox VE / Backup Server / Mail Gateway
 //!
 //! Single personality: `proxmox`
 

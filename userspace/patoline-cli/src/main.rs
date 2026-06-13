@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! patoline-cli — SlateOS Patoline typesetting system
+//! patoline-cli — Slate OS Patoline typesetting system
 //!
 //! Single personality: `patoline`
 

@@ -1,4 +1,4 @@
-//! SlateOS `ctags` -- Code Tag Generator
+//! Slate OS `ctags` -- Code Tag Generator
 //!
 //! A multi-personality tag generator compatible with Exuberant Ctags and
 //! Emacs etags.  When invoked as `ctags` (the default) it produces a sorted

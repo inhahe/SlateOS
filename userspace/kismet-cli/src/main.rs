@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kismet-cli — SlateOS Kismet wireless network detector
+//! kismet-cli — Slate OS Kismet wireless network detector
 //!
 //! Multi-personality: `kismet`, `kismet_cap_linux_wifi`
 

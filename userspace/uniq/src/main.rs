@@ -1,4 +1,4 @@
-//! SlateOS `uniq` Utility -- Filter Adjacent Duplicate Lines
+//! Slate OS `uniq` Utility -- Filter Adjacent Duplicate Lines
 //!
 //! Reads lines from input (file or stdin) and filters adjacent matching lines,
 //! writing the result to output (file or stdout). Typically used with sorted

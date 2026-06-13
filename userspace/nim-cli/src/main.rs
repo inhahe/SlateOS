@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nim-cli — SlateOS Nim programming language
+//! nim-cli — Slate OS Nim programming language
 //!
 //! Multi-personality: `nim`, `nimble`, `nimsuggest`
 

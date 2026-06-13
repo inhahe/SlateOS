@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! orca-cli — SlateOS Orca screen reader CLI
+//! orca-cli — Slate OS Orca screen reader CLI
 //!
 //! Single personality: `orca`
 

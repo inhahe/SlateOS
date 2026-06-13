@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cloud-hypervisor-cli — SlateOS Cloud Hypervisor VMM
+//! cloud-hypervisor-cli — Slate OS Cloud Hypervisor VMM
 //!
 //! Single personality: `cloud-hypervisor`
 

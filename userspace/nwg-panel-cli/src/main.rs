@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nwg-panel-cli — SlateOS nwg-panel GTK panel for Wayland
+//! nwg-panel-cli — Slate OS nwg-panel GTK panel for Wayland
 //!
 //! Single personality: `nwg-panel`
 

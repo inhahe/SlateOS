@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dagster-cli — SlateOS Dagster data orchestration CLI
+//! dagster-cli — Slate OS Dagster data orchestration CLI
 //!
 //! Multi-personality: `dagster`, `dagit`
 

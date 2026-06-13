@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! capstone-cli — SlateOS Capstone disassembly engine
+//! capstone-cli — Slate OS Capstone disassembly engine
 //!
 //! Single personality: `cstool`
 

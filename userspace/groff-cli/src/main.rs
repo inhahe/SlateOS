@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! groff-cli — SlateOS groff/troff CLI
+//! groff-cli — Slate OS groff/troff CLI
 //!
 //! Multi-personality: `groff`, `troff`, `nroff`, `tbl`, `eqn`, `pic`
 

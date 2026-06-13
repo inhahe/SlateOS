@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ruff-cli — SlateOS Ruff Python linter/formatter
+//! ruff-cli — Slate OS Ruff Python linter/formatter
 //!
 //! Single personality: `ruff`
 

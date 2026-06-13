@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! thanos-cli — SlateOS Thanos HA Prometheus tools
+//! thanos-cli — Slate OS Thanos HA Prometheus tools
 //!
 //! Multi-personality: `thanos`
 

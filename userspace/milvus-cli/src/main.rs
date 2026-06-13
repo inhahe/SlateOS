@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! milvus-cli — SlateOS Milvus (open-source cloud-native vector DB, Zilliz commercial, Shanghai/Redwood City)
+//! milvus-cli — Slate OS Milvus (open-source cloud-native vector DB, Zilliz commercial, Shanghai/Redwood City)
 
 use std::env;
 use std::process;

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! youtube-dl — SlateOS video downloader (yt-dlp compatible)
+//! youtube-dl — Slate OS video downloader (yt-dlp compatible)
 //!
 //! Multi-personality: `yt-dlp`, `youtube-dl`
 

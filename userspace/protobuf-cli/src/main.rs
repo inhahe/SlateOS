@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! protobuf-cli — SlateOS Protocol Buffers / serialization tools
+//! protobuf-cli — Slate OS Protocol Buffers / serialization tools
 //!
 //! Multi-personality: `protoc`, `protoc-gen-go`, `buf`
 

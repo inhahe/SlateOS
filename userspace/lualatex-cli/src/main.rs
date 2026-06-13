@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lualatex-cli — SlateOS LuaLaTeX/LuaTeX engine
+//! lualatex-cli — Slate OS LuaLaTeX/LuaTeX engine
 //!
 //! Multi-personality: `lualatex`, `luatex`, `luahbtex`
 

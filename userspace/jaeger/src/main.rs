@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! jaeger — SlateOS distributed tracing system
+//! jaeger — Slate OS distributed tracing system
 //!
 //! Multi-personality: `jaeger`, `jaeger-agent`, `jaeger-collector`, `jaeger-query`
 

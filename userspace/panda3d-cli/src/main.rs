@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! panda3d-cli — SlateOS Panda3D game engine
+//! panda3d-cli — Slate OS Panda3D game engine
 //!
 //! Single personality: `panda3d`
 

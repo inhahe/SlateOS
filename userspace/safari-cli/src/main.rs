@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! safari-cli — SlateOS Apple Safari browser
+//! safari-cli — Slate OS Apple Safari browser
 //!
 //! Single personality: `safari`
 

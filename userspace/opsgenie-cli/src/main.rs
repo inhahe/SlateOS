@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! opsgenie-cli — SlateOS Opsgenie CLI
+//! opsgenie-cli — Slate OS Opsgenie CLI
 //!
 //! Single personality: `opsgenie`
 

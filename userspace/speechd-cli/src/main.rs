@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! speechd-cli — SlateOS Speech Dispatcher text-to-speech
+//! speechd-cli — Slate OS Speech Dispatcher text-to-speech
 //!
 //! Multi-personality: `speech-dispatcher`, `spd-say`, `spd-conf`
 

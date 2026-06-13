@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sox-cli — SlateOS SoX (Sound eXchange) CLI
+//! sox-cli — Slate OS SoX (Sound eXchange) CLI
 //!
 //! Single personality: `sox`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! seldon-cli — SlateOS Seldon Core CLI
+//! seldon-cli — Slate OS Seldon Core CLI
 //!
 //! Multi-personality: `seldon`
 

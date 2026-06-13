@@ -1,4 +1,4 @@
-//! SlateOS EFI boot manager utility.
+//! Slate OS EFI boot manager utility.
 //!
 //! Multi-personality binary providing:
 //! - **efibootmgr** — manipulate UEFI boot entries

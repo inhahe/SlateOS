@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nannou-cli — SlateOS Nannou creative coding framework
+//! nannou-cli — Slate OS Nannou creative coding framework
 //!
 //! Single personality: `nannou`
 

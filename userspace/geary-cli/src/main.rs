@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! geary-cli — SlateOS Geary email client
+//! geary-cli — Slate OS Geary email client
 //!
 //! Single personality: `geary`
 

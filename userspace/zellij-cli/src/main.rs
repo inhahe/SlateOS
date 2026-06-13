@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zellij-cli — SlateOS Zellij terminal multiplexer
+//! zellij-cli — Slate OS Zellij terminal multiplexer
 //!
 //! Single personality: `zellij`
 

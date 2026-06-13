@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kops-cli — SlateOS kops Kubernetes operations tool
+//! kops-cli — Slate OS kops Kubernetes operations tool
 //!
 //! Single personality: `kops`
 

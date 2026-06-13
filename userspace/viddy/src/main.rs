@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! viddy — SlateOS modern watch command with diff and history
+//! viddy — Slate OS modern watch command with diff and history
 //!
 //! Single personality: `viddy`
 

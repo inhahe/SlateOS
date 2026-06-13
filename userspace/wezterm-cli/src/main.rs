@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wezterm-cli — SlateOS WezTerm terminal emulator
+//! wezterm-cli — Slate OS WezTerm terminal emulator
 //!
 //! Multi-personality: `wezterm`, `wezterm-gui`, `wezterm-mux-server`
 

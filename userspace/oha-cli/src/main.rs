@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! oha-cli — SlateOS oha HTTP load generator
+//! oha-cli — Slate OS oha HTTP load generator
 //!
 //! Single personality: `oha`
 

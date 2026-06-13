@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! screengrab-cli — SlateOS ScreenGrab screenshot tool
+//! screengrab-cli — Slate OS ScreenGrab screenshot tool
 //!
 //! Single personality: `screengrab`
 

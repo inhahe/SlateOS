@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wave-cli — SlateOS Wave (Wave Apps — free accounting, now owned by H&R Block)
+//! wave-cli — Slate OS Wave (Wave Apps — free accounting, now owned by H&R Block)
 //!
 //! Single personality: `wave`
 

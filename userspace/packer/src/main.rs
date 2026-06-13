@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! packer — SlateOS machine image builder
+//! packer — Slate OS machine image builder
 //!
 //! Single personality: `packer`
 

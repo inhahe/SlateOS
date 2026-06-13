@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mumble-cli — SlateOS Mumble voice chat
+//! mumble-cli — Slate OS Mumble voice chat
 //!
 //! Multi-personality: `mumble`, `murmurd`
 

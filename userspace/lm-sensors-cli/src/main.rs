@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lm-sensors-cli — SlateOS lm-sensors hardware monitoring
+//! lm-sensors-cli — Slate OS lm-sensors hardware monitoring
 //!
 //! Multi-personality: `sensors`, `sensors-detect`
 

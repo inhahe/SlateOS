@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ggez-cli — SlateOS ggez Rust game framework helper
+//! ggez-cli — Slate OS ggez Rust game framework helper
 //!
 //! Single personality: `ggez`
 

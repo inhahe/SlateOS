@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tpm-cli — SlateOS TPM (Trusted Platform Module) tools
+//! tpm-cli — Slate OS TPM (Trusted Platform Module) tools
 //!
 //! Multi-personality: `tpm2_getcap`, `tpm2_getrandom`, `tpm2_pcrread`,
 //! `tpm2_createprimary`, `tpm2_nvdefine`, `tpm2_nvread`

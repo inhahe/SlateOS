@@ -1,4 +1,4 @@
-//! seq/yes/expr — number sequence, repeated output, and expression evaluation for SlateOS
+//! seq/yes/expr — number sequence, repeated output, and expression evaluation for Slate OS
 //!
 //! Multi-personality binary detected via argv[0]:
 //! - `seq`: print a sequence of numbers

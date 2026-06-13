@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pubsub-cli — SlateOS Google Cloud Pub/Sub (Google's planet-scale messaging, built on Borg)
+//! pubsub-cli — Slate OS Google Cloud Pub/Sub (Google's planet-scale messaging, built on Borg)
 
 use std::env;
 use std::process;

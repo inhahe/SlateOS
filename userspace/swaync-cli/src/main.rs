@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! swaync-cli — SlateOS SwayNotificationCenter
+//! swaync-cli — Slate OS SwayNotificationCenter
 //!
 //! Multi-personality: `swaync`, `swaync-client`
 

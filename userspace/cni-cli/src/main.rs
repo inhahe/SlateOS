@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cni-cli — SlateOS CNI (Container Network Interface) plugins
+//! cni-cli — Slate OS CNI (Container Network Interface) plugins
 //!
 //! Multi-personality: `cnitool`, `flannel`, `calico`
 

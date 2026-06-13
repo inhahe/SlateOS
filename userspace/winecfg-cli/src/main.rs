@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! winecfg-cli — SlateOS Wine configuration utility
+//! winecfg-cli — Slate OS Wine configuration utility
 //!
 //! Single personality: `winecfg`
 

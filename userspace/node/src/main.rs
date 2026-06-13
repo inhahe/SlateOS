@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! node — SlateOS Node.js JavaScript runtime
+//! node — Slate OS Node.js JavaScript runtime
 //!
 //! Multi-personality binary detected via argv[0]:
 //!

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! packer-cli — SlateOS HashiCorp Packer image builder CLI
+//! packer-cli — Slate OS HashiCorp Packer image builder CLI
 //!
 //! Single personality: `packer`
 

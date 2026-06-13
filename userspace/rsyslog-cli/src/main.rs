@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rsyslog-cli — SlateOS rsyslog system logging daemon
+//! rsyslog-cli — Slate OS rsyslog system logging daemon
 //!
 //! Multi-personality: `rsyslogd`, `logger`
 

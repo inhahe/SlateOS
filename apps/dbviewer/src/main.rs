@@ -1,4 +1,4 @@
-//! `SlateOS` `SQLite` Database Viewer / Browser
+//! `Slate OS` `SQLite` Database Viewer / Browser
 //!
 //! A database viewer/browser tool (like DB Browser for `SQLite`) with:
 //! - SQL parser: basic SELECT, INSERT, UPDATE, DELETE, CREATE TABLE, DROP TABLE

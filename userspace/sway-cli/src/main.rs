@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sway-cli — SlateOS Sway window manager tools
+//! sway-cli — Slate OS Sway window manager tools
 //!
 //! Multi-personality: `swaymsg`, `swaynag`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pagerduty-cli — SlateOS PagerDuty CLI
+//! pagerduty-cli — Slate OS PagerDuty CLI
 //!
 //! Single personality: `pd`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sendmail-cli — SlateOS sendmail/msmtp CLI
+//! sendmail-cli — Slate OS sendmail/msmtp CLI
 //!
 //! Multi-personality: `sendmail`, `msmtp`
 

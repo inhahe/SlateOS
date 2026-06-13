@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! grub-cli — SlateOS GRUB bootloader tools
+//! grub-cli — Slate OS GRUB bootloader tools
 //!
 //! Multi-personality: `grub-install`, `grub-mkconfig`, `update-grub`,
 //! `grub-set-default`, `grub-editenv`

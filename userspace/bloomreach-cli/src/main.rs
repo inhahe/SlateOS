@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bloomreach-cli — SlateOS Bloomreach (commerce CDP + experience + AI search, Mountain View + EU)
+//! bloomreach-cli — Slate OS Bloomreach (commerce CDP + experience + AI search, Mountain View + EU)
 
 use std::env;
 use std::process;

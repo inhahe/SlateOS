@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! etckeeper-cli — SlateOS etckeeper /etc version control
+//! etckeeper-cli — Slate OS etckeeper /etc version control
 //!
 //! Single personality: `etckeeper`
 

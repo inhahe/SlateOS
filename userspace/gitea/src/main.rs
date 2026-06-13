@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gitea — SlateOS self-hosted Git service
+//! gitea — Slate OS self-hosted Git service
 //!
 //! Single personality: `gitea`
 

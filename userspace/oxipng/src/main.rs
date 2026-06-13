@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! oxipng — SlateOS PNG optimizer (lossless compression)
+//! oxipng — Slate OS PNG optimizer (lossless compression)
 //!
 //! Single personality: `oxipng`
 

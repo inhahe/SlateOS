@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! exiftool — SlateOS metadata reader/writer for files
+//! exiftool — Slate OS metadata reader/writer for files
 //!
 //! Single personality: `exiftool`
 

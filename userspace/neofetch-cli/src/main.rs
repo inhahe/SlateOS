@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! neofetch-cli — SlateOS Neofetch system information
+//! neofetch-cli — Slate OS Neofetch system information
 //!
 //! Single personality: `neofetch`
 

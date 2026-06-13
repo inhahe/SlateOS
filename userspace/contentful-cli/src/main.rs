@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! contentful-cli — SlateOS Contentful headless CMS personality CLI.
+//! contentful-cli — Slate OS Contentful headless CMS personality CLI.
 
 use std::env;
 use std::process;

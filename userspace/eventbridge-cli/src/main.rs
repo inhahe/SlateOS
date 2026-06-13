@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! eventbridge-cli — SlateOS AWS EventBridge (serverless event bus, formerly CloudWatch Events, 2019)
+//! eventbridge-cli — Slate OS AWS EventBridge (serverless event bus, formerly CloudWatch Events, 2019)
 
 use std::env;
 use std::process;

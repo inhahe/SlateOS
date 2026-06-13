@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! helpscout-cli — SlateOS Help Scout (email-first helpdesk that feels like real email)
+//! helpscout-cli — Slate OS Help Scout (email-first helpdesk that feels like real email)
 //!
 //! Single personality: `helpscout`
 

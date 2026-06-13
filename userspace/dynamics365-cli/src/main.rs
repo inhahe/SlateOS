@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dynamics365-cli — SlateOS Microsoft Dynamics 365 ERP/CRM
+//! dynamics365-cli — Slate OS Microsoft Dynamics 365 ERP/CRM
 //!
 //! Single personality: `dynamics365`
 

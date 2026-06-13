@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! namecheap-cli — SlateOS personality CLI for Namecheap, the long-standing affordable registrar.
+//! namecheap-cli — Slate OS personality CLI for Namecheap, the long-standing affordable registrar.
 
 use std::env;
 use std::process;

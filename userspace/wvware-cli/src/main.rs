@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wvware-cli — SlateOS Microsoft Word document converter
+//! wvware-cli — Slate OS Microsoft Word document converter
 //!
 //! Multi-personality: `wvText`, `wvHtml`, `wvPS`, `wvPDF`
 

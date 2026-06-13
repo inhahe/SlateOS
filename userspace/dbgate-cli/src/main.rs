@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dbgate-cli — SlateOS DbGate database manager
+//! dbgate-cli — Slate OS DbGate database manager
 //!
 //! Single personality: `dbgate`
 

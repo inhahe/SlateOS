@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xd-cli — SlateOS Adobe XD (sunset UX/UI design tool)
+//! xd-cli — Slate OS Adobe XD (sunset UX/UI design tool)
 //!
 //! Single personality: `xd`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! appimage-cli — SlateOS AppImage tools
+//! appimage-cli — Slate OS AppImage tools
 //!
 //! Multi-personality: `appimagetool`, `appimaged`, `appimage-update`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! scilab-cli — SlateOS Scilab numerical computing
+//! scilab-cli — Slate OS Scilab numerical computing
 //!
 //! Single personality: `scilab`
 

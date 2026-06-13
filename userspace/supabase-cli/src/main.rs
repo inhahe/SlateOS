@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! supabase-cli — SlateOS Supabase CLI
+//! supabase-cli — Slate OS Supabase CLI
 //!
 //! Multi-personality: `supabase`
 

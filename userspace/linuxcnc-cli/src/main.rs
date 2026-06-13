@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! linuxcnc-cli — SlateOS LinuxCNC machine control
+//! linuxcnc-cli — Slate OS LinuxCNC machine control
 //!
 //! Multi-personality: `linuxcnc`, `halcmd`, `halrun`
 

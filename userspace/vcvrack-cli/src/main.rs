@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vcvrack-cli — SlateOS VCV Rack modular synthesizer
+//! vcvrack-cli — Slate OS VCV Rack modular synthesizer
 //!
 //! Single personality: `vcvrack`
 

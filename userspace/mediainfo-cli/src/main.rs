@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mediainfo-cli — SlateOS MediaInfo CLI
+//! mediainfo-cli — Slate OS MediaInfo CLI
 //!
 //! Single personality: `mediainfo`
 

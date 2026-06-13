@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bricscad-cli — SlateOS Bricsys BricsCAD DWG-compatible CAD
+//! bricscad-cli — Slate OS Bricsys BricsCAD DWG-compatible CAD
 //!
 //! Single personality: `bricscad`
 

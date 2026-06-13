@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! steamtinkerlaunch-cli — SlateOS SteamTinkerLaunch tweaking tool
+//! steamtinkerlaunch-cli — Slate OS SteamTinkerLaunch tweaking tool
 //!
 //! Single personality: `steamtinkerlaunch`
 

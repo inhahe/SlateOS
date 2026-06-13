@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! paychex-cli — SlateOS Paychex (the #2 US payroll provider, SMB-focused)
+//! paychex-cli — Slate OS Paychex (the #2 US payroll provider, SMB-focused)
 //!
 //! Single personality: `paychex`
 

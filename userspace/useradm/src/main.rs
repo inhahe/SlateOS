@@ -1,4 +1,4 @@
-//! SlateOS User Account Management
+//! Slate OS User Account Management
 //!
 //! Unified tool for creating, modifying, and deleting user accounts.
 //! Manages /etc/users.yaml (our OS's user database format) and

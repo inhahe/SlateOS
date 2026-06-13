@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! x11vnc-cli — SlateOS x11vnc VNC server for existing displays
+//! x11vnc-cli — Slate OS x11vnc VNC server for existing displays
 //!
 //! Single personality: `x11vnc`
 

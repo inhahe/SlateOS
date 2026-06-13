@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tempo-cli — SlateOS Grafana Tempo CLI
+//! tempo-cli — Slate OS Grafana Tempo CLI
 //!
 //! Multi-personality: `tempo-cli`
 

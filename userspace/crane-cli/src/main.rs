@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! crane-cli — SlateOS container registry interaction CLI
+//! crane-cli — Slate OS container registry interaction CLI
 //!
 //! Single personality: `crane`
 

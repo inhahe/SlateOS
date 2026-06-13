@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wayst-cli — SlateOS Wayst GPU-accelerated terminal
+//! wayst-cli — Slate OS Wayst GPU-accelerated terminal
 //!
 //! Single personality: `wayst`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! evidently-cli — SlateOS Evidently ML model monitoring
+//! evidently-cli — Slate OS Evidently ML model monitoring
 //!
 //! Single personality: `evidently`
 

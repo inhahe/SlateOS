@@ -1,4 +1,4 @@
-//! pkg — SlateOS package manager.
+//! pkg — Slate OS package manager.
 //!
 //! Content-addressed package store with atomic generational updates.
 //!
@@ -672,7 +672,7 @@ impl PkgConfig {
     ///
     /// Format:
     /// ```yaml
-    /// # SlateOS package manager configuration
+    /// # Slate OS package manager configuration
     /// repo: stable
     ///   url: https://repo.slateos.org/stable
     ///   priority: 100

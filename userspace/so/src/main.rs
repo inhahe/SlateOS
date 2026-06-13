@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! so — SlateOS StackOverflow from the terminal
+//! so — Slate OS StackOverflow from the terminal
 //!
 //! Single personality: `so`
 

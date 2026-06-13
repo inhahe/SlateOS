@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bitwarden-cli — SlateOS Bitwarden password manager
+//! bitwarden-cli — Slate OS Bitwarden password manager
 //!
 //! Multi-personality: `bitwarden-desktop`, `bw`
 

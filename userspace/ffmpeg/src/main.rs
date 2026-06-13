@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ffmpeg — SlateOS multimedia framework
+//! ffmpeg — Slate OS multimedia framework
 //!
 //! Multi-personality binary detected via argv[0]:
 //!

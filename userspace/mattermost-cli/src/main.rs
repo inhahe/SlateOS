@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mattermost-cli — SlateOS Mattermost CLI
+//! mattermost-cli — Slate OS Mattermost CLI
 //!
 //! Single personality: `mmctl`
 

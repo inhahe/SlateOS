@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! postman-cli — SlateOS Postman CLI (Newman)
+//! postman-cli — Slate OS Postman CLI (Newman)
 //!
 //! Single personality: `postman` (also `newman`)
 

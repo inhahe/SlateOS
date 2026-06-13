@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! garageband-cli — SlateOS GarageBand (Apple consumer DAW)
+//! garageband-cli — Slate OS GarageBand (Apple consumer DAW)
 //!
 //! Single personality: `garageband`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! restic — SlateOS fast, encrypted backup tool
+//! restic — Slate OS fast, encrypted backup tool
 //!
 //! Single personality: `restic`
 

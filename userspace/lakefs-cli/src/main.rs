@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lakefs-cli — SlateOS lakeFS data lake version control
+//! lakefs-cli — Slate OS lakeFS data lake version control
 //!
 //! Multi-personality: `lakefs`, `lakectl`
 

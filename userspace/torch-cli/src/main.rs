@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! torch-cli — SlateOS PyTorch machine learning framework
+//! torch-cli — Slate OS PyTorch machine learning framework
 //!
 //! Multi-personality: `torch`, `torchrun`
 

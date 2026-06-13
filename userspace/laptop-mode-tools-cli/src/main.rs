@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! laptop-mode-tools-cli — SlateOS laptop-mode-tools power savings
+//! laptop-mode-tools-cli — Slate OS laptop-mode-tools power savings
 //!
 //! Single personality: `laptop_mode`
 

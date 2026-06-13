@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cast-cli — SlateOS Foundry cast Ethereum CLI
+//! cast-cli — Slate OS Foundry cast Ethereum CLI
 //!
 //! Single personality: `cast`
 

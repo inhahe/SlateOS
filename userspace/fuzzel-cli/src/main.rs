@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fuzzel-cli — SlateOS Fuzzel application launcher
+//! fuzzel-cli — Slate OS Fuzzel application launcher
 //!
 //! Single personality: `fuzzel`
 

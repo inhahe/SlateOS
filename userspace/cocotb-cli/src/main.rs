@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cocotb-cli — SlateOS cocotb HDL verification framework
+//! cocotb-cli — Slate OS cocotb HDL verification framework
 //!
 //! Single personality: `cocotb`
 

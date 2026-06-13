@@ -1,4 +1,4 @@
-//! SlateOS Settings — Centralized System Configuration UI
+//! Slate OS Settings — Centralized System Configuration UI
 //!
 //! A Windows-style settings/control panel application providing unified
 //! access to system configuration: display, sound, network, personalization,
@@ -3564,7 +3564,7 @@ impl SettingsState {
 fn main() {
     let mut state = SettingsState::new();
 
-    // In a real SlateOS environment, this would enter the compositor event loop.
+    // In a real Slate OS environment, this would enter the compositor event loop.
     // For now, render one frame to verify the UI builds correctly.
     let tree = state.render();
 

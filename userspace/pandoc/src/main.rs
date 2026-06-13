@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pandoc — SlateOS universal document converter
+//! pandoc — Slate OS universal document converter
 //!
 //! Single personality: `pandoc`
 

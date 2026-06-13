@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! logrotate-cli — SlateOS logrotate CLI
+//! logrotate-cli — Slate OS logrotate CLI
 //!
 //! Single personality: `logrotate`
 

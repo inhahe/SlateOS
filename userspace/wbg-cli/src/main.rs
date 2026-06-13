@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wbg-cli — SlateOS wbg minimal wallpaper setter
+//! wbg-cli — Slate OS wbg minimal wallpaper setter
 //!
 //! Single personality: `wbg`
 

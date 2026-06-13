@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pass-cli — SlateOS pass (password-store) CLI
+//! pass-cli — Slate OS pass (password-store) CLI
 //!
 //! Single personality: `pass`
 

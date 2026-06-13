@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! paypal-cli — SlateOS PayPal CLI
+//! paypal-cli — Slate OS PayPal CLI
 //!
 //! Single personality: `paypal`
 

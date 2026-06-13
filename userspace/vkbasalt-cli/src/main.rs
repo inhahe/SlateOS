@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vkbasalt-cli — SlateOS vkBasalt Vulkan post-processing
+//! vkbasalt-cli — Slate OS vkBasalt Vulkan post-processing
 //!
 //! Single personality: `vkbasalt`
 

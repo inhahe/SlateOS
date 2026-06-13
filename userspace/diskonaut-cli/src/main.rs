@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! diskonaut-cli — SlateOS diskonaut disk space navigator
+//! diskonaut-cli — Slate OS diskonaut disk space navigator
 //!
 //! Single personality: `diskonaut`
 

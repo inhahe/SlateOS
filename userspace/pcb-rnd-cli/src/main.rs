@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pcb-rnd-cli — SlateOS pcb-rnd PCB layout editor
+//! pcb-rnd-cli — Slate OS pcb-rnd PCB layout editor
 //!
 //! Single personality: `pcb-rnd`
 

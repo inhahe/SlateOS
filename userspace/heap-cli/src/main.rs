@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! heap-cli — SlateOS Heap (auto-capture analytics — never miss an event)
+//! heap-cli — Slate OS Heap (auto-capture analytics — never miss an event)
 //!
 //! Single personality: `heap`
 

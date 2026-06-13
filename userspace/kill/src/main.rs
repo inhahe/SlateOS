@@ -1,6 +1,6 @@
-//! SlateOS Process Termination Utility
+//! Slate OS Process Termination Utility
 //!
-//! Sends termination messages to processes. In SlateOS, process control uses
+//! Sends termination messages to processes. In Slate OS, process control uses
 //! IPC messages rather than Unix signals. The `kill` utility first attempts
 //! a graceful shutdown via IPC (giving the target process a chance to clean
 //! up), then falls back to the `SYS_PROCESS_KILL` syscall for forceful
@@ -97,7 +97,7 @@ const SYS_THREAD_RESUME: u64 = 514;
 
 /// Issue a three-argument syscall using the x86-64 `syscall` instruction.
 ///
-/// Register mapping follows the SlateOS syscall ABI:
+/// Register mapping follows the Slate OS syscall ABI:
 ///   rax = syscall number, rdi = arg1, rsi = arg2, rdx = arg3
 ///   Return value in rax. rcx and r11 are clobbered by the CPU.
 #[cfg(target_arch = "x86_64")]
@@ -125,7 +125,7 @@ unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
 // Signal compatibility mapping
 // ============================================================================
 
-/// Signal entry for the compatibility table. SlateOS does not use Unix signals,
+/// Signal entry for the compatibility table. Slate OS does not use Unix signals,
 /// but we map traditional signal names/numbers to IPC actions for familiarity.
 struct SignalEntry {
     number: u32,

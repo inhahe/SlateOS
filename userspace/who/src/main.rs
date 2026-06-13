@@ -1,10 +1,10 @@
-//! SlateOS Logged-In Users Display (`who` / `w`)
+//! Slate OS Logged-In Users Display (`who` / `w`)
 //!
 //! Shows who is currently logged in to the system. Reads session data from
 //! multiple sources in priority order:
 //!
 //! 1. `/var/run/utmp` -- binary utmp records (Linux format for compatibility)
-//! 2. `/run/sessions/` -- SlateOS native session directory
+//! 2. `/run/sessions/` -- Slate OS native session directory
 //! 3. `/tmp/.users/` -- fallback: files named by username
 //!
 //! When invoked as `w` (detected via `argv[0]`), displays an extended format
@@ -336,7 +336,7 @@ fn read_utmp(path: &str) -> Option<Vec<SessionRecord>> {
 }
 
 // ============================================================================
-// Data source: /run/sessions/ (SlateOS native)
+// Data source: /run/sessions/ (Slate OS native)
 // ============================================================================
 
 /// Parse session files from /run/sessions/.

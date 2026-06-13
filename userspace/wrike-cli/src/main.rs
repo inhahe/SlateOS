@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wrike-cli — SlateOS Wrike (Citrix-owned enterprise work management)
+//! wrike-cli — Slate OS Wrike (Citrix-owned enterprise work management)
 
 use std::env;
 use std::process;

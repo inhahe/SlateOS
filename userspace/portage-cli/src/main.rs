@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! portage-cli — SlateOS Gentoo Portage package manager
+//! portage-cli — Slate OS Gentoo Portage package manager
 //!
 //! Multi-personality: `emerge`, `equery`, `eclean`
 

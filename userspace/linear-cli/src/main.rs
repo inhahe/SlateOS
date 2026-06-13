@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! linear-cli — SlateOS Linear CLI
+//! linear-cli — Slate OS Linear CLI
 //!
 //! Single personality: `linear`
 

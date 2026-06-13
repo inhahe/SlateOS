@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! roundcube-cli — SlateOS Roundcube webmail
+//! roundcube-cli — Slate OS Roundcube webmail
 //!
 //! Single personality: `roundcube`
 

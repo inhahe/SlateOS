@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sentry-cli — SlateOS Sentry error tracking CLI
+//! sentry-cli — Slate OS Sentry error tracking CLI
 //!
 //! Single personality: `sentry-cli`
 

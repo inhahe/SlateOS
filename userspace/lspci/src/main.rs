@@ -1,4 +1,4 @@
-//! SlateOS PCI Device Lister
+//! Slate OS PCI Device Lister
 //!
 //! Lists PCI devices by reading from /sys/bus/pci/ or /proc/pci.
 //! Includes a built-in vendor/device ID database for common hardware.

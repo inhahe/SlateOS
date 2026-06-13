@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nutshell-cli — SlateOS Nutshell (small-team CRM from Ann Arbor)
+//! nutshell-cli — Slate OS Nutshell (small-team CRM from Ann Arbor)
 //!
 //! Single personality: `nutshell`
 

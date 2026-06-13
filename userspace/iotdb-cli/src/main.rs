@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! iotdb-cli — SlateOS Apache IoTDB time-series database
+//! iotdb-cli — Slate OS Apache IoTDB time-series database
 //!
 //! Single personality: `iotdb`
 

@@ -1,4 +1,4 @@
-//! SlateOS Backup Utility
+//! Slate OS Backup Utility
 //!
 //! Snapshot-based backup tool supporting full and incremental backups with
 //! SHA-256 integrity verification and manifest tracking.

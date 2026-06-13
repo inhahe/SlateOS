@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tempo — SlateOS distributed tracing backend
+//! tempo — Slate OS distributed tracing backend
 //!
 //! Single personality: `tempo`
 

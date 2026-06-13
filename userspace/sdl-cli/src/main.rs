@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sdl-cli — SlateOS SDL2 config tool
+//! sdl-cli — Slate OS SDL2 config tool
 //!
 //! Multi-personality: `sdl2-config`
 

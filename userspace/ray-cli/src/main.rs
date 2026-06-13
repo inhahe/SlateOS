@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ray-cli — SlateOS Ray distributed computing CLI
+//! ray-cli — Slate OS Ray distributed computing CLI
 //!
 //! Multi-personality: `ray`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pgcli-cli — SlateOS pgcli enhanced PostgreSQL client
+//! pgcli-cli — Slate OS pgcli enhanced PostgreSQL client
 //!
 //! Multi-personality: `pgcli`
 

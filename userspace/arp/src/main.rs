@@ -1,4 +1,4 @@
-//! SlateOS ARP Table Management Utility
+//! Slate OS ARP Table Management Utility
 //!
 //! Displays the ARP (Address Resolution Protocol) cache.  The cache is read
 //! through the dedicated `SYS_ARP_TABLE` syscall, which returns the resolved
@@ -12,14 +12,14 @@
 //! arp -n                      Display entries, numeric output only
 //! arp -i eth0                 Limit display to interface eth0
 //! arp -v                      Verbose output
-//! arp -d hostname             Delete an ARP entry (unsupported on SlateOS)
-//! arp -s hostname hw_addr     Add a static ARP entry (unsupported on SlateOS)
+//! arp -d hostname             Delete an ARP entry (unsupported on Slate OS)
+//! arp -s hostname hw_addr     Add a static ARP entry (unsupported on Slate OS)
 //! arp -D -s hostname iface    Use device MAC for a static entry (unsupported)
 //! ```
 //!
 //! # ABI note
 //!
-//! SlateOS exposes `SYS_ARP_TABLE` (read) and `SYS_NET_IF_INFO` (interface
+//! Slate OS exposes `SYS_ARP_TABLE` (read) and `SYS_NET_IF_INFO` (interface
 //! configuration, including the local MAC) but has **no** syscall to add,
 //! delete, or probe ARP entries.  Those operations therefore report a clear
 //! "not supported" error rather than silently invoking the wrong syscall.
@@ -54,7 +54,7 @@ const MAX_ARP_RECORDS: usize = 1024;
 /// # Safety
 ///
 /// The caller must ensure:
-/// - `nr` is a valid SlateOS syscall number.
+/// - `nr` is a valid Slate OS syscall number.
 /// - All arguments are valid for that specific syscall (valid pointers,
 ///   correct sizes, etc.).
 #[cfg(target_arch = "x86_64")]
@@ -184,7 +184,7 @@ fn mac_is_zero(mac: &[u8; 6]) -> bool {
 // ARP cache entry
 // ============================================================================
 
-/// ARP cache flags.  SlateOS reports only resolved/unresolved state, so the
+/// ARP cache flags.  Slate OS reports only resolved/unresolved state, so the
 /// vocabulary mirrors Linux's `arp` output for familiarity even though only
 /// `COMPLETE` is currently synthesised from kernel data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

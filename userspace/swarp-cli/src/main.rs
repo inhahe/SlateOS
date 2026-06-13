@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! swarp-cli — SlateOS SWarp image resampling and co-adding
+//! swarp-cli — Slate OS SWarp image resampling and co-adding
 //!
 //! Single personality: `swarp`
 

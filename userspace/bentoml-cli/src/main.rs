@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bentoml-cli — SlateOS BentoML model serving CLI
+//! bentoml-cli — Slate OS BentoML model serving CLI
 //!
 //! Multi-personality: `bentoml`
 

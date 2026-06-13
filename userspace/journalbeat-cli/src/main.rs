@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! journalbeat-cli — SlateOS Journalbeat log shipper
+//! journalbeat-cli — Slate OS Journalbeat log shipper
 //!
 //! Single personality: `journalbeat`
 

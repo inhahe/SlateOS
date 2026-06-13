@@ -1,4 +1,4 @@
-// SlateOS w — show who is logged in and what they are doing
+// Slate OS w — show who is logged in and what they are doing
 //
 // Multi-personality binary:
 //   w      — show logged-in users and their activity

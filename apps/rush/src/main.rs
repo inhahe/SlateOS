@@ -9,7 +9,7 @@
 #![allow(clippy::struct_excessive_bools)]
 #![allow(clippy::fn_params_excessive_bools)]
 
-//! SlateOS Rush Hour -- sliding car puzzle game.
+//! Slate OS Rush Hour -- sliding car puzzle game.
 //!
 //! A 6x6 grid contains vehicles (cars occupy 2 cells, trucks occupy 3 cells).
 //! Each vehicle can only slide along its orientation axis (horizontal or

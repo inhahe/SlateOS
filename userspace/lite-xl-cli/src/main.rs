@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lite-xl-cli — SlateOS Lite XL editor
+//! lite-xl-cli — Slate OS Lite XL editor
 //!
 //! Single personality: `lite-xl`
 

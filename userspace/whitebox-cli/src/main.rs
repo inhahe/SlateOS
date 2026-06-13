@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! whitebox-cli — SlateOS WhiteboxTools geospatial analysis
+//! whitebox-cli — Slate OS WhiteboxTools geospatial analysis
 //!
 //! Single personality: `whitebox_tools`
 

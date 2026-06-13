@@ -1,4 +1,4 @@
-// SlateOS lp — printing utilities
+// Slate OS lp — printing utilities
 //
 // Multi-personality binary:
 //   lp      — submit print job

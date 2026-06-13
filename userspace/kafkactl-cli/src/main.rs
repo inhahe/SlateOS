@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kafkactl-cli — SlateOS kafkactl Apache Kafka management
+//! kafkactl-cli — Slate OS kafkactl Apache Kafka management
 //!
 //! Single personality: `kafkactl`
 

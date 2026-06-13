@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! openvpn-cli — SlateOS OpenVPN CLI
+//! openvpn-cli — Slate OS OpenVPN CLI
 //!
 //! Single personality: `openvpn`
 

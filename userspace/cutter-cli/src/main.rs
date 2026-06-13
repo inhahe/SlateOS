@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cutter-cli — SlateOS Cutter reverse engineering GUI
+//! cutter-cli — Slate OS Cutter reverse engineering GUI
 //!
 //! Single personality: `cutter`
 

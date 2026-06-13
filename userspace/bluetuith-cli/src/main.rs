@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bluetuith-cli — SlateOS bluetuith TUI Bluetooth manager
+//! bluetuith-cli — Slate OS bluetuith TUI Bluetooth manager
 //!
 //! Single personality: `bluetuith`
 

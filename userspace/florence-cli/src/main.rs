@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! florence-cli — SlateOS Florence virtual keyboard
+//! florence-cli — Slate OS Florence virtual keyboard
 //!
 //! Single personality: `florence`
 

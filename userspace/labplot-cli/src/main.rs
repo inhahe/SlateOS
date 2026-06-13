@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! labplot-cli — SlateOS LabPlot scientific data analysis
+//! labplot-cli — Slate OS LabPlot scientific data analysis
 //!
 //! Single personality: `labplot`
 

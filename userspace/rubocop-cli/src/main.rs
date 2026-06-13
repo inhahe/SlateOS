@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rubocop-cli — SlateOS RuboCop CLI
+//! rubocop-cli — Slate OS RuboCop CLI
 //!
 //! Single personality: `rubocop`
 

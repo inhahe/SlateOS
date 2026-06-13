@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! buildkite-cli — SlateOS Buildkite CLI
+//! buildkite-cli — Slate OS Buildkite CLI
 //!
 //! Multi-personality: `bk`
 

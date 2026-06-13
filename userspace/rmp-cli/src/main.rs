@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rmp-cli — SlateOS MessagePack inspector (rmp-based)
+//! rmp-cli — Slate OS MessagePack inspector (rmp-based)
 //!
 //! Single personality: `msgpack-inspect`
 

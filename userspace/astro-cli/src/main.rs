@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! astro-cli — SlateOS Astro web framework CLI
+//! astro-cli — Slate OS Astro web framework CLI
 //!
 //! Single personality: `astro`
 

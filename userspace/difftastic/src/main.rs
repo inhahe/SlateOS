@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! difftastic — SlateOS structural diff tool that understands syntax
+//! difftastic — Slate OS structural diff tool that understands syntax
 //!
 //! Single personality: `difft`
 

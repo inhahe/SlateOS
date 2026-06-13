@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! jekyll-cli — SlateOS Jekyll static site generator
+//! jekyll-cli — Slate OS Jekyll static site generator
 //!
 //! Multi-personality: `jekyll`
 

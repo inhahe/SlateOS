@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lighttpd-cli — SlateOS lighttpd web server
+//! lighttpd-cli — Slate OS lighttpd web server
 //!
 //! Single personality: `lighttpd`
 

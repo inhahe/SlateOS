@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! age — SlateOS modern file encryption tool
+//! age — Slate OS modern file encryption tool
 //!
 //! Multi-personality binary detected via argv[0]:
 //!

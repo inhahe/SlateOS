@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gopass-cli — SlateOS gopass CLI
+//! gopass-cli — Slate OS gopass CLI
 //!
 //! Single personality: `gopass`
 

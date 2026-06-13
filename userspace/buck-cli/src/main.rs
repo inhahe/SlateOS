@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! buck-cli — SlateOS Buck2 build system
+//! buck-cli — Slate OS Buck2 build system
 //!
 //! Multi-personality: `buck2`, `buck`
 

@@ -1,4 +1,4 @@
-//! SlateOS Sound Mixer
+//! Slate OS Sound Mixer
 //!
 //! A per-app volume mixer similar to Windows Volume Mixer or PulseAudio
 //! Volume Control. Shows currently-playing applications with individual

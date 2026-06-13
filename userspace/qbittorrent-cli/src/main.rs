@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! qbittorrent-cli — SlateOS qBittorrent client
+//! qbittorrent-cli — Slate OS qBittorrent client
 //!
 //! Multi-personality: `qbittorrent`, `qbittorrent-nox`
 

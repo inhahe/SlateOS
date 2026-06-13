@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! psalm-cli — SlateOS Psalm static analysis tool for PHP
+//! psalm-cli — Slate OS Psalm static analysis tool for PHP
 //!
 //! Multi-personality: `psalm`, `psalter`, `psalm-plugin`
 

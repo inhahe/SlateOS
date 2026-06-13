@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! semaphore-cli — SlateOS Semaphore CI/CD (Rendered Text, performance-focused)
+//! semaphore-cli — Slate OS Semaphore CI/CD (Rendered Text, performance-focused)
 //!
 //! Single personality: `semaphore`
 

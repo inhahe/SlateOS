@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ibmcloud-cli — SlateOS IBM Cloud (hybrid cloud + Red Hat OpenShift + watsonx AI, Armonk NY, NYSE:IBM)
+//! ibmcloud-cli — Slate OS IBM Cloud (hybrid cloud + Red Hat OpenShift + watsonx AI, Armonk NY, NYSE:IBM)
 
 use std::env;
 use std::process;

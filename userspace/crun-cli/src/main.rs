@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! crun-cli — SlateOS crun OCI container runtime
+//! crun-cli — Slate OS crun OCI container runtime
 //!
 //! Single personality: `crun`
 

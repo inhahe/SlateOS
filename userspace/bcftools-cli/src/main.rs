@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bcftools-cli — SlateOS BCFtools variant calling tools
+//! bcftools-cli — Slate OS BCFtools variant calling tools
 //!
 //! Multi-personality: `bcftools`
 

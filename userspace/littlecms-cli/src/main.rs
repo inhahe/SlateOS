@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! littlecms-cli — SlateOS Little CMS color management
+//! littlecms-cli — Slate OS Little CMS color management
 //!
 //! Multi-personality: `jpgicc`, `linkicc`, `transicc`, `tificc`
 

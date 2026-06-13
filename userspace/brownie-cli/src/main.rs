@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! brownie-cli — SlateOS Brownie Python Ethereum framework
+//! brownie-cli — Slate OS Brownie Python Ethereum framework
 //!
 //! Single personality: `brownie`
 

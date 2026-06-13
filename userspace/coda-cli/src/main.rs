@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! coda-cli — SlateOS Coda doc-as-app platform
+//! coda-cli — Slate OS Coda doc-as-app platform
 //!
 //! Single personality: `coda`
 

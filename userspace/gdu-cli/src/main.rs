@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gdu-cli — SlateOS gdu disk usage analyzer
+//! gdu-cli — Slate OS gdu disk usage analyzer
 //!
 //! Single personality: `gdu`
 

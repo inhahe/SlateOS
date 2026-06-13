@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gnome-disks-cli — SlateOS GNOME Disks utility
+//! gnome-disks-cli — Slate OS GNOME Disks utility
 //!
 //! Single personality: `gnome-disks`
 

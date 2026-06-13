@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! coriolis-cli — SlateOS Coriolis VLSI place & route
+//! coriolis-cli — Slate OS Coriolis VLSI place & route
 //!
 //! Multi-personality: `cgt`, `blif2vst`, `s2r`
 

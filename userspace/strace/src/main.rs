@@ -1,4 +1,4 @@
-//! SlateOS Syscall Trace Utility
+//! Slate OS Syscall Trace Utility
 //!
 //! Traces system calls made by a target process.  Uses kernel trace
 //! syscalls (`SYS_TRACE_ENABLE` / `SYS_TRACE_READ`) to enable per-PID
@@ -160,7 +160,7 @@ enum ArgFormat {
     Handle,
 }
 
-/// Build the syscall name table covering all SlateOS syscall ranges.
+/// Build the syscall name table covering all Slate OS syscall ranges.
 ///
 /// Ranges:
 ///   0-199:   kernel-core (memory, scheduler, time, misc)

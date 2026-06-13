@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! okular-cli — SlateOS KDE Okular document viewer
+//! okular-cli — Slate OS KDE Okular document viewer
 //!
 //! Single personality: `okular`
 

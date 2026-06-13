@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dremio-cli — SlateOS Dremio (Apache Arrow + Iceberg lakehouse query engine)
+//! dremio-cli — Slate OS Dremio (Apache Arrow + Iceberg lakehouse query engine)
 
 use std::env;
 use std::process;

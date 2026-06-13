@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pdm-cli — SlateOS PDM Python package manager
+//! pdm-cli — Slate OS PDM Python package manager
 //!
 //! Multi-personality: `pdm`
 

@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! lemonsqueezy-cli — SlateOS Lemon Squeezy indie-MoR personality CLI.
+//! lemonsqueezy-cli — Slate OS Lemon Squeezy indie-MoR personality CLI.
 
 use std::env;
 use std::process;

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xkbcomp-cli — SlateOS XKB keyboard layout compiler
+//! xkbcomp-cli — Slate OS XKB keyboard layout compiler
 //!
 //! Single personality: `xkbcomp`
 

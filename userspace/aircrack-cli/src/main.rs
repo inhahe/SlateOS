@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! aircrack-cli — SlateOS Aircrack-ng wireless security auditing
+//! aircrack-cli — Slate OS Aircrack-ng wireless security auditing
 //!
 //! Multi-personality: `aircrack-ng`, `airodump-ng`, `aireplay-ng`, `airmon-ng`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kvmtool-cli — SlateOS kvmtool lightweight KVM tool
+//! kvmtool-cli — Slate OS kvmtool lightweight KVM tool
 //!
 //! Single personality: `lkvm`
 

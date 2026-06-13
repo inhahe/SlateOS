@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! klaviyo-cli — SlateOS Klaviyo (e-commerce email/SMS marketing, NYSE:KVYO)
+//! klaviyo-cli — Slate OS Klaviyo (e-commerce email/SMS marketing, NYSE:KVYO)
 //!
 //! Single personality: `klaviyo`
 

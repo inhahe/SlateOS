@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nextcloud-cli — SlateOS Nextcloud file sync & collaboration
+//! nextcloud-cli — Slate OS Nextcloud file sync & collaboration
 //!
 //! Single personality: `nextcloud`
 

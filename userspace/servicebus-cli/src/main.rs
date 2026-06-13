@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! servicebus-cli — SlateOS Azure Service Bus (Microsoft's enterprise broker, AMQP 1.0, Redmond WA)
+//! servicebus-cli — Slate OS Azure Service Bus (Microsoft's enterprise broker, AMQP 1.0, Redmond WA)
 
 use std::env;
 use std::process;

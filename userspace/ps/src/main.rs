@@ -1,4 +1,4 @@
-//! SlateOS Process Listing Utility
+//! Slate OS Process Listing Utility
 //!
 //! Lists running processes by reading the `/proc` virtual filesystem.
 //! Supports multiple output formats (default, full, long, user-oriented),
@@ -28,7 +28,7 @@ use std::process;
 // Constants
 // ============================================================================
 
-/// SlateOS uses 16 KiB pages.
+/// Slate OS uses 16 KiB pages.
 const PAGE_SIZE_KB: u64 = 16;
 
 /// Assumed tick rate (ticks per second).

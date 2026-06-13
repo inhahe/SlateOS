@@ -1,4 +1,4 @@
-//! SlateOS Service Bus Daemon
+//! Slate OS Service Bus Daemon
 //!
 //! A D-Bus-like named service registry and message routing daemon. Programs use
 //! this to discover system services by well-known name, introspect their typed
@@ -1980,7 +1980,7 @@ impl Default for ServiceBus {
 
 /// Runs the service bus daemon.
 ///
-/// In a full SlateOS system, this listens on a well-known IPC endpoint for client
+/// In a full Slate OS system, this listens on a well-known IPC endpoint for client
 /// connections and processes messages in a loop. For now, this sets up the bus
 /// with default configuration and reports readiness.
 fn main() {

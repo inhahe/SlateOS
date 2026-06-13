@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kubectx-cli — SlateOS kubectx/kubens context and namespace switcher
+//! kubectx-cli — Slate OS kubectx/kubens context and namespace switcher
 //!
 //! Two personalities: `kubectx`, `kubens`
 

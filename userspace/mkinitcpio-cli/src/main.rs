@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mkinitcpio-cli — SlateOS initramfs generator (Arch-style)
+//! mkinitcpio-cli — Slate OS initramfs generator (Arch-style)
 //!
 //! Multi-personality: `mkinitcpio`, `update-initramfs`
 

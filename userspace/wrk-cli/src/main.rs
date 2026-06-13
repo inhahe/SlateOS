@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wrk-cli — SlateOS wrk HTTP benchmarking tool
+//! wrk-cli — Slate OS wrk HTTP benchmarking tool
 //!
 //! Multi-personality: `wrk`, `wrk2`
 

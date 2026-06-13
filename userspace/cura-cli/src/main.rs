@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cura-cli — SlateOS Cura 3D printing slicer
+//! cura-cli — Slate OS Cura 3D printing slicer
 //!
 //! Multi-personality: `cura`, `CuraEngine`
 

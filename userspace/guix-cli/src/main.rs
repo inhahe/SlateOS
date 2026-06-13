@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! guix-cli — SlateOS GNU Guix package manager
+//! guix-cli — Slate OS GNU Guix package manager
 //!
 //! Multi-personality: `guix`
 

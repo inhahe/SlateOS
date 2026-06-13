@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! deluge-cli — SlateOS Deluge BitTorrent client
+//! deluge-cli — Slate OS Deluge BitTorrent client
 //!
 //! Multi-personality: `deluged`, `deluge-console`, `deluge-gtk`, `deluge-web`
 

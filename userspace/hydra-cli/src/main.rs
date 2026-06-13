@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hydra-cli — SlateOS Hydra password cracker CLI
+//! hydra-cli — Slate OS Hydra password cracker CLI
 //!
 //! Single personality: `hydra`
 

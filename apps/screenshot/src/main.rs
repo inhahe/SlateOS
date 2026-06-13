@@ -1,4 +1,4 @@
-//! SlateOS Screenshot Utility
+//! Slate OS Screenshot Utility
 //!
 //! Screen capture application with:
 //! - Full screen, active window, region selection, and delayed captures

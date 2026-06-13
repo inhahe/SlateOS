@@ -1,4 +1,4 @@
-//! SlateOS btrfs filesystem management utility.
+//! Slate OS btrfs filesystem management utility.
 //!
 //! Multi-personality binary providing:
 //! - **btrfs** — btrfs filesystem management (subcommands: filesystem, subvolume,
@@ -371,7 +371,7 @@ fn validate_sector_size(size: u32) -> bool {
 }
 
 // ============================================================================
-// Filesystem operations (simulated for SlateOS userspace)
+// Filesystem operations (simulated for Slate OS userspace)
 // ============================================================================
 
 /// Probe a device path and return simulated filesystem info.

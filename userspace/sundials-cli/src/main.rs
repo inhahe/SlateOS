@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sundials-cli — SlateOS SUNDIALS ODE/DAE solver info
+//! sundials-cli — Slate OS SUNDIALS ODE/DAE solver info
 //!
 //! Single personality: `sundials-info`
 

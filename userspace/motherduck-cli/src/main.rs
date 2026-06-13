@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! motherduck-cli — SlateOS MotherDuck (DuckDB cloud, hybrid execution, Seattle, private 2022)
+//! motherduck-cli — Slate OS MotherDuck (DuckDB cloud, hybrid execution, Seattle, private 2022)
 
 use std::env;
 use std::process;

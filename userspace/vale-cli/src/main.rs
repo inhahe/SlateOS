@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vale-cli — SlateOS Vale prose linter
+//! vale-cli — Slate OS Vale prose linter
 //!
 //! Multi-personality: `vale`
 

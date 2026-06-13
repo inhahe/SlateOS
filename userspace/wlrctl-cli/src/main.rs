@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wlrctl-cli — SlateOS wlrctl wlroots compositor control
+//! wlrctl-cli — Slate OS wlrctl wlroots compositor control
 //!
 //! Single personality: `wlrctl`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ab — SlateOS Apache HTTP benchmarking tool
+//! ab — Slate OS Apache HTTP benchmarking tool
 //!
 //! Multi-personality: `ab`, `siege`
 

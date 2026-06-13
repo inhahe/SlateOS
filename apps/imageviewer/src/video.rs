@@ -1,4 +1,4 @@
-//! Video playback engine for the SlateOS Image Viewer.
+//! Video playback engine for the Slate OS Image Viewer.
 //!
 //! Supports common container formats (AVI, MP4/MOV, MKV/WebM) with a
 //! full-featured player state machine, playback controls UI, and keyboard

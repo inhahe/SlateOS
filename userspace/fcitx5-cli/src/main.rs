@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fcitx5-cli — SlateOS Fcitx5 input method framework
+//! fcitx5-cli — Slate OS Fcitx5 input method framework
 //!
 //! Multi-personality: `fcitx5`, `fcitx5-configtool`, `fcitx5-diagnose`
 

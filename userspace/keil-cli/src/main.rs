@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! keil-cli — SlateOS Arm Keil MDK (Microcontroller Development Kit)
+//! keil-cli — Slate OS Arm Keil MDK (Microcontroller Development Kit)
 //!
 //! Single personality: `keil`
 

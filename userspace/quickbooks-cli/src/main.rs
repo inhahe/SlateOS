@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! quickbooks-cli — SlateOS Intuit QuickBooks accounting
+//! quickbooks-cli — Slate OS Intuit QuickBooks accounting
 //!
 //! Single personality: `quickbooks`
 

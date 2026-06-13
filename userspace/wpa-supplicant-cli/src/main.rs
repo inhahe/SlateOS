@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wpa-supplicant-cli — SlateOS wpa_supplicant wireless client
+//! wpa-supplicant-cli — Slate OS wpa_supplicant wireless client
 //!
 //! Multi-personality: `wpa_supplicant`, `wpa_cli`, `wpa_passphrase`
 

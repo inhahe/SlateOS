@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! neo4j — SlateOS graph database
+//! neo4j — Slate OS graph database
 //!
 //! Multi-personality: `neo4j` (server manager), `cypher-shell` (CLI)
 

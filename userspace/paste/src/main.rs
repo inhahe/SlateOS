@@ -1,4 +1,4 @@
-//! SlateOS `paste` Utility -- Merge Lines of Files Side by Side
+//! Slate OS `paste` Utility -- Merge Lines of Files Side by Side
 //!
 //! Reads corresponding lines from each input file and joins them with a
 //! delimiter, writing the merged result to standard output. Modeled after

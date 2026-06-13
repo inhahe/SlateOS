@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! heidisql-cli — SlateOS HeidiSQL database client
+//! heidisql-cli — Slate OS HeidiSQL database client
 //!
 //! Single personality: `heidisql`
 

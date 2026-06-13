@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! catia-cli — SlateOS Dassault Systèmes CATIA aerospace/automotive CAD/CAE/PLM
+//! catia-cli — Slate OS Dassault Systèmes CATIA aerospace/automotive CAD/CAE/PLM
 //!
 //! Single personality: `catia`
 

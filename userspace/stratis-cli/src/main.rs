@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! stratis-cli — SlateOS Stratis storage management
+//! stratis-cli — Slate OS Stratis storage management
 //!
 //! Multi-personality: `stratis`, `stratisd`
 

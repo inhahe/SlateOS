@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fonttools-cli — SlateOS FontTools Python library CLI
+//! fonttools-cli — Slate OS FontTools Python library CLI
 //!
 //! Multi-personality: `pyftsubset`, `ttx`, `pyftmerge`
 

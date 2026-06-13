@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! premiere-cli — SlateOS Adobe Premiere Pro video editing
+//! premiere-cli — Slate OS Adobe Premiere Pro video editing
 //!
 //! Single personality: `premiere`
 

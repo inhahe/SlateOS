@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! betterbird-cli — SlateOS Betterbird enhanced Thunderbird fork
+//! betterbird-cli — Slate OS Betterbird enhanced Thunderbird fork
 //!
 //! Single personality: `betterbird`
 

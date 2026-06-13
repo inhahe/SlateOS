@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! adminer-cli — SlateOS Adminer database management
+//! adminer-cli — Slate OS Adminer database management
 //!
 //! Single personality: `adminer`
 

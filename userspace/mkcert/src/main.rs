@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mkcert — SlateOS local development certificate tool
+//! mkcert — Slate OS local development certificate tool
 //!
 //! Single personality: `mkcert`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! berglas-cli — SlateOS Berglas GCP secret management
+//! berglas-cli — Slate OS Berglas GCP secret management
 //!
 //! Single personality: `berglas`
 

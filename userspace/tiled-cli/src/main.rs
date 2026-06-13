@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tiled-cli — SlateOS Tiled map editor
+//! tiled-cli — Slate OS Tiled map editor
 //!
 //! Single personality: `tiled`
 

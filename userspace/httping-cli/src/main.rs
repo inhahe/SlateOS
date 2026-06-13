@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! httping-cli — SlateOS HTTP ping utility
+//! httping-cli — Slate OS HTTP ping utility
 //!
 //! Single personality: `httping`
 

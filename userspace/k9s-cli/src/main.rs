@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! k9s-cli — SlateOS K9s Kubernetes TUI
+//! k9s-cli — Slate OS K9s Kubernetes TUI
 //!
 //! Single personality: `k9s`
 

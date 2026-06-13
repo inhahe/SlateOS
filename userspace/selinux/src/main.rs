@@ -1,4 +1,4 @@
-//! SlateOS SELinux security tools.
+//! Slate OS SELinux security tools.
 //!
 //! Multi-personality binary providing:
 //! - **getenforce** (default) — get SELinux enforcement mode
@@ -2420,7 +2420,7 @@ fn print_audit2allow_usage() {
 // ============================================================================
 
 fn print_version(name: &str) {
-    println!("{} (SlateOS selinux-tools) {}", name, VERSION);
+    println!("{} (Slate OS selinux-tools) {}", name, VERSION);
 }
 
 fn main() {

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ogre-cli — SlateOS OGRE 3D graphics engine
+//! ogre-cli — Slate OS OGRE 3D graphics engine
 //!
 //! Single personality: `ogre`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! parted-cli — SlateOS GNU Parted CLI
+//! parted-cli — Slate OS GNU Parted CLI
 //!
 //! Single personality: `parted`
 

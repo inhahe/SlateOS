@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! uvtool-cli — SlateOS uvtool cloud image management
+//! uvtool-cli — Slate OS uvtool cloud image management
 //!
 //! Multi-personality: `uvt-simplestreams-libvirt`, `uvt-kvm`
 

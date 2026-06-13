@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! grafana-cli — SlateOS Grafana CLI
+//! grafana-cli — Slate OS Grafana CLI
 //!
 //! Single personality: `grafana-cli`
 

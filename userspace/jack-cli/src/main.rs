@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! jack-cli — SlateOS JACK Audio Connection Kit
+//! jack-cli — Slate OS JACK Audio Connection Kit
 //!
 //! Multi-personality: `jackd`, `jack_connect`, `jack_disconnect`, `jack_lsp`, `jack_control`
 

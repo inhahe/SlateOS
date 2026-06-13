@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wix-cli — SlateOS Wix (NASDAQ:WIX, drag-and-drop website + commerce)
+//! wix-cli — Slate OS Wix (NASDAQ:WIX, drag-and-drop website + commerce)
 
 use std::env;
 use std::process;

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! neovim-cli — SlateOS Neovim (extensible modern vim fork)
+//! neovim-cli — Slate OS Neovim (extensible modern vim fork)
 //!
 //! Single personality: `neovim` (also: nvim)
 

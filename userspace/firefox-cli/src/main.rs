@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! firefox-cli — SlateOS Mozilla Firefox browser
+//! firefox-cli — Slate OS Mozilla Firefox browser
 //!
 //! Single personality: `firefox`
 

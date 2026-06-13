@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! betteruptime-cli — SlateOS Better Uptime monitoring
+//! betteruptime-cli — Slate OS Better Uptime monitoring
 //!
 //! Single personality: `betteruptime`
 

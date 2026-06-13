@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tcl-cli — SlateOS Tcl interpreter
+//! tcl-cli — Slate OS Tcl interpreter
 //!
 //! Multi-personality: `tclsh`, `tclsh8.6`
 

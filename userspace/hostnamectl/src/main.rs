@@ -1,4 +1,4 @@
-//! SlateOS hostname management utilities.
+//! Slate OS hostname management utilities.
 //!
 //! Multi-personality binary providing:
 //! - **hostnamectl** — query and set system hostname and related settings

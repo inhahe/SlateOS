@@ -1,4 +1,4 @@
-//! SlateOS User and Group Management Utilities
+//! Slate OS User and Group Management Utilities
 //!
 //! Multi-personality binary providing POSIX-compatible user/group management:
 //! useradd, userdel, usermod, groupadd, groupdel, groupmod, newgrp.
@@ -465,7 +465,7 @@ fn remove_home_dir(home: &str) -> Result<(), String> {
 /// Set ownership on a path. On our OS this would be a syscall; here we attempt
 /// a chown-like call. Non-fatal on failure so tools don't break in test envs.
 fn set_ownership(_path: &str, _uid: u32, _gid: u32) {
-    // On SlateOS, this would invoke SYS_CHOWN. In the current build
+    // On Slate OS, this would invoke SYS_CHOWN. In the current build
     // environment we skip actual chown since it requires kernel support.
     // The directory was already created with the process's credentials.
 }
@@ -1534,7 +1534,7 @@ fn cmd_newgrp(argv: &[String]) -> i32 {
         group.name, group.gid
     ));
 
-    // On SlateOS, we would invoke:
+    // On Slate OS, we would invoke:
     //   syscall(SYS_SETGID, group.gid)
     //   syscall(SYS_EXEC, shell_path, ...)
     // For now, just exit success indicating the group was validated.

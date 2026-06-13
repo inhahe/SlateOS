@@ -1,4 +1,4 @@
-//! SlateOS Installer — CLI frontend.
+//! Slate OS Installer — CLI frontend.
 //!
 //! Usage:
 //!   installer --config <path.yaml>       Run unattended installation

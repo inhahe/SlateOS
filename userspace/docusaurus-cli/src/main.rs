@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! docusaurus-cli — SlateOS Docusaurus CLI
+//! docusaurus-cli — Slate OS Docusaurus CLI
 //!
 //! Multi-personality: `docusaurus`
 

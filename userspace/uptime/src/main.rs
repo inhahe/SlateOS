@@ -1,4 +1,4 @@
-//! SlateOS System Uptime Display
+//! Slate OS System Uptime Display
 //!
 //! Displays how long the system has been running, the number of logged-in
 //! users, and load averages — matching the output format of Linux `uptime`.
@@ -207,7 +207,7 @@ fn count_users() -> u32 {
 /// The utmp record format on Linux x86_64 is 384 bytes per entry. We look for
 /// records with ut_type == 7 (USER_PROCESS) to count logged-in users.
 ///
-/// On SlateOS the utmp format may differ; this function degrades gracefully by
+/// On Slate OS the utmp format may differ; this function degrades gracefully by
 /// returning `None` if the file is too small or does not parse.
 fn read_utmp_user_count(path: &str) -> Option<u32> {
     let data = fs::read(path).ok()?;

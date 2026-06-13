@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fnott-cli — SlateOS fnott notification daemon
+//! fnott-cli — Slate OS fnott notification daemon
 //!
 //! Single personality: `fnott`
 

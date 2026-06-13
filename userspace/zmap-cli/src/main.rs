@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zmap-cli — SlateOS ZMap network scanner
+//! zmap-cli — Slate OS ZMap network scanner
 //!
 //! Single personality: `zmap`
 

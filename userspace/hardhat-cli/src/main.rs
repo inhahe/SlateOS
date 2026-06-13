@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hardhat-cli — SlateOS Hardhat Ethereum dev environment
+//! hardhat-cli — Slate OS Hardhat Ethereum dev environment
 //!
 //! Single personality: `hardhat` (alias `npx hardhat`)
 

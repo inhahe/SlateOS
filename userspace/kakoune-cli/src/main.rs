@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kakoune-cli — SlateOS Kakoune editor
+//! kakoune-cli — Slate OS Kakoune editor
 //!
 //! Multi-personality: `kak`, `kak-lsp`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! troff-cli — SlateOS troff/nroff text formatter
+//! troff-cli — Slate OS troff/nroff text formatter
 //!
 //! Multi-personality: `troff`, `nroff`, `tbl`, `eqn`, `pic`, `refer`
 

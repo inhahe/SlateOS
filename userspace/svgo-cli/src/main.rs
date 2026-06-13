@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! svgo-cli — SlateOS SVGO SVG optimizer
+//! svgo-cli — Slate OS SVGO SVG optimizer
 //!
 //! Single personality: `svgo`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! prtg-cli — SlateOS PRTG-compatible monitoring probe
+//! prtg-cli — Slate OS PRTG-compatible monitoring probe
 //!
 //! Single personality: `prtg-probe`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ttfdump-cli — SlateOS TrueType font dumper
+//! ttfdump-cli — Slate OS TrueType font dumper
 //!
 //! Single personality: `ttfdump`
 

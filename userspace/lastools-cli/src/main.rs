@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lastools-cli — SlateOS LAStools LiDAR processing
+//! lastools-cli — Slate OS LAStools LiDAR processing
 //!
 //! Multi-personality: `lasinfo`, `lasview`, `las2txt`, `txt2las`, `lasmerge`, `lassort`
 

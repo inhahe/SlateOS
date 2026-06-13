@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! brevo-cli — SlateOS Brevo (formerly Sendinblue, European SMB marketing platform)
+//! brevo-cli — Slate OS Brevo (formerly Sendinblue, European SMB marketing platform)
 //!
 //! Single personality: `brevo` (also responds to `sendinblue`)
 

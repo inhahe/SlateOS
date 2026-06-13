@@ -1,4 +1,4 @@
-//! SlateOS Disk Free Space Utility
+//! Slate OS Disk Free Space Utility
 //!
 //! Displays filesystem disk space usage by reading mount information from
 //! `/proc/mounts` and querying per-filesystem statistics via the
@@ -32,7 +32,7 @@ use std::process;
 // ============================================================================
 //
 // df queries per-filesystem space via SYS_FS_STATVFS=608 (fs zone 600-799).
-// The previous version used 650, which on SlateOS is SYS_FS_SEEK_DATA, and ALSO
+// The previous version used 650, which on Slate OS is SYS_FS_SEEK_DATA, and ALSO
 // passed the arguments in the wrong order (buffer where the length belongs):
 // it could never have returned valid filesystem statistics. The real handler's
 // ABI is arg0=path ptr, arg1=path len, arg2=output-buffer ptr.
@@ -45,7 +45,7 @@ const FS_STATVFS_SIZE: usize = 64;
 
 /// Parsed `SYS_FS_STATVFS` result.
 ///
-/// SlateOS statvfs does not distinguish "free" from "available to unprivileged
+/// Slate OS statvfs does not distinguish "free" from "available to unprivileged
 /// users" (there is no reserved-block pool), so callers treat available == free.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct StatVfs {
@@ -272,7 +272,7 @@ fn gather_fs_info(entry: &MountEntry) -> Option<FsInfo> {
     {
         let total = st.total_blocks.saturating_mul(st.block_size);
         let free = st.free_blocks.saturating_mul(st.block_size);
-        // SlateOS statvfs has no reserved-block pool, so the space available to
+        // Slate OS statvfs has no reserved-block pool, so the space available to
         // unprivileged users equals the free space.
         let avail = free;
         let used = total.saturating_sub(free);
@@ -395,7 +395,7 @@ const COLOR_RESET: &str = "\x1b[0m";
 
 /// Returns true when stdout is likely a terminal that supports color.
 fn stdout_is_tty() -> bool {
-    // On SlateOS we assume /dev/tty is a terminal indicator. A more complete
+    // On Slate OS we assume /dev/tty is a terminal indicator. A more complete
     // implementation would use an ioctl, but this suffices for now.
     env::var_os("TERM").is_some()
 }

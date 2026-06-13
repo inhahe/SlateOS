@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! innernet-cli — SlateOS innernet WireGuard network manager
+//! innernet-cli — Slate OS innernet WireGuard network manager
 //!
 //! Multi-personality: `innernet`, `innernet-server`
 

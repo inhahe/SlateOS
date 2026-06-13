@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! arrow-cli — SlateOS Apache Arrow tools
+//! arrow-cli — Slate OS Apache Arrow tools
 //!
 //! Multi-personality: `arrow`, `parquet`
 

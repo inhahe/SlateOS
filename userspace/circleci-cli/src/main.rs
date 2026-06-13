@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! circleci-cli — SlateOS CircleCI CLI
+//! circleci-cli — Slate OS CircleCI CLI
 //!
 //! Single personality: `circleci`
 

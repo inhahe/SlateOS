@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bareos-cli — SlateOS Bareos backup suite
+//! bareos-cli — Slate OS Bareos backup suite
 //!
 //! Multi-personality: `bareos-dir`, `bareos-sd`, `bareos-fd`, `bconsole`
 

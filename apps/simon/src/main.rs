@@ -14,7 +14,7 @@
 #![allow(clippy::indexing_slicing)]
 #![allow(clippy::arithmetic_side_effects)]
 
-//! SlateOS Simon — classic memory pattern game.
+//! Slate OS Simon — classic memory pattern game.
 //!
 //! Features four colored buttons (Red, Green, Blue, Yellow) in a 2x2 grid.
 //! The computer plays a growing sequence of colors; the player must repeat

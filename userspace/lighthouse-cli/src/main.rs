@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lighthouse-cli — SlateOS Lighthouse web auditing CLI
+//! lighthouse-cli — Slate OS Lighthouse web auditing CLI
 //!
 //! Single personality: `lighthouse`
 

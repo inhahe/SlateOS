@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! perf-cli — SlateOS Linux perf performance analysis tool
+//! perf-cli — Slate OS Linux perf performance analysis tool
 //!
 //! Multi-personality: `perf`
 

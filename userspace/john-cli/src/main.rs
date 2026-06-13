@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! john-cli — SlateOS John the Ripper CLI
+//! john-cli — Slate OS John the Ripper CLI
 //!
 //! Single personality: `john`
 

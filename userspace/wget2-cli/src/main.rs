@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wget2-cli — SlateOS wget2 HTTP/HTTPS downloader
+//! wget2-cli — Slate OS wget2 HTTP/HTTPS downloader
 //!
 //! Single personality: `wget2`
 

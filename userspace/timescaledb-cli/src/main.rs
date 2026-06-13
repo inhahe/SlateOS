@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! timescaledb-cli — SlateOS TimescaleDB time-series tools
+//! timescaledb-cli — Slate OS TimescaleDB time-series tools
 //!
 //! Multi-personality: `timescaledb-tune`, `tsdb`
 

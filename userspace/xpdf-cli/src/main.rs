@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xpdf-cli — SlateOS Xpdf PDF utilities
+//! xpdf-cli — Slate OS Xpdf PDF utilities
 //!
 //! Multi-personality: `pdfinfo`, `pdffonts`, `pdftoppm`
 

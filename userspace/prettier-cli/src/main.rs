@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! prettier-cli — SlateOS Prettier CLI
+//! prettier-cli — Slate OS Prettier CLI
 //!
 //! Single personality: `prettier`
 

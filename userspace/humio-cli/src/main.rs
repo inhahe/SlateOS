@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! humio-cli — SlateOS Humio / CrowdStrike Falcon LogScale (log-management, Aarhus DK / Sunnyvale CA)
+//! humio-cli — Slate OS Humio / CrowdStrike Falcon LogScale (log-management, Aarhus DK / Sunnyvale CA)
 
 use std::env;
 use std::process;

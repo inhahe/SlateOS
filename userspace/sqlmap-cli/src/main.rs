@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sqlmap-cli — SlateOS sqlmap CLI
+//! sqlmap-cli — Slate OS sqlmap CLI
 //!
 //! Single personality: `sqlmap`
 

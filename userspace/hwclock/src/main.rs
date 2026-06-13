@@ -352,7 +352,7 @@ fn write_rtc(dt: &DateTime) -> Result<(), String> {
     // kernel-provided control file.
     let timestamp_str = format!("{dt}");
 
-    // Try the combined "set_time" control file first (SlateOS extension).
+    // Try the combined "set_time" control file first (Slate OS extension).
     let set_path = "/sys/class/rtc/rtc0/set_time";
     if let Ok(mut f) = fs::File::create(set_path) {
         f.write_all(timestamp_str.as_bytes())
@@ -379,7 +379,7 @@ fn write_rtc(dt: &DateTime) -> Result<(), String> {
 // System time helpers
 // ---------------------------------------------------------------------------
 
-// Native SlateOS clock syscalls (kernel syscall/number.rs is the ABI source of
+// Native Slate OS clock syscalls (kernel syscall/number.rs is the ABI source of
 // truth).  There is NO combined clock_gettime(clock_id, *ts): SYS_CLOCK_REALTIME
 // takes no arguments and returns wall-clock nanoseconds-since-epoch in rax, and
 // SYS_CLOCK_SETTIME takes the absolute target ns as its only argument.  hwclock

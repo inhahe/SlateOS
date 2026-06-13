@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! runc-cli — SlateOS OCI container runtime
+//! runc-cli — Slate OS OCI container runtime
 //!
 //! Multi-personality: `runc`, `crun`
 

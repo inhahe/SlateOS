@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! anthy-cli — SlateOS Anthy Japanese input method
+//! anthy-cli — Slate OS Anthy Japanese input method
 //!
 //! Multi-personality: `anthy`, `anthy-dic-tool`
 

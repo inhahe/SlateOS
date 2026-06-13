@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bevy-cli — SlateOS Bevy game engine CLI
+//! bevy-cli — Slate OS Bevy game engine CLI
 //!
 //! Multi-personality: `bevy`
 

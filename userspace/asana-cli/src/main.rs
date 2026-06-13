@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! asana-cli — SlateOS Asana CLI
+//! asana-cli — Slate OS Asana CLI
 //!
 //! Single personality: `asana`
 

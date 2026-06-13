@@ -1,4 +1,4 @@
-//! SlateOS SMBIOS/DMI system information utility.
+//! Slate OS SMBIOS/DMI system information utility.
 //!
 //! Multi-personality binary providing:
 //! - **dmidecode** — DMI table decoder (SMBIOS data from firmware)

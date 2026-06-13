@@ -9,7 +9,7 @@
 #![allow(clippy::struct_excessive_bools)]
 #![allow(clippy::fn_params_excessive_bools)]
 
-//! SlateOS Snake — classic snake arcade game.
+//! Slate OS Snake — classic snake arcade game.
 //!
 //! Features a 20x20 grid-based playfield with arrow-key movement,
 //! food and bonus food spawning, collision detection (walls/self),

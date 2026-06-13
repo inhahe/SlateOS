@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zendesk-cli — SlateOS Zendesk Support (the original SaaS helpdesk)
+//! zendesk-cli — Slate OS Zendesk Support (the original SaaS helpdesk)
 //!
 //! Single personality: `zendesk`
 

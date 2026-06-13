@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wireguard — SlateOS WireGuard VPN management
+//! wireguard — Slate OS WireGuard VPN management
 //!
 //! Multi-personality binary for WireGuard VPN tunnels.
 //! Detected via argv[0]:

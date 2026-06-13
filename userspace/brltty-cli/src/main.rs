@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! brltty-cli — SlateOS BRLTTY braille display driver CLI
+//! brltty-cli — Slate OS BRLTTY braille display driver CLI
 //!
 //! Multi-personality: `brltty`, `brltty-setup`, `brltty-lsinc`
 

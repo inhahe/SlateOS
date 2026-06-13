@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! librenms-cli — SlateOS LibreNMS network monitoring
+//! librenms-cli — Slate OS LibreNMS network monitoring
 //!
 //! Multi-personality: `lnms`, `librenms-service`
 

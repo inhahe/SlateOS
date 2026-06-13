@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! duckstation-cli — SlateOS DuckStation PS1 emulator
+//! duckstation-cli — Slate OS DuckStation PS1 emulator
 //!
 //! Multi-personality: `duckstation`, `duckstation-nogui`
 

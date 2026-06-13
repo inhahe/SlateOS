@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! skype-cli — SlateOS Microsoft Skype consumer VoIP
+//! skype-cli — Slate OS Microsoft Skype consumer VoIP
 //!
 //! Single personality: `skype`
 

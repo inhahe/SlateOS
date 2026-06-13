@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! androidstudio-cli — SlateOS Android Studio (Google's official Android IDE)
+//! androidstudio-cli — Slate OS Android Studio (Google's official Android IDE)
 //!
 //! Single personality: `androidstudio`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sns-cli — SlateOS AWS SNS (Simple Notification Service — pub/sub + SMS + email + push, 2010)
+//! sns-cli — Slate OS AWS SNS (Simple Notification Service — pub/sub + SMS + email + push, 2010)
 
 use std::env;
 use std::process;

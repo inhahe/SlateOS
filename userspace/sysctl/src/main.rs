@@ -1,4 +1,4 @@
-//! SlateOS Sysctl — View and Modify Kernel Parameters
+//! Slate OS Sysctl — View and Modify Kernel Parameters
 //!
 //! Reads and writes kernel tunable parameters exposed via `/proc/sys/` and
 //! `/sys/kernel/`. Provides the standard `sysctl` interface for inspecting

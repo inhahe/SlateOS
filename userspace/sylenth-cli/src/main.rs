@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sylenth-cli — SlateOS LennarDigital Sylenth1 synthesizer
+//! sylenth-cli — Slate OS LennarDigital Sylenth1 synthesizer
 //!
 //! Single personality: `sylenth`
 

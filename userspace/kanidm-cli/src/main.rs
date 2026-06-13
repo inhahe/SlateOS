@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kanidm-cli — SlateOS Kanidm identity management
+//! kanidm-cli — Slate OS Kanidm identity management
 //!
 //! Multi-personality: `kanidmd`, `kanidm`
 

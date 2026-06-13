@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! ghost-cli — SlateOS personality CLI for Ghost, the open-source publishing platform.
+//! ghost-cli — Slate OS personality CLI for Ghost, the open-source publishing platform.
 
 use std::env;
 use std::process;

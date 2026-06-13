@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! envoy-cli — SlateOS Envoy service proxy
+//! envoy-cli — Slate OS Envoy service proxy
 //!
 //! Multi-personality: `envoy`, `istioctl`
 

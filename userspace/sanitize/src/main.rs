@@ -1,4 +1,4 @@
-//! SlateOS Filename Sanitizer
+//! Slate OS Filename Sanitizer
 //!
 //! A utility that renames files and directories with problematic characters
 //! to safe, portable names. Handles spaces, special characters, control

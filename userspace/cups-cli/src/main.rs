@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cups-cli — SlateOS CUPS printing system CLI
+//! cups-cli — Slate OS CUPS printing system CLI
 //!
 //! Multi-personality: `cupsctl`, `cupsenable`, `cupsdisable`, `cupsaccept`, `cupsreject`
 

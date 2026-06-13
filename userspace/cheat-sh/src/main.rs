@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cheat-sh — SlateOS community-driven cheat sheets client
+//! cheat-sh — Slate OS community-driven cheat sheets client
 //!
 //! Single personality: `cht`
 

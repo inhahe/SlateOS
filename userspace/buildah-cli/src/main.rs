@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! buildah-cli — SlateOS Buildah OCI image builder CLI
+//! buildah-cli — Slate OS Buildah OCI image builder CLI
 //!
 //! Single personality: `buildah`
 

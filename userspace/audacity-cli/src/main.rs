@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! audacity-cli — SlateOS Audacity-style audio editor CLI
+//! audacity-cli — Slate OS Audacity-style audio editor CLI
 //!
 //! Single personality: `audacity-cli`
 

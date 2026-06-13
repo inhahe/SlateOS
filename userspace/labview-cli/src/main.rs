@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! labview-cli — SlateOS NI LabVIEW graphical instrumentation/control programming
+//! labview-cli — Slate OS NI LabVIEW graphical instrumentation/control programming
 //!
 //! Single personality: `labview`
 

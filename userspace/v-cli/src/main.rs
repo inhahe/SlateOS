@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! v-cli — SlateOS V programming language
+//! v-cli — Slate OS V programming language
 //!
 //! Multi-personality: `v`
 

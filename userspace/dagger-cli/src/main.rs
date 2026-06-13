@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dagger-cli — SlateOS Dagger CI/CD CLI
+//! dagger-cli — Slate OS Dagger CI/CD CLI
 //!
 //! Multi-personality: `dagger`
 

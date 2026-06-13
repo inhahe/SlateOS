@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! handbrake-cli — SlateOS HandBrake CLI
+//! handbrake-cli — Slate OS HandBrake CLI
 //!
 //! Single personality: `HandBrakeCLI`
 

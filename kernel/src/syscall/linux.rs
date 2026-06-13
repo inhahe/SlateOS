@@ -7003,7 +7003,7 @@ fn alsa_control_ioctl(_entry: &FdEntry, request: u32, argp: u64) -> SyscallResul
 }
 
 /// `SNDRV_CTL_IOCTL_CARD_INFO` — fill a `snd_ctl_card_info` describing the
-/// single virtual sound card (card 0) that the SlateOS mixer exposes.
+/// single virtual sound card (card 0) that the Slate OS mixer exposes.
 fn alsa_control_ioctl_card_info(argp: u64) -> SyscallResult {
     use crate::audio_alsa_ctl as ctl;
     // SAFETY: SndCtlCardInfo is a plain `#[repr(C)]` aggregate of integers and

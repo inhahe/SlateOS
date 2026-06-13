@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fetchmail-cli — SlateOS fetchmail/getmail CLI
+//! fetchmail-cli — Slate OS fetchmail/getmail CLI
 //!
 //! Multi-personality: `fetchmail`, `getmail`
 

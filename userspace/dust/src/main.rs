@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dust — SlateOS intuitive disk usage tool (du + rust = dust)
+//! dust — Slate OS intuitive disk usage tool (du + rust = dust)
 //!
 //! Single personality: `dust`
 

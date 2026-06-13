@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vscode-cli — SlateOS Visual Studio Code (Microsoft's dominant code editor)
+//! vscode-cli — Slate OS Visual Studio Code (Microsoft's dominant code editor)
 //!
 //! Single personality: `vscode`
 

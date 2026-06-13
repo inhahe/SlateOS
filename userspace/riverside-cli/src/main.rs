@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! riverside-cli — SlateOS Riverside.fm remote podcast/video recording
+//! riverside-cli — Slate OS Riverside.fm remote podcast/video recording
 //!
 //! Single personality: `riverside`
 

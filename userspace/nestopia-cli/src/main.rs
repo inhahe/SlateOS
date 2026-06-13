@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nestopia-cli — SlateOS Nestopia NES emulator
+//! nestopia-cli — Slate OS Nestopia NES emulator
 //!
 //! Single personality: `nestopia`
 

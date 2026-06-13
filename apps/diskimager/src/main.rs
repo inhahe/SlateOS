@@ -1,4 +1,4 @@
-//! SlateOS Disk Imager / ISO Tool
+//! Slate OS Disk Imager / ISO Tool
 //!
 //! GUI disk imaging tool with:
 //! - Image creation from drives/partitions (raw dd-style, compressed)

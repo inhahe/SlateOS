@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! imagemagick-cli — SlateOS ImageMagick-compatible CLI (convert/identify/mogrify)
+//! imagemagick-cli — Slate OS ImageMagick-compatible CLI (convert/identify/mogrify)
 //!
 //! Multi-personality: `convert`, `identify`, `mogrify`, `composite`, `montage`
 

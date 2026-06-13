@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! osmium-cli — SlateOS Osmium OpenStreetMap data processing
+//! osmium-cli — Slate OS Osmium OpenStreetMap data processing
 //!
 //! Multi-personality: `osmium`
 

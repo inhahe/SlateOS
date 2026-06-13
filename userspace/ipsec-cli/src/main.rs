@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ipsec-cli — SlateOS IPsec/IKE VPN tools
+//! ipsec-cli — Slate OS IPsec/IKE VPN tools
 //!
 //! Multi-personality: `ipsec`, `swanctl`, `strongswan`
 

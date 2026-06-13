@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ion-cli — SlateOS Amazon Ion data format tool
+//! ion-cli — Slate OS Amazon Ion data format tool
 //!
 //! Single personality: `ion`
 

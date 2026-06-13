@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zookeeper — SlateOS distributed coordination service
+//! zookeeper — Slate OS distributed coordination service
 //!
 //! Multi-personality: `zkServer` (server), `zkCli` (CLI client)
 

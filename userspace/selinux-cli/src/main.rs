@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! selinux-cli — SlateOS SELinux management tools
+//! selinux-cli — Slate OS SELinux management tools
 //!
 //! Multi-personality: `getenforce`, `setenforce`, `sestatus`, `semanage`,
 //! `setsebool`, `getsebool`, `restorecon`, `chcon`

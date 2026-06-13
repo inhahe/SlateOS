@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! jsdelivr-cli — SlateOS jsDelivr free public CDN personality CLI.
+//! jsdelivr-cli — Slate OS jsDelivr free public CDN personality CLI.
 
 use std::env;
 use std::process;

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mezmo-cli — SlateOS Mezmo (was LogDNA, telemetry pipeline + log management, Mountain View CA)
+//! mezmo-cli — Slate OS Mezmo (was LogDNA, telemetry pipeline + log management, Mountain View CA)
 
 use std::env;
 use std::process;

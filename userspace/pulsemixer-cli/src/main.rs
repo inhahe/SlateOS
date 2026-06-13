@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pulsemixer-cli — SlateOS pulsemixer audio mixer
+//! pulsemixer-cli — Slate OS pulsemixer audio mixer
 //!
 //! Single personality: `pulsemixer`
 

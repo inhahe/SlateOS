@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nethogs-cli — SlateOS nethogs per-process network monitor
+//! nethogs-cli — Slate OS nethogs per-process network monitor
 //!
 //! Single personality: `nethogs`
 

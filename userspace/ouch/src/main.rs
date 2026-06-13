@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ouch — SlateOS painless compression/decompression tool
+//! ouch — Slate OS painless compression/decompression tool
 //!
 //! Single personality: `ouch`
 

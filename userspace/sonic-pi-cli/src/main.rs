@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sonic-pi-cli — SlateOS Sonic Pi live coding synth
+//! sonic-pi-cli — Slate OS Sonic Pi live coding synth
 //!
 //! Single personality: `sonic-pi`
 

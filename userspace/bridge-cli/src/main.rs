@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bridge-cli — SlateOS network bridge/bonding tools
+//! bridge-cli — Slate OS network bridge/bonding tools
 //!
 //! Multi-personality: `bridge`, `brctl`, `bondctl`
 

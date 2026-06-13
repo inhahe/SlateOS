@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dbt-cli — SlateOS dbt (data build tool) CLI
+//! dbt-cli — Slate OS dbt (data build tool) CLI
 //!
 //! Single personality: `dbt`
 

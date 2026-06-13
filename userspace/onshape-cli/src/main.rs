@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! onshape-cli — SlateOS PTC Onshape cloud-native CAD
+//! onshape-cli — Slate OS PTC Onshape cloud-native CAD
 //!
 //! Single personality: `onshape`
 

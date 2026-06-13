@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! flyctl — SlateOS Fly.io CLI
+//! flyctl — Slate OS Fly.io CLI
 //!
 //! Single personality: `fly` (or `flyctl`)
 

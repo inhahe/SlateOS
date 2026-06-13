@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mupdf-cli — SlateOS MuPDF tools
+//! mupdf-cli — Slate OS MuPDF tools
 //!
 //! Multi-personality: `mutool`, `mupdf`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kcat-cli — SlateOS kcat (kafkacat) Kafka tool
+//! kcat-cli — Slate OS kcat (kafkacat) Kafka tool
 //!
 //! Single personality: `kcat`
 

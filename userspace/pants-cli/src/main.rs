@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pants-cli — SlateOS Pants build system
+//! pants-cli — Slate OS Pants build system
 //!
 //! Multi-personality: `pants`
 

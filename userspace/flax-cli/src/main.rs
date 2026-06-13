@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! flax-cli — SlateOS Flax game engine
+//! flax-cli — Slate OS Flax game engine
 //!
 //! Single personality: `flax`
 

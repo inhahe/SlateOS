@@ -1,4 +1,4 @@
-//! SlateOS `uname` Utility — Print System Information
+//! Slate OS `uname` Utility — Print System Information
 //!
 //! Reads system identity from `/proc/sys/kernel/` and `/proc/cpuinfo`, then
 //! prints the requested fields separated by spaces. Falls back to hardcoded
@@ -372,7 +372,7 @@ fn push_unique(fields: &mut Vec<Field>, field: Field) {
 // ============================================================================
 
 fn print_help() {
-    println!("SlateOS uname v{VERSION}");
+    println!("Slate OS uname v{VERSION}");
     println!();
     println!("Print system information.");
     println!();
@@ -424,7 +424,7 @@ fn run(request: Request) -> i32 {
         }
 
         Request::Version => {
-            println!("uname (SlateOS) {VERSION}");
+            println!("uname (Slate OS) {VERSION}");
             0
         }
 

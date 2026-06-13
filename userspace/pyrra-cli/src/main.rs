@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pyrra-cli — SlateOS Pyrra SLO management tool
+//! pyrra-cli — Slate OS Pyrra SLO management tool
 //!
 //! Single personality: `pyrra`
 

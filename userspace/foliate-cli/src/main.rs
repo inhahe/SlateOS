@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! foliate-cli — SlateOS Foliate e-book reader
+//! foliate-cli — Slate OS Foliate e-book reader
 //!
 //! Single personality: `foliate`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! figma-cli — SlateOS Figma collaborative design tool
+//! figma-cli — Slate OS Figma collaborative design tool
 //!
 //! Single personality: `figma`
 

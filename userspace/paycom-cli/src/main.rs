@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! paycom-cli — SlateOS Paycom (Oklahoma-based mid-market HCM, Beti employee-driven payroll)
+//! paycom-cli — Slate OS Paycom (Oklahoma-based mid-market HCM, Beti employee-driven payroll)
 //!
 //! Single personality: `paycom`
 

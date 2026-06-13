@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wlsunset-cli — SlateOS wlsunset day/night gamma adjuster
+//! wlsunset-cli — Slate OS wlsunset day/night gamma adjuster
 //!
 //! Single personality: `wlsunset`
 

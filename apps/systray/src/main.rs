@@ -1,7 +1,7 @@
 #![allow(dead_code, clippy::too_many_arguments)]
-//! SlateOS System Tray — notification area and quick settings
+//! Slate OS System Tray — notification area and quick settings
 //!
-//! Provides the system tray (notification area) for the SlateOS taskbar.
+//! Provides the system tray (notification area) for the Slate OS taskbar.
 //! Features:
 //! - Tray icons with notification badges and tooltip support
 //! - Built-in system icons (volume, network, battery, clock, notifications, power)

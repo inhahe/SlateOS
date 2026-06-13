@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mako-cli — SlateOS mako Wayland notification daemon
+//! mako-cli — Slate OS mako Wayland notification daemon
 //!
 //! Multi-personality: `mako`, `makoctl`
 

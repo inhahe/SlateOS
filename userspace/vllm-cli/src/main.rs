@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vllm-cli — SlateOS vLLM serving CLI
+//! vllm-cli — Slate OS vLLM serving CLI
 //!
 //! Multi-personality: `vllm`
 

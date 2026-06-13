@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bitdefender-cli — SlateOS Bitdefender Total Security
+//! bitdefender-cli — Slate OS Bitdefender Total Security
 //!
 //! Single personality: `bitdefender`
 

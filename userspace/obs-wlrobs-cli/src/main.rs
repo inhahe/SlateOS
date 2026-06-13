@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! obs-wlrobs-cli — SlateOS wlrobs OBS screen capture for wlroots
+//! obs-wlrobs-cli — Slate OS wlrobs OBS screen capture for wlroots
 //!
 //! Single personality: `wlrobs`
 

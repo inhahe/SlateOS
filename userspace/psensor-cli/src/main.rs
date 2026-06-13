@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! psensor-cli — SlateOS Psensor hardware temperature monitor
+//! psensor-cli — Slate OS Psensor hardware temperature monitor
 //!
 //! Multi-personality: `psensor`, `psensor-server`
 

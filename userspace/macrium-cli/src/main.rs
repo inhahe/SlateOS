@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! macrium-cli — SlateOS Macrium Reflect disk imaging
+//! macrium-cli — Slate OS Macrium Reflect disk imaging
 //!
 //! Single personality: `macrium`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! azuredatastudio-cli — SlateOS Azure Data Studio
+//! azuredatastudio-cli — Slate OS Azure Data Studio
 //!
 //! Single personality: `azuredatastudio`
 

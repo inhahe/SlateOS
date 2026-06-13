@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! electrum-cli — SlateOS Electrum Bitcoin wallet
+//! electrum-cli — Slate OS Electrum Bitcoin wallet
 //!
 //! Single personality: `electrum`
 

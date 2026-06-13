@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! renoise-cli — SlateOS Renoise tracker DAW
+//! renoise-cli — Slate OS Renoise tracker DAW
 //!
 //! Single personality: `renoise`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! toad-cli — SlateOS Quest Toad database tools
+//! toad-cli — Slate OS Quest Toad database tools
 //!
 //! Single personality: `toad`
 

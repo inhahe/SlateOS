@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rebelle-cli — SlateOS Escape Motions Rebelle realistic painting
+//! rebelle-cli — Slate OS Escape Motions Rebelle realistic painting
 //!
 //! Single personality: `rebelle`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sqlpad-cli — SlateOS SQLPad web SQL editor
+//! sqlpad-cli — Slate OS SQLPad web SQL editor
 //!
 //! Single personality: `sqlpad`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ccache — SlateOS compiler cache
+//! ccache — Slate OS compiler cache
 //!
 //! Single personality: `ccache`
 

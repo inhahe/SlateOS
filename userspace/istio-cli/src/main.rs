@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! istio-cli — SlateOS Istio service mesh
+//! istio-cli — Slate OS Istio service mesh
 //!
 //! Single personality: `istioctl`
 

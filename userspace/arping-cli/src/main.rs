@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! arping-cli — SlateOS ARP ping utility
+//! arping-cli — Slate OS ARP ping utility
 //!
 //! Single personality: `arping`
 

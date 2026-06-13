@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! studioone-cli — SlateOS PreSonus Studio One DAW
+//! studioone-cli — Slate OS PreSonus Studio One DAW
 //!
 //! Single personality: `studioone`
 

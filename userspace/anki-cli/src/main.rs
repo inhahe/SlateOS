@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! anki-cli — SlateOS Anki spaced-repetition flashcards
+//! anki-cli — Slate OS Anki spaced-repetition flashcards
 //!
 //! Single personality: `anki`
 

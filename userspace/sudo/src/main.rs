@@ -1,4 +1,4 @@
-//! SlateOS Privileged Command Execution Utility
+//! Slate OS Privileged Command Execution Utility
 //!
 //! Multi-personality binary providing `sudo`, `sudoedit`/`visudo`, and
 //! `sudoreplay` functionality. Personality is detected via `argv[0]` basename,
@@ -400,7 +400,7 @@ fn parse_sudoers_line(line: &str, config: &mut SudoersConfig) -> Result<(), Sudo
         || line.starts_with("#includedir")
         || line.starts_with("@includedir")
     {
-        // In SlateOS, includes are handled at a higher level; skip in parsing.
+        // In Slate OS, includes are handled at a higher level; skip in parsing.
         return Ok(());
     }
 
@@ -1599,7 +1599,7 @@ fn authenticate(username: &str, _password: &str) -> Result<(), SudoError> {
 }
 
 // ============================================================================
-// Platform helpers (SlateOS stubs)
+// Platform helpers (Slate OS stubs)
 // ============================================================================
 
 /// Get the current username.
@@ -1644,7 +1644,7 @@ fn current_tty() -> String {
 
 /// Get user groups for a username (stub).
 fn get_user_groups(username: &str) -> Vec<String> {
-    // In SlateOS, read from /etc/users.yaml.
+    // In Slate OS, read from /etc/users.yaml.
     let mut groups = vec![username.to_string()];
     if let Ok(content) = fs::read_to_string("/etc/users.yaml") {
         // Simple parser: find the user's groups line.
@@ -2345,7 +2345,7 @@ fn run_sudo(args: &[String]) -> i32 {
     );
 
     // Execute the command.
-    // On SlateOS, this would use exec() syscall to replace the process.
+    // On Slate OS, this would use exec() syscall to replace the process.
     // For now, we simulate with std::process::Command.
     let mut cmd = process::Command::new(&effective_command[0]);
     if effective_command.len() > 1 {
@@ -2653,7 +2653,7 @@ fn run_visudo(args: &[String]) -> i32 {
             }
 
             // Set permissions (sudoers should be 0440).
-            // On SlateOS, this would use chmod syscall.
+            // On Slate OS, this would use chmod syscall.
 
             let _ = fs::remove_file(&temp_path);
             release_lock(&lock_path);

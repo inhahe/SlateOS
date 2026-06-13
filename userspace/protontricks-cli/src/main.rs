@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! protontricks-cli — SlateOS Protontricks Proton/Wine helper
+//! protontricks-cli — Slate OS Protontricks Proton/Wine helper
 //!
 //! Multi-personality: `protontricks`, `protontricks-launch`
 

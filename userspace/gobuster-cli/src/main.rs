@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gobuster-cli — SlateOS Gobuster directory/DNS brute-forcer
+//! gobuster-cli — Slate OS Gobuster directory/DNS brute-forcer
 //!
 //! Single personality: `gobuster`
 

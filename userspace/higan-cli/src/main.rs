@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! higan-cli — SlateOS higan multi-system emulator
+//! higan-cli — Slate OS higan multi-system emulator
 //!
 //! Single personality: `higan`
 

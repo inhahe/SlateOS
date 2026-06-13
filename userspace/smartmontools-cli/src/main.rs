@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! smartmontools-cli — SlateOS SMART disk monitoring
+//! smartmontools-cli — Slate OS SMART disk monitoring
 //!
 //! Multi-personality: `smartctl`, `smartd`
 

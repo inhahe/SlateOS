@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tesseract-cli — SlateOS Tesseract OCR CLI
+//! tesseract-cli — Slate OS Tesseract OCR CLI
 //!
 //! Single personality: `tesseract`
 

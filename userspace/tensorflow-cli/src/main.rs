@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tensorflow-cli — SlateOS TensorFlow machine learning framework
+//! tensorflow-cli — Slate OS TensorFlow machine learning framework
 //!
 //! Multi-personality: `tensorflow`, `tf`, `saved_model_cli`, `tflite`
 

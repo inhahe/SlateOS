@@ -1,4 +1,4 @@
-//! SlateOS `wpa` -- WiFi Protected Access multi-personality binary.
+//! Slate OS `wpa` -- WiFi Protected Access multi-personality binary.
 //!
 //! Detected from `argv[0]`:
 //! - **wpa_supplicant** -- WiFi authentication daemon managing WPA/WPA2/WPA3
@@ -1607,7 +1607,7 @@ fn run(args: &[String], out: &mut dyn Write) -> i32 {
 }
 
 // ============================================================================
-// SlateOS entry point
+// Slate OS entry point
 // ============================================================================
 
 #[cfg(not(test))]

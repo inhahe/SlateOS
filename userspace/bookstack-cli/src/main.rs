@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bookstack-cli — SlateOS BookStack wiki platform
+//! bookstack-cli — Slate OS BookStack wiki platform
 //!
 //! Single personality: `bookstack`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cdk8s-cli — SlateOS CDK for Kubernetes CLI
+//! cdk8s-cli — Slate OS CDK for Kubernetes CLI
 //!
 //! Multi-personality: `cdk8s`
 

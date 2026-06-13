@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! flexbuffers-cli — SlateOS FlexBuffers schema-less binary inspector
+//! flexbuffers-cli — Slate OS FlexBuffers schema-less binary inspector
 //!
 //! Single personality: `flexbuf`
 

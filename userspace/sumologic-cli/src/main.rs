@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sumologic-cli — SlateOS Sumo Logic collector
+//! sumologic-cli — Slate OS Sumo Logic collector
 //!
 //! Single personality: `sumo`
 

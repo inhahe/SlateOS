@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cloudcompare-cli — SlateOS CloudCompare point cloud processing
+//! cloudcompare-cli — Slate OS CloudCompare point cloud processing
 //!
 //! Multi-personality: `CloudCompare`, `ccViewer`
 

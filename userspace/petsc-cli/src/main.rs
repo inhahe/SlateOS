@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! petsc-cli — SlateOS PETSc scientific computing toolkit
+//! petsc-cli — Slate OS PETSc scientific computing toolkit
 //!
 //! Single personality: `petsc-info`
 

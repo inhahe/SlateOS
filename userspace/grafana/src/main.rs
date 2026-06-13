@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! grafana — SlateOS observability and visualization platform
+//! grafana — Slate OS observability and visualization platform
 //!
 //! Multi-personality: `grafana-server` (default), `grafana-cli`
 

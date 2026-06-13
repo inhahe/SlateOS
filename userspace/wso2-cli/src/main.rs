@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! wso2-cli — SlateOS WSO2 open-source integration platform personality CLI.
+//! wso2-cli — Slate OS WSO2 open-source integration platform personality CLI.
 
 use std::env;
 use std::process;

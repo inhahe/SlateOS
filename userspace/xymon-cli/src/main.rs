@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xymon-cli — SlateOS Xymon system monitor
+//! xymon-cli — Slate OS Xymon system monitor
 //!
 //! Multi-personality: `xymond`, `xymon`, `xymoncmd`
 

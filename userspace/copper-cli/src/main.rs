@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! copper-cli — SlateOS Copper (CRM built natively inside Google Workspace)
+//! copper-cli — Slate OS Copper (CRM built natively inside Google Workspace)
 //!
 //! Single personality: `copper`
 

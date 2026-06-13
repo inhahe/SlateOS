@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! age-cli — SlateOS age encryption CLI
+//! age-cli — Slate OS age encryption CLI
 //!
 //! Multi-personality: `age` and `age-keygen`
 

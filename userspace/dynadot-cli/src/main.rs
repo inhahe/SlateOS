@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! dynadot-cli — SlateOS personality CLI for Dynadot, the domainer-focused registrar.
+//! dynadot-cli — Slate OS personality CLI for Dynadot, the domainer-focused registrar.
 
 use std::env;
 use std::process;

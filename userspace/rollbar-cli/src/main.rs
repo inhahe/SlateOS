@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rollbar-cli — SlateOS Rollbar (error tracking, real-time, RQL queries)
+//! rollbar-cli — Slate OS Rollbar (error tracking, real-time, RQL queries)
 //!
 //! Single personality: `rollbar`
 

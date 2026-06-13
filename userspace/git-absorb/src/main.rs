@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! git-absorb — SlateOS automatically absorb staged changes into commits
+//! git-absorb — Slate OS automatically absorb staged changes into commits
 //!
 //! Single personality: `git-absorb`
 

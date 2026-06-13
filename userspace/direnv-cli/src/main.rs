@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! direnv-cli — SlateOS direnv environment switcher
+//! direnv-cli — Slate OS direnv environment switcher
 //!
 //! Single personality: `direnv`
 

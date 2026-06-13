@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! itch-cli — SlateOS itch.io desktop app (indie game store)
+//! itch-cli — Slate OS itch.io desktop app (indie game store)
 //!
 //! Single personality: `itch`
 

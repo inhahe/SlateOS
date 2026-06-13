@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! edgio-cli — SlateOS Edgio bankruptcy / Akamai acquisition obituary CLI.
+//! edgio-cli — Slate OS Edgio bankruptcy / Akamai acquisition obituary CLI.
 
 use std::env;
 use std::process;

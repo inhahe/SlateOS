@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! avrdude-cli — SlateOS AVR/MCU programmer
+//! avrdude-cli — Slate OS AVR/MCU programmer
 //!
 //! Multi-personality: `avrdude`, `esptool`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! openbao-cli — SlateOS OpenBao secrets management
+//! openbao-cli — Slate OS OpenBao secrets management
 //!
 //! Single personality: `openbao`
 

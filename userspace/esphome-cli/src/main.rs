@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! esphome-cli — SlateOS ESPHome IoT firmware builder
+//! esphome-cli — Slate OS ESPHome IoT firmware builder
 //!
 //! Multi-personality: `esphome`
 

@@ -12,7 +12,7 @@
 #![allow(clippy::manual_range_contains)]
 #![allow(clippy::unreadable_literal)]
 
-//! SlateOS Pinball — classic pinball arcade game.
+//! Slate OS Pinball — classic pinball arcade game.
 //!
 //! Features a tall vertical playfield with two flippers (left/right),
 //! a spring-loaded plunger/launcher, circular bumpers with bounce physics,

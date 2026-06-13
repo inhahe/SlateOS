@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mailspring-cli — SlateOS Mailspring modern email client
+//! mailspring-cli — Slate OS Mailspring modern email client
 //!
 //! Single personality: `mailspring`
 

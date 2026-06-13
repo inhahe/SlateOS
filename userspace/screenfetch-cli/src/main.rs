@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! screenfetch-cli — SlateOS screenFetch system information
+//! screenfetch-cli — Slate OS screenFetch system information
 //!
 //! Single personality: `screenfetch`
 

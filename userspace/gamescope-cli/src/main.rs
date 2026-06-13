@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gamescope-cli — SlateOS Gamescope Wayland compositor for gaming
+//! gamescope-cli — Slate OS Gamescope Wayland compositor for gaming
 //!
 //! Multi-personality: `gamescope`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! stanza-cli — SlateOS Stanza log agent
+//! stanza-cli — Slate OS Stanza log agent
 //!
 //! Single personality: `stanza`
 

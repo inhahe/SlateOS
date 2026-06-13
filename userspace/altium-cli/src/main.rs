@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! altium-cli — SlateOS Altium Designer PCB EDA
+//! altium-cli — Slate OS Altium Designer PCB EDA
 //!
 //! Single personality: `altium`
 

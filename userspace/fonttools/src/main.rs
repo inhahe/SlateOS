@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fonttools — SlateOS font inspection and manipulation toolkit
+//! fonttools — Slate OS font inspection and manipulation toolkit
 //!
 //! Single personality: `fonttools`
 

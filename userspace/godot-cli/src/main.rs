@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! godot-cli — SlateOS Godot Engine CLI
+//! godot-cli — Slate OS Godot Engine CLI
 //!
 //! Multi-personality: `godot`
 

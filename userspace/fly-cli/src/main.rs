@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fly-cli — SlateOS Fly.io (edge PaaS for Docker apps, Chicago, private)
+//! fly-cli — Slate OS Fly.io (edge PaaS for Docker apps, Chicago, private)
 
 use std::env;
 use std::process;

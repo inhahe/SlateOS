@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nxlog-cli — SlateOS NXLog log collection
+//! nxlog-cli — Slate OS NXLog log collection
 //!
 //! Single personality: `nxlog`
 

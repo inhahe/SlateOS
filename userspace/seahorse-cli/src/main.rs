@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! seahorse-cli — SlateOS GNOME Seahorse key/password manager
+//! seahorse-cli — Slate OS GNOME Seahorse key/password manager
 //!
 //! Single personality: `seahorse`
 

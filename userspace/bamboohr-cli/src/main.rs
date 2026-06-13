@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bamboohr-cli — SlateOS BambooHR (people-data HRIS focused on SMB, Utah-based)
+//! bamboohr-cli — Slate OS BambooHR (people-data HRIS focused on SMB, Utah-based)
 //!
 //! Single personality: `bamboohr`
 

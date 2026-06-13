@@ -1,4 +1,4 @@
-//! SlateOS Text Editor
+//! Slate OS Text Editor
 //!
 //! Graphical text editor with:
 //! - Multi-file editing with tabs

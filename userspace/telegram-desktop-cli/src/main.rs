@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! telegram-desktop-cli — SlateOS Telegram Desktop client
+//! telegram-desktop-cli — Slate OS Telegram Desktop client
 //!
 //! Single personality: `telegram-desktop`
 

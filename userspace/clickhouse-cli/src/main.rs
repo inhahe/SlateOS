@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! clickhouse-cli — SlateOS ClickHouse CLI
+//! clickhouse-cli — Slate OS ClickHouse CLI
 //!
 //! Single personality: `clickhouse-client`
 

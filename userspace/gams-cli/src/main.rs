@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gams-cli — SlateOS GAMS optimization modeling
+//! gams-cli — Slate OS GAMS optimization modeling
 //!
 //! Multi-personality: `gams`, `gamside`
 

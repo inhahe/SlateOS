@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bzip2 — SlateOS bzip2 compression utility
+//! bzip2 — Slate OS bzip2 compression utility
 //!
 //! Multi-personality binary detected via argv[0]:
 //!

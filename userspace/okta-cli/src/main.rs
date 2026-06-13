@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! okta-cli — SlateOS Okta (the SSO/IAM market leader, $80B at peak)
+//! okta-cli — Slate OS Okta (the SSO/IAM market leader, $80B at peak)
 //!
 //! Single personality: `okta`
 

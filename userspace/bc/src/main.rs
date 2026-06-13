@@ -1,4 +1,4 @@
-//! SlateOS `bc` -- arbitrary-precision calculator
+//! Slate OS `bc` -- arbitrary-precision calculator
 //!
 //! A POSIX-compatible `bc` implementation with extensions.  Supports
 //! arbitrary-precision integers and fixed-point decimals, variables,
@@ -2771,7 +2771,7 @@ fn main() {
     let is_tty = std::env::var("TERM").is_ok();
 
     if !quiet && is_tty {
-        println!("bc 1.0 (SlateOS)");
+        println!("bc 1.0 (Slate OS)");
         println!("Type 'quit' to exit.");
     }
 

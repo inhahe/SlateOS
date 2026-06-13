@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wshowkeys-cli — SlateOS wshowkeys key press display
+//! wshowkeys-cli — Slate OS wshowkeys key press display
 //!
 //! Single personality: `wshowkeys`
 

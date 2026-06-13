@@ -1,4 +1,4 @@
-//! SlateOS initial RAM filesystem builder.
+//! Slate OS initial RAM filesystem builder.
 //!
 //! Multi-personality binary providing:
 //! - **mkinitramfs** — create an initramfs image for boot

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! iterable-cli — SlateOS Iterable (cross-channel marketing automation for growth teams)
+//! iterable-cli — Slate OS Iterable (cross-channel marketing automation for growth teams)
 //!
 //! Single personality: `iterable`
 

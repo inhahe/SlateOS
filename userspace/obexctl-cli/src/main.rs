@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! obexctl-cli — SlateOS obexctl OBEX Bluetooth file transfer
+//! obexctl-cli — Slate OS obexctl OBEX Bluetooth file transfer
 //!
 //! Single personality: `obexctl`
 

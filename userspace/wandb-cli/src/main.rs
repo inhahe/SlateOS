@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wandb-cli — SlateOS Weights & Biases CLI
+//! wandb-cli — Slate OS Weights & Biases CLI
 //!
 //! Single personality: `wandb`
 

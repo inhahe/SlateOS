@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mplab-cli — SlateOS Microchip MPLAB X IDE for PIC/AVR/SAM/dsPIC
+//! mplab-cli — Slate OS Microchip MPLAB X IDE for PIC/AVR/SAM/dsPIC
 //!
 //! Single personality: `mplab`
 

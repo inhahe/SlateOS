@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! x86-energy-perf-cli — SlateOS x86_energy_perf_policy tool
+//! x86-energy-perf-cli — Slate OS x86_energy_perf_policy tool
 //!
 //! Single personality: `x86_energy_perf_policy`
 

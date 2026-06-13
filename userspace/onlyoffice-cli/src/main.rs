@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! onlyoffice-cli — SlateOS ONLYOFFICE desktop editors
+//! onlyoffice-cli — Slate OS ONLYOFFICE desktop editors
 //!
 //! Single personality: `onlyoffice-desktopeditors`
 

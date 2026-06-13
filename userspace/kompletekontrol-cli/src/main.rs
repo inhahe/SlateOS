@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kompletekontrol-cli — SlateOS Native Instruments Komplete Kontrol host
+//! kompletekontrol-cli — Slate OS Native Instruments Komplete Kontrol host
 //!
 //! Single personality: `kompletekontrol`
 

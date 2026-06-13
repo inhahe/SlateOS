@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! az-cli — SlateOS Azure CLI
+//! az-cli — Slate OS Azure CLI
 //!
 //! Single personality: `az`
 

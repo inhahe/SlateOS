@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pylint-cli — SlateOS Pylint CLI
+//! pylint-cli — Slate OS Pylint CLI
 //!
 //! Single personality: `pylint`
 

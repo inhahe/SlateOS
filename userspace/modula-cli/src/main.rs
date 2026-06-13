@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! modula-cli — SlateOS Modula-2/Oberon compiler
+//! modula-cli — Slate OS Modula-2/Oberon compiler
 //!
 //! Multi-personality: `gm2`, `obc`
 

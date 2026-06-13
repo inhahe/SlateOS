@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! boomi-cli — SlateOS Boomi (iPaaS pioneer, Conshohocken PA, ex-Dell, now PE-owned)
+//! boomi-cli — Slate OS Boomi (iPaaS pioneer, Conshohocken PA, ex-Dell, now PE-owned)
 
 use std::env;
 use std::process;

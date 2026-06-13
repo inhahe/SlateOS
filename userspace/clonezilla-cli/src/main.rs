@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! clonezilla-cli — SlateOS Clonezilla disk/partition cloning
+//! clonezilla-cli — Slate OS Clonezilla disk/partition cloning
 //!
 //! Multi-personality: `clonezilla`, `ocs-sr`, `ocs-onthefly`
 

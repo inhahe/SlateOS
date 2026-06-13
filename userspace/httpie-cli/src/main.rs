@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! httpie-cli — SlateOS HTTPie command-line HTTP client
+//! httpie-cli — Slate OS HTTPie command-line HTTP client
 //!
 //! Multi-personality: `http`, `https`
 

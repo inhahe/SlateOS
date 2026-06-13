@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! powerbi-cli — SlateOS Microsoft Power BI
+//! powerbi-cli — Slate OS Microsoft Power BI
 //!
 //! Single personality: `powerbi`
 

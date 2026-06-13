@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! razorpay-cli — SlateOS Razorpay India payments personality CLI.
+//! razorpay-cli — Slate OS Razorpay India payments personality CLI.
 
 use std::env;
 use std::process;

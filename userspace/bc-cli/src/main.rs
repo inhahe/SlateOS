@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bc-cli — SlateOS bc/dc calculator CLI
+//! bc-cli — Slate OS bc/dc calculator CLI
 //!
 //! Multi-personality: `bc`, `dc`
 

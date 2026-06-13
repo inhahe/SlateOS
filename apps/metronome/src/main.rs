@@ -1,4 +1,4 @@
-//! SlateOS Metronome
+//! Slate OS Metronome
 //!
 //! A musical metronome with BPM control, time signature selection,
 //! visual beat indicator, tap tempo, accent patterns, and subdivisions.

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! spacelift-cli — SlateOS Spacelift CLI
+//! spacelift-cli — Slate OS Spacelift CLI
 //!
 //! Multi-personality: `spacectl`
 

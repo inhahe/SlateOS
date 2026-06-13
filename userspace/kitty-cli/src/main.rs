@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kitty-cli — SlateOS Kitty terminal emulator tools
+//! kitty-cli — Slate OS Kitty terminal emulator tools
 //!
 //! Multi-personality: `kitty`, `kitten`
 

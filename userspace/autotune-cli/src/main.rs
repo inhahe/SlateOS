@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! autotune-cli — SlateOS Antares Auto-Tune pitch correction
+//! autotune-cli — Slate OS Antares Auto-Tune pitch correction
 //!
 //! Single personality: `autotune`
 

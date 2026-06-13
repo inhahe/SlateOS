@@ -1,4 +1,4 @@
-//! SlateOS Automator -- Keyboard/Mouse Automation & Macro Recorder
+//! Slate OS Automator -- Keyboard/Mouse Automation & Macro Recorder
 //!
 //! A desktop automation tool with:
 //! - **Macro recording**: capture keyboard and mouse actions with timestamps

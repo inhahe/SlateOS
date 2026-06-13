@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! jami-cli — SlateOS Jami peer-to-peer communicator
+//! jami-cli — Slate OS Jami peer-to-peer communicator
 //!
 //! Multi-personality: `jami`, `jami-daemon`
 

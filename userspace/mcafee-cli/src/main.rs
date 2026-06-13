@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mcafee-cli — SlateOS McAfee+ consumer security
+//! mcafee-cli — Slate OS McAfee+ consumer security
 //!
 //! Single personality: `mcafee`
 

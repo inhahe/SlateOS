@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cpupower — SlateOS CPU frequency and power management
+//! cpupower — Slate OS CPU frequency and power management
 //!
 //! Multi-personality binary for CPU frequency scaling and power control.
 //! Detected via argv[0]:

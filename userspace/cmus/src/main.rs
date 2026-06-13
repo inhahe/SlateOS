@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cmus — SlateOS console music player
+//! cmus — Slate OS console music player
 //!
 //! Multi-personality: `cmus`, `cmus-remote`
 

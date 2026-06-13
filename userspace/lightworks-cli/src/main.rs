@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lightworks-cli — SlateOS Lightworks professional NLE
+//! lightworks-cli — Slate OS Lightworks professional NLE
 //!
 //! Single personality: `lightworks`
 

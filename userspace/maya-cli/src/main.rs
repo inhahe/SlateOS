@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! maya-cli — SlateOS Autodesk Maya 3D animation
+//! maya-cli — Slate OS Autodesk Maya 3D animation
 //!
 //! Single personality: `maya`
 

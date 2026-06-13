@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zapier-cli — SlateOS Zapier (SMB/prosumer automation, San Francisco, fully remote, profitable)
+//! zapier-cli — Slate OS Zapier (SMB/prosumer automation, San Francisco, fully remote, profitable)
 
 use std::env;
 use std::process;

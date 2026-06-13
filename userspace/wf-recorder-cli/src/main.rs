@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wf-recorder-cli — SlateOS wf-recorder screen recorder
+//! wf-recorder-cli — Slate OS wf-recorder screen recorder
 //!
 //! Single personality: `wf-recorder`
 

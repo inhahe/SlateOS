@@ -1,4 +1,4 @@
-//! SlateOS dc — desk calculator (reverse Polish notation)
+//! Slate OS dc — desk calculator (reverse Polish notation)
 //!
 //! A traditional RPN calculator supporting arbitrary-precision integers,
 //! registers, string operations, and conditional execution.

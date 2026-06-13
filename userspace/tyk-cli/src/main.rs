@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tyk-cli — SlateOS Tyk API gateway
+//! tyk-cli — Slate OS Tyk API gateway
 //!
 //! Multi-personality: `tyk`, `tyk-gateway`
 

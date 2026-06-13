@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! airtable-cli — SlateOS Airtable spreadsheet-database hybrid
+//! airtable-cli — Slate OS Airtable spreadsheet-database hybrid
 //!
 //! Single personality: `airtable`
 

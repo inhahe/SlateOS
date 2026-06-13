@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! github-cli — SlateOS GitHub gh CLI
+//! github-cli — Slate OS GitHub gh CLI
 //!
 //! Single personality: `github`
 

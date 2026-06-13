@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mc-cli — SlateOS Midnight Commander
+//! mc-cli — Slate OS Midnight Commander
 //!
 //! Multi-personality: `mc`, `mcedit`, `mcview`, `mcdiff`
 

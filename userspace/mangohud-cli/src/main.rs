@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mangohud-cli — SlateOS MangoHud performance overlay
+//! mangohud-cli — Slate OS MangoHud performance overlay
 //!
 //! Multi-personality: `mangohud`, `mangoapp`, `mangostats`
 

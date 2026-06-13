@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vital-cli — SlateOS Vital free wavetable synthesizer
+//! vital-cli — Slate OS Vital free wavetable synthesizer
 //!
 //! Single personality: `vital`
 

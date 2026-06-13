@@ -1,4 +1,4 @@
-//! SlateOS Block Device Lister
+//! Slate OS Block Device Lister
 //!
 //! Lists block devices by reading from `/sys/block/` and `/proc/partitions`.
 //! Displays disk and partition information in tree, list, or JSON format.

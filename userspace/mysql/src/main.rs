@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mysql — SlateOS MySQL relational database
+//! mysql — Slate OS MySQL relational database
 //!
 //! Multi-personality: `mysqld` (server), `mysql` (client), `mysqladmin`, `mysqldump`
 

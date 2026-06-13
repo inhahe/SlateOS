@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! goxel-cli — SlateOS Goxel voxel editor
+//! goxel-cli — Slate OS Goxel voxel editor
 //!
 //! Single personality: `goxel`
 

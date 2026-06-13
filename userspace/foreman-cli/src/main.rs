@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! foreman-cli — SlateOS Foreman lifecycle management
+//! foreman-cli — Slate OS Foreman lifecycle management
 //!
 //! Multi-personality: `foreman`, `hammer`, `foreman-rake`
 

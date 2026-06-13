@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xrandr-cli — SlateOS xrandr display configuration CLI
+//! xrandr-cli — Slate OS xrandr display configuration CLI
 //!
 //! Single personality: `xrandr`
 

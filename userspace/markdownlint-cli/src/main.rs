@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! markdownlint-cli — SlateOS markdownlint CLI
+//! markdownlint-cli — Slate OS markdownlint CLI
 //!
 //! Multi-personality: `markdownlint`
 

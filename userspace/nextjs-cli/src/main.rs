@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nextjs-cli — SlateOS Next.js CLI
+//! nextjs-cli — Slate OS Next.js CLI
 //!
 //! Multi-personality: `next`
 

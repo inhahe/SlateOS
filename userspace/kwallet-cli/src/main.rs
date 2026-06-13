@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kwallet-cli — SlateOS KDE KWallet password storage
+//! kwallet-cli — Slate OS KDE KWallet password storage
 //!
 //! Multi-personality: `kwalletd6`, `kwalletmanager5`, `kwallet-query`
 

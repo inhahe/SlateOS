@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! datagrip-cli — SlateOS DataGrip database IDE
+//! datagrip-cli — Slate OS DataGrip database IDE
 //!
 //! Single personality: `datagrip`
 

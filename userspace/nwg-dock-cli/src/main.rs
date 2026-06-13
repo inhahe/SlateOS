@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nwg-dock-cli — SlateOS nwg-dock application dock
+//! nwg-dock-cli — Slate OS nwg-dock application dock
 //!
 //! Single personality: `nwg-dock`
 

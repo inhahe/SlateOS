@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lapce-cli — SlateOS Lapce code editor
+//! lapce-cli — Slate OS Lapce code editor
 //!
 //! Single personality: `lapce`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! virtinst-cli — SlateOS virt-install VM provisioning
+//! virtinst-cli — Slate OS virt-install VM provisioning
 //!
 //! Multi-personality: `virt-install`, `virt-clone`, `virt-xml`
 

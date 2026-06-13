@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zerotier-cli — SlateOS ZeroTier virtual network
+//! zerotier-cli — Slate OS ZeroTier virtual network
 //!
 //! Multi-personality: `zerotier-one`, `zerotier-cli`
 

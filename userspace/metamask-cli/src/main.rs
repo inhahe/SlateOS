@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! metamask-cli — SlateOS MetaMask-style Ethereum wallet
+//! metamask-cli — Slate OS MetaMask-style Ethereum wallet
 //!
 //! Single personality: `metamask`
 

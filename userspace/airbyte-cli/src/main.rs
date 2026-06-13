@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! airbyte-cli — SlateOS Airbyte CLI (octavia)
+//! airbyte-cli — Slate OS Airbyte CLI (octavia)
 //!
 //! Multi-personality: `octavia`, `airbyte`
 

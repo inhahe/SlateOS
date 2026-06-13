@@ -1,4 +1,4 @@
-// SlateOS ethtool - ethernet device configuration
+// Slate OS ethtool - ethernet device configuration
 //
 // Single-personality binary providing ethernet/network interface
 // configuration and statistics display (similar to Linux ethtool).
@@ -9,7 +9,7 @@
 // ioctl ABI surface (ETHTOOL_GSET / ETHTOOL_GLINKSETTINGS / ETHTOOL_GMODULEEEPROM
 // / ETHTOOL_GWOL / ETHTOOL_SWOL). The current stub binary only exercises a
 // subset of the surface, but the full vocabulary must be present so the real
-// implementation — which will speak ioctl(2) to SlateOS network drivers — can
+// implementation — which will speak ioctl(2) to Slate OS network drivers — can
 // drop in without reshaping the public types. Dead-code lint cannot see
 // across that future boundary.
 #![allow(dead_code)]

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! macaulay2-cli — SlateOS Macaulay2 algebraic geometry system
+//! macaulay2-cli — Slate OS Macaulay2 algebraic geometry system
 //!
 //! Single personality: `M2`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wirecast-cli — SlateOS Telestream Wirecast live production
+//! wirecast-cli — Slate OS Telestream Wirecast live production
 //!
 //! Single personality: `wirecast`
 

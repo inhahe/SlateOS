@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! embree-cli — SlateOS Intel Embree ray tracing tool
+//! embree-cli — Slate OS Intel Embree ray tracing tool
 //!
 //! Single personality: `embree`
 

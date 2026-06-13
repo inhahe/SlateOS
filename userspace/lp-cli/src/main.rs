@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lp-cli — SlateOS lp/lpr/lpq/lprm/lpstat/lpadmin/lpoptions print commands
+//! lp-cli — Slate OS lp/lpr/lpq/lprm/lpstat/lpadmin/lpoptions print commands
 //!
 //! Multi-personality: `lp`, `lpr`, `lpq`, `lprm`, `lpstat`, `lpadmin`, `lpoptions`
 

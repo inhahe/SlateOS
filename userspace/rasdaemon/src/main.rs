@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rasdaemon — SlateOS RAS (Reliability, Availability, Serviceability) event logger
+//! rasdaemon — Slate OS RAS (Reliability, Availability, Serviceability) event logger
 //!
 //! Multi-personality binary for monitoring and logging hardware error events.
 //! Detected via argv[0]:

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! seafile-cli — SlateOS Seafile file sync
+//! seafile-cli — Slate OS Seafile file sync
 //!
 //! Multi-personality: `seaf-cli`, `seaf-daemon`
 

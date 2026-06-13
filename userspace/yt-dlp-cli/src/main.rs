@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! yt-dlp-cli — SlateOS yt-dlp video downloader CLI
+//! yt-dlp-cli — Slate OS yt-dlp video downloader CLI
 //!
 //! Single personality: `yt-dlp`
 

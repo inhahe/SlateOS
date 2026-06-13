@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sokol-cli — SlateOS Sokol shader compiler
+//! sokol-cli — Slate OS Sokol shader compiler
 //!
 //! Single personality: `sokol-shdc`
 

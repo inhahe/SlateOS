@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! centreon-cli — SlateOS Centreon IT monitoring
+//! centreon-cli — Slate OS Centreon IT monitoring
 //!
 //! Single personality: `centreon`
 

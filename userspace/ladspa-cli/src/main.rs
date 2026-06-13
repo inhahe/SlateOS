@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ladspa-cli — SlateOS LADSPA/LV2 audio plugin tools
+//! ladspa-cli — Slate OS LADSPA/LV2 audio plugin tools
 //!
 //! Multi-personality: `listplugins`, `analyseplugin`, `lv2ls`, `lv2info`
 

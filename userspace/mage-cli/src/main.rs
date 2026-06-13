@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mage-cli — SlateOS Mage AI data pipeline
+//! mage-cli — Slate OS Mage AI data pipeline
 //!
 //! Single personality: `mage`
 

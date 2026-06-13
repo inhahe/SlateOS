@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hdparm-cli — SlateOS hdparm disk parameter tool
+//! hdparm-cli — Slate OS hdparm disk parameter tool
 //!
 //! Single personality: `hdparm`
 

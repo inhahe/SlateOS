@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cacti-cli — SlateOS Cacti network graphing tool
+//! cacti-cli — Slate OS Cacti network graphing tool
 //!
 //! Multi-personality: `cacti`, `cacti-poller`, `cacti-spine`
 

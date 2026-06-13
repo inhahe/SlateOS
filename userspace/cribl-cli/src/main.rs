@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cribl-cli — SlateOS Cribl Stream data pipeline
+//! cribl-cli — Slate OS Cribl Stream data pipeline
 //!
 //! Single personality: `cribl`
 

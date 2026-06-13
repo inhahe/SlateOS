@@ -1,4 +1,4 @@
-//! SlateOS Login Manager — Display Manager and Session Launcher
+//! Slate OS Login Manager — Display Manager and Session Launcher
 //!
 //! Presents the login screen, authenticates users against the local user
 //! database, and starts user sessions. Also provides a lock screen that
@@ -2524,7 +2524,7 @@ fn main() {
         return;
     }
 
-    // In a real SlateOS environment, this enters the compositor event loop.
+    // In a real Slate OS environment, this enters the compositor event loop.
     // For now, render one frame to verify the UI builds correctly.
     let tree = manager.render();
     assert!(!tree.is_empty(), "Login UI must produce render commands");

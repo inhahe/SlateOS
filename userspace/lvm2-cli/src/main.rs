@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lvm2-cli — SlateOS LVM2 logical volume manager
+//! lvm2-cli — Slate OS LVM2 logical volume manager
 //!
 //! Multi-personality: `pvcreate`, `vgcreate`, `lvcreate`, `pvs`, `vgs`, `lvs`, `pvdisplay`, `vgdisplay`, `lvdisplay`
 

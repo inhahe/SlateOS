@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! matlab-cli — SlateOS MathWorks MATLAB technical computing
+//! matlab-cli — Slate OS MathWorks MATLAB technical computing
 //!
 //! Single personality: `matlab`
 

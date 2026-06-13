@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sourcegraph-cli — SlateOS Sourcegraph (universal code search + AI coding platform)
+//! sourcegraph-cli — Slate OS Sourcegraph (universal code search + AI coding platform)
 //!
 //! Single personality: `sourcegraph`
 

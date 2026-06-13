@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ntopng-cli — SlateOS ntopng network traffic monitor
+//! ntopng-cli — Slate OS ntopng network traffic monitor
 //!
 //! Single personality: `ntopng`
 

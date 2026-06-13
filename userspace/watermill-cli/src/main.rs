@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! watermill-cli — SlateOS Watermill event streaming library
+//! watermill-cli — Slate OS Watermill event streaming library
 //!
 //! Single personality: `watermill`
 

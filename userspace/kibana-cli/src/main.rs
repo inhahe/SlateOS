@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kibana-cli — SlateOS Kibana (Elastic's visualization frontend, the 'K' in ELK)
+//! kibana-cli — Slate OS Kibana (Elastic's visualization frontend, the 'K' in ELK)
 //!
 //! Single personality: `kibana`
 

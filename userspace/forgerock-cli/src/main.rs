@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! forgerock-cli — SlateOS ForgeRock (Sun OpenAM heritage, Vancouver WA/Bristol UK, merged with Ping 2023)
+//! forgerock-cli — Slate OS ForgeRock (Sun OpenAM heritage, Vancouver WA/Bristol UK, merged with Ping 2023)
 
 use std::env;
 use std::process;

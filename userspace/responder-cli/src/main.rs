@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! responder-cli — SlateOS Responder LLMNR/NBT-NS/MDNS poisoner
+//! responder-cli — Slate OS Responder LLMNR/NBT-NS/MDNS poisoner
 //!
 //! Single personality: `responder`
 

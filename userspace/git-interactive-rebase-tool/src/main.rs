@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! git-interactive-rebase-tool — SlateOS TUI for interactive git rebase
+//! git-interactive-rebase-tool — Slate OS TUI for interactive git rebase
 //!
 //! Single personality: `git-interactive-rebase-tool`
 

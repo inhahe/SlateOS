@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! helix-cli — SlateOS Helix editor
+//! helix-cli — Slate OS Helix editor
 //!
 //! Single personality: `hx`
 

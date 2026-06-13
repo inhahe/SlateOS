@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! looker-cli — SlateOS Google Cloud Looker BI
+//! looker-cli — Slate OS Google Cloud Looker BI
 //!
 //! Single personality: `looker`
 

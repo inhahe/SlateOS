@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rancher-cli — SlateOS SUSE Rancher Kubernetes management
+//! rancher-cli — Slate OS SUSE Rancher Kubernetes management
 //!
 //! Single personality: `rancher`
 

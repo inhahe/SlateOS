@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wireproxy-cli — SlateOS WireProxy WireGuard-based proxy
+//! wireproxy-cli — Slate OS WireProxy WireGuard-based proxy
 //!
 //! Single personality: `wireproxy`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! auto-cpufreq-cli — SlateOS auto-cpufreq automatic CPU frequency scaler
+//! auto-cpufreq-cli — Slate OS auto-cpufreq automatic CPU frequency scaler
 //!
 //! Single personality: `auto-cpufreq`
 

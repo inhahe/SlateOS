@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! getmail-cli — SlateOS getmail mail retriever
+//! getmail-cli — Slate OS getmail mail retriever
 //!
 //! Single personality: `getmail`
 

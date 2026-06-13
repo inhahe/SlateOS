@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! minitest-cli — SlateOS Ruby Minitest runner
+//! minitest-cli — Slate OS Ruby Minitest runner
 //!
 //! Multi-personality: `minitest`, `ruby-test`
 

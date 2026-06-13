@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gramps-cli — SlateOS Gramps genealogy research tool
+//! gramps-cli — Slate OS Gramps genealogy research tool
 //!
 //! Single personality: `gramps`
 

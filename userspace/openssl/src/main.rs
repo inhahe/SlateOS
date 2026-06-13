@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! openssl — SlateOS OpenSSL command-line toolkit
+//! openssl — Slate OS OpenSSL command-line toolkit
 //!
 //! Single personality: `openssl`
 

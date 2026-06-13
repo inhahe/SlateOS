@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kmail-cli — SlateOS KDE KMail email client
+//! kmail-cli — Slate OS KDE KMail email client
 //!
 //! Multi-personality: `kmail`, `korganizer`, `kaddressbook`
 

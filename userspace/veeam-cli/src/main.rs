@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! veeam-cli — SlateOS Veeam Data Platform (enterprise backup/recovery)
+//! veeam-cli — Slate OS Veeam Data Platform (enterprise backup/recovery)
 //!
 //! Single personality: `veeam`
 

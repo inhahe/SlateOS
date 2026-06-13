@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wings3d-cli — SlateOS Wings 3D subdivision modeler
+//! wings3d-cli — Slate OS Wings 3D subdivision modeler
 //!
 //! Single personality: `wings3d`
 

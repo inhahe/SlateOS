@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sketch-cli — SlateOS Sketch macOS design tool
+//! sketch-cli — Slate OS Sketch macOS design tool
 //!
 //! Single personality: `sketch`
 

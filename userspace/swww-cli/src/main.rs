@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! swww-cli — SlateOS swww animated wallpaper daemon
+//! swww-cli — Slate OS swww animated wallpaper daemon
 //!
 //! Multi-personality: `swww`, `swww-daemon`
 

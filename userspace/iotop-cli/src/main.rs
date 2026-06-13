@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! iotop-cli — SlateOS iotop CLI
+//! iotop-cli — Slate OS iotop CLI
 //!
 //! Single personality: `iotop`
 

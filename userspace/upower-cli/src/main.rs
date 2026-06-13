@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! upower-cli — SlateOS UPower power device enumeration
+//! upower-cli — Slate OS UPower power device enumeration
 //!
 //! Multi-personality: `upowerd`, `upower`
 

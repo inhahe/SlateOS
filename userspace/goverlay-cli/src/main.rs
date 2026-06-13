@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! goverlay-cli — SlateOS GOverlay graphics overlay manager
+//! goverlay-cli — Slate OS GOverlay graphics overlay manager
 //!
 //! Single personality: `goverlay`
 

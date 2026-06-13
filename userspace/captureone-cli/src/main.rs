@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! captureone-cli — SlateOS Capture One Pro professional RAW workflow
+//! captureone-cli — Slate OS Capture One Pro professional RAW workflow
 //!
 //! Single personality: `captureone`
 

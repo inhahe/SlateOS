@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zstd — SlateOS Zstandard compression utility
+//! zstd — Slate OS Zstandard compression utility
 //!
 //! Multi-personality binary detected via argv[0]:
 //!

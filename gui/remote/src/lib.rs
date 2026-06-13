@@ -1,6 +1,6 @@
-//! SlateOS native remote-desktop protocol.
+//! Slate OS native remote-desktop protocol.
 //!
-//! The compositor in SlateOS already drives the screen from a stream of
+//! The compositor in Slate OS already drives the screen from a stream of
 //! [`guitk::render::RenderCommand`]s — high-level draw primitives (rect
 //! fills, text, lines, clips, transforms). For remote display we serialise
 //! that same command stream and ship it to a remote viewer, which decodes

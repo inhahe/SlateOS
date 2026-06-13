@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! proton-ge-cli — SlateOS Proton GE custom Proton build
+//! proton-ge-cli — Slate OS Proton GE custom Proton build
 //!
 //! Single personality: `proton-ge`
 

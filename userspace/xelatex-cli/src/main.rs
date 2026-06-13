@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xelatex-cli — SlateOS XeLaTeX/XeTeX engine
+//! xelatex-cli — Slate OS XeLaTeX/XeTeX engine
 //!
 //! Multi-personality: `xelatex`, `xetex`
 

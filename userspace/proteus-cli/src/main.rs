@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! proteus-cli — SlateOS Labcenter Proteus schematic/PCB/simulation
+//! proteus-cli — Slate OS Labcenter Proteus schematic/PCB/simulation
 //!
 //! Single personality: `proteus`
 

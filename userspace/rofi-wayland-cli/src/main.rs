@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rofi-wayland-cli — SlateOS rofi-wayland application launcher
+//! rofi-wayland-cli — Slate OS rofi-wayland application launcher
 //!
 //! Single personality: `rofi`
 

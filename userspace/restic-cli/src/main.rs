@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! restic-cli — SlateOS Restic backup CLI
+//! restic-cli — Slate OS Restic backup CLI
 //!
 //! Single personality: `restic`
 

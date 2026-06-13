@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! flask-cli — SlateOS Flask web framework CLI
+//! flask-cli — Slate OS Flask web framework CLI
 //!
 //! Multi-personality: `flask`
 

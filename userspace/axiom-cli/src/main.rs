@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! axiom-cli — SlateOS Axiom/FriCAS computer algebra system
+//! axiom-cli — Slate OS Axiom/FriCAS computer algebra system
 //!
 //! Multi-personality: `fricas`, `axiom`
 

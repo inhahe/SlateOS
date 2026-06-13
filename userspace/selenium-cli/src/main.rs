@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! selenium-cli — SlateOS Selenium WebDriver CLI
+//! selenium-cli — Slate OS Selenium WebDriver CLI
 //!
 //! Single personality: `selenium`
 

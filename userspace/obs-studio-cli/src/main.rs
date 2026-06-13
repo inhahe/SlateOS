@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! obs-studio-cli — SlateOS OBS Studio streaming/recording
+//! obs-studio-cli — Slate OS OBS Studio streaming/recording
 //!
 //! Single personality: `obs`
 

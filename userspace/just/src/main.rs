@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! just — SlateOS command runner (make alternative)
+//! just — Slate OS command runner (make alternative)
 //!
 //! Single personality: `just`
 

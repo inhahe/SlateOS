@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! scratch-cli — SlateOS Assimilate SCRATCH dailies/color/finishing
+//! scratch-cli — Slate OS Assimilate SCRATCH dailies/color/finishing
 //!
 //! Single personality: `scratch`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! quip-cli — SlateOS Quip (Salesforce-owned docs+spreadsheets, deprecated 2025)
+//! quip-cli — Slate OS Quip (Salesforce-owned docs+spreadsheets, deprecated 2025)
 
 use std::env;
 use std::process;

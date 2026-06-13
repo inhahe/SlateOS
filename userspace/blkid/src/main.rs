@@ -1,4 +1,4 @@
-// SlateOS blkid — block device identification
+// Slate OS blkid — block device identification
 //
 // Multi-personality binary:
 //   blkid   — locate/print block device attributes

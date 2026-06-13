@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! jitterbit-cli — SlateOS Jitterbit (Harmony iPaaS + API mgmt, Alameda CA, PE-owned)
+//! jitterbit-cli — Slate OS Jitterbit (Harmony iPaaS + API mgmt, Alameda CA, PE-owned)
 
 use std::env;
 use std::process;

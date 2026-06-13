@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dog — SlateOS command-line DNS client (like dig but friendlier)
+//! dog — Slate OS command-line DNS client (like dig but friendlier)
 //!
 //! Single personality: `dog`
 

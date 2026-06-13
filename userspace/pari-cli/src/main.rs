@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pari-cli — SlateOS PARI/GP number theory calculator
+//! pari-cli — Slate OS PARI/GP number theory calculator
 //!
 //! Single personality: `gp`
 

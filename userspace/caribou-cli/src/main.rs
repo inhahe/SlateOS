@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! caribou-cli — SlateOS Caribou on-screen keyboard
+//! caribou-cli — Slate OS Caribou on-screen keyboard
 //!
 //! Multi-personality: `caribou`, `caribou-preferences`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hexchat-cli — SlateOS HexChat IRC client
+//! hexchat-cli — Slate OS HexChat IRC client
 //!
 //! Single personality: `hexchat`
 

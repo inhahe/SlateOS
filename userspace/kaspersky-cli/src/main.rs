@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kaspersky-cli — SlateOS Kaspersky Premium security
+//! kaspersky-cli — Slate OS Kaspersky Premium security
 //!
 //! Single personality: `kaspersky`
 

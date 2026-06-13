@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fabric-cli — SlateOS Fabric remote execution tool
+//! fabric-cli — Slate OS Fabric remote execution tool
 //!
 //! Multi-personality: `fab`, `fabric`
 

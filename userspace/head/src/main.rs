@@ -1,4 +1,4 @@
-//! SlateOS `head` / `tail` Utility -- Output First or Last Part of Files
+//! Slate OS `head` / `tail` Utility -- Output First or Last Part of Files
 //!
 //! A combined head+tail binary that detects its invocation name via `argv[0]`.
 //! When invoked as `tail`, it outputs the last part of files; when invoked as
@@ -793,7 +793,7 @@ fn follow_file<W: Write>(
                 writer.write_all(&buf[..n])?;
                 writer.flush()?;
             } else {
-                // TODO: check PID if specified (requires SlateOS process query API)
+                // TODO: check PID if specified (requires Slate OS process query API)
                 thread::sleep(sleep_dur);
             }
         }
@@ -834,7 +834,7 @@ fn follow_file<W: Write>(
                 }
             }
 
-            // TODO: check PID if specified (requires SlateOS process query API)
+            // TODO: check PID if specified (requires Slate OS process query API)
             thread::sleep(sleep_dur);
         }
     }

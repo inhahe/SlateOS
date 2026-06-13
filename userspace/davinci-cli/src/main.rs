@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! davinci-cli — SlateOS DaVinci Resolve color & editing
+//! davinci-cli — Slate OS DaVinci Resolve color & editing
 //!
 //! Single personality: `davinci`
 

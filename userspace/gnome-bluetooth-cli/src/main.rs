@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gnome-bluetooth-cli — SlateOS GNOME Bluetooth settings
+//! gnome-bluetooth-cli — Slate OS GNOME Bluetooth settings
 //!
 //! Multi-personality: `gnome-bluetooth`, `bluetooth-sendto`
 

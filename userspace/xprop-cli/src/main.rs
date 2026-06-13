@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xprop-cli — SlateOS xprop/xwininfo X11 property tools CLI
+//! xprop-cli — Slate OS xprop/xwininfo X11 property tools CLI
 //!
 //! Multi-personality: `xprop`, `xwininfo`
 

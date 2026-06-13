@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! flux-cli — SlateOS Flux GitOps toolkit
+//! flux-cli — Slate OS Flux GitOps toolkit
 //!
 //! Multi-personality: `flux`
 

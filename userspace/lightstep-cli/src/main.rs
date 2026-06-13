@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lightstep-cli — SlateOS Lightstep / ServiceNow Cloud Observability (Ben Sigelman's OpenTracing co.)
+//! lightstep-cli — Slate OS Lightstep / ServiceNow Cloud Observability (Ben Sigelman's OpenTracing co.)
 //!
 //! Single personality: `lightstep`
 

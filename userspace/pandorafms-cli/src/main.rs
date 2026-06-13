@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pandorafms-cli — SlateOS Pandora FMS monitoring
+//! pandorafms-cli — Slate OS Pandora FMS monitoring
 //!
 //! Multi-personality: `pandora_server`, `pandora_agent`
 

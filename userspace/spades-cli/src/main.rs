@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! spades-cli — SlateOS SPAdes genome assembler
+//! spades-cli — Slate OS SPAdes genome assembler
 //!
 //! Single personality: `spades`
 

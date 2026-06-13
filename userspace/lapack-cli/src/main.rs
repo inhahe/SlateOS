@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lapack-cli — SlateOS LAPACK linear algebra info/test
+//! lapack-cli — Slate OS LAPACK linear algebra info/test
 //!
 //! Single personality: `lapack-test`
 

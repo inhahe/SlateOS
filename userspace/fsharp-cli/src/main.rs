@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fsharp-cli — SlateOS F# language tools
+//! fsharp-cli — Slate OS F# language tools
 //!
 //! Multi-personality: `dotnet fsi`, `fsi`, `fsharpc`
 

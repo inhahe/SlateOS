@@ -1,4 +1,4 @@
-//! `SlateOS` Reminders & Tasks Application
+//! `Slate OS` Reminders & Tasks Application
 //!
 //! A comprehensive desktop reminders and task management application with:
 //! - Task creation, editing, deletion with title, description, due date/time,

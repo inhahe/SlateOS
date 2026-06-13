@@ -1,4 +1,4 @@
-//! taskscheduler -- SlateOS Task Scheduler
+//! taskscheduler -- Slate OS Task Scheduler
 //!
 //! A cron-like task scheduling application with a GUI built on guitk.
 //! Supports one-shot and recurring schedules including daily, weekly,

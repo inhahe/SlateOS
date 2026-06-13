@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vernemq-cli — SlateOS VerneMQ MQTT broker
+//! vernemq-cli — Slate OS VerneMQ MQTT broker
 //!
 //! Multi-personality: `vernemq`, `vmq-admin`, `vmq-passwd`
 

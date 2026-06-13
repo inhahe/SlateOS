@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pendo-cli — SlateOS Pendo (product analytics + in-app guides + feedback)
+//! pendo-cli — Slate OS Pendo (product analytics + in-app guides + feedback)
 //!
 //! Single personality: `pendo`
 

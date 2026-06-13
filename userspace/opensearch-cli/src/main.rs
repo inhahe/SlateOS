@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! opensearch-cli — SlateOS OpenSearch distributed search engine
+//! opensearch-cli — Slate OS OpenSearch distributed search engine
 //!
 //! Single personality: `opensearch`
 

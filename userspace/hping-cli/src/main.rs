@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hping-cli — SlateOS hping3 network tool
+//! hping-cli — Slate OS hping3 network tool
 //!
 //! Single personality: `hping3`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! paw-cli — SlateOS Paw API client tool
+//! paw-cli — Slate OS Paw API client tool
 //!
 //! Single personality: `paw`
 

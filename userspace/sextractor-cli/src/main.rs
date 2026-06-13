@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sextractor-cli — SlateOS SExtractor source extraction
+//! sextractor-cli — Slate OS SExtractor source extraction
 //!
 //! Single personality: `sex`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kafka — SlateOS distributed event streaming platform
+//! kafka — Slate OS distributed event streaming platform
 //!
 //! Multi-personality: `kafka-server-start` (broker), `kafka-topics`,
 //!   `kafka-console-producer`, `kafka-console-consumer`, `kafka-consumer-groups`

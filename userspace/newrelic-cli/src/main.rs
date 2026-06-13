@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! newrelic-cli — SlateOS New Relic CLI
+//! newrelic-cli — Slate OS New Relic CLI
 //!
 //! Multi-personality: `newrelic`
 

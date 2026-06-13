@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! apache-cli — SlateOS Apache HTTP Server
+//! apache-cli — Slate OS Apache HTTP Server
 //!
 //! Multi-personality: `httpd`, `apachectl`, `ab`
 

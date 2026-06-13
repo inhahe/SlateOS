@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! singular-cli — SlateOS Singular computer algebra system
+//! singular-cli — Slate OS Singular computer algebra system
 //!
 //! Single personality: `singular`
 

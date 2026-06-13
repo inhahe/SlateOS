@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dovecot — SlateOS IMAP/POP3 mail server
+//! dovecot — Slate OS IMAP/POP3 mail server
 //!
 //! Multi-personality: `dovecot` (server), `doveconf` (config dumper), `doveadm` (admin)
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! blender-cli — SlateOS Blender 3D CLI
+//! blender-cli — Slate OS Blender 3D CLI
 //!
 //! Single personality: `blender`
 

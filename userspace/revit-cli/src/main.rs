@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! revit-cli — SlateOS Autodesk Revit BIM (Building Information Modeling)
+//! revit-cli — Slate OS Autodesk Revit BIM (Building Information Modeling)
 //!
 //! Single personality: `revit`
 

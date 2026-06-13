@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gloo-cli — SlateOS Gloo Edge API gateway
+//! gloo-cli — Slate OS Gloo Edge API gateway
 //!
 //! Single personality: `glooctl`
 

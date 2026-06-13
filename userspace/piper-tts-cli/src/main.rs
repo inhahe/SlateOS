@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! piper-tts-cli — SlateOS Piper neural text-to-speech
+//! piper-tts-cli — Slate OS Piper neural text-to-speech
 //!
 //! Single personality: `piper`
 

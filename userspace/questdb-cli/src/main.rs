@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! questdb-cli — SlateOS QuestDB time-series database
+//! questdb-cli — Slate OS QuestDB time-series database
 //!
 //! Single personality: `questdb`
 

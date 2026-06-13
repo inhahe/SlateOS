@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! otfcc-cli — SlateOS OTFCC OpenType font compiler
+//! otfcc-cli — Slate OS OTFCC OpenType font compiler
 //!
 //! Multi-personality: `otfccdump`, `otfccbuild`
 

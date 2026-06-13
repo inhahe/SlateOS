@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rbw-cli — SlateOS rbw unofficial Bitwarden CLI
+//! rbw-cli — Slate OS rbw unofficial Bitwarden CLI
 //!
 //! Multi-personality: `rbw`, `rbw-agent`
 

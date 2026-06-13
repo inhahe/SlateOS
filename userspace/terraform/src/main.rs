@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! terraform — SlateOS infrastructure as code tool
+//! terraform — Slate OS infrastructure as code tool
 //!
 //! Single personality: `terraform`
 

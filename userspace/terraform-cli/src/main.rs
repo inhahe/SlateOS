@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! terraform-cli — SlateOS Terraform infrastructure-as-code CLI
+//! terraform-cli — Slate OS Terraform infrastructure-as-code CLI
 //!
 //! Single personality: `terraform`
 

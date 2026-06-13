@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! avahi-cli — SlateOS Avahi mDNS/DNS-SD tools
+//! avahi-cli — Slate OS Avahi mDNS/DNS-SD tools
 //!
 //! Multi-personality: `avahi-browse`, `avahi-resolve`, `avahi-publish`, `avahi-daemon`
 

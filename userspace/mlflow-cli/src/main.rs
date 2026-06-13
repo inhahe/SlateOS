@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mlflow-cli — SlateOS MLflow CLI
+//! mlflow-cli — Slate OS MLflow CLI
 //!
 //! Single personality: `mlflow`
 

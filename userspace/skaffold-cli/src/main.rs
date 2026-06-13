@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! skaffold-cli — SlateOS Skaffold Kubernetes development tool
+//! skaffold-cli — Slate OS Skaffold Kubernetes development tool
 //!
 //! Single personality: `skaffold`
 

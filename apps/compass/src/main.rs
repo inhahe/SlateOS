@@ -9,7 +9,7 @@
 #![allow(clippy::struct_excessive_bools)]
 #![allow(clippy::fn_params_excessive_bools)]
 
-//! SlateOS Compass -- digital compass and navigation tool.
+//! Slate OS Compass -- digital compass and navigation tool.
 //!
 //! Features:
 //! - Compass rose with cardinal/intercardinal labels and degree tick marks

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sage-cli — SlateOS SageMath computer algebra system
+//! sage-cli — Slate OS SageMath computer algebra system
 //!
 //! Multi-personality: `sage`, `sage-notebook`
 

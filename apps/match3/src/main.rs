@@ -10,7 +10,7 @@
 #![allow(clippy::fn_params_excessive_bools)]
 #![allow(clippy::needless_range_loop)]
 
-//! SlateOS Match-3 — Bejeweled-style puzzle game.
+//! Slate OS Match-3 — Bejeweled-style puzzle game.
 //!
 //! Features an 8x8 grid of colored gems with match-3 mechanics,
 //! gravity/cascading, special gems (line clear, color bomb),

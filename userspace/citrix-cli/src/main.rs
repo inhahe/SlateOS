@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! citrix-cli — SlateOS Citrix Workspace / DaaS / Hypervisor
+//! citrix-cli — Slate OS Citrix Workspace / DaaS / Hypervisor
 //!
 //! Single personality: `citrix`
 

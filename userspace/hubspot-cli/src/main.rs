@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hubspot-cli — SlateOS HubSpot (inbound marketing/sales/service CRM)
+//! hubspot-cli — Slate OS HubSpot (inbound marketing/sales/service CRM)
 //!
 //! Single personality: `hubspot`
 

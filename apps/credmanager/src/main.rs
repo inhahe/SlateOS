@@ -1,4 +1,4 @@
-//! SlateOS Credential Manager
+//! Slate OS Credential Manager
 //!
 //! A secure password and credential management application for SlateOS.
 //! Stores and organizes passwords, secure notes, credit cards, identities,

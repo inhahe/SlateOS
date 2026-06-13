@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! duo-cli — SlateOS Duo Security (the green-screen push-notification MFA, now Cisco-owned)
+//! duo-cli — Slate OS Duo Security (the green-screen push-notification MFA, now Cisco-owned)
 //!
 //! Single personality: `duo`
 

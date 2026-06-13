@@ -1,4 +1,4 @@
-//! SlateOS Screen Recorder
+//! Slate OS Screen Recorder
 //!
 //! A screen recording/capture application providing:
 //! - Capture modes: full screen, selected window, custom region (drag to select)

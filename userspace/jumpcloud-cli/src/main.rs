@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! jumpcloud-cli — SlateOS JumpCloud (Directory-as-a-Service — cloud AD alternative)
+//! jumpcloud-cli — Slate OS JumpCloud (Directory-as-a-Service — cloud AD alternative)
 //!
 //! Single personality: `jumpcloud`
 

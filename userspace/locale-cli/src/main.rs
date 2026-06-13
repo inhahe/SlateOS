@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! locale-cli — SlateOS locale/localedef/locale-gen CLI
+//! locale-cli — Slate OS locale/localedef/locale-gen CLI
 //!
 //! Multi-personality: `locale`, `localedef`, `locale-gen`
 

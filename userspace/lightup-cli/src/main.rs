@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lightup-cli — SlateOS Lightup Data (no-code data quality, SF, acquired by Acceldata 2024)
+//! lightup-cli — Slate OS Lightup Data (no-code data quality, SF, acquired by Acceldata 2024)
 
 use std::env;
 use std::process;

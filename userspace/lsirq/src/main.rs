@@ -1,4 +1,4 @@
-//! SlateOS IRQ information display utility.
+//! Slate OS IRQ information display utility.
 //!
 //! Multi-personality binary providing:
 //! - **lsirq** — display information about system interrupts

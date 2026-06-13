@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hplip-cli — SlateOS HP Linux Imaging and Printing tools
+//! hplip-cli — Slate OS HP Linux Imaging and Printing tools
 //!
 //! Multi-personality: `hp-setup`, `hp-info`, `hp-levels`, `hp-toolbox`
 

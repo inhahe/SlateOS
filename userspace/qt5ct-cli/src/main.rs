@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! qt5ct-cli — SlateOS qt5ct Qt5 configuration tool
+//! qt5ct-cli — Slate OS qt5ct Qt5 configuration tool
 //!
 //! Single personality: `qt5ct`
 

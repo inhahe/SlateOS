@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gusto-cli — SlateOS Gusto (modern self-serve SMB payroll, formerly ZenPayroll)
+//! gusto-cli — Slate OS Gusto (modern self-serve SMB payroll, formerly ZenPayroll)
 //!
 //! Single personality: `gusto`
 

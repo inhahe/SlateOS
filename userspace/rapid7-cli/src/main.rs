@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rapid7-cli — SlateOS Rapid7 (Metasploit + InsightVM + Insight platform, Boston, NASDAQ:RPD)
+//! rapid7-cli — Slate OS Rapid7 (Metasploit + InsightVM + Insight platform, Boston, NASDAQ:RPD)
 
 use std::env;
 use std::process;

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! powertop — SlateOS power consumption analysis tool
+//! powertop — Slate OS power consumption analysis tool
 //!
 //! Single personality: `powertop`
 

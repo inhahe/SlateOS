@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dusty3d-cli — SlateOS Dust3D auto-rigging 3D modeler
+//! dusty3d-cli — Slate OS Dust3D auto-rigging 3D modeler
 //!
 //! Single personality: `dust3d`
 

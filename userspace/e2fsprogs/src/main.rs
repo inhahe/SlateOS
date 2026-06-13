@@ -1,4 +1,4 @@
-// SlateOS e2fsprogs — ext2/3/4 filesystem utilities
+// Slate OS e2fsprogs — ext2/3/4 filesystem utilities
 //
 // Multi-personality binary:
 //   mke2fs    / mkfs.ext2 / mkfs.ext3 / mkfs.ext4 — create ext2/3/4 filesystem
@@ -407,7 +407,7 @@ impl Default for Superblock {
             s_minor_rev_level: 0,
             s_lastcheck: 1700000000,
             s_checkinterval: 0,
-            s_creator_os: 5, // SlateOS
+            s_creator_os: 5, // Slate OS
             s_rev_level: EXT2_DYNAMIC_REV,
             s_def_resuid: 0,
             s_def_resgid: 0,

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gitlab-cli — SlateOS GitLab CLI tools
+//! gitlab-cli — Slate OS GitLab CLI tools
 //!
 //! Multi-personality: `glab`, `gitlab-runner`
 

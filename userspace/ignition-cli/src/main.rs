@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ignition-cli — SlateOS Ignition/Gazebo Sim tools
+//! ignition-cli — Slate OS Ignition/Gazebo Sim tools
 //!
 //! Multi-personality: `ign`, `gz`
 

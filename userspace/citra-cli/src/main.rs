@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! citra-cli — SlateOS Citra Nintendo 3DS emulator
+//! citra-cli — Slate OS Citra Nintendo 3DS emulator
 //!
 //! Multi-personality: `citra`, `citra-room`
 

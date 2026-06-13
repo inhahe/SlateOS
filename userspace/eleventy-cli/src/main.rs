@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! eleventy-cli — SlateOS Eleventy static site generator
+//! eleventy-cli — Slate OS Eleventy static site generator
 //!
 //! Single personality: `eleventy`
 

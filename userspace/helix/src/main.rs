@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! helix — SlateOS post-modern modal text editor
+//! helix — Slate OS post-modern modal text editor
 //!
 //! Single personality: `hx`
 

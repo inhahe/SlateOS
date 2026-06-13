@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hyperfine — SlateOS command-line benchmarking tool
+//! hyperfine — Slate OS command-line benchmarking tool
 //!
 //! Single personality: `hyperfine`
 

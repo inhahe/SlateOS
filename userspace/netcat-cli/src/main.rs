@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! netcat-cli — SlateOS netcat (nc) CLI
+//! netcat-cli — Slate OS netcat (nc) CLI
 //!
 //! Multi-personality: `nc`, `ncat`, `netcat`
 

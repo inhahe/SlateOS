@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! goaccess-cli — SlateOS web log analyzer
+//! goaccess-cli — Slate OS web log analyzer
 //!
 //! Single personality: `goaccess`
 

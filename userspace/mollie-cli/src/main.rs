@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! mollie-cli — SlateOS Mollie European payments personality CLI.
+//! mollie-cli — Slate OS Mollie European payments personality CLI.
 
 use std::env;
 use std::process;

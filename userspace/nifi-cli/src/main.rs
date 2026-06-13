@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nifi-cli — SlateOS Apache NiFi data flow
+//! nifi-cli — Slate OS Apache NiFi data flow
 //!
 //! Single personality: `nifi`
 

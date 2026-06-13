@@ -1,4 +1,4 @@
-//! `SlateOS` Password Generator & Strength Analyzer
+//! `Slate OS` Password Generator & Strength Analyzer
 //!
 //! A password utility tool with:
 //! - Configurable password generation (length, character classes)

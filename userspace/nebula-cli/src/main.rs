@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nebula-cli — SlateOS Nebula overlay network tools
+//! nebula-cli — Slate OS Nebula overlay network tools
 //!
 //! Multi-personality: `nebula`, `nebula-cert`
 

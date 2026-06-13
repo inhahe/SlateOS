@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ant-cli — SlateOS Apache Ant build system
+//! ant-cli — Slate OS Apache Ant build system
 //!
 //! Multi-personality: `ant`
 

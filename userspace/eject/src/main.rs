@@ -1,4 +1,4 @@
-//! SlateOS removable media ejection utility.
+//! Slate OS removable media ejection utility.
 //!
 //! Multi-personality binary providing:
 //! - **eject** — eject removable media (CD/DVD, USB, floppy)

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! thermald-cli — SlateOS thermal management daemon
+//! thermald-cli — Slate OS thermal management daemon
 //!
 //! Multi-personality: `thermald`, `thermal-monitor`
 

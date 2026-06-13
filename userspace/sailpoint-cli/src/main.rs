@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sailpoint-cli — SlateOS SailPoint (IGA market leader, Austin TX, Thoma Bravo round-trip, IPO'd twice)
+//! sailpoint-cli — Slate OS SailPoint (IGA market leader, Austin TX, Thoma Bravo round-trip, IPO'd twice)
 
 use std::env;
 use std::process;

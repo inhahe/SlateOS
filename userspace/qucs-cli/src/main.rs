@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! qucs-cli — SlateOS Qucs circuit simulator
+//! qucs-cli — Slate OS Qucs circuit simulator
 //!
 //! Multi-personality: `qucs`, `qucsator`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! asdf-cli — SlateOS asdf version manager
+//! asdf-cli — Slate OS asdf version manager
 //!
 //! Single personality: `asdf`
 

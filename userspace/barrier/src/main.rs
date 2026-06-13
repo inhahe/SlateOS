@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! barrier — SlateOS software KVM (keyboard/video/mouse sharing)
+//! barrier — Slate OS software KVM (keyboard/video/mouse sharing)
 //!
 //! Multi-personality: `barriers`, `barrierc`
 

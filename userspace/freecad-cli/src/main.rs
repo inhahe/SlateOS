@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! freecad-cli — SlateOS FreeCAD CLI
+//! freecad-cli — Slate OS FreeCAD CLI
 //!
 //! Multi-personality: `freecad`, `freecadcmd`
 

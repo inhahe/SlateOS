@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kubectl-cli — SlateOS Kubernetes command-line tool
+//! kubectl-cli — Slate OS Kubernetes command-line tool
 //!
 //! Single personality: `kubectl`
 

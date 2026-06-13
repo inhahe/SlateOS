@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zettlr-cli — SlateOS Zettlr Markdown editor for academics
+//! zettlr-cli — Slate OS Zettlr Markdown editor for academics
 //!
 //! Single personality: `zettlr`
 

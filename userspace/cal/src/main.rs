@@ -1,4 +1,4 @@
-//! SlateOS calendar display utility.
+//! Slate OS calendar display utility.
 //!
 //! Multi-personality binary providing:
 //! - **cal** — display a calendar
@@ -80,7 +80,7 @@ fn day_of_week(year: i32, month: u32, day: u32) -> u32 {
 /// Get current date from the system (year, month, day).
 fn current_date() -> (i32, u32, u32) {
     // Try reading from system.
-    // On SlateOS this would use the kernel clock; for now use a reasonable default.
+    // On Slate OS this would use the kernel clock; for now use a reasonable default.
     // We'll try to parse /proc/driver/rtc or use std::time.
     use std::time::{SystemTime, UNIX_EPOCH};
     if let Ok(dur) = SystemTime::now().duration_since(UNIX_EPOCH) {

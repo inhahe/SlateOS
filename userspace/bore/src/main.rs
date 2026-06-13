@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bore — SlateOS simple TCP tunnel exposing local ports to the internet
+//! bore — Slate OS simple TCP tunnel exposing local ports to the internet
 //!
 //! Single personality: `bore`
 

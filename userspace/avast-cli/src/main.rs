@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! avast-cli — SlateOS Gen Digital Avast One
+//! avast-cli — Slate OS Gen Digital Avast One
 //!
 //! Single personality: `avast`
 

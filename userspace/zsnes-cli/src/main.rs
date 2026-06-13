@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zsnes-cli — SlateOS ZSNES Super Nintendo emulator
+//! zsnes-cli — Slate OS ZSNES Super Nintendo emulator
 //!
 //! Single personality: `zsnes`
 

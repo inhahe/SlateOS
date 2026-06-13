@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! htop-cli — SlateOS htop CLI
+//! htop-cli — Slate OS htop CLI
 //!
 //! Single personality: `htop`
 

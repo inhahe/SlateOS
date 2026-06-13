@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! close-cli — SlateOS Close (inside-sales CRM with built-in calling/SMS/email)
+//! close-cli — Slate OS Close (inside-sales CRM with built-in calling/SMS/email)
 //!
 //! Single personality: `close`
 

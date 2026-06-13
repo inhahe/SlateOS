@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cachet-cli — SlateOS Cachet status page
+//! cachet-cli — Slate OS Cachet status page
 //!
 //! Single personality: `cachet`
 

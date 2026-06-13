@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pads-cli — SlateOS Siemens PADS professional PCB
+//! pads-cli — Slate OS Siemens PADS professional PCB
 //!
 //! Single personality: `pads`
 

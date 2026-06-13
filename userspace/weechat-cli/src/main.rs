@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! weechat-cli — SlateOS WeeChat IRC/messaging client CLI
+//! weechat-cli — Slate OS WeeChat IRC/messaging client CLI
 //!
 //! Single personality: `weechat`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tengine-cli — SlateOS Tengine web server (Nginx fork)
+//! tengine-cli — Slate OS Tengine web server (Nginx fork)
 //!
 //! Single personality: `tengine`
 

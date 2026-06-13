@@ -1,4 +1,4 @@
-//! SlateOS swap and memory management utilities.
+//! Slate OS swap and memory management utilities.
 //!
 //! Multi-personality binary providing:
 //! - **swapon** — enable swap space

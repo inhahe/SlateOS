@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pandas-cli — SlateOS Pandas data analysis library
+//! pandas-cli — Slate OS Pandas data analysis library
 //!
 //! Multi-personality: `pandas`
 

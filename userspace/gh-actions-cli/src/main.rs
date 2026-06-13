@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gh-actions-cli — SlateOS GitHub Actions workflow management
+//! gh-actions-cli — Slate OS GitHub Actions workflow management
 //!
 //! Single personality: `gh-actions`
 

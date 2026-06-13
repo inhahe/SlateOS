@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! loki-cli — SlateOS Grafana Loki log query CLI (logcli)
+//! loki-cli — Slate OS Grafana Loki log query CLI (logcli)
 //!
 //! Single personality: `logcli`
 

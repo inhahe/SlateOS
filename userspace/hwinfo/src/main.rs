@@ -1,4 +1,4 @@
-//! SlateOS hardware information utility.
+//! Slate OS hardware information utility.
 //!
 //! Multi-personality binary providing:
 //! - **hwinfo** — comprehensive hardware inventory

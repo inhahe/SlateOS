@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! marqo-cli — SlateOS Marqo (open-source multi-modal vector search engine, Sydney AU)
+//! marqo-cli — Slate OS Marqo (open-source multi-modal vector search engine, Sydney AU)
 
 use std::env;
 use std::process;

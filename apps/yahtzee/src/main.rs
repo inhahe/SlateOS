@@ -11,7 +11,7 @@
 #![allow(clippy::needless_range_loop)]
 #![allow(unused_imports)]
 
-//! SlateOS Yahtzee — the classic dice game.
+//! Slate OS Yahtzee — the classic dice game.
 //!
 //! Roll five dice up to three times per turn, strategically holding dice
 //! between rolls, and assign the result to one of 13 scoring categories.

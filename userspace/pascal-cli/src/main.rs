@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pascal-cli — SlateOS Free Pascal compiler
+//! pascal-cli — Slate OS Free Pascal compiler
 //!
 //! Multi-personality: `fpc`, `ppcx64`, `fpcmake`, `instantfpc`
 

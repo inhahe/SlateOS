@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bowtie-cli — SlateOS Bowtie2 sequence aligner
+//! bowtie-cli — Slate OS Bowtie2 sequence aligner
 //!
 //! Multi-personality: `bowtie2`, `bowtie2-build`, `bowtie2-inspect`
 

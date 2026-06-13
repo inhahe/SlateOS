@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! calculix-cli — SlateOS CalculiX finite element solver
+//! calculix-cli — Slate OS CalculiX finite element solver
 //!
 //! Multi-personality: `ccx`, `cgx`
 

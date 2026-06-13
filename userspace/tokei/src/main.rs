@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tokei — SlateOS code statistics tool (count lines of code)
+//! tokei — Slate OS code statistics tool (count lines of code)
 //!
 //! Single personality: `tokei`
 

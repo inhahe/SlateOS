@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! conan-cli — SlateOS Conan package manager CLI
+//! conan-cli — Slate OS Conan package manager CLI
 //!
 //! Single personality: `conan`
 

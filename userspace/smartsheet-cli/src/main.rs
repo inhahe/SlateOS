@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! smartsheet-cli — SlateOS Smartsheet (NYSE:SMAR, spreadsheet-meets-PM)
+//! smartsheet-cli — Slate OS Smartsheet (NYSE:SMAR, spreadsheet-meets-PM)
 
 use std::env;
 use std::process;

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! shotman-cli — SlateOS shotman screenshot manager
+//! shotman-cli — Slate OS shotman screenshot manager
 //!
 //! Single personality: `shotman`
 

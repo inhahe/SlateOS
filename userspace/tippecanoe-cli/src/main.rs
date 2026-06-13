@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tippecanoe-cli — SlateOS Tippecanoe vector tile builder
+//! tippecanoe-cli — Slate OS Tippecanoe vector tile builder
 //!
 //! Single personality: `tippecanoe`
 

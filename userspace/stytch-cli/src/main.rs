@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! stytch-cli — SlateOS Stytch developer-first auth platform personality CLI.
+//! stytch-cli — Slate OS Stytch developer-first auth platform personality CLI.
 
 use std::env;
 use std::process;

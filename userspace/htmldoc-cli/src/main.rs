@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! htmldoc-cli — SlateOS HTML document processor
+//! htmldoc-cli — Slate OS HTML document processor
 //!
 //! Single personality: `htmldoc`
 

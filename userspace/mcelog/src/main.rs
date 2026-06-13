@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mcelog — SlateOS machine check exception logger
+//! mcelog — Slate OS machine check exception logger
 //!
 //! Multi-personality binary for handling CPU hardware errors (MCEs).
 //! Detected via argv[0]:

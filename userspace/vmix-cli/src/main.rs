@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vmix-cli — SlateOS vMix professional video switcher
+//! vmix-cli — Slate OS vMix professional video switcher
 //!
 //! Single personality: `vmix`
 

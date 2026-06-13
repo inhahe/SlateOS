@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mpvpaper-cli — SlateOS mpvpaper video wallpaper
+//! mpvpaper-cli — Slate OS mpvpaper video wallpaper
 //!
 //! Single personality: `mpvpaper`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! scim-cli — SlateOS SCIM input method platform
+//! scim-cli — Slate OS SCIM input method platform
 //!
 //! Multi-personality: `scim`, `scim-setup`
 

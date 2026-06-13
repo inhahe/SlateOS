@@ -1,4 +1,4 @@
-//! SlateOS PolicyKit Authorization Framework
+//! Slate OS PolicyKit Authorization Framework
 //!
 //! A multi-personality binary providing:
 //! - **polkitd** -- PolicyKit authorization daemon that manages policy rules,
@@ -408,7 +408,7 @@ const POLICY_DIR: &str = "/usr/share/polkit-1/actions";
 /// ```xml
 /// <?xml version="1.0" encoding="UTF-8"?>
 /// <policyconfig>
-///   <vendor>SlateOS</vendor>
+///   <vendor>Slate OS</vendor>
 ///   <vendor_url>https://slateos.example.com</vendor_url>
 ///   <action id="org.slateos.example">
 ///     <description>Do something</description>
@@ -842,7 +842,7 @@ fn run_polkitd(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" | "-V" => {
-                println!("polkitd 0.1.0 (SlateOS)");
+                println!("polkitd 0.1.0 (Slate OS)");
                 return 0;
             }
             _ => {
@@ -966,7 +966,7 @@ fn run_polkitd(args: &[String]) -> i32 {
 fn print_polkitd_usage() {
     println!("Usage: polkitd [OPTIONS]");
     println!();
-    println!("SlateOS PolicyKit authorization daemon.");
+    println!("Slate OS PolicyKit authorization daemon.");
     println!();
     println!("Options:");
     println!("  --no-debug     Suppress debug output on stderr");
@@ -1007,7 +1007,7 @@ fn run_pkexec(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" | "-V" => {
-                println!("pkexec 0.1.0 (SlateOS)");
+                println!("pkexec 0.1.0 (Slate OS)");
                 return 0;
             }
             "--user" => {
@@ -1214,7 +1214,7 @@ fn run_pkaction(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" | "-V" => {
-                println!("pkaction 0.1.0 (SlateOS)");
+                println!("pkaction 0.1.0 (Slate OS)");
                 return 0;
             }
             "--action-id" => {
@@ -1334,7 +1334,7 @@ fn run_pkcheck(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" | "-V" => {
-                println!("pkcheck 0.1.0 (SlateOS)");
+                println!("pkcheck 0.1.0 (Slate OS)");
                 return 0;
             }
             "--action-id" => {
@@ -1711,8 +1711,8 @@ mod tests {
     #[test]
     fn test_extract_xml_text_simple() {
         assert_eq!(
-            extract_xml_text("<vendor>SlateOS</vendor>", "vendor"),
-            Some("SlateOS".to_string())
+            extract_xml_text("<vendor>Slate OS</vendor>", "vendor"),
+            Some("Slate OS".to_string())
         );
     }
 

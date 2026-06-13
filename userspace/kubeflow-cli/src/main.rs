@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kubeflow-cli — SlateOS Kubeflow Pipelines CLI
+//! kubeflow-cli — Slate OS Kubeflow Pipelines CLI
 //!
 //! Multi-personality: `kfp`
 

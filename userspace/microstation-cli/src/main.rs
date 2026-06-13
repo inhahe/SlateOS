@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! microstation-cli — SlateOS Bentley MicroStation CAD for infrastructure
+//! microstation-cli — Slate OS Bentley MicroStation CAD for infrastructure
 //!
 //! Single personality: `microstation`
 

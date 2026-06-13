@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hevo-cli — SlateOS Hevo Data pipeline
+//! hevo-cli — Slate OS Hevo Data pipeline
 //!
 //! Single personality: `hevo`
 

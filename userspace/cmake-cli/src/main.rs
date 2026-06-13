@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cmake-cli — SlateOS CMake CLI
+//! cmake-cli — Slate OS CMake CLI
 //!
 //! Single personality: `cmake`
 

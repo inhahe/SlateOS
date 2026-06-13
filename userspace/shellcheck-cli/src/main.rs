@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! shellcheck-cli — SlateOS ShellCheck CLI
+//! shellcheck-cli — Slate OS ShellCheck CLI
 //!
 //! Single personality: `shellcheck`
 

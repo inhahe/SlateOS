@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! stackstorm-cli — SlateOS StackStorm event-driven automation
+//! stackstorm-cli — Slate OS StackStorm event-driven automation
 //!
 //! Single personality: `st2`
 

@@ -1,4 +1,4 @@
-//! SlateOS Notification Daemon
+//! Slate OS Notification Daemon
 //!
 //! Manages system and application notifications with toast display,
 //! a notification center UI, and Do Not Disturb scheduling. Communicates

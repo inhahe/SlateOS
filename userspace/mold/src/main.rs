@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mold — SlateOS high-performance linker
+//! mold — Slate OS high-performance linker
 //!
 //! Multi-personality: `mold`, `ld.mold`, `ld64.mold`
 

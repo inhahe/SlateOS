@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dbvisualizer-cli — SlateOS DbVisualizer database tool
+//! dbvisualizer-cli — Slate OS DbVisualizer database tool
 //!
 //! Single personality: `dbvis`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sympy-cli — SlateOS SymPy symbolic mathematics
+//! sympy-cli — Slate OS SymPy symbolic mathematics
 //!
 //! Multi-personality: `sympy`, `isympy`
 

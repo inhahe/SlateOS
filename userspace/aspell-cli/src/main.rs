@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! aspell-cli — SlateOS GNU Aspell spell checker CLI
+//! aspell-cli — Slate OS GNU Aspell spell checker CLI
 //!
 //! Single personality: `aspell`
 

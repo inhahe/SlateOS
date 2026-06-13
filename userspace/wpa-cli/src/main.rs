@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wpa-cli — SlateOS WPA supplicant control
+//! wpa-cli — Slate OS WPA supplicant control
 //!
 //! Multi-personality: `wpa_cli`, `wpa_supplicant`, `wpa_passphrase`
 

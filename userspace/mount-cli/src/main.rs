@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mount-cli — SlateOS mount/umount/findmnt CLI
+//! mount-cli — Slate OS mount/umount/findmnt CLI
 //!
 //! Multi-personality: `mount`, `umount`, `findmnt`
 

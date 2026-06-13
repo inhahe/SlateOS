@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ozone-cli — SlateOS iZotope Ozone mastering suite
+//! ozone-cli — Slate OS iZotope Ozone mastering suite
 //!
 //! Single personality: `ozone`
 

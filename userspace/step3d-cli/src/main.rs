@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! step3d-cli — SlateOS STEP file viewer
+//! step3d-cli — Slate OS STEP file viewer
 //!
 //! Single personality: `step3d`
 

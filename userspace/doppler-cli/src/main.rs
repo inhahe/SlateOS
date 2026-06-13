@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! doppler-cli — SlateOS Doppler secrets manager
+//! doppler-cli — Slate OS Doppler secrets manager
 //!
 //! Single personality: `doppler`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pandoc-cli — SlateOS Pandoc document converter CLI
+//! pandoc-cli — Slate OS Pandoc document converter CLI
 //!
 //! Single personality: `pandoc`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! haproxy — SlateOS reliable, high-performance TCP/HTTP load balancer
+//! haproxy — Slate OS reliable, high-performance TCP/HTTP load balancer
 //!
 //! Single personality: `haproxy`
 

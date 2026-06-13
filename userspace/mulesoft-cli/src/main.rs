@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mulesoft-cli — SlateOS MuleSoft (Anypoint Platform + API mgmt, San Francisco, Salesforce subsidiary)
+//! mulesoft-cli — Slate OS MuleSoft (Anypoint Platform + API mgmt, San Francisco, Salesforce subsidiary)
 
 use std::env;
 use std::process;

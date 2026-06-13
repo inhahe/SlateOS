@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! remix-cli — SlateOS Remix framework CLI
+//! remix-cli — Slate OS Remix framework CLI
 //!
 //! Multi-personality: `remix`
 

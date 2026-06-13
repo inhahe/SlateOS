@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! slack-cli — SlateOS Slack CLI
+//! slack-cli — Slate OS Slack CLI
 //!
 //! Single personality: `slack`
 

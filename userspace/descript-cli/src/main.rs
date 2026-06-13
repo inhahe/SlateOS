@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! descript-cli — SlateOS Descript text-based audio/video editor
+//! descript-cli — Slate OS Descript text-based audio/video editor
 //!
 //! Single personality: `descript`
 

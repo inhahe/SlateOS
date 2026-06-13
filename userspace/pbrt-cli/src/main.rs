@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pbrt-cli — SlateOS PBRT physically based renderer
+//! pbrt-cli — Slate OS PBRT physically based renderer
 //!
 //! Single personality: `pbrt`
 

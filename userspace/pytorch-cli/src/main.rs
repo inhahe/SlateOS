@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pytorch-cli — SlateOS PyTorch deep learning framework
+//! pytorch-cli — Slate OS PyTorch deep learning framework
 //!
 //! Multi-personality: `torchrun`, `torch_shm_manager`
 

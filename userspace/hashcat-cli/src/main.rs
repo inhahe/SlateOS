@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hashcat-cli — SlateOS hashcat password recovery
+//! hashcat-cli — Slate OS hashcat password recovery
 //!
 //! Single personality: `hashcat`
 

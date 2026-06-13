@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sdparm-cli — SlateOS sdparm SCSI device parameter tool
+//! sdparm-cli — Slate OS sdparm SCSI device parameter tool
 //!
 //! Single personality: `sdparm`
 

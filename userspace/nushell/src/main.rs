@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nushell — SlateOS modern shell with structured data
+//! nushell — Slate OS modern shell with structured data
 //!
 //! Single personality: `nu`
 

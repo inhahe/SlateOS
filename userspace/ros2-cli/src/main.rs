@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ros2-cli — SlateOS ROS 2 command line interface
+//! ros2-cli — Slate OS ROS 2 command line interface
 //!
 //! Single personality: `ros2`
 

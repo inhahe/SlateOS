@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! sparkpost-cli — SlateOS SparkPost / Bird Email personality CLI (historical).
+//! sparkpost-cli — Slate OS SparkPost / Bird Email personality CLI (historical).
 
 use std::env;
 use std::process;

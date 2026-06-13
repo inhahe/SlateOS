@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pinecone-cli — SlateOS Pinecone (managed vector database, NYC, private — the category creator)
+//! pinecone-cli — Slate OS Pinecone (managed vector database, NYC, private — the category creator)
 
 use std::env;
 use std::process;

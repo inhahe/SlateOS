@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! alliance-cli — SlateOS Alliance VLSI CAD tools
+//! alliance-cli — Slate OS Alliance VLSI CAD tools
 //!
 //! Multi-personality: `vasy`, `boom`, `boog`, `loon`, `ocp`, `nero`, `cougar`, `druc`
 

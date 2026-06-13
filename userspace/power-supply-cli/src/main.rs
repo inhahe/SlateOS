@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! power-supply-cli — SlateOS power supply information
+//! power-supply-cli — Slate OS power supply information
 //!
 //! Single personality: `power-supply`
 

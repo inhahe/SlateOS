@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! povray-cli — SlateOS POV-Ray ray tracer
+//! povray-cli — Slate OS POV-Ray ray tracer
 //!
 //! Single personality: `povray`
 

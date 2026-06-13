@@ -1,4 +1,4 @@
-//! SlateOS Music Player
+//! Slate OS Music Player
 //!
 //! Desktop music player application with:
 //! - Audio format detection (WAV, MP3, FLAC, OGG)
@@ -2261,7 +2261,7 @@ fn main() {
     // Set first track as current
     state.current_track_index = Some(0);
 
-    // Main event loop (placeholder — in real SlateOS, this would receive events from compositor)
+    // Main event loop (placeholder — in real Slate OS, this would receive events from compositor)
     let _tree = render(&state);
 
     // Simulate a tick

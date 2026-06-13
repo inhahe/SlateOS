@@ -1,4 +1,4 @@
-//! SlateOS `env` / `printenv` Utility -- Display and Modify Environment Variables
+//! Slate OS `env` / `printenv` Utility -- Display and Modify Environment Variables
 //!
 //! Displays environment variables, optionally modifies them, and runs commands
 //! in the modified environment. Also operates in `printenv` mode when invoked
@@ -447,7 +447,7 @@ fn exec_command(
 // ============================================================================
 
 fn print_env_help() {
-    println!("SlateOS env v{VERSION}");
+    println!("Slate OS env v{VERSION}");
     println!();
     println!("Display, modify, or clear environment variables, optionally");
     println!("running a command in the modified environment.");
@@ -476,7 +476,7 @@ fn print_env_help() {
 }
 
 fn print_printenv_help() {
-    println!("SlateOS printenv v{VERSION}");
+    println!("Slate OS printenv v{VERSION}");
     println!();
     println!("Print the values of specified environment variables.");
     println!();
@@ -539,7 +539,7 @@ fn run(action: Action) -> i32 {
 
         Action::Version { printenv_mode } => {
             let name = if printenv_mode { "printenv" } else { "env" };
-            println!("{name} (SlateOS) {VERSION}");
+            println!("{name} (Slate OS) {VERSION}");
             0
         }
 

@@ -1,6 +1,6 @@
-//! SlateOS Window Library — compositor client for creating windows and receiving events.
+//! Slate OS Window Library — compositor client for creating windows and receiving events.
 //!
-//! This crate provides the primary API for applications to interact with the SlateOS
+//! This crate provides the primary API for applications to interact with the Slate OS
 //! compositor. It handles window creation, event dispatch, rendering submission,
 //! and window lifecycle management.
 //!

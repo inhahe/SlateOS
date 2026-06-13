@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! checkout-cli — SlateOS Checkout.com personality CLI.
+//! checkout-cli — Slate OS Checkout.com personality CLI.
 
 use std::env;
 use std::process;

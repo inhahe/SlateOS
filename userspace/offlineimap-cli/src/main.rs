@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! offlineimap-cli — SlateOS OfflineIMAP mail synchronizer
+//! offlineimap-cli — Slate OS OfflineIMAP mail synchronizer
 //!
 //! Single personality: `offlineimap`
 

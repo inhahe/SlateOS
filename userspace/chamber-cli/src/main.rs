@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! chamber-cli — SlateOS Chamber secrets manager
+//! chamber-cli — Slate OS Chamber secrets manager
 //!
 //! Single personality: `chamber`
 

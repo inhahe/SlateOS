@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! luarocks-cli — SlateOS LuaRocks package manager
+//! luarocks-cli — Slate OS LuaRocks package manager
 //!
 //! Multi-personality: `luarocks`, `luarocks-admin`
 

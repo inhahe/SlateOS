@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zuul-ci-cli — SlateOS Zuul CI/CD gating system
+//! zuul-ci-cli — Slate OS Zuul CI/CD gating system
 //!
 //! Multi-personality: `zuul`, `zuul-scheduler`, `zuul-executor`
 

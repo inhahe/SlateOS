@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dnsmasq-cli — SlateOS dnsmasq DNS/DHCP server
+//! dnsmasq-cli — Slate OS dnsmasq DNS/DHCP server
 //!
 //! Single personality: `dnsmasq`
 

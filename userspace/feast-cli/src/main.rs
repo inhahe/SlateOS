@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! feast-cli — SlateOS Feast feature store
+//! feast-cli — Slate OS Feast feature store
 //!
 //! Single personality: `feast`
 

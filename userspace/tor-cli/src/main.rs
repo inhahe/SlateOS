@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tor-cli — SlateOS Tor anonymity network tools
+//! tor-cli — Slate OS Tor anonymity network tools
 //!
 //! Multi-personality: `tor`, `torify`, `torsocks`, `tor-resolve`
 

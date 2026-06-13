@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! electric-cli — SlateOS Electric VLSI Design System
+//! electric-cli — Slate OS Electric VLSI Design System
 //!
 //! Single personality: `electric`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! siril-cli — SlateOS Siril astrophotography processor
+//! siril-cli — Slate OS Siril astrophotography processor
 //!
 //! Single personality: `siril-cli`
 

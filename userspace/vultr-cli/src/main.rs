@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vultr-cli — SlateOS Vultr CLI
+//! vultr-cli — Slate OS Vultr CLI
 //!
 //! Single personality: `vultr-cli`
 

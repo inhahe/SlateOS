@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! objdump-cli — SlateOS object file tools
+//! objdump-cli — Slate OS object file tools
 //!
 //! Multi-personality: `objdump`, `objcopy`, `strip`, `size`, `strings`, `addr2line`
 

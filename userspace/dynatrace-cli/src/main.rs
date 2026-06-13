@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dynatrace-cli — SlateOS Dynatrace (AI-driven full-stack observability, Davis AI)
+//! dynatrace-cli — Slate OS Dynatrace (AI-driven full-stack observability, Davis AI)
 //!
 //! Single personality: `dynatrace`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! assimp-cli — SlateOS Open Asset Import Library
+//! assimp-cli — Slate OS Open Asset Import Library
 //!
 //! Single personality: `assimp`
 

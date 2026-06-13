@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vmware-cli — SlateOS VMware Workstation Pro / Fusion / vSphere
+//! vmware-cli — Slate OS VMware Workstation Pro / Fusion / vSphere
 //!
 //! Single personality: `vmware`
 

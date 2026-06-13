@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rofi-cli — SlateOS Rofi application launcher
+//! rofi-cli — Slate OS Rofi application launcher
 //!
 //! Multi-personality: `rofi`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lilypond-cli — SlateOS LilyPond music engraver
+//! lilypond-cli — Slate OS LilyPond music engraver
 //!
 //! Multi-personality: `lilypond`, `lilypond-book`
 

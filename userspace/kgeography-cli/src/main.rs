@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kgeography-cli — SlateOS KGeography geography learning
+//! kgeography-cli — Slate OS KGeography geography learning
 //!
 //! Single personality: `kgeography`
 

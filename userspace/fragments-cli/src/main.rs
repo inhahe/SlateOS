@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fragments-cli — SlateOS Fragments GNOME BitTorrent client
+//! fragments-cli — Slate OS Fragments GNOME BitTorrent client
 //!
 //! Single personality: `fragments`
 

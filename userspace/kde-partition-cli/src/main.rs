@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kde-partition-cli — SlateOS KDE Partition Manager
+//! kde-partition-cli — Slate OS KDE Partition Manager
 //!
 //! Single personality: `partitionmanager`
 

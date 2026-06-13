@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vinagre-cli — SlateOS Vinagre remote desktop viewer
+//! vinagre-cli — Slate OS Vinagre remote desktop viewer
 //!
 //! Single personality: `vinagre`
 

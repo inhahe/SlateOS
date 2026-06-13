@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mysqldump-cli — SlateOS mysqldump CLI
+//! mysqldump-cli — Slate OS mysqldump CLI
 //!
 //! Single personality: `mysqldump`
 

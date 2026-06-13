@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! waveform-cli — SlateOS Tracktion Waveform DAW
+//! waveform-cli — Slate OS Tracktion Waveform DAW
 //!
 //! Single personality: `waveform`
 

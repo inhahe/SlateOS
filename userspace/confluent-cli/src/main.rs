@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! confluent-cli — SlateOS Confluent (commercial Apache Kafka, NASDAQ:CFLT)
+//! confluent-cli — Slate OS Confluent (commercial Apache Kafka, NASDAQ:CFLT)
 
 use std::env;
 use std::process;

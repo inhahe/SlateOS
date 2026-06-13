@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dotool-cli — SlateOS dotool input automation
+//! dotool-cli — Slate OS dotool input automation
 //!
 //! Multi-personality: `dotool`, `dotoold`
 

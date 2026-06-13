@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cutadapt-cli — SlateOS Cutadapt adapter trimmer
+//! cutadapt-cli — Slate OS Cutadapt adapter trimmer
 //!
 //! Single personality: `cutadapt`
 

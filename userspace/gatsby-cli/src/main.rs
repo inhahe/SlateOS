@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gatsby-cli — SlateOS Gatsby React static site generator
+//! gatsby-cli — Slate OS Gatsby React static site generator
 //!
 //! Single personality: `gatsby`
 

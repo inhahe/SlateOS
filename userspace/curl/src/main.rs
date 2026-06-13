@@ -1,6 +1,6 @@
-//! SlateOS HTTP/HTTPS Client Utility
+//! Slate OS HTTP/HTTPS Client Utility
 //!
-//! A comprehensive HTTP client similar to curl, built for SlateOS using the
+//! A comprehensive HTTP client similar to curl, built for Slate OS using the
 //! kernel's TCP syscall interface. Supports multiple HTTP methods, custom
 //! headers, authentication, redirects, cookies, chunked transfer encoding,
 //! POST data, form uploads, and progress display.
@@ -43,7 +43,7 @@ use std::time::Instant;
 // Syscall interface
 // ============================================================================
 
-// Native SlateOS syscall numbers (kernel/src/syscall/number.rs). These were
+// Native Slate OS syscall numbers (kernel/src/syscall/number.rs). These were
 // previously off by one (802/803/804), which collided with TCP_RECV/CLOSE and
 // an unassigned slot — every send/recv/close hit the wrong syscall.
 const SYS_TCP_CONNECT: u64 = 800;

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! meshlab-cli — SlateOS MeshLab 3D mesh processing
+//! meshlab-cli — Slate OS MeshLab 3D mesh processing
 //!
 //! Multi-personality: `meshlab`, `meshlabserver`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! shortcut-cli — SlateOS Shortcut (formerly Clubhouse) CLI
+//! shortcut-cli — Slate OS Shortcut (formerly Clubhouse) CLI
 //!
 //! Single personality: `shortcut`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! baselight-cli — SlateOS FilmLight Baselight color grading
+//! baselight-cli — Slate OS FilmLight Baselight color grading
 //!
 //! Single personality: `baselight`
 

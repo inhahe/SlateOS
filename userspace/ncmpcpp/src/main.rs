@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ncmpcpp — SlateOS NCurses Music Player Client (Plus Plus)
+//! ncmpcpp — Slate OS NCurses Music Player Client (Plus Plus)
 //!
 //! Multi-personality: `ncmpcpp`, `mpc`
 

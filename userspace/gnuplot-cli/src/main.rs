@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gnuplot-cli — SlateOS gnuplot CLI
+//! gnuplot-cli — Slate OS gnuplot CLI
 //!
 //! Single personality: `gnuplot`
 

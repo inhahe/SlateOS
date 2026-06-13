@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hive-cli — SlateOS Hive (NYC democratic-input PM platform)
+//! hive-cli — Slate OS Hive (NYC democratic-input PM platform)
 
 use std::env;
 use std::process;

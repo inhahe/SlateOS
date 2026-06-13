@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! keychain-cli — SlateOS keychain SSH/GPG agent manager
+//! keychain-cli — Slate OS keychain SSH/GPG agent manager
 //!
 //! Single personality: `keychain`
 

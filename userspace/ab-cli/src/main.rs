@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ab-cli — SlateOS Apache Bench (ab) HTTP benchmarking tool
+//! ab-cli — Slate OS Apache Bench (ab) HTTP benchmarking tool
 //!
 //! Multi-personality: `ab`
 

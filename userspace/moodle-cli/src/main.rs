@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! moodle-cli — SlateOS Moodle desktop client
+//! moodle-cli — Slate OS Moodle desktop client
 //!
 //! Single personality: `moodle`
 

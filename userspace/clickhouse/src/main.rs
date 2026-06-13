@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! clickhouse — SlateOS column-oriented OLAP database
+//! clickhouse — Slate OS column-oriented OLAP database
 //!
 //! Multi-personality: `clickhouse-server`, `clickhouse-client`, `clickhouse-local`
 

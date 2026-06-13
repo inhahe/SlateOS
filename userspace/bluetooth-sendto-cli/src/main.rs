@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bluetooth-sendto-cli — SlateOS gnome-bluetooth file sender
+//! bluetooth-sendto-cli — Slate OS gnome-bluetooth file sender
 //!
 //! Single personality: `bluetooth-sendto`
 

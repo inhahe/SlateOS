@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lightwave-cli — SlateOS NewTek LightWave 3D
+//! lightwave-cli — Slate OS NewTek LightWave 3D
 //!
 //! Single personality: `lightwave`
 

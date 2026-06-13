@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ast-grep — SlateOS structural search/replace tool based on AST
+//! ast-grep — Slate OS structural search/replace tool based on AST
 //!
 //! Single personality: `sg` (ast-grep)
 

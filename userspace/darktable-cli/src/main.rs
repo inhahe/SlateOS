@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! darktable-cli — SlateOS darktable open-source RAW photo workflow
+//! darktable-cli — Slate OS darktable open-source RAW photo workflow
 //!
 //! Single personality: `darktable`
 

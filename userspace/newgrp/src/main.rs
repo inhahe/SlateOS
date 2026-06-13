@@ -1,4 +1,4 @@
-//! SlateOS group switching utility.
+//! Slate OS group switching utility.
 //!
 //! Multi-personality binary providing:
 //! - **newgrp** — log in to a new group

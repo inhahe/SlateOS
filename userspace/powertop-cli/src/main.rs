@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! powertop-cli — SlateOS power consumption monitor
+//! powertop-cli — Slate OS power consumption monitor
 //!
 //! Multi-personality: `powertop`
 

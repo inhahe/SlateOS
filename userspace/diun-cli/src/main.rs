@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! diun-cli — SlateOS Docker Image Update Notifier
+//! diun-cli — Slate OS Docker Image Update Notifier
 //!
 //! Single personality: `diun`
 

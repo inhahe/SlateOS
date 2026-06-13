@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! linode-cli — SlateOS Linode CLI
+//! linode-cli — Slate OS Linode CLI
 //!
 //! Single personality: `linode-cli`
 

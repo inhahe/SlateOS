@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vagrant-cli — SlateOS Vagrant CLI
+//! vagrant-cli — Slate OS Vagrant CLI
 //!
 //! Single personality: `vagrant`
 

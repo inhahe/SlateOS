@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! octave-cli — SlateOS GNU Octave CLI
+//! octave-cli — Slate OS GNU Octave CLI
 //!
 //! Single personality: `octave`
 

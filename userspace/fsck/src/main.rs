@@ -1,4 +1,4 @@
-//! SlateOS Filesystem Check and Repair Utility
+//! Slate OS Filesystem Check and Repair Utility
 //!
 //! Traditional `fsck` front-end that delegates to the kernel's filesystem
 //! verification and repair syscalls (`SYS_FS_VERIFY` / `SYS_FS_REPAIR`).

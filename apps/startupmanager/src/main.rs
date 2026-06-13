@@ -1,4 +1,4 @@
-//! startupmanager -- SlateOS Startup Apps Manager
+//! startupmanager -- Slate OS Startup Apps Manager
 //!
 //! A graphical application for managing programs that launch automatically
 //! at system startup. Supports four startup categories (Login, Service,

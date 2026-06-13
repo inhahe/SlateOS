@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! luckybackup-cli — SlateOS luckyBackup rsync-based GUI backup
+//! luckybackup-cli — Slate OS luckyBackup rsync-based GUI backup
 //!
 //! Single personality: `luckybackup`
 

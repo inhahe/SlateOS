@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! phaser-cli — SlateOS Phaser game framework
+//! phaser-cli — Slate OS Phaser game framework
 //!
 //! Single personality: `phaser`
 

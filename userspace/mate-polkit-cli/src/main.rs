@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mate-polkit-cli — SlateOS MATE PolicyKit authentication agent
+//! mate-polkit-cli — Slate OS MATE PolicyKit authentication agent
 //!
 //! Single personality: `mate-polkit`
 

@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! loops-cli — SlateOS Loops.so SaaS email lifecycle platform personality CLI.
+//! loops-cli — Slate OS Loops.so SaaS email lifecycle platform personality CLI.
 
 use std::env;
 use std::process;

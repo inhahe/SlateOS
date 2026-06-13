@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fl-cli — SlateOS Image-Line FL Studio DAW
+//! fl-cli — Slate OS Image-Line FL Studio DAW
 //!
 //! Single personality: `fl`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sonatype-cli — SlateOS Sonatype (Nexus + Lifecycle, SCA + supply chain, Fulton MD)
+//! sonatype-cli — Slate OS Sonatype (Nexus + Lifecycle, SCA + supply chain, Fulton MD)
 
 use std::env;
 use std::process;

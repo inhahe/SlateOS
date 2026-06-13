@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vertica-cli — SlateOS Vertica (Stonebraker C-Store-derived columnar MPP, OpenText/HPE heritage)
+//! vertica-cli — Slate OS Vertica (Stonebraker C-Store-derived columnar MPP, OpenText/HPE heritage)
 
 use std::env;
 use std::process;

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rq-cli — SlateOS Python RQ (Redis Queue) tools
+//! rq-cli — Slate OS Python RQ (Redis Queue) tools
 //!
 //! Multi-personality: `rq`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xsv — SlateOS fast CSV command-line toolkit
+//! xsv — Slate OS fast CSV command-line toolkit
 //!
 //! Single personality: `xsv`
 

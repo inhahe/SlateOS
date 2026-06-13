@@ -5,7 +5,7 @@
 #![allow(clippy::cast_precision_loss)]
 #![allow(clippy::cast_lossless)]
 
-//! SlateOS Personal Finance — budget tracking and expense management.
+//! Slate OS Personal Finance — budget tracking and expense management.
 //!
 //! Track income and expenses across categories, set budgets, view spending
 //! trends, manage accounts, and get financial summaries.

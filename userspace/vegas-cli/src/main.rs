@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vegas-cli — SlateOS MAGIX VEGAS Pro video editor
+//! vegas-cli — Slate OS MAGIX VEGAS Pro video editor
 //!
 //! Single personality: `vegas`
 

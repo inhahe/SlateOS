@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cni-plugins — SlateOS Container Networking Interface plugins
+//! cni-plugins — Slate OS Container Networking Interface plugins
 //!
 //! Multi-personality: `bridge`, `host-local`, `loopback`, `portmap`, `firewall`, `tuning`, `bandwidth`
 

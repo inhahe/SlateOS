@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tinc-cli — SlateOS tinc mesh VPN
+//! tinc-cli — Slate OS tinc mesh VPN
 //!
 //! Multi-personality: `tincd`, `tinc`
 

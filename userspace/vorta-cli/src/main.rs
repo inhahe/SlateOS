@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vorta-cli — SlateOS Vorta BorgBackup GUI frontend
+//! vorta-cli — Slate OS Vorta BorgBackup GUI frontend
 //!
 //! Single personality: `vorta`
 

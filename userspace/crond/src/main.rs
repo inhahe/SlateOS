@@ -1,4 +1,4 @@
-//! SlateOS Cron Daemon (`crond`)
+//! Slate OS Cron Daemon (`crond`)
 //!
 //! A time-based task scheduler that runs commands at specified times and
 //! intervals. Supports standard crontab syntax plus extensions.

@@ -1,4 +1,4 @@
-//! SlateOS Login Records Viewer (`last` / `lastb` / `lastlog`)
+//! Slate OS Login Records Viewer (`last` / `lastb` / `lastlog`)
 //!
 //! Multi-personality binary that shows historical login information. The
 //! personality is detected via `argv[0]`:

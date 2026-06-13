@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! squeekboard-cli — SlateOS Squeekboard on-screen keyboard
+//! squeekboard-cli — Slate OS Squeekboard on-screen keyboard
 //!
 //! Single personality: `squeekboard`
 

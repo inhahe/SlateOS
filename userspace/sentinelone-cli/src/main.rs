@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sentinelone-cli — SlateOS SentinelOne Singularity XDR
+//! sentinelone-cli — Slate OS SentinelOne Singularity XDR
 //!
 //! Single personality: `sentinelone`
 

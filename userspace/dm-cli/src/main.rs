@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dm-cli — SlateOS device-mapper tools
+//! dm-cli — Slate OS device-mapper tools
 //!
 //! Multi-personality: `dmsetup`, `dmstats`
 

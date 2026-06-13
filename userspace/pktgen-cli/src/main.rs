@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pktgen-cli — SlateOS packet generator
+//! pktgen-cli — Slate OS packet generator
 //!
 //! Single personality: `pktgen`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cml-cli — SlateOS CML (Continuous Machine Learning) CLI
+//! cml-cli — Slate OS CML (Continuous Machine Learning) CLI
 //!
 //! Multi-personality: `cml`
 

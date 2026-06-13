@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ocaml-cli — SlateOS OCaml language tools
+//! ocaml-cli — Slate OS OCaml language tools
 //!
 //! Multi-personality: `ocaml`, `ocamlc`, `ocamlopt`, `opam`, `dune`
 

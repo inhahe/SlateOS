@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! woff2-cli — SlateOS WOFF2 font compression tool
+//! woff2-cli — Slate OS WOFF2 font compression tool
 //!
 //! Multi-personality: `woff2_compress`, `woff2_decompress`
 

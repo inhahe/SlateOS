@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! deta-cli — SlateOS Deta Space CLI
+//! deta-cli — Slate OS Deta Space CLI
 //!
 //! Multi-personality: `space`, `deta`
 

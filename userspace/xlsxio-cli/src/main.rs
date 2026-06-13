@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xlsxio-cli — SlateOS XLSX spreadsheet reader/writer
+//! xlsxio-cli — Slate OS XLSX spreadsheet reader/writer
 //!
 //! Multi-personality: `xlsxio_read`, `xlsxio_write`
 

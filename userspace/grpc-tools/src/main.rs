@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! grpc-tools — SlateOS gRPC development and debugging tools
+//! grpc-tools — Slate OS gRPC development and debugging tools
 //!
 //! Multi-personality: `grpcurl`, `grpc_health_probe`, `grpc_cli`
 

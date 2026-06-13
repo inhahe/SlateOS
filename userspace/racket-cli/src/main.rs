@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! racket-cli — SlateOS Racket language tools
+//! racket-cli — Slate OS Racket language tools
 //!
 //! Multi-personality: `racket`, `raco`, `drracket`
 

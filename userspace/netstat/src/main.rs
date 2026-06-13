@@ -1,4 +1,4 @@
-//! SlateOS `netstat` — network connection and socket statistics.
+//! Slate OS `netstat` — network connection and socket statistics.
 //!
 //! Reads from `/proc/net/{tcp,udp,tcp6,udp6}` and related procfs paths
 //! to display active connections, listening sockets, routing tables,

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rabbitmqctl-cli — SlateOS RabbitMQ management CLI
+//! rabbitmqctl-cli — Slate OS RabbitMQ management CLI
 //!
 //! Single personality: `rabbitmqctl`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! googleworkspace-cli — SlateOS Google Workspace (formerly G Suite)
+//! googleworkspace-cli — Slate OS Google Workspace (formerly G Suite)
 //!
 //! Single personality: `googleworkspace`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cargo-bloat — SlateOS find out what takes most of the space in your executable
+//! cargo-bloat — Slate OS find out what takes most of the space in your executable
 //!
 //! Single personality: `cargo-bloat`
 

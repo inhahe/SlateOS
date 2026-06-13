@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cadabra-cli — SlateOS Cadabra symbolic computer algebra for field theory
+//! cadabra-cli — Slate OS Cadabra symbolic computer algebra for field theory
 //!
 //! Multi-personality: `cadabra2`, `cadabra2-cli`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cloudbeaver-cli — SlateOS CloudBeaver database manager
+//! cloudbeaver-cli — Slate OS CloudBeaver database manager
 //!
 //! Single personality: `cloudbeaver`
 

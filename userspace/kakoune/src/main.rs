@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kakoune — SlateOS modal code editor
+//! kakoune — Slate OS modal code editor
 //!
 //! Single personality: `kak`
 

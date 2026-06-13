@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lz4 — SlateOS LZ4 compression utility
+//! lz4 — Slate OS LZ4 compression utility
 //!
 //! Multi-personality binary detected via argv[0]:
 //!

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ncdu-cli — SlateOS ncdu CLI
+//! ncdu-cli — Slate OS ncdu CLI
 //!
 //! Single personality: `ncdu`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! efibootmgr-cli — SlateOS EFI boot manager
+//! efibootmgr-cli — Slate OS EFI boot manager
 //!
 //! Multi-personality: `efibootmgr`, `efivar`
 

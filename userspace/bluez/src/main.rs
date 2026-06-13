@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bluez — SlateOS Bluetooth management
+//! bluez — Slate OS Bluetooth management
 //!
 //! Multi-personality binary for Bluetooth device management.
 //! Detected via argv[0]:

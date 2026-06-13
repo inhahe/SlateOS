@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wlopm-cli — SlateOS wlopm Wayland output power management
+//! wlopm-cli — Slate OS wlopm Wayland output power management
 //!
 //! Single personality: `wlopm`
 

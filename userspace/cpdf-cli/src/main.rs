@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cpdf-cli — SlateOS cpdf PDF command-line tools
+//! cpdf-cli — Slate OS cpdf PDF command-line tools
 //!
 //! Single personality: `cpdf`
 

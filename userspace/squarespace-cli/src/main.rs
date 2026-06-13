@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! squarespace-cli — SlateOS Squarespace (NYSE:SQSP, design-led website + commerce builder)
+//! squarespace-cli — Slate OS Squarespace (NYSE:SQSP, design-led website + commerce builder)
 
 use std::env;
 use std::process;

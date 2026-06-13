@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nutanix-cli — SlateOS Nutanix Cloud Platform (HCI + AHV hypervisor)
+//! nutanix-cli — Slate OS Nutanix Cloud Platform (HCI + AHV hypervisor)
 //!
 //! Single personality: `nutanix`
 

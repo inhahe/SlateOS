@@ -12,7 +12,7 @@
 #![allow(clippy::match_same_arms)]
 #![allow(unused_imports)]
 
-//! SlateOS Spades -- a 4-player trick-taking card game with AI opponents.
+//! Slate OS Spades -- a 4-player trick-taking card game with AI opponents.
 //!
 //! The human plays as Player 0 (South), partnered with Player 2 (North)
 //! against Player 1 (East) and Player 3 (West). Features bidding with nil

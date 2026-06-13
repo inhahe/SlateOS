@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! shotwell-cli — SlateOS Shotwell photo manager
+//! shotwell-cli — Slate OS Shotwell photo manager
 //!
 //! Single personality: `shotwell`
 

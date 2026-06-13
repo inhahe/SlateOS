@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! openldap-cli — SlateOS OpenLDAP directory server
+//! openldap-cli — Slate OS OpenLDAP directory server
 //!
 //! Multi-personality: `slapd`, `ldapsearch`, `ldapadd`, `ldapmodify`, `ldapdelete`
 

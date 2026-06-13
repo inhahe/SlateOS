@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bullet-cli — SlateOS Bullet Physics engine tool
+//! bullet-cli — Slate OS Bullet Physics engine tool
 //!
 //! Single personality: `bullet`
 

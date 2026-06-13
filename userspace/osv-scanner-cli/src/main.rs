@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! osv-scanner-cli — SlateOS OSV-Scanner vulnerability scanner
+//! osv-scanner-cli — Slate OS OSV-Scanner vulnerability scanner
 //!
 //! Single personality: `osv-scanner`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! apk-cli — SlateOS Alpine Package Keeper
+//! apk-cli — Slate OS Alpine Package Keeper
 //!
 //! Multi-personality: `apk`
 

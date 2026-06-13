@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tray-cli — SlateOS Tray.io (general automation, San Francisco/London, private)
+//! tray-cli — Slate OS Tray.io (general automation, San Francisco/London, private)
 
 use std::env;
 use std::process;

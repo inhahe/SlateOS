@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! goproxy-cli — SlateOS GoProxy Go module proxy
+//! goproxy-cli — Slate OS GoProxy Go module proxy
 //!
 //! Single personality: `goproxy`
 

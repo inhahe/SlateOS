@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! flite-cli — SlateOS Flite lightweight speech synthesis
+//! flite-cli — Slate OS Flite lightweight speech synthesis
 //!
 //! Single personality: `flite`
 

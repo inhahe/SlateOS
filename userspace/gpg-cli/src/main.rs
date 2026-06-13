@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gpg-cli — SlateOS GnuPG CLI
+//! gpg-cli — Slate OS GnuPG CLI
 //!
 //! Single personality: `gpg`
 

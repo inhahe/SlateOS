@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dmidecode-cli — SlateOS DMI/SMBIOS table decoder
+//! dmidecode-cli — Slate OS DMI/SMBIOS table decoder
 //!
 //! Multi-personality: `dmidecode`, `biosdecode`, `vpddecode`
 

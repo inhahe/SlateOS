@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ncat-cli — SlateOS Ncat networking utility
+//! ncat-cli — Slate OS Ncat networking utility
 //!
 //! Single personality: `ncat`
 

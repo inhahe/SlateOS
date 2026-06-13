@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! m17n-cli — SlateOS m17n multilingualization library
+//! m17n-cli — Slate OS m17n multilingualization library
 //!
 //! Multi-personality: `m17n-db`, `m17n-conv`
 

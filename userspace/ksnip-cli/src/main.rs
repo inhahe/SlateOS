@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ksnip-cli — SlateOS ksnip screenshot annotation tool
+//! ksnip-cli — Slate OS ksnip screenshot annotation tool
 //!
 //! Single personality: `ksnip`
 

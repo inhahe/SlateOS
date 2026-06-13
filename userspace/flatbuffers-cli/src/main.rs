@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! flatbuffers-cli — SlateOS FlatBuffers serialization compiler
+//! flatbuffers-cli — Slate OS FlatBuffers serialization compiler
 //!
 //! Multi-personality: `flatc`
 

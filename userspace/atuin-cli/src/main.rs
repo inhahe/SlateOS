@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! atuin-cli — SlateOS Atuin shell history manager
+//! atuin-cli — Slate OS Atuin shell history manager
 //!
 //! Single personality: `atuin`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mgmt-cli — SlateOS mgmt config management (reactive)
+//! mgmt-cli — Slate OS mgmt config management (reactive)
 //!
 //! Single personality: `mgmt`
 

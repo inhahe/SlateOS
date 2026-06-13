@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dcraw-cli — SlateOS dcraw RAW photo decoder
+//! dcraw-cli — Slate OS dcraw RAW photo decoder
 //!
 //! Single personality: `dcraw`
 

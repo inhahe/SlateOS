@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wl-mirror-cli — SlateOS wl-mirror Wayland output mirroring
+//! wl-mirror-cli — Slate OS wl-mirror Wayland output mirroring
 //!
 //! Single personality: `wl-mirror`
 

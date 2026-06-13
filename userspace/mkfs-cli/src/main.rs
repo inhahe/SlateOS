@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mkfs-cli — SlateOS mkfs filesystem creation CLIs
+//! mkfs-cli — Slate OS mkfs filesystem creation CLIs
 //!
 //! Multi-personality: `mkfs`, `mkfs.ext4`, `mkfs.xfs`, `mkfs.btrfs`, `mkfs.fat`, `mkswap`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! flyway-cli — SlateOS Flyway CLI
+//! flyway-cli — Slate OS Flyway CLI
 //!
 //! Single personality: `flyway`
 

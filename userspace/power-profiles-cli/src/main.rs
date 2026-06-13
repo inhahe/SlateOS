@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! power-profiles-cli — SlateOS power-profiles-daemon
+//! power-profiles-cli — Slate OS power-profiles-daemon
 //!
 //! Multi-personality: `powerprofilesctl`, `power-profiles-daemon`
 

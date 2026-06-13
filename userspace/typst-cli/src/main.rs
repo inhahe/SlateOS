@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! typst-cli — SlateOS Typst typesetting system
+//! typst-cli — Slate OS Typst typesetting system
 //!
 //! Multi-personality: `typst`
 

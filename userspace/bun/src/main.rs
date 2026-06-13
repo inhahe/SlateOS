@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bun — SlateOS Bun JavaScript runtime and toolkit
+//! bun — Slate OS Bun JavaScript runtime and toolkit
 //!
 //! Multi-personality: `bun`, `bunx`
 

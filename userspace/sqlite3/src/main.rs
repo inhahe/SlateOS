@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sqlite3 — SlateOS SQLite command-line shell
+//! sqlite3 — Slate OS SQLite command-line shell
 //!
 //! Single personality: `sqlite3`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! networkd-cli — SlateOS systemd-networkd tools
+//! networkd-cli — Slate OS systemd-networkd tools
 //!
 //! Multi-personality: `networkctl`, `resolvectl`, `systemd-resolve`
 

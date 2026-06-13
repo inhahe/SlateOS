@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zookeeper-cli — SlateOS ZooKeeper CLI
+//! zookeeper-cli — Slate OS ZooKeeper CLI
 //!
 //! Single personality: `zkCli`
 

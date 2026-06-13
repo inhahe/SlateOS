@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! meltano-cli — SlateOS Meltano ELT CLI
+//! meltano-cli — Slate OS Meltano ELT CLI
 //!
 //! Multi-personality: `meltano`
 

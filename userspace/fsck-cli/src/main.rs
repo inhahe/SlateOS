@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fsck-cli — SlateOS fsck filesystem check CLIs
+//! fsck-cli — Slate OS fsck filesystem check CLIs
 //!
 //! Multi-personality: `fsck`, `fsck.ext4`, `e2fsck`, `xfs_repair`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! secret-tool-cli — SlateOS libsecret secret-tool
+//! secret-tool-cli — Slate OS libsecret secret-tool
 //!
 //! Single personality: `secret-tool`
 

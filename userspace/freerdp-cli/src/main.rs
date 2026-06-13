@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! freerdp-cli — SlateOS FreeRDP RDP client
+//! freerdp-cli — Slate OS FreeRDP RDP client
 //!
 //! Multi-personality: `xfreerdp`, `wlfreerdp`
 

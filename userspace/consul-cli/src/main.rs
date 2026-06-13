@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! consul-cli — SlateOS HashiCorp Consul service mesh CLI
+//! consul-cli — Slate OS HashiCorp Consul service mesh CLI
 //!
 //! Single personality: `consul`
 

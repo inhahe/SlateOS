@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cryptsetup-cli — SlateOS cryptsetup disk encryption
+//! cryptsetup-cli — Slate OS cryptsetup disk encryption
 //!
 //! Multi-personality: `cryptsetup`, `veritysetup`, `integritysetup`
 

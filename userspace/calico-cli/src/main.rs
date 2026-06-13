@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! calico-cli — SlateOS Calico container networking
+//! calico-cli — Slate OS Calico container networking
 //!
 //! Multi-personality: `calicoctl`, `calico-node`
 

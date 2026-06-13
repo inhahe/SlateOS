@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rhino-cli — SlateOS Robert McNeel Rhinoceros 3D NURBS modeler
+//! rhino-cli — Slate OS Robert McNeel Rhinoceros 3D NURBS modeler
 //!
 //! Single personality: `rhino`
 

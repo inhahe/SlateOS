@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! raylib-cli — SlateOS Raylib game development helper
+//! raylib-cli — Slate OS Raylib game development helper
 //!
 //! Multi-personality: `raylib-config`
 

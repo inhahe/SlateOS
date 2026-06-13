@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tealdeer — SlateOS fast tldr client (simplified man pages)
+//! tealdeer — Slate OS fast tldr client (simplified man pages)
 //!
 //! Single personality: `tldr`
 

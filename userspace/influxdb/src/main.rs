@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! influxdb — SlateOS time series database
+//! influxdb — Slate OS time series database
 //!
 //! Multi-personality: `influxd` (server daemon), `influx` (CLI)
 

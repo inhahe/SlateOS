@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! distcc — SlateOS distributed compiler
+//! distcc — Slate OS distributed compiler
 //!
 //! Multi-personality: `distcc`, `distccd`, `distccmon-text`, `pump`
 

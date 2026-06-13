@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bcachefs-cli — SlateOS bcachefs filesystem tools
+//! bcachefs-cli — Slate OS bcachefs filesystem tools
 //!
 //! Single personality: `bcachefs`
 

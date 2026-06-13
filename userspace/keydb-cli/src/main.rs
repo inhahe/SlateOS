@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! keydb-cli — SlateOS KeyDB multithreaded Redis fork
+//! keydb-cli — Slate OS KeyDB multithreaded Redis fork
 //!
 //! Multi-personality: `keydb-server`, `keydb-cli`
 

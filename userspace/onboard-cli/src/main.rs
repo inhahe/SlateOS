@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! onboard-cli — SlateOS Onboard on-screen keyboard
+//! onboard-cli — Slate OS Onboard on-screen keyboard
 //!
 //! Single personality: `onboard`
 

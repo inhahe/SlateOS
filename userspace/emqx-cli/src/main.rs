@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! emqx-cli — SlateOS EMQX MQTT broker CLI
+//! emqx-cli — Slate OS EMQX MQTT broker CLI
 //!
 //! Single personality: `emqx`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hunspell-cli — SlateOS Hunspell spell checker CLI
+//! hunspell-cli — Slate OS Hunspell spell checker CLI
 //!
 //! Single personality: `hunspell`
 

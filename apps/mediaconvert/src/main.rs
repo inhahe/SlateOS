@@ -1,4 +1,4 @@
-//! `SlateOS` Media Converter
+//! `Slate OS` Media Converter
 //!
 //! A batch media format conversion tool with:
 //! - Audio format support: WAV, MP3, FLAC, AAC, OGG, WMA, AIFF, ALAC, Opus

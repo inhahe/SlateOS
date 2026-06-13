@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! virtualdj-cli — SlateOS VirtualDJ (Atomix Productions DJ software)
+//! virtualdj-cli — Slate OS VirtualDJ (Atomix Productions DJ software)
 //!
 //! Single personality: `virtualdj`
 

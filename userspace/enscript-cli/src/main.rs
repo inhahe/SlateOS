@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! enscript-cli — SlateOS GNU Enscript CLI
+//! enscript-cli — Slate OS GNU Enscript CLI
 //!
 //! Single personality: `enscript`
 

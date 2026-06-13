@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bup-cli — SlateOS bup git-based backup
+//! bup-cli — Slate OS bup git-based backup
 //!
 //! Single personality: `bup`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mkdocs-cli — SlateOS MkDocs documentation site generator
+//! mkdocs-cli — Slate OS MkDocs documentation site generator
 //!
 //! Multi-personality: `mkdocs`
 

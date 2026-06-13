@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! phpmyadmin-cli — SlateOS phpMyAdmin database management
+//! phpmyadmin-cli — Slate OS phpMyAdmin database management
 //!
 //! Single personality: `phpmyadmin`
 

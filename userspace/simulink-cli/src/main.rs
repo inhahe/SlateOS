@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! simulink-cli — SlateOS MathWorks Simulink model-based design
+//! simulink-cli — Slate OS MathWorks Simulink model-based design
 //!
 //! Single personality: `simulink`
 

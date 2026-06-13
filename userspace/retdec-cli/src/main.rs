@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! retdec-cli — SlateOS RetDec decompiler
+//! retdec-cli — Slate OS RetDec decompiler
 //!
 //! Multi-personality: `retdec-decompiler`, `retdec-fileinfo`, `retdec-unpacker`
 

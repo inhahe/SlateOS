@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! genius-cli — SlateOS Genius Mathematics Tool
+//! genius-cli — Slate OS Genius Mathematics Tool
 //!
 //! Single personality: `genius`
 

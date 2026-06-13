@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! minio — SlateOS S3-compatible object storage
+//! minio — Slate OS S3-compatible object storage
 //!
 //! Multi-personality: `minio` (server), `mc` (client)
 

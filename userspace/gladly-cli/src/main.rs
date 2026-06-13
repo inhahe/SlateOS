@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gladly-cli — SlateOS Gladly (radically personal customer service for consumer brands)
+//! gladly-cli — Slate OS Gladly (radically personal customer service for consumer brands)
 //!
 //! Single personality: `gladly`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cargo-audit — SlateOS audit Cargo.lock for security vulnerabilities
+//! cargo-audit — Slate OS audit Cargo.lock for security vulnerabilities
 //!
 //! Single personality: `cargo-audit`
 

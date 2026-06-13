@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tmux — SlateOS terminal multiplexer
+//! tmux — Slate OS terminal multiplexer
 //!
 //! Single personality: `tmux`
 

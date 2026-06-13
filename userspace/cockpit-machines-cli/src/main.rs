@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cockpit-machines-cli — SlateOS Cockpit Machines VM management
+//! cockpit-machines-cli — Slate OS Cockpit Machines VM management
 //!
 //! Single personality: `cockpit-machines`
 

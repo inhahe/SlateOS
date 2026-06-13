@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! n8n-cli — SlateOS n8n workflow automation
+//! n8n-cli — Slate OS n8n workflow automation
 //!
 //! Single personality: `n8n`
 

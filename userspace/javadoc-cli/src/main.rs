@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! javadoc-cli — SlateOS Javadoc documentation generator
+//! javadoc-cli — Slate OS Javadoc documentation generator
 //!
 //! Multi-personality: `javadoc`, `scaladoc`, `kotlindoc`
 

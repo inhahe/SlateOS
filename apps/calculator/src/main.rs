@@ -1,4 +1,4 @@
-//! SlateOS Calculator
+//! Slate OS Calculator
 //!
 //! Graphical scientific calculator with:
 //! - Standard and Scientific modes (toggle between them)
@@ -1413,10 +1413,10 @@ fn main() {
     let mut tree = WidgetTree::new(root, WINDOW_WIDTH, height);
     tree.layout();
 
-    // In a real SlateOS environment this would enter the compositor event loop.
+    // In a real Slate OS environment this would enter the compositor event loop.
     // For now, demonstrate that the UI builds and the expression evaluator works.
     //
-    // The calculator is ready for integration with the SlateOS compositor once
+    // The calculator is ready for integration with the Slate OS compositor once
     // the window-management and event-dispatch infrastructure is in place.
     // The event loop would look like:
     //

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! owncloud-cli — SlateOS ownCloud file sync
+//! owncloud-cli — Slate OS ownCloud file sync
 //!
 //! Single personality: `owncloud`
 

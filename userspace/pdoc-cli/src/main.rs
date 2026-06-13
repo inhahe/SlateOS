@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pdoc-cli — SlateOS pdoc Python documentation generator
+//! pdoc-cli — Slate OS pdoc Python documentation generator
 //!
 //! Multi-personality: `pdoc`, `pdoc3`
 

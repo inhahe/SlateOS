@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! netmaker-cli — SlateOS Netmaker virtual network platform
+//! netmaker-cli — Slate OS Netmaker virtual network platform
 //!
 //! Multi-personality: `netmaker`, `nmctl`
 

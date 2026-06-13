@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! blueman-cli — SlateOS Blueman Bluetooth manager
+//! blueman-cli — Slate OS Blueman Bluetooth manager
 //!
 //! Multi-personality: `blueman-manager`, `blueman-applet`, `blueman-sendto`, `blueman-adapters`
 

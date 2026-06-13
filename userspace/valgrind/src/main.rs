@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! valgrind — SlateOS memory debugging and profiling toolkit
+//! valgrind — Slate OS memory debugging and profiling toolkit
 //!
 //! Multi-personality binary detected via argv[0]:
 //!

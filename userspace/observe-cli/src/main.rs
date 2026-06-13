@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! observe-cli — SlateOS Observe (Snowflake-based observability, San Mateo CA, private Sutter Hill-backed)
+//! observe-cli — Slate OS Observe (Snowflake-based observability, San Mateo CA, private Sutter Hill-backed)
 
 use std::env;
 use std::process;

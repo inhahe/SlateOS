@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pueue — SlateOS task manager for sequential and parallel command execution
+//! pueue — Slate OS task manager for sequential and parallel command execution
 //!
 //! Multi-personality: `pueue` (client), `pueued` (daemon)
 

@@ -11942,7 +11942,7 @@ fn gen_sys(rel: &str) -> KernelResult<Vec<u8>> {
             format!("{avail}\n")
         }
         // Memory-commit policy as seen through the Linux ABI.  `/proc/sys/vm/`
-        // is a Linux-ABI-only surface — native SlateOS programs use native APIs,
+        // is a Linux-ABI-only surface — native Slate OS programs use native APIs,
         // so the only readers of this file are Linux binaries.  Per the
         // memory-commit policy decision (design-decisions.md §11), this file is
         // the canonical userspace name for the Linux-ABI system-wide commit
@@ -14564,7 +14564,7 @@ pub fn self_test() -> KernelResult<()> {
 
         // 5b. /sys/vm lists overcommit_memory, which reads as the Linux-ABI
         //     default policy `0` (heuristic). This surface is Linux-compat only:
-        //     SlateOS's Linux mmap path always passes MAP_LAZY (demand-paged), so
+        //     Slate OS's Linux mmap path always passes MAP_LAZY (demand-paged), so
         //     reporting overcommit_memory=0 is honest — Linux programs see the
         //     lazy/overcommit allocation idiom they expect. overcommit_ratio /
         //     overcommit_kbytes are deliberately absent (no commit accounting).

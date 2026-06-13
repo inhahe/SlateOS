@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! directus-cli — SlateOS personality CLI for Directus, the open-data platform.
+//! directus-cli — Slate OS personality CLI for Directus, the open-data platform.
 
 use std::env;
 use std::process;

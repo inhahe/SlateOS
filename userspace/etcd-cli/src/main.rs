@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! etcd-cli — SlateOS etcd CLI
+//! etcd-cli — Slate OS etcd CLI
 //!
 //! Single personality: `etcdctl`
 

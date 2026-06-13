@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! emissary-cli — SlateOS Emissary-ingress API gateway
+//! emissary-cli — Slate OS Emissary-ingress API gateway
 //!
 //! Single personality: `emissary`
 

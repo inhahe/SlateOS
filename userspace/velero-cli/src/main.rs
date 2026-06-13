@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! velero-cli — SlateOS Velero Kubernetes backup tool
+//! velero-cli — Slate OS Velero Kubernetes backup tool
 //!
 //! Single personality: `velero`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! java — SlateOS Java runtime environment
+//! java — Slate OS Java runtime environment
 //!
 //! Multi-personality binary detected via argv[0]:
 //!

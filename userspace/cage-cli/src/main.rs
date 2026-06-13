@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cage-cli — SlateOS Cage kiosk Wayland compositor
+//! cage-cli — Slate OS Cage kiosk Wayland compositor
 //!
 //! Single personality: `cage`
 

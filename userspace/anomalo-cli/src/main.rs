@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! anomalo-cli — SlateOS Anomalo (ML-first data quality, SF)
+//! anomalo-cli — Slate OS Anomalo (ML-first data quality, SF)
 
 use std::env;
 use std::process;

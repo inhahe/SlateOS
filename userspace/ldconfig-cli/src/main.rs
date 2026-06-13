@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ldconfig-cli — SlateOS dynamic linker cache manager
+//! ldconfig-cli — Slate OS dynamic linker cache manager
 //!
 //! Multi-personality: `ldconfig`
 

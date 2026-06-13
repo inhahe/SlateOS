@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! halibut-cli — SlateOS Halibut documentation system
+//! halibut-cli — Slate OS Halibut documentation system
 //!
 //! Single personality: `halibut`
 

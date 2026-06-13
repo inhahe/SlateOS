@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! john — SlateOS John the Ripper password cracker
+//! john — Slate OS John the Ripper password cracker
 //!
 //! Multi-personality: `john`, `unshadow`, `zip2john`, `rar2john`, `pdf2john`
 

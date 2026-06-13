@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! timidity-cli — SlateOS TiMidity++ MIDI player
+//! timidity-cli — Slate OS TiMidity++ MIDI player
 //!
 //! Single personality: `timidity`
 

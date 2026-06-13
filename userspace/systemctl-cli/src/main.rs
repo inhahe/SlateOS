@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! systemctl-cli — SlateOS systemctl CLI
+//! systemctl-cli — Slate OS systemctl CLI
 //!
 //! Single personality: `systemctl`
 

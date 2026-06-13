@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lytics-cli — SlateOS Lytics (composable CDP + behavioral scoring, Portland)
+//! lytics-cli — Slate OS Lytics (composable CDP + behavioral scoring, Portland)
 
 use std::env;
 use std::process;

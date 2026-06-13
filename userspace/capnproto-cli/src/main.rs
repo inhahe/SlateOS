@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! capnproto-cli — SlateOS Cap'n Proto serialization compiler
+//! capnproto-cli — Slate OS Cap'n Proto serialization compiler
 //!
 //! Multi-personality: `capnp`, `capnpc`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! urbackup-cli — SlateOS UrBackup client/server backup
+//! urbackup-cli — Slate OS UrBackup client/server backup
 //!
 //! Multi-personality: `urbackupclientbackend`, `urbackupclientctl`, `urbackupsrv`
 

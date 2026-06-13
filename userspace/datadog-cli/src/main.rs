@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! datadog-cli — SlateOS Datadog CLI (dogstatsd/ddog)
+//! datadog-cli — Slate OS Datadog CLI (dogstatsd/ddog)
 //!
 //! Single personality: `ddog`
 

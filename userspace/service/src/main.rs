@@ -1,4 +1,4 @@
-//! SlateOS Service Management CLI
+//! Slate OS Service Management CLI
 //!
 //! Start, stop, restart, and query system services. Communicates with the
 //! init/service manager daemon via IPC or reads status from /run/services/.

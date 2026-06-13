@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! recurly-cli — SlateOS Recurly subscription billing personality CLI.
+//! recurly-cli — Slate OS Recurly subscription billing personality CLI.
 
 use std::env;
 use std::process;

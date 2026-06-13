@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! godoc-cli — SlateOS Go documentation tools
+//! godoc-cli — Slate OS Go documentation tools
 //!
 //! Multi-personality: `godoc`, `go doc`
 

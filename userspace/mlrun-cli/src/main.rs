@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mlrun-cli — SlateOS MLRun CLI
+//! mlrun-cli — Slate OS MLRun CLI
 //!
 //! Multi-personality: `mlrun`
 

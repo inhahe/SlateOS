@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! entraid-cli — SlateOS Microsoft Entra ID (formerly Azure AD — the M365 identity backbone)
+//! entraid-cli — Slate OS Microsoft Entra ID (formerly Azure AD — the M365 identity backbone)
 //!
 //! Single personality: `entraid`
 

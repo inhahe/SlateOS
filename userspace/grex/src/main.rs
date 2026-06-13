@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! grex — SlateOS command-line tool for generating regular expressions from examples
+//! grex — Slate OS command-line tool for generating regular expressions from examples
 //!
 //! Single personality: `grex`
 

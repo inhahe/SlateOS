@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! homeassistant-cli — SlateOS Home Assistant CLI
+//! homeassistant-cli — Slate OS Home Assistant CLI
 //!
 //! Multi-personality: `ha`, `hass-cli`
 

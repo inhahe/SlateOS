@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! playwright-cli — SlateOS Playwright testing CLI
+//! playwright-cli — Slate OS Playwright testing CLI
 //!
 //! Single personality: `playwright`
 

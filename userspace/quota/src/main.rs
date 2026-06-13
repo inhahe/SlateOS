@@ -1,4 +1,4 @@
-// SlateOS quota - disk quota management
+// Slate OS quota - disk quota management
 //
 // Multi-personality binary:
 //   quota     - display disk usage and limits

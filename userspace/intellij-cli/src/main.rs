@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! intellij-cli — SlateOS IntelliJ IDEA (JetBrains flagship IDE)
+//! intellij-cli — Slate OS IntelliJ IDEA (JetBrains flagship IDE)
 //!
 //! Single personality: `intellij`
 

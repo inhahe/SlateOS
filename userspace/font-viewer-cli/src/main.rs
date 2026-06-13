@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! font-viewer-cli — SlateOS GNOME font viewer
+//! font-viewer-cli — Slate OS GNOME font viewer
 //!
 //! Single personality: `gnome-font-viewer`
 

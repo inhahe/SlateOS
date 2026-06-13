@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dmesg-cli — SlateOS kernel ring buffer viewer
+//! dmesg-cli — Slate OS kernel ring buffer viewer
 //!
 //! Multi-personality: `dmesg`
 

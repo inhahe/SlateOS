@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! krakend-cli — SlateOS KrakenD high-performance API gateway personality CLI.
+//! krakend-cli — Slate OS KrakenD high-performance API gateway personality CLI.
 
 use std::env;
 use std::process;

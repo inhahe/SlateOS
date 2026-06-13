@@ -1,11 +1,11 @@
-//! SlateOS firejail security sandbox framework.
+//! Slate OS firejail security sandbox framework.
 //!
 //! Multi-personality binary providing:
 //! - **firejail** (default) -- security sandbox for running applications
 //! - **firemon** -- monitor running sandboxes
 //! - **firecfg** -- configure default sandboxes for applications
 //!
-//! Implements Linux-compatible firejail sandbox isolation for SlateOS,
+//! Implements Linux-compatible firejail sandbox isolation for Slate OS,
 //! supporting network namespaces, filesystem restrictions, capability
 //! dropping, seccomp filtering, and profile-based configuration.
 
@@ -1080,7 +1080,7 @@ fn run_firejail(args: &[String]) -> i32 {
     // 5. Apply seccomp filters.
     // 6. exec() the target program.
     //
-    // For SlateOS, the actual isolation mechanism uses the kernel's capability
+    // For Slate OS, the actual isolation mechanism uses the kernel's capability
     // system and namespace support. This frontend parses the configuration
     // and issues the appropriate syscalls.
 
@@ -1299,7 +1299,7 @@ fn firejail_shutdown(target: &str) -> i32 {
     }
 }
 
-/// Get the current user name (placeholder for SlateOS).
+/// Get the current user name (placeholder for Slate OS).
 fn get_current_user() -> String {
     env::var("USER")
         .or_else(|_| env::var("USERNAME"))
@@ -1585,7 +1585,7 @@ fn firemon_netstats() -> i32 {
     println!("{}", "-".repeat(60));
     for entry in &entries {
         // In a real implementation, we would read /proc/<pid>/net/dev
-        // or equivalent SlateOS statistics. Placeholder zeros for now.
+        // or equivalent Slate OS statistics. Placeholder zeros for now.
         println!(
             "{:>6} {:<16} {:<10} {:>12} {:>12}",
             entry.pid,
@@ -1711,7 +1711,7 @@ fn firecfg_fix() -> i32 {
             }
         }
 
-        // Create symlink. On SlateOS, std::os::unix::fs::symlink would be used.
+        // Create symlink. On Slate OS, std::os::unix::fs::symlink would be used.
         // For portability of this code, we simulate it.
         match create_symlink(&firejail_path, &link_path) {
             Ok(()) => {
@@ -1782,7 +1782,7 @@ fn create_symlink(target: &Path, link: &Path) -> Result<(), String> {
         let _ = fs::create_dir_all(parent);
     }
 
-    // On Unix-like systems (including SlateOS), use symlink.
+    // On Unix-like systems (including Slate OS), use symlink.
     // We write a small marker file as a placeholder on platforms where
     // symlink may not be available (e.g., Windows during development).
     #[cfg(unix)]

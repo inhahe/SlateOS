@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! love2d-cli — SlateOS LÖVE 2D game framework
+//! love2d-cli — Slate OS LÖVE 2D game framework
 //!
 //! Multi-personality: `love`
 

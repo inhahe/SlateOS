@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kmag-cli — SlateOS KMag screen magnifier
+//! kmag-cli — Slate OS KMag screen magnifier
 //!
 //! Single personality: `kmag`
 

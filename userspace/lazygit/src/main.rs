@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lazygit — SlateOS terminal UI for git commands
+//! lazygit — Slate OS terminal UI for git commands
 //!
 //! Single personality: `lazygit`
 

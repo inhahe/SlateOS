@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! latex-cli — SlateOS LaTeX CLI
+//! latex-cli — Slate OS LaTeX CLI
 //!
 //! Multi-personality: `pdflatex`, `xelatex`, `lualatex`, `latex`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cri-tools — SlateOS Container Runtime Interface tools
+//! cri-tools — Slate OS Container Runtime Interface tools
 //!
 //! Multi-personality: `crictl`, `critest`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lynis — SlateOS security auditing tool
+//! lynis — Slate OS security auditing tool
 //!
 //! Single personality: `lynis`
 

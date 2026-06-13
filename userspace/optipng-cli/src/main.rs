@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! optipng-cli — SlateOS OptiPNG PNG optimizer
+//! optipng-cli — Slate OS OptiPNG PNG optimizer
 //!
 //! Single personality: `optipng`
 

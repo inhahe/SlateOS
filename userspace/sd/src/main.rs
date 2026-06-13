@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sd — SlateOS intuitive find & replace CLI (sed alternative)
+//! sd — Slate OS intuitive find & replace CLI (sed alternative)
 //!
 //! Single personality: `sd`
 

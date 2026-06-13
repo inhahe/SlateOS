@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bundler-cli — SlateOS Ruby Bundler dependency manager
+//! bundler-cli — Slate OS Ruby Bundler dependency manager
 //!
 //! Multi-personality: `bundle`, `bundler`
 

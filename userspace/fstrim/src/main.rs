@@ -1,4 +1,4 @@
-// SlateOS fstrim - filesystem trim/discard utilities
+// Slate OS fstrim - filesystem trim/discard utilities
 //
 // Multi-personality binary:
 //   fstrim     - trim (discard) unused blocks on a mounted filesystem

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! testdisk-cli — SlateOS TestDisk data recovery
+//! testdisk-cli — Slate OS TestDisk data recovery
 //!
 //! Multi-personality: `testdisk`, `photorec`
 

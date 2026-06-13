@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rio-cli — SlateOS Rio terminal emulator
+//! rio-cli — Slate OS Rio terminal emulator
 //!
 //! Single personality: `rio`
 

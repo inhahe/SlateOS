@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! udevadm-cli — SlateOS udev device manager admin tool
+//! udevadm-cli — Slate OS udev device manager admin tool
 //!
 //! Multi-personality: `udevadm`
 

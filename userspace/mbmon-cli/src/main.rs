@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mbmon-cli — SlateOS motherboard monitor
+//! mbmon-cli — Slate OS motherboard monitor
 //!
 //! Single personality: `mbmon`
 

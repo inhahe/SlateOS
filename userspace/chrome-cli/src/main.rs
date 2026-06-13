@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! chrome-cli — SlateOS Google Chrome browser
+//! chrome-cli — Slate OS Google Chrome browser
 //!
 //! Single personality: `chrome`
 

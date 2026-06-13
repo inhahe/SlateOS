@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kestra-cli — SlateOS Kestra orchestration platform
+//! kestra-cli — Slate OS Kestra orchestration platform
 //!
 //! Single personality: `kestra`
 

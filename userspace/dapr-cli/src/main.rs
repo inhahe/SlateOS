@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dapr-cli — SlateOS Dapr CLI
+//! dapr-cli — Slate OS Dapr CLI
 //!
 //! Single personality: `dapr`
 

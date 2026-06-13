@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! yacas-cli — SlateOS YACAS computer algebra system
+//! yacas-cli — Slate OS YACAS computer algebra system
 //!
 //! Single personality: `yacas`
 

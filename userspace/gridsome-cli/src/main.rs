@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gridsome-cli — SlateOS Gridsome Vue.js static site generator
+//! gridsome-cli — Slate OS Gridsome Vue.js static site generator
 //!
 //! Single personality: `gridsome`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! waf-cli — SlateOS Waf build system
+//! waf-cli — Slate OS Waf build system
 //!
 //! Multi-personality: `waf`
 

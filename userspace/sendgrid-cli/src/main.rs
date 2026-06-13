@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sendgrid-cli — SlateOS SendGrid email CLI
+//! sendgrid-cli — Slate OS SendGrid email CLI
 //!
 //! Single personality: `sendgrid`
 

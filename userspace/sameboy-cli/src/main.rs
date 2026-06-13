@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sameboy-cli — SlateOS SameBoy Game Boy emulator
+//! sameboy-cli — Slate OS SameBoy Game Boy emulator
 //!
 //! Single personality: `sameboy`
 

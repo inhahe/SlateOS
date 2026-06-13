@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bluez-cli — SlateOS BlueZ Bluetooth tools
+//! bluez-cli — Slate OS BlueZ Bluetooth tools
 //!
 //! Multi-personality: `bluetoothctl`, `hcitool`, `hciconfig`, `btmon`, `sdptool`
 

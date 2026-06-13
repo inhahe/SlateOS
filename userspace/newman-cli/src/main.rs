@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! newman-cli — SlateOS Newman Postman collection runner
+//! newman-cli — Slate OS Newman Postman collection runner
 //!
 //! Multi-personality: `newman`
 

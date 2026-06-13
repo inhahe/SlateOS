@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! openblas-cli — SlateOS OpenBLAS info/benchmark
+//! openblas-cli — Slate OS OpenBLAS info/benchmark
 //!
 //! Single personality: `openblas-test`
 

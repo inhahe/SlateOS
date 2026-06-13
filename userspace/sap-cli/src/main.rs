@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sap-cli — SlateOS SAP S/4HANA + SAP GUI
+//! sap-cli — Slate OS SAP S/4HANA + SAP GUI
 //!
 //! Single personality: `sap`
 

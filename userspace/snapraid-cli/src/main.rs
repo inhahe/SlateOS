@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! snapraid-cli — SlateOS SnapRAID parity-based backup
+//! snapraid-cli — Slate OS SnapRAID parity-based backup
 //!
 //! Single personality: `snapraid`
 

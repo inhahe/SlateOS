@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zoxide — SlateOS smarter cd command that learns your habits
+//! zoxide — Slate OS smarter cd command that learns your habits
 //!
 //! Multi-personality: `zoxide` (manager), `z` (jump), `zi` (interactive)
 

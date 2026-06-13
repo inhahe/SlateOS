@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ethers-cli — SlateOS Ethereum CLI (cast/anvil)
+//! ethers-cli — Slate OS Ethereum CLI (cast/anvil)
 //!
 //! Multi-personality: `cast`, `anvil`
 

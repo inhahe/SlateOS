@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gnome-keyring-cli — SlateOS GNOME Keyring daemon
+//! gnome-keyring-cli — Slate OS GNOME Keyring daemon
 //!
 //! Multi-personality: `gnome-keyring-daemon`, `gnome-keyring-3`
 

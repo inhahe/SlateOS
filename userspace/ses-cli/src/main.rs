@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! ses-cli — SlateOS AWS Simple Email Service personality CLI.
+//! ses-cli — Slate OS AWS Simple Email Service personality CLI.
 
 use std::env;
 use std::process;

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mathomatic-cli — SlateOS Mathomatic computer algebra system
+//! mathomatic-cli — Slate OS Mathomatic computer algebra system
 //!
 //! Single personality: `mathomatic`
 

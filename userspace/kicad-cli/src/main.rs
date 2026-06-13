@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kicad-cli — SlateOS KiCad EDA suite
+//! kicad-cli — Slate OS KiCad EDA suite
 //!
 //! Multi-personality: `kicad`, `kicad-cli`, `pcbnew`, `eeschema`
 

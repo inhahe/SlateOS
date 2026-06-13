@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tlp — SlateOS laptop power management
+//! tlp — Slate OS laptop power management
 //!
 //! Multi-personality binary for optimizing laptop battery life.
 //! Detected via argv[0]:

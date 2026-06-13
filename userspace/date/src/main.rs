@@ -1,4 +1,4 @@
-//! SlateOS Date and Time Utility
+//! Slate OS Date and Time Utility
 //!
 //! Displays or sets the system date and time. Supports strftime-like format
 //! strings, multiple output formats (RFC 5322, RFC 3339, ISO 8601, JSON),
@@ -38,7 +38,7 @@ use std::process;
 // Syscall constants
 // ============================================================================
 
-// Native SlateOS clock syscall numbers (kernel syscall/number.rs is the ABI
+// Native Slate OS clock syscall numbers (kernel syscall/number.rs is the ABI
 // source of truth).  These are NOT the Linux numbers, and they are NOT the
 // combined clock_gettime(clock_id, *ts) form: SYS_CLOCK_REALTIME takes no
 // arguments and returns wall-clock nanoseconds-since-epoch in rax;

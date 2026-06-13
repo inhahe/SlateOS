@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! system-config-printer-cli — SlateOS printer configuration
+//! system-config-printer-cli — Slate OS printer configuration
 //!
 //! Single personality: `system-config-printer`
 

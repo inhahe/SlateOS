@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hyprpaper-cli — SlateOS hyprpaper wallpaper utility
+//! hyprpaper-cli — Slate OS hyprpaper wallpaper utility
 //!
 //! Multi-personality: `hyprpaper`, `hyprctl-paper`
 

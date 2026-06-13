@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rx-cli — SlateOS iZotope RX audio repair suite
+//! rx-cli — Slate OS iZotope RX audio repair suite
 //!
 //! Single personality: `rx`
 

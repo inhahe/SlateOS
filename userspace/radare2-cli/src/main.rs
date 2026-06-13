@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! radare2-cli — SlateOS radare2 reverse engineering framework
+//! radare2-cli — Slate OS radare2 reverse engineering framework
 //!
 //! Multi-personality: `r2`, `rabin2`, `rasm2`, `rahash2`, `radiff2`, `rafind2`
 

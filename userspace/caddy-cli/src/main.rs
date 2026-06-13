@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! caddy-cli — SlateOS Caddy web server
+//! caddy-cli — Slate OS Caddy web server
 //!
 //! Multi-personality: `caddy`
 

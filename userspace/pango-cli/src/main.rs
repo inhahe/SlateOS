@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pango-cli — SlateOS Pango text layout tool
+//! pango-cli — Slate OS Pango text layout tool
 //!
 //! Single personality: `pango-view`
 

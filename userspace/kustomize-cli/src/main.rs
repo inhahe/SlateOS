@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kustomize-cli — SlateOS Kustomize CLI
+//! kustomize-cli — Slate OS Kustomize CLI
 //!
 //! Multi-personality: `kustomize`
 

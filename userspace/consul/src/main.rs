@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! consul — SlateOS service discovery and configuration
+//! consul — Slate OS service discovery and configuration
 //!
 //! Single personality: `consul`
 

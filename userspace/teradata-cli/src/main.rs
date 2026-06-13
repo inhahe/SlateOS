@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! teradata-cli — SlateOS Teradata (Vantage data warehouse, the OG MPP DW, San Diego, NYSE:TDC)
+//! teradata-cli — Slate OS Teradata (Vantage data warehouse, the OG MPP DW, San Diego, NYSE:TDC)
 
 use std::env;
 use std::process;

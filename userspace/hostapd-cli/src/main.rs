@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hostapd-cli — SlateOS wireless access point daemon
+//! hostapd-cli — Slate OS wireless access point daemon
 //!
 //! Multi-personality: `hostapd`, `hostapd_cli`
 

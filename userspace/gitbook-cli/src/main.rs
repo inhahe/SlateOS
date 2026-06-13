@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gitbook-cli — SlateOS GitBook CLI
+//! gitbook-cli — Slate OS GitBook CLI
 //!
 //! Multi-personality: `gitbook`
 

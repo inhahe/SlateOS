@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ghostscript — SlateOS PostScript and PDF interpreter
+//! ghostscript — Slate OS PostScript and PDF interpreter
 //!
 //! Multi-personality: `gs`, `ps2pdf`, `pdf2ps`
 

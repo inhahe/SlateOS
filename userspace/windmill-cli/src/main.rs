@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! windmill-cli — SlateOS Windmill developer platform
+//! windmill-cli — Slate OS Windmill developer platform
 //!
 //! Single personality: `windmill`
 

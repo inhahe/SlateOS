@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! datamash-cli — SlateOS GNU datamash CLI
+//! datamash-cli — Slate OS GNU datamash CLI
 //!
 //! Single personality: `datamash`
 

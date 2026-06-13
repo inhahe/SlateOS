@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! trello-cli — SlateOS Trello CLI
+//! trello-cli — Slate OS Trello CLI
 //!
 //! Single personality: `trello`
 

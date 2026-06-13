@@ -1,4 +1,4 @@
-//! SlateOS namespace isolation utility.
+//! Slate OS namespace isolation utility.
 //!
 //! Multi-personality binary providing:
 //! - **unshare** — run program in new namespaces

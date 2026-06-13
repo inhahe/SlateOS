@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zenith-cli — SlateOS Zenith system monitor
+//! zenith-cli — Slate OS Zenith system monitor
 //!
 //! Single personality: `zenith`
 

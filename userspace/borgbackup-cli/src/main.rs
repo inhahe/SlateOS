@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! borgbackup-cli — SlateOS BorgBackup CLI
+//! borgbackup-cli — Slate OS BorgBackup CLI
 //!
 //! Single personality: `borg`
 

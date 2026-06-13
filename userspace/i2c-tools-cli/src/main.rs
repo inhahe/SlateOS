@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! i2c-tools-cli — SlateOS I2C bus tools
+//! i2c-tools-cli — Slate OS I2C bus tools
 //!
 //! Multi-personality: `i2cdetect`, `i2cget`, `i2cset`, `i2cdump`
 

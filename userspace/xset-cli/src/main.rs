@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xset-cli — SlateOS xset/xsetroot/xrdb X11 settings CLI
+//! xset-cli — Slate OS xset/xsetroot/xrdb X11 settings CLI
 //!
 //! Multi-personality: `xset`, `xsetroot`, `xrdb`
 

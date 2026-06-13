@@ -1,4 +1,4 @@
-//! SlateOS Ebook Reader
+//! Slate OS Ebook Reader
 //!
 //! A plain-text ebook reader with:
 //! - Library view listing books with title, author, progress

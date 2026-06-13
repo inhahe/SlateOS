@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! claws-mail-cli — SlateOS Claws Mail lightweight email client
+//! claws-mail-cli — Slate OS Claws Mail lightweight email client
 //!
 //! Single personality: `claws-mail`
 

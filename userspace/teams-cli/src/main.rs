@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! teams-cli — SlateOS Microsoft Teams (PWA/web client)
+//! teams-cli — Slate OS Microsoft Teams (PWA/web client)
 //!
 //! Single personality: `teams`
 

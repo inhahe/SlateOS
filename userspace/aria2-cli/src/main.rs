@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! aria2-cli — SlateOS aria2 download utility
+//! aria2-cli — Slate OS aria2 download utility
 //!
 //! Single personality: `aria2c`
 

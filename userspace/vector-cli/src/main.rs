@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vector-cli — SlateOS Vector data pipeline CLI
+//! vector-cli — Slate OS Vector data pipeline CLI
 //!
 //! Single personality: `vector`
 

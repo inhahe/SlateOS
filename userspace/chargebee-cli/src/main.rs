@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! chargebee-cli — SlateOS Chargebee subscription billing personality CLI.
+//! chargebee-cli — Slate OS Chargebee subscription billing personality CLI.
 
 use std::env;
 use std::process;

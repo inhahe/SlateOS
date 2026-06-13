@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bibtex-cli — SlateOS BibTeX CLI
+//! bibtex-cli — Slate OS BibTeX CLI
 //!
 //! Multi-personality: `bibtex`, `biber`
 

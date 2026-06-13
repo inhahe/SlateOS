@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! render-cli — SlateOS Render CLI
+//! render-cli — Slate OS Render CLI
 //!
 //! Single personality: `render`
 

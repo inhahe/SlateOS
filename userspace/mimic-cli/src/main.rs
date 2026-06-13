@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mimic-cli — SlateOS Mycroft Mimic speech synthesis
+//! mimic-cli — Slate OS Mycroft Mimic speech synthesis
 //!
 //! Single personality: `mimic`
 

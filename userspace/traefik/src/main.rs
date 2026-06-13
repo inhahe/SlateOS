@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! traefik — SlateOS cloud-native edge router
+//! traefik — Slate OS cloud-native edge router
 //!
 //! Single personality: `traefik`
 

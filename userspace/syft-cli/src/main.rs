@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! syft-cli — SlateOS Syft SBOM generator
+//! syft-cli — Slate OS Syft SBOM generator
 //!
 //! Multi-personality: `syft`
 

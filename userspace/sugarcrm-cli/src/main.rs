@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sugarcrm-cli — SlateOS SugarCRM (originally open-source CRM, now AI-driven enterprise)
+//! sugarcrm-cli — Slate OS SugarCRM (originally open-source CRM, now AI-driven enterprise)
 //!
 //! Single personality: `sugar`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xplr-cli — SlateOS xplr file explorer
+//! xplr-cli — Slate OS xplr file explorer
 //!
 //! Single personality: `xplr`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! yosys-cli — SlateOS Yosys open synthesis suite
+//! yosys-cli — Slate OS Yosys open synthesis suite
 //!
 //! Multi-personality: `yosys`, `yosys-abc`, `yosys-smtbmc`
 

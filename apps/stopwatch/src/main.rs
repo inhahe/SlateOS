@@ -1,4 +1,4 @@
-//! SlateOS Stopwatch & Lap Timer
+//! Slate OS Stopwatch & Lap Timer
 //!
 //! A precision stopwatch with lap timing, split times, countdown timer mode,
 //! and session history.

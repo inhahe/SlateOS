@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! containerd-cli — SlateOS containerd container runtime
+//! containerd-cli — Slate OS containerd container runtime
 //!
 //! Multi-personality: `ctr`, `containerd`, `containerd-shim`
 

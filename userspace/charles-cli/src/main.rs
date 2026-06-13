@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! charles-cli — SlateOS Charles Proxy web debugging tool
+//! charles-cli — Slate OS Charles Proxy web debugging tool
 //!
 //! Single personality: `charles`
 

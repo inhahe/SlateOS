@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pdftotext-cli — SlateOS pdftotext PDF text extractor
+//! pdftotext-cli — Slate OS pdftotext PDF text extractor
 //!
 //! Single personality: `pdftotext`
 

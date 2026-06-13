@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! jira-cli — SlateOS Jira CLI
+//! jira-cli — Slate OS Jira CLI
 //!
 //! Single personality: `jira`
 

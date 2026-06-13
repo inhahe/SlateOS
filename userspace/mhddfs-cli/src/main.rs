@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mhddfs-cli — SlateOS mhddfs multi-HDD FUSE filesystem
+//! mhddfs-cli — Slate OS mhddfs multi-HDD FUSE filesystem
 //!
 //! Single personality: `mhddfs`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kopia-cli — SlateOS Kopia backup CLI
+//! kopia-cli — Slate OS Kopia backup CLI
 //!
 //! Single personality: `kopia`
 

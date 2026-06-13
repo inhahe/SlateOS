@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! firebase-cli — SlateOS Firebase CLI
+//! firebase-cli — Slate OS Firebase CLI
 //!
 //! Multi-personality: `firebase`
 

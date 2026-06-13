@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ancestris-cli — SlateOS Ancestris genealogy tool
+//! ancestris-cli — Slate OS Ancestris genealogy tool
 //!
 //! Single personality: `ancestris`
 

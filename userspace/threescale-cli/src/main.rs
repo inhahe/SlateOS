@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! threescale-cli — SlateOS Red Hat 3scale API Management personality CLI.
+//! threescale-cli — Slate OS Red Hat 3scale API Management personality CLI.
 
 use std::env;
 use std::process;

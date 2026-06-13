@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lspci-cli — SlateOS PCI device lister
+//! lspci-cli — Slate OS PCI device lister
 //!
 //! Multi-personality: `lspci`, `setpci`
 

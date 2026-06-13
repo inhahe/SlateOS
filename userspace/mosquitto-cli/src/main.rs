@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mosquitto-cli — SlateOS Mosquitto MQTT CLI
+//! mosquitto-cli — Slate OS Mosquitto MQTT CLI
 //!
 //! Multi-personality: `mosquitto_pub`, `mosquitto_sub`
 

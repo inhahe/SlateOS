@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nnn-cli — SlateOS nnn file manager
+//! nnn-cli — Slate OS nnn file manager
 //!
 //! Single personality: `nnn`
 

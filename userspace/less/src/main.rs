@@ -1,4 +1,4 @@
-//! SlateOS `less` -- Terminal Pager
+//! Slate OS `less` -- Terminal Pager
 //!
 //! A terminal pager inspired by the classic Unix `less` utility.  Reads a file
 //! (or standard input) and presents it in a scrollable, searchable display.
@@ -184,7 +184,7 @@ static mut ORIG_TERMIOS: Option<libc::termios> = None;
 /// Enable raw terminal mode: disable echo and line buffering so we receive
 /// each keypress individually.
 ///
-/// On SlateOS this writes to `/proc/self/tty_raw` if available, otherwise we
+/// On Slate OS this writes to `/proc/self/tty_raw` if available, otherwise we
 /// use the POSIX termios interface through the POSIX compatibility layer.
 fn enable_raw_mode() {
     // Try the SlateOS-specific procfs toggle first.
@@ -1549,7 +1549,7 @@ fn read_stdin_fully() -> io::Result<Vec<u8>> {
 }
 
 /// Check if a key is available on stdin without blocking.
-/// Uses the SlateOS `/proc/self/tty_avail` interface or returns false.
+/// Uses the Slate OS `/proc/self/tty_avail` interface or returns false.
 fn check_key_available() -> bool {
     if let Ok(val) = std::fs::read_to_string("/proc/self/tty_avail")
         && let Ok(n) = val.trim().parse::<usize>() {

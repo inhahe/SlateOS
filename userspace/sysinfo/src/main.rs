@@ -1,4 +1,4 @@
-//! SlateOS System Information Utility
+//! Slate OS System Information Utility
 //!
 //! Queries and displays comprehensive system information from /proc, /sys,
 //! and other kernel interfaces. Similar to `neofetch`, `inxi`, or Windows

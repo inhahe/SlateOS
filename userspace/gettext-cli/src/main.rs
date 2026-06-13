@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gettext-cli — SlateOS GNU gettext i18n tools CLI
+//! gettext-cli — Slate OS GNU gettext i18n tools CLI
 //!
 //! Multi-personality: `gettext`, `xgettext`, `msgfmt`, `msginit`, `msgmerge`, `msgcat`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nanomq-cli — SlateOS NanoMQ lightweight MQTT broker
+//! nanomq-cli — Slate OS NanoMQ lightweight MQTT broker
 //!
 //! Multi-personality: `nanomq`, `nanomq_cli`
 

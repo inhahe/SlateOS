@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! minicom-cli — SlateOS serial terminal emulator
+//! minicom-cli — Slate OS serial terminal emulator
 //!
 //! Multi-personality: `minicom`, `screen` (serial mode)
 

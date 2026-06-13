@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! teamwork-cli — SlateOS Teamwork.com (Irish PM/PSA for client services agencies)
+//! teamwork-cli — Slate OS Teamwork.com (Irish PM/PSA for client services agencies)
 
 use std::env;
 use std::process;

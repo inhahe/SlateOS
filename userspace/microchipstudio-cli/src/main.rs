@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! microchipstudio-cli — SlateOS Microchip Studio (formerly Atmel Studio)
+//! microchipstudio-cli — Slate OS Microchip Studio (formerly Atmel Studio)
 //!
 //! Single personality: `microchipstudio`
 

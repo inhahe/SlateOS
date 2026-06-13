@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fancontrol-cli — SlateOS fan control daemon
+//! fancontrol-cli — Slate OS fan control daemon
 //!
 //! Multi-personality: `fancontrol`, `pwmconfig`
 

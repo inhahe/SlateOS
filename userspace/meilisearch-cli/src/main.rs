@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! meilisearch-cli — SlateOS Meilisearch search engine
+//! meilisearch-cli — Slate OS Meilisearch search engine
 //!
 //! Single personality: `meilisearch`
 

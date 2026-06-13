@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wl-protocols-cli — SlateOS Wayland protocol info tool
+//! wl-protocols-cli — Slate OS Wayland protocol info tool
 //!
 //! Single personality: `wl-protocols`
 

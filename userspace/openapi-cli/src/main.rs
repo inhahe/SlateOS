@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! openapi-cli — SlateOS OpenAPI tools
+//! openapi-cli — Slate OS OpenAPI tools
 //!
 //! Multi-personality: `openapi`, `openapi-generator`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! usd-cli — SlateOS Universal Scene Description tools
+//! usd-cli — Slate OS Universal Scene Description tools
 //!
 //! Multi-personality: `usdcat`, `usdchecker`, `usdview`, `usdzip`
 

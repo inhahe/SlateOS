@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! segment-cli — SlateOS Twilio Segment (CDP category creator, SF, acquired by Twilio 2020)
+//! segment-cli — Slate OS Twilio Segment (CDP category creator, SF, acquired by Twilio 2020)
 
 use std::env;
 use std::process;

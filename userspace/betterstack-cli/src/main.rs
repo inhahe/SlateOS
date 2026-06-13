@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! betterstack-cli — SlateOS Better Stack (uptime + logs + incidents, Prague, dev-friendly)
+//! betterstack-cli — Slate OS Better Stack (uptime + logs + incidents, Prague, dev-friendly)
 
 use std::env;
 use std::process;

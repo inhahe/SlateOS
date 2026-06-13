@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! thunder-cli — SlateOS Thunder Client REST API testing
+//! thunder-cli — Slate OS Thunder Client REST API testing
 //!
 //! Single personality: `thunder`
 

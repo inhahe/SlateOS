@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gnome-screenshot-cli — SlateOS GNOME Screenshot
+//! gnome-screenshot-cli — Slate OS GNOME Screenshot
 //!
 //! Single personality: `gnome-screenshot`
 

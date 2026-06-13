@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! crossplane-cli — SlateOS Crossplane CLI
+//! crossplane-cli — Slate OS Crossplane CLI
 //!
 //! Multi-personality: `crossplane`, `crank`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cyberark-cli — SlateOS CyberArk (PAM market leader, founded 1999 Israel, NASDAQ:CYBR)
+//! cyberark-cli — Slate OS CyberArk (PAM market leader, founded 1999 Israel, NASDAQ:CYBR)
 
 use std::env;
 use std::process;

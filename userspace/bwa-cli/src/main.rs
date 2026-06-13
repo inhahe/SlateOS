@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bwa-cli — SlateOS BWA sequence aligner
+//! bwa-cli — Slate OS BWA sequence aligner
 //!
 //! Multi-personality: `bwa`, `bwa-mem2`
 

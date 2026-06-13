@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ghdl-cli — SlateOS GHDL VHDL simulator/synthesizer
+//! ghdl-cli — Slate OS GHDL VHDL simulator/synthesizer
 //!
 //! Multi-personality: `ghdl`
 

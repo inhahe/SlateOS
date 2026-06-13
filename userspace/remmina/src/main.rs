@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! remmina — SlateOS remote desktop client
+//! remmina — Slate OS remote desktop client
 //!
 //! Single personality: `remmina`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! netsuite-cli — SlateOS Oracle NetSuite cloud ERP
+//! netsuite-cli — Slate OS Oracle NetSuite cloud ERP
 //!
 //! Single personality: `netsuite`
 

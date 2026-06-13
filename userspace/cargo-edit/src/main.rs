@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cargo-edit — SlateOS cargo subcommands for dependency management
+//! cargo-edit — Slate OS cargo subcommands for dependency management
 //!
 //! Multi-personality: `cargo-add`, `cargo-rm`, `cargo-upgrade`, `cargo-set-version`
 

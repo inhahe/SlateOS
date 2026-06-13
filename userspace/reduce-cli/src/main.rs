@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! reduce-cli — SlateOS REDUCE computer algebra system
+//! reduce-cli — Slate OS REDUCE computer algebra system
 //!
 //! Single personality: `reduce`
 

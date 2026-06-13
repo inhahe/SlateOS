@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lnav-cli — SlateOS log file navigator
+//! lnav-cli — Slate OS log file navigator
 //!
 //! Single personality: `lnav`
 

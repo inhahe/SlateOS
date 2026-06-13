@@ -11,7 +11,7 @@
 #![allow(clippy::needless_range_loop)]
 #![allow(unused_imports)]
 
-//! SlateOS Hearts -- a classic four-player Hearts card game.
+//! Slate OS Hearts -- a classic four-player Hearts card game.
 //!
 //! Features:
 //! - 4 players (1 human, 3 AI) playing standard Hearts rules

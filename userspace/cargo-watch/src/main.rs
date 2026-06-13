@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cargo-watch — SlateOS watches over your project's source for changes
+//! cargo-watch — Slate OS watches over your project's source for changes
 //!
 //! Single personality: `cargo-watch`
 

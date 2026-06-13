@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mcfly-cli — SlateOS McFly shell history search
+//! mcfly-cli — Slate OS McFly shell history search
 //!
 //! Single personality: `mcfly`
 

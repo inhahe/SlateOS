@@ -1,4 +1,4 @@
-//! SlateOS Watch Utility -- Execute a Command Periodically
+//! Slate OS Watch Utility -- Execute a Command Periodically
 //!
 //! Runs a command repeatedly at a configurable interval, displaying its output
 //! in a full-screen terminal view. Modeled after the Linux `watch(1)` utility.
@@ -49,7 +49,7 @@ const RESET: &str = "\x1b[0m";
 /// BEL character for terminal beep.
 const BEL: &str = "\x07";
 
-/// Shell used to run commands (matching SlateOS convention).
+/// Shell used to run commands (matching Slate OS convention).
 const SHELL: &str = "/bin/sh";
 
 /// Hostname file path.

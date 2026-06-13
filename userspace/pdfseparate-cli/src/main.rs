@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pdfseparate-cli — SlateOS pdfseparate PDF page splitter
+//! pdfseparate-cli — Slate OS pdfseparate PDF page splitter
 //!
 //! Single personality: `pdfseparate`
 

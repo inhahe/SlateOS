@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gatus-cli — SlateOS Gatus health dashboard
+//! gatus-cli — Slate OS Gatus health dashboard
 //!
 //! Single personality: `gatus`
 

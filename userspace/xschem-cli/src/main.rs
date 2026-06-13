@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xschem-cli — SlateOS Xschem schematic editor
+//! xschem-cli — Slate OS Xschem schematic editor
 //!
 //! Single personality: `xschem`
 

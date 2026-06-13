@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! usql-cli — SlateOS usql universal SQL client
+//! usql-cli — Slate OS usql universal SQL client
 //!
 //! Single personality: `usql`
 

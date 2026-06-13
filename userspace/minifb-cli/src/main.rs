@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! minifb-cli — SlateOS MiniFB framebuffer window tool
+//! minifb-cli — Slate OS MiniFB framebuffer window tool
 //!
 //! Single personality: `minifb`
 

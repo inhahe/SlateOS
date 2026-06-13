@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! navi — SlateOS interactive cheatsheet tool
+//! navi — Slate OS interactive cheatsheet tool
 //!
 //! Single personality: `navi`
 

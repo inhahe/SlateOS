@@ -1,4 +1,4 @@
-//! SlateOS zip/unzip archive utility.
+//! Slate OS zip/unzip archive utility.
 //!
 //! Multi-personality binary: detects operating mode from `argv[0]`.
 //!
@@ -40,7 +40,7 @@ use std::process;
 use std::time::SystemTime;
 
 // Note: all I/O goes through std (std::fs / std::io / std::process), which
-// reaches native SlateOS syscalls via the posix libc layer.  A previous
+// reaches native Slate OS syscalls via the posix libc layer.  A previous
 // hand-rolled syscall stub here hardcoded Linux numbers (WRITE=1=SYS_EXIT,
 // OPEN=2=SYS_TASK_ID, EXIT=60=SYS_SYSCTL_GET, ...) that collide with
 // unrelated native syscalls; it was dead code and has been removed.

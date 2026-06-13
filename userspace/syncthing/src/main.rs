@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! syncthing — SlateOS continuous file synchronization
+//! syncthing — Slate OS continuous file synchronization
 //!
 //! Single personality: `syncthing`
 

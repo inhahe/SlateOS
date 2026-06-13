@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! openfoam-cli — SlateOS OpenFOAM CFD toolkit
+//! openfoam-cli — Slate OS OpenFOAM CFD toolkit
 //!
 //! Multi-personality: `simpleFoam`, `icoFoam`, `blockMesh`, `paraFoam`,
 //! `checkMesh`, `decomposePar`

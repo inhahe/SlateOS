@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! amqp-cli — SlateOS AMQP command-line tools
+//! amqp-cli — Slate OS AMQP command-line tools
 //!
 //! Multi-personality: `amqp-publish`, `amqp-consume`, `amqp-declare-queue`
 

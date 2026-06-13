@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! youki-cli — SlateOS youki container runtime (Rust OCI)
+//! youki-cli — Slate OS youki container runtime (Rust OCI)
 //!
 //! Single personality: `youki`
 

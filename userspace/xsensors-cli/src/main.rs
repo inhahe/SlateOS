@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xsensors-cli — SlateOS xsensors graphical sensor viewer
+//! xsensors-cli — Slate OS xsensors graphical sensor viewer
 //!
 //! Single personality: `xsensors`
 

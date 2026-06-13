@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pipedrive-cli — SlateOS Pipedrive (sales-first visual pipeline CRM)
+//! pipedrive-cli — Slate OS Pipedrive (sales-first visual pipeline CRM)
 //!
 //! Single personality: `pipedrive`
 

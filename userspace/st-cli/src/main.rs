@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! st-cli — SlateOS st (suckless terminal)
+//! st-cli — Slate OS st (suckless terminal)
 //!
 //! Single personality: `st`
 

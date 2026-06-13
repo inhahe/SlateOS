@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! spss-cli — SlateOS IBM SPSS Statistics
+//! spss-cli — Slate OS IBM SPSS Statistics
 //!
 //! Single personality: `spss`
 

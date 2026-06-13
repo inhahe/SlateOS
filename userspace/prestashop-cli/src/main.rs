@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! prestashop-cli — SlateOS PrestaShop (French open-source e-commerce, EU favourite)
+//! prestashop-cli — Slate OS PrestaShop (French open-source e-commerce, EU favourite)
 
 use std::env;
 use std::process;

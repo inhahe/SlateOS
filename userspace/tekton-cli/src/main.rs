@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tekton-cli — SlateOS Tekton Pipelines CLI
+//! tekton-cli — Slate OS Tekton Pipelines CLI
 //!
 //! Multi-personality: `tkn`
 

@@ -1,4 +1,4 @@
-//! SlateOS Kernel Module Management Tools
+//! Slate OS Kernel Module Management Tools
 //!
 //! Multi-personality binary providing `lsmod`, `modprobe`, `insmod`, and `rmmod`
 //! functionality. The active personality is detected from `argv[0]`.
@@ -23,11 +23,11 @@ use std::process;
 // Module load/unload support
 // ============================================================================
 //
-// SlateOS is a microkernel: there are no loadable kernel modules. Device drivers
+// Slate OS is a microkernel: there are no loadable kernel modules. Device drivers
 // run as ordinary userspace processes managed by the driver framework / service
 // manager, not as code injected into the kernel address space. There is
 // therefore no `init_module`/`delete_module` syscall to call (the previous code
-// targeted Linux numbers 150/151, which are unassigned on SlateOS and so just
+// targeted Linux numbers 150/151, which are unassigned on Slate OS and so just
 // returned NotSupported). The mutating personalities (insmod, rmmod, and
 // modprobe's load/remove paths) report this clearly rather than invoking a
 // nonexistent syscall. The read-only `lsmod` listing and modprobe's dependency
@@ -304,7 +304,7 @@ fn modules_dep_path() -> String {
 
 /// Load a kernel module from a memory image.
 ///
-/// Unsupported on SlateOS — see the `MODULE_UNSUPPORTED` documentation above.
+/// Unsupported on Slate OS — see the `MODULE_UNSUPPORTED` documentation above.
 /// The image bytes and parameter string are accepted for signature
 /// compatibility with the calling personalities but cannot be acted on.
 fn do_init_module(_image: &[u8], _params: &str) -> Result<(), String> {
@@ -313,7 +313,7 @@ fn do_init_module(_image: &[u8], _params: &str) -> Result<(), String> {
 
 /// Remove a loaded kernel module.
 ///
-/// Unsupported on SlateOS — see the `MODULE_UNSUPPORTED` documentation above.
+/// Unsupported on Slate OS — see the `MODULE_UNSUPPORTED` documentation above.
 fn do_delete_module(_name: &str, _force: bool) -> Result<(), String> {
     Err(MODULE_UNSUPPORTED.to_string())
 }

@@ -1,4 +1,4 @@
-// SlateOS acpi — power management information
+// Slate OS acpi — power management information
 //
 // Multi-personality binary:
 //   acpi    — show battery/AC/thermal/cooling status

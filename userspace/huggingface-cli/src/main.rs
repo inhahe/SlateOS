@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! huggingface-cli — SlateOS Hugging Face CLI
+//! huggingface-cli — Slate OS Hugging Face CLI
 //!
 //! Single personality: `huggingface-cli`
 

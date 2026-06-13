@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! trezor-cli — SlateOS Trezor hardware wallet tool
+//! trezor-cli — Slate OS Trezor hardware wallet tool
 //!
 //! Single personality: `trezorctl`
 

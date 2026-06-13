@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! osquery-cli — SlateOS osquery endpoint visibility
+//! osquery-cli — Slate OS osquery endpoint visibility
 //!
 //! Multi-personality: `osqueryi`, `osqueryd`
 

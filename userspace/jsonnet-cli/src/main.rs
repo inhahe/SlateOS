@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! jsonnet-cli — SlateOS Jsonnet data templating CLI
+//! jsonnet-cli — Slate OS Jsonnet data templating CLI
 //!
 //! Multi-personality: `jsonnet`, `jsonnetfmt`, `jsonnet-lint`
 

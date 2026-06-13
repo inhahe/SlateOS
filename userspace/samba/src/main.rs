@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! samba — SlateOS SMB/CIFS file server
+//! samba — Slate OS SMB/CIFS file server
 //!
 //! Multi-personality: `smbd` (file server), `nmbd` (NetBIOS), `smbclient`, `smbstatus`, `testparm`
 

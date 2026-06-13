@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ocrmypdf-cli — SlateOS OCRmyPDF CLI
+//! ocrmypdf-cli — Slate OS OCRmyPDF CLI
 //!
 //! Single personality: `ocrmypdf`
 

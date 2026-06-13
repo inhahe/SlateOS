@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! druid-cli — SlateOS Apache Druid analytics database
+//! druid-cli — Slate OS Apache Druid analytics database
 //!
 //! Single personality: `druid`
 

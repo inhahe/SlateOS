@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tym-cli — SlateOS tym Lua-configurable terminal
+//! tym-cli — Slate OS tym Lua-configurable terminal
 //!
 //! Single personality: `tym`
 

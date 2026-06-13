@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! uim-cli — SlateOS uim input method framework
+//! uim-cli — Slate OS uim input method framework
 //!
 //! Multi-personality: `uim-xim`, `uim-toolbar`, `uim-pref`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ncmpcpp-cli — SlateOS ncmpcpp MPD client
+//! ncmpcpp-cli — Slate OS ncmpcpp MPD client
 //!
 //! Single personality: `ncmpcpp`
 

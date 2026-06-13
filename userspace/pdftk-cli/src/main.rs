@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pdftk-cli — SlateOS PDFtk PDF toolkit
+//! pdftk-cli — Slate OS PDFtk PDF toolkit
 //!
 //! Single personality: `pdftk`
 

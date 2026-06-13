@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! h2o-cli — SlateOS H2O HTTP/2 web server
+//! h2o-cli — Slate OS H2O HTTP/2 web server
 //!
 //! Single personality: `h2o`
 

@@ -1,4 +1,4 @@
-//! SlateOS locale and keyboard configuration.
+//! Slate OS locale and keyboard configuration.
 //!
 //! Multi-personality binary providing:
 //! - **localectl** — control system locale and keyboard settings

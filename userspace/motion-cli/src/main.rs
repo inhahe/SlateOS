@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! motion-cli — SlateOS Apple Motion (motion graphics for Final Cut Pro)
+//! motion-cli — Slate OS Apple Motion (motion graphics for Final Cut Pro)
 //!
 //! Single personality: `motion`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! knime-cli — SlateOS KNIME Analytics Platform
+//! knime-cli — Slate OS KNIME Analytics Platform
 //!
 //! Single personality: `knime`
 

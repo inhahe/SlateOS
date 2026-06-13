@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! autocad-cli — SlateOS Autodesk AutoCAD 2D/3D CAD
+//! autocad-cli — Slate OS Autodesk AutoCAD 2D/3D CAD
 //!
 //! Single personality: `autocad`
 

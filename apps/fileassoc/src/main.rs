@@ -1,4 +1,4 @@
-//! SlateOS File Association Manager — GUI for File Type Associations
+//! Slate OS File Association Manager — GUI for File Type Associations
 //!
 //! A graphical application for managing which applications open which file
 //! types. Provides browsing by category, search/filter, default-app assignment,

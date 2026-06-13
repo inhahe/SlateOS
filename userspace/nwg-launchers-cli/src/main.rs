@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nwg-launchers-cli — SlateOS nwg-launchers application launcher suite
+//! nwg-launchers-cli — Slate OS nwg-launchers application launcher suite
 //!
 //! Multi-personality: `nwg-drawer`, `nwg-bar`, `nwg-menu`
 

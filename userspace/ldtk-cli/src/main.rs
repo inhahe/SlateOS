@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ldtk-cli — SlateOS LDtk level designer toolkit
+//! ldtk-cli — Slate OS LDtk level designer toolkit
 //!
 //! Single personality: `ldtk`
 

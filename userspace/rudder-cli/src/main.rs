@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rudder-cli — SlateOS Rudder continuous auditing & configuration
+//! rudder-cli — Slate OS Rudder continuous auditing & configuration
 //!
 //! Multi-personality: `rudder`, `rudder-agent`, `rudder-relayd`
 

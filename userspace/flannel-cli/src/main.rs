@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! flannel-cli — SlateOS Flannel container networking
+//! flannel-cli — Slate OS Flannel container networking
 //!
 //! Single personality: `flanneld`
 

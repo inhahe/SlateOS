@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cinema4d-cli — SlateOS Maxon Cinema 4D
+//! cinema4d-cli — Slate OS Maxon Cinema 4D
 //!
 //! Single personality: `cinema4d`
 

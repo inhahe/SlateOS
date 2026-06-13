@@ -1,4 +1,4 @@
-//! SlateOS Background File Indexer
+//! Slate OS Background File Indexer
 //!
 //! A configurable file indexing service that maintains a searchable database
 //! of files across specified directories. Designed to run as a background

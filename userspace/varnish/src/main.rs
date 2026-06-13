@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! varnish — SlateOS HTTP accelerator (reverse proxy cache)
+//! varnish — Slate OS HTTP accelerator (reverse proxy cache)
 //!
 //! Multi-personality: `varnishd` (daemon), `varnishlog`, `varnishstat`, `varnishadm`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! chroma-cli — SlateOS Chroma (open-source embedding database, San Francisco, private)
+//! chroma-cli — Slate OS Chroma (open-source embedding database, San Francisco, private)
 
 use std::env;
 use std::process;

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bitcoin-cli — SlateOS Bitcoin Core RPC client
+//! bitcoin-cli — Slate OS Bitcoin Core RPC client
 //!
 //! Single personality: `bitcoin-cli`
 

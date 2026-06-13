@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! telegraf-cli — SlateOS Telegraf metrics agent
+//! telegraf-cli — Slate OS Telegraf metrics agent
 //!
 //! Single personality: `telegraf`
 

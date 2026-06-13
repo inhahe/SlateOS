@@ -1,4 +1,4 @@
-//! SlateOS Network Packet Analyzer
+//! Slate OS Network Packet Analyzer
 //!
 //! Capture and analyze network packets. Similar to tcpdump on Linux.
 //!
@@ -36,7 +36,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 // Syscall interface
 // ============================================================================
 
-// Native SlateOS monotonic clock (kernel syscall/number.rs); no-arg, returns
+// Native Slate OS monotonic clock (kernel syscall/number.rs); no-arg, returns
 // boot-relative nanoseconds in rax.  (Syscall 30 is SYS_IRQ_REGISTER.)
 const SYS_CLOCK_MONOTONIC: u64 = 10;
 

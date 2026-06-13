@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! scikit-learn-cli — SlateOS scikit-learn machine learning
+//! scikit-learn-cli — Slate OS scikit-learn machine learning
 //!
 //! Single personality: `sklearn`
 

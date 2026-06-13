@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! trimmomatic-cli — SlateOS Trimmomatic read trimmer
+//! trimmomatic-cli — Slate OS Trimmomatic read trimmer
 //!
 //! Single personality: `trimmomatic`
 

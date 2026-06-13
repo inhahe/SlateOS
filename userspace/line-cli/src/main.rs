@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! line-cli — SlateOS LINE messaging app (LY Corp / Naver+SoftBank)
+//! line-cli — Slate OS LINE messaging app (LY Corp / Naver+SoftBank)
 //!
 //! Single personality: `line`
 

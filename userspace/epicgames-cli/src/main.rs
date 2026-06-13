@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! epicgames-cli — SlateOS Epic Games Launcher / Store
+//! epicgames-cli — Slate OS Epic Games Launcher / Store
 //!
 //! Single personality: `epicgames`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! system-log-viewer-cli — SlateOS GNOME System Log Viewer
+//! system-log-viewer-cli — Slate OS GNOME System Log Viewer
 //!
 //! Single personality: `gnome-system-log`
 

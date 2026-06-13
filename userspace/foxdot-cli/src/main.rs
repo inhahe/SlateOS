@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! foxdot-cli — SlateOS FoxDot live coding with Python
+//! foxdot-cli — Slate OS FoxDot live coding with Python
 //!
 //! Single personality: `foxdot`
 

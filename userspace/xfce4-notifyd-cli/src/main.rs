@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xfce4-notifyd-cli — SlateOS XFCE notification daemon
+//! xfce4-notifyd-cli — Slate OS XFCE notification daemon
 //!
 //! Multi-personality: `xfce4-notifyd`, `xfce4-notifyd-config`
 

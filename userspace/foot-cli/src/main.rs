@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! foot-cli — SlateOS foot terminal emulator
+//! foot-cli — Slate OS foot terminal emulator
 //!
 //! Multi-personality: `foot`, `footclient`, `foot-server`
 

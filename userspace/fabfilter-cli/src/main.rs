@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fabfilter-cli — SlateOS FabFilter plug-in bundle
+//! fabfilter-cli — Slate OS FabFilter plug-in bundle
 //!
 //! Single personality: `fabfilter`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bincode-cli — SlateOS bincode serialization tool
+//! bincode-cli — Slate OS bincode serialization tool
 //!
 //! Single personality: `bincode`
 

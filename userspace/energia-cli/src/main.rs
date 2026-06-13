@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! energia-cli — SlateOS Energia IDE for TI MSP430/MSP432/Tiva/CC3200
+//! energia-cli — Slate OS Energia IDE for TI MSP430/MSP432/Tiva/CC3200
 //!
 //! Single personality: `energia`
 

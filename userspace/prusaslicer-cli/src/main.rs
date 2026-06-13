@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! prusaslicer-cli — SlateOS PrusaSlicer 3D printing slicer
+//! prusaslicer-cli — Slate OS PrusaSlicer 3D printing slicer
 //!
 //! Multi-personality: `prusa-slicer`, `prusaslicer`
 

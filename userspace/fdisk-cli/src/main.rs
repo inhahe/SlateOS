@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fdisk-cli — SlateOS fdisk/sfdisk/cfdisk CLI
+//! fdisk-cli — Slate OS fdisk/sfdisk/cfdisk CLI
 //!
 //! Multi-personality: `fdisk`, `sfdisk`, `cfdisk`
 

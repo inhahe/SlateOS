@@ -1,4 +1,4 @@
-//! SlateOS `sort` Utility -- Sort Lines of Text
+//! Slate OS `sort` Utility -- Sort Lines of Text
 //!
 //! Reads lines from files (or stdin) and writes them to stdout (or a file) in
 //! sorted order. Modeled after GNU coreutils `sort` with the same flag set.

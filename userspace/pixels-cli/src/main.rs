@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pixels-cli — SlateOS Pixels framebuffer renderer
+//! pixels-cli — Slate OS Pixels framebuffer renderer
 //!
 //! Single personality: `pixels`
 

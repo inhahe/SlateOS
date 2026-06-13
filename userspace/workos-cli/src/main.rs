@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! workos-cli — SlateOS WorkOS (developer-friendly enterprise-readiness API: SSO, SCIM, audit logs)
+//! workos-cli — Slate OS WorkOS (developer-friendly enterprise-readiness API: SSO, SCIM, audit logs)
 //!
 //! Single personality: `workos`
 

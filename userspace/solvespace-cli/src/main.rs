@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! solvespace-cli — SlateOS SolveSpace parametric 3D CAD
+//! solvespace-cli — Slate OS SolveSpace parametric 3D CAD
 //!
 //! Single personality: `solvespace`
 

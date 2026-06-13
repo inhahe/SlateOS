@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! isync-cli — SlateOS isync/mbsync IMAP mailbox synchronizer
+//! isync-cli — Slate OS isync/mbsync IMAP mailbox synchronizer
 //!
 //! Single personality: `mbsync`
 

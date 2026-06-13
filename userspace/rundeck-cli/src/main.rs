@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rundeck-cli — SlateOS Rundeck job scheduler
+//! rundeck-cli — Slate OS Rundeck job scheduler
 //!
 //! Single personality: `rundeck`
 

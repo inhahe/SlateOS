@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! forge-cli — SlateOS Foundry forge build/test tool
+//! forge-cli — Slate OS Foundry forge build/test tool
 //!
 //! Single personality: `forge`
 

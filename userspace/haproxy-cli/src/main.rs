@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! haproxy-cli — SlateOS HAProxy load balancer/reverse proxy
+//! haproxy-cli — Slate OS HAProxy load balancer/reverse proxy
 //!
 //! Multi-personality: `haproxy`, `hatop`
 

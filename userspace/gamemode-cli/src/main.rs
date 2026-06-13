@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gamemode-cli — SlateOS Feral GameMode performance optimizer
+//! gamemode-cli — Slate OS Feral GameMode performance optimizer
 //!
 //! Multi-personality: `gamemoded`, `gamemoderun`, `gamemodelist`
 

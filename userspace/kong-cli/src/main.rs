@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kong-cli — SlateOS Kong API gateway
+//! kong-cli — Slate OS Kong API gateway
 //!
 //! Single personality: `kong`
 

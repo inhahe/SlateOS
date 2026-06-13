@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! thruk-cli — SlateOS Thruk monitoring web interface
+//! thruk-cli — Slate OS Thruk monitoring web interface
 //!
 //! Single personality: `thruk`
 

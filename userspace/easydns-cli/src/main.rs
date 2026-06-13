@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! easydns-cli — SlateOS personality CLI for easyDNS, the Canadian civil-liberties registrar.
+//! easydns-cli — Slate OS personality CLI for easyDNS, the Canadian civil-liberties registrar.
 
 use std::env;
 use std::process;

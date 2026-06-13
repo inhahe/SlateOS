@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ntp-cli — SlateOS NTP time synchronization tools
+//! ntp-cli — Slate OS NTP time synchronization tools
 //!
 //! Multi-personality: `ntpd`, `ntpq`, `ntpdate`, `chronyc`, `chronyd`
 

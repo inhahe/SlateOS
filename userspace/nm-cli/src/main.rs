@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nm-cli — SlateOS symbol table tools
+//! nm-cli — Slate OS symbol table tools
 //!
 //! Multi-personality: `nm`, `c++filt`, `ar`, `ranlib`
 

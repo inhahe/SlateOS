@@ -1,4 +1,4 @@
-//! SlateOS loop device management utility.
+//! Slate OS loop device management utility.
 //!
 //! Multi-personality binary providing:
 //! - **losetup** — set up and control loop devices

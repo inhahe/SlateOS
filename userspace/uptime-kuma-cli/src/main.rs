@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! uptime-kuma-cli — SlateOS Uptime Kuma monitoring
+//! uptime-kuma-cli — Slate OS Uptime Kuma monitoring
 //!
 //! Single personality: `uptime-kuma`
 

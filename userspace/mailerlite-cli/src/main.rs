@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! mailerlite-cli — SlateOS MailerLite email marketing platform personality CLI.
+//! mailerlite-cli — Slate OS MailerLite email marketing platform personality CLI.
 
 use std::env;
 use std::process;

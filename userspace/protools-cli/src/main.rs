@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! protools-cli — SlateOS Avid Pro Tools DAW
+//! protools-cli — Slate OS Avid Pro Tools DAW
 //!
 //! Single personality: `protools`
 

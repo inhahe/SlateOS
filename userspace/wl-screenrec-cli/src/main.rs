@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wl-screenrec-cli — SlateOS wl-screenrec hardware-accelerated screen recording
+//! wl-screenrec-cli — Slate OS wl-screenrec hardware-accelerated screen recording
 //!
 //! Single personality: `wl-screenrec`
 

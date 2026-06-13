@@ -1,4 +1,4 @@
-// SlateOS mkswap - swap management (mkswap/swapon/swapoff)
+// Slate OS mkswap - swap management (mkswap/swapon/swapoff)
 //
 // Multi-personality binary:
 //   mkswap  - create swap area on device/file
@@ -20,7 +20,7 @@ use std::fmt;
 const SWAP_MAGIC: &[u8; 10] = b"SWAPSPACE2";
 const SWAP_MAGIC_OFFSET: usize = 4086; // page_size - 10 for 4K page
 const SWAP_MAGIC_OFFSET_16K: usize = 16374; // 16KiB page - 10
-const PAGE_SIZE: u32 = 16384; // 16 KiB pages for SlateOS
+const PAGE_SIZE: u32 = 16384; // 16 KiB pages for Slate OS
 const MIN_SWAP_SIZE: u64 = 10 * PAGE_SIZE as u64;
 const MAX_LABEL_LEN: usize = 16;
 const UUID_LEN: usize = 16;

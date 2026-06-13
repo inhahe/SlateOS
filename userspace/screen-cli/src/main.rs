@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! screen-cli — SlateOS GNU Screen CLI
+//! screen-cli — Slate OS GNU Screen CLI
 //!
 //! Single personality: `screen`
 

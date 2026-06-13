@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ansys-cli — SlateOS Ansys multiphysics engineering simulation
+//! ansys-cli — Slate OS Ansys multiphysics engineering simulation
 //!
 //! Single personality: `ansys`
 

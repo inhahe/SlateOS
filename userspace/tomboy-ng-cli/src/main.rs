@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tomboy-ng-cli — SlateOS Tomboy-ng desktop notes
+//! tomboy-ng-cli — Slate OS Tomboy-ng desktop notes
 //!
 //! Single personality: `tomboy-ng`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bugsnag-cli — SlateOS BugSnag / SmartBear Insight Hub (app stability monitoring, mobile focus)
+//! bugsnag-cli — Slate OS BugSnag / SmartBear Insight Hub (app stability monitoring, mobile focus)
 //!
 //! Single personality: `bugsnag`
 

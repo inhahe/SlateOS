@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! oh-my-posh-cli — SlateOS Oh My Posh prompt engine
+//! oh-my-posh-cli — Slate OS Oh My Posh prompt engine
 //!
 //! Single personality: `oh-my-posh`
 

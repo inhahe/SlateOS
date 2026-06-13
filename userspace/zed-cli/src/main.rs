@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zed-cli — SlateOS Zed code editor
+//! zed-cli — Slate OS Zed code editor
 //!
 //! Single personality: `zed`
 

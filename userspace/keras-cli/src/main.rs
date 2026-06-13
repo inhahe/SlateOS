@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! keras-cli — SlateOS Keras deep learning API
+//! keras-cli — Slate OS Keras deep learning API
 //!
 //! Multi-personality: `keras`
 

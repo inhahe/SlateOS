@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dolphin-cli — SlateOS Dolphin GameCube/Wii emulator
+//! dolphin-cli — Slate OS Dolphin GameCube/Wii emulator
 //!
 //! Multi-personality: `dolphin-emu`, `dolphin-emu-nogui`
 

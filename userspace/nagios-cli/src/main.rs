@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nagios-cli — SlateOS Nagios monitoring system
+//! nagios-cli — Slate OS Nagios monitoring system
 //!
 //! Multi-personality: `nagios`, `nagiostats`, `nagios-check`
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! flac-tools — SlateOS FLAC audio codec tools
+//! flac-tools — Slate OS FLAC audio codec tools
 //!
 //! Multi-personality: `flac`, `metaflac`
 

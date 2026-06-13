@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! platformio-cli — SlateOS PlatformIO embedded development
+//! platformio-cli — Slate OS PlatformIO embedded development
 //!
 //! Multi-personality: `pio`, `platformio`
 

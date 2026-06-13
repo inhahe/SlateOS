@@ -1,4 +1,4 @@
-// SlateOS sysstat -- system performance monitoring
+// Slate OS sysstat -- system performance monitoring
 //
 // Multi-personality binary:
 //   sar        -- system activity reporter (default)

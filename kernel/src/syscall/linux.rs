@@ -16395,16 +16395,30 @@ fn sys_tee(args: &SyscallArgs) -> SyscallResult {
 
 /// `vmsplice(fd, iov, nr_segs, flags)`.
 fn sys_vmsplice(args: &SyscallArgs) -> SyscallResult {
-    // Linux gate order (fs/splice.c::SYSCALL_DEFINE4(vmsplice)):
-    //   1. flags & ~SPLICE_F_ALL    -> -EINVAL (32-bit width).
-    //   2. nr_segs > UIO_MAXIOV     -> -EINVAL.
-    //   3. nr_segs == 0             -> 0      (no-op success).
-    //   4. fdget(fd)                -> -EBADF.
-    //   5. iov NULL + nr_segs > 0   -> -EFAULT (via import_iovec).
-    //   6. do_vmsplice() body.
+    // Linux v6.6 fs/splice.c SYSCALL_DEFINE4(vmsplice) verbatim order:
+    //   1. if (flags & ~SPLICE_F_ALL) return -EINVAL;
+    //   2. f = fdget(fd); error = vmsplice_type(f, &type);
+    //        vmsplice_type(): if (!f.file)             return -EBADF;
+    //                         else if (f_mode&FMODE_WRITE) type=ITER_SOURCE;
+    //                         else if (f_mode&FMODE_READ)  type=ITER_DEST;
+    //                         else                     return -EBADF;  // O_PATH
+    //   3. import_iovec(type, uiov, nr_segs, ...):
+    //        iovec_from_user(): if (nr_segs == 0)         -> 0-count -> success 0;
+    //                           if (nr_segs > UIO_MAXIOV) return -EINVAL;
+    //                           copy_iovec_from_user      -> -EFAULT;
+    //   4. transfer (vmsplice_to_pipe / vmsplice_to_user) — unimplemented -> EINVAL.
     //
-    // Pre-batch: gate 3 missing (nr_segs=0 marched through fd
-    // validation to the EINVAL fallback); flags mask at u64 width.
+    // Batch 541: the pre-batch order was WRONG (and its comment documented the
+    // wrong order). It ran the nr_segs gates (>UIO_MAXIOV -> EINVAL, ==0 ->
+    // success) and the iov EFAULT BEFORE the fd EBADF check, but Linux runs
+    // fdget + vmsplice_type (EBADF) FIRST and only then import_iovec. The
+    // user-visible bug: a *bad fd* with nr_segs==0 returned success (0)
+    // pre-batch where Linux returns EBADF. Reorder so the fd gate precedes
+    // the iovec gates. (vmsplice_type's "neither FMODE_READ nor FMODE_WRITE
+    // -> EBADF" corner only applies to O_PATH-style handles, whose f_mode our
+    // O_ACCMODE-derived access helpers cannot represent — every modelled fd is
+    // readable or writable — so there is nothing extra to gate there, and the
+    // transfer direction does not affect the errno.)
     const SPLICE_F_ALL: u32 = 1 | 2 | 4 | 8;
 
     #[allow(clippy::cast_possible_truncation)]
@@ -16412,21 +16426,26 @@ fn sys_vmsplice(args: &SyscallArgs) -> SyscallResult {
     if flags & !SPLICE_F_ALL != 0 {
         return linux_err(errno::EINVAL);
     }
-    let nr_segs = args.arg2 as usize;
-    // Linux: IOV_MAX = 1024 (UIO_MAXIOV).
-    if nr_segs > 1024 {
-        return linux_err(errno::EINVAL);
-    }
-    // Gate 3: nr_segs == 0 short-circuits.
-    if nr_segs == 0 {
-        return SyscallResult::ok(0);
-    }
+
+    // fdget + vmsplice_type: bad fd -> EBADF, before any iovec handling.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
     if let Err(r) = validate_linux_fd(fd) {
         return r;
     }
-    // iov NULL with nr_segs > 0 -> EFAULT.
+
+    // import_iovec / iovec_from_user gates (run after vmsplice_type).
+    let nr_segs = args.arg2 as usize;
+    // nr_segs == 0 is checked first in iovec_from_user and yields a 0-count
+    // iter -> success(0).
+    if nr_segs == 0 {
+        return SyscallResult::ok(0);
+    }
+    // Linux: UIO_MAXIOV = 1024.
+    if nr_segs > 1024 {
+        return linux_err(errno::EINVAL);
+    }
+    // iov NULL with nr_segs > 0 -> EFAULT (copy_iovec_from_user).
     if args.arg1 == 0 {
         return linux_err(errno::EFAULT);
     }
@@ -54985,6 +55004,31 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: vmsplice(huge nr_segs) not EINVAL");
             return Err(KernelError::InternalError);
+        }
+        // Batch 541: vmsplice now runs the fdget+vmsplice_type EBADF gate
+        // BEFORE the import_iovec gates (nr_segs ==0 success / >MAXIOV EINVAL /
+        // iov EFAULT), matching v6.6 SYSCALL_DEFINE4(vmsplice). The reorder is
+        // bypassed at boot (kernel-context caller_pid()=None skips the fd gate),
+        // so it is not directly dispatch-observable; the regression guard is
+        // that the import_iovec gates still fire identically once the fd gate
+        // passes. Re-affirm the boot-visible invariants in fd-passed context:
+        //   nr_segs==0 -> 0 ; nr_segs>1024 -> EINVAL ; NULL iov -> EFAULT.
+        {
+            let a0 = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 4,
+                arg4: 0, arg5: 0 };
+            let ahuge = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 2048, arg3: 0,
+                arg4: 0, arg5: 0 };
+            let anull = SyscallArgs { arg0: 0, arg1: 0, arg2: 4, arg3: 0,
+                arg4: 0, arg5: 0 };
+            if dispatch_linux(nr::VMSPLICE, &a0).value != 0
+                || dispatch_linux(nr::VMSPLICE, &ahuge).value
+                    != i64::from(errno::EINVAL).wrapping_neg()
+                || dispatch_linux(nr::VMSPLICE, &anull).value
+                    != i64::from(errno::EFAULT).wrapping_neg() {
+                serial_println!("[syscall/linux]   FAIL: vmsplice import_iovec gate regressed after fd-first reorder");
+                return Err(KernelError::InternalError);
+            }
+            serial_println!("[syscall/linux]   vmsplice fdget/vmsplice_type EBADF before import_iovec (batch 541): OK");
         }
         // copy_file_range with non-zero flags -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 1, arg3: 0,

@@ -1,5 +1,5 @@
 
-## IN PROGRESS (2026-06-12): Linux dynamic-linker (ld.so) load path — roadmap 5.1 remaining item
+## DONE (2026-06-12): Linux dynamic-linker (ld.so) load path — roadmap 5.1 remaining item
 ## The Linux ABI loader currently handles STATIC executables only: spawn_process maps the
 ## executable's PT_LOAD segments and enters at its e_entry. A dynamically-linked Linux binary
 ## instead names a program interpreter (ld.so) in a PT_INTERP segment; the kernel must load THAT
@@ -15,13 +15,22 @@
 ##       interp_base; build_linux_initial_stack() forwards it; when Some, push AuxEntry(AT_BASE, base).
 ##       AT_ENTRY stays the EXECUTABLE's e_entry. spawn+exec pass None for now. Self-test verifies AT_BASE
 ##       round-trips into the stack image when supplied and is absent otherwise. Boot still BOOT_OK.
-##   [TODO commit 4] Wire spawn_process (+ exec): if elf.interp_path() is Some, read that file from the
-##       VFS, parse it, pick an interpreter base (fixed mmap-region base for now, no ASLR — document as a
-##       known limitation), load_segments_with_bias(interp, pml4, base), set entry_rip = base+interp.e_entry,
-##       and pass Some(base) to the stack builder. If the interpreter file is absent/unreadable, log and
-##       fall back to direct entry (today's behavior) so static binaries are unaffected. Needs: VFS read
-##       in spawn context + path resolution; an actual ld.so on disk is required for an END-TO-END boot
-##       test (deferred until a glibc/musl loader is present — the mechanism is unit-tested meanwhile).
+##   [DONE commit 4] Wire spawn_process (+ exec): load_interpreter() reads elf.interp_path(), if Some
+##       converts the bytes to &str (VFS read API is str-based; non-UTF-8 → fallback), reads the file via
+##       Vfs::read_file, parses it, loads its PT_LOAD segments at LINUX_INTERP_BASE (0x0000_7000_0000_0000,
+##       fixed — no ASLR yet) via load_segments_with_bias, and returns LoadedInterp{base, entry_rip=
+##       base+interp.e_entry}. spawn_process/exec gate it on is_linux_abi/new_abi_mode==Linux: on Some they
+##       enter the interpreter (UserEntryInfo.entry_rip / ExecResult.entry_rip = interp entry) and pass
+##       Some(base) to build_linux_initial_stack (→ AT_BASE); AT_ENTRY stays the executable's e_entry.
+##       DEFENSIVE FALLBACK: non-UTF-8 path / missing / unreadable / unparseable / unloadable interpreter
+##       all log + return Ok(None) → enter the executable directly (today's behavior), so static and native
+##       binaries are wholly unaffected and a missing loader degrades gracefully. Boot self-test
+##       test_load_interpreter_fallbacks() (spawn.rs Test 21) covers the static-ELF and absent-interpreter
+##       Ok(None) paths against a real freshly-created PML4; stamps "[spawn] load_interpreter fallbacks
+##       (static + absent): OK". elf::build_dynamic_interp_test_elf() added as the test ELF builder.
+##   [REMAINING] END-TO-END interpreter EXECUTION (entering ld.so, relocating, running a real dynamic
+##       binary) needs an actual glibc/musl ld.so on the filesystem — deferred until one is present. The
+##       load mechanism (base selection, biased segment mapping, AT_BASE/AT_ENTRY auxv) is unit-tested.
 ## DESIGN NOTES (Claude autonomous, clearly-correct defaults; revisit if operator disagrees):
 ##   - Interpreter base: fixed address (no ASLR yet). ASLR is a security enhancement, not required for
 ##     correctness; documenting rather than blocking.

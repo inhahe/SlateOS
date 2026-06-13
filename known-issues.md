@@ -462,6 +462,38 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
+### TD9. Linux program interpreter (ld.so) loaded at a fixed base — no ASLR — DEBT 2026-06-12
+
+**What:** The Linux dynamic-linker load path (`load_interpreter` in
+`kernel/src/proc/spawn.rs`) maps the program interpreter (ld.so) at a
+**fixed** virtual base, `LINUX_INTERP_BASE = 0x0000_7000_0000_0000`,
+every time.  Real Linux randomises the interpreter base (and the mmap
+region generally) via ASLR.  The executable itself is also loaded at its
+fixed link-time vaddr (PIE executables are not yet re-based either).
+
+**Where:** `kernel/src/proc/spawn.rs` — the `LINUX_INTERP_BASE` constant
+and `load_interpreter()`.  AT_BASE is reported correctly from whatever
+base is chosen, so making this random is a localised change.
+
+**Why it's debt, not a bug:** ASLR is a security hardening measure, not a
+correctness requirement — ld.so relocates itself to wherever it is placed
+using the base it is told (AT_BASE) and its own dynamic relocations.  A
+fixed base is fully functional; it just removes the address-space
+randomisation defence against exploitation.
+
+**Proper fix:** Once a userspace mmap-region allocator / ASLR policy
+exists, draw the interpreter base (and PIE executable base) from it with
+per-exec randomisation instead of the fixed constant.  Keep the AT_BASE
+plumbing as-is — it already carries whatever base is chosen.
+
+**Related limitation (not debt, just unimplemented):** end-to-end
+interpreter *execution* is untested because no real glibc/musl ld.so is
+on the filesystem yet.  The load mechanism (base selection, biased
+segment mapping via `load_segments_with_bias`, AT_BASE/AT_ENTRY auxv) is
+unit-tested via `spawn::test_load_interpreter_fallbacks` (static-ELF and
+absent-interpreter `Ok(None)` fallbacks).  See `todo.txt` "Linux
+dynamic-linker (ld.so) load path".
+
 ### TD8. `membarrier` PRIVATE_EXPEDITED issue without prior REGISTER returns 0 where Linux returns `-EPERM` — APPROXIMATION 2026-06-12
 
 **What:** `sys_membarrier()` (`kernel/src/syscall/linux.rs`) accepts every

@@ -478,6 +478,38 @@ pub fn spawn_process(
         return Err(e);
     }
 
+    // Step 3b (Linux ABI, dynamically-linked only): load the program
+    // interpreter (ld.so) named in the executable's PT_INTERP segment.
+    //
+    // A dynamically-linked Linux binary cannot run on its own: the
+    // kernel maps its interpreter and enters *that* image instead,
+    // passing the real program entry via AT_ENTRY and the interpreter
+    // base via AT_BASE so ld.so can relocate itself and the program.
+    // Static executables have no PT_INTERP and skip this entirely; if
+    // the interpreter is missing/unreadable/malformed we fall back to
+    // direct entry (see `load_interpreter`), so static binaries and
+    // native binaries are completely unaffected.
+    let mut entry_rip = entry_point;
+    let mut interp_base: Option<u64> = None;
+    if is_linux_abi {
+        // SAFETY: pml4_phys is the new process's private address space
+        // (freshly created above); no other CPU is using it yet.
+        match unsafe { load_interpreter(&elf_file, pml4_phys) } {
+            Ok(Some(interp)) => {
+                entry_rip = interp.entry_rip;
+                interp_base = Some(interp.base);
+            }
+            // Ok(None): static executable, or a defensive fallback to
+            // entering the executable's own entry point directly.
+            Ok(None) => {}
+            Err(e) => {
+                serial_println!("[spawn] Failed to load interpreter: {:?}", e);
+                pcb::destroy(pid);
+                return Err(e);
+            }
+        }
+    }
+
     // Step 4: Allocate and map the user stack.
     let mut user_rsp = match setup_user_stack(pml4_phys) {
         Ok(rsp) => rsp,
@@ -497,9 +529,9 @@ pub fn spawn_process(
     // left untouched (design-decision #4); this only runs for Linux-ABI
     // images.
     if is_linux_abi {
-        // interp_base is None until the dynamic-linker wiring lands; a
-        // static Linux executable has no interpreter and thus no AT_BASE.
-        match build_linux_initial_stack(pml4_phys, &elf_file, options.argv, options.envp, None) {
+        // interp_base is Some(base) for a dynamically-linked binary (so
+        // ld.so receives AT_BASE) and None for a static one.
+        match build_linux_initial_stack(pml4_phys, &elf_file, options.argv, options.envp, interp_base) {
             Ok(installed) => {
                 serial_println!(
                     "[spawn] Built Linux SysV stack: rsp={:#x} (was {:#x})",
@@ -724,7 +756,10 @@ pub fn spawn_process(
     // the trampoline when the thread first runs) and spawn the
     // initial thread.
     let info = Box::new(UserEntryInfo {
-        entry_rip: entry_point,
+        // For a dynamically-linked Linux binary this is the interpreter's
+        // entry (base + interp.e_entry); otherwise it is the executable's
+        // own entry point.
+        entry_rip,
         user_rsp,
     });
     let info_ptr = Box::into_raw(info) as u64;
@@ -750,7 +785,7 @@ pub fn spawn_process(
 
     serial_println!(
         "[spawn] Process {} running (thread {}, entry={:#x}, user_rsp={:#x})",
-        pid, task_id, entry_point, user_rsp
+        pid, task_id, entry_rip, user_rsp
     );
 
     Ok(SpawnResult {
@@ -911,6 +946,31 @@ pub fn exec_process(
         return Err(e);
     }
 
+    // Step 4b (Linux ABI, dynamically-linked only): load the program
+    // interpreter (ld.so) for the new image.  Mirrors spawn_process's
+    // Step 3b — a dynamically-linked Linux binary enters its interpreter
+    // (base + interp.e_entry) with AT_BASE set; static/native images and
+    // the missing-interpreter fallback enter the executable directly.
+    let mut entry_rip = entry_point;
+    let mut interp_base: Option<u64> = None;
+    if new_abi_mode == pcb::AbiMode::Linux {
+        // SAFETY: pml4_phys is this process's address space, whose user
+        // half was just cleared above; the calling thread is in the
+        // kernel so no user code runs concurrently.
+        match unsafe { load_interpreter(&elf_file, pml4_phys) } {
+            Ok(Some(interp)) => {
+                entry_rip = interp.entry_rip;
+                interp_base = Some(interp.base);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                serial_println!("[exec] Failed to load interpreter: {:?}", e);
+                let _ = pcb::set_exit_code(pid, KILLED_EXIT_CODE);
+                return Err(e);
+            }
+        }
+    }
+
     // Step 5: Allocate and map a fresh user stack.
     let mut user_rsp = match setup_user_stack(pml4_phys) {
         Ok(rsp) => rsp,
@@ -929,8 +989,9 @@ pub fn exec_process(
     // walks the table explicitly via HHDM so it is independent of CR3).
     // Native images keep the bare stack from `setup_user_stack`.
     if new_abi_mode == pcb::AbiMode::Linux {
-        // interp_base is None until the dynamic-linker wiring lands.
-        match build_linux_initial_stack(pml4_phys, &elf_file, argv, envp, None) {
+        // interp_base is Some(base) for a dynamically-linked binary and
+        // None for a static one.
+        match build_linux_initial_stack(pml4_phys, &elf_file, argv, envp, interp_base) {
             Ok(installed) => {
                 serial_println!(
                     "[exec] Built Linux SysV stack: rsp={:#x} (was {:#x})",
@@ -1088,13 +1149,143 @@ pub fn exec_process(
 
     serial_println!(
         "[exec] Process {} exec complete: entry={:#x}, rsp={:#x}",
-        pid, entry_point, user_rsp
+        pid, entry_rip, user_rsp
     );
 
     Ok(ExecResult {
-        entry_rip: entry_point,
+        entry_rip,
         user_rsp,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Linux dynamic-linker (ld.so) loading
+// ---------------------------------------------------------------------------
+
+/// Fixed load base for a Linux program interpreter (ld.so).
+///
+/// Dynamically-linked Linux executables name their interpreter in a
+/// `PT_INTERP` segment.  That interpreter is a position-independent
+/// (ET_DYN) image: the kernel loads it at this fixed base, enters at
+/// `base + interp.e_entry`, and reports the base to the program via the
+/// `AT_BASE` auxv entry so ld.so can relocate itself and then the
+/// program.
+///
+/// The base is **fixed (no ASLR) for now** — documented as a known
+/// limitation.  It sits well clear of both the executable (loaded low,
+/// around `0x40_0000_0000`) and the user stack region (top
+/// `USER_STACK_TOP` = `0x0000_7FFF_FFFF_0000`, growing down by at most
+/// `MAX_STACK_SIZE`).  A typical ld.so image is a few hundred KiB, so
+/// the gap above this base to the stack guard is ample.
+const LINUX_INTERP_BASE: u64 = 0x0000_7000_0000_0000;
+
+/// Where a loaded program interpreter was placed and where to enter it.
+struct LoadedInterp {
+    /// Fixed base the interpreter image was loaded at (reported via
+    /// `AT_BASE`).
+    base: u64,
+    /// Entry point to jump to: `base + interp.e_entry`.
+    entry_rip: u64,
+}
+
+/// Load the program interpreter (ld.so) of a dynamically-linked Linux
+/// executable into the given address space.
+///
+/// If `elf_file` has no `PT_INTERP` segment it is a static executable
+/// and this returns `Ok(None)`.  For a dynamically-linked executable it
+/// resolves the interpreter path, reads the interpreter image from the
+/// VFS, parses it, loads its `PT_LOAD` segments at [`LINUX_INTERP_BASE`]
+/// via [`elf::load_segments_with_bias`], and returns the base plus the
+/// entry point `base + interp.e_entry`.
+///
+/// **Defensive fallback:** if the interpreter path is not valid UTF-8
+/// (the VFS API is `&str`-based), the file is absent/unreadable, the
+/// image fails to parse, or its segments fail to load, this logs a
+/// warning and returns `Ok(None)` — the caller then enters the
+/// executable's own entry point directly (today's behaviour).  This
+/// keeps static and native binaries completely unaffected and degrades
+/// gracefully when an interpreter is missing rather than killing the
+/// process before it starts.  A genuine internal error (e.g. an
+/// arithmetic overflow computing the entry) is returned as `Err`.
+///
+/// # Safety
+///
+/// `pml4_phys` must be the freshly-prepared address space for the
+/// process being started (a clean user half); no other CPU may be using
+/// it concurrently.
+unsafe fn load_interpreter(
+    elf_file: &elf::ElfFile<'_>,
+    pml4_phys: u64,
+) -> KernelResult<Option<LoadedInterp>> {
+    // Static executable: no interpreter to load.
+    let Some(interp_bytes) = elf_file.interp_path() else {
+        return Ok(None);
+    };
+
+    // The VFS read API is &str-based.  Interpreter paths are ASCII in
+    // practice; if this one is not valid UTF-8 we cannot resolve it, so
+    // fall back to direct entry rather than fail the spawn.
+    let Ok(interp_path) = core::str::from_utf8(interp_bytes) else {
+        serial_println!(
+            "[spawn] interpreter path is not valid UTF-8 ({} bytes); \
+             entering executable directly",
+            interp_bytes.len()
+        );
+        return Ok(None);
+    };
+
+    // Read the interpreter image from the filesystem.
+    let interp_data = match crate::fs::Vfs::read_file(interp_path) {
+        Ok(d) => d,
+        Err(e) => {
+            serial_println!(
+                "[spawn] interpreter '{}' unreadable ({:?}); \
+                 entering executable directly",
+                interp_path, e
+            );
+            return Ok(None);
+        }
+    };
+
+    // Parse it as an ELF64 image.
+    let interp_elf = match elf::ElfFile::parse(&interp_data) {
+        Ok(e) => e,
+        Err(e) => {
+            serial_println!(
+                "[spawn] interpreter '{}' is not a valid ELF ({:?}); \
+                 entering executable directly",
+                interp_path, e
+            );
+            return Ok(None);
+        }
+    };
+
+    let base = LINUX_INTERP_BASE;
+
+    // Load the interpreter's PT_LOAD segments at the fixed base.
+    //
+    // SAFETY: forwarded from this function's contract — `pml4_phys` is
+    // the process's private address space and no other CPU uses it yet.
+    if let Err(e) = unsafe { elf::load_segments_with_bias(&interp_elf, pml4_phys, base) } {
+        serial_println!(
+            "[spawn] failed to load interpreter '{}' segments ({:?}); \
+             entering executable directly",
+            interp_path, e
+        );
+        return Ok(None);
+    }
+
+    let entry_rip = base.checked_add(interp_elf.entry_point()).ok_or_else(|| {
+        serial_println!("[spawn] interpreter entry point overflowed base");
+        KernelError::InvalidExecutable
+    })?;
+
+    serial_println!(
+        "[spawn] loaded interpreter '{}' at base={:#x}, entry={:#x}",
+        interp_path, base, entry_rip
+    );
+
+    Ok(Some(LoadedInterp { base, entry_rip }))
 }
 
 // ---------------------------------------------------------------------------
@@ -1316,7 +1507,72 @@ pub fn self_test() -> KernelResult<()> {
     test_spawn_args_one_shot()?;
     test_spawn_ex_args_layout()?;
     test_spawn_linux_sysv_stack()?;
+    test_load_interpreter_fallbacks()?;
 
+    Ok(())
+}
+
+/// Test 21: program-interpreter (ld.so) loading fallbacks.
+///
+/// Exercises [`load_interpreter`] for the two cases that do not require a
+/// real ld.so on disk:
+///
+///   (a) a **static** executable (no `PT_INTERP`) → `Ok(None)`, so the
+///       caller enters the executable directly; and
+///   (b) a **dynamically-linked** executable whose interpreter file is
+///       absent → the defensive `Ok(None)` fallback, again entering the
+///       executable directly rather than failing the spawn.
+///
+/// A real freshly-created address space is used so the `unsafe` contract
+/// of `load_interpreter` holds, even though neither path reaches segment
+/// mapping.  End-to-end interpreter *execution* needs an actual ld.so on
+/// the filesystem and is covered separately once one is available.
+fn test_load_interpreter_fallbacks() -> KernelResult<()> {
+    let pid = pcb::create("interp-test", 0);
+    let Some(pml4) = pcb::get_pml4(pid).filter(|&p| p != 0) else {
+        pcb::destroy(pid);
+        serial_println!("[spawn]   FAIL: interp-test process has no PML4");
+        return Err(KernelError::InternalError);
+    };
+
+    // (a) Static executable: no PT_INTERP → Ok(None), pml4 untouched.
+    let static_elf = elf::build_test_elf_public();
+    let static_parsed = match elf::ElfFile::parse(&static_elf) {
+        Ok(e) => e,
+        Err(e) => {
+            pcb::destroy(pid);
+            return Err(e);
+        }
+    };
+    // SAFETY: `pml4` is this freshly-created process's private address
+    // space; no other CPU is using it.  The static path returns before
+    // any mapping is performed.
+    let static_ok = matches!(unsafe { load_interpreter(&static_parsed, pml4) }, Ok(None));
+    if !static_ok {
+        pcb::destroy(pid);
+        serial_println!("[spawn]   FAIL: static ELF expected Ok(None) from load_interpreter");
+        return Err(KernelError::InternalError);
+    }
+
+    // (b) Dynamically-linked, interpreter file absent → fallback Ok(None).
+    let dyn_elf = elf::build_dynamic_interp_test_elf(b"/no-such-ld-test-interpreter.so.999\0");
+    let dyn_parsed = match elf::ElfFile::parse(&dyn_elf) {
+        Ok(e) => e,
+        Err(e) => {
+            pcb::destroy(pid);
+            return Err(e);
+        }
+    };
+    // SAFETY: same private address space; the missing-file path returns
+    // before any mapping is performed.
+    let dyn_ok = matches!(unsafe { load_interpreter(&dyn_parsed, pml4) }, Ok(None));
+    pcb::destroy(pid);
+    if !dyn_ok {
+        serial_println!("[spawn]   FAIL: absent interpreter expected Ok(None) fallback");
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[spawn]   load_interpreter fallbacks (static + absent): OK");
     Ok(())
 }
 

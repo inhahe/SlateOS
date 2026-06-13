@@ -2271,6 +2271,14 @@ fn test_zero_phentsize() -> KernelResult<()> {
 ///
 /// `osabi` is written into `e_ident[EI_OSABI]`.  Pass `ELFOSABI_SYSV`
 /// for "no OSABI hint" or `ELFOSABI_GNU` to explicitly tag as Linux.
+/// Build a dynamically-linked Linux test ELF whose `PT_INTERP` segment
+/// names `interp_path` (which must be NUL-terminated).  Used by the
+/// spawn interpreter-loading self-tests to exercise the ld.so path.
+pub fn build_dynamic_interp_test_elf(interp_path: &[u8]) -> alloc::vec::Vec<u8> {
+    // ELFOSABI_SYSV (0): interp_path() keys off PT_INTERP, not the OSABI.
+    build_interp_elf(0, interp_path)
+}
+
 fn build_interp_elf(osabi: u8, interp_path: &[u8]) -> alloc::vec::Vec<u8> {
     use alloc::vec;
 

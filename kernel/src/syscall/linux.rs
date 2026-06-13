@@ -10534,6 +10534,20 @@ fn sys_sysinfo(args: &SyscallArgs) -> SyscallResult {
 /// libc HZ) and reports `monotonic_seconds * 100`.
 ///
 /// Returns clock ticks on success, `-EFAULT` on bad `tms` pointer.
+/// `times(tms *buf)` — elapsed-time and CPU-time accounting.
+///
+/// Linux v6.6 `kernel/sys.c::SYSCALL_DEFINE1(times)`: when `buf` is
+/// non-NULL it copies a `struct tms` (4 × `__kernel_clock_t` = 32 bytes
+/// on x86_64) to user space, then returns elapsed ticks since boot at
+/// `USER_HZ` (100) via `force_successful_syscall_return()` (so a return
+/// that happens to fall in the errno band is still treated as success).
+///
+/// We have no per-process CPU-time accounting yet (known-issues TD14),
+/// so the four `tms` fields (`tms_utime`/`tms_stime`/`tms_cutime`/
+/// `tms_cstime`) are honestly zero. `buf == NULL` is permitted (POSIX:
+/// the caller wants only the return value). A non-NULL but unwritable
+/// `buf` returns `EFAULT`. See the batch-555 self-test for the struct
+/// write contract.
 fn sys_times(args: &SyscallArgs) -> SyscallResult {
     let tms_ptr = args.arg0;
 
@@ -42983,6 +42997,65 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   getrusage ru_maxrss = peak RSS KiB from mm::accounting (RUSAGE_SELF; batch 554; pre-batch zeroed): OK"
+        );
+    }
+
+    // Batch 555 — sys_times struct write contract.  Linux v6.6
+    // kernel/sys.c::SYSCALL_DEFINE1(times) copies a `struct tms` (4 ×
+    // __kernel_clock_t = 4 × 8 = 32 bytes on x86_64) to the user pointer
+    // when non-NULL, then returns elapsed ticks since boot at USER_HZ
+    // (100) via force_successful_syscall_return().  We have no per-process
+    // CPU-time accounting (known-issues TD14), so all four tms fields
+    // (tms_utime/tms_stime/tms_cutime/tms_cstime) are honestly zero — but
+    // the struct must still be written, exactly 32 bytes wide, with no
+    // overrun, and the return must be a non-negative tick count.  This
+    // pins (a) the 32-byte size, (b) the all-zero CPU-time payload, and
+    // (c) the absence of a buffer overrun past the struct.  The bad-pointer
+    // EFAULT gate is NOT dispatch-tested here: at boot the caller is kernel
+    // context, so validate_user_write bypasses (same limitation noted for
+    // the sendfile/copy_file_range fd gates) — the EFAULT branch is
+    // predicate-only and unobservable from a self-test.
+    {
+        // 40-byte buffer: 32 for the tms struct + an 8-byte guard region
+        // pre-filled with a sentinel to catch any write past the struct.
+        let mut tbuf = [0xAAu8; 40];
+        let tptr = tbuf.as_mut_ptr() as u64;
+        let a = SyscallArgs {
+            arg0: tptr,
+            arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let ret = dispatch_linux(nr::TIMES, &a).value;
+        if ret < 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: times(valid) returned negative ({})",
+                ret
+            );
+            return Err(KernelError::InternalError);
+        }
+        // The 32-byte tms struct must be written all-zero (no CPU
+        // accounting -> every clock_t field is 0).
+        match tbuf.get(0..32) {
+            Some(tms) if tms.iter().all(|&b| b == 0) => {}
+            _ => {
+                serial_println!(
+                    "[syscall/linux]   FAIL: times() tms struct not 32 zero bytes"
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // The guard region must be untouched (no write past the 32-byte
+        // struct) — proves the write width is exactly sizeof(struct tms).
+        match tbuf.get(32..40) {
+            Some(guard) if guard.iter().all(|&b| b == 0xAA) => {}
+            _ => {
+                serial_println!(
+                    "[syscall/linux]   FAIL: times() wrote past the 32-byte tms struct (guard clobbered)"
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        serial_println!(
+            "[syscall/linux]   times tms = 32 zero bytes (no CPU accounting, TD14) + non-negative tick return (batch 555): OK"
         );
     }
 

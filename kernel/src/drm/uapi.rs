@@ -347,8 +347,9 @@ pub const fn client_cap_supported(cap: u64) -> bool {
 #[must_use]
 pub const fn cap_value(cap: u64) -> Option<u64> {
     match cap {
-        // KMS dumb-buffer scanout — handlers land in a later commit.
-        DRM_CAP_DUMB_BUFFER => Some(0),
+        // KMS dumb-buffer scanout: CREATE/DESTROY_DUMB + MAP_DUMB + the
+        // mmap-on-/dev/dri-fd path are all wired, so advertise support.
+        DRM_CAP_DUMB_BUFFER => Some(1),
         DRM_CAP_DUMB_PREFERRED_DEPTH => Some(24),
         DRM_CAP_DUMB_PREFER_SHADOW => Some(0),
         // Core DRM facts, independent of the device backend.
@@ -1034,8 +1035,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     );
     check!(cap_value(DRM_CAP_PRIME) == Some(0), "prime cap not yet supported");
     check!(
-        cap_value(DRM_CAP_DUMB_BUFFER) == Some(0),
-        "dumb-buffer cap not yet supported"
+        cap_value(DRM_CAP_DUMB_BUFFER) == Some(1),
+        "dumb-buffer cap supported (CREATE/MAP/DESTROY_DUMB wired)"
     );
     check!(
         cap_value(0xffff_ffff).is_none(),

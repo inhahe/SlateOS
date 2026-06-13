@@ -51,6 +51,8 @@ pub mod atomic;
 #[allow(dead_code)]
 pub mod connector;
 #[allow(dead_code)]
+pub mod dumb_mmap;
+#[allow(dead_code)]
 pub mod crtc;
 #[allow(dead_code)]
 pub mod driver;
@@ -435,6 +437,28 @@ impl DrmDevice {
         Ok(gem.pitch)
     }
 
+    /// Return the *physical* base addresses of a GEM object's backing frames,
+    /// in scanout order.
+    ///
+    /// Unlike [`Self::gem_frame_addrs`] (which returns HHDM-mapped *virtual*
+    /// addresses for in-kernel pixel writes), this returns raw physical frame
+    /// addresses so the Linux `mmap` shim can reconstruct [`crate::mm::frame::
+    /// PhysFrame`]s and map the buffer into a user process.  Each address is
+    /// 16 KiB-frame-aligned.  Addresses remain valid as long as the GEM object
+    /// is not destroyed.
+    pub fn gem_phys_addrs(&self, handle: u32) -> KernelResult<Vec<u64>> {
+        let gem = self.gem_objects.iter().find(|g| g.handle == handle)
+            .ok_or(KernelError::NotFound)?;
+        Ok(gem.phys_frames.iter().map(|pf| pf.addr()).collect())
+    }
+
+    /// Get the total byte size of a GEM object's allocation.
+    pub fn gem_size(&self, handle: u32) -> KernelResult<usize> {
+        let gem = self.gem_objects.iter().find(|g| g.handle == handle)
+            .ok_or(KernelError::NotFound)?;
+        Ok(gem.size)
+    }
+
     /// Look up the first CRTC's object ID.
     #[must_use]
     pub fn first_crtc_id(&self) -> Option<DrmObjectId> {
@@ -763,6 +787,9 @@ pub fn self_test() -> KernelResult<()> {
 
     // 6. PixelFormat conversion.
     mode::self_test()?;
+
+    // 6b. Fake-offset allocator for dumb-buffer mmap.
+    dumb_mmap::self_test()?;
 
     // 7. EDID parser.
     edid::self_test()?;

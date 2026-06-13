@@ -8650,6 +8650,30 @@ Remaining net improvements (diminishing returns):
 
 ## Judgment Calls
 
+- (2026-06-13) DRM dumb-buffer mmap not ref-tracked across `fork()`.
+  Commit 7 of the Linux DRM/KMS shim (MAP_DUMB + mmap-on-/dev/dri-fd)
+  maps a dumb buffer's GEM frames into the calling process by
+  `frame::ref_inc`-ing each frame before `map_frame`, so process-exit
+  teardown's refcounted `free_frame` merely balances the extra ref
+  rather than double-freeing the buffer (the GEM object keeps its own
+  ref until `gem_destroy`).  This is correct for a single process.
+  HOWEVER: if a process that holds a dumb mmap calls `fork()`, the
+  child inherits the user PTEs for that mapping but the kernel does
+  NOT `ref_inc` the frames a second time on the child's behalf.  Today
+  this does not double-free, because our `fork()` does not deep-copy
+  user mappings the way a full CoW fork would (see the fork() Judgment
+  Calls entry, 2026-05-31) — but if/when fork gains real per-page CoW
+  of arbitrary VMAs, a dumb mmap inherited by a child and then torn
+  down on both sides could under- or over-count the frame refcount.
+  Proper fix (deferred until fork does general user-VMA copying):
+  teach the fork path to recognise DRM-dumb-backed VMAs (or, more
+  generally, externally-refcounted frames) and `ref_inc` each frame
+  per child mapping, so every address space that maps a frame holds
+  exactly one ref and teardown stays balanced.  For now this is a
+  documented limitation: graphics clients are single-process and do
+  not fork while holding a live framebuffer mmap, so the gap is not
+  reachable in practice.  Also in known-issues.md.
+
 - (2026-06-04) Host-side raw `syscall` instruction in posix functions.
   `posix/src/syscall.rs` exposes `syscall0..syscall6` that issue a raw
   `syscall` x86_64 instruction with no host gating.  On a Windows host,

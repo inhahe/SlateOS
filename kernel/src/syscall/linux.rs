@@ -4727,7 +4727,7 @@ fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
 
     let addr_hint = args.arg0;
     let length = args.arg1;
-    let _prot = args.arg2;
+    let prot = args.arg2;
     let flags = args.arg3;
     let fd = args.arg4 as i32;
     let offset = args.arg5;
@@ -4742,6 +4742,22 @@ fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
     // kinds, since Linux's EINVAL would win the race).
     if (offset & (FRAME_SIZE as u64).wrapping_sub(1)) != 0 {
         return linux_err(errno::EINVAL);
+    }
+
+    // DRM dumb-buffer mmap: a `/dev/dri/cardN` fd mmap'd at a fake offset
+    // (handed out by `DRM_IOCTL_MODE_MAP_DUMB`) maps the dumb buffer's backing
+    // GEM frames into the calling process.  This is the one file-backed mmap
+    // the Linux ABI currently supports; everything else falls through to the
+    // anonymous-only path below.  Checked before the ENOSYS gate so a valid
+    // DRM mmap isn't rejected as "file-backed".
+    if fd >= 0 {
+        if let Some(pid) = caller_pid() {
+            if let Some(entry) = pcb::linux_fd_lookup(pid, fd) {
+                if matches!(entry.kind, crate::proc::linux_fd::HandleKind::DrmCard) {
+                    return drm_mmap_dumb(&entry, pid, addr_hint, length, prot, flags, offset);
+                }
+            }
+        }
     }
 
     // File-backed maps not yet supported.
@@ -7220,6 +7236,12 @@ fn drm_card_ioctl(entry: &FdEntry, request: u32, argp: u64) -> SyscallResult {
             }
             drm_card_ioctl_mode_create_dumb(handle, argp)
         }
+        uapi::DRM_IOCTL_MODE_MAP_DUMB => {
+            if render_node {
+                return linux_err(errno::EACCES);
+            }
+            drm_card_ioctl_mode_map_dumb(handle, argp)
+        }
         uapi::DRM_IOCTL_MODE_DESTROY_DUMB => {
             if render_node {
                 return linux_err(errno::EACCES);
@@ -7238,9 +7260,7 @@ fn drm_card_ioctl(entry: &FdEntry, request: u32, argp: u64) -> SyscallResult {
             }
             drm_card_ioctl_mode_rmfb(handle, argp)
         }
-        // MAP_DUMB (+ the mmap-on-drm-fd integration that flips
-        // DRM_CAP_DUMB_BUFFER on) and PAGE_FLIP (+ vblank-event delivery) land
-        // in the follow-up commits.
+        // PAGE_FLIP (+ vblank-event delivery) lands in the follow-up commit.
         _ => linux_err(errno::ENOTTY),
     }
 }
@@ -7918,6 +7938,49 @@ fn drm_card_ioctl_mode_create_dumb(
     }
 }
 
+/// `DRM_IOCTL_MODE_MAP_DUMB` — hand back the fake mmap offset for a dumb
+/// buffer.
+///
+/// The client passes a dumb-buffer GEM handle and receives an opaque offset
+/// token to feed to `mmap(/dev/dri/cardN, …, offset)`.  We validate the handle
+/// exists on this device, then allocate (idempotently) a 16 KiB-aligned fake
+/// offset via [`crate::drm::dumb_mmap`] and write it back.  The actual mapping
+/// of the buffer's frames happens in [`sys_mmap`] when the client mmaps with
+/// this offset.
+fn drm_card_ioctl_mode_map_dumb(
+    handle: crate::drm::card_fd::DrmCardHandle,
+    argp: u64,
+) -> SyscallResult {
+    use crate::drm::uapi;
+    let mut md = match read_user_struct::<uapi::DrmModeMapDumb>(argp) {
+        Ok(v) => v,
+        Err(e) => return linux_err(e),
+    };
+    let device = match drm_card_device(handle) {
+        Ok(d) => d,
+        Err(e) => return linux_err(e),
+    };
+    // Confirm the handle is a live GEM object on this device and grab its size
+    // (the offset token space is advanced by the buffer size).
+    let size = match crate::drm::with_device(device, |dev| dev.gem_size(md.handle)) {
+        Ok(s) => s,
+        Err(e) => return linux_err(drm_kernel_err(e)),
+    };
+    let size_u64 = u64::try_from(size).unwrap_or(u64::MAX);
+    let offset = match crate::drm::dumb_mmap::offset_for(device, md.handle, size_u64) {
+        Some(o) => o,
+        // Token space exhausted — closest Linux errno is ENOMEM (the offset
+        // manager couldn't allocate a node).
+        None => return linux_err(errno::ENOMEM),
+    };
+    md.offset = offset;
+    md.pad = 0;
+    match write_user_struct(argp, &md) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(e),
+    }
+}
+
 /// `DRM_IOCTL_MODE_DESTROY_DUMB` — free a dumb buffer by GEM handle.
 fn drm_card_ioctl_mode_destroy_dumb(
     handle: crate::drm::card_fd::DrmCardHandle,
@@ -7933,7 +7996,14 @@ fn drm_card_ioctl_mode_destroy_dumb(
         Err(e) => return linux_err(e),
     };
     match crate::drm::with_device_mut(device, |dev| dev.gem_destroy(dd.handle)) {
-        Ok(()) => SyscallResult::ok(0),
+        Ok(()) => {
+            // Drop any fake mmap offset so the token can't resolve to a freed
+            // buffer (and a recycled handle gets a fresh offset).  Existing
+            // user mappings stay valid until the process unmaps/exits — their
+            // frames are kept alive by the per-mapping GEM frame refcount.
+            crate::drm::dumb_mmap::forget(device, dd.handle);
+            SyscallResult::ok(0)
+        }
         Err(e) => linux_err(drm_kernel_err(e)),
     }
 }
@@ -8013,6 +8083,200 @@ fn drm_card_ioctl_mode_rmfb(
         Ok(()) => SyscallResult::ok(0),
         Err(e) => linux_err(drm_kernel_err(e)),
     }
+}
+
+/// Roll back a partially-completed dumb-buffer mmap.
+///
+/// Unmaps frames `[0, count)` from `pml4` (each at `base + j*frame_size`) and
+/// drops the per-mapping reference [`drm_mmap_dumb`] took on each, so a failed
+/// mmap leaves no mapped pages and no leaked frame references.  Errors are
+/// ignored: this is a best-effort teardown of state we just created in the
+/// same call, so each step is known to be valid, and there is nothing useful
+/// to do on the (impossible) failure of an inverse operation.
+fn drm_mmap_dumb_rollback(pml4: u64, base: u64, count: usize, phys: &[u64], frame_size: u64) {
+    use crate::mm::frame::{self, PhysFrame};
+    use crate::mm::page_table::{self, VirtAddr};
+    for j in 0..count {
+        let off = u64::try_from(j).unwrap_or(u64::MAX).saturating_mul(frame_size);
+        if let Some(va) = base.checked_add(off) {
+            // SAFETY: we mapped this frame earlier in this same call, so the
+            // PTE is present and `pml4` is the live page table for the caller.
+            let _ = unsafe { page_table::unmap_frame(pml4, VirtAddr::new(va)) };
+        }
+        if let Some(&pa) = phys.get(j) {
+            if let Some(pf) = PhysFrame::from_addr(pa) {
+                // SAFETY: we `ref_inc`'d this frame when mapping it, so the
+                // matching `ref_dec` only balances that extra reference.
+                let _ = unsafe { frame::ref_dec(pf) };
+            }
+        }
+    }
+}
+
+/// Map a DRM dumb buffer's backing frames into the calling process (the
+/// `mmap(/dev/dri/cardN, …, offset)` path).
+///
+/// `offset` is the fake token previously handed out by
+/// `DRM_IOCTL_MODE_MAP_DUMB`; we resolve it to a `(device, GEM handle)` via
+/// [`crate::drm::dumb_mmap`], confirm it belongs to this fd's device, gather
+/// the buffer's physical frames, and map `length` (rounded up to whole 16 KiB
+/// frames) of them into the process at `prot`-derived permissions.
+///
+/// ## Frame lifetime
+///
+/// Each mapped frame is `ref_inc`'d before mapping.  The GEM object keeps its
+/// own reference until `DRM_IOCTL_MODE_DESTROY_DUMB`, and the process address
+/// space holds this extra one; process teardown's refcounted `free_frame`
+/// (`clear_user_address_space`) just decrements it.  Whichever side drops the
+/// last reference truly frees the frame — so neither destroying the buffer
+/// while it is mapped nor exiting while it is allocated double-frees.
+#[allow(clippy::too_many_arguments)]
+fn drm_mmap_dumb(
+    entry: &FdEntry,
+    pid: u64,
+    addr_hint: u64,
+    length: u64,
+    prot: u64,
+    flags: u64,
+    offset: u64,
+) -> SyscallResult {
+    use crate::mm::frame::{self, FRAME_SIZE, PhysFrame};
+    use crate::mm::page_table::{self, PageFlags, VirtAddr};
+
+    const MAP_FIXED: u64 = 0x10;
+    const PROT_WRITE: u64 = 0x2;
+    const PROT_EXEC: u64 = 0x4;
+
+    // Linux rejects a zero-length mmap with EINVAL.
+    if length == 0 {
+        return linux_err(errno::EINVAL);
+    }
+
+    // Resolve the fake offset → (device, gem handle).  An offset that was
+    // never handed out (or has been forgotten) is EINVAL, matching Linux's
+    // "no drm_vma_offset_node for this pgoff".
+    let (device, gem_handle) = match crate::drm::dumb_mmap::lookup(offset) {
+        Some(v) => v,
+        None => return linux_err(errno::EINVAL),
+    };
+    // The offset must belong to the device this fd refers to.
+    let handle = crate::drm::card_fd::DrmCardHandle::from_raw(entry.raw_handle);
+    match crate::drm::card_fd::device(handle) {
+        Some(d) if d == device => {}
+        Some(_) => return linux_err(errno::EINVAL),
+        None => return linux_err(errno::EBADF),
+    }
+
+    // Gather the buffer's physical frames under the DRM lock, then drop it
+    // before touching page tables (lock-ordering discipline).
+    let phys = match crate::drm::with_device(device, |dev| dev.gem_phys_addrs(gem_handle)) {
+        Ok(v) => v,
+        Err(e) => return linux_err(drm_kernel_err(e)),
+    };
+
+    let frame_size = FRAME_SIZE as u64;
+    // Round the requested length up to whole frames.
+    let length_aligned = match length
+        .checked_add(frame_size.wrapping_sub(1))
+        .map(|v| v & !frame_size.wrapping_sub(1))
+    {
+        Some(v) if v != 0 => v,
+        _ => return linux_err(errno::ENOMEM),
+    };
+    let want_frames = usize::try_from(length_aligned / frame_size).unwrap_or(usize::MAX);
+    // Can't map past the end of the buffer.
+    if want_frames > phys.len() {
+        return linux_err(errno::EINVAL);
+    }
+
+    // Derive page permissions from the mmap prot.  Always user-accessible and
+    // present; PROT_WRITE → writable, no PROT_EXEC → no-execute.
+    let mut page_flags = PageFlags::PRESENT | PageFlags::USER_ACCESSIBLE;
+    if prot & PROT_WRITE != 0 {
+        page_flags |= PageFlags::WRITABLE;
+    }
+    if prot & PROT_EXEC == 0 {
+        page_flags |= PageFlags::NO_EXECUTE;
+    }
+
+    let pml4 = match pcb::get_pml4(pid) {
+        Some(p) if p != 0 => p,
+        _ => return linux_err(errno::ENOMEM),
+    };
+
+    // Charge RLIMIT_AS for the virtual span (refunded on any failure below).
+    if pcb::linux_as_charge(pid, length_aligned).is_err() {
+        return linux_err(errno::ENOMEM);
+    }
+
+    // Pick the base virtual address.  Honour an aligned MAP_FIXED hint;
+    // otherwise let the mmap bump allocator choose.
+    let fixed = (flags & MAP_FIXED) != 0;
+    let base = if fixed {
+        if addr_hint & frame_size.wrapping_sub(1) != 0 {
+            pcb::linux_as_release(pid, length_aligned);
+            return linux_err(errno::EINVAL);
+        }
+        addr_hint
+    } else {
+        handlers::mmap_alloc_vaddr(length_aligned)
+    };
+    if base == 0 {
+        pcb::linux_as_release(pid, length_aligned);
+        return linux_err(errno::ENOMEM);
+    }
+
+    // ref_inc + map each frame; roll back fully on the first failure.
+    for i in 0..want_frames {
+        let pa = match phys.get(i) {
+            Some(&a) => a,
+            None => {
+                drm_mmap_dumb_rollback(pml4, base, i, &phys, frame_size);
+                pcb::linux_as_release(pid, length_aligned);
+                return linux_err(errno::EINVAL);
+            }
+        };
+        let pf = match PhysFrame::from_addr(pa) {
+            Some(f) => f,
+            None => {
+                drm_mmap_dumb_rollback(pml4, base, i, &phys, frame_size);
+                pcb::linux_as_release(pid, length_aligned);
+                return linux_err(errno::EINVAL);
+            }
+        };
+        let off = u64::try_from(i).unwrap_or(u64::MAX).saturating_mul(frame_size);
+        let va = match base.checked_add(off) {
+            Some(v) => v,
+            None => {
+                drm_mmap_dumb_rollback(pml4, base, i, &phys, frame_size);
+                pcb::linux_as_release(pid, length_aligned);
+                return linux_err(errno::ENOMEM);
+            }
+        };
+        // Take the per-mapping reference before mapping, so the refcounted
+        // teardown can never observe a mapped-but-unreferenced frame.
+        // SAFETY: `pf` is the base of a 16 KiB frame the GEM allocator owns
+        // (allocated via `frame::alloc_frame` in `GemObject::alloc_2d`).
+        if unsafe { frame::ref_inc(pf) }.is_err() {
+            drm_mmap_dumb_rollback(pml4, base, i, &phys, frame_size);
+            pcb::linux_as_release(pid, length_aligned);
+            return linux_err(errno::ENOMEM);
+        }
+        // SAFETY: `pml4` is the live page table for the caller, `pf` is a
+        // valid allocator frame we just referenced, and `va` is in user space.
+        if unsafe { page_table::map_frame(pml4, VirtAddr::new(va), pf, page_flags) }.is_err() {
+            // Undo this frame's ref_inc (it never got mapped), then roll back
+            // the frames mapped before it.
+            // SAFETY: we just `ref_inc`'d `pf` above and it is not mapped.
+            let _ = unsafe { frame::ref_dec(pf) };
+            drm_mmap_dumb_rollback(pml4, base, i, &phys, frame_size);
+            pcb::linux_as_release(pid, length_aligned);
+            return linux_err(errno::ENOMEM);
+        }
+    }
+
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(base as i64)
 }
 
 /// Copy a fixed `#[repr(C)]` payload struct out of userspace by value.

@@ -462,6 +462,36 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
+### TD11. DRM dumb-buffer mmap not ref-tracked across `fork()` — DEBT 2026-06-13
+
+**Where:** `drm_mmap_dumb` in `kernel/src/syscall/linux.rs` (the
+`HandleKind::DrmCard` mmap interception in `sys_mmap`), in concert with
+the refcounted `mm/frame.rs::free_frame` and the process-exit teardown
+in `mm/page_table.rs::clear_user_address_space`.
+
+**What it is:** The DRM Linux-ABI shim's MAP_DUMB path maps a dumb
+buffer's GEM frames into the calling process by `frame::ref_inc`-ing
+each frame before `map_frame`, so process-exit teardown's refcounted
+`free_frame` merely balances the extra ref rather than double-freeing
+the buffer (the GEM object retains its own ref until `gem_destroy`).
+This is correct for a single process. It is NOT correct under a future
+deep-copying `fork()`: a child that inherits the user PTEs for a dumb
+mmap does not get a second `ref_inc`, so if fork ever gains general
+per-page CoW of arbitrary user VMAs, a dumb mmap inherited by a child
+and torn down on both sides could mis-count the frame refcount.
+
+**Why it's not a live bug today:** our `fork()` does not deep-copy
+arbitrary user mappings (see todo.txt Judgment Calls, fork(), 2026-05-31),
+and graphics clients are single-process and do not fork while holding a
+live framebuffer mmap. The gap is unreachable in practice.
+
+**Proper fix (deferred until fork does general user-VMA copying):**
+teach the fork path to recognise DRM-dumb-backed VMAs (or, more
+generally, externally-refcounted frames) and `ref_inc` each frame per
+child mapping, so every address space that maps a frame holds exactly
+one ref and teardown stays balanced. Also recorded in todo.txt under
+Judgment Calls.
+
 ### TD10. ALSA PCM shim does not implement the STATUS ioctl — DEBT 2026-06-13 (narrowed 2026-06-13)
 
 **Update (commit 4b):** SYNC_PTR and READI_FRAMES are now implemented.

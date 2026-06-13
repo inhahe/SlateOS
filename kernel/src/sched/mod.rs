@@ -1486,6 +1486,13 @@ pub fn watchdog_status() -> [(u64, u64); priority_rr::MAX_CPUS] {
 /// Also increments the current task's burst tick counter for
 /// interactive task detection and enforces CPU bandwidth quotas.
 ///
+/// `from_user` reflects the privilege level the timer interrupt
+/// preempted (`true` = ring 3, `false` = ring 0).  It is forwarded to
+/// [`Task::tick_burst`](crate::sched::task::Task::tick_burst) so the
+/// tick is charged to the task's user- or system-time bucket — the
+/// Linux tick-sampling CPU-time model.  The caller (the timer ISR)
+/// derives it from the saved interrupt frame's `CS` (CPL bits).
+///
 /// Periodically checks load balance: if this CPU's local queue is
 /// empty but other CPUs have work, returns `true` to trigger a
 /// preempt (which does work stealing via `schedule_inner`).
@@ -1493,7 +1500,7 @@ pub fn watchdog_status() -> [(u64, u64); priority_rr::MAX_CPUS] {
 /// Returns `true` if the current task's time slice has expired,
 /// the task's CPU bandwidth quota is exhausted, or a load balance
 /// steal is warranted — and a reschedule is needed.
-pub fn timer_tick() -> bool {
+pub fn timer_tick(from_user: bool) -> bool {
     let cpu = current_cpu_id();
 
     // Report RCU quiescent state — the timer tick is a natural
@@ -1545,7 +1552,7 @@ pub fn timer_tick() -> bool {
             return false;
         }
         if let Some(task) = state.tasks.get_mut(&current_id) {
-            task.tick_burst();
+            task.tick_burst(from_user);
 
             // CPU bandwidth enforcement: if the task has a quota and
             // has used all its ticks for this period, throttle it.
@@ -1627,6 +1634,21 @@ pub fn timer_tick() -> bool {
     }
 
     false
+}
+
+/// Return the accumulated `(user_ticks, sys_ticks)` CPU time for a task
+/// by its scheduler id, or `None` if no such task is registered.
+///
+/// Ticks are at `USER_HZ` (100 Hz, 10 ms each), the same units Linux
+/// uses for `times`/`/proc` clock_t fields.  Used by the Linux-ABI
+/// `getrusage`/`times`/`/proc/<pid>/stat` CPU-time surfaces (via the
+/// per-process roll-up in `proc::thread::process_cpu_ticks`).  Takes the
+/// global `SCHED` lock — not for hot paths.
+#[must_use]
+pub fn cpu_ticks(tid: TaskId) -> Option<(u64, u64)> {
+    let state = SCHED.lock();
+    let task = state.tasks.get(&tid)?;
+    Some((task.user_ticks, task.sys_ticks))
 }
 
 /// Preempt the current task (called from timer ISR after time slice
@@ -2754,6 +2776,13 @@ pub struct TaskInfo {
     pub priority: u8,
     /// Total CPU time consumed (timer ticks, 10 ms each at 100 Hz).
     pub total_ticks: u64,
+    /// User-mode (ring 3) CPU time, in timer ticks.  `user_ticks +
+    /// sys_ticks == total_ticks`.  Exposed as `/proc/<pid>/stat` field
+    /// 14 (utime).
+    pub user_ticks: u64,
+    /// System (ring 0) CPU time, in timer ticks.  Exposed as
+    /// `/proc/<pid>/stat` field 15 (stime).
+    pub sys_ticks: u64,
     /// Total CPU cycles consumed (TSC-based, nanosecond precision).
     pub total_cycles: u64,
     /// Number of times this task was scheduled.
@@ -2792,6 +2821,8 @@ pub fn task_list() -> alloc::vec::Vec<TaskInfo> {
             state: task.state,
             priority: task.priority,
             total_ticks: task.total_ticks,
+            user_ticks: task.user_ticks,
+            sys_ticks: task.sys_ticks,
             total_cycles: task.total_cycles,
             schedule_count: task.schedule_count,
             start_tick: task.start_tick,

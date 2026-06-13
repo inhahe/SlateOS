@@ -10607,11 +10607,12 @@ fn write_uid32_triple(a: u64, b: u64, c: u64) -> SyscallResult {
 /// `getrusage(who, usage)` — query resource usage for the calling
 /// process or one of its children.
 ///
-/// We don't track per-process CPU time, page faults, context switches,
-/// etc., so we report all-zero `struct rusage` (144 bytes on x86_64).
-/// Programs that consume `ru_utime` / `ru_stime` (e.g. `time(1)` after
-/// a child exits) see zero CPU time — observationally correct in the
-/// sense that nothing claims false work, but loses fidelity.
+/// `ru_utime`/`ru_stime` (CPU time) and `ru_maxrss` (peak RSS) are
+/// populated; the fault and context-switch counters
+/// (`ru_minflt`/`ru_majflt`/`ru_nvcsw`/`ru_nivcsw`) are not tracked yet
+/// and stay 0.  CPU time comes from the scheduler's per-task
+/// tick-sampling accounting (Linux `account_user_time`/
+/// `account_system_time` model).
 ///
 /// `who`:
 ///   - `RUSAGE_SELF == 0`: stats for the calling process
@@ -10622,15 +10623,39 @@ fn write_uid32_triple(a: u64, b: u64, c: u64) -> SyscallResult {
 /// `-EINVAL` before the rusage pointer is touched (matching Linux's
 /// gate order — see batch 305).
 ///
-/// The returned rusage is mostly zero: we have no per-process CPU-time,
-/// page-fault, or context-switch accounting yet, so utime/stime,
-/// minflt/majflt, nvcsw/nivcsw, etc. stay 0.  The one populated field is
-/// `ru_maxrss` (peak resident set size in KiB), sourced from the
-/// per-address-space RSS accounting for `RUSAGE_SELF`/`RUSAGE_THREAD`;
-/// `RUSAGE_CHILDREN` keeps it 0 (no child accounting).
+/// Populated fields: `ru_utime`/`ru_stime` (user/system CPU time from
+/// the scheduler's per-task tick counters — process-wide for
+/// `RUSAGE_SELF`, the calling thread for `RUSAGE_THREAD`) and
+/// `ru_maxrss` (peak resident set size in KiB, from the per-address-space
+/// RSS accounting).  `RUSAGE_CHILDREN` keeps both at 0 (reaped-children
+/// accounting not tracked yet — known-issues TD14).  The fault and
+/// context-switch counters stay 0.
 ///
 /// Returns 0 on success, `-EINVAL` for an unknown `who`, `-EFAULT` if
 /// `usage` is a bad pointer.
+/// Write a `struct timeval { i64 tv_sec; i64 tv_usec; }` into `buf` at
+/// byte `off`, derived from `ticks` at `USER_HZ == 100` (10 ms/tick).
+///
+/// Used to fill `getrusage`'s `ru_utime`/`ru_stime` from the scheduler's
+/// per-task tick counters.  Pure integer math, saturating throughout so
+/// an implausibly large tick count can never overflow or panic.
+fn write_rusage_timeval(buf: &mut [u8; 144], off: usize, ticks: u64) {
+    // 100 Hz → 10_000 microseconds per tick.
+    let micros = ticks.saturating_mul(10_000);
+    let secs = micros / 1_000_000;
+    let usecs = micros % 1_000_000;
+    #[allow(clippy::cast_possible_wrap)]
+    let secs_i = secs as i64;
+    #[allow(clippy::cast_possible_wrap)]
+    let usecs_i = usecs as i64;
+    if let Some(slot) = buf.get_mut(off..off.saturating_add(8)) {
+        slot.copy_from_slice(&secs_i.to_ne_bytes());
+    }
+    if let Some(slot) = buf.get_mut(off.saturating_add(8)..off.saturating_add(16)) {
+        slot.copy_from_slice(&usecs_i.to_ne_bytes());
+    }
+}
+
 fn sys_getrusage(args: &SyscallArgs) -> SyscallResult {
     // Linux gate order (kernel/sys.c::SYSCALL_DEFINE2(getrusage)):
     //   1. who not in {SELF=0, CHILDREN=-1, THREAD=1}    -> -EINVAL
@@ -10664,12 +10689,35 @@ fn sys_getrusage(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = crate::mm::user::validate_user_write(usage_ptr, RUSAGE_SIZE) {
         return linux_err(linux_errno_for(e));
     }
-    // Build the rusage in kernel memory.  Most fields stay zero because we
-    // have no per-process CPU-time / fault / context-switch accounting yet
-    // (utime/stime, minflt/majflt, nvcsw/nivcsw, ...).  See known-issues:
-    // populating those requires scheduler-level CPU accounting on the hot
-    // path and is a separate feature, not an ABI gap.
+    // Build the rusage in kernel memory.  Fault and context-switch
+    // counters (minflt/majflt, nvcsw/nivcsw, ...) stay zero — we don't
+    // track those yet — but ru_utime/ru_stime (CPU time) and ru_maxrss
+    // are now populated.
     let mut buf = [0u8; RUSAGE_SIZE];
+
+    // ru_utime (offset 0..16) and ru_stime (offset 16..32): user and
+    // system CPU time as `struct timeval { i64 tv_sec; i64 tv_usec; }`.
+    // Sourced from the scheduler's per-task tick-sampling accounting
+    // (Linux `account_user_time`/`account_system_time` model).  Ticks at
+    // USER_HZ == 100 Hz, so each tick is 10 ms == 10_000 us.
+    //
+    //   - RUSAGE_SELF (0): sum across all live threads of the process.
+    //   - RUSAGE_THREAD (1): just the calling thread.
+    //   - RUSAGE_CHILDREN (-1): reaped-children CPU time, which we don't
+    //     accumulate yet (known-issues TD14) — stays 0.
+    let (user_ticks, sys_ticks): (u64, u64) = match who_i32 {
+        RUSAGE_SELF => {
+            let pid = caller_pid().unwrap_or(0);
+            crate::proc::thread::process_cpu_ticks(pid)
+        }
+        RUSAGE_THREAD => {
+            let tid = crate::sched::current_task_id();
+            crate::sched::cpu_ticks(tid).unwrap_or((0, 0))
+        }
+        _ => (0, 0), // RUSAGE_CHILDREN
+    };
+    write_rusage_timeval(&mut buf, 0, user_ticks);
+    write_rusage_timeval(&mut buf, 16, sys_ticks);
 
     // Batch 554: ru_maxrss (offset 32, __kernel_long_t) — peak resident set
     // size in KiB.  Linux `kernel/sys.c::getrusage` (v6.6):
@@ -10894,27 +10942,39 @@ fn sys_sysinfo(args: &SyscallArgs) -> SyscallResult {
 /// `USER_HZ` (100) via `force_successful_syscall_return()` (so a return
 /// that happens to fall in the errno band is still treated as success).
 ///
-/// We have no per-process CPU-time accounting yet (known-issues TD14),
-/// so the four `tms` fields (`tms_utime`/`tms_stime`/`tms_cutime`/
-/// `tms_cstime`) are honestly zero. `buf == NULL` is permitted (POSIX:
+/// `tms_utime`/`tms_stime` (the calling process's user/system CPU time
+/// in clock ticks at `USER_HZ == 100`) are sourced from the scheduler's
+/// per-task tick counters, summed across the process's live threads.
+/// `tms_cutime`/`tms_cstime` (reaped-children time) are not tracked yet
+/// (known-issues TD14) and stay 0.  `buf == NULL` is permitted (POSIX:
 /// the caller wants only the return value). A non-NULL but unwritable
-/// `buf` returns `EFAULT`. See the batch-555 self-test for the struct
-/// write contract.
+/// `buf` returns `EFAULT`.  Because our tick rate equals Linux's USER_HZ,
+/// a tick count maps directly to a `clock_t` with no rescale.
 fn sys_times(args: &SyscallArgs) -> SyscallResult {
     let tms_ptr = args.arg0;
 
     // tms_ptr is allowed to be NULL — POSIX says it's optional when
-    // the caller only wants the return value.  When non-NULL, write
-    // 32 zero bytes.
+    // the caller only wants the return value.  When non-NULL, write the
+    // 32-byte `struct tms { clock_t tms_utime, tms_stime, tms_cutime,
+    // tms_cstime; }` (4 × i64 on x86_64).
     if tms_ptr != 0 {
         const TMS_SIZE: usize = 32;
         if let Err(e) = crate::mm::user::validate_user_write(tms_ptr, TMS_SIZE) {
             return linux_err(linux_errno_for(e));
         }
-        let zero = [0u8; TMS_SIZE];
+        let pid = caller_pid().unwrap_or(0);
+        let (user_ticks, sys_ticks) = crate::proc::thread::process_cpu_ticks(pid);
+        let mut buf = [0u8; TMS_SIZE];
+        #[allow(clippy::cast_possible_wrap)]
+        let utime_i = user_ticks as i64;
+        #[allow(clippy::cast_possible_wrap)]
+        let stime_i = sys_ticks as i64;
+        buf[0..8].copy_from_slice(&utime_i.to_ne_bytes()); // tms_utime
+        buf[8..16].copy_from_slice(&stime_i.to_ne_bytes()); // tms_stime
+        // tms_cutime (16..24) / tms_cstime (24..32) stay 0 (TD14).
         // SAFETY: validate_user_write above confirmed a 32-byte
-        // writable user range; we copy 32 zero bytes.
-        let r = unsafe { crate::mm::user::copy_to_user(zero.as_ptr(), tms_ptr, TMS_SIZE) };
+        // writable user range; we copy exactly 32 bytes.
+        let r = unsafe { crate::mm::user::copy_to_user(buf.as_ptr(), tms_ptr, TMS_SIZE) };
         if let Err(e) = r {
             return linux_err(linux_errno_for(e));
         }

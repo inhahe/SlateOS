@@ -414,6 +414,26 @@ pub struct Task {
     /// Convert to nanoseconds via `bench::cycles_to_ns(total_cycles)`.
     pub total_cycles: u64,
 
+    /// CPU time charged to this task while it was executing **user-mode**
+    /// (ring 3) code, in timer ticks (USER_HZ = 100, so 10 ms each).
+    ///
+    /// Charged by [`tick_burst`](Self::tick_burst) on each timer tick
+    /// where the interrupted context was ring 3.  `user_ticks +
+    /// sys_ticks == total_ticks`.  Sourced by `getrusage` `ru_utime`,
+    /// `times` `tms_utime`, and `/proc/<pid>/stat` field 14 (utime).
+    /// This is the Linux tick-sampling model (`account_user_time`),
+    /// which charges a whole tick to whichever mode the CPU was in when
+    /// the timer fired — O(1) and with zero syscall-fast-path cost.
+    pub user_ticks: u64,
+
+    /// CPU time charged to this task while it was executing **kernel**
+    /// (ring 0) code on the task's behalf — syscalls, faults, the
+    /// scheduler — in timer ticks.  The complement of
+    /// [`user_ticks`](Self::user_ticks).  Sourced by `getrusage`
+    /// `ru_stime`, `times` `tms_stime`, and `/proc/<pid>/stat` field 15
+    /// (stime).
+    pub sys_ticks: u64,
+
     /// Total number of times this task has been scheduled (context
     /// switched into).
     ///
@@ -581,9 +601,22 @@ impl Task {
 
     /// Increment the burst tick counter and total CPU time.
     /// Called on each timer tick while the task is Running.
-    pub fn tick_burst(&mut self) {
+    ///
+    /// `from_user` is `true` when the timer interrupt preempted ring-3
+    /// (user-mode) code and `false` when it preempted ring-0 (kernel)
+    /// code running on this task's behalf.  The whole tick is charged to
+    /// the corresponding bucket, mirroring Linux's tick-based CPU-time
+    /// accounting (`account_user_time` / `account_system_time` driven
+    /// from `update_process_times`).  `user_ticks + sys_ticks` is kept
+    /// equal to `total_ticks`.
+    pub fn tick_burst(&mut self, from_user: bool) {
         self.burst_ticks = self.burst_ticks.saturating_add(1);
         self.total_ticks = self.total_ticks.saturating_add(1);
+        if from_user {
+            self.user_ticks = self.user_ticks.saturating_add(1);
+        } else {
+            self.sys_ticks = self.sys_ticks.saturating_add(1);
+        }
     }
 
     /// Mark this task as Ready and record the timestamp for wait
@@ -715,6 +748,8 @@ impl Task {
             cpu_affinity: CPU_AFFINITY_ALL,
             total_ticks: 0,
             total_cycles: 0,
+            user_ticks: 0,
+            sys_ticks: 0,
             schedule_count: 0,
             // Idle tasks are created at boot, before the timer ticks; a
             // start_tick of 0 reads as "started at boot" in /proc stat.
@@ -789,6 +824,8 @@ impl Task {
             cpu_affinity: CPU_AFFINITY_ALL,
             total_ticks: 0,
             total_cycles: 0,
+            user_ticks: 0,
+            sys_ticks: 0,
             schedule_count: 0,
             // Idle tasks are created at boot, before the timer ticks; a
             // start_tick of 0 reads as "started at boot" in /proc stat.
@@ -918,6 +955,8 @@ impl Task {
             cpu_affinity: CPU_AFFINITY_ALL,
             total_ticks: 0,
             total_cycles: 0,
+            user_ticks: 0,
+            sys_ticks: 0,
             schedule_count: 0,
             // Capture the boot-relative creation time for /proc/<pid>/stat
             // starttime (field 22).  USER_HZ == tick rate, so no rescale.

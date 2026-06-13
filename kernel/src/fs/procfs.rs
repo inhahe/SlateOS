@@ -2367,9 +2367,16 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     let num_threads = crate::proc::pcb::get_threads(proc_id)
         .map_or(1, |t| t.len());
 
-    // utime: clock ticks consumed.  USER_HZ == TICK_RATE_HZ == 100, so the
-    // raw timer-tick count is already in ABI units.
-    let utime = task.total_ticks;
+    // utime/stime (fields 14/15): user and system CPU time in clock
+    // ticks.  USER_HZ == TICK_RATE_HZ == 100, so the raw timer-tick
+    // counts are already in ABI units.  These are this task's own
+    // tick-sampled user/kernel split (Linux `account_user_time`/
+    // `account_system_time` model); `user_ticks + sys_ticks ==
+    // total_ticks`.  For a single-threaded process this equals the
+    // process total; the thread-group-leader sum for multi-threaded
+    // processes is the same TD14 follow-up as getrusage's children path.
+    let utime = task.user_ticks;
+    let stime = task.sys_ticks;
 
     // Virtual size (bytes) and resident pages, in Linux ABI page units.
     // Bare scheduler tasks (no process / address-space charge) report 0,
@@ -2441,10 +2448,10 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     // starttime vsize rss rsslim <startcode..wchan=0> <nswap/cnswap=0>
     // exit_signal=17 processor <rt_priority..env_end=0> exit_code.
     let text = format!(
-        "{} ({}) {} {} {} {} 0 -1 0 0 0 0 0 {} 0 0 0 {} 0 {} 0 {} {} {} {} \
+        "{} ({}) {} {} {} {} 0 -1 0 0 0 0 0 {} {} 0 0 {} 0 {} 0 {} {} {} {} \
          0 0 0 0 0 0 0 0 0 0 0 0 17 {} 0 0 0 0 0 0 0 0 0 0 0 0 {}\n",
         task.id, name, state_char, ppid, pgrp_sid, pgrp_sid,
-        utime, priority, num_threads, starttime,
+        utime, stime, priority, num_threads, starttime,
         vsize, rss_pages, rsslim,
         processor,
         exit_code,
@@ -13191,6 +13198,8 @@ pub fn self_test() -> KernelResult<()> {
             state: crate::sched::task::TaskState::Ready,
             priority: 20,
             total_ticks: 7,
+            user_ticks: 5,
+            sys_ticks: 2,
             total_cycles: 0,
             schedule_count: 0,
             start_tick: 99_999,
@@ -13225,12 +13234,28 @@ pub fn self_test() -> KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+        // field 14 (utime) sits at index 11; field 15 (stime) at index 12.
+        // The synthetic task has user_ticks=5, sys_ticks=2 (sum == total 7).
+        if rest.get(11).and_then(|f| f.parse::<u64>().ok()) != Some(5) {
+            serial_println!(
+                "[procfs]   FAIL: synthetic stat utime (field 14) = {:?}, want 5",
+                rest.get(11)
+            );
+            return Err(KernelError::InternalError);
+        }
+        if rest.get(12).and_then(|f| f.parse::<u64>().ok()) != Some(2) {
+            serial_println!(
+                "[procfs]   FAIL: synthetic stat stime (field 15) = {:?}, want 2",
+                rest.get(12)
+            );
+            return Err(KernelError::InternalError);
+        }
         // field 1 must be the synthetic task id (sanity on the whole line).
         if line.split(' ').next() != Some("4242") {
             serial_println!("[procfs]   FAIL: synthetic stat field1 != 4242");
             return Err(KernelError::InternalError);
         }
-        serial_println!("[procfs]   build_pid_stat: synthetic starttime+processor OK");
+        serial_println!("[procfs]   build_pid_stat: synthetic starttime+processor+utime/stime OK");
     }
 
     // --- stat <-> status State-char consistency (deterministic) ---
@@ -13259,6 +13284,8 @@ pub fn self_test() -> KernelResult<()> {
                 state: st,
                 priority: 20,
                 total_ticks: 0,
+                user_ticks: 0,
+                sys_ticks: 0,
                 total_cycles: 0,
                 schedule_count: 0,
                 start_tick: 0,
@@ -13323,6 +13350,8 @@ pub fn self_test() -> KernelResult<()> {
             state: crate::sched::task::TaskState::Ready,
             priority: 20,
             total_ticks: 0,
+            user_ticks: 0,
+            sys_ticks: 0,
             total_cycles: 0,
             schedule_count: 0,
             start_tick: 0,

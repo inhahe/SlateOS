@@ -1051,7 +1051,13 @@ pub extern "C" fn handle_timer_irq(frame: &crate::idt::InterruptStackFrame, _err
     // Tick the scheduler and check if a reschedule is needed.
     // This is the minimal hard-IRQ work: per-CPU lock only, no global
     // lock, O(1) time-slice decrement.
-    let needs_reschedule = crate::sched::timer_tick();
+    //
+    // The CPL bits (low 2) of the interrupted frame's CS tell us whether
+    // the timer preempted ring-3 (user) or ring-0 (kernel) code, so the
+    // scheduler can charge this tick to the current task's user- or
+    // system-time bucket (Linux tick-sampling CPU accounting).
+    let from_user = (frame.cs & 0x3) == 0x3;
+    let needs_reschedule = crate::sched::timer_tick(from_user);
 
     // Fire any high-resolution timers that have expired.
     // Checked every tick (~10 ms); actual precision depends on HPET timestamps.

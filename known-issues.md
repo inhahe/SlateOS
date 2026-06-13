@@ -797,37 +797,44 @@ this kernel rarely steps the realtime clock at runtime.
 stamp it into the timerfd at settime when `CANCEL_ON_SET` is set; on read/poll, if
 the counter advanced, return `ECANCELED`/`EPOLLERR` and disarm.
 
-### TD14. No per-process CPU-time accounting — `getrusage`/`times` report zero CPU time — DEBT 2026-06-13
+### TD14. Per-process CPU-time accounting — PARTIALLY RESOLVED 2026-06-13 (self/thread done; children + exited-thread pending)
 
-**Where:** `kernel/src/syscall/linux.rs` `sys_getrusage` (~10275) and `sys_times`
-(~10495); the scheduler `kernel/src/sched/mod.rs` has no per-thread/per-process
-accumulated run-time fields.
+**Where:** `kernel/src/syscall/linux.rs` `sys_getrusage` and `sys_times`;
+`kernel/src/sched/task.rs` (`Task::user_ticks`/`sys_ticks`, `tick_burst(from_user)`);
+`kernel/src/sched/mod.rs` (`timer_tick(from_user)`, `cpu_ticks(tid)`, `TaskInfo`);
+`kernel/src/proc/thread.rs` (`process_cpu_ticks(pid)`); `kernel/src/apic.rs`
+(CPL sampling in `handle_timer_irq`); `kernel/src/fs/procfs.rs` (`build_pid_stat`).
 
-**What it is:** `getrusage(2)` leaves `ru_utime`/`ru_stime` (and the fault and
-context-switch counters `ru_minflt`/`ru_majflt`/`ru_nvcsw`/`ru_nivcsw`) zero, and
-`times(2)` writes an all-zero `struct tms` (`tms_utime`/`tms_stime`/`tms_cutime`/
-`tms_cstime`). Linux fills these from per-task accumulated CPU time. We have no
-such accounting, so the values are an honest 0 rather than a wrong non-zero — but
-tools that measure CPU usage (`time(1)`'s user/sys split, `getrusage`-based
-profilers, shell `times` builtin) see no CPU time consumed.
+**Resolved (2026-06-13):** implemented Linux-style tick-sampling CPU-time
+accounting. On every timer IRQ, `handle_timer_irq` reads the interrupted frame's
+CPL (`(frame.cs & 0x3) == 0x3` ⇒ ring-3) and passes `from_user` down through
+`sched::timer_tick` → `Task::tick_burst`, which charges the whole tick to
+`user_ticks` or `sys_ticks` (O(1), zero syscall-fastpath cost — Linux's default
+non-NO_HZ_FULL model). `sched::cpu_ticks(tid)` exposes the per-thread split;
+`proc::thread::process_cpu_ticks(pid)` rolls it up across a process's live
+threads. Wired into:
+- `getrusage(RUSAGE_SELF)` → process roll-up; `getrusage(RUSAGE_THREAD)` →
+  current thread. `ru_utime`/`ru_stime` now populated (ticks×10ms → timeval).
+- `times(2)` `tms_utime`/`tms_stime` (USER_HZ==TICK_RATE_HZ==100, so tick
+  counts map directly to clock_t).
+- `/proc/<pid>/stat` fields 14 (utime) / 15 (stime).
 
-**Why it's not an ABI gap (and not fixed in the batch-553/554 sweep):** unlike
-the zeroed *peak-RSS* field (batch 554) or sysinfo `loads[]` (batch 553), there is
-no existing data source to read — populating CPU time requires building real
-accounting: accumulate elapsed time per thread on every context switch (and roll
-it up per process), split user vs kernel time, and track minor/major fault and
-voluntary/involuntary context-switch counters. That is a scheduler hot-path
-feature with its own correctness and performance (benchmark) requirements, not a
-one-line ABI fix.
+**Still pending (TD14-followup):**
+1. **Children time** — `times` `tms_cutime`/`tms_cstime`, `getrusage(RUSAGE_CHILDREN)`,
+   and `/proc/<pid>/stat` fields 16/17 (cutime/cstime) stay 0. Proper fix: a
+   per-process child-time accumulator credited at `wait4`/reap from the reaped
+   child's (utime+cutime, stime+cstime).
+2. **Exited-thread accumulation** — `process_cpu_ticks` only sums *live* threads,
+   so a multi-threaded process under-reports CPU consumed by already-exited
+   worker threads. Exact for single-threaded processes. Proper fix: a per-process
+   `user_ticks`/`sys_ticks` accumulator that a thread folds its counters into on
+   exit, summed with live-thread counters at query time.
+3. **Fault / ctxsw counters** — `ru_minflt`/`ru_majflt`/`ru_nvcsw`/`ru_nivcsw`
+   remain 0 (separate per-task counters, not yet tracked).
 
-**Proper fix:** add `utime_ns`/`stime_ns` (and fault / ctxsw counters) to the
-thread accounting struct, charge them at context-switch boundaries (user/kernel
-split via the entry/exit transition), expose a `sched::cpu_time_ns(tid)` /
-process roll-up, then source `getrusage` `ru_utime`/`ru_stime` and `times` `tms_*`
-from it (and `/proc/<pid>/stat` utime/stime, which is also currently approximate).
-Trigger: when CPU-usage-reporting tooling becomes a priority, or when the
-scheduler is next reworked. Keep it native-neutral — elapsed-time accounting is
-not a Linux-specific construct; only the rusage/tms *wire format* is.
+Trigger for the followups: when CPU-usage tooling that needs children-time
+(shell `times` after subprocesses, `time(1)` on a pipeline) or multi-threaded
+fidelity becomes a priority.
 
 ### TD13. A few Linux-compat-flavored fields live in the native PCB — WATCH 2026-06-13
 

@@ -148,6 +148,16 @@ pub enum HandleKind {
     /// releases one refcount on the in-kernel `ALSA_PCM_TABLE` entry (and, on
     /// final close, the mixer slot it holds).
     AlsaPcm,
+    /// ALSA control device — Linux `/dev/snd/controlC0`.  Opened by
+    /// ALSA-lib (`snd_ctl_open`, used by `alsamixer`/`amixer`/PulseAudio)
+    /// to enumerate the card before touching any PCM substream.  Driven
+    /// purely via `ioctl(SNDRV_CTL_IOCTL_*)`; `read`/`write` return
+    /// `EINVAL`.  A control fd is a *stateless* window onto the global
+    /// `audio_mixer` — there is no per-open kernel resource (unlike a PCM
+    /// substream, which holds a scarce mixer slot), so `raw_handle` carries
+    /// the card number (always 0) and `needs_kernel_close()` returns
+    /// `false`.  This mirrors `Console`/`PidFd`.
+    AlsaControl,
 }
 
 impl HandleKind {
@@ -156,7 +166,7 @@ impl HandleKind {
     #[must_use]
     pub const fn needs_kernel_close(self) -> bool {
         match self {
-            Self::Console | Self::PidFd => false,
+            Self::Console | Self::PidFd | Self::AlsaControl => false,
             Self::File
             | Self::Pipe
             | Self::EventFd
@@ -364,6 +374,24 @@ impl FdEntry {
         Self {
             kind: HandleKind::AlsaPcm,
             raw_handle: handle,
+            fd_flags,
+            status_flags,
+            f_owner: 0,
+            f_owner_sig: 0,
+        }
+    }
+
+    /// Construct an entry for an ALSA control device (`/dev/snd/controlC0`).
+    /// A control fd is *stateless*: it carries no per-open kernel resource,
+    /// so `raw_handle` holds the card number (always 0) and there is nothing
+    /// to release on close.  `fd_flags` carries `FD_CLOEXEC` when opened with
+    /// `O_CLOEXEC`; `status_flags` carries `O_NONBLOCK` when opened
+    /// non-blocking.
+    #[must_use]
+    pub const fn alsa_control(fd_flags: u32, status_flags: u32) -> Self {
+        Self {
+            kind: HandleKind::AlsaControl,
+            raw_handle: 0,
             fd_flags,
             status_flags,
             f_owner: 0,

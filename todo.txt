@@ -82,10 +82,19 @@
 ##       hex); IFACE/TYPE/ACCESS constants; the card's element model (NUMID_MASTER_VOLUME=1 INTEGER 0..100,
 ##       NUMID_MASTER_SWITCH=2 BOOLEAN, ELEM_COUNT=2). Exhaustive self-test (sizes, alignments, ioctl encs,
 ##       version, constants) wired into boot after the PCM self-tests. Built clean, clippy 17462, BOOT_OK.
-##   [TODO commit 5b] /dev/snd/controlC0 devfs node + HandleKind::AlsaControl fd family (mirror commit 3's
-##       PCM node wiring): register the node, route open()/close()/ioctl to a control instance object.
-##   [TODO commit 5c] control ioctl dispatch: PVERSION, CARD_INFO (fill OuRoS card), ELEM_LIST/INFO/READ/
-##       WRITE for the two master elements, mapping READ/WRITE to audio_mixer master_volume / mute.
+##   [DONE commit 5b] /dev/snd/controlC0 open interception + HandleKind::AlsaControl fd family. Added a
+##       STATELESS AlsaControl fd kind (raw_handle = card 0, needs_kernel_close=false, no instance table, no
+##       capability resource — a control fd is a pure window onto the global mixer, mirroring Console/PidFd).
+##       try_open_alsa_control() intercepts the path before the VFS open in both open entry points (matching
+##       try_open_alsa_pcm — the PCM nodes are also pure path-interception, not real devfs nodes). Threaded
+##       the new variant through all ~25 match sites in linux.rs + procfs fd-link + the kcmp ord table:
+##       read/write→EINVAL, lseek→ESPIPE, poll→never ready, fstat→S_IFCHR|0o660, fork-dup/close→no-op,
+##       fcntl-lock→EBADF, cachestat→EOPNOTSUPP, /proc/self/fd→/dev/snd/controlC0. ioctl routed to a new
+##       alsa_control_ioctl() implementing PVERSION + CARD_INFO (OuRoS card identity); ELEM_* return ENOTTY
+##       for now. Built clean, clippy 17462, BOOT_OK (alsactl self-test PASSED).
+##   [TODO commit 5c] control ioctl dispatch: ELEM_LIST/INFO/READ/WRITE for the two master elements
+##       (NUMID 1 volume INTEGER 0..100, NUMID 2 switch BOOLEAN), mapping READ/WRITE to audio_mixer
+##       master_volume / mute.
 ##   DESIGN NOTE (clearly-correct default, not blocking): ALSA-direct kernel interface chosen over a
 ##   userspace PulseAudio-protocol daemon because PA/PipeWire/JACK/SDL/WINE all layer on ALSA — providing
 ##   ALSA gives the broadest compat with one interface. If the operator prefers a userspace PA-protocol

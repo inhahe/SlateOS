@@ -2867,6 +2867,8 @@ fn fd_link_target(entry: &crate::proc::linux_fd::FdEntry) -> String {
                 String::from("/dev/snd/pcmC0D0p")
             }
         }
+        // ALSA control device is a real device node at a fixed path.
+        HandleKind::AlsaControl => String::from("/dev/snd/controlC0"),
     }
 }
 

@@ -2547,6 +2547,11 @@ pub fn close_handle(entry: FdEntry) -> SyscallResult {
             // pid.  The fd slot has already been freed by the caller.
             SyscallResult::ok(0)
         }
+        HandleKind::AlsaControl => {
+            // Stateless control device — no per-open kernel resource and no
+            // ipc_handles registration, so there is nothing to release.
+            SyscallResult::ok(0)
+        }
         HandleKind::MemFd => {
             // Deregister from the per-process ipc_handles list — same
             // rationale as the EventFd arm above.
@@ -2695,7 +2700,8 @@ fn dispatch_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
         }
         HandleKind::EventFd => dispatch_eventfd_write(entry, buf, len),
         // signalfd, timerfd and inotify are read-only: write(2) → EINVAL.
-        HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify => {
+        // The ALSA control device is ioctl-only, so write(2) → EINVAL too.
+        HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaControl => {
             linux_err(errno::EINVAL)
         }
         // ALSA PCM playback substream — `write(2)` pushes interleaved frames
@@ -2880,7 +2886,8 @@ fn dispatch_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
             linux_from_native(handlers::sys_pipe_read(&a))
         }
         HandleKind::EventFd => dispatch_eventfd_read(entry, buf, cap),
-        HandleKind::PidFd | HandleKind::Epoll => linux_err(errno::EINVAL),
+        // The ALSA control device is ioctl-only: read(2) → EINVAL.
+        HandleKind::PidFd | HandleKind::Epoll | HandleKind::AlsaControl => linux_err(errno::EINVAL),
         HandleKind::MemFd => dispatch_memfd_read(entry, buf, cap),
         HandleKind::SignalFd => dispatch_signalfd_read(entry, buf, cap),
         HandleKind::Timerfd => dispatch_timerfd_read(entry, buf, cap),
@@ -3858,7 +3865,8 @@ fn fcntl_flock_apply(
         | HandleKind::SignalFd
         | HandleKind::Timerfd
         | HandleKind::Inotify
-        | HandleKind::AlsaPcm => {
+        | HandleKind::AlsaPcm
+        | HandleKind::AlsaControl => {
             return linux_err(errno::EBADF);
         }
     }
@@ -3993,7 +4001,7 @@ fn sys_lseek(args: &SyscallArgs) -> SyscallResult {
                 Err(e) => linux_err(linux_errno_for(e)),
             }
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl => linux_err(errno::ESPIPE),
     }
 }
 
@@ -4078,6 +4086,51 @@ fn try_open_alsa_pcm(path: &[u8], flags: u32) -> Option<SyscallResult> {
     }
 }
 
+/// Intercept `open()` of the ALSA control device node and mint an
+/// [`crate::proc::linux_fd::HandleKind::AlsaControl`] fd instead of routing
+/// through the VFS.  Mirrors [`try_open_alsa_pcm`]: both open entry points
+/// consult this helper *before* the VFS open so a single place owns the
+/// control-node recognition.
+///
+/// Unlike a PCM substream, a control fd holds **no** per-open kernel resource
+/// — it is a stateless window onto the global mixer — so there is no instance
+/// to create, no IPC-handle registration, and nothing to roll back on a table
+/// failure.
+///
+/// Returns `Some(result)` when `path` is the control node (the result being
+/// the new fd or an errno); `None` when it is not, so the caller falls through
+/// to the normal VFS open.
+///
+/// Recognised today (card 0):
+///   * `/dev/snd/controlC0` — control device
+fn try_open_alsa_control(path: &[u8], flags: u32) -> Option<SyscallResult> {
+    if path != b"/dev/snd/controlC0" {
+        return None;
+    }
+
+    // A real caller is required — kernel context has no fd table to install
+    // into.  Return EBADF the same way the VFS path does for kernel context.
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => return Some(linux_err(errno::EBADF)),
+    };
+
+    let status_flags = flags & oflags::O_NONBLOCK;
+    let fd_flags = if flags & oflags::O_CLOEXEC != 0 {
+        crate::proc::linux_fd::FD_CLOEXEC
+    } else {
+        0
+    };
+    let entry = FdEntry::alsa_control(fd_flags, status_flags);
+
+    match pcb::linux_fd_install(pid, entry, 0) {
+        Ok(fd) => Some(SyscallResult::ok(i64::from(fd))),
+        // No instance or registration to roll back — the control fd is
+        // stateless, so a table-install failure is just an errno.
+        Err(e) => Some(linux_err(linux_errno_for(e))),
+    }
+}
+
 /// Shared backend for `open` / `openat`.
 fn open_common(path_ptr: u64, path_len_hint: u64, flags: u32) -> SyscallResult {
     if path_ptr == 0 {
@@ -4118,6 +4171,9 @@ fn open_common(path_ptr: u64, path_len_hint: u64, flags: u32) -> SyscallResult {
     // always yields the path slice; the fallback is unreachable.
     if let Some(path_slice) = tmp.get(..len) {
         if let Some(r) = try_open_alsa_pcm(path_slice, flags) {
+            return r;
+        }
+        if let Some(r) = try_open_alsa_control(path_slice, flags) {
             return r;
         }
     }
@@ -4305,6 +4361,9 @@ fn open_kernel_path_install(path: &str, flags: u32) -> SyscallResult {
     // the VFS open, exactly as in `open_common`, so a relative openat that
     // resolves to one mints its own HandleKind instead of a File fd.
     if let Some(r) = try_open_alsa_pcm(path.as_bytes(), flags) {
+        return r;
+    }
+    if let Some(r) = try_open_alsa_control(path.as_bytes(), flags) {
         return r;
     }
     if let Err(e) = handlers::require_cap_type(
@@ -6338,10 +6397,18 @@ fn sys_ioctl(args: &SyscallArgs) -> SyscallResult {
         _ => {
             // Device-specific ioctls: route by handle kind.  An ALSA PCM
             // substream answers the `SNDRV_PCM_IOCTL_*` family ('A' magic);
-            // everything else is an unsupported request on this fd → ENOTTY.
+            // an ALSA control device answers the `SNDRV_CTL_IOCTL_*` family
+            // ('U' magic); everything else is an unsupported request on this
+            // fd → ENOTTY.
             if let Some(entry) = pcb::linux_fd_lookup(pid, fd) {
-                if matches!(entry.kind, crate::proc::linux_fd::HandleKind::AlsaPcm) {
-                    return alsa_pcm_ioctl(&entry, request, args.arg2);
+                match entry.kind {
+                    crate::proc::linux_fd::HandleKind::AlsaPcm => {
+                        return alsa_pcm_ioctl(&entry, request, args.arg2);
+                    }
+                    crate::proc::linux_fd::HandleKind::AlsaControl => {
+                        return alsa_control_ioctl(&entry, request, args.arg2);
+                    }
+                    _ => {}
                 }
             }
             linux_err(errno::ENOTTY)
@@ -6733,6 +6800,65 @@ fn alsa_pcm_ioctl_sync_ptr(entry: &FdEntry, argp: u64) -> SyscallResult {
     sp.control.avail_min = pos.avail_min;
 
     match write_user_struct(argp, &sp) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(e),
+    }
+}
+
+/// Dispatch a `SNDRV_CTL_IOCTL_*` request against an open ALSA control device
+/// (`/dev/snd/controlC0`).
+///
+/// A control fd is stateless — it is a pure window onto the global mixer — so
+/// every request is answered directly from the card model in
+/// [`crate::audio_alsa_ctl`], with no per-fd bookkeeping.
+///
+/// Wired in this commit: `PVERSION` (protocol version) and `CARD_INFO` (card
+/// identification), which is everything `snd_ctl_open()` needs to make the card
+/// *visible* to ALSA-lib.  The element-access family (`ELEM_LIST` / `ELEM_INFO`
+/// / `ELEM_READ` / `ELEM_WRITE`) lands in the follow-up commit that maps it to
+/// `audio_mixer`; until then those — and every unrecognised request — return
+/// `ENOTTY`, exactly as Linux does for an unsupported control ioctl.
+fn alsa_control_ioctl(_entry: &FdEntry, request: u32, argp: u64) -> SyscallResult {
+    use crate::audio_alsa_ctl as ctl;
+
+    match request {
+        ctl::SNDRV_CTL_IOCTL_PVERSION => {
+            // Report the control protocol version (an `int` out-parameter).
+            if crate::mm::user::validate_user_write(argp, 4).is_err() {
+                return linux_err(errno::EFAULT);
+            }
+            let v = ctl::SNDRV_CTL_VERSION;
+            // SAFETY: argp validated writable for 4 bytes just above; `v` is a
+            // local `u32` so the 4-byte source is valid.
+            if unsafe { crate::mm::user::copy_to_user(core::ptr::addr_of!(v).cast::<u8>(), argp, 4) }
+                .is_err()
+            {
+                return linux_err(errno::EFAULT);
+            }
+            SyscallResult::ok(0)
+        }
+        ctl::SNDRV_CTL_IOCTL_CARD_INFO => alsa_control_ioctl_card_info(argp),
+        // ELEM_* and everything else is unsupported for now → ENOTTY.
+        _ => linux_err(errno::ENOTTY),
+    }
+}
+
+/// `SNDRV_CTL_IOCTL_CARD_INFO` — fill a `snd_ctl_card_info` describing the
+/// single virtual sound card (card 0) that the OuRoS mixer exposes.
+fn alsa_control_ioctl_card_info(argp: u64) -> SyscallResult {
+    use crate::audio_alsa_ctl as ctl;
+    // SAFETY: SndCtlCardInfo is a plain `#[repr(C)]` aggregate of integers and
+    // byte arrays with no padding/niche invariants, so an all-zero value is a
+    // valid initialised value.
+    let mut info: ctl::SndCtlCardInfo = unsafe { core::mem::zeroed() };
+    info.card = 0;
+    info.pad = 0;
+    write_cstr_field(&mut info.id, b"OuRoS");
+    write_cstr_field(&mut info.driver, b"OuRoS");
+    write_cstr_field(&mut info.name, b"OuRoS Virtual Audio");
+    write_cstr_field(&mut info.longname, b"OuRoS Virtual Audio - software mixer");
+    write_cstr_field(&mut info.mixername, b"OuRoS Mixer");
+    match write_user_struct(argp, &info) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => linux_err(e),
     }
@@ -11053,7 +11179,7 @@ fn sys_fsync(args: &SyscallArgs) -> SyscallResult {
     };
     match entry.kind {
         HandleKind::File | HandleKind::MemFd => SyscallResult::ok(0),
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm => linux_err(errno::EINVAL),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl => linux_err(errno::EINVAL),
     }
 }
 
@@ -11945,7 +12071,8 @@ fn sys_readahead(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::SignalFd
         | HandleKind::Timerfd
         | HandleKind::Inotify
-        | HandleKind::AlsaPcm => return linux_err(errno::EINVAL),
+        | HandleKind::AlsaPcm
+        | HandleKind::AlsaControl => return linux_err(errno::EINVAL),
     }
     SyscallResult::ok(0)
 }
@@ -13667,6 +13794,8 @@ fn fill_stat_for_fd(
         // ALSA PCM is a real character device node under /dev/snd
         // (crw-rw---- root:audio on Linux), not an anon_inode.
         HandleKind::AlsaPcm => (S_IFCHR | 0o660, 4096),
+        // ALSA control device is a character device node like the PCM one.
+        HandleKind::AlsaControl => (S_IFCHR | 0o660, 4096),
     };
 
     // Inode: use the raw_handle as a stable-ish identity.
@@ -13956,6 +14085,8 @@ fn fill_statx_for_fd(
         HandleKind::Inotify => ((S_IFREG | 0o600) as u16, 4096),
         // ALSA PCM character device node under /dev/snd (crw-rw---- on Linux).
         HandleKind::AlsaPcm => ((S_IFCHR | 0o660) as u16, 4096),
+        // ALSA control character device node under /dev/snd.
+        HandleKind::AlsaControl => ((S_IFCHR | 0o660) as u16, 4096),
     };
     let st_ino: u64 = entry.raw_handle;
     // Surface the live memfd data length so stx_size reflects what callers
@@ -15133,7 +15264,7 @@ fn sys_ftruncate(args: &SyscallArgs) -> SyscallResult {
         }
         // Pipes, consoles, eventfds, pidfds, epoll, signalfds, timerfds cannot
         // be truncated.
-        HandleKind::Pipe | HandleKind::Console | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm => linux_err(errno::EINVAL),
+        HandleKind::Pipe | HandleKind::Console | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl => linux_err(errno::EINVAL),
     }
 }
 
@@ -18851,8 +18982,8 @@ fn sys_pidfd_getfd(args: &SyscallArgs) -> SyscallResult {
     // closing the fd) and we have NOT yet allocated anything in the
     // caller's table, so there's no rollback to do.
     match entry.kind {
-        HandleKind::Console | HandleKind::PidFd => {
-            // No kernel resource to refcount.
+        HandleKind::Console | HandleKind::PidFd | HandleKind::AlsaControl => {
+            // No kernel resource to refcount (stateless fd kinds).
         }
         HandleKind::File => {
             if crate::fs::handle::dup_shared(entry.raw_handle).is_err() {
@@ -18944,7 +19075,7 @@ fn sys_pidfd_getfd(args: &SyscallArgs) -> SyscallResult {
         HandleKind::Timerfd => Some(crate::cap::ResourceType::Timerfd),
         HandleKind::Inotify => Some(crate::cap::ResourceType::Inotify),
         HandleKind::AlsaPcm => Some(crate::cap::ResourceType::AlsaPcm),
-        HandleKind::Console | HandleKind::PidFd => None,
+        HandleKind::Console | HandleKind::PidFd | HandleKind::AlsaControl => None,
     };
     if let Some(rt) = resource {
         pcb::register_ipc_handle(caller, rt, entry.raw_handle);
@@ -18979,7 +19110,7 @@ fn sys_pidfd_getfd(args: &SyscallArgs) -> SyscallResult {
 /// which is the matching half of `dup` / `dup_shared`.
 fn release_handle_ref(kind: HandleKind, raw_handle: u64) {
     match kind {
-        HandleKind::Console | HandleKind::PidFd => {}
+        HandleKind::Console | HandleKind::PidFd | HandleKind::AlsaControl => {}
         HandleKind::File => {
             let a = SyscallArgs {
                 arg0: raw_handle,
@@ -21781,6 +21912,13 @@ fn poll_revents_from_entry(
             }
             bits
         }
+        HandleKind::AlsaControl => {
+            // A control fd becomes readable when an element-change event is
+            // queued (ALSA's control event FIFO).  We do not yet generate
+            // those events, so a control fd is never reported ready — never
+            // POLLIN (no events queued) and never POLLOUT (ioctl-only).
+            0
+        }
     };
 
     raw & mask
@@ -22564,7 +22702,8 @@ fn sys_epoll_ctl(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::SignalFd
         | HandleKind::Timerfd
         | HandleKind::Inotify
-        | HandleKind::AlsaPcm => {}
+        | HandleKind::AlsaPcm
+        | HandleKind::AlsaControl => {}
     }
 
     // Gate 5: f.file == tf.file || !is_file_epoll(f.file) -> EINVAL.
@@ -25773,6 +25912,7 @@ fn handle_kind_ord(k: crate::proc::linux_fd::HandleKind) -> u64 {
         HandleKind::Timerfd => 8,
         HandleKind::Inotify => 9,
         HandleKind::AlsaPcm => 10,
+        HandleKind::AlsaControl => 11,
     }
 }
 
@@ -26756,7 +26896,7 @@ fn sys_cachestat(args: &SyscallArgs) -> SyscallResult {
                 // memfd is page-cache-backed on Linux, so cachestat is
                 // valid against it (always zero in our world).
                 HandleKind::File | HandleKind::MemFd => {}
-                HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm => {
+                HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl => {
                     return linux_err(errno::EOPNOTSUPP);
                 }
             }
@@ -31307,7 +31447,7 @@ fn sys_pread64(args: &SyscallArgs) -> SyscallResult {
                 Err(e) => linux_err(e),
             }
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl => linux_err(errno::ESPIPE),
     }
 }
 
@@ -31364,7 +31504,7 @@ fn sys_pwrite64(args: &SyscallArgs) -> SyscallResult {
                 Err(e) => linux_err(e),
             }
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl => linux_err(errno::ESPIPE),
     }
 }
 
@@ -33064,7 +33204,7 @@ fn sys_preadv(args: &SyscallArgs) -> SyscallResult {
             let off = offset as u64;
             preadv_memfd_walk(entry.raw_handle, off, iov_ptr, iovcnt)
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl => linux_err(errno::ESPIPE),
     }
 }
 
@@ -33095,7 +33235,7 @@ fn sys_pwritev(args: &SyscallArgs) -> SyscallResult {
             let off = offset as u64;
             pwritev_memfd_walk(entry.raw_handle, off, iov_ptr, iovcnt)
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl => linux_err(errno::ESPIPE),
     }
 }
 
@@ -33157,7 +33297,7 @@ fn sys_preadv2(args: &SyscallArgs) -> SyscallResult {
             let off = offset as u64;
             preadv_memfd_walk(entry.raw_handle, off, iov_ptr, iovcnt)
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl => linux_err(errno::ESPIPE),
     }
 }
 
@@ -33201,7 +33341,7 @@ fn sys_pwritev2(args: &SyscallArgs) -> SyscallResult {
             let off = offset as u64;
             pwritev_memfd_walk(entry.raw_handle, off, iov_ptr, iovcnt)
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl => linux_err(errno::ESPIPE),
     }
 }
 
@@ -46933,7 +47073,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 HandleKind::Timerfd => Some(crate::cap::ResourceType::Timerfd),
                 HandleKind::Inotify => Some(crate::cap::ResourceType::Inotify),
                 HandleKind::AlsaPcm => Some(crate::cap::ResourceType::AlsaPcm),
-                HandleKind::Console | HandleKind::PidFd => None,
+                HandleKind::Console | HandleKind::PidFd | HandleKind::AlsaControl => None,
             }
         };
         assert_eq!(kind_to_rt(HandleKind::File),
@@ -46946,6 +47086,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                    Some(crate::cap::ResourceType::MemFd));
         assert_eq!(kind_to_rt(HandleKind::Console), None);
         assert_eq!(kind_to_rt(HandleKind::PidFd), None);
+        assert_eq!(kind_to_rt(HandleKind::AlsaControl), None);
 
         // (b) Per-resource register / deregister round-trip on a
         //     synthetic PCB.  This is the contract sys_pidfd_getfd

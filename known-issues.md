@@ -82,6 +82,35 @@ deny — are now fixed; see F8 and F9.)_
 
 ## Fixed Bugs
 
+### F12. ALSA PCM `hw_params` leaked a mixer slot under concurrent calls on a shared fd — FIXED 2026-06-13
+
+**Where:** `kernel/src/ipc/alsa_pcm.rs` `hw_params` (the slot-reservation
+re-acquire path, ~lines 376-410).
+
+**Symptom:** None observed yet (latent). Two concurrent `SNDRV_PCM_IOCTL_HW_PARAMS`
+ioctls on the *same* PCM fd — reachable when a fd is shared across threads or
+inherited across `fork()` — could permanently leak one `audio_mixer` stream
+slot. Mixer slots are a finite resource, so repeated occurrences would
+eventually exhaust them and make `open_stream` fail with `WouldBlock` for all
+clients.
+
+**Root cause:** A TOCTOU window in the leaf-lock dance. `hw_params` read
+`need_stream = pcm.mixer_stream.is_none()` under the table lock, dropped the
+lock to call `audio_mixer::open_stream()` (which must not run under the table
+lock), then re-acquired the lock and did `pcm.mixer_stream = Some(sid)`
+**unconditionally**. Two racing calls both observed `mixer_stream == None`, both
+opened a slot, and the one that re-acquired the lock second overwrote the
+first's stored `StreamId` — orphaning it (it was never `close_stream`d; the
+instance's eventual `close` frees only the surviving slot).
+
+**Fix:** On re-acquire, only store the freshly-opened slot if `mixer_stream` is
+still `None`; otherwise treat it as redundant, keep the existing slot, and free
+the redundant one with `audio_mixer::close_stream` *after* dropping the table
+lock (preserving the documented leaf-lock invariant — no mixer call under the
+table lock). Added a single-threaded idempotency assertion to the self-test
+(a repeat `hw_params` stays `SETUP` with unchanged params, exercising the
+`need_stream == false` reuse branch).
+
 ### F11. hrtimer self-test Test 2 raced the APIC timer ISR → intermittent boot panic — FIXED 2026-06-12
 
 **Where:** `kernel/src/hrtimer.rs` self-test Test 2 (~lines 475-496).

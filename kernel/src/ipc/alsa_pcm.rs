@@ -375,22 +375,40 @@ pub fn hw_params(
 
     // Re-acquire and apply.  If the instance vanished while the lock was
     // dropped (a concurrent close), release any freshly-opened slot.
-    let mut table = ALSA_PCM_TABLE.lock();
-    let Some(pcm) = table.get_mut(&handle.id()) else {
-        drop(table);
+    //
+    // A redundant slot can also arise without a close: two `hw_params` calls
+    // racing on the same handle both observe `mixer_stream == None` under
+    // lock #1 and both open a slot.  Whichever re-acquires lock #2 second must
+    // *not* overwrite the slot the first one already stored (that would leak
+    // it); it keeps the existing slot and frees its own after the lock drops.
+    let mut redundant_stream: Option<StreamId> = None;
+    {
+        let mut table = ALSA_PCM_TABLE.lock();
+        let Some(pcm) = table.get_mut(&handle.id()) else {
+            drop(table);
+            if let Some(sid) = new_stream {
+                audio_mixer::close_stream(sid);
+            }
+            return Err(KernelError::InvalidHandle);
+        };
         if let Some(sid) = new_stream {
-            audio_mixer::close_stream(sid);
+            if pcm.mixer_stream.is_none() {
+                pcm.mixer_stream = Some(sid);
+            } else {
+                // Lost the race: a concurrent hw_params already reserved a slot.
+                redundant_stream = Some(sid);
+            }
         }
-        return Err(KernelError::InvalidHandle);
-    };
-    if let Some(sid) = new_stream {
-        pcm.mixer_stream = Some(sid);
+        pcm.format = Some(format);
+        pcm.rate = Some(rate);
+        pcm.channels = Some(channels);
+        pcm.state = STATE_SETUP;
+        pcm.frames_written = 0;
     }
-    pcm.format = Some(format);
-    pcm.rate = Some(rate);
-    pcm.channels = Some(channels);
-    pcm.state = STATE_SETUP;
-    pcm.frames_written = 0;
+    // Free the redundant slot with the table lock released (leaf-lock invariant).
+    if let Some(sid) = redundant_stream {
+        audio_mixer::close_stream(sid);
+    }
     Ok(())
 }
 
@@ -779,6 +797,11 @@ pub fn self_test() -> KernelResult<()> {
     hw_params(p, 2, 48000, 2)?;
     check!(state(p) == Some(STATE_SETUP), "hw_params -> SETUP");
     check!(params(p) == Some((2, 48000, 2)), "params stored");
+    // Idempotent repeat: a second HW_PARAMS reuses the already-reserved mixer
+    // slot (need_stream == false) rather than opening/leaking another.
+    hw_params(p, 2, 48000, 2)?;
+    check!(state(p) == Some(STATE_SETUP), "repeat hw_params stays SETUP");
+    check!(params(p) == Some((2, 48000, 2)), "repeat hw_params keeps params");
     // PREPARE -> PREPARED, then a write auto-starts to RUNNING.
     prepare(p)?;
     check!(state(p) == Some(STATE_PREPARED), "prepare -> PREPARED");

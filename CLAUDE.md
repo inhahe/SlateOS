@@ -5,7 +5,8 @@ This is a Rust microkernel OS for x86_64 desktops. The entire codebase is writte
 ## Project Layout and Key Files
 
 - `design.txt` — full design specification (the "what")
-- `roadmap.md` — phased task list with dependencies and status (the "when")
+- `roadmap.md` — **the live source of truth for task progress/status** (the "when"). This is the phased task list with dependencies and status; consult and update it when starting or finishing a task.
+- `roadmap-detailed.md` — the design reference: an exhaustive, `design.txt`-derived feature inventory (finer-grained than `roadmap.md`, but NOT the status authority — it lags). Annotate it in place with concise status flags (`[x]` done, `[-]` in progress, `[~]`/blocked + a short "blocked by …" note) **without deleting any information**, and only when the status is verified (cross-referenced against `roadmap.md` or the code) — never fabricate done-status, and don't attempt a one-shot reconciliation of every item. See design-decisions.md §13.
 - `scheduler.txt`, `ipc.txt`, `memory management.txt` — deep dives on subsystems
 - `design-review.txt`, `design desicions.txt`, `other design decisions.txt` — rationale and tradeoffs
 

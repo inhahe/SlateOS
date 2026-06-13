@@ -51,6 +51,7 @@ extern crate alloc;
 mod ac97;
 mod acpi;
 mod apic;
+mod audio_alsa;
 mod audio_history;
 mod audio_mixer;
 mod audio_notify;
@@ -2816,6 +2817,12 @@ extern "C" fn kernel_main() -> ! {
 
     // Audio mixer self-test.
     audio_mixer::self_test();
+
+    // ALSA PCM ABI self-test (Linux audio-compat foundation).
+    if let Err(e) = audio_alsa::self_test() {
+        serial_println!("FATAL: ALSA PCM ABI self-test failed: {}", e);
+        cpu::halt_loop();
+    }
 
     // System notification sounds self-test.
     audio_notify::self_test();

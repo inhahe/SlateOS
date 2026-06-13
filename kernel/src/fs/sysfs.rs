@@ -26,7 +26,13 @@
 //! │           ├── online    Online CPU range, e.g. "0-7" (read-only)
 //! │           ├── present   Present (populated) CPU range (read-only)
 //! │           ├── possible  Possible CPU range (read-only)
-//! │           └── kernel_max Highest addressable CPU index (read-only)
+//! │           ├── kernel_max Highest addressable CPU index (read-only)
+//! │           └── cpuN/                 One per present CPU
+//! │               └── topology/
+//! │                   ├── physical_package_id   Socket id (read-only)
+//! │                   ├── core_id               Core id within socket
+//! │                   ├── core_siblings[_list]  Threads in same socket
+//! │                   └── thread_siblings[_list] Threads in same core
 //! └── fs/
 //!     ├── cache_sectors    Buffer cache capacity (read-only)
 //!     ├── cache_stats      Buffer cache hit/miss stats (read-only)
@@ -111,6 +117,12 @@ enum SysPath<'a> {
     SystemCpuDir,
     /// A CPU range file: /sys/devices/system/cpu/online etc.
     CpuFile(&'a str),
+    /// A per-CPU directory: /sys/devices/system/cpu/cpuN/
+    CpuN(usize),
+    /// A per-CPU topology directory: /sys/devices/system/cpu/cpuN/topology/
+    CpuNTopologyDir(usize),
+    /// A per-CPU topology file: /sys/devices/system/cpu/cpuN/topology/core_id etc.
+    CpuTopoFile(usize, &'a str),
     /// File in fs/ subdir: /sys/fs/cache_sectors etc.
     FsFile(&'a str),
     /// Not found.
@@ -138,6 +150,80 @@ const FS_FILES: &[&str] = &["cache_sectors", "cache_stats", "mount_count"];
 /// nproc, hwloc, and OpenMP/TBB runtimes consult to size thread pools — they
 /// try this authoritative sysfs path *before* falling back to /proc/cpuinfo.
 const CPU_FILES: &[&str] = &["online", "present", "possible", "kernel_max"];
+
+/// Per-CPU topology files in /sys/devices/system/cpu/cpuN/topology/.
+///
+/// hwloc and lscpu read these to reconstruct the socket/core/thread layout:
+/// `physical_package_id` (socket), `core_id`, and the sibling maps/lists.
+/// Both the hex-mask (`*_siblings`) and CPU-list (`*_siblings_list`) forms are
+/// provided because hwloc parses the mask form on older kernels and the list
+/// form on newer ones.
+const CPU_TOPOLOGY_FILES: &[&str] = &[
+    "physical_package_id",
+    "core_id",
+    "core_siblings",
+    "core_siblings_list",
+    "thread_siblings",
+    "thread_siblings_list",
+];
+
+/// Parse a `cpuN` directory name into its index, e.g. `"cpu3"` -> `Some(3)`.
+/// Rejects names without the `cpu` prefix, with a non-numeric tail, or with
+/// leading zeros (`cpu03`) to match Linux's exact `cpuN` naming.
+fn parse_cpu_dir(name: &str) -> Option<usize> {
+    let digits = name.strip_prefix("cpu")?;
+    if digits.is_empty() || (digits.len() > 1 && digits.starts_with('0')) {
+        return None;
+    }
+    if !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse::<usize>().ok()
+}
+
+/// Classify the path tail beneath `/sys/devices/system/cpu/`.  `tail` is the
+/// portion after `cpu/` (e.g. `""`, `"online"`, `"cpu0/topology/core_id"`).
+fn classify_cpu_tail(tail: &str) -> SysPath<'_> {
+    if tail.is_empty() {
+        return SysPath::SystemCpuDir;
+    }
+    let (head, rest) = match tail.find('/') {
+        Some(pos) => {
+            let (a, b) = tail.split_at(pos);
+            (a, b.get(1..).unwrap_or(""))
+        }
+        None => (tail, ""),
+    };
+    // A flat range file (online/present/possible/kernel_max).
+    if rest.is_empty() && CPU_FILES.contains(&head) {
+        return SysPath::CpuFile(head);
+    }
+    // A per-CPU directory cpuN — must index a present CPU.
+    if let Some(idx) = parse_cpu_dir(head) {
+        if idx >= crate::acpi::processor_count() {
+            return SysPath::NotFound;
+        }
+        if rest.is_empty() {
+            return SysPath::CpuN(idx);
+        }
+        let (sub, leaf) = match rest.find('/') {
+            Some(pos) => {
+                let (a, b) = rest.split_at(pos);
+                (a, b.get(1..).unwrap_or(""))
+            }
+            None => (rest, ""),
+        };
+        if sub == "topology" {
+            if leaf.is_empty() {
+                return SysPath::CpuNTopologyDir(idx);
+            } else if !leaf.contains('/') && CPU_TOPOLOGY_FILES.contains(&leaf) {
+                return SysPath::CpuTopoFile(idx, leaf);
+            }
+        }
+        return SysPath::NotFound;
+    }
+    SysPath::NotFound
+}
 
 fn classify_path(rel: &str) -> SysPath<'_> {
     if rel.is_empty() {
@@ -203,13 +289,7 @@ fn classify_path(rel: &str) -> SysPath<'_> {
                             None => (tail, ""),
                         };
                         if third == "cpu" {
-                            if rest2.is_empty() {
-                                SysPath::SystemCpuDir
-                            } else if !rest2.contains('/') && CPU_FILES.contains(&rest2) {
-                                SysPath::CpuFile(rest2)
-                            } else {
-                                SysPath::NotFound
-                            }
+                            classify_cpu_tail(rest2)
                         } else {
                             SysPath::NotFound
                         }
@@ -309,6 +389,107 @@ fn gen_cpu_file(name: &str) -> KernelResult<Vec<u8>> {
         }
         _ => Err(KernelError::NotFound),
     }
+}
+
+/// Format a set of CPU ids as a Linux CPU list (`0-2,4`), compressing
+/// contiguous runs into ranges.  Input need not be sorted; duplicates are
+/// collapsed.  Always terminated with a newline.
+fn fmt_cpu_list(cpus: &[u32]) -> String {
+    let mut ids: Vec<u32> = cpus.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+
+    let mut out = String::new();
+    // Current contiguous run [start, end]; flushed when the run breaks.
+    let mut run: Option<(u32, u32)> = None;
+    let flush = |out: &mut String, start: u32, end: u32| {
+        if !out.is_empty() {
+            out.push(',');
+        }
+        if start == end {
+            out.push_str(&format!("{start}"));
+        } else {
+            out.push_str(&format!("{start}-{end}"));
+        }
+    };
+    for &id in &ids {
+        match run {
+            // Extend the run when `id` immediately follows `end`.
+            Some((start, end)) if id == end.saturating_add(1) => {
+                run = Some((start, id));
+            }
+            Some((start, end)) => {
+                flush(&mut out, start, end);
+                run = Some((id, id));
+            }
+            None => run = Some((id, id)),
+        }
+    }
+    if let Some((start, end)) = run {
+        flush(&mut out, start, end);
+    }
+    out.push('\n');
+    out
+}
+
+/// Format a set of CPU ids as a Linux hex CPU mask.  Our `MAX_CPUS` is 16, so
+/// the mask always fits in a single 32-bit word, rendered zero-padded to eight
+/// hex digits the way hwloc expects.  Always terminated with a newline.
+fn fmt_cpu_mask(cpus: &[u32]) -> String {
+    let mut mask: u32 = 0;
+    for &c in cpus {
+        if c < 32 {
+            mask |= 1u32 << c;
+        }
+    }
+    format!("{mask:08x}\n")
+}
+
+/// Generate a per-CPU topology file.  Topology is sourced from the real,
+/// already-detected layout in `cputopo`; if detection has not populated an
+/// entry we fall back to a single-thread core in package 0 (the same honest
+/// "we don't know better" layout `cputopo::init_defaults` itself uses), never
+/// fabricated data.
+fn gen_cpu_topo_file(cpu_idx: usize, name: &str) -> KernelResult<Vec<u8>> {
+    // Idempotent: populates the snapshot from cpu_topology on first call.
+    crate::fs::cputopo::init_defaults();
+
+    let id = cpu_idx as u32;
+    let cpu = crate::fs::cputopo::get_cpu(id);
+    let package_id = cpu.as_ref().map_or(0, |c| c.package_id);
+    let core_id = cpu.as_ref().map_or(id, |c| c.core_id);
+
+    let bytes = match name {
+        "physical_package_id" => format!("{package_id}\n").into_bytes(),
+        "core_id" => format!("{core_id}\n").into_bytes(),
+        "core_siblings" | "core_siblings_list" => {
+            // All logical CPUs in the same package (socket), including self.
+            let mut sibs: Vec<u32> = crate::fs::cputopo::cpus_in_package(package_id)
+                .iter()
+                .map(|c| c.id)
+                .collect();
+            if sibs.is_empty() {
+                sibs.push(id);
+            }
+            if name == "core_siblings" {
+                fmt_cpu_mask(&sibs).into_bytes()
+            } else {
+                fmt_cpu_list(&sibs).into_bytes()
+            }
+        }
+        "thread_siblings" | "thread_siblings_list" => {
+            // Threads sharing this physical core, including self.
+            let mut sibs = crate::fs::cputopo::thread_siblings(id);
+            sibs.push(id);
+            if name == "thread_siblings" {
+                fmt_cpu_mask(&sibs).into_bytes()
+            } else {
+                fmt_cpu_list(&sibs).into_bytes()
+            }
+        }
+        _ => return Err(KernelError::NotFound),
+    };
+    Ok(bytes)
 }
 
 fn gen_fs_file(name: &str) -> KernelResult<Vec<u8>> {
@@ -452,10 +633,42 @@ impl FileSystem for SysFs {
                 }])
             }
             SysPath::SystemCpuDir => {
-                let entries = CPU_FILES
+                let mut entries: Vec<DirEntry> = CPU_FILES
                     .iter()
                     .map(|name| {
                         let size = gen_cpu_file(name).map_or(0, |d| d.len() as u64);
+                        DirEntry {
+                            name: String::from(*name),
+                            entry_type: EntryType::File,
+                            size,
+                        }
+                    })
+                    .collect();
+                // One cpuN directory per present CPU.
+                for i in 0..crate::acpi::processor_count() {
+                    entries.push(DirEntry {
+                        name: format!("cpu{i}"),
+                        entry_type: EntryType::Directory,
+                        size: 0,
+                    });
+                }
+                Ok(entries)
+            }
+            SysPath::CpuN(_) => {
+                // Each cpuN exposes a topology/ subdir (cache/ is omitted: no
+                // per-CPU cache share-maps are honestly available yet).
+                Ok(vec![DirEntry {
+                    name: String::from("topology"),
+                    entry_type: EntryType::Directory,
+                    size: 0,
+                }])
+            }
+            SysPath::CpuNTopologyDir(idx) => {
+                let entries = CPU_TOPOLOGY_FILES
+                    .iter()
+                    .map(|name| {
+                        let size =
+                            gen_cpu_topo_file(idx, name).map_or(0, |d| d.len() as u64);
                         DirEntry {
                             name: String::from(*name),
                             entry_type: EntryType::File,
@@ -497,13 +710,16 @@ impl FileSystem for SysFs {
             | SysPath::DevicesDir
             | SysPath::PciDir
             | SysPath::SystemDir
-            | SysPath::SystemCpuDir => Err(KernelError::IsADirectory),
+            | SysPath::SystemCpuDir
+            | SysPath::CpuN(_)
+            | SysPath::CpuNTopologyDir(_) => Err(KernelError::IsADirectory),
 
             SysPath::KernelFile(name) => gen_kernel_file(name),
             SysPath::ParamFile(name) => gen_param_file(name),
             SysPath::PciDevice(bdf) => gen_pci_device(bdf),
             SysPath::FsFile(name) => gen_fs_file(name),
             SysPath::CpuFile(name) => gen_cpu_file(name),
+            SysPath::CpuTopoFile(idx, name) => gen_cpu_topo_file(idx, name),
             SysPath::NotFound => Err(KernelError::NotFound),
         }
     }
@@ -582,6 +798,24 @@ impl FileSystem for SysFs {
                     size,
                 })
             }
+            SysPath::CpuN(idx) => Ok(DirEntry {
+                name: format!("cpu{idx}"),
+                entry_type: EntryType::Directory,
+                size: 0,
+            }),
+            SysPath::CpuNTopologyDir(_) => Ok(DirEntry {
+                name: String::from("topology"),
+                entry_type: EntryType::Directory,
+                size: 0,
+            }),
+            SysPath::CpuTopoFile(idx, name) => {
+                let size = gen_cpu_topo_file(idx, name).map_or(0, |d| d.len() as u64);
+                Ok(DirEntry {
+                    name: String::from(name),
+                    entry_type: EntryType::File,
+                    size,
+                })
+            }
             SysPath::NotFound => Err(KernelError::NotFound),
         }
     }
@@ -611,7 +845,8 @@ impl FileSystem for SysFs {
             SysPath::KernelFile(_)
             | SysPath::FsFile(_)
             | SysPath::PciDevice(_)
-            | SysPath::CpuFile(_) => {
+            | SysPath::CpuFile(_)
+            | SysPath::CpuTopoFile(_, _) => {
                 // Read-only files.
                 Err(KernelError::NotSupported)
             }
@@ -620,7 +855,9 @@ impl FileSystem for SysFs {
             | SysPath::DevicesDir
             | SysPath::PciDir
             | SysPath::SystemDir
-            | SysPath::SystemCpuDir => Err(KernelError::IsADirectory),
+            | SysPath::SystemCpuDir
+            | SysPath::CpuN(_)
+            | SysPath::CpuNTopologyDir(_) => Err(KernelError::IsADirectory),
             SysPath::NotFound => Err(KernelError::NotFound),
         }
     }
@@ -889,6 +1126,87 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!(
             "[sysfs]   devices/system/cpu: OK (online={}, present={})",
             online_txt.trim(), present_txt.trim()
+        );
+    }
+
+    // 12. Per-CPU topology subtree (/sys/devices/system/cpu/cpuN/topology/).
+    // hwloc and lscpu read these to reconstruct socket/core/thread layout.
+    {
+        let ncpu = crate::acpi::processor_count();
+        // cpu/ lists one cpuN directory per present CPU.
+        let cpu_dir = fs.readdir("/devices/system/cpu")?;
+        for i in 0..ncpu {
+            let want = format!("cpu{i}");
+            assert!(
+                cpu_dir.iter().any(|e| e.name == want
+                    && e.entry_type == EntryType::Directory),
+                "devices/system/cpu missing '{}'",
+                want
+            );
+        }
+
+        // cpu0 always exists; it exposes a topology/ subdir.
+        let cpu0 = fs.readdir("/devices/system/cpu/cpu0")?;
+        assert!(
+            cpu0.iter().any(|e| e.name == "topology"
+                && e.entry_type == EntryType::Directory),
+            "cpu0 should contain 'topology'"
+        );
+
+        // topology/ lists exactly the topology files.
+        let topo = fs.readdir("/devices/system/cpu/cpu0/topology")?;
+        for name in CPU_TOPOLOGY_FILES {
+            assert!(
+                topo.iter().any(|e| e.name == *name && e.entry_type == EntryType::File),
+                "cpu0/topology missing '{}'",
+                name
+            );
+        }
+
+        // physical_package_id and core_id parse as numbers.
+        let pkg = fs.read_file("/devices/system/cpu/cpu0/topology/physical_package_id")?;
+        let pkg_txt = core::str::from_utf8(&pkg).map_err(|_| KernelError::InternalError)?;
+        let _pkg_val: u32 = pkg_txt.trim().parse().map_err(|_| KernelError::InternalError)?;
+        let core = fs.read_file("/devices/system/cpu/cpu0/topology/core_id")?;
+        let core_txt = core::str::from_utf8(&core).map_err(|_| KernelError::InternalError)?;
+        let _core_val: u32 = core_txt.trim().parse().map_err(|_| KernelError::InternalError)?;
+
+        // thread_siblings_list always includes self (cpu0).
+        let tsl = fs.read_file("/devices/system/cpu/cpu0/topology/thread_siblings_list")?;
+        let tsl_txt = core::str::from_utf8(&tsl).map_err(|_| KernelError::InternalError)?;
+        assert!(
+            tsl_txt.split([',', '-'])
+                .any(|tok| tok.trim() == "0"),
+            "thread_siblings_list {:?} should include cpu 0",
+            tsl_txt
+        );
+
+        // core_siblings (hex mask) has bit 0 set (self is in its own socket).
+        let csm = fs.read_file("/devices/system/cpu/cpu0/topology/core_siblings")?;
+        let csm_txt = core::str::from_utf8(&csm).map_err(|_| KernelError::InternalError)?;
+        let csm_val = u32::from_str_radix(csm_txt.trim(), 16)
+            .map_err(|_| KernelError::InternalError)?;
+        assert!(csm_val & 1 == 1, "core_siblings {:?} should set bit 0", csm_txt);
+
+        // Topology files are read-only.
+        assert!(
+            fs.write_file("/devices/system/cpu/cpu0/topology/core_id", b"7").is_err(),
+            "topology/core_id should reject writes"
+        );
+
+        // Out-of-range CPU and unknown topology file are NotFound.
+        let bogus_cpu = format!("/devices/system/cpu/cpu{ncpu}");
+        assert!(fs.stat(&bogus_cpu).is_err(), "cpu{} should not exist", ncpu);
+        assert!(
+            fs.stat("/devices/system/cpu/cpu0/topology/bogus").is_err(),
+            "unknown topology file should be NotFound"
+        );
+        // cpuN with a leading zero is not a valid Linux name.
+        assert!(fs.stat("/devices/system/cpu/cpu00").is_err());
+
+        serial_println!(
+            "[sysfs]   devices/system/cpu/cpuN/topology: OK ({} cpuN dirs)",
+            ncpu
         );
     }
 

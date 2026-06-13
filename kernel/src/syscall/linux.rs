@@ -23740,84 +23740,66 @@ fn sys_migrate_pages(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let pid = args.arg0 as i32;
     let maxnode = args.arg1;
-    if maxnode > (1 << 23) {
-        return linux_err(errno::EINVAL);
-    }
-    if maxnode == 0 {
-        // No mask supplied: target is the empty set, which Linux
-        // rejects as "no valid target node".
-        return linux_err(errno::EINVAL);
-    }
-    let bytes = maxnode.div_ceil(8) as usize;
-    if args.arg2 == 0 || args.arg3 == 0 {
-        return linux_err(errno::EFAULT);
-    }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg2, bytes) {
-        return linux_err(linux_errno_for(e));
-    }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg3, bytes) {
-        return linux_err(linux_errno_for(e));
-    }
 
-    // Read both masks into heap Vec<u8>; cap by the existing
-    // maxnode > (1 << 23) check above.
-    let mut old_mask = alloc::vec![0u8; bytes];
-    let mut new_mask = alloc::vec![0u8; bytes];
-    // SAFETY: validate_user_read above confirmed both buffers are
-    // readable; copy_from_user does the SMAP-safe transfer.
-    let r1 = unsafe {
-        crate::mm::user::copy_from_user(
-            args.arg2,
-            old_mask.as_mut_ptr(),
-            bytes,
-        )
+    // Linux v6.6 `kernel_migrate_pages` (mm/mempolicy.c) reads BOTH
+    // nodemasks via `get_nodes` BEFORE the task lookup, the ptrace
+    // check, and the capability gate.  Old mask first, then new mask,
+    // both with the same `maxnode`.  `get_nodes` semantics (shared with
+    // mbind/set_mempolicy via `get_nodes_uma`): a NULL mask is an empty
+    // set + success (NOT -EFAULT); `--maxnode` underflow on a non-NULL
+    // mask makes the cap check fire -> -EINVAL; an over-cap maxnode is
+    // -EINVAL; an unreadable mask is -EFAULT.  Pre-batch this had its
+    // own divergent inline logic (`maxnode > 1<<23` cap, unconditional
+    // `maxnode == 0 -> EINVAL`, `arg2==0||arg3==0 -> EFAULT`); the
+    // verbatim `get_nodes` rejects none of those the same way (NULL is
+    // empty success, the cap is 32768, and maxnode==0 underflows only
+    // with a non-NULL mask).
+    let (_old_empty, _old_extra) = match get_nodes_uma(args.arg2, maxnode) {
+        Ok(v) => v,
+        Err(e) => return linux_err(e),
     };
-    if let Err(e) = r1 {
-        return linux_err(linux_errno_for(e));
-    }
-    // SAFETY: as above for the second buffer.
-    let r2 = unsafe {
-        crate::mm::user::copy_from_user(
-            args.arg3,
-            new_mask.as_mut_ptr(),
-            bytes,
-        )
+    let (new_empty, new_extra) = match get_nodes_uma(args.arg3, maxnode) {
+        Ok(v) => v,
+        Err(e) => return linux_err(e),
     };
-    if let Err(e) = r2 {
-        return linux_err(linux_errno_for(e));
-    }
 
-    // Linux kernel_migrate_pages (mm/mempolicy.c): after both get_nodes
-    // calls succeed, `task = pid ? find_task_by_vpid(pid) : current`,
-    // and `if (!task) return -ESRCH`.  Negative pids cast to pid_t are
-    // out-of-range for the idr lookup and return NULL too, so they
-    // also yield ESRCH (not EINVAL).  Our pre-batch stub rejected
-    // pid<0 with EINVAL up front, before the mask copy, hiding the
-    // ESRCH discriminator and reordering the EFAULT/EINVAL gates.
-    // No per-task tracking is available here beyond `current`, so any
-    // non-zero pid that isn't the current task id resolves to NULL
-    // and we return ESRCH (matches Linux for unknown pid).  ptrace
-    // EPERM would fire AFTER ESRCH if the task existed but couldn't
-    // be inspected — when real task tracking lands, slot that gate in
-    // between this check and the mask intersection below.
+    // `task = pid ? find_task_by_vpid(pid) : current; if (!task)
+    // return -ESRCH`.  Negative pids cast to pid_t are out-of-range for
+    // the idr lookup and return NULL too, so they also yield ESRCH (not
+    // EINVAL).  No per-task tracking is available here beyond `current`,
+    // so any non-zero pid that isn't the current task id resolves to
+    // NULL -> ESRCH (matches Linux for an unknown pid).  ptrace EPERM
+    // would fire AFTER ESRCH if the task existed but couldn't be
+    // inspected — when real task tracking lands, slot that gate in
+    // between this check and the capability/intersection checks below.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let current_tid_i32 = crate::sched::current_task_id() as i32;
     if pid != 0 && pid != current_tid_i32 {
         return linux_err(errno::ESRCH);
     }
 
-    // new_nodes ∩ {0}: bit 0 must be set (or the target is empty).
-    let new_has_node0 = (new_mask[0] & 1) != 0;
-    if !new_has_node0 {
+    // After the task is found, Linux sets `err = -EINVAL`, passes the
+    // ptrace check (true for `current`), then:
+    //   task_nodes = cpuset_mems_allowed(task);   // = {0} on UMA
+    //   if (!nodes_subset(*new, task_nodes) && !capable(CAP_SYS_NICE))
+    //       err = -EPERM;  goto out_put;
+    // `*new` is a subset of {0} iff it names no node other than node 0,
+    // i.e. `!new_extra`.  The dispatch context carries no CAP_SYS_NICE
+    // (unprivileged ABI surface), so naming any non-existent node is
+    // -EPERM — Linux's answer for an unprivileged caller.
+    if new_extra {
+        return linux_err(errno::EPERM);
+    }
+    //   nodes_and(*new, *new, cpuset_mems_allowed(current)); // ∩ {0}
+    //   if (nodes_empty(*new)) goto out_put;   // err still -EINVAL
+    // An empty `*new` intersects {0} to empty -> -EINVAL.
+    if new_empty {
         return linux_err(errno::EINVAL);
     }
-    // We intentionally ignore extra bits in new_mask (Linux ignores
-    // bits outside mems_allowed for the intersection computation).
-    // Same for old_mask — bits > 0 are irrelevant on UMA.
-    // Suppress unused-variable warnings for the read buffer.
-    let _ = old_mask;
-
-    // Nothing actually moves: every page is already on node 0.
+    // do_migrate_pages: every page already lives on node 0, so nothing
+    // moves and the call is a trivial success.  The old mask is only
+    // used by Linux to map source->dest nodes, a no-op on a single-node
+    // system, so `_old_*` are intentionally unused.
     SyscallResult::ok(0)
 }
 
@@ -37811,7 +37793,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // Case 3: target mask = {bit 1} (no node 0) -> -EINVAL.
+        // Case 3: target mask = {bit 1} (no node 0) -> -EPERM.
+        // Batch 547: faithful kernel_migrate_pages.  `*new = {1}` is not
+        // a subset of mems_allowed = {0}; with no CAP_SYS_NICE in the
+        // dispatch context, `nodes_subset` failure yields -EPERM (it is
+        // checked BEFORE the `nodes_and`/`nodes_empty` -EINVAL gate).
+        // Pre-batch this conflated the EPERM/EINVAL split into -EINVAL.
         let bad: u64 = 0x2;
         let a = SyscallArgs {
             arg0: 0, arg1: 64,
@@ -37820,9 +37807,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             arg4: 0, arg5: 0,
         };
         let r = dispatch_linux(nr::MIGRATE_PAGES, &a);
-        if r.value != -i64::from(errno::EINVAL) {
+        if r.value != i64::from(errno::EPERM).wrapping_neg() {
             serial_println!(
-                "[syscall/linux]   FAIL: migrate_pages({{0}},{{1}}) -> {} (expected -EINVAL)",
+                "[syscall/linux]   FAIL: migrate_pages({{0}},{{1}}) -> {} (expected -EPERM)",
                 r.value,
             );
             return Err(KernelError::InternalError);
@@ -37845,7 +37832,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // Case 5: maxnode > 0 but old_nodes NULL -> -EFAULT.
+        // Case 5: old_nodes NULL, valid new = {0} -> 0.
+        // Batch 547: faithful `get_nodes` treats a NULL mask as an empty
+        // set + success (the `!nmask` short-circuit), NOT -EFAULT.  An
+        // empty source mask with target {0} is a trivial UMA success
+        // (cf. Case 4).  Pre-batch the inline `arg2==0 -> EFAULT` gate
+        // diverged from Linux here.
         let a = SyscallArgs {
             arg0: 0, arg1: 64,
             arg2: 0,
@@ -37853,9 +37845,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             arg4: 0, arg5: 0,
         };
         let r = dispatch_linux(nr::MIGRATE_PAGES, &a);
-        if r.value != -i64::from(errno::EFAULT) {
+        if r.value != 0 {
             serial_println!(
-                "[syscall/linux]   FAIL: migrate_pages(NULL,{{0}}) -> {} (expected -EFAULT)",
+                "[syscall/linux]   FAIL: migrate_pages(NULL,{{0}}) -> {} (expected 0)",
                 r.value,
             );
             return Err(KernelError::InternalError);
@@ -37916,9 +37908,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // Case 9: pid lookup runs AFTER the EFAULT mask check —
-        // (pid=-1, old=NULL, valid new) returns -EFAULT, not
-        // -ESRCH (Linux's get_nodes failure beats pid lookup).
+        // Case 9: pid=-1, old=NULL, valid new -> -ESRCH.
+        // Batch 547: a NULL old mask is now an empty-set success (not
+        // -EFAULT), so both `get_nodes` calls succeed and the pid lookup
+        // runs: find_task_by_vpid(-1) -> NULL -> -ESRCH.  Pre-batch the
+        // NULL-old EFAULT gate beat the pid lookup and returned -EFAULT.
         let a = SyscallArgs {
             arg0: u64::MAX, arg1: 64,
             arg2: 0,
@@ -37926,15 +37920,15 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             arg4: 0, arg5: 0,
         };
         let r = dispatch_linux(nr::MIGRATE_PAGES, &a);
-        if r.value != -i64::from(errno::EFAULT) {
+        if r.value != i64::from(errno::ESRCH).wrapping_neg() {
             serial_println!(
-                "[syscall/linux]   FAIL: migrate_pages(neg pid,NULL old) -> {} (expected -EFAULT)",
+                "[syscall/linux]   FAIL: migrate_pages(neg pid,NULL old) -> {} (expected -ESRCH)",
                 r.value,
             );
             return Err(KernelError::InternalError);
         }
         serial_println!(
-            "[syscall/linux]   migrate_pages pid-lookup-after-mask / neg-pid ESRCH: OK"
+            "[syscall/linux]   migrate_pages get_nodes(old,new)/pid-ESRCH/new-subset EPERM (batch 547): OK"
         );
     }
 
@@ -62935,22 +62929,36 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: get_mempolicy valid not 0");
             return Err(KernelError::InternalError);
         }
-        // migrate_pages(maxnode=0) -> EINVAL (maxnode=0 fires before
-        // the pid lookup; cf. Linux get_nodes underflow path).  Note
-        // batch 215 moved pid<0 from up-front EINVAL to ESRCH after
-        // mask copy, so this test's neg pid no longer drives the
-        // EINVAL — the maxnode=0 path does.
-        let a = SyscallArgs { arg0: u64::MAX, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::MIGRATE_PAGES, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: migrate_pages maxnode=0 not EINVAL");
+        // migrate_pages(maxnode=0, NON-NULL old) -> EINVAL via the
+        // `--maxnode` underflow in get_nodes: `--maxnode` makes maxnode
+        // ULONG_MAX, which (with a non-NULL mask) exceeds the
+        // PAGE_SIZE*BITS_PER_BYTE cap -> -EINVAL.  This `get_nodes(old)`
+        // failure fires BEFORE the pid lookup, so the negative pid here
+        // does not drive the result (Linux: mask read beats ESRCH).
+        // Batch 547: a NON-NULL mask is required to reach the underflow
+        // path — with NULL masks, get_nodes short-circuits to empty
+        // success and the pid lookup would return -ESRCH instead.
+        let mn: u64 = 0x1;
+        let a = SyscallArgs {
+            arg0: u64::MAX, arg1: 0,
+            arg2: (&raw const mn).addr() as u64,
+            arg3: (&raw const mn).addr() as u64,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::MIGRATE_PAGES, &a).value != i64::from(errno::EINVAL).wrapping_neg() {
+            serial_println!("[syscall/linux]   FAIL: migrate_pages maxnode=0 (non-NULL old) not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // migrate_pages(pid=1, maxnode=0, NULL, NULL) -> -EINVAL
-        // (batch 104 upgrade: maxnode==0 is now rejected as an
-        // empty-target-set error; pre-batch returned -ENOSYS).
-        let a = SyscallArgs { arg0: 1, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::MIGRATE_PAGES, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: migrate_pages maxnode=0 not EINVAL");
+        // Same underflow path with a positive pid: get_nodes(old) EINVAL
+        // still fires before the pid lookup.
+        let a = SyscallArgs {
+            arg0: 1, arg1: 0,
+            arg2: (&raw const mn).addr() as u64,
+            arg3: (&raw const mn).addr() as u64,
+            arg4: 0, arg5: 0,
+        };
+        if dispatch_linux(nr::MIGRATE_PAGES, &a).value != i64::from(errno::EINVAL).wrapping_neg() {
+            serial_println!("[syscall/linux]   FAIL: migrate_pages maxnode=0 (pid=1) not EINVAL");
             return Err(KernelError::InternalError);
         }
         // move_pages bad flags -> EINVAL.

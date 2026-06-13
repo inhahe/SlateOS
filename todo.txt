@@ -1,4 +1,45 @@
 
+## DONE (2026-06-12): ABI batch 547 — migrate_pages: convert to get_nodes_uma; faithful EPERM/EINVAL/ESRCH split (kernel_migrate_pages order)
+## Linux v6.6 mm/mempolicy.c kernel_migrate_pages (verified verbatim against raw.githubusercontent.com torvalds/linux v6.6):
+##   err = get_nodes(old, old_nodes, maxnode); if (err) goto out;     // OLD mask first
+##   err = get_nodes(new, new_nodes, maxnode); if (err) goto out;     // NEW mask second (same maxnode)
+##   task = pid ? find_task_by_vpid(pid) : current;
+##   if (!task) { err = -ESRCH; goto out; }                           // unknown/neg pid => ESRCH
+##   err = -EINVAL;                                                   // default once task found
+##   if (!ptrace_may_access(task, PTRACE_MODE_READ_REALCREDS)) { err = -EPERM; goto out_put; }
+##   task_nodes = cpuset_mems_allowed(task);                          // = {0} on UMA
+##   if (!nodes_subset(*new, task_nodes) && !capable(CAP_SYS_NICE)) { err = -EPERM; goto out_put; }
+##   nodes_and(*new, *new, cpuset_mems_allowed(current));             // ∩ {0}
+##   if (nodes_empty(*new)) goto out_put;                             // err still -EINVAL
+##   ... security_task_movememory, get_task_mm, do_migrate_pages -> 0
+## get_nodes (shared with mbind/set_mempolicy via get_nodes_uma): --maxnode; nodes_clear; if(maxnode==0||!nmask) return 0
+##   (NULL mask => empty + SUCCESS, NOT -EFAULT); if(maxnode>32768) -EINVAL; copy/EFAULT.
+## DIVERGENCES (pre-batch sys_migrate_pages had its own inline logic), all now fixed:
+##   (a) cap was maxnode > (1<<23)=8388608; Linux caps (after --maxnode) at 32768.  Now via get_nodes_uma.
+##   (b) `maxnode == 0 -> EINVAL` was UNCONDITIONAL; Linux only EINVALs maxnode==0 with a NON-NULL mask (the --maxnode
+##       underflow over-caps); with a NULL mask, maxnode==0 is empty SUCCESS and the pid lookup runs (=> ESRCH for
+##       unknown pid).  Now faithful.
+##   (c) `arg2==0 || arg3==0 -> EFAULT` rejected NULL masks; Linux treats a NULL mask as an empty set + success.
+##   (d) new-mask handling `(new[0]&1)==0 -> EINVAL` CONFLATED Linux's two distinct gates:
+##       new names a node other than 0 (not subset of {0}) + no CAP_SYS_NICE -> -EPERM (checked FIRST);
+##       new intersects {0} to empty (i.e. new was empty) -> -EINVAL (checked AFTER).
+## FIX (translator-only): sys_migrate_pages now calls get_nodes_uma(arg2, maxnode) then get_nodes_uma(arg3, maxnode)
+##   (old then new), keeps the pid!=0 && pid!=current -> ESRCH lookup, then `if new_extra -> EPERM; if new_empty -> EINVAL`.
+##   Old-mask bits are irrelevant on UMA (do_migrate_pages source->dest map is a single-node no-op): `_old_*` unused.
+##   The inline maxnode cap / NULL-EFAULT / double copy_from_user / mask[0] indexing block was removed.
+## SELF-TEST (boot, dispatch_linux) stamp:
+##   "migrate_pages get_nodes(old,new)/pid-ESRCH/new-subset EPERM (batch 547): OK"
+##   Updated cases in the batch-104 block: Case 3 ({0},{1}) EINVAL->EPERM (new not subset of {0}, no CAP_SYS_NICE);
+##   Case 5 (NULL old,{0}) EFAULT->0 (NULL = empty success); Case 9 (neg pid, NULL old) EFAULT->ESRCH (get_nodes ok,
+##   pid lookup drives result).  Cases 1/2/4/6/7/8 unchanged.  The duplicate maxnode=0 tests (NUMA block) were given a
+##   NON-NULL mask so they still exercise the --maxnode underflow -> EINVAL path (with NULL masks they'd now be ESRCH).
+## NOTE (capability model): EPERM for new_extra assumes no CAP_SYS_NICE in the dispatch context (the unprivileged ABI
+##   surface; caller_pid() is None at boot).  When a real privilege model lands, a CAP_SYS_NICE holder should instead
+##   reach the nodes_and/nodes_empty gate (new_extra then maps to EINVAL, not EPERM) — slot the capable() check there.
+## VERIFIED: build clean; clippy 17466 (DOWN 6 from batch-546's 17472 — removed the inline mask[0] indexing + two
+##   double-copy validate/copy blocks, and the changed asserts use i64::from(errno).wrapping_neg()); boot-test BOOT_OK
+##   + stamp in serial-test.txt + EXIT=0, no SELF-TEST FAILURE.
+
 ## DONE (2026-06-12): ABI batch 546 — mbind/set_mempolicy: get_nodes + mpol_new fidelity (NULL-mask=empty, 32768-bit cap, per-mode/flag emptiness rules, do_mbind ordering)
 ## Linux v6.6 mm/mempolicy.c (verified verbatim against raw.githubusercontent.com torvalds/linux v6.6):
 ##   get_nodes(nodemask_t*, const unsigned long __user *nmask, unsigned long maxnode):
@@ -38,10 +79,7 @@
 ## VERIFIED: build clean; clippy 17472 (DOWN 3 from baseline 17475 — removed two inline mask[0] indexings, helper uses
 ##   .first()/.last_mut(); no new warnings); boot-test BOOT_OK + stamp in serial-test.txt + EXIT=0, no SELF-TEST FAILURE.
 ## FOLLOW-UPS (tracked, not done this batch):
-##   * sys_migrate_pages (~line 23708) still has its own inline `maxnode > (1<<23)` cap and `maxnode==0 -> EINVAL` /
-##     `arg2==0||arg3==0 -> EFAULT` handling, and calls get_nodes TWICE (old + new) in Linux.  Convert it to
-##     get_nodes_uma in a dedicated batch (its --maxnode wraparound interacts with the pid/ESRCH ordering and the
-##     double-mask copy — needs its own careful self-tests).  Until then it keeps the old, looser cap/NULL behavior.
+##   * [DONE in batch 547] sys_migrate_pages converted to get_nodes_uma (see batch-547 entry above).
 ##   * APPROXIMATION (see known-issues.md): get_nodes_uma collapses "any node other than 0" to EINVAL, so a mask of
 ##     {0, N} (node 0 PLUS a non-existent node) is rejected, whereas Linux intersects with mems_allowed={0} and would
 ##     ACCEPT it for PREFERRED/BIND/INTERLEAVE (effective mask = {0}).  Real programs don't pass such masks on a

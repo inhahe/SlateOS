@@ -52,6 +52,7 @@ mod ac97;
 mod acpi;
 mod apic;
 mod audio_alsa;
+mod audio_alsa_ctl;
 mod audio_history;
 mod audio_mixer;
 mod audio_notify;
@@ -2828,6 +2829,13 @@ extern "C" fn kernel_main() -> ! {
     // refcounting behind a /dev/snd/pcmC0D0p fd).
     if let Err(e) = ipc::alsa_pcm::self_test() {
         serial_println!("FATAL: ALSA PCM instance self-test failed: {}", e);
+        cpu::halt_loop();
+    }
+
+    // ALSA control-device ABI self-test (card enumeration foundation behind
+    // /dev/snd/controlC0).
+    if let Err(e) = audio_alsa_ctl::self_test() {
+        serial_println!("FATAL: ALSA control ABI self-test failed: {}", e);
         cpu::halt_loop();
     }
 

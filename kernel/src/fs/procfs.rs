@@ -2852,6 +2852,21 @@ fn fd_link_target(entry: &crate::proc::linux_fd::FdEntry) -> String {
         HandleKind::SignalFd => String::from("anon_inode:[signalfd]"),
         HandleKind::Timerfd => String::from("anon_inode:[timerfd]"),
         HandleKind::Inotify => String::from("anon_inode:inotify"),
+        // ALSA PCM is a real device node, so /proc/self/fd/N resolves to its
+        // /dev/snd path.  The direction (playback `p` vs capture `c`) is
+        // recorded on the instance object; a stale handle falls back to the
+        // playback node name.
+        HandleKind::AlsaPcm => {
+            let capture = crate::ipc::alsa_pcm::is_capture(
+                crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(entry.raw_handle),
+            )
+            .unwrap_or(false);
+            if capture {
+                String::from("/dev/snd/pcmC0D0c")
+            } else {
+                String::from("/dev/snd/pcmC0D0p")
+            }
+        }
     }
 }
 

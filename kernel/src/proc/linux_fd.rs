@@ -139,6 +139,15 @@ pub enum HandleKind {
     /// Close releases one refcount on the in-kernel `INOTIFY_TABLE` entry
     /// (and, on final close, every native watch it owns).
     Inotify,
+    /// ALSA PCM substream — Linux `/dev/snd/pcmC0D0p` (playback) /
+    /// `pcmC0D0c` (capture).  `raw_handle` holds the
+    /// `ipc::alsa_pcm::AlsaPcmHandle` raw u64.  The substream is driven via
+    /// `ioctl(SNDRV_PCM_IOCTL_*)`; `write` pushes interleaved PCM frames to
+    /// the substream's mixer slot (a later commit wires the routing).
+    /// `status_flags` carries `O_NONBLOCK` when opened non-blocking.  Close
+    /// releases one refcount on the in-kernel `ALSA_PCM_TABLE` entry (and, on
+    /// final close, the mixer slot it holds).
+    AlsaPcm,
 }
 
 impl HandleKind {
@@ -155,7 +164,8 @@ impl HandleKind {
             | Self::Epoll
             | Self::SignalFd
             | Self::Timerfd
-            | Self::Inotify => true,
+            | Self::Inotify
+            | Self::AlsaPcm => true,
         }
     }
 }
@@ -337,6 +347,22 @@ impl FdEntry {
     pub const fn inotify(handle: u64, fd_flags: u32, status_flags: u32) -> Self {
         Self {
             kind: HandleKind::Inotify,
+            raw_handle: handle,
+            fd_flags,
+            status_flags,
+            f_owner: 0,
+            f_owner_sig: 0,
+        }
+    }
+
+    /// Construct an entry for an ALSA PCM substream.  `raw_handle` is the
+    /// `ipc::alsa_pcm::AlsaPcmHandle` raw u64.  `fd_flags` carries
+    /// `FD_CLOEXEC` when opened with `O_CLOEXEC`; `status_flags` carries
+    /// `O_NONBLOCK` when opened non-blocking.
+    #[must_use]
+    pub const fn alsa_pcm(handle: u64, fd_flags: u32, status_flags: u32) -> Self {
+        Self {
+            kind: HandleKind::AlsaPcm,
             raw_handle: handle,
             fd_flags,
             status_flags,

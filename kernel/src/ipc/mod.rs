@@ -19,6 +19,7 @@
 //! - Eventfd wake: 0.5-1us
 //! - Completion port ready events: sub-microsecond
 
+pub mod alsa_pcm;
 pub mod channel;
 pub mod completion;
 pub mod epoll;
@@ -90,6 +91,9 @@ pub fn cleanup_handles(handles: &[(ResourceType, u64)]) {
             }
             ResourceType::Inotify => {
                 inotify::close(inotify::InotifyHandle::from_raw(handle_raw));
+            }
+            ResourceType::AlsaPcm => {
+                alsa_pcm::close(alsa_pcm::AlsaPcmHandle::from_raw(handle_raw));
             }
             ResourceType::File => {
                 // Open file handles are refcounted in the open-file table;

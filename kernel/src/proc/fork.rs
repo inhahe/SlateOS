@@ -244,6 +244,17 @@ fn dup_one(rtype: ResourceType, id: u64) -> KernelResult<Option<(ResourceType, u
             )?;
             Ok(Some((rtype, id)))
         }
+        ResourceType::AlsaPcm => {
+            // Bump the PCM-substream instance refcount so parent and child each
+            // own one reference to the same open substream (shared state and
+            // mixer slot) — same id.  Frames written through either reach the
+            // same mixer stream, matching Linux's shared-kernel-object
+            // semantics across fork.
+            crate::ipc::alsa_pcm::dup(
+                crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(id),
+            )?;
+            Ok(Some((rtype, id)))
+        }
         // No refcounted same-id dup yet — not inherited.  Documented
         // limitation in todo.txt; revisit when these gain dup support.
         ResourceType::Channel
@@ -312,6 +323,11 @@ fn close_one(rtype: ResourceType, id: u64) {
         ResourceType::Inotify => {
             crate::ipc::inotify::close(
                 crate::ipc::inotify::InotifyHandle::from_raw(id),
+            );
+        }
+        ResourceType::AlsaPcm => {
+            crate::ipc::alsa_pcm::close(
+                crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(id),
             );
         }
         // Nothing was duped for these in `dup_one`.

@@ -2824,6 +2824,13 @@ extern "C" fn kernel_main() -> ! {
         cpu::halt_loop();
     }
 
+    // ALSA PCM instance-object lifecycle self-test (per-open substream
+    // refcounting behind a /dev/snd/pcmC0D0p fd).
+    if let Err(e) = ipc::alsa_pcm::self_test() {
+        serial_println!("FATAL: ALSA PCM instance self-test failed: {}", e);
+        cpu::halt_loop();
+    }
+
     // System notification sounds self-test.
     audio_notify::self_test();
 

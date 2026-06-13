@@ -186,6 +186,15 @@ pub enum ResourceType {
     /// (and every native watch it owns) is released when an owning process
     /// dies, and so `fork()` knows to bump the refcount in the child.
     Inotify = 21,
+    /// An ALSA PCM substream instance (Linux `/dev/snd/pcmC0D0p`).
+    ///
+    /// A refcounted reference into [`crate::ipc::alsa_pcm`] holding one open
+    /// PCM substream's state-machine state and the software-mixer slot it
+    /// feeds; no capability is required to create one — the handle itself is
+    /// the authority.  Tracked per-process so the instance (and its mixer
+    /// slot) is released when an owning process dies, and so `fork()` knows to
+    /// bump the refcount in the child.
+    AlsaPcm = 22,
 }
 
 // ---------------------------------------------------------------------------

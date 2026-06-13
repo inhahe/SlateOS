@@ -18,10 +18,20 @@
 ##       snd_pcm_sync_ptr (SYNC_PTR=_IOWR('A',0x23)) embed struct timespec and have time32/time64 (STATUS64)
 ##       variants — handle them in the wiring commit that consumes them, using the explicit non-timespec
 ##       layout ALSA-lib actually sends (SNDRV_PCM_IOCTL_STATUS64 / mmap status with __snd_timespec).
-##   [TODO commit 3] devfs: register /dev/snd/ + pcmC0D0p (playback) and controlC0 nodes so openat()
-##       returns an fd backed by a new HandleKind::AlsaPcm. Mirror the eventfd/timerfd fd-family wiring
-##       (linux_fd.rs FdEntry, cap, fork dup/close, procfs anon-or-path, ipc cleanup_handles, and the
-##       ~50 exhaustive HandleKind match sites in syscall/linux.rs).
+##   [DONE commit 3] /dev/snd PCM device node + HandleKind::AlsaPcm fd family. New module
+##       kernel/src/ipc/alsa_pcm.rs: refcounted per-open PCM substream instance (AlsaPcmHandle +
+##       ALSA_PCM_TABLE BTreeMap, create/dup/close/exists, STATE_* + format/rate/channels/mixer_stream
+##       fields, accessors, boot self-test) — mirrors ipc/timerfd.rs. close() defers the mixer
+##       close_stream() until after the table lock is dropped (no mixer lock nested under ALSA_PCM_TABLE).
+##       Wiring: cap::ResourceType::AlsaPcm=22; HandleKind::AlsaPcm + FdEntry::alsa_pcm() in linux_fd.rs;
+##       fork dup_one/close_one; ipc::cleanup_handles; ~14 exhaustive HandleKind match sites in
+##       syscall/linux.rs (close/read/write/lseek/fsync/ftruncate/readahead/cachestat/flock/fstat/statx/
+##       poll/epoll_ctl/kcmp/pidfd_getfd dup+release+rt-map + the self-test rt-map); procfs fd_link_target
+##       resolves to /dev/snd/pcmC0D0{p,c}. openat path recognition via try_open_alsa_pcm() consulted by
+##       BOTH open_common (absolute) and open_kernel_path_install (resolved-relative); openat2 routes
+##       through sys_openat so it's covered too. read/write/poll currently EINVAL/not-ready — the actual
+##       ioctl/mixer routing + POLLOUT readiness lands in commit 4. Built clean, clippy 17462, BOOT_OK
+##       (both [alsa] ABI and [alsa_pcm] instance self-tests PASS).
 ##   [TODO commit 4] Per-open PCM state machine (OPEN->SETUP->PREPARED->RUNNING) keyed by the fd handle:
 ##       HW_REFINE advertises only the native config (forces ALSA-lib to negotiate down to 48k/S16/2),
 ##       HW_PARAMS validates+stores it and opens an audio_mixer stream, PREPARE/START/DROP/DRAIN drive

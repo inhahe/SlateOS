@@ -1,4 +1,50 @@
 
+## DONE (2026-06-12): ABI batch 545 — mbind/set_mempolicy: sanitize_mpol_flags fidelity (NUMA_BALANCING flag bit, static/relative mutual exclusion, numa-balancing-requires-BIND)
+## Linux v6.6 mm/mempolicy.c (verified verbatim against raw.githubusercontent.com torvalds/linux v6.6):
+##   #define MPOL_F_STATIC_NODES   (1 << 15)
+##   #define MPOL_F_RELATIVE_NODES (1 << 14)
+##   #define MPOL_F_NUMA_BALANCING (1 << 13)
+##   #define MPOL_MODE_FLAGS (MPOL_F_STATIC_NODES | MPOL_F_RELATIVE_NODES | MPOL_F_NUMA_BALANCING)
+##   MPOL_MAX = 6  (DEFAULT 0, PREFERRED 1, BIND 2, INTERLEAVE 3, LOCAL 4, PREFERRED_MANY 5)
+##   static inline int sanitize_mpol_flags(int *mode, unsigned short *flags) {
+##       *flags = *mode & MPOL_MODE_FLAGS;
+##       *mode &= ~MPOL_MODE_FLAGS;
+##       if ((unsigned int)(*mode) >= MPOL_MAX)                      return -EINVAL;
+##       if ((*flags & MPOL_F_STATIC_NODES) && (*flags & MPOL_F_RELATIVE_NODES)) return -EINVAL;
+##       if (*flags & MPOL_F_NUMA_BALANCING) {
+##           if (*mode != MPOL_BIND) return -EINVAL;
+##           *flags |= (MPOL_F_MOF | MPOL_F_MORON);
+##       }
+##       return 0;
+##   }
+##   Both kernel_mbind() and kernel_set_mempolicy() call sanitize_mpol_flags() before get_nodes()/nodemask handling.
+## DIVERGENCE (pre-batch): our MPOL_MODE_FLAGS was (1<<14)|(1<<15) — it OMITTED MPOL_F_NUMA_BALANCING
+##   (bit 13).  The two syscalls used a single combined gate:
+##       if ((mode & 0x7) > 5 || (mode & ~(0x7 | MPOL_MODE_FLAGS)) != 0) return -EINVAL;
+##   Consequences:
+##     (a) MPOL_BIND | MPOL_F_NUMA_BALANCING (0x2002) — Linux ACCEPTS (mode==BIND); we returned EINVAL
+##         because bit 13 read as a stray high bit.
+##     (b) MPOL_BIND | MPOL_F_STATIC_NODES | MPOL_F_RELATIVE_NODES (0xC002) — Linux returns EINVAL
+##         (mutual exclusion); we ACCEPTED it (both flag bits were in the allowed mask, no exclusion check).
+##     (c) MPOL_INTERLEAVE | MPOL_F_NUMA_BALANCING — Linux returns EINVAL (NUMA_BALANCING demands BIND);
+##         after fixing (a) this would have been wrongly accepted without the dedicated rule.
+## FIX (translator-only): added a shared `sanitize_mpol_flags(mode_raw) -> Result<(mode, flags), errno>`
+##   helper (verbatim port) just above sys_mbind, and replaced the combined ad-hoc gate in BOTH
+##   sys_mbind (arg2) and sys_set_mempolicy (arg0) with a call to it.  MPOL_MODE_FLAGS now
+##   (1<<13)|(1<<14)|(1<<15); the residual-mode >= MPOL_MAX, static/relative mutual-exclusion, and
+##   numa-balancing-requires-BIND rules are enforced in Linux's exact order.  mode returned by the
+##   helper is `mode_raw & ~MPOL_MODE_FLAGS`, which sanitize guarantees is in 0..=5, so the downstream
+##   per-mode emptiness match arms are unaffected.  (MPOL_F_MOF|MPOL_F_MORON augmentation is observable
+##   only via policy enforcement, which we do not implement; the accept/reject decision now matches Linux.)
+## SELF-TEST (boot, dispatch_linux): set_mempolicy(BIND|NUMA_BALANCING,{0})->0; (INTERLEAVE|NUMA_BALANCING)->EINVAL;
+##   (BIND|STATIC|RELATIVE)->EINVAL; and the same three for mbind over a 4 KiB range.  Stamp:
+##   "sanitize_mpol_flags NUMA_BALANCING bit + static/relative mutual-exclusion + numa-balancing-requires-BIND (batch 545): OK"
+## VERIFIED: build clean; clippy 17475 (baseline, new asserts use i64::from(errno::EINVAL).wrapping_neg());
+##   boot-test BOOT_OK + stamp in serial-test.txt + EXIT=0, no SELF-TEST FAILURE.
+## DEFERRED (out of scope, later batch): get_nodes() maxnode cap divergence — Linux does `--maxnode;
+##   if (maxnode > PAGE_SIZE*BITS_PER_BYTE) return -EINVAL` whereas we use `maxnode > (1<<23)` with no
+##   decrement; murkier (PAGE_SIZE interpretation on a 16 KiB-page kernel), keep as its own batch.
+
 ## DONE (2026-06-12): ABI batch 544 — semop/semtimedop: E2BIG/EINVAL structural gates precede copy_from_user(sops); nsops unsigned-int truncation
 ## Linux v6.6 ipc/sem.c (verified verbatim against raw.githubusercontent.com torvalds/linux v6.6):
 ##   SYSCALL_DEFINE3(semop)  = do_semtimedop(semid, tsops, nsops, NULL)

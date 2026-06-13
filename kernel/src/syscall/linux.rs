@@ -23136,6 +23136,65 @@ fn sys_move_mount(_args: &SyscallArgs) -> SyscallResult {
 // caller see a clear error.
 // ---------------------------------------------------------------------------
 
+/// Verbatim port of Linux v6.6 `sanitize_mpol_flags` (mm/mempolicy.c).
+///
+/// The raw `mode` argument passed to `mbind` / `set_mempolicy` packs the
+/// base policy mode (low bits) together with the `MPOL_MODE_FLAGS` modifier
+/// bits.  Linux splits and validates them in a fixed order:
+///
+/// ```c
+/// static inline int sanitize_mpol_flags(int *mode, unsigned short *flags)
+/// {
+///     *flags = *mode & MPOL_MODE_FLAGS;
+///     *mode &= ~MPOL_MODE_FLAGS;
+///     if ((unsigned int)(*mode) >= MPOL_MAX)
+///         return -EINVAL;
+///     if ((*flags & MPOL_F_STATIC_NODES) && (*flags & MPOL_F_RELATIVE_NODES))
+///         return -EINVAL;
+///     if (*flags & MPOL_F_NUMA_BALANCING) {
+///         if (*mode != MPOL_BIND)
+///             return -EINVAL;
+///         *flags |= (MPOL_F_MOF | MPOL_F_MORON);
+///     }
+///     return 0;
+/// }
+/// ```
+///
+/// Both `kernel_mbind` and `kernel_set_mempolicy` run this before any
+/// nodemask handling.  Returns `(mode, flags)` (mode stripped of the flag
+/// bits) on success, or the Linux errno on rejection.  The `MPOL_F_MOF`
+/// / `MPOL_F_MORON` augmentation for `MPOL_F_NUMA_BALANCING` is observable
+/// only through later policy enforcement, which we do not implement; we
+/// still perform the validation so the accept/reject decision matches
+/// Linux exactly.
+fn sanitize_mpol_flags(mode_raw: u32) -> Result<(u32, u32), i32> {
+    const MPOL_F_STATIC_NODES: u32 = 1 << 15;
+    const MPOL_F_RELATIVE_NODES: u32 = 1 << 14;
+    const MPOL_F_NUMA_BALANCING: u32 = 1 << 13;
+    const MPOL_MODE_FLAGS: u32 =
+        MPOL_F_STATIC_NODES | MPOL_F_RELATIVE_NODES | MPOL_F_NUMA_BALANCING;
+    // MPOL_MAX is one past the highest valid mode (PREFERRED_MANY == 5).
+    const MPOL_MAX: u32 = 6;
+    const MPOL_BIND: u32 = 2;
+
+    let flags = mode_raw & MPOL_MODE_FLAGS;
+    let mode = mode_raw & !MPOL_MODE_FLAGS;
+    // (unsigned int)(*mode) >= MPOL_MAX — note this is the *full* residual
+    // value, not just the low 3 bits, so any stray high bit outside the
+    // flag set lands here as an out-of-range mode.
+    if mode >= MPOL_MAX {
+        return Err(errno::EINVAL);
+    }
+    if (flags & MPOL_F_STATIC_NODES) != 0 && (flags & MPOL_F_RELATIVE_NODES) != 0
+    {
+        return Err(errno::EINVAL);
+    }
+    if flags & MPOL_F_NUMA_BALANCING != 0 && mode != MPOL_BIND {
+        return Err(errno::EINVAL);
+    }
+    Ok((mode, flags))
+}
+
 /// `mbind(addr, len, mode, nodemask*, maxnode, flags)` — set the NUMA
 /// memory policy for a virtual-address range.
 ///
@@ -23187,8 +23246,6 @@ fn sys_move_mount(_args: &SyscallArgs) -> SyscallResult {
 /// failures.  Cross-reference todo.txt entries 130 (get_mempolicy),
 /// 131 (set_mempolicy), and 132 (this entry).
 fn sys_mbind(args: &SyscallArgs) -> SyscallResult {
-    const MPOL_MODE_MASK: u32 = 0x7;
-    const MPOL_MODE_FLAGS: u32 = (1 << 14) | (1 << 15);
     const MPOL_DEFAULT: u32 = 0;
     const MPOL_PREFERRED: u32 = 1;
     const MPOL_BIND: u32 = 2;
@@ -23200,14 +23257,14 @@ fn sys_mbind(args: &SyscallArgs) -> SyscallResult {
     // but accepting 4 KiB alignment matches what programs assume.
     const ABI_PAGE_SIZE: u64 = 4096;
 
+    // Linux do_mbind -> kernel_mbind splits/validates the packed mode word
+    // via sanitize_mpol_flags before any range or nodemask handling.
     #[allow(clippy::cast_possible_truncation)]
     let mode_raw = args.arg2 as u32;
-    if (mode_raw & MPOL_MODE_MASK) > 5
-        || (mode_raw & !(MPOL_MODE_MASK | MPOL_MODE_FLAGS)) != 0
-    {
-        return linux_err(errno::EINVAL);
-    }
-    let mode = mode_raw & MPOL_MODE_MASK;
+    let (mode, _flags) = match sanitize_mpol_flags(mode_raw) {
+        Ok(v) => v,
+        Err(e) => return linux_err(e),
+    };
 
     // mbind flags: MOVE | MOVE_ALL | STRICT (= 1 | 2 | 4).
     const MPOL_MF_MOVE_ALL: u32 = 1 << 1;
@@ -23349,8 +23406,6 @@ fn sys_mbind(args: &SyscallArgs) -> SyscallResult {
 /// also assumes MPOL_DEFAULT), so this asymmetry is acceptable.
 /// Documented as a limitation in todo.txt.
 fn sys_set_mempolicy(args: &SyscallArgs) -> SyscallResult {
-    const MPOL_MODE_MASK: u32 = 0x7;
-    const MPOL_MODE_FLAGS: u32 = (1 << 14) | (1 << 15);
     const MPOL_DEFAULT: u32 = 0;
     const MPOL_PREFERRED: u32 = 1;
     const MPOL_BIND: u32 = 2;
@@ -23358,14 +23413,14 @@ fn sys_set_mempolicy(args: &SyscallArgs) -> SyscallResult {
     const MPOL_LOCAL: u32 = 4;
     const MPOL_PREFERRED_MANY: u32 = 5;
 
+    // Linux set_mempolicy -> kernel_set_mempolicy validates the packed
+    // mode word via sanitize_mpol_flags before reading the nodemask.
     #[allow(clippy::cast_possible_truncation)]
     let mode_raw = args.arg0 as u32;
-    if (mode_raw & MPOL_MODE_MASK) > 5
-        || (mode_raw & !(MPOL_MODE_MASK | MPOL_MODE_FLAGS)) != 0
-    {
-        return linux_err(errno::EINVAL);
-    }
-    let mode = mode_raw & MPOL_MODE_MASK;
+    let (mode, _flags) = match sanitize_mpol_flags(mode_raw) {
+        Ok(v) => v,
+        Err(e) => return linux_err(e),
+    };
     let maxnode = args.arg2;
     let mask_ptr = args.arg1;
 
@@ -37418,6 +37473,123 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   mbind MOVE_ALL EPERM ahead of addr-align: OK"
+        );
+    }
+
+    // (9g-545) Batch 545: sanitize_mpol_flags fidelity.  Linux v6.6
+    // mm/mempolicy.c::sanitize_mpol_flags treats MPOL_MODE_FLAGS as
+    // (1<<13)|(1<<14)|(1<<15) — i.e. it includes MPOL_F_NUMA_BALANCING
+    // (bit 13) alongside STATIC_NODES (15) and RELATIVE_NODES (14) — and
+    // enforces three rules in order: residual mode < MPOL_MAX, STATIC and
+    // RELATIVE are mutually exclusive, and NUMA_BALANCING is only legal
+    // with MPOL_BIND.  Pre-batch our mask omitted bit 13, so a perfectly
+    // valid `MPOL_BIND | MPOL_F_NUMA_BALANCING` was rejected with EINVAL
+    // (bit 13 looked like a stray high bit), and the static/relative and
+    // numa-balancing-mode rules were absent entirely.
+    {
+        const MPOL_BIND: u64 = 2;
+        const MPOL_INTERLEAVE: u64 = 3;
+        const MPOL_F_RELATIVE_NODES: u64 = 1 << 14;
+        const MPOL_F_STATIC_NODES: u64 = 1 << 15;
+        const MPOL_F_NUMA_BALANCING: u64 = 1 << 13;
+        let mask: u64 = 0x1; // node {0}
+
+        // set_mempolicy(BIND | NUMA_BALANCING, {0}, 64) -> 0.
+        // NUMA_BALANCING is now a recognised flag and legal with BIND;
+        // pre-batch this returned -EINVAL.
+        let a = SyscallArgs {
+            arg0: MPOL_BIND | MPOL_F_NUMA_BALANCING,
+            arg1: (&raw const mask).addr() as u64,
+            arg2: 64, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
+        if r.value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: set_mempolicy(BIND|NUMA_BALANCING,{{0}}) -> {} (expected 0)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // set_mempolicy(INTERLEAVE | NUMA_BALANCING, {0}, 64) -> -EINVAL.
+        // NUMA_BALANCING demands MPOL_BIND.
+        let a = SyscallArgs {
+            arg0: MPOL_INTERLEAVE | MPOL_F_NUMA_BALANCING,
+            arg1: (&raw const mask).addr() as u64,
+            arg2: 64, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
+        if r.value != i64::from(errno::EINVAL).wrapping_neg() {
+            serial_println!(
+                "[syscall/linux]   FAIL: set_mempolicy(INTERLEAVE|NUMA_BALANCING) -> {} (expected -EINVAL)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // set_mempolicy(BIND | STATIC | RELATIVE, {0}, 64) -> -EINVAL.
+        // STATIC and RELATIVE node flags are mutually exclusive.
+        let a = SyscallArgs {
+            arg0: MPOL_BIND | MPOL_F_STATIC_NODES | MPOL_F_RELATIVE_NODES,
+            arg1: (&raw const mask).addr() as u64,
+            arg2: 64, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
+        if r.value != i64::from(errno::EINVAL).wrapping_neg() {
+            serial_println!(
+                "[syscall/linux]   FAIL: set_mempolicy(BIND|STATIC|RELATIVE) -> {} (expected -EINVAL)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // mbind(BIND | NUMA_BALANCING, {0}) over a 4 KiB range -> 0.
+        let a = SyscallArgs {
+            arg0: 0x1000, arg1: 0x1000,
+            arg2: MPOL_BIND | MPOL_F_NUMA_BALANCING,
+            arg3: (&raw const mask).addr() as u64, arg4: 64, arg5: 0,
+        };
+        let r = dispatch_linux(nr::MBIND, &a);
+        if r.value != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: mbind(BIND|NUMA_BALANCING,{{0}}) -> {} (expected 0)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // mbind(INTERLEAVE | NUMA_BALANCING, ...) -> -EINVAL.
+        let a = SyscallArgs {
+            arg0: 0x1000, arg1: 0x1000,
+            arg2: MPOL_INTERLEAVE | MPOL_F_NUMA_BALANCING,
+            arg3: (&raw const mask).addr() as u64, arg4: 64, arg5: 0,
+        };
+        let r = dispatch_linux(nr::MBIND, &a);
+        if r.value != i64::from(errno::EINVAL).wrapping_neg() {
+            serial_println!(
+                "[syscall/linux]   FAIL: mbind(INTERLEAVE|NUMA_BALANCING) -> {} (expected -EINVAL)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // mbind(BIND | STATIC | RELATIVE, ...) -> -EINVAL.
+        let a = SyscallArgs {
+            arg0: 0x1000, arg1: 0x1000,
+            arg2: MPOL_BIND | MPOL_F_STATIC_NODES | MPOL_F_RELATIVE_NODES,
+            arg3: (&raw const mask).addr() as u64, arg4: 64, arg5: 0,
+        };
+        let r = dispatch_linux(nr::MBIND, &a);
+        if r.value != i64::from(errno::EINVAL).wrapping_neg() {
+            serial_println!(
+                "[syscall/linux]   FAIL: mbind(BIND|STATIC|RELATIVE) -> {} (expected -EINVAL)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   sanitize_mpol_flags NUMA_BALANCING bit + static/relative mutual-exclusion + numa-balancing-requires-BIND (batch 545): OK"
         );
     }
 

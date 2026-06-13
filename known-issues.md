@@ -491,6 +491,48 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
+### TD19. Crate-root `#![deny(clippy::pedantic)]` overrides the workspace lint allow-list — DEBT 2026-06-13 (needs operator policy call)
+
+**Where:** every crate carrying a crate-root `#![deny(clippy::all,
+clippy::pedantic)]` (e.g. `posix/src/lib.rs`) vs. the root `Cargo.toml`
+`[workspace.lints.clippy]` block. Reproduce: `cargo clippy -p posix --target
+x86_64-pc-windows-gnu` reports ~3038 errors + 260 warnings.
+
+**What it is:** rustc applies crate-root attributes *after* and at higher
+precedence than the command-line lint flags Cargo derives from
+`[workspace.lints]`. So a crate-root `#![deny(clippy::pedantic)]` re-denies the
+whole pedantic group and overrides every per-lint `= "allow"` in
+`[workspace.lints.clippy]`. The only allows that survive are ones *also* listed
+in that crate's own `#![allow(...)]`. Result: workspace-allowed lints
+(`unreadable_literal` ~1943, `must_use_candidate` ~761, `manual_let_else`, …)
+fire as hard errors anyway. The 260 warnings (`indexing_slicing` 171,
+`arithmetic_side_effects` 89) are correct warn-level per the workspace config.
+This is a design conflict between (a) CLAUDE.md's mandate of
+`#![deny(clippy::all, clippy::pedantic)]` in every crate and (b) the newer
+`[workspace.lints.clippy]` block (`pedantic = "warn"` + centralized allow-list)
+documented as the intended suppression mechanism — mutually exclusive while both
+are in force. Note: 15 userspace tools have already adopted `[lints] workspace =
+true` and dropped their crate-root deny, so the conflict is being resolved
+piecemeal in that direction.
+
+**Impact:** low — bare-metal build and all host tests are green; this only
+affects `clippy -p <crate>` noise. Not blocking feature work.
+
+**Proper fix:** an **operator policy call**, because CLAUDE.md is operator-owned
+and OPT 1 relaxes its "deny in every crate" rule:
+- **OPT 1 (recommended):** remove the redundant crate-root deny from each crate
+  and rely on `[lints] workspace = true`; the workspace config becomes
+  authoritative (`clippy::all` deny, pedantic warn, allow-list effective).
+  Residual non-allowed lints then surface as warnings to fix or add to the
+  allow-list. Downside: pedantic becomes warn-level workspace-wide.
+- **OPT 2:** keep the crate-root deny and copy the full workspace allow-list into
+  every crate's `#![allow(...)]` — the per-crate duplication the workspace block
+  was created to avoid. Already done in source: `decimal_bitwise_operands` was
+  relaxed at both the workspace level and in `posix/src/lib.rs` (our `linux_*`
+  ABI constant tables mirror upstream kernel headers verbatim, so hex literals
+  would obscure the correspondence). Trigger: dedicated lint-policy pass once the
+  operator picks an option.
+
 ### TD18. A group of userspace net/disk/admin tools target syscalls that don't exist in the native ABI — DEBT 2026-06-13
 
 **Where:** `userspace/` tools — net-config (`dhcpcd`, `fw`, `ifconfig`, `ip`,

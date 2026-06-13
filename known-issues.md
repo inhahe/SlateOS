@@ -491,7 +491,26 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
-### TD23. No `/sys/devices/system/cpu/cpuN/cache/` tree — lscpu/hwloc cannot read real cache geometry — DEBT 2026-06-13
+### TD23. No `/sys/devices/system/cpu/cpuN/cache/` tree — lscpu/hwloc cannot read real cache geometry — RESOLVED 2026-06-13
+
+**Resolution (2026-06-13):** Built the per-CPU `cache/indexI/` sysfs subtree in
+`kernel/src/fs/sysfs.rs`, sourced from `cpu::cache_topology()`. Each detected
+cache level/type exposes `level`, `type`, `size`, `coherency_line_size`,
+`ways_of_associativity`, `number_of_sets` (all directly CPUID-derived, honest)
+plus `shared_cpu_map`/`shared_cpu_list` derived from the real topology via
+`cache_shared_cpus()` — which matches `max_sharing` against the known per-core
+(thread-sibling) and whole-package scopes and never overclaims (an unplaceable
+clustered cache falls back to the known-true per-core subset). The tree is
+present only when geometry was detected (`cache_index_count() > 0`); when CPUID
+reports nothing (e.g. QEMU's default model) the `cache/` dir is absent rather
+than fabricated. lscpu's existing reader (fixed under the previous commit)
+lights up automatically with real data on hardware that exposes caches.
+Self-test step 13 covers both the populated and absent paths. The original
+debt write-up follows for history.
+
+---
+
+**Original debt (now resolved):**
 
 **Where:** kernel `kernel/src/fs/sysfs.rs` (would add a `cache/indexN/` subtree
 under each `cpuN`), data source `kernel/src/cpu.rs::cache_topology()` (returns

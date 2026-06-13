@@ -29,11 +29,16 @@
 //! │           ├── kernel_max Highest addressable CPU index (read-only)
 //! │           └── cpuN/                 One per present CPU
 //! │               ├── online            Online toggle, cpu1+ (read-only)
-//! │               └── topology/
-//! │                   ├── physical_package_id   Socket id (read-only)
-//! │                   ├── core_id               Core id within socket
-//! │                   ├── core_siblings[_list]  Threads in same socket
-//! │                   └── thread_siblings[_list] Threads in same core
+//! │               ├── topology/
+//! │               │   ├── physical_package_id   Socket id (read-only)
+//! │               │   ├── core_id               Core id within socket
+//! │               │   ├── core_siblings[_list]  Threads in same socket
+//! │               │   └── thread_siblings[_list] Threads in same core
+//! │               └── cache/indexI/     One per detected cache level/type
+//! │                   ├── level / type / size   CPUID-derived geometry
+//! │                   ├── coherency_line_size
+//! │                   ├── ways_of_associativity / number_of_sets
+//! │                   └── shared_cpu_map[_list]  CPUs sharing this cache
 //! └── fs/
 //!     ├── cache_sectors    Buffer cache capacity (read-only)
 //!     ├── cache_stats      Buffer cache hit/miss stats (read-only)
@@ -126,6 +131,12 @@ enum SysPath<'a> {
     CpuNTopologyDir(usize),
     /// A per-CPU topology file: /sys/devices/system/cpu/cpuN/topology/core_id etc.
     CpuTopoFile(usize, &'a str),
+    /// A per-CPU cache directory: /sys/devices/system/cpu/cpuN/cache/
+    CpuCacheDir(usize),
+    /// A per-CPU cache-index directory: /sys/devices/system/cpu/cpuN/cache/indexI/
+    CpuCacheIndexDir(usize, usize),
+    /// A per-CPU cache file: /sys/devices/system/cpu/cpuN/cache/indexI/size etc.
+    CpuCacheFile(usize, usize, &'a str),
     /// File in fs/ subdir: /sys/fs/cache_sectors etc.
     FsFile(&'a str),
     /// Not found.
@@ -170,11 +181,26 @@ const CPU_TOPOLOGY_FILES: &[&str] = &[
     "thread_siblings_list",
 ];
 
-/// Parse a `cpuN` directory name into its index, e.g. `"cpu3"` -> `Some(3)`.
-/// Rejects names without the `cpu` prefix, with a non-numeric tail, or with
-/// leading zeros (`cpu03`) to match Linux's exact `cpuN` naming.
-fn parse_cpu_dir(name: &str) -> Option<usize> {
-    let digits = name.strip_prefix("cpu")?;
+/// Per-CPU cache files in /sys/devices/system/cpu/cpuN/cache/indexI/.
+///
+/// lscpu reads `level`/`type`/`size`/`ways_of_associativity`; hwloc also reads
+/// the sibling maps to build the cache hierarchy.  Every value is sourced from
+/// `cpu::cache_topology()` (CPUID-derived) — never fabricated.
+const CPU_CACHE_FILES: &[&str] = &[
+    "level",
+    "type",
+    "size",
+    "coherency_line_size",
+    "ways_of_associativity",
+    "number_of_sets",
+    "shared_cpu_map",
+    "shared_cpu_list",
+];
+
+/// Parse an `indexN`-style directory name into its index, with the same
+/// strictness as [`parse_cpu_dir`] (no leading zeros, decimal only).
+fn parse_prefixed_index(name: &str, prefix: &str) -> Option<usize> {
+    let digits = name.strip_prefix(prefix)?;
     if digits.is_empty() || (digits.len() > 1 && digits.starts_with('0')) {
         return None;
     }
@@ -182,6 +208,18 @@ fn parse_cpu_dir(name: &str) -> Option<usize> {
         return None;
     }
     digits.parse::<usize>().ok()
+}
+
+/// Parse a `cpuN` directory name into its index, e.g. `"cpu3"` -> `Some(3)`.
+/// Rejects names without the `cpu` prefix, with a non-numeric tail, or with
+/// leading zeros (`cpu03`) to match Linux's exact `cpuN` naming.
+fn parse_cpu_dir(name: &str) -> Option<usize> {
+    parse_prefixed_index(name, "cpu")
+}
+
+/// Number of cache index entries the kernel can honestly describe.
+fn cache_index_count() -> usize {
+    crate::cpu::cache_topology().len()
 }
 
 /// Classify the path tail beneath `/sys/devices/system/cpu/`.  `tail` is the
@@ -226,6 +264,33 @@ fn classify_cpu_tail(tail: &str) -> SysPath<'_> {
                 return SysPath::CpuNTopologyDir(idx);
             } else if !leaf.contains('/') && CPU_TOPOLOGY_FILES.contains(&leaf) {
                 return SysPath::CpuTopoFile(idx, leaf);
+            }
+        }
+        // Per-CPU cache hierarchy: cache/ -> cache/indexI/ -> cache/indexI/FILE.
+        // Only present when the kernel detected cache geometry.
+        if sub == "cache" {
+            if cache_index_count() == 0 {
+                return SysPath::NotFound;
+            }
+            if leaf.is_empty() {
+                return SysPath::CpuCacheDir(idx);
+            }
+            let (idxname, file) = match leaf.find('/') {
+                Some(pos) => {
+                    let (a, b) = leaf.split_at(pos);
+                    (a, b.get(1..).unwrap_or(""))
+                }
+                None => (leaf, ""),
+            };
+            if let Some(ci) = parse_prefixed_index(idxname, "index") {
+                if ci >= cache_index_count() {
+                    return SysPath::NotFound;
+                }
+                if file.is_empty() {
+                    return SysPath::CpuCacheIndexDir(idx, ci);
+                } else if !file.contains('/') && CPU_CACHE_FILES.contains(&file) {
+                    return SysPath::CpuCacheFile(idx, ci, file);
+                }
             }
         }
         return SysPath::NotFound;
@@ -511,6 +576,79 @@ fn gen_cpu_online_file(cpu_idx: usize) -> Vec<u8> {
     }
 }
 
+/// Determine the set of logical CPUs sharing `cpu_idx`'s cache instance, given
+/// the cache's CPUID-reported `max_sharing` (max logical processors per cache).
+///
+/// We never overclaim: the set is matched against the *real* topology scopes we
+/// know (thread siblings for per-core caches, package siblings for caches that
+/// span the whole socket).  When `max_sharing` falls between those scopes (a
+/// clustered cache we cannot place exactly), we return the largest known scope
+/// that is definitely a subset — never a fabricated wider set.
+fn cache_shared_cpus(cpu_idx: usize, max_sharing: u16) -> Vec<u32> {
+    crate::fs::cputopo::init_defaults();
+    let id = cpu_idx as u32;
+
+    // Per-core scope: this thread plus its SMT siblings.
+    let mut thread: Vec<u32> = crate::fs::cputopo::thread_siblings(id);
+    thread.push(id);
+    thread.sort_unstable();
+    thread.dedup();
+
+    // Whole-package scope.
+    let package_id = crate::fs::cputopo::get_cpu(id).map_or(0, |c| c.package_id);
+    let pkg: Vec<u32> = crate::fs::cputopo::cpus_in_package(package_id)
+        .iter()
+        .map(|c| c.id)
+        .collect();
+
+    let share = usize::from(max_sharing.max(1));
+    if !pkg.is_empty() && share >= pkg.len() {
+        pkg
+    } else if share <= thread.len() {
+        thread
+    } else {
+        // Intermediate (clustered) cache: fall back to the known-true per-core
+        // subset rather than guess which other cores share it.
+        thread
+    }
+}
+
+/// Format a cache size the way Linux's `size` file does: kibibytes with a `K`
+/// suffix (e.g. `32K`, `8192K`).  Sizes that are not a whole number of KiB are
+/// rendered in bytes (no fabricated rounding).
+fn fmt_cache_size(size_bytes: u32) -> String {
+    if size_bytes != 0 && size_bytes.is_multiple_of(1024) {
+        format!("{}K\n", size_bytes / 1024)
+    } else {
+        format!("{size_bytes}\n")
+    }
+}
+
+/// Generate a per-CPU cache file from `cpu::cache_topology()` (CPUID-derived).
+/// The geometry fields are directly honest; the sibling maps are derived from
+/// the real topology via [`cache_shared_cpus`].
+fn gen_cpu_cache_file(cpu_idx: usize, cache_idx: usize, name: &str) -> KernelResult<Vec<u8>> {
+    let topo = crate::cpu::cache_topology();
+    let c = topo.get(cache_idx).ok_or(KernelError::NotFound)?;
+
+    let bytes = match name {
+        "level" => format!("{}\n", c.level).into_bytes(),
+        "type" => format!("{}\n", c.type_name()).into_bytes(),
+        "size" => fmt_cache_size(c.size).into_bytes(),
+        "coherency_line_size" => format!("{}\n", c.line_size).into_bytes(),
+        "ways_of_associativity" => format!("{}\n", c.ways).into_bytes(),
+        "number_of_sets" => format!("{}\n", c.sets).into_bytes(),
+        "shared_cpu_map" => {
+            fmt_cpu_mask(&cache_shared_cpus(cpu_idx, c.max_sharing)).into_bytes()
+        }
+        "shared_cpu_list" => {
+            fmt_cpu_list(&cache_shared_cpus(cpu_idx, c.max_sharing)).into_bytes()
+        }
+        _ => return Err(KernelError::NotFound),
+    };
+    Ok(bytes)
+}
+
 fn gen_fs_file(name: &str) -> KernelResult<Vec<u8>> {
     match name {
         "cache_sectors" => {
@@ -674,14 +812,21 @@ impl FileSystem for SysFs {
                 Ok(entries)
             }
             SysPath::CpuN(idx) => {
-                // Each cpuN exposes a topology/ subdir (cache/ is omitted: no
-                // per-CPU cache share-maps are honestly available yet) and,
-                // for cpu1+, an online toggle (cpu0 cannot be offlined).
+                // Each cpuN exposes a topology/ subdir, a cache/ subdir (when
+                // the kernel detected cache geometry), and — for cpu1+ — an
+                // online toggle (cpu0 cannot be offlined).
                 let mut entries = vec![DirEntry {
                     name: String::from("topology"),
                     entry_type: EntryType::Directory,
                     size: 0,
                 }];
+                if cache_index_count() > 0 {
+                    entries.push(DirEntry {
+                        name: String::from("cache"),
+                        entry_type: EntryType::Directory,
+                        size: 0,
+                    });
+                }
                 if idx >= 1 {
                     entries.push(DirEntry {
                         name: String::from("online"),
@@ -689,6 +834,32 @@ impl FileSystem for SysFs {
                         size: gen_cpu_online_file(idx).len() as u64,
                     });
                 }
+                Ok(entries)
+            }
+            SysPath::CpuCacheDir(_) => {
+                // One indexI directory per detected cache level/type.
+                let entries = (0..cache_index_count())
+                    .map(|ci| DirEntry {
+                        name: format!("index{ci}"),
+                        entry_type: EntryType::Directory,
+                        size: 0,
+                    })
+                    .collect();
+                Ok(entries)
+            }
+            SysPath::CpuCacheIndexDir(idx, ci) => {
+                let entries = CPU_CACHE_FILES
+                    .iter()
+                    .map(|name| {
+                        let size =
+                            gen_cpu_cache_file(idx, ci, name).map_or(0, |d| d.len() as u64);
+                        DirEntry {
+                            name: String::from(*name),
+                            entry_type: EntryType::File,
+                            size,
+                        }
+                    })
+                    .collect();
                 Ok(entries)
             }
             SysPath::CpuNTopologyDir(idx) => {
@@ -740,7 +911,9 @@ impl FileSystem for SysFs {
             | SysPath::SystemDir
             | SysPath::SystemCpuDir
             | SysPath::CpuN(_)
-            | SysPath::CpuNTopologyDir(_) => Err(KernelError::IsADirectory),
+            | SysPath::CpuNTopologyDir(_)
+            | SysPath::CpuCacheDir(_)
+            | SysPath::CpuCacheIndexDir(_, _) => Err(KernelError::IsADirectory),
 
             SysPath::KernelFile(name) => gen_kernel_file(name),
             SysPath::ParamFile(name) => gen_param_file(name),
@@ -749,6 +922,7 @@ impl FileSystem for SysFs {
             SysPath::CpuFile(name) => gen_cpu_file(name),
             SysPath::CpuNOnline(idx) => Ok(gen_cpu_online_file(idx)),
             SysPath::CpuTopoFile(idx, name) => gen_cpu_topo_file(idx, name),
+            SysPath::CpuCacheFile(idx, ci, name) => gen_cpu_cache_file(idx, ci, name),
             SysPath::NotFound => Err(KernelError::NotFound),
         }
     }
@@ -850,6 +1024,24 @@ impl FileSystem for SysFs {
                     size,
                 })
             }
+            SysPath::CpuCacheDir(_) => Ok(DirEntry {
+                name: String::from("cache"),
+                entry_type: EntryType::Directory,
+                size: 0,
+            }),
+            SysPath::CpuCacheIndexDir(_, ci) => Ok(DirEntry {
+                name: format!("index{ci}"),
+                entry_type: EntryType::Directory,
+                size: 0,
+            }),
+            SysPath::CpuCacheFile(idx, ci, name) => {
+                let size = gen_cpu_cache_file(idx, ci, name).map_or(0, |d| d.len() as u64);
+                Ok(DirEntry {
+                    name: String::from(name),
+                    entry_type: EntryType::File,
+                    size,
+                })
+            }
             SysPath::NotFound => Err(KernelError::NotFound),
         }
     }
@@ -881,7 +1073,8 @@ impl FileSystem for SysFs {
             | SysPath::PciDevice(_)
             | SysPath::CpuFile(_)
             | SysPath::CpuNOnline(_)
-            | SysPath::CpuTopoFile(_, _) => {
+            | SysPath::CpuTopoFile(_, _)
+            | SysPath::CpuCacheFile(_, _, _) => {
                 // Read-only files (we do not model runtime CPU hot-plug).
                 Err(KernelError::NotSupported)
             }
@@ -892,7 +1085,9 @@ impl FileSystem for SysFs {
             | SysPath::SystemDir
             | SysPath::SystemCpuDir
             | SysPath::CpuN(_)
-            | SysPath::CpuNTopologyDir(_) => Err(KernelError::IsADirectory),
+            | SysPath::CpuNTopologyDir(_)
+            | SysPath::CpuCacheDir(_)
+            | SysPath::CpuCacheIndexDir(_, _) => Err(KernelError::IsADirectory),
             SysPath::NotFound => Err(KernelError::NotFound),
         }
     }
@@ -1267,6 +1462,90 @@ pub fn self_test() -> KernelResult<()> {
             "[sysfs]   devices/system/cpu/cpuN/topology+online: OK ({} cpuN dirs)",
             ncpu
         );
+    }
+
+    // 13. Per-CPU cache subtree (/sys/devices/system/cpu/cpuN/cache/indexI/).
+    // Sourced from cpu::cache_topology() — present only when cache geometry was
+    // detected, so the whole block is conditional on that.
+    {
+        let ncache = crate::cpu::cache_topology().len();
+        let cpu0 = fs.readdir("/devices/system/cpu/cpu0")?;
+        if ncache == 0 {
+            // No detected geometry: the cache/ dir must be absent (we never
+            // expose an empty/fabricated tree).
+            assert!(
+                !cpu0.iter().any(|e| e.name == "cache"),
+                "cpu0 must not list 'cache' when no geometry detected"
+            );
+            assert!(fs.stat("/devices/system/cpu/cpu0/cache").is_err());
+            serial_println!("[sysfs]   devices/system/cpu/cpuN/cache: absent (no geometry)");
+        } else {
+            assert!(
+                cpu0.iter().any(|e| e.name == "cache"
+                    && e.entry_type == EntryType::Directory),
+                "cpu0 should contain 'cache'"
+            );
+            // cache/ lists exactly ncache indexI dirs.
+            let cache_dir = fs.readdir("/devices/system/cpu/cpu0/cache")?;
+            assert!(
+                cache_dir.len() == ncache,
+                "cache/ has {} entries, want {}",
+                cache_dir.len(), ncache
+            );
+            for i in 0..ncache {
+                let want = format!("index{i}");
+                assert!(
+                    cache_dir.iter().any(|e| e.name == want
+                        && e.entry_type == EntryType::Directory),
+                    "cache/ missing '{}'",
+                    want
+                );
+            }
+
+            // index0 exposes the full file set; geometry parses and matches the
+            // kernel's own cache_topology() values (no fabrication, no drift).
+            let topo0 = crate::cpu::cache_topology().first().copied()
+                .ok_or(KernelError::InternalError)?;
+            let lvl = fs.read_file("/devices/system/cpu/cpu0/cache/index0/level")?;
+            let lvl_txt = core::str::from_utf8(&lvl).map_err(|_| KernelError::InternalError)?;
+            let lvl_val: u8 = lvl_txt.trim().parse().map_err(|_| KernelError::InternalError)?;
+            assert!(lvl_val == topo0.level, "index0 level {} != {}", lvl_val, topo0.level);
+
+            let ty = fs.read_file("/devices/system/cpu/cpu0/cache/index0/type")?;
+            let ty_txt = core::str::from_utf8(&ty).map_err(|_| KernelError::InternalError)?;
+            assert!(ty_txt.trim() == topo0.type_name(), "index0 type mismatch");
+
+            let ways = fs.read_file("/devices/system/cpu/cpu0/cache/index0/ways_of_associativity")?;
+            let ways_txt = core::str::from_utf8(&ways).map_err(|_| KernelError::InternalError)?;
+            let ways_val: u16 = ways_txt.trim().parse().map_err(|_| KernelError::InternalError)?;
+            assert!(ways_val == topo0.ways, "index0 ways {} != {}", ways_val, topo0.ways);
+
+            // shared_cpu_list always contains cpu0 itself.
+            let scl = fs.read_file("/devices/system/cpu/cpu0/cache/index0/shared_cpu_list")?;
+            let scl_txt = core::str::from_utf8(&scl).map_err(|_| KernelError::InternalError)?;
+            assert!(
+                scl_txt.split([',', '-']).any(|t| t.trim() == "0"),
+                "index0 shared_cpu_list {:?} should include cpu 0",
+                scl_txt
+            );
+
+            // Cache files are read-only; out-of-range index is NotFound.
+            assert!(
+                fs.write_file("/devices/system/cpu/cpu0/cache/index0/size", b"0").is_err(),
+                "cache size should reject writes"
+            );
+            let bogus = format!("/devices/system/cpu/cpu0/cache/index{ncache}");
+            assert!(fs.stat(&bogus).is_err(), "index{} should not exist", ncache);
+            assert!(
+                fs.stat("/devices/system/cpu/cpu0/cache/index0/bogus").is_err(),
+                "unknown cache file should be NotFound"
+            );
+
+            serial_println!(
+                "[sysfs]   devices/system/cpu/cpuN/cache: OK ({} cache indices)",
+                ncache
+            );
+        }
     }
 
     serial_println!("[sysfs] Self-test passed.");

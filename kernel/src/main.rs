@@ -2855,6 +2855,12 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("[drm] Self-test failed: {:?} (non-fatal)", e);
     }
 
+    // DRM Linux-uAPI ABI self-test (Linux graphics-compat foundation).
+    if let Err(e) = drm::uapi::self_test() {
+        serial_println!("FATAL: DRM uAPI ABI self-test failed: {:?}", e);
+        cpu::halt_loop();
+    }
+
     // Console VT100/ANSI escape sequence self-test.
     console::self_test();
 

@@ -72,6 +72,8 @@ pub mod plane;
 pub mod property;
 #[allow(dead_code)]
 pub mod syscall;
+#[allow(dead_code)]
+pub mod uapi;
 
 extern crate alloc;
 

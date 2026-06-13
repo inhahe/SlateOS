@@ -491,6 +491,51 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
+### TD18. A group of userspace net/disk/admin tools target syscalls that don't exist in the native ABI — DEBT 2026-06-13
+
+**Where:** `userspace/` tools — net-config (`dhcpcd`, `fw`, `ifconfig`, `ip`,
+`nft`, `route`), mount (`mount`, `umount`), disk-admin (`mkfs`, `fsck`,
+`diskutil`), and `chroot`. Authoritative syscall list:
+`kernel/src/syscall/number.rs`.
+
+**What it is:** a 2026-05-30/31 audit of ~55 userspace tools that hand-roll
+inline-asm syscalls found most tools were either already correct or fixable by
+migrating to `std` / posix `extern "C"` symbols (those fixes shipped — see git
+log for jq/zip/ssh-keygen/curl/dig/whois/screen/telnet/stty/df/chown/chmod/
+monctl/date/at/nmap/ntpd/hwclock). The residual group below calls syscalls that
+**genuinely do not exist** in the native ABI, so they cannot be fixed by a
+client-side number correction:
+
+- **net-config** (`dhcpcd`, `fw`, `ifconfig`, `ip`, `nft`, `route`): all issue
+  `SYS_NET_IOCTL=810` (which aliases `UDP_BIND`) for interface/route/DNS/firewall
+  *writes*. No net-config write syscall exists; only `NET_IF_INFO=842` /
+  `ARP_TABLE=843` are present and read-only. Precise harm (traced 2026-06-01):
+  with a Socket-WRITE cap the call silently binds+leaks a UDP socket on a low
+  port and misleads the user that the config change applied; without the cap it
+  fails. The intended operation never happens either way.
+- **mount/umount**: no `MOUNT`/`UMOUNT` syscall (620/621 are
+  `FS_TRASH_RESTORE`/`FS_TRASH_EMPTY`).
+- **mkfs/fsck/diskutil**: no `FS_FORMAT`/`FS_VERIFY`/`FS_REPAIR`/`FS_TRIM`
+  syscall (650–655 are `SEEK_DATA`/`SEEK_HOLE` + unassigned).
+- **chroot**: no `CHROOT`/`CHDIR`/`SETUID`/`SETGID`/`SETGROUPS` syscall — needs a
+  real process-credential + filesystem-root ABI.
+
+**Impact:** these specific tools are non-functional (no-op at best). They are not
+on any critical path, so nothing currently blocks on them.
+
+**Proper fix:** this is an **operator design decision**, not a mechanical fix —
+the kernel must first grow the missing ABI, and the *shape* of that ABI is a
+fork: a native net-config syscall family vs. a network-manager IPC daemon for
+the net tools; a real mount/umount + fs-admin (format/verify/repair) syscall set;
+and a process-credential + fs-root ABI for chroot. A partial near-term win that
+needs no decision: wire the net tools' **read** paths (`ifconfig` no-args, `ip
+addr show`, `route -n`) to `NET_IF_INFO=842`. Trigger to revisit: when the
+matching kernel syscalls land (track via roadmap net-config / mount / fs-admin
+tasks). Related: `sys_clock_settime`/`sys_clock_adjtime` now enforce
+`require_clock_authority()` keyed on `uid==0`; revisit to key off a real
+per-process `CAP_SYS_TIME` bit when the PCB gains a POSIX capability set (today
+`ProcessCredentials` is only uid/gid/groups).
+
 ### TD17. inotify event coverage is limited to native-derived events — DEBT 2026-06-12
 
 **Where:** `kernel/src/ipc/inotify.rs` (Linux-ABI adapter) backed 1:1 by

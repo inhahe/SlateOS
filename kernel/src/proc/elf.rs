@@ -480,6 +480,50 @@ impl<'a> ElfFile<'a> {
         false
     }
 
+    /// Return the dynamic loader path from the `PT_INTERP` segment.
+    ///
+    /// A dynamically-linked ELF (`ET_DYN` executables and any binary that
+    /// is not fully static) carries a `PT_INTERP` program header whose
+    /// file image is a NUL-terminated path naming the program interpreter
+    /// — e.g. `/lib64/ld-linux-x86-64.so.2` (glibc) or
+    /// `/lib/ld-musl-x86_64.so.1` (musl).  The kernel must load *that*
+    /// interpreter (not the executable's own `e_entry`) and transfer
+    /// control to it; the interpreter then maps shared libraries and
+    /// jumps to the real entry point (passed via `AT_ENTRY`).
+    ///
+    /// Returns the path with its trailing NUL (and any bytes after the
+    /// first NUL) trimmed, or `None` when:
+    /// - the binary is statically linked (no `PT_INTERP` segment), or
+    /// - the segment's file image is out of bounds, or
+    /// - the path is empty (a malformed `PT_INTERP`).
+    ///
+    /// The result is raw bytes, never `str`: an interpreter path is an
+    /// OS path and may contain any byte except `/` (separator) and NUL
+    /// (terminator), so it must not be forced through UTF-8 validation.
+    #[must_use]
+    pub fn interp_path(&self) -> Option<&'a [u8]> {
+        for i in 0..self.program_header_count() {
+            let Some(phdr) = self.program_header(i) else {
+                continue;
+            };
+            if phdr.p_type != PT_INTERP {
+                continue;
+            }
+            let bytes = self.raw_segment_bytes(&phdr)?;
+            // The image is NUL-terminated in the file; trim at the first
+            // NUL (Linux's `load_elf_interp` likewise treats the segment
+            // as a C string).  An image with no NUL is tolerated by using
+            // its full length, but a leading NUL (empty path) is rejected.
+            let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+            let path = bytes.get(..end)?;
+            if path.is_empty() {
+                return None;
+            }
+            return Some(path);
+        }
+        None
+    }
+
     /// Iterate over all `PT_LOAD` segments as [`LoadableSegment`]s.
     ///
     /// Validates each segment:
@@ -1893,6 +1937,9 @@ pub fn self_test() -> KernelResult<()> {
     test_detect_linux_abi_interp_unrelated()?;
     test_detect_linux_abi_gnu_property()?;
     test_is_linux_interp_helper()?;
+    test_interp_path_dynamic()?;
+    test_interp_path_static()?;
+    test_interp_path_empty()?;
 
     Ok(())
 }
@@ -2418,5 +2465,51 @@ fn test_is_linux_interp_helper() -> KernelResult<()> {
         }
     }
     serial_println!("[elf]   is_linux_interp helper: OK");
+    Ok(())
+}
+
+/// Test: `interp_path` extracts and NUL-trims the `PT_INTERP` path of a
+/// dynamically-linked binary.
+fn test_interp_path_dynamic() -> KernelResult<()> {
+    // build_interp_elf writes the path image verbatim (including the
+    // trailing NUL the caller supplies); interp_path must trim at it.
+    let data = build_interp_elf(ELFOSABI_SYSV, b"/lib64/ld-linux-x86-64.so.2\0");
+    let elf = ElfFile::parse(&data)?;
+    match elf.interp_path() {
+        Some(path) if path == b"/lib64/ld-linux-x86-64.so.2" => {}
+        other => {
+            serial_println!(
+                "[elf]   FAIL: interp_path dynamic mismatch: {:?}",
+                other.map(core::str::from_utf8),
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    serial_println!("[elf]   interp_path dynamic: OK");
+    Ok(())
+}
+
+/// Test: `interp_path` returns `None` for a static binary (no
+/// `PT_INTERP` — `build_test_elf` is a single `PT_LOAD`).
+fn test_interp_path_static() -> KernelResult<()> {
+    let data = build_test_elf();
+    let elf = ElfFile::parse(&data)?;
+    if elf.interp_path().is_some() {
+        serial_println!("[elf]   FAIL: interp_path should be None for static ELF");
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[elf]   interp_path static: OK");
+    Ok(())
+}
+
+/// Test: `interp_path` rejects an empty (leading-NUL) `PT_INTERP` image.
+fn test_interp_path_empty() -> KernelResult<()> {
+    let data = build_interp_elf(ELFOSABI_SYSV, b"\0");
+    let elf = ElfFile::parse(&data)?;
+    if elf.interp_path().is_some() {
+        serial_println!("[elf]   FAIL: interp_path should be None for empty PT_INTERP");
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[elf]   interp_path empty: OK");
     Ok(())
 }

@@ -20,16 +20,28 @@
 ##     commit f90f336f7).
 ##   - DISPLAY FORM (operator decided): user-visible text reads "Slate OS" (with a space);
 ##     code identifiers/consts/env-vars/filenames stay "SlateOS"/"slateos"/"SLATEOS".
-##     Applied via scripts/display_rename.py, which rewrites "SlateOS" -> "Slate OS" ONLY
-##     inside Rust string literals and only as a standalone word (not adjacent to . / _ - :,
-##     so "SlateOS.installer", PRODID "//SlateOS//", "SlateOS::Foo", "SlateOSConfig" are
-##     left intact). Inserting a space inside an existing string literal can't break Rust
-##     syntax, and paired test assertions convert in lockstep (verified: readelf 48/48 host
-##     tests pass; kernel boot-test PASSED). Touched ~2538 .rs files.
-##     NOT changed by the display pass (intentional): code comments/module-docs (not
-##     user-facing), lowercase "slateos" (paths/domains/identifiers), all-caps "SLATEOS"
-##     (consts/banners). If a future need arises for "Slate OS" in non-.rs user-facing
-##     assets (yaml configs, generated /etc/os-release, docs prose), extend the same rule.
+##     Applied via scripts/display_rename.py, which rewrites a standalone "SlateOS" ->
+##     "Slate OS" (not adjacent to . / _ - :, so "SlateOS.installer", PRODID "//SlateOS//",
+##     "SlateOS::Foo", "SlateOSConfig", "SlateOSUser", "SlateOS_1.0" are left intact).
+##     Two modes: default = string literals; --comments = line/block comments + module-docs.
+##     COMMENTS/MODULE-DOCS now ALSO converted (operator: "change comments/module docs for
+##     consistency, it'll look better to developers") — commit 1c5f2ce3a.
+##     SCANNER-BUG FIX (1c5f2ce3a): the original line-by-line scanner treated a lone quote
+##     inside a comment (e.g. `// 2: "`) or a char literal ('"') as a string start, desyncing
+##     string detection and SKIPPING real display strings (~13 files: qrcode, backup, terminal,
+##     bc, wc, uname, ...) while risking wrong conversion of code identifiers. Rewrote the tool
+##     as a single region tokenizer (code / string / char-literal / line+block comment,
+##     Rust-nested) so embedded quotes can't desync scanning; both modes idempotent.
+##     Regenerated BOTH passes from the pre-display base (a7ef65778).
+##     Verified: 0 standalone "SlateOS" remain in ANY region; "Slate OS" appears only inside
+##     strings/comments (never in code); kernel boot-test PASSED; readelf 48/48 host tests pass.
+##     String pass touched 2546 .rs, comment pass 2782 .rs (2781 source committed; build/ .rs
+##     excluded). Inserting a space in a literal/comment can't break Rust syntax, and paired
+##     test assertions convert in lockstep.
+##     NOT changed (intentional): lowercase "slateos" (paths/domains/identifiers), all-caps
+##     "SLATEOS" (consts/banners), all code identifiers. If a future need arises for "Slate OS"
+##     in non-.rs user-facing assets (yaml configs, generated /etc/os-release, docs prose),
+##     extend the same rule.
 ## ============================================================================
 
 ## IN PROGRESS (2026-06-13): ALSA/PulseAudio compatibility shim — roadmap 5.1 / 5095

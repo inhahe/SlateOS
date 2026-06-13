@@ -25,7 +25,9 @@ This OS is built entirely by AI. The human operator does not review code line-by
 - Accessibility evaluation (screen reader experience, color-blind usability beyond automated contrast checks)
 - Anything that requires human judgment about whether something is annoying, confusing, or ugly
 
-When AI finishes a feature that has aspects requiring human manual testing, it must document what needs testing and what specifically to look for in `manual-testing.txt`. Not in commit messages (too easy to miss), and not in `todo.txt` (that is the human operator's personal file — AI does not write to it).
+When AI finishes a feature that has aspects requiring human manual testing, it must document what needs testing and what specifically to look for in `manual-testing.txt`. Not in commit messages (too easy to miss), and not in `todo.txt`.
+
+`todo.txt` is the **AI's working scratch file** (operator delegated ownership 2026-06-13; see design-decisions.md §14). Its scope is genuine open TODOs and deferred-with-rationale items only. Bugs / divergences / limitations / tech-debt go in `known-issues.md`; resolved judgment calls and design decisions go in `design-decisions.md`; judgment calls awaiting operator input go in `open-questions.md`; completed work is recorded by the commit + the `roadmap.md` checkbox, not duplicated into `todo.txt`.
 
 ### Benchmark Targets and Methodology
 

@@ -1,3 +1,29 @@
+## ############################################################################
+## PURPOSE & SCOPE (policy set 2026-06-13; operator decision, design-decisions.md §14)
+## ############################################################################
+## This is the AI's working scratch file. It is owned and written by the AI
+## session (the operator delegated it). Going forward it holds ONLY:
+##   - genuine OPEN TODOs (work not yet done), and
+##   - DEFERRED-WITH-RATIONALE items (what the proper fix is, why it's deferred,
+##     and the condition that should trigger doing it).
+##
+## It is NOT a catch-all journal anymore. Route other things to their homes:
+##   - bugs / divergences / limitations / tech-debt  -> known-issues.md
+##   - resolved judgment calls & design decisions     -> design-decisions.md
+##   - judgment calls awaiting operator input         -> open-questions.md
+##   - completed work                                 -> the git commit + the
+##                                                       roadmap.md checkbox
+##                                                       (do NOT restate here)
+##
+## LEGACY MIGRATION (in progress): everything BELOW this header predates the
+## policy and is a historical journal (~109 BUG/DIVERGENCE/LIMITATION blocks,
+## ~55 DONE/VERIFIED changelog blocks, etc.). The issue blocks are being moved
+## to known-issues.md and removed from here, carefully, a chunk at a time. A
+## full snapshot was taken first: todo.backup-2026-06-13.txt (git-ignored).
+## Until the migration completes, treat known-issues.md as authoritative for
+## any issue that has already been moved.
+## ############################################################################
+
 ## ============================================================================
 ## DONE (2026-06-13): mechanical rename OuRoS -> Slate OS, EXECUTED.
 ## ============================================================================

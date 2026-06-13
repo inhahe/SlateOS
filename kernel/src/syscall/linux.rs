@@ -7099,31 +7099,251 @@ fn alsa_control_ioctl_elem_write(argp: u64) -> SyscallResult {
 
 /// `ioctl(DRM_IOCTL_*)` dispatch for a `/dev/dri/*` fd.
 ///
-/// This commit installs the routing entry point only: it recognises that the
-/// request targets the DRM device (the `'d'` ioctl magic, `DRM_IOCTL_BASE`)
-/// and otherwise reports `ENOTTY`, exactly as Linux does for an unsupported
-/// request on a DRM fd.  The actual request handlers (`DRM_IOCTL_VERSION`,
-/// `GET_CAP`, `SET_CLIENT_CAP`, the KMS enumeration family, dumb-buffer
-/// allocation, page-flip) are wired in the follow-up commits that map each
-/// request onto the native [`crate::drm`] device model.
+/// This commit wires the **core (non-KMS) ioctls** every libdrm client issues
+/// at open time: `DRM_IOCTL_VERSION` (driver name/date/desc + version),
+/// `DRM_IOCTL_GET_CAP` (device capability query), `DRM_IOCTL_SET_CLIENT_CAP`
+/// (atomic / universal-planes opt-in), `DRM_IOCTL_GET_UNIQUE` (bus-id string),
+/// `DRM_IOCTL_SET_VERSION` (interface-version negotiation), and the legacy
+/// authentication pair `GET_MAGIC` / `AUTH_MAGIC`.  The KMS enumeration family,
+/// dumb-buffer allocation, and page-flip land in the follow-up commits that map
+/// each request onto the native [`crate::drm`] device model; any DRM ioctl not
+/// yet handled reports `ENOTTY`, matching Linux's response for an ioctl a
+/// driver doesn't implement.
+///
+/// **Render-node restriction:** a `renderD128` fd has no display authority, so
+/// the primary-node-only ioctls (the legacy auth pair, `GET_UNIQUE`,
+/// `SET_UNIQUE`, `SET_VERSION`) report `EACCES` on it, exactly as the Linux DRM
+/// core does for ioctls without the `DRM_RENDER_ALLOW` flag.  `VERSION`,
+/// `GET_CAP`, and `SET_CLIENT_CAP` are allowed on both node types.
 ///
 /// `entry.raw_handle` is the [`crate::drm::card_fd::DrmCardHandle`] of the
 /// open client; a stale handle (the instance was already closed) is reported
 /// as `EBADF`.
-fn drm_card_ioctl(entry: &FdEntry, request: u32, _argp: u64) -> SyscallResult {
+fn drm_card_ioctl(entry: &FdEntry, request: u32, argp: u64) -> SyscallResult {
+    use crate::drm::uapi;
+
     let handle = crate::drm::card_fd::DrmCardHandle::from_raw(entry.raw_handle);
-    if !crate::drm::card_fd::exists(handle) {
-        return linux_err(errno::EBADF);
-    }
+    // `is_render_node` returns None exactly when the instance is stale, so this
+    // doubles as the existence check.
+    let render_node = match crate::drm::card_fd::is_render_node(handle) {
+        Some(r) => r,
+        None => return linux_err(errno::EBADF),
+    };
     // Reject anything that is not a DRM ('d' magic) ioctl outright — those
     // can never be meant for this fd.
-    if crate::drm::uapi::ioc_type(request) != crate::drm::uapi::DRM_IOCTL_BASE {
+    if uapi::ioc_type(request) != uapi::DRM_IOCTL_BASE {
         return linux_err(errno::ENOTTY);
     }
-    // Request handlers land in a later commit; until then every recognised DRM
-    // ioctl is reported as unsupported, matching Linux's ENOTTY for an ioctl a
-    // driver doesn't implement.
-    linux_err(errno::ENOTTY)
+    match request {
+        // --- render-allowed core ioctls ---
+        uapi::DRM_IOCTL_VERSION => drm_card_ioctl_version(argp),
+        uapi::DRM_IOCTL_GET_CAP => drm_card_ioctl_get_cap(argp),
+        uapi::DRM_IOCTL_SET_CLIENT_CAP => drm_card_ioctl_set_client_cap(handle, argp),
+        // --- primary-node-only ioctls (no display authority on a render node) ---
+        uapi::DRM_IOCTL_GET_MAGIC => {
+            if render_node {
+                return linux_err(errno::EACCES);
+            }
+            drm_card_ioctl_get_magic(handle, argp)
+        }
+        uapi::DRM_IOCTL_AUTH_MAGIC => {
+            if render_node {
+                return linux_err(errno::EACCES);
+            }
+            drm_card_ioctl_auth_magic(argp)
+        }
+        uapi::DRM_IOCTL_GET_UNIQUE => {
+            if render_node {
+                return linux_err(errno::EACCES);
+            }
+            drm_card_ioctl_get_unique(argp)
+        }
+        uapi::DRM_IOCTL_SET_VERSION => {
+            if render_node {
+                return linux_err(errno::EACCES);
+            }
+            drm_card_ioctl_set_version(argp)
+        }
+        // SET_UNIQUE is a legacy bus-id setter only meaningful for the old
+        // drm_pci framework; modern drivers reject it.  Primary-node only.
+        uapi::DRM_IOCTL_SET_UNIQUE => {
+            if render_node {
+                return linux_err(errno::EACCES);
+            }
+            linux_err(errno::EINVAL)
+        }
+        // KMS / GEM ioctls land in follow-up commits.
+        _ => linux_err(errno::ENOTTY),
+    }
+}
+
+/// Copy one variable-length string field out for `DRM_IOCTL_VERSION` /
+/// `GET_UNIQUE`, mirroring Linux's `drm_copy_field`.
+///
+/// Copies `min(*len, src.len())` bytes of `src` into the user buffer `buf`
+/// (only when both are non-zero) and always writes the *full* source length
+/// back into `*len`, so a client that first probes with `len = 0` learns the
+/// size to allocate, then calls again with a big-enough buffer.  No NUL
+/// terminator is added — libdrm sizes its buffer to `len + 1` and terminates.
+fn drm_copy_field(buf: u64, len: &mut u64, src: &[u8]) -> Result<(), i32> {
+    let actual = u64::try_from(src.len()).unwrap_or(u64::MAX);
+    let to_copy = (*len).min(actual);
+    if to_copy > 0 && buf != 0 {
+        let n = usize::try_from(to_copy).unwrap_or(0);
+        if let Some(s) = src.get(..n) {
+            // SAFETY: `s` is a valid kernel slice of exactly `n` bytes;
+            // `copy_to_user` validates the user destination range and handles
+            // SMAP.
+            if unsafe { crate::mm::user::copy_to_user(s.as_ptr(), buf, n) }.is_err() {
+                return Err(errno::EFAULT);
+            }
+        }
+    }
+    *len = actual;
+    Ok(())
+}
+
+/// `DRM_IOCTL_VERSION` — report the driver name/date/description and version
+/// numbers.  Fills the three version ints unconditionally and copies each
+/// string field with [`drm_copy_field`] (length-probe friendly).
+fn drm_card_ioctl_version(argp: u64) -> SyscallResult {
+    use crate::drm::uapi;
+    let mut v = match read_user_struct::<uapi::DrmVersion>(argp) {
+        Ok(v) => v,
+        Err(e) => return linux_err(e),
+    };
+    v.version_major = uapi::DRIVER_VERSION_MAJOR;
+    v.version_minor = uapi::DRIVER_VERSION_MINOR;
+    v.version_patchlevel = uapi::DRIVER_VERSION_PATCHLEVEL;
+    if let Err(e) = drm_copy_field(v.name, &mut v.name_len, uapi::DRIVER_NAME) {
+        return linux_err(e);
+    }
+    if let Err(e) = drm_copy_field(v.date, &mut v.date_len, uapi::DRIVER_DATE) {
+        return linux_err(e);
+    }
+    if let Err(e) = drm_copy_field(v.desc, &mut v.desc_len, uapi::DRIVER_DESC) {
+        return linux_err(e);
+    }
+    match write_user_struct(argp, &v) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(e),
+    }
+}
+
+/// `DRM_IOCTL_GET_CAP` — report a `DRM_CAP_*` device-capability value.  An
+/// unknown capability tag is `EINVAL`, matching Linux's `drm_getcap`.
+fn drm_card_ioctl_get_cap(argp: u64) -> SyscallResult {
+    use crate::drm::uapi;
+    let mut gc = match read_user_struct::<uapi::DrmGetCap>(argp) {
+        Ok(v) => v,
+        Err(e) => return linux_err(e),
+    };
+    match uapi::cap_value(gc.capability) {
+        Some(val) => {
+            gc.value = val;
+            match write_user_struct(argp, &gc) {
+                Ok(()) => SyscallResult::ok(0),
+                Err(e) => linux_err(e),
+            }
+        }
+        None => linux_err(errno::EINVAL),
+    }
+}
+
+/// `DRM_IOCTL_SET_CLIENT_CAP` — opt this client into a `DRM_CLIENT_CAP_*`
+/// behaviour change (atomic, universal planes, aspect ratio).  Unsupported
+/// caps or out-of-range values report `EINVAL`.
+fn drm_card_ioctl_set_client_cap(
+    handle: crate::drm::card_fd::DrmCardHandle,
+    argp: u64,
+) -> SyscallResult {
+    use crate::drm::uapi;
+    let scc = match read_user_struct::<uapi::DrmSetClientCap>(argp) {
+        Ok(v) => v,
+        Err(e) => return linux_err(e),
+    };
+    match crate::drm::card_fd::set_client_cap(handle, scc.capability, scc.value) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(crate::error::KernelError::InvalidHandle) => linux_err(errno::EBADF),
+        // Unsupported cap or out-of-range value.
+        Err(_) => linux_err(errno::EINVAL),
+    }
+}
+
+/// `DRM_IOCTL_GET_MAGIC` — hand the client an authentication magic token.
+///
+/// Our single-user model has no separate DRM master, so the token is purely
+/// nominal: we derive a stable nonzero value from the client handle and accept
+/// any magic in `AUTH_MAGIC`.  Returning a token keeps legacy X.Org / libdrm
+/// auth handshakes happy.
+fn drm_card_ioctl_get_magic(
+    handle: crate::drm::card_fd::DrmCardHandle,
+    argp: u64,
+) -> SyscallResult {
+    use crate::drm::uapi;
+    // A nonzero per-client magic (the low 32 bits of the handle id; floored to
+    // 1 so it is never the "no magic" sentinel).
+    let magic = u32::try_from(handle.raw() & 0xFFFF_FFFF).unwrap_or(1);
+    let magic = if magic == 0 { 1 } else { magic };
+    let auth = uapi::DrmAuth { magic };
+    match write_user_struct(argp, &auth) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(e),
+    }
+}
+
+/// `DRM_IOCTL_AUTH_MAGIC` — authenticate a previously-issued magic.
+///
+/// In our single-user model every client is effectively authenticated, so we
+/// accept any well-formed token (after validating the user pointer) and return
+/// success.
+fn drm_card_ioctl_auth_magic(argp: u64) -> SyscallResult {
+    use crate::drm::uapi;
+    match read_user_struct::<uapi::DrmAuth>(argp) {
+        Ok(_) => SyscallResult::ok(0),
+        Err(e) => linux_err(e),
+    }
+}
+
+/// `DRM_IOCTL_GET_UNIQUE` — report the device's unique bus-id string.
+fn drm_card_ioctl_get_unique(argp: u64) -> SyscallResult {
+    use crate::drm::uapi;
+    let mut u = match read_user_struct::<uapi::DrmUnique>(argp) {
+        Ok(v) => v,
+        Err(e) => return linux_err(e),
+    };
+    if let Err(e) = drm_copy_field(u.unique, &mut u.unique_len, uapi::DRIVER_UNIQUE) {
+        return linux_err(e);
+    }
+    match write_user_struct(argp, &u) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(e),
+    }
+}
+
+/// `DRM_IOCTL_SET_VERSION` — negotiate the DRM interface / driver version.
+///
+/// The client passes the interface version it wants (negative = "don't
+/// care"); the kernel writes back the versions it actually provides.  We
+/// report DRM interface 1.4 (the version modern libdrm targets) and our driver
+/// version, then succeed.
+fn drm_card_ioctl_set_version(argp: u64) -> SyscallResult {
+    use crate::drm::uapi;
+    // Validate the user buffer is readable (the request struct), then overwrite
+    // it with our supported versions.
+    if read_user_struct::<uapi::DrmSetVersion>(argp).is_err() {
+        return linux_err(errno::EFAULT);
+    }
+    let sv = uapi::DrmSetVersion {
+        drm_di_major: 1,
+        drm_di_minor: 4,
+        drm_dd_major: uapi::DRIVER_VERSION_MAJOR,
+        drm_dd_minor: uapi::DRIVER_VERSION_MINOR,
+    };
+    match write_user_struct(argp, &sv) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(e),
+    }
 }
 
 /// Copy a fixed `#[repr(C)]` payload struct out of userspace by value.

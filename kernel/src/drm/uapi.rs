@@ -331,6 +331,44 @@ pub const fn client_cap_supported(cap: u64) -> bool {
     )
 }
 
+/// The value this driver reports for a `DRM_CAP_*` query (`DRM_IOCTL_GET_CAP`).
+///
+/// `None` means the capability tag is unknown — the dispatch layer maps that
+/// to `-EINVAL`, exactly as Linux's `drm_getcap` does for an unrecognised
+/// capability.  `Some(v)` is the (success) value to report.
+///
+/// The values are honest about the *current* implementation state: the core
+/// DRM facts (CLOCK_MONOTONIC timestamps, vblank-high-CRTC, CRTC id in the
+/// vblank event) are reported as supported, while features whose handlers are
+/// not yet wired — dumb buffers, PRIME/dma-buf, async page-flip, sync objects,
+/// per-plane format modifiers — report `0`.  Later commits that implement
+/// those paths flip the corresponding value.  `CURSOR_WIDTH`/`HEIGHT` report
+/// the conventional 64×64 hint Linux returns regardless of cursor support.
+#[must_use]
+pub const fn cap_value(cap: u64) -> Option<u64> {
+    match cap {
+        // KMS dumb-buffer scanout — handlers land in a later commit.
+        DRM_CAP_DUMB_BUFFER => Some(0),
+        DRM_CAP_DUMB_PREFERRED_DEPTH => Some(24),
+        DRM_CAP_DUMB_PREFER_SHADOW => Some(0),
+        // Core DRM facts, independent of the device backend.
+        DRM_CAP_VBLANK_HIGH_CRTC => Some(1),
+        DRM_CAP_TIMESTAMP_MONOTONIC => Some(1),
+        DRM_CAP_CRTC_IN_VBLANK_EVENT => Some(1),
+        // Conventional cursor-size hint (Linux returns 64 regardless).
+        DRM_CAP_CURSOR_WIDTH | DRM_CAP_CURSOR_HEIGHT => Some(64),
+        // Not yet implemented: PRIME/dma-buf, async flip, modifiers, target
+        // vblank, sync objects.
+        DRM_CAP_PRIME
+        | DRM_CAP_ASYNC_PAGE_FLIP
+        | DRM_CAP_ADDFB2_MODIFIERS
+        | DRM_CAP_PAGE_FLIP_TARGET
+        | DRM_CAP_SYNCOBJ
+        | DRM_CAP_SYNCOBJ_TIMELINE => Some(0),
+        _ => None,
+    }
+}
+
 // ===========================================================================
 // KMS (kernel mode-setting) ABI — `include/uapi/drm/drm_mode.h`
 // ===========================================================================
@@ -962,6 +1000,34 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     check!(
         !client_cap_supported(DRM_CLIENT_CAP_WRITEBACK_CONNECTORS),
         "writeback-connectors cap should be rejected (no writeback connectors)"
+    );
+
+    // --- GET_CAP value policy --------------------------------------------
+    check!(
+        cap_value(DRM_CAP_TIMESTAMP_MONOTONIC) == Some(1),
+        "timestamp-monotonic cap value"
+    );
+    check!(
+        cap_value(DRM_CAP_VBLANK_HIGH_CRTC) == Some(1),
+        "vblank-high-crtc cap value"
+    );
+    check!(
+        cap_value(DRM_CAP_CRTC_IN_VBLANK_EVENT) == Some(1),
+        "crtc-in-vblank-event cap value"
+    );
+    check!(
+        cap_value(DRM_CAP_CURSOR_WIDTH) == Some(64)
+            && cap_value(DRM_CAP_CURSOR_HEIGHT) == Some(64),
+        "cursor-size cap hint"
+    );
+    check!(cap_value(DRM_CAP_PRIME) == Some(0), "prime cap not yet supported");
+    check!(
+        cap_value(DRM_CAP_DUMB_BUFFER) == Some(0),
+        "dumb-buffer cap not yet supported"
+    );
+    check!(
+        cap_value(0xffff_ffff).is_none(),
+        "unknown cap tag should be None (EINVAL)"
     );
 
     // --- KMS struct layouts vs Linux drm_mode.h (64-bit) -----------------

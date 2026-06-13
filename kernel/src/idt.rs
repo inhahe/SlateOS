@@ -1399,6 +1399,8 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
                     mm::swap::register_reclaimable(pml4, virt.as_u64(), flags);
                     mm::fault::record_swap_in();
                     mm::fault::record_user_resolved();
+                    // Major fault: resolution required I/O (swap-in).
+                    sched::account_fault(sched::current_task_id(), true);
                     return; // Swap-in successful — retry the instruction.
                 }
                 // If swap-in fails (OOM, etc.), fall through to other
@@ -1412,6 +1414,8 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
         let pid = crate::proc::thread::owner_process(task_id).unwrap_or(0);
         if pid != 0 && crate::proc::pcb::try_resolve_fault(pid, cr2, error) {
             mm::fault::record_user_resolved();
+            // Minor fault: demand-zero / CoW resolved without I/O.
+            sched::account_fault(task_id, false);
             return; // Demand-paged successfully — retry the instruction.
         }
 
@@ -1421,6 +1425,8 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
         if try_grow_user_stack(cr2, error, pid) {
             mm::fault::record_stack_growth();
             mm::fault::record_user_resolved();
+            // Minor fault: stack growth resolved without I/O.
+            sched::account_fault(task_id, false);
             return; // Stack grew successfully — retry the instruction.
         }
 

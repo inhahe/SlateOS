@@ -1059,6 +1059,23 @@ pub struct Process {
     pub child_user_ticks: u64,
     /// Accumulated kernel-mode ticks of reaped descendant processes.
     pub child_sys_ticks: u64,
+
+    // --- Per-process page-fault accounting (minflt/majflt) ---
+    //
+    // Mirrors the CPU-time accumulators above: live threads carry their own
+    // `Task::min_flt`/`maj_flt`, folded into `acct_min_flt`/`acct_maj_flt`
+    // when the thread exits.  Reaped children's totals (own + their children)
+    // are credited into `child_min_flt`/`child_maj_flt`.  Backs
+    // `getrusage` `ru_minflt`/`ru_majflt` and `/proc/<pid>/stat` fields
+    // 10/11/12/13.  Reset to 0 on fork.
+    /// Accumulated minor faults from this process's already-exited threads.
+    pub acct_min_flt: u64,
+    /// Accumulated major faults from this process's already-exited threads.
+    pub acct_maj_flt: u64,
+    /// Accumulated minor faults of reaped descendant processes.
+    pub child_min_flt: u64,
+    /// Accumulated major faults of reaped descendant processes.
+    pub child_maj_flt: u64,
     /// Job-control: `true` while the process is stopped (all its threads
     /// suspended by a stop signal). Set when a stop signal takes effect,
     /// cleared by `SIGCONT`. A stopped process is still alive (not a
@@ -1294,6 +1311,10 @@ impl Process {
             acct_sys_ticks: 0,
             child_user_ticks: 0,
             child_sys_ticks: 0,
+            acct_min_flt: 0,
+            acct_maj_flt: 0,
+            child_min_flt: 0,
+            child_maj_flt: 0,
             // Fresh process starts runnable, with no pending job-control
             // report for its parent to observe.
             stopped: false,
@@ -1751,6 +1772,11 @@ pub fn fork_create(
         acct_sys_ticks: 0,
         child_user_ticks: 0,
         child_sys_ticks: 0,
+        // Page-fault accounting also resets on fork.
+        acct_min_flt: 0,
+        acct_maj_flt: 0,
+        child_min_flt: 0,
+        child_maj_flt: 0,
         // POSIX: a forked child starts runnable even if the parent is
         // stopped (it is a brand-new process), and has no pending
         // job-control report of its own.
@@ -1791,6 +1817,27 @@ pub fn add_thread(pid: ProcessId, task_id: TaskId) -> KernelResult<()> {
     Ok(())
 }
 
+/// Per-thread accounting totals captured at thread-exit time.
+///
+/// When a thread exits it is removed from the scheduler, so the
+/// per-task counters it carried (`Task::user_ticks`/`sys_ticks` and
+/// `Task::min_flt`/`maj_flt`) would otherwise vanish.  The caller
+/// (`proc::thread::on_thread_exit`) snapshots them from the scheduler
+/// while the task is still alive and passes them to [`remove_thread`],
+/// which folds them into the owning process's `acct_*` accumulators so
+/// a process's totals stay exact across thread reaping.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ThreadExitAccounting {
+    /// User-mode (ring 3) CPU time of the exiting thread, in timer ticks.
+    pub user_ticks: u64,
+    /// Kernel-mode (ring 0) CPU time of the exiting thread, in timer ticks.
+    pub sys_ticks: u64,
+    /// Minor page faults charged to the exiting thread.
+    pub min_flt: u64,
+    /// Major page faults charged to the exiting thread.
+    pub maj_flt: u64,
+}
+
 /// Remove a thread from a process.
 ///
 /// If this was the last thread, the process enters Zombie state.
@@ -1809,8 +1856,7 @@ pub fn add_thread(pid: ProcessId, task_id: TaskId) -> KernelResult<()> {
 pub fn remove_thread(
     pid: ProcessId,
     task_id: TaskId,
-    exit_user_ticks: u64,
-    exit_sys_ticks: u64,
+    acct: ThreadExitAccounting,
 ) -> KernelResult<(bool, Option<TaskId>, Option<TaskId>)> {
     let mut table = PROCESS_TABLE.lock();
     let proc = table
@@ -1819,12 +1865,14 @@ pub fn remove_thread(
 
     proc.threads.retain(|&t| t != task_id);
 
-    // Fold the exiting thread's CPU ticks into the per-process accumulator
-    // so they survive the thread's removal from the scheduler.  The caller
-    // captured these from `sched::cpu_ticks(task_id)` while the task was
-    // still alive (the scheduler frees the Task after this point).
-    proc.acct_user_ticks = proc.acct_user_ticks.saturating_add(exit_user_ticks);
-    proc.acct_sys_ticks = proc.acct_sys_ticks.saturating_add(exit_sys_ticks);
+    // Fold the exiting thread's per-task counters into the per-process
+    // accumulators so they survive the thread's removal from the scheduler.
+    // The caller captured these from the scheduler while the task was still
+    // alive (the scheduler frees the Task after this point).
+    proc.acct_user_ticks = proc.acct_user_ticks.saturating_add(acct.user_ticks);
+    proc.acct_sys_ticks = proc.acct_sys_ticks.saturating_add(acct.sys_ticks);
+    proc.acct_min_flt = proc.acct_min_flt.saturating_add(acct.min_flt);
+    proc.acct_maj_flt = proc.acct_maj_flt.saturating_add(acct.maj_flt);
 
     if proc.threads.is_empty() && proc.state == ProcessState::Running {
         proc.state = ProcessState::Zombie;
@@ -3390,6 +3438,13 @@ pub fn try_reap(
         let child_sys = proc
             .acct_sys_ticks
             .saturating_add(proc.child_sys_ticks);
+        // Same carry-up for page faults (ru_minflt/ru_majflt children).
+        let child_min = proc
+            .acct_min_flt
+            .saturating_add(proc.child_min_flt);
+        let child_maj = proc
+            .acct_maj_flt
+            .saturating_add(proc.child_maj_flt);
 
         // Extract the IPC handle list and initial fds before removing.
         let mut removed = table.remove(&child_pid);
@@ -3410,6 +3465,10 @@ pub fn try_reap(
                 parent.child_user_ticks.saturating_add(child_user);
             parent.child_sys_ticks =
                 parent.child_sys_ticks.saturating_add(child_sys);
+            parent.child_min_flt =
+                parent.child_min_flt.saturating_add(child_min);
+            parent.child_maj_flt =
+                parent.child_maj_flt.saturating_add(child_maj);
         }
 
         let info = ExitInfo { exit_code, crash };
@@ -3481,7 +3540,7 @@ pub fn try_reap_any(
         };
 
         // Extract the zombie's info and remove it from the table.
-        let (exit_code, crash, pml4_phys, child_user, child_sys) = {
+        let (exit_code, crash, pml4_phys, child_user, child_sys, child_min, child_maj) = {
             let proc = table
                 .get(&child_pid)
                 .ok_or(KernelError::NoSuchProcess)?;
@@ -3493,6 +3552,9 @@ pub fn try_reap_any(
                 // the parent's cutime/cstime accumulator (see try_reap).
                 proc.acct_user_ticks.saturating_add(proc.child_user_ticks),
                 proc.acct_sys_ticks.saturating_add(proc.child_sys_ticks),
+                // Same carry-up for page faults.
+                proc.acct_min_flt.saturating_add(proc.child_min_flt),
+                proc.acct_maj_flt.saturating_add(proc.child_maj_flt),
             )
         };
 
@@ -3513,6 +3575,10 @@ pub fn try_reap_any(
                 parent.child_user_ticks.saturating_add(child_user);
             parent.child_sys_ticks =
                 parent.child_sys_ticks.saturating_add(child_sys);
+            parent.child_min_flt =
+                parent.child_min_flt.saturating_add(child_min);
+            parent.child_maj_flt =
+                parent.child_maj_flt.saturating_add(child_maj);
         }
 
         let info = ExitInfo { exit_code, crash };
@@ -4911,6 +4977,34 @@ pub fn process_child_ticks(pid: ProcessId) -> (u64, u64) {
         .unwrap_or((0, 0))
 }
 
+/// Get a process's accumulated page faults from its already-exited threads,
+/// as `(min_flt, maj_flt)`.  Returns `None` if the process is unknown.
+///
+/// This is the exited-thread half of a process's total fault counts; live
+/// threads are summed separately (see `proc::thread::process_fault_counts`).
+#[must_use]
+pub fn process_acct_faults(pid: ProcessId) -> Option<(u64, u64)> {
+    let table = PROCESS_TABLE.lock();
+    table
+        .get(&pid)
+        .map(|p| (p.acct_min_flt, p.acct_maj_flt))
+}
+
+/// Get a process's accumulated children page faults (from reaped
+/// descendants) as `(child_min_flt, child_maj_flt)`.  Returns `(0, 0)`
+/// if the process is unknown.
+///
+/// Backs `getrusage(RUSAGE_CHILDREN)` `ru_minflt`/`ru_majflt` and
+/// `/proc/<pid>/stat` fields 11/13 (cminflt/cmajflt).
+#[must_use]
+pub fn process_child_faults(pid: ProcessId) -> (u64, u64) {
+    let table = PROCESS_TABLE.lock();
+    table
+        .get(&pid)
+        .map(|p| (p.child_min_flt, p.child_maj_flt))
+        .unwrap_or((0, 0))
+}
+
 /// Get the state of a process.
 #[allow(dead_code)]
 pub fn state(pid: ProcessId) -> Option<ProcessState> {
@@ -5257,7 +5351,7 @@ fn test_thread_lifecycle() -> KernelResult<()> {
     add_thread(pid, 200)?;
 
     // Remove first — process should still be running.
-    let (zombie, _wake, _any) = remove_thread(pid, 100, 0, 0)?;
+    let (zombie, _wake, _any) = remove_thread(pid, 100, ThreadExitAccounting::default())?;
     if zombie {
         serial_println!("[proc]   FAIL: should not be zombie with 1 thread left");
         destroy(pid);
@@ -5265,7 +5359,7 @@ fn test_thread_lifecycle() -> KernelResult<()> {
     }
 
     // Remove last — process becomes zombie.
-    let (zombie, _wake, _any) = remove_thread(pid, 200, 0, 0)?;
+    let (zombie, _wake, _any) = remove_thread(pid, 200, ThreadExitAccounting::default())?;
     if !zombie {
         serial_println!("[proc]   FAIL: should be zombie with 0 threads");
         destroy(pid);
@@ -5376,10 +5470,14 @@ fn test_cpu_time_accounting() -> KernelResult<()> {
     let grandchild = create("cputime-grandchild", child);
 
     // Bring the grandchild to life then make it a zombie, charging it
-    // 2 user / 1 sys ticks at thread-exit.
+    // 2 user / 1 sys ticks and 3 minor / 1 major faults at thread-exit.
     set_running(grandchild)?;
     add_thread(grandchild, 970)?;
-    let (gc_zombie, _, _) = remove_thread(grandchild, 970, 2, 1)?;
+    let (gc_zombie, _, _) = remove_thread(
+        grandchild,
+        970,
+        ThreadExitAccounting { user_ticks: 2, sys_ticks: 1, min_flt: 3, maj_flt: 1 },
+    )?;
     if !gc_zombie {
         serial_println!("[proc]   FAIL: grandchild should be zombie after last thread exits");
         destroy(grandchild);
@@ -5406,6 +5504,22 @@ fn test_cpu_time_accounting() -> KernelResult<()> {
         destroy(parent);
         return Err(KernelError::InternalError);
     }
+    // Same property for the page-fault accumulator.
+    if process_acct_faults(grandchild) != Some((3, 1)) {
+        serial_println!("[proc]   FAIL: grandchild acct faults != (3,1): {:?}",
+            process_acct_faults(grandchild));
+        destroy(grandchild);
+        destroy(child);
+        destroy(parent);
+        return Err(KernelError::InternalError);
+    }
+    if crate::proc::thread::process_fault_counts(grandchild) != (3, 1) {
+        serial_println!("[proc]   FAIL: grandchild process_fault_counts != (3,1)");
+        destroy(grandchild);
+        destroy(child);
+        destroy(parent);
+        return Err(KernelError::InternalError);
+    }
 
     // The child reaps the grandchild → child.child_* == (2, 1).
     set_running(child)?;
@@ -5426,11 +5540,23 @@ fn test_cpu_time_accounting() -> KernelResult<()> {
         destroy(parent);
         return Err(KernelError::InternalError);
     }
+    if process_child_faults(child) != (3, 1) {
+        serial_println!("[proc]   FAIL: child children-faults != (3,1): {:?}",
+            process_child_faults(child));
+        destroy(child);
+        destroy(parent);
+        return Err(KernelError::InternalError);
+    }
 
-    // Now the child itself exits, charging 5 user / 3 sys ticks, and the
-    // parent reaps it.  Property 3: the parent's children-time accumulates
-    // the child's own CPU time (5,3) PLUS the child's children-time (2,1).
-    let (c_zombie, _, _) = remove_thread(child, 971, 5, 3)?;
+    // Now the child itself exits, charging 5 user / 3 sys ticks and
+    // 4 minor / 2 major faults, and the parent reaps it.  Property 3:
+    // the parent's children accumulators take the child's own totals
+    // (5,3)/(4,2) PLUS the child's children-totals (2,1)/(3,1).
+    let (c_zombie, _, _) = remove_thread(
+        child,
+        971,
+        ThreadExitAccounting { user_ticks: 5, sys_ticks: 3, min_flt: 4, maj_flt: 2 },
+    )?;
     if !c_zombie {
         serial_println!("[proc]   FAIL: child should be zombie after last thread exits");
         destroy(child);
@@ -5451,9 +5577,16 @@ fn test_cpu_time_accounting() -> KernelResult<()> {
         destroy(parent);
         return Err(KernelError::InternalError);
     }
+    // Parent children-faults: child's own (4,2) + child's children (3,1) = (7,3).
+    if process_child_faults(parent) != (7, 3) {
+        serial_println!("[proc]   FAIL: parent children-faults != (7,3): {:?}",
+            process_child_faults(parent));
+        destroy(parent);
+        return Err(KernelError::InternalError);
+    }
 
     destroy(parent);
-    serial_println!("[proc]   CPU-time accounting (exited-thread fold + children carry-up): OK");
+    serial_println!("[proc]   CPU-time + fault accounting (exited-thread fold + children carry-up): OK");
     Ok(())
 }
 
@@ -5479,7 +5612,7 @@ fn test_reap_zombie() -> KernelResult<()> {
 
     // Set exit code and make zombie.
     set_exit_code(child_pid, 42)?;
-    let (zombie, _wake, _any) = remove_thread(child_pid, 900, 0, 0)?;
+    let (zombie, _wake, _any) = remove_thread(child_pid, 900, ThreadExitAccounting::default())?;
     if !zombie {
         serial_println!("[proc]   FAIL: should be zombie after last thread exits");
         destroy(child_pid);
@@ -5517,7 +5650,7 @@ fn test_reap_zombie() -> KernelResult<()> {
     set_running(child2)?;
     add_thread(child2, 901)?;
     set_exit_code(child2, 0)?;
-    let _ = remove_thread(child2, 901, 0, 0)?;
+    let _ = remove_thread(child2, 901, ThreadExitAccounting::default())?;
 
     match try_reap(99999, child2) {
         Err(KernelError::PermissionDenied) => {} // Expected.
@@ -5589,7 +5722,7 @@ fn test_reap_zombie() -> KernelResult<()> {
     }
 
     // Make zombie and reap — crash info should be in ExitInfo.
-    let (zombie, _, _) = remove_thread(crash_child, 950, 0, 0)?;
+    let (zombie, _, _) = remove_thread(crash_child, 950, ThreadExitAccounting::default())?;
     if !zombie {
         serial_println!("[proc]   FAIL: crash child should be zombie");
         destroy(crash_child);
@@ -5674,7 +5807,7 @@ fn test_reap_any() -> KernelResult<()> {
 
     // Make child_b a zombie with a distinctive exit code.
     set_exit_code(child_b, 7)?;
-    let (zombie, _wake, _any) = remove_thread(child_b, 961, 0, 0)?;
+    let (zombie, _wake, _any) = remove_thread(child_b, 961, ThreadExitAccounting::default())?;
     if !zombie {
         serial_println!("[proc]   FAIL: child_b should be zombie");
         destroy(child_a);
@@ -5711,7 +5844,7 @@ fn test_reap_any() -> KernelResult<()> {
 
     // Reap child_a too.
     set_exit_code(child_a, 0)?;
-    let (zombie, _wake, _any) = remove_thread(child_a, 960, 0, 0)?;
+    let (zombie, _wake, _any) = remove_thread(child_a, 960, ThreadExitAccounting::default())?;
     if !zombie {
         serial_println!("[proc]   FAIL: child_a should be zombie");
         destroy(child_a);

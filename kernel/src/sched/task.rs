@@ -434,6 +434,21 @@ pub struct Task {
     /// (stime).
     pub sys_ticks: u64,
 
+    /// Minor page faults serviced for this task — faults resolved without
+    /// disk I/O (demand-zero anonymous pages, copy-on-write, stack
+    /// growth).  Charged by the page-fault handler at each resolution
+    /// point.  Sourced by `getrusage` `ru_minflt`, `/proc/<pid>/stat`
+    /// field 10 (minflt).  Linux distinguishes minor (`min_flt`) from
+    /// major (`maj_flt`) by whether the fault required I/O to satisfy.
+    pub min_flt: u64,
+
+    /// Major page faults serviced for this task — faults that required
+    /// disk I/O to resolve (currently: swap-in of an evicted page;
+    /// file-backed mmap read-faults will count here too once supported).
+    /// Sourced by `getrusage` `ru_majflt`, `/proc/<pid>/stat` field 12
+    /// (majflt).
+    pub maj_flt: u64,
+
     /// Total number of times this task has been scheduled (context
     /// switched into).
     ///
@@ -750,6 +765,8 @@ impl Task {
             total_cycles: 0,
             user_ticks: 0,
             sys_ticks: 0,
+            min_flt: 0,
+            maj_flt: 0,
             schedule_count: 0,
             // Idle tasks are created at boot, before the timer ticks; a
             // start_tick of 0 reads as "started at boot" in /proc stat.
@@ -826,6 +843,8 @@ impl Task {
             total_cycles: 0,
             user_ticks: 0,
             sys_ticks: 0,
+            min_flt: 0,
+            maj_flt: 0,
             schedule_count: 0,
             // Idle tasks are created at boot, before the timer ticks; a
             // start_tick of 0 reads as "started at boot" in /proc stat.
@@ -957,6 +976,8 @@ impl Task {
             total_cycles: 0,
             user_ticks: 0,
             sys_ticks: 0,
+            min_flt: 0,
+            maj_flt: 0,
             schedule_count: 0,
             // Capture the boot-relative creation time for /proc/<pid>/stat
             // starttime (field 22).  USER_HZ == tick rate, so no rescale.

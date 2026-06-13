@@ -10607,12 +10607,13 @@ fn write_uid32_triple(a: u64, b: u64, c: u64) -> SyscallResult {
 /// `getrusage(who, usage)` — query resource usage for the calling
 /// process or one of its children.
 ///
-/// `ru_utime`/`ru_stime` (CPU time) and `ru_maxrss` (peak RSS) are
-/// populated; the fault and context-switch counters
-/// (`ru_minflt`/`ru_majflt`/`ru_nvcsw`/`ru_nivcsw`) are not tracked yet
+/// `ru_utime`/`ru_stime` (CPU time), `ru_maxrss` (peak RSS), and
+/// `ru_minflt`/`ru_majflt` (page-fault counts) are populated; the
+/// context-switch counters (`ru_nvcsw`/`ru_nivcsw`) are not tracked yet
 /// and stay 0.  CPU time comes from the scheduler's per-task
 /// tick-sampling accounting (Linux `account_user_time`/
-/// `account_system_time` model).
+/// `account_system_time` model); fault counts come from the page-fault
+/// handler's per-task accounting.
 ///
 /// `who`:
 ///   - `RUSAGE_SELF == 0`: stats for the calling process
@@ -10629,8 +10630,10 @@ fn write_uid32_triple(a: u64, b: u64, c: u64) -> SyscallResult {
 /// reaped-children accumulator for `RUSAGE_CHILDREN`) and `ru_maxrss`
 /// (peak resident set size in KiB, from the per-address-space RSS
 /// accounting; `RUSAGE_CHILDREN` keeps `ru_maxrss` at 0, matching Linux's
-/// `signal->cmaxrss` which we don't track).  The fault and context-switch
-/// counters stay 0 (known-issues TD14 follow-up).
+/// `signal->cmaxrss` which we don't track) and `ru_minflt`/`ru_majflt`
+/// (minor/major page faults — process-wide, calling-thread, or
+/// reaped-children per `who`).  The context-switch counters
+/// (`ru_nvcsw`/`ru_nivcsw`) stay 0 (known-issues TD14 follow-up).
 ///
 /// Returns 0 on success, `-EINVAL` for an unknown `who`, `-EFAULT` if
 /// `usage` is a bad pointer.
@@ -10723,6 +10726,34 @@ fn sys_getrusage(args: &SyscallArgs) -> SyscallResult {
     };
     write_rusage_timeval(&mut buf, 0, user_ticks);
     write_rusage_timeval(&mut buf, 16, sys_ticks);
+
+    // ru_minflt (offset 64) and ru_majflt (offset 72), both
+    // `__kernel_long_t` (i64).  Minor faults resolved without I/O
+    // (demand-zero, CoW, stack growth); major faults required I/O
+    // (swap-in, file-backed read).  Counted per task by the page-fault
+    // handler (`sched::account_fault`), folded into the process on thread
+    // exit, and carried up to the parent at reap (`signal->cmin_flt`/
+    // `cmaj_flt`), mirroring the CPU-time accounting above.
+    let (min_flt, maj_flt): (u64, u64) = match who_i32 {
+        RUSAGE_SELF => {
+            let pid = caller_pid().unwrap_or(0);
+            crate::proc::thread::process_fault_counts(pid)
+        }
+        RUSAGE_THREAD => {
+            let tid = crate::sched::current_task_id();
+            crate::sched::fault_counts(tid).unwrap_or((0, 0))
+        }
+        _ => {
+            // RUSAGE_CHILDREN: reaped-children fault counts.
+            let pid = caller_pid().unwrap_or(0);
+            crate::proc::pcb::process_child_faults(pid)
+        }
+    };
+    #[allow(clippy::cast_possible_wrap)]
+    {
+        buf[64..72].copy_from_slice(&(min_flt as i64).to_ne_bytes());
+        buf[72..80].copy_from_slice(&(maj_flt as i64).to_ne_bytes());
+    }
 
     // Batch 554: ru_maxrss (offset 32, __kernel_long_t) — peak resident set
     // size in KiB.  Linux `kernel/sys.c::getrusage` (v6.6):
@@ -34631,7 +34662,7 @@ fn test_waitid_scan() -> crate::error::KernelResult<()> {
     pcb::set_exit_code(child, 42)?;
     // Transition to Zombie: register then drop the last thread.
     pcb::add_thread(child, 7000)?;
-    pcb::remove_thread(child, 7000, 0, 0)?;
+    pcb::remove_thread(child, 7000, pcb::ThreadExitAccounting::default())?;
 
     // WNOWAIT (any-child) finds the zombie but must NOT reap it.
     match waitid_scan(parent, None, true, false, false, true)? {

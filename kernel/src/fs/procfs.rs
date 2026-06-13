@@ -2385,6 +2385,16 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     // mirroring Linux's `signal->cutime`/`cstime`.
     let (cutime, cstime) = crate::proc::pcb::process_child_ticks(proc_id);
 
+    // minflt/majflt (fields 10/12): minor/major page faults charged to this
+    // task.  Mirrors the utime/stime treatment above — a per-task value
+    // (TaskInfo), which equals the process total for a single-threaded
+    // process; the thread-group sum is the same TD14 follow-up.  cminflt/
+    // cmajflt (fields 11/13): faults of reaped descendants, process-wide
+    // (keyed off `proc_id`; a bare kernel thread reports 0).
+    let minflt = task.min_flt;
+    let majflt = task.maj_flt;
+    let (cminflt, cmajflt) = crate::proc::pcb::process_child_faults(proc_id);
+
     // Virtual size (bytes) and resident pages, in Linux ABI page units.
     // Bare scheduler tasks (no process / address-space charge) report 0,
     // exactly as Linux does for kernel threads.  Threads share the owning
@@ -2455,9 +2465,10 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     // starttime vsize rss rsslim <startcode..wchan=0> <nswap/cnswap=0>
     // exit_signal=17 processor <rt_priority..env_end=0> exit_code.
     let text = format!(
-        "{} ({}) {} {} {} {} 0 -1 0 0 0 0 0 {} {} {} {} {} 0 {} 0 {} {} {} {} \
+        "{} ({}) {} {} {} {} 0 -1 0 {} {} {} {} {} {} {} {} {} 0 {} 0 {} {} {} {} \
          0 0 0 0 0 0 0 0 0 0 0 0 17 {} 0 0 0 0 0 0 0 0 0 0 0 0 {}\n",
         task.id, name, state_char, ppid, pgrp_sid, pgrp_sid,
+        minflt, cminflt, majflt, cmajflt,
         utime, stime, cutime, cstime, priority, num_threads, starttime,
         vsize, rss_pages, rsslim,
         processor,
@@ -13207,6 +13218,8 @@ pub fn self_test() -> KernelResult<()> {
             total_ticks: 7,
             user_ticks: 5,
             sys_ticks: 2,
+            min_flt: 0,
+            maj_flt: 0,
             total_cycles: 0,
             schedule_count: 0,
             start_tick: 99_999,
@@ -13293,6 +13306,8 @@ pub fn self_test() -> KernelResult<()> {
                 total_ticks: 0,
                 user_ticks: 0,
                 sys_ticks: 0,
+                min_flt: 0,
+                maj_flt: 0,
                 total_cycles: 0,
                 schedule_count: 0,
                 start_tick: 0,
@@ -13359,6 +13374,8 @@ pub fn self_test() -> KernelResult<()> {
             total_ticks: 0,
             user_ticks: 0,
             sys_ticks: 0,
+            min_flt: 0,
+            maj_flt: 0,
             total_cycles: 0,
             schedule_count: 0,
             start_tick: 0,

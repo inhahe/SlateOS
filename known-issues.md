@@ -797,16 +797,19 @@ this kernel rarely steps the realtime clock at runtime.
 stamp it into the timerfd at settime when `CANCEL_ON_SET` is set; on read/poll, if
 the counter advanced, return `ECANCELED`/`EPOLLERR` and disarm.
 
-### TD14. Per-process CPU-time accounting — MOSTLY RESOLVED 2026-06-13 (self/thread/children + exited-thread done; only fault/ctxsw counters pending)
+### TD14. Per-process CPU-time accounting — MOSTLY RESOLVED 2026-06-13 (CPU-time + page-fault counters done; only ctxsw counters pending)
 
 **Where:** `kernel/src/syscall/linux.rs` `sys_getrusage` and `sys_times`;
 `kernel/src/sched/task.rs` (`Task::user_ticks`/`sys_ticks`, `tick_burst(from_user)`);
 `kernel/src/sched/mod.rs` (`timer_tick(from_user)`, `cpu_ticks(tid)`, `TaskInfo`);
-`kernel/src/proc/thread.rs` (`process_cpu_ticks(pid)`, `on_thread_exit`);
-`kernel/src/proc/pcb.rs` (`Process::{acct_,child_}{user,sys}_ticks`, `remove_thread`,
-`try_reap`/`try_reap_any`, `process_acct_ticks`/`process_child_ticks`);
-`kernel/src/apic.rs` (CPL sampling in `handle_timer_irq`); `kernel/src/fs/procfs.rs`
-(`build_pid_stat`).
+`kernel/src/proc/thread.rs` (`process_cpu_ticks(pid)`, `process_fault_counts(pid)`,
+`on_thread_exit`); `kernel/src/proc/pcb.rs` (`Process::{acct_,child_}{user,sys}_ticks`
+and `{acct_,child_}{min,maj}_flt`, `ThreadExitAccounting`, `remove_thread`,
+`try_reap`/`try_reap_any`, `process_acct_ticks`/`process_child_ticks`,
+`process_acct_faults`/`process_child_faults`); `kernel/src/sched/mod.rs`
+(`account_fault`/`fault_counts`); `kernel/src/idt.rs` (`account_fault` calls in
+`handle_page_fault`); `kernel/src/apic.rs` (CPL sampling in `handle_timer_irq`);
+`kernel/src/fs/procfs.rs` (`build_pid_stat`).
 
 **Resolved — base (2026-06-13):** Linux-style tick-sampling CPU-time
 accounting. On every timer IRQ, `handle_timer_irq` reads the interrupted frame's
@@ -839,14 +842,32 @@ Self-test: `pcb::test_cpu_time_accounting` exercises the exited-thread fold,
 `process_cpu_ticks` after all threads exit, and the parent←child←grandchild
 children-time carry-up (asserts parent sees `(5+2, 3+1)`). Boot-test PASSED.
 
-**Still pending (TD14-followup):**
-- **Fault / ctxsw counters** — `getrusage` `ru_minflt`/`ru_majflt`/`ru_nvcsw`/
-  `ru_nivcsw` remain 0 (separate per-task counters, not yet tracked). Proper
-  fix: increment per-task minor/major fault counters in the page-fault handler
-  and voluntary/involuntary ctxsw counters at the scheduler switch point, roll
-  them up per process, and source the four rusage fields from them.
+**Resolved — page-fault counters (2026-06-13):** added per-task `min_flt`/`maj_flt`
+to `Task` (sched/task.rs) charged by `sched::account_fault(tid, major)` from the
+three user-fault resolution points in `idt.rs::handle_page_fault` — swap-in ⇒
+major (required I/O); demand-page (CoW/demand-zero) and stack growth ⇒ minor.
+Mirroring the CPU-time path, the PCB gained `acct_min_flt`/`acct_maj_flt`
+(exited-thread fold) and `child_min_flt`/`child_maj_flt` (reaped-children
+carry-up). `remove_thread`'s signature was refactored from positional tick args
+to a `ThreadExitAccounting { user_ticks, sys_ticks, min_flt, maj_flt }` struct
+(the proper fix vs. a 6-arg signature). `proc::thread::process_fault_counts(pid)`
+sums live + exited; `pcb::process_child_faults(pid)` reports the children
+accumulator. Wired into `getrusage` `ru_minflt`(off 64)/`ru_majflt`(off 72) for
+SELF/THREAD/CHILDREN, and `/proc/<pid>/stat` fields 10/11/12/13
+(minflt/cminflt/majflt/cmajflt). `test_cpu_time_accounting` extended to assert
+the fault fold (grandchild `(3,1)`), child children-faults `(3,1)`, and parent
+children-faults `(4+3, 2+1) = (7,3)`. Boot-test PASSED.
 
-Trigger for the followup: when rusage-based profilers that read the fault/ctxsw
+**Still pending (TD14-followup):**
+- **Ctxsw counters** — `getrusage` `ru_nvcsw`/`ru_nivcsw` (and `/proc/<pid>/stat`
+  has no ctxsw field) remain 0. Proper fix: distinguish voluntary
+  (blocked/yielded) vs involuntary (preempted) context switches at the scheduler
+  switch point, increment per-task counters, roll up per process (fold on thread
+  exit + children carry-up, same pattern as faults), and source the two rusage
+  fields. Note `Task::schedule_count` already counts total dispatches but doesn't
+  split voluntary/involuntary.
+
+Trigger for the followup: when rusage-based profilers that read the ctxsw
 counters become a priority.
 
 ### TD13. A few Linux-compat-flavored fields live in the native PCB — WATCH 2026-06-13

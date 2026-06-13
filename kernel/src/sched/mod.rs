@@ -1651,6 +1651,46 @@ pub fn cpu_ticks(tid: TaskId) -> Option<(u64, u64)> {
     Some((task.user_ticks, task.sys_ticks))
 }
 
+/// Charge a page fault to a task's per-task fault counters.
+///
+/// `major == true` increments `maj_flt` (the fault required I/O to
+/// resolve — e.g. swap-in); `false` increments `min_flt` (resolved
+/// without I/O — demand-zero, CoW, stack growth).
+///
+/// **Best-effort, non-blocking.** This is called from the page-fault
+/// handler, which must never block on the `SCHED` lock (it would deadlock
+/// against a timer IRQ that also takes the lock, or against the scheduler
+/// faulting on user memory).  We use `try_lock`; on contention the fault
+/// is simply not counted.  Under-counting under contention is acceptable
+/// for these statistical rusage/proc counters and matches the existing
+/// `current_task_cgroup` / `try_get_rlimit` page-fault-path pattern.
+pub fn account_fault(tid: TaskId, major: bool) {
+    if let Some(mut state) = SCHED.try_lock() {
+        if let Some(task) = state.tasks.get_mut(&tid) {
+            if major {
+                task.maj_flt = task.maj_flt.saturating_add(1);
+            } else {
+                task.min_flt = task.min_flt.saturating_add(1);
+            }
+        }
+    }
+}
+
+/// Return the accumulated `(min_flt, maj_flt)` page-fault counts for a
+/// task by its scheduler id, or `None` if no such task is registered.
+///
+/// Used by the Linux-ABI `getrusage` `ru_minflt`/`ru_majflt` and
+/// `/proc/<pid>/stat` fields 10/12 (via the per-process roll-up in
+/// `proc::thread::process_fault_counts`).  Takes the global `SCHED` lock
+/// — not for hot paths (the read side is the syscall surface, not the
+/// fault handler).
+#[must_use]
+pub fn fault_counts(tid: TaskId) -> Option<(u64, u64)> {
+    let state = SCHED.lock();
+    let task = state.tasks.get(&tid)?;
+    Some((task.min_flt, task.maj_flt))
+}
+
 /// Preempt the current task (called from timer ISR after time slice
 /// expiry).
 ///
@@ -2783,6 +2823,12 @@ pub struct TaskInfo {
     /// System (ring 0) CPU time, in timer ticks.  Exposed as
     /// `/proc/<pid>/stat` field 15 (stime).
     pub sys_ticks: u64,
+    /// Minor page faults (resolved without I/O — demand-zero, CoW,
+    /// stack growth).  Exposed as `/proc/<pid>/stat` field 10 (minflt).
+    pub min_flt: u64,
+    /// Major page faults (required I/O — swap-in, file-backed read).
+    /// Exposed as `/proc/<pid>/stat` field 12 (majflt).
+    pub maj_flt: u64,
     /// Total CPU cycles consumed (TSC-based, nanosecond precision).
     pub total_cycles: u64,
     /// Number of times this task was scheduled.
@@ -2823,6 +2869,8 @@ pub fn task_list() -> alloc::vec::Vec<TaskInfo> {
             total_ticks: task.total_ticks,
             user_ticks: task.user_ticks,
             sys_ticks: task.sys_ticks,
+            min_flt: task.min_flt,
+            maj_flt: task.maj_flt,
             total_cycles: task.total_cycles,
             schedule_count: task.schedule_count,
             start_tick: task.start_tick,

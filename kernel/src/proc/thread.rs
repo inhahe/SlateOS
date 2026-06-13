@@ -389,15 +389,22 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
     // This prevents dangling registrations when a driver process crashes.
     crate::ioapic::release_irqs_for_task(task_id);
 
-    // Capture the exiting thread's accumulated CPU ticks while its Task is
+    // Capture the exiting thread's accumulated counters while its Task is
     // still alive in the scheduler — `remove_thread` folds them into the
-    // owning process's accumulator so they survive the Task's destruction.
+    // owning process's accumulators so they survive the Task's destruction.
     // (Lock ordering: read SCHED here, before taking PROCESS_TABLE inside
     // remove_thread, to avoid nesting the two locks.)
     let (exit_user, exit_sys) = sched::cpu_ticks(task_id).unwrap_or((0, 0));
+    let (exit_min, exit_maj) = sched::fault_counts(task_id).unwrap_or((0, 0));
+    let acct = pcb::ThreadExitAccounting {
+        user_ticks: exit_user,
+        sys_ticks: exit_sys,
+        min_flt: exit_min,
+        maj_flt: exit_maj,
+    };
 
     // Remove from the process's thread list.
-    match pcb::remove_thread(pid, task_id, exit_user, exit_sys) {
+    match pcb::remove_thread(pid, task_id, acct) {
         Ok((is_zombie, wake_task, any_waiter)) => {
             if is_zombie {
                 serial_println!(
@@ -477,6 +484,34 @@ pub fn process_cpu_ticks(pid: ProcessId) -> (u64, u64) {
         }
     }
     (user, sys)
+}
+
+/// Sum the `(min_flt, maj_flt)` page-fault counts of a process across both
+/// its **live** and **already-exited** threads.
+///
+/// Mirrors [`process_cpu_ticks`] for page faults: live threads carry their
+/// own `Task::min_flt`/`maj_flt`, and exited threads have folded theirs into
+/// `Process::acct_min_flt`/`acct_maj_flt`.  Returns `(0, 0)` if the process
+/// is unknown.
+///
+/// Sourced by `getrusage(RUSAGE_SELF)` `ru_minflt`/`ru_majflt` and
+/// `/proc/<pid>/stat` fields 10/12 (minflt/majflt).  Children faults
+/// (`RUSAGE_CHILDREN`, fields 11/13) are tracked separately — see
+/// [`crate::proc::pcb::process_child_faults`].
+#[must_use]
+pub fn process_fault_counts(pid: ProcessId) -> (u64, u64) {
+    let Some((mut min_flt, mut maj_flt)) = pcb::process_acct_faults(pid) else {
+        return (0, 0);
+    };
+    if let Some(task_ids) = pcb::get_threads(pid) {
+        for tid in task_ids {
+            if let Some((mn, mj)) = sched::fault_counts(tid) {
+                min_flt = min_flt.saturating_add(mn);
+                maj_flt = maj_flt.saturating_add(mj);
+            }
+        }
+    }
+    (min_flt, maj_flt)
 }
 
 /// Force-kill all threads in a process.

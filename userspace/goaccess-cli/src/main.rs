@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_goaccess(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: goaccess [OPTIONS] [FILE]");
-        println!("goaccess v1.9 (SlateOS) — Real-time web log analyzer");
+        println!("goaccess v1.9 (Slate OS) — Real-time web log analyzer");
         println!();
         println!("Options:");
         println!("  FILE              Access log file");

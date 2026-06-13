@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_bc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: bigcommerce [OPTIONS]");
-        println!("BigCommerce (SlateOS) — open SaaS e-commerce platform (Shopify alternative)");
+        println!("BigCommerce (Slate OS) — open SaaS e-commerce platform (Shopify alternative)");
         println!();
         println!("Options:");
         println!("  --standard             Standard — $39/mo");
@@ -24,8 +24,8 @@ fn run_bc(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("BigCommerce 2024 (SlateOS)"); return 0; }
-    println!("BigCommerce 2024 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("BigCommerce 2024 (Slate OS)"); return 0; }
+    println!("BigCommerce 2024 (Slate OS)");
     println!("  Vendor: BigCommerce Holdings, Inc. (Austin, TX — NASDAQ:BIGC)");
     println!("  Founders: Eddie Machaalani + Mitchell Harper, 2009");
     println!("          both Australian — built original BigCommerce in Sydney before relocating to Austin");

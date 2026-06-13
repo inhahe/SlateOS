@@ -27,7 +27,7 @@ fn run_lottie(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("lottie-player 1.0.0 (SlateOS)");
+        println!("lottie-player 1.0.0 (Slate OS)");
         return 0;
     }
 

@@ -11,7 +11,7 @@ fn run_doctl(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: doctl <GROUP> <COMMAND> [FLAGS]");
         println!();
-        println!("DigitalOcean command-line interface (SlateOS).");
+        println!("DigitalOcean command-line interface (Slate OS).");
         println!();
         println!("Groups:");
         println!("  compute      Droplets, volumes, load balancers, etc.");
@@ -32,7 +32,7 @@ fn run_doctl(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("doctl 1.101.0 (SlateOS)");
+        println!("doctl 1.101.0 (Slate OS)");
         println!("Git commit hash: abc1234");
         return 0;
     }

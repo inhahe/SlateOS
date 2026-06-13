@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ion(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: ion COMMAND [OPTIONS] [FILE]");
-        println!("ion v1.1 (SlateOS) — Amazon Ion data tool");
+        println!("ion v1.1 (Slate OS) — Amazon Ion data tool");
         println!();
         println!("Commands:");
         println!("  cat               Display Ion data as text");
@@ -69,7 +69,7 @@ fn run_ion(args: &[String], _prog: &str) -> i32 {
             println!("  Input: data.ion");
             println!("  Result: PASS (all constraints satisfied)");
         }
-        "version" | "--version" => println!("ion v1.1 (SlateOS)"),
+        "version" | "--version" => println!("ion v1.1 (Slate OS)"),
         _ => println!("ion {}: completed", cmd),
     }
     0

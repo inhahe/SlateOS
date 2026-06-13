@@ -53,7 +53,7 @@ fn run_clearml(args: &[String], prog: &str) -> i32 {
 
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: clearml-task [OPTIONS]");
-        println!("ClearML Task CLI 1.14.0 (SlateOS)");
+        println!("ClearML Task CLI 1.14.0 (Slate OS)");
         println!();
         println!("Options:");
         println!("  --name NAME        Task name");

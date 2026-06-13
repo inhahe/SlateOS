@@ -11,7 +11,7 @@ fn run_conan(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: conan <COMMAND> [OPTIONS]");
         println!();
-        println!("Conan — C/C++ package manager (SlateOS).");
+        println!("Conan — C/C++ package manager (Slate OS).");
         println!();
         println!("Commands:");
         println!("  install      Install dependencies");
@@ -27,7 +27,7 @@ fn run_conan(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Conan version 2.0.14 (SlateOS)");
+        println!("Conan version 2.0.14 (Slate OS)");
         return 0;
     }
 
@@ -87,7 +87,7 @@ fn run_conan(args: Vec<String>) -> i32 {
                     println!("build_type=Release");
                     println!("compiler=clang");
                     println!("compiler.version=17");
-                    println!("os=SlateOS");
+                    println!("os=Slate OS");
                 }
                 "list" => {
                     println!("Profiles:");

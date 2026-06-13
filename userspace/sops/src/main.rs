@@ -44,7 +44,7 @@ fn run_sops(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("sops 3.8.1 (SlateOS)");
+        println!("sops 3.8.1 (Slate OS)");
         return 0;
     }
 

@@ -11,7 +11,7 @@ fn run_plaid(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: plaid <COMMAND> [OPTIONS]");
         println!();
-        println!("Plaid financial data CLI (SlateOS).");
+        println!("Plaid financial data CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  accounts     List linked accounts");

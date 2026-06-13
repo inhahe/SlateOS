@@ -11,7 +11,7 @@ fn run_jupyter(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: jupyter <COMMAND> [OPTIONS]");
         println!();
-        println!("Jupyter notebook and lab CLI (SlateOS).");
+        println!("Jupyter notebook and lab CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  notebook     Start notebook server");
@@ -24,7 +24,7 @@ fn run_jupyter(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("jupyter 7.0.0 (SlateOS)");
+        println!("jupyter 7.0.0 (Slate OS)");
         return 0;
     }
 

@@ -43,7 +43,7 @@ fn run_git_branchless(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("git-branchless 0.8.0 (SlateOS)");
+            println!("git-branchless 0.8.0 (Slate OS)");
             0
         }
         "init" => {

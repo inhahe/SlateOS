@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_kanshi(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: kanshi [OPTIONS]");
-        println!("kanshi v1.5 (SlateOS) — Dynamic output configuration for Wayland");
+        println!("kanshi v1.5 (Slate OS) — Dynamic output configuration for Wayland");
         println!();
         println!("Options:");
         println!("  -c FILE           Configuration file");
@@ -23,7 +23,7 @@ fn run_kanshi(args: &[String], _prog: &str) -> i32 {
         println!("Config: ~/.config/kanshi/config");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("kanshi v1.5 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("kanshi v1.5 (Slate OS)"); return 0; }
     println!("kanshi: watching for output changes...");
     println!("  Profile matched: docked");
     println!("    HDMI-A-1: 3840x2160@60Hz, pos 0,0, scale 1.5");

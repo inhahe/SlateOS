@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_aide(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: arduinoide [OPTIONS] [SKETCH]");
-        println!("Arduino IDE 2.3 (SlateOS) — Open-source microcontroller IDE");
+        println!("Arduino IDE 2.3 (Slate OS) — Open-source microcontroller IDE");
         println!();
         println!("Options:");
         println!("  --sketch FILE          Open .ino sketch");
@@ -24,8 +24,8 @@ fn run_aide(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Arduino IDE 2.3.3 (SlateOS)"); return 0; }
-    println!("Arduino IDE 2.3.3 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Arduino IDE 2.3.3 (Slate OS)"); return 0; }
+    println!("Arduino IDE 2.3.3 (Slate OS)");
     println!("  Architecture: Electron + Theia + arduino-cli backend");
     println!("  Languages: Arduino C/C++ (sketches), .ino files");
     println!("  Boards: AVR (Uno/Mega/Nano), SAMD (Zero/MKR), ESP32/ESP8266, RP2040,");

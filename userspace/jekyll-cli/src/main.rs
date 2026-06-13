@@ -10,7 +10,7 @@ use std::process;
 fn run_jekyll(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: jekyll COMMAND [OPTIONS]");
-        println!("jekyll 4.3.3 (SlateOS)");
+        println!("jekyll 4.3.3 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  new PATH       Create new Jekyll site");
@@ -22,7 +22,7 @@ fn run_jekyll(args: &[String]) -> i32 {
     }
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match subcmd {
-        "--version" => println!("jekyll 4.3.3 (SlateOS)"),
+        "--version" => println!("jekyll 4.3.3 (Slate OS)"),
         "new" => {
             let path = args.get(1).map(|s| s.as_str()).unwrap_or("mysite");
             println!("New jekyll site installed in {}/", path);

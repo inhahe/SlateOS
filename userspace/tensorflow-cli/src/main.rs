@@ -20,7 +20,7 @@ fn run_tensorflow(args: &[String]) -> i32 {
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match subcmd {
         "version" | "--version" => {
-            println!("TensorFlow 2.15.0 (SlateOS)");
+            println!("TensorFlow 2.15.0 (Slate OS)");
             println!("Python 3.12.0");
             println!("CUDA: 12.1");
             println!("cuDNN: 8.9.7");
@@ -82,7 +82,7 @@ fn run_saved_model_cli(args: &[String]) -> i32 {
     }
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("show");
     match subcmd {
-        "--version" => println!("saved_model_cli 2.15.0 (TensorFlow, SlateOS)"),
+        "--version" => println!("saved_model_cli 2.15.0 (TensorFlow, Slate OS)"),
         "show" => {
             let dir = args.get(1).map(|s| s.as_str()).unwrap_or("./saved_model");
             println!("MetaGraphDef with tag-set: 'serve'");
@@ -122,7 +122,7 @@ fn run_tflite(args: &[String]) -> i32 {
     }
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match subcmd {
-        "version" | "--version" => println!("TensorFlow Lite 2.15.0 (SlateOS)"),
+        "version" | "--version" => println!("TensorFlow Lite 2.15.0 (Slate OS)"),
         "info" => {
             let model = args.get(1).map(|s| s.as_str()).unwrap_or("model.tflite");
             println!("Model: {}", model);

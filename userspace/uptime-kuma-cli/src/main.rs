@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_uptime_kuma(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: uptime-kuma [COMMAND] [OPTIONS]");
-        println!("Uptime Kuma v1.23 (SlateOS) — Self-hosted monitoring tool");
+        println!("Uptime Kuma v1.23 (Slate OS) — Self-hosted monitoring tool");
         println!();
         println!("Commands:");
         println!("  start              Start Uptime Kuma");
@@ -30,8 +30,8 @@ fn run_uptime_kuma(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Uptime Kuma v1.23.13 (SlateOS)"); return 0; }
-    println!("Uptime Kuma v1.23.13 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Uptime Kuma v1.23.13 (Slate OS)"); return 0; }
+    println!("Uptime Kuma v1.23.13 (Slate OS)");
     println!("  Monitors: 34 (30 up, 3 down, 1 pending)");
     println!("  Status pages: 2");
     println!("  Notifications: Slack, Discord, Telegram, Email, PagerDuty");

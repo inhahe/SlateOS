@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gm(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gamemaker [OPTIONS]");
-        println!("GameMaker 2024.11 (SlateOS) — Opera GameMaker Studio (indie 2D engine)");
+        println!("GameMaker 2024.11 (Slate OS) — Opera GameMaker Studio (indie 2D engine)");
         println!();
         println!("Options:");
         println!("  --new                  New project");
@@ -23,8 +23,8 @@ fn run_gm(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("GameMaker 2024.11.0.180 (SlateOS)"); return 0; }
-    println!("GameMaker 2024.11.0.180 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("GameMaker 2024.11.0.180 (Slate OS)"); return 0; }
+    println!("GameMaker 2024.11.0.180 (Slate OS)");
     println!("  Vendor: Opera Limited (Norway) — acquired YoYo Games (GameMaker creators) Jan 2021");
     println!("  Created by: Mark Overmars (Utrecht Univ., Netherlands, 1999 — initially 'Animo')");
     println!("  Renamed: Animo → Game Maker → GameMaker Studio → GameMaker Studio 2 → GameMaker");

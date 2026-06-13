@@ -11,7 +11,7 @@ fn run_task(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: task [OPTIONS] [TASKS...]");
         println!();
-        println!("Task — task runner / simpler Make alternative (SlateOS).");
+        println!("Task — task runner / simpler Make alternative (Slate OS).");
         println!();
         println!("Options:");
         println!("  -l, --list           List tasks");
@@ -25,7 +25,7 @@ fn run_task(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Task version: v3.34.1 (SlateOS)");
+        println!("Task version: v3.34.1 (Slate OS)");
         return 0;
     }
 

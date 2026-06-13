@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_thunder(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: thunder COMMAND [OPTIONS]");
-        println!("Thunder Client v2.20.0 (SlateOS) — REST API testing tool");
+        println!("Thunder Client v2.20.0 (Slate OS) — REST API testing tool");
         println!();
         println!("Commands:");
         println!("  run             Run collection or request");
@@ -32,7 +32,7 @@ fn run_thunder(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("Thunder Client v2.20.0 (SlateOS)");
+        println!("Thunder Client v2.20.0 (Slate OS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("collection");

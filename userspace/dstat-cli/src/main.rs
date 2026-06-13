@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_dstat(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: dstat [OPTIONS]");
-        println!("dstat 0.8.0 (SlateOS) — Versatile resource statistics");
+        println!("dstat 0.8.0 (Slate OS) — Versatile resource statistics");
         println!();
         println!("Options:");
         println!("  -c, --cpu              CPU stats");
@@ -39,7 +39,7 @@ fn run_dstat(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("dstat 0.8.0 (SlateOS)");
+        println!("dstat 0.8.0 (Slate OS)");
         return 0;
     }
     println!("----total-usage---- -dsk/total- -net/total- ---paging-- ---system--");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wrangler(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: wrangler COMMAND [OPTIONS]");
-        println!("wrangler 3.62.0 (SlateOS)");
+        println!("wrangler 3.62.0 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  init          Initialize a new Workers project");

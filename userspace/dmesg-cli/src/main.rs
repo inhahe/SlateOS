@@ -19,7 +19,7 @@ fn run_dmesg(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: dmesg [OPTIONS]");
         println!();
-        println!("dmesg — print kernel ring buffer messages (SlateOS).");
+        println!("dmesg — print kernel ring buffer messages (Slate OS).");
         println!();
         println!("Options:");
         println!("  -C, --clear          Clear the ring buffer");
@@ -40,7 +40,7 @@ fn run_dmesg(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("dmesg from util-linux 2.39 (SlateOS)");
+        println!("dmesg from util-linux 2.39 (Slate OS)");
         return 0;
     }
 
@@ -57,7 +57,7 @@ fn run_dmesg(args: &[String]) -> i32 {
 
     if json {
         println!("{{\"dmesg\": [");
-        println!("  {{\"pri\": 6, \"time\": 0.000000, \"msg\": \"SlateOS version 1.0.0 (rust 2024) #1 SMP PREEMPT\"}},");
+        println!("  {{\"pri\": 6, \"time\": 0.000000, \"msg\": \"Slate OS version 1.0.0 (rust 2024) #1 SMP PREEMPT\"}},");
         println!("  {{\"pri\": 6, \"time\": 0.000001, \"msg\": \"Command line: root=/dev/sda2 ro quiet splash\"}},");
         println!("  {{\"pri\": 6, \"time\": 0.000100, \"msg\": \"x86/cpu: Intel(R) Core(TM) i9-13900K\"}}");
         println!("]}}");
@@ -65,7 +65,7 @@ fn run_dmesg(args: &[String]) -> i32 {
     }
 
     let messages = [
-        (0.000000, "kern", "info", "SlateOS version 1.0.0 (rust 2024) #1 SMP PREEMPT"),
+        (0.000000, "kern", "info", "Slate OS version 1.0.0 (rust 2024) #1 SMP PREEMPT"),
         (0.000001, "kern", "info", "Command line: root=/dev/sda2 ro quiet splash"),
         (0.000100, "kern", "info", "x86/cpu: Intel(R) Core(TM) i9-13900K"),
         (0.000200, "kern", "info", "x86/fpu: x87 FPU: SSE, SSE2, SSE3, SSSE3, SSE4.1, SSE4.2, AVX, AVX2, AVX-512"),

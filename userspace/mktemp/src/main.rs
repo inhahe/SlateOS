@@ -467,7 +467,7 @@ fn run_mktemp(args: &[String]) -> i32 {
                 return 0;
             }
             "-V" | "--version" => {
-                println!("mktemp (SlateOS) 0.1.0");
+                println!("mktemp (Slate OS) 0.1.0");
                 return 0;
             }
             other if other.starts_with("--tmpdir=") => {
@@ -533,7 +533,7 @@ fn run_mktemp(args: &[String]) -> i32 {
 }
 
 fn print_mktemp_help() {
-    println!("mktemp (SlateOS) 0.1.0 -- Create temporary files or directories safely");
+    println!("mktemp (Slate OS) 0.1.0 -- Create temporary files or directories safely");
     println!();
     println!("USAGE:");
     println!("  mktemp [OPTIONS] [TEMPLATE]");
@@ -604,7 +604,7 @@ fn parse_id_args(args: &[String]) -> Result<IdOpts, i32> {
                 return Err(0);
             }
             "-V" | "--version" => {
-                println!("id (SlateOS) 0.1.0");
+                println!("id (Slate OS) 0.1.0");
                 return Err(0);
             }
             other if other.starts_with('-') => {
@@ -804,7 +804,7 @@ fn collect_all_groups(opts: &IdOpts) -> Vec<(u32, String)> {
 }
 
 fn print_id_help() {
-    println!("id (SlateOS) 0.1.0 -- Display user and group IDs");
+    println!("id (Slate OS) 0.1.0 -- Display user and group IDs");
     println!();
     println!("USAGE:");
     println!("  id [OPTIONS] [USER]");
@@ -835,7 +835,7 @@ fn run_groups(args: &[String]) -> i32 {
         let arg = &args[i];
         match arg.as_str() {
             "-h" | "--help" => {
-                println!("groups (SlateOS) 0.1.0 -- Display group memberships");
+                println!("groups (Slate OS) 0.1.0 -- Display group memberships");
                 println!();
                 println!("USAGE:");
                 println!("  groups [USER...]");
@@ -844,7 +844,7 @@ fn run_groups(args: &[String]) -> i32 {
                 return 0;
             }
             "-V" | "--version" => {
-                println!("groups (SlateOS) 0.1.0");
+                println!("groups (Slate OS) 0.1.0");
                 return 0;
             }
             _ => users.push(arg.clone()),
@@ -917,7 +917,7 @@ fn run_whoami(args: &[String]) -> i32 {
     if let Some(arg) = args.get(1) {
         match arg.as_str() {
             "-h" | "--help" => {
-                println!("whoami (SlateOS) 0.1.0 -- Print effective username");
+                println!("whoami (Slate OS) 0.1.0 -- Print effective username");
                 println!();
                 println!("USAGE:");
                 println!("  whoami");
@@ -926,7 +926,7 @@ fn run_whoami(args: &[String]) -> i32 {
                 return 0;
             }
             "-V" | "--version" => {
-                println!("whoami (SlateOS) 0.1.0");
+                println!("whoami (Slate OS) 0.1.0");
                 return 0;
             }
             other => {

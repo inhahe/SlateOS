@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: paycom [OPTIONS]");
-        println!("Paycom (SlateOS) — Mid-market HCM, employee-driven payroll");
+        println!("Paycom (Slate OS) — Mid-market HCM, employee-driven payroll");
         println!();
         println!("Options:");
         println!("  --beti                 Beti (Better Employee Transaction Interface — employees run their own payroll)");
@@ -22,8 +22,8 @@ fn run_pc(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Paycom 2024 (SlateOS)"); return 0; }
-    println!("Paycom 2024 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Paycom 2024 (Slate OS)"); return 0; }
+    println!("Paycom 2024 (Slate OS)");
     println!("  Vendor: Paycom Software, Inc. (Oklahoma City — NYSE:PAYC)");
     println!("  Founder: Chad Richison (Oklahoma City, founded 1998)");
     println!("          Richison: Oklahoma football lineage, philanthropy, OKC Thunder NBA team minority owner");

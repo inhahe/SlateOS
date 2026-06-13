@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_swipl(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: swipl [OPTIONS] [FILE]");
-        println!("SWI-Prolog 9.2.0 (SlateOS)");
+        println!("SWI-Prolog 9.2.0 (Slate OS)");
         println!("  -g GOAL       Run goal");
         println!("  -t GOAL       Top-level goal");
         println!("  -f FILE       Load file");
@@ -40,7 +40,7 @@ fn run_swipl(args: &[String]) -> i32 {
         println!("% loading {}", f);
         println!("% compiled 0.001 sec, 42 clauses");
     }
-    println!("Welcome to SWI-Prolog 9.2.0 (SlateOS)");
+    println!("Welcome to SWI-Prolog 9.2.0 (Slate OS)");
     println!("?- ");
     0
 }
@@ -48,7 +48,7 @@ fn run_swipl(args: &[String]) -> i32 {
 fn run_gprolog(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gprolog [OPTIONS]");
-        println!("GNU Prolog 1.5.0 (SlateOS)");
+        println!("GNU Prolog 1.5.0 (Slate OS)");
         println!("  --consult-file FILE  Load file");
         println!("  --init-goal GOAL     Initial goal");
         println!("  --query-goal GOAL    Query goal");
@@ -57,7 +57,7 @@ fn run_gprolog(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("gprolog 1.5.0 (SlateOS)");
+        println!("gprolog 1.5.0 (Slate OS)");
         println!("By Daniel Diaz");
         return 0;
     }

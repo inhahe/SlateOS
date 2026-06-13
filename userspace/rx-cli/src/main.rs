@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rx(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: rx [OPTIONS] [AUDIO]");
-        println!("iZotope RX 11 Advanced (SlateOS) — Audio repair & restoration");
+        println!("iZotope RX 11 Advanced (Slate OS) — Audio repair & restoration");
         println!();
         println!("Options:");
         println!("  --assistant            Repair Assistant (AI)");
@@ -24,8 +24,8 @@ fn run_rx(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("iZotope RX 11.5.0 Advanced (SlateOS)"); return 0; }
-    println!("iZotope RX 11.5.0 Advanced (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("iZotope RX 11.5.0 Advanced (Slate OS)"); return 0; }
+    println!("iZotope RX 11.5.0 Advanced (Slate OS)");
     println!("  Modules: 30+ (De-click, De-hum, De-rustle, Dialogue Isolate, etc.)");
     println!("  AI: Dialogue Isolate, Music Rebalance, Voice De-noise");
     println!("  Spectral editing: Frequency-time selection, magic wand, brush tools");

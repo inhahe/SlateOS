@@ -11,7 +11,7 @@ fn run_openscad(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: openscad [OPTIONS] FILE");
         println!();
-        println!("OpenSCAD — programmatic 3D CAD (SlateOS).");
+        println!("OpenSCAD — programmatic 3D CAD (Slate OS).");
         println!();
         println!("Options:");
         println!("  -o FILE          Output file (.stl/.off/.amf/.3mf/.csg/.dxf/.svg/.png)");
@@ -28,7 +28,7 @@ fn run_openscad(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("OpenSCAD version 2024.01.15 (SlateOS)");
+        println!("OpenSCAD version 2024.01.15 (Slate OS)");
         return 0;
     }
 
@@ -50,7 +50,7 @@ fn run_openscad(args: Vec<String>) -> i32 {
             println!("Opening in GUI: {}", f);
         }
     } else {
-        println!("OpenSCAD 2024.01.15 (SlateOS)");
+        println!("OpenSCAD 2024.01.15 (Slate OS)");
         println!("Starting OpenSCAD GUI...");
     }
     0

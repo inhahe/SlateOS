@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_zola(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: zola COMMAND [OPTIONS]");
-        println!("Zola v0.19.0 (SlateOS) — Fast static site generator");
+        println!("Zola v0.19.0 (Slate OS) — Fast static site generator");
         println!();
         println!("Commands:");
         println!("  init PATH       Initialize new site");

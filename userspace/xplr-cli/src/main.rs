@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_xplr(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: xplr [OPTIONS] [PATH]...");
-        println!("xplr 0.21.9 (SlateOS) — Hackable, minimal, fast TUI file explorer");
+        println!("xplr 0.21.9 (Slate OS) — Hackable, minimal, fast TUI file explorer");
         println!();
         println!("Options:");
         println!("  --config FILE        Config file");
@@ -27,7 +27,7 @@ fn run_xplr(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("xplr 0.21.9 (SlateOS)");
+        println!("xplr 0.21.9 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "--read-only") {

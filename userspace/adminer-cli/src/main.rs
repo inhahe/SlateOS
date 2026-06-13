@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_adminer(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: adminer [OPTIONS]");
-        println!("adminer v4.8 (SlateOS) — Database management in single file");
+        println!("adminer v4.8 (Slate OS) — Database management in single file");
         println!();
         println!("Options:");
         println!("  --port PORT      Web server port (default: 8080)");
@@ -23,7 +23,7 @@ fn run_adminer(args: &[String], _prog: &str) -> i32 {
         println!("Supports: MySQL, PostgreSQL, SQLite, MS SQL, Oracle, MongoDB");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("adminer v4.8 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("adminer v4.8 (Slate OS)"); return 0; }
     println!("adminer: web interface started");
     println!("  URL: http://localhost:8080");
     println!("  Drivers: MySQL, PostgreSQL, SQLite");

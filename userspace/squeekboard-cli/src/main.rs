@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_squeekboard(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: squeekboard [OPTIONS]");
-        println!("squeekboard v1.22 (SlateOS) — On-screen keyboard for Wayland");
+        println!("squeekboard v1.22 (Slate OS) — On-screen keyboard for Wayland");
         println!();
         println!("Options:");
         println!("  --layout LAYOUT   Keyboard layout (us, de, fr, etc.)");
@@ -24,7 +24,7 @@ fn run_squeekboard(args: &[String], _prog: &str) -> i32 {
         println!("Automatically shows/hides when text input is focused.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("squeekboard v1.22 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("squeekboard v1.22 (Slate OS)"); return 0; }
 
     let layout = args.iter().skip_while(|a| a.as_str() != "--layout").nth(1)
         .map(|s| s.as_str()).unwrap_or("us");

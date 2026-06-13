@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_d3(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: d3 [COMMAND] [OPTIONS]");
-        println!("d3 v7.0 (SlateOS) — Data-driven document visualization CLI");
+        println!("d3 v7.0 (Slate OS) — Data-driven document visualization CLI");
         println!();
         println!("Commands:");
         println!("  chart TYPE DATA   Generate chart (bar, line, scatter, pie, area)");
@@ -30,7 +30,7 @@ fn run_d3(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("d3-cli v7.0.0 (SlateOS, based on D3.js)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("d3-cli v7.0.0 (Slate OS, based on D3.js)"); return 0; }
     match args.first().map(|s| s.as_str()) {
         Some("chart") => {
             let chart_type = args.get(1).map(|s| s.as_str()).unwrap_or("bar");

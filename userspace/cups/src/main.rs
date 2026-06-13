@@ -3414,7 +3414,7 @@ fn build_test_ppd(filename: &str) -> PpdFile {
         ppd
     } else {
         // Default: valid PPD
-        build_sample_ppd(filename, "SlateOS", "Generic Printer")
+        build_sample_ppd(filename, "Slate OS", "Generic Printer")
     }
 }
 

@@ -14,7 +14,7 @@ fn run_haproxy(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: haproxy [OPTIONS]");
         println!();
-        println!("haproxy — high-performance load balancer (SlateOS).");
+        println!("haproxy — high-performance load balancer (Slate OS).");
         println!();
         println!("Options:");
         println!("  -f <file>       Configuration file");
@@ -29,13 +29,13 @@ fn run_haproxy(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-v") {
-        println!("HAProxy version 2.9.4-1 (SlateOS)");
+        println!("HAProxy version 2.9.4-1 (Slate OS)");
         println!("Status: long-term supported branch");
         println!("Built with OpenSSL 3.2.1 30 Jan 2024");
         return 0;
     }
     if args.iter().any(|a| a == "-vv") {
-        println!("HAProxy version 2.9.4-1 (SlateOS)");
+        println!("HAProxy version 2.9.4-1 (Slate OS)");
         println!("Build options:");
         println!("  TARGET  = linux-glibc");
         println!("  CC      = gcc");
@@ -61,7 +61,7 @@ fn run_haproxy(args: &[String]) -> i32 {
     let config = args.windows(2).find(|w| w[0] == "-f")
         .map(|w| w[1].as_str())
         .unwrap_or("/etc/haproxy/haproxy.cfg");
-    println!("[NOTICE]   (1) : haproxy version is 2.9.4-1 (SlateOS)");
+    println!("[NOTICE]   (1) : haproxy version is 2.9.4-1 (Slate OS)");
     println!("[NOTICE]   (1) : Loading config from '{}'", config);
     println!("[WARNING]  (1) : config : missing stats socket");
     println!("[NOTICE]   (1) : New worker (2) forked");
@@ -83,7 +83,7 @@ fn run_hatop(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: hatop [OPTIONS]");
         println!();
-        println!("hatop — HAProxy stats viewer (SlateOS).");
+        println!("hatop — HAProxy stats viewer (Slate OS).");
         println!();
         println!("Options:");
         println!("  -s <socket>    Stats socket path");
@@ -91,7 +91,7 @@ fn run_hatop(args: &[String]) -> i32 {
         return 0;
     }
 
-    println!("HAProxy Statistics — hatop 0.8.0 (SlateOS)");
+    println!("HAProxy Statistics — hatop 0.8.0 (Slate OS)");
     println!("Stats socket: /run/haproxy/admin.sock");
     println!();
     println!("NAME             STATUS  WEIGHT  CUR  MAX  RATE  BYTES_IN   BYTES_OUT");

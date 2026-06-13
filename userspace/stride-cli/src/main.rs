@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_stride(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: stride [COMMAND] [OPTIONS]");
-        println!("Stride v4.2 (SlateOS) — Open-source C# 3D game engine");
+        println!("Stride v4.2 (Slate OS) — Open-source C# 3D game engine");
         println!();
         println!("Commands:");
         println!("  new PROJECT        Create new project");
@@ -30,8 +30,8 @@ fn run_stride(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Stride v4.2.0 (SlateOS)"); return 0; }
-    println!("Stride v4.2.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Stride v4.2.0 (Slate OS)"); return 0; }
+    println!("Stride v4.2.0 (Slate OS)");
     println!("  Language: C# (.NET 8)");
     println!("  Renderer: Direct3D11/12, Vulkan, OpenGL, OpenGL ES");
     println!("  Platforms: Windows, Linux, Android, iOS, UWP");

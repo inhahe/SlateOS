@@ -35,7 +35,7 @@ fn run_snapper(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("snapper 0.10.7 (SlateOS)");
+        println!("snapper 0.10.7 (Slate OS)");
         return 0;
     }
 

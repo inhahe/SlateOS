@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_at(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: autotune [OPTIONS] [VOCAL]");
-        println!("Antares Auto-Tune Pro X (SlateOS) — Real-time and graphical pitch correction");
+        println!("Antares Auto-Tune Pro X (Slate OS) — Real-time and graphical pitch correction");
         println!();
         println!("Options:");
         println!("  --key KEY              Target key (e.g. C, Am, F#m)");
@@ -24,8 +24,8 @@ fn run_at(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Antares Auto-Tune Pro X v10.5.0 (SlateOS)"); return 0; }
-    println!("Antares Auto-Tune Pro X v10.5.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Antares Auto-Tune Pro X v10.5.0 (Slate OS)"); return 0; }
+    println!("Antares Auto-Tune Pro X v10.5.0 (Slate OS)");
     println!("  Modes: Auto Mode (real-time), Graph Mode (offline edit)");
     println!("  Engine: Antares Spectral Shift");
     println!("  Features: Classic Mode (retro \"5 hardware\"), Humanize, Throat Modeling");

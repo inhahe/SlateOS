@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_nutshell(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: nutshell [OPTIONS]");
-        println!("Nutshell (SlateOS) — easy CRM for small teams");
+        println!("Nutshell (Slate OS) — easy CRM for small teams");
         println!();
         println!("Options:");
         println!("  --foundation           Foundation $16/user/mo");
@@ -25,8 +25,8 @@ fn run_nutshell(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Nutshell 2024 (SlateOS)"); return 0; }
-    println!("Nutshell 2024 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Nutshell 2024 (Slate OS)"); return 0; }
+    println!("Nutshell 2024 (Slate OS)");
     println!("  Vendor: Nutshell, Inc. (Ann Arbor, MI — private)");
     println!("  Founders: Guy Suter, Andy Fowler, Ian Berry (2010)");
     println!("          all U-Michigan grads / Ann Arbor startup community");

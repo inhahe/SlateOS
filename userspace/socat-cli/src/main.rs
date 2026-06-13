@@ -11,7 +11,7 @@ fn run_socat(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: socat [OPTIONS] <ADDRESS1> <ADDRESS2>");
         println!();
-        println!("socat — multipurpose relay / bidirectional data transfer (SlateOS).");
+        println!("socat — multipurpose relay / bidirectional data transfer (Slate OS).");
         println!();
         println!("Address types:");
         println!("  TCP:host:port         TCP client");
@@ -32,7 +32,7 @@ fn run_socat(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("socat version 1.8.0.0 (SlateOS)");
+        println!("socat version 1.8.0.0 (Slate OS)");
         return 0;
     }
 

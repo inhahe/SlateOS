@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gw(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: googleworkspace [OPTIONS]");
-        println!("Google Workspace (SlateOS) — Cloud productivity suite");
+        println!("Google Workspace (Slate OS) — Cloud productivity suite");
         println!();
         println!("Options:");
         println!("  --app NAME             docs/sheets/slides/gmail/drive/meet/calendar");
@@ -23,8 +23,8 @@ fn run_gw(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Google Workspace 2024.11 (SlateOS)"); return 0; }
-    println!("Google Workspace (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Google Workspace 2024.11 (Slate OS)"); return 0; }
+    println!("Google Workspace (Slate OS)");
     println!("  Vendor: Google LLC (Mountain View, California)");
     println!("  History: Google Apps (2006) → G Suite (2016) → Google Workspace (Oct 2020)");
     println!("  Apps: Gmail, Drive, Docs, Sheets, Slides, Forms, Calendar, Meet, Chat,");

@@ -15,7 +15,7 @@ fn run_recursor(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "rec_control" => {
-                println!("rec_control (SlateOS) — PowerDNS Recursor control");
+                println!("rec_control (Slate OS) — PowerDNS Recursor control");
                 println!("  ping           Ping recursor");
                 println!("  quit           Shut down");
                 println!("  reload-zones   Reload auth zones");
@@ -25,7 +25,7 @@ fn run_recursor(args: &[String], prog: &str) -> i32 {
                 println!("  wipe-cache DOMAIN  Clear cache entry");
             }
             _ => {
-                println!("pdns_recursor v5.0 (SlateOS) — Recursive DNS resolver");
+                println!("pdns_recursor v5.0 (Slate OS) — Recursive DNS resolver");
                 println!("  --config-dir DIR   Config directory");
                 println!("  --daemon           Daemonize");
                 println!("  --local-address IP Listen address");
@@ -36,7 +36,7 @@ fn run_recursor(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("PowerDNS Recursor v5.0.3 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("PowerDNS Recursor v5.0.3 (Slate OS)"); return 0; }
     match prog {
         "rec_control" => {
             println!("rec_control: statistics");
@@ -47,7 +47,7 @@ fn run_recursor(args: &[String], prog: &str) -> i32 {
             println!("  cache-entries: 234,567");
         }
         _ => {
-            println!("PowerDNS Recursor v5.0.3 (SlateOS)");
+            println!("PowerDNS Recursor v5.0.3 (Slate OS)");
             println!("  Threads: 4");
             println!("  Listening: 0.0.0.0:53");
             println!("  Cache: 500,000 max entries");

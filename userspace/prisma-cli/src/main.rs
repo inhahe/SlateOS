@@ -11,7 +11,7 @@ fn run_prisma(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: prisma <COMMAND> [OPTIONS]");
         println!();
-        println!("Prisma ORM CLI (SlateOS).");
+        println!("Prisma ORM CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  init         Set up Prisma");
@@ -24,7 +24,7 @@ fn run_prisma(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("prisma                  : 5.8.1 (SlateOS)");
+        println!("prisma                  : 5.8.1 (Slate OS)");
         println!("@prisma/client          : 5.8.1");
         println!("Current platform        : slateos-x86_64");
         println!("Query Engine (Node-API) : libquery-engine abc123");

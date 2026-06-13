@@ -19,7 +19,7 @@ fn run_mount(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mount [OPTIONS] DEVICE MOUNTPOINT");
         println!();
-        println!("mount — mount a filesystem (SlateOS).");
+        println!("mount — mount a filesystem (Slate OS).");
         println!();
         println!("Options:");
         println!("  -t, --types TYPE       Filesystem type");

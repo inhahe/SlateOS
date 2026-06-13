@@ -11,7 +11,7 @@ fn run_coinbase(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: coinbase <COMMAND> [OPTIONS]");
         println!();
-        println!("Coinbase cryptocurrency CLI (SlateOS).");
+        println!("Coinbase cryptocurrency CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  accounts     List accounts");

@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_tealium(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: tealium [OPTIONS]");
-        println!("Tealium (SlateOS) — CDP + Tag Management leader, San Diego");
+        println!("Tealium (Slate OS) — CDP + Tag Management leader, San Diego");
         println!();
         println!("Options:");
         println!("  --iq                   Tealium iQ — tag management (the original product)");
@@ -22,8 +22,8 @@ fn run_tealium(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Tealium 2024 (SlateOS)"); return 0; }
-    println!("Tealium 2024 (SlateOS) — CDP + Tag Management");
+    if args.iter().any(|a| a == "--version") { println!("Tealium 2024 (Slate OS)"); return 0; }
+    println!("Tealium 2024 (Slate OS) — CDP + Tag Management");
     println!("  Vendor: Tealium, Inc. (San Diego, CA)");
     println!("  Founders: Mike Anderson (CEO until 2024) + Ali Behnam + others, 2008");
     println!("          Mike Anderson: founder of WebSideStory (web analytics, sold to Visual Sciences/Adobe)");

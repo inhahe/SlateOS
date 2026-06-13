@@ -11,7 +11,7 @@ fn run_twilio(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: twilio <COMMAND> [OPTIONS]");
         println!();
-        println!("Twilio CLI for communications APIs (SlateOS).");
+        println!("Twilio CLI for communications APIs (Slate OS).");
         println!();
         println!("Commands:");
         println!("  login        Log in to Twilio");

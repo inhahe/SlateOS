@@ -21,7 +21,7 @@ fn run_cqlsh(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: cqlsh [OPTIONS] [HOST [PORT]]");
         println!();
-        println!("Cassandra CQL shell (SlateOS).");
+        println!("Cassandra CQL shell (Slate OS).");
         println!();
         println!("Options:");
         println!("  -e CMD         Execute CQL statement");
@@ -32,7 +32,7 @@ fn run_cqlsh(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("cqlsh 6.1.0 (SlateOS)");
+        println!("cqlsh 6.1.0 (Slate OS)");
         return 0;
     }
 
@@ -68,7 +68,7 @@ fn run_nodetool(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: nodetool <COMMAND> [OPTIONS]");
         println!();
-        println!("Cassandra node management tool (SlateOS).");
+        println!("Cassandra node management tool (Slate OS).");
         println!();
         println!("Commands:");
         println!("  status         Show cluster status");

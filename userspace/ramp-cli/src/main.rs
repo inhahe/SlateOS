@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ramp(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ramp [OPTIONS]");
-        println!("Ramp (SlateOS) — Corporate cards + expense + bill pay + accounting automation");
+        println!("Ramp (Slate OS) — Corporate cards + expense + bill pay + accounting automation");
         println!();
         println!("Options:");
         println!("  --card                 Issue virtual or physical Ramp card");
@@ -24,8 +24,8 @@ fn run_ramp(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Ramp 2024 (SlateOS)"); return 0; }
-    println!("Ramp 2024 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Ramp 2024 (Slate OS)"); return 0; }
+    println!("Ramp 2024 (Slate OS)");
     println!("  Vendor: Ramp Business Corporation (New York, NY — founded 2019)");
     println!("  Founders: Eric Glyman + Karim Atiyeh + Gene Lee (previously Paribus, sold to Capital One 2016)");
     println!("  Funding: Founders Fund, Sequoia, Stripe, Khosla, Greylock");

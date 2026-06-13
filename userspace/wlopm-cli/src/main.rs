@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wlopm(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: wlopm [OPTIONS] [OUTPUT]");
-        println!("wlopm v0.1 (SlateOS) — Wayland output power management");
+        println!("wlopm v0.1 (Slate OS) — Wayland output power management");
         println!();
         println!("Options:");
         println!("  --on OUTPUT       Turn output on");

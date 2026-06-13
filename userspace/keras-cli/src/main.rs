@@ -17,11 +17,11 @@ fn run_keras(args: &[String]) -> i32 {
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match subcmd {
         "version" | "--version" => {
-            println!("Keras 3.0.4 (SlateOS)");
+            println!("Keras 3.0.4 (Slate OS)");
             println!("Backend: TensorFlow 2.15.0");
         }
         "info" => {
-            println!("Keras 3.0.4 (SlateOS)");
+            println!("Keras 3.0.4 (Slate OS)");
             println!("  Backend: tensorflow");
             println!("  Float dtype: float32");
             println!("  Epsilon: 1e-7");

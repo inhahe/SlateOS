@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_appd(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: appdynamics [OPTIONS]");
-        println!("AppDynamics SaaS 24.11 (SlateOS) — Application performance management");
+        println!("AppDynamics SaaS 24.11 (Slate OS) — Application performance management");
         println!();
         println!("Options:");
         println!("  --controller           AppDynamics Controller (data + UI)");
@@ -22,8 +22,8 @@ fn run_appd(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("AppDynamics SaaS 24.11 (SlateOS)"); return 0; }
-    println!("AppDynamics SaaS 24.11 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("AppDynamics SaaS 24.11 (Slate OS)"); return 0; }
+    println!("AppDynamics SaaS 24.11 (Slate OS)");
     println!("  Vendor: AppDynamics (part of Cisco Systems since Jan 2017)");
     println!("  Founder: Jyoti Bansal (Indian-American engineer — also founded Harness, Unusual Ventures)");
     println!("          founded 2008 in San Francisco");

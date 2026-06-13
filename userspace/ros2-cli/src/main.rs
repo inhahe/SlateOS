@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ros2(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: ros2 COMMAND [OPTIONS]");
-        println!("ROS 2 Jazzy (SlateOS) — Robot Operating System");
+        println!("ROS 2 Jazzy (Slate OS) — Robot Operating System");
         println!();
         println!("Commands:");
         println!("  topic             Topic tools (list, echo, pub, info)");
@@ -29,7 +29,7 @@ fn run_ros2(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("ROS 2 Jazzy Jalisco (SlateOS)");
+        println!("ROS 2 Jazzy Jalisco (Slate OS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("doctor");

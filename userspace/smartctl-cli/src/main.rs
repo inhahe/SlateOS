@@ -19,7 +19,7 @@ fn run_smartctl(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: smartctl [OPTIONS] DEVICE");
         println!();
-        println!("smartctl — SMART disk monitoring (SlateOS).");
+        println!("smartctl — SMART disk monitoring (Slate OS).");
         println!();
         println!("Options:");
         println!("  -i, --info         Device identity info");
@@ -35,7 +35,7 @@ fn run_smartctl(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("smartctl 7.4 (SlateOS)");
+        println!("smartctl 7.4 (Slate OS)");
         println!("smartmontools release 7.4");
         return 0;
     }
@@ -53,7 +53,7 @@ fn run_smartctl(args: &[String]) -> i32 {
     let test = args.windows(2).find(|w| w[0] == "-t").map(|w| w[1].as_str());
 
     if let Some(test_type) = test {
-        println!("smartctl 7.4 (SlateOS)");
+        println!("smartctl 7.4 (Slate OS)");
         println!("=== START OF OFFLINE IMMEDIATE AND SELF-TEST SECTION ===");
         match test_type {
             "short" => println!("Sending command: \"Execute SMART Short self-test routine immediately in off-line mode\"."),
@@ -78,7 +78,7 @@ fn run_smartctl(args: &[String]) -> i32 {
         return 0;
     }
 
-    println!("smartctl 7.4 (SlateOS)");
+    println!("smartctl 7.4 (Slate OS)");
     println!("Copyright (C) 2002-24 smartmontools developers");
     println!();
 
@@ -135,7 +135,7 @@ fn run_smartd(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: smartd [OPTIONS]");
         println!();
-        println!("smartd — SMART daemon (SlateOS).");
+        println!("smartd — SMART daemon (Slate OS).");
         println!();
         println!("Options:");
         println!("  -d              Run in foreground");
@@ -146,7 +146,7 @@ fn run_smartd(args: &[String]) -> i32 {
         return 0;
     }
 
-    println!("smartd: starting daemon (SlateOS)");
+    println!("smartd: starting daemon (Slate OS)");
     println!("smartd: reading config file /etc/smartd.conf");
     println!("smartd: monitoring 2 devices");
     println!("smartd: /dev/sda [SAT]: Samsung SSD 870 EVO 1TB, S/N:S1234567890, FW:SVT01B6Q, 1.00 TB");

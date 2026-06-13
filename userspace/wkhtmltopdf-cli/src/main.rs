@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wkhtmltopdf(args: &[String], prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: {} [OPTIONS] <input> <output>", prog);
-        println!("{} v0.12.6 (SlateOS) — HTML to PDF converter", prog);
+        println!("{} v0.12.6 (Slate OS) — HTML to PDF converter", prog);
         println!();
         println!("Options:");
         println!("  --page-size SIZE     Page size (A4, Letter, etc.)");
@@ -33,7 +33,7 @@ fn run_wkhtmltopdf(args: &[String], prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("{} v0.12.6 (SlateOS) with patched Qt", prog);
+        println!("{} v0.12.6 (Slate OS) with patched Qt", prog);
         return 0;
     }
     if args.len() < 2 {
@@ -55,7 +55,7 @@ fn run_wkhtmltopdf(args: &[String], prog: &str) -> i32 {
 fn run_wkhtmltoimage(args: &[String], prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: {} [OPTIONS] <input> <output>", prog);
-        println!("{} v0.12.6 (SlateOS) — HTML to image converter", prog);
+        println!("{} v0.12.6 (Slate OS) — HTML to image converter", prog);
         println!();
         println!("Options:");
         println!("  --format FMT         Output format (png, jpg, svg, bmp)");
@@ -71,7 +71,7 @@ fn run_wkhtmltoimage(args: &[String], prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("{} v0.12.6 (SlateOS) with patched Qt", prog);
+        println!("{} v0.12.6 (Slate OS) with patched Qt", prog);
         return 0;
     }
     if args.len() < 2 {

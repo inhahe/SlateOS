@@ -919,7 +919,7 @@ struct Config {
 }
 
 fn print_usage() {
-    println!("SlateOS USB Device Lister v0.1.0");
+    println!("Slate OS USB Device Lister v0.1.0");
     println!();
     println!("List USB devices and their properties.");
     println!();

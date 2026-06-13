@@ -30,7 +30,7 @@ fn run_grpcurl(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("grpcurl v1.9.1 (SlateOS)");
+        println!("grpcurl v1.9.1 (Slate OS)");
         return 0;
     }
 

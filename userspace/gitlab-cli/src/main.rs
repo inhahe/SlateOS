@@ -14,7 +14,7 @@ fn run_glab(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: glab <command> [flags]");
         println!();
-        println!("glab — GitLab CLI (SlateOS).");
+        println!("glab — GitLab CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  mr          Manage merge requests");
@@ -30,7 +30,7 @@ fn run_glab(args: &[String]) -> i32 {
 
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match subcmd {
-        "version" | "--version" => println!("glab version 1.36.0 (SlateOS)"),
+        "version" | "--version" => println!("glab version 1.36.0 (Slate OS)"),
         "mr" => {
             let cmd = args.get(1).map(|s| s.as_str()).unwrap_or("list");
             match cmd {
@@ -85,7 +85,7 @@ fn run_gitlab_runner(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Version:      16.8.0 (SlateOS)");
+        println!("Version:      16.8.0 (Slate OS)");
         println!("Git revision: abcdef12");
         return 0;
     }

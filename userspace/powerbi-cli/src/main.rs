@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pbi(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: powerbi [OPTIONS] [FILE]");
-        println!("Microsoft Power BI Desktop 2.137 (SlateOS) — Business analytics platform");
+        println!("Microsoft Power BI Desktop 2.137 (Slate OS) — Business analytics platform");
         println!();
         println!("Options:");
         println!("  --open FILE            Open .pbix/.pbit (template)");
@@ -24,8 +24,8 @@ fn run_pbi(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Microsoft Power BI Desktop 2.137.1102.0 (SlateOS)"); return 0; }
-    println!("Microsoft Power BI Desktop 2.137.1102.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Microsoft Power BI Desktop 2.137.1102.0 (Slate OS)"); return 0; }
+    println!("Microsoft Power BI Desktop 2.137.1102.0 (Slate OS)");
     println!("  Products: Desktop, Service (cloud), Mobile, Report Server (on-prem)");
     println!("  Fabric: unified analytics platform (Power BI + Synapse + Data Factory)");
     println!("  Data: Power Query (M), 200+ connectors, DirectQuery, semantic models");

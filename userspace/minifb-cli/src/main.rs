@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_minifb(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: minifb COMMAND [OPTIONS]");
-        println!("MiniFB v0.27.0 (SlateOS) — Cross-platform framebuffer window");
+        println!("MiniFB v0.27.0 (Slate OS) — Cross-platform framebuffer window");
         println!();
         println!("Commands:");
         println!("  new NAME        Create new MiniFB project");
@@ -25,7 +25,7 @@ fn run_minifb(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("minifb v0.27.0 (SlateOS)");
+        println!("minifb v0.27.0 (Slate OS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("info");

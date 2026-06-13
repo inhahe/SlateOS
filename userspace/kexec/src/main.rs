@@ -156,7 +156,7 @@ fn run_kexec(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("kexec-tools 0.1.0 (SlateOS)");
+            println!("kexec-tools 0.1.0 (Slate OS)");
             0
         }
         "-l" | "--load" => kexec_load(&args),
@@ -477,7 +477,7 @@ fn run_makedumpfile(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("makedumpfile 0.1.0 (SlateOS)");
+            println!("makedumpfile 0.1.0 (Slate OS)");
             0
         }
         "--mem-usage" => makedumpfile_mem_usage(),
@@ -608,7 +608,7 @@ fn run_vmcore_dmesg(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("vmcore-dmesg 0.1.0 (SlateOS)");
+            println!("vmcore-dmesg 0.1.0 (Slate OS)");
             0
         }
         _ => {

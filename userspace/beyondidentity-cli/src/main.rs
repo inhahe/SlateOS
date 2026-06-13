@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_bi(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: beyondidentity [OPTIONS]");
-        println!("Beyond Identity (SlateOS) — passwordless phishing-resistant MFA on device-bound credentials");
+        println!("Beyond Identity (Slate OS) — passwordless phishing-resistant MFA on device-bound credentials");
         println!();
         println!("Options:");
         println!("  --workforce            Beyond Identity Workforce (passwordless SSO + MFA)");
@@ -22,8 +22,8 @@ fn run_bi(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Beyond Identity 2024 (SlateOS) — beyondidentity-cli (REST + bi-cli)"); return 0; }
-    println!("Beyond Identity 2024 (SlateOS) — Passwordless Phishing-Resistant Auth (Netscape Pedigree)");
+    if args.iter().any(|a| a == "--version") { println!("Beyond Identity 2024 (Slate OS) — beyondidentity-cli (REST + bi-cli)"); return 0; }
+    println!("Beyond Identity 2024 (Slate OS) — Passwordless Phishing-Resistant Auth (Netscape Pedigree)");
     println!("  Vendor: Beyond Identity, Inc. (New York, NY — private)");
     println!("  Founders: Jim Clark + TJ Jermoluk, 2020");
     println!("          Jim Clark: Netscape co-founder (Netscape Navigator, 1994 IPO), Silicon Graphics co-founder, Healtheon");

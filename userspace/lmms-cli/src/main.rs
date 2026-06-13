@@ -10,7 +10,7 @@ use std::process;
 fn run_lmms(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lmms [OPTIONS] [FILE.mmp]");
-        println!("LMMS 1.2.2 (SlateOS)");
+        println!("LMMS 1.2.2 (Slate OS)");
         println!("  -r, --render FILE   Render to audio file");
         println!("  -f, --format FMT    Output format (wav, ogg, mp3)");
         println!("  -s, --samplerate N  Sample rate");
@@ -20,7 +20,7 @@ fn run_lmms(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("LMMS 1.2.2 (SlateOS)");
+        println!("LMMS 1.2.2 (Slate OS)");
         return 0;
     }
     let render = args.iter().any(|a| a == "-r" || a == "--render");

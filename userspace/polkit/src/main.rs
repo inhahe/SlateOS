@@ -857,7 +857,7 @@ fn run_polkitd(args: &[String]) -> i32 {
         i += 1;
     }
 
-    // In a daemon, we would fork into the background. On SlateOS the service
+    // In a daemon, we would fork into the background. On Slate OS the service
     // manager starts us, so we always run in the foreground.
     let _ = foreground;
     let _ = replace;
@@ -1132,7 +1132,7 @@ fn exec_command(command_args: &[String], target_user: &str, users: &[UserInfo]) 
         .filter_map(|key| env::var(key).ok().map(|val| (key.to_string(), val)))
         .collect();
 
-    // On SlateOS we would use exec() to replace the process. Since we cannot
+    // On Slate OS we would use exec() to replace the process. Since we cannot
     // exec in this stub environment, we simulate with std::process::Command.
     let program = &command_args[0];
     let program_args = if command_args.len() > 1 {
@@ -1759,7 +1759,7 @@ mod tests {
     fn test_parse_policy_xml_full() {
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <policyconfig>
-  <vendor>SlateOS</vendor>
+  <vendor>Slate OS</vendor>
   <vendor_url>https://slateos.example.com</vendor_url>
   <action id="org.slateos.test.action1">
     <description>Test action one</description>
@@ -1790,7 +1790,7 @@ mod tests {
         assert_eq!(actions[0].description, "Test action one");
         assert_eq!(actions[0].message, "Auth required for test one");
         assert_eq!(actions[0].icon_name, "test-icon");
-        assert_eq!(actions[0].vendor, "SlateOS");
+        assert_eq!(actions[0].vendor, "Slate OS");
         assert_eq!(actions[0].vendor_url, "https://slateos.example.com");
         assert_eq!(actions[0].defaults_any, AuthResult::No);
         assert_eq!(actions[0].defaults_inactive, AuthResult::AuthAdmin);

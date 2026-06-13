@@ -345,7 +345,7 @@ fn run(config: &Config) -> i32 {
 // ============================================================================
 
 fn print_help() {
-    println!("SlateOS tee v{VERSION}");
+    println!("Slate OS tee v{VERSION}");
     println!();
     println!("Copy standard input to each FILE, and also to standard output.");
     println!();
@@ -380,7 +380,7 @@ fn main() {
             process::exit(0);
         }
         ParseResult::Version => {
-            println!("tee (SlateOS) {VERSION}");
+            println!("tee (Slate OS) {VERSION}");
             process::exit(0);
         }
         ParseResult::Run(config) => {

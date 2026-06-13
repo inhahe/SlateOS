@@ -15,7 +15,7 @@ fn run_cilium(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS] COMMAND", prog);
         match prog {
             "hubble" => {
-                println!("Hubble v0.13 (SlateOS) — Network observability (Cilium)");
+                println!("Hubble v0.13 (Slate OS) — Network observability (Cilium)");
                 println!("  observe        Observe network flows");
                 println!("  status         Show Hubble status");
                 println!("  list           List nodes");
@@ -24,7 +24,7 @@ fn run_cilium(args: &[String], prog: &str) -> i32 {
                 println!("  --verdict V    Verdict filter (FORWARDED, DROPPED)");
             }
             _ => {
-                println!("Cilium v1.15 (SlateOS) — eBPF-based networking");
+                println!("Cilium v1.15 (Slate OS) — eBPF-based networking");
                 println!("  install        Install Cilium");
                 println!("  status         Show status");
                 println!("  connectivity   Connectivity tests");
@@ -37,17 +37,17 @@ fn run_cilium(args: &[String], prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Cilium v1.15.6 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("Cilium v1.15.6 (Slate OS)"); return 0; }
     match prog {
         "hubble" => {
-            println!("Hubble v0.13 (SlateOS)");
+            println!("Hubble v0.13 (Slate OS)");
             println!("  Nodes: 5");
             println!("  Flows observed: 1,234,567");
             println!("  Flow rate: 5,678/s");
             println!("  Verdicts: FORWARDED=98.5%, DROPPED=1.5%");
         }
         _ => {
-            println!("Cilium v1.15.6 (SlateOS)");
+            println!("Cilium v1.15.6 (Slate OS)");
             println!("  /host           Ready");
             println!("  Nodes: 5/5 ready");
             println!("  Endpoints: 45 ready, 0 not-ready");

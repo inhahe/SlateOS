@@ -1125,7 +1125,7 @@ impl ScreenSaver {
         cmds.push(RenderCommand::Text {
             x: x + 15.0,
             y: y + 15.0,
-            text: "SlateOS".to_string(),
+            text: "Slate OS".to_string(),
             color: COL_BASE,
             font_size: 28.0,
             font_weight: FontWeightHint::Bold,

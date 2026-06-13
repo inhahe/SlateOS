@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_vcftools(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: vcftools [OPTIONS]");
-        println!("VCFtools v0.1.17 (SlateOS) — VCF/BCF file manipulation");
+        println!("VCFtools v0.1.17 (Slate OS) — VCF/BCF file manipulation");
         println!();
         println!("Input:");
         println!("  --vcf FILE        Input VCF file");
@@ -37,8 +37,8 @@ fn run_vcftools(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("VCFtools v0.1.17 (SlateOS)"); return 0; }
-    println!("VCFtools v0.1.17 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("VCFtools v0.1.17 (Slate OS)"); return 0; }
+    println!("VCFtools v0.1.17 (Slate OS)");
     println!("  Variants: 1,234,567");
     println!("  Samples: 100");
     println!("  After filtering: 987,654 variants");

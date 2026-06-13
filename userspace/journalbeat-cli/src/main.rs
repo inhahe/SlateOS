@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_journalbeat(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: journalbeat [OPTIONS]");
-        println!("Journalbeat v8.14 (SlateOS) — Journal log shipper");
+        println!("Journalbeat v8.14 (Slate OS) — Journal log shipper");
         println!();
         println!("Options:");
         println!("  -c, --config FILE     Config file");
@@ -27,8 +27,8 @@ fn run_journalbeat(args: &[String], _prog: &str) -> i32 {
         println!("  --version             Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("journalbeat v8.14.3 (SlateOS)"); return 0; }
-    println!("Journalbeat v8.14.3 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("journalbeat v8.14.3 (Slate OS)"); return 0; }
+    println!("Journalbeat v8.14.3 (Slate OS)");
     println!("  Journal units: 45 monitored");
     println!("  Output: elasticsearch");
     println!("  Events/s: 234");

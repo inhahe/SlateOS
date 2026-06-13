@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wayland_logout(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wayland-logout [OPTIONS]");
-        println!("wayland-logout v1.4 (SlateOS) — Terminate Wayland compositor session");
+        println!("wayland-logout v1.4 (Slate OS) — Terminate Wayland compositor session");
         println!();
         println!("Options:");
         println!("  -p PID            Compositor PID to terminate");
@@ -23,7 +23,7 @@ fn run_wayland_logout(args: &[String], _prog: &str) -> i32 {
         println!("ending the session. Uses wl_registry to find the compositor.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("wayland-logout v1.4 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("wayland-logout v1.4 (Slate OS)"); return 0; }
     println!("wayland-logout: requesting compositor session exit...");
     println!("  Session terminated cleanly.");
     0

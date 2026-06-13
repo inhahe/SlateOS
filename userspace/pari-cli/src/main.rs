@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gp(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gp [OPTIONS] [FILE...]");
-        println!("gp v2.15 (SlateOS) — PARI/GP number theory calculator");
+        println!("gp v2.15 (Slate OS) — PARI/GP number theory calculator");
         println!();
         println!("Options:");
         println!("  -q              Quiet mode (no banner)");
@@ -28,7 +28,7 @@ fn run_gp(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("GP/PARI CALCULATOR Version 2.15 (SlateOS)");
+        println!("GP/PARI CALCULATOR Version 2.15 (Slate OS)");
         println!("amd64 running slateos (x86-64 kernel)");
         return 0;
     }
@@ -39,9 +39,9 @@ fn run_gp(args: &[String], _prog: &str) -> i32 {
     }
     let quiet = args.iter().any(|a| a == "-q");
     if !quiet {
-        println!("                  GP/PARI CALCULATOR Version 2.15 (SlateOS)");
+        println!("                  GP/PARI CALCULATOR Version 2.15 (Slate OS)");
         println!("              amd64 running slateos (x86-64/GMP kernel)");
-        println!("                   64-bit version, compiled for SlateOS");
+        println!("                   64-bit version, compiled for Slate OS");
         println!("          Type ? for help, \\q to quit.");
         println!("          Type ?12 for how to use online help.");
     }

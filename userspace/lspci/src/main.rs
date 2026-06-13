@@ -599,7 +599,7 @@ fn display_json(devices: &[PciDevice]) {
 // ============================================================================
 
 fn print_usage() {
-    println!("SlateOS PCI Device Lister v0.1.0");
+    println!("Slate OS PCI Device Lister v0.1.0");
     println!();
     println!("List PCI devices and their configuration.");
     println!();

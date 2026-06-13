@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_airflow(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: airflow COMMAND [OPTIONS]");
-        println!("Apache Airflow 2.9.0 (SlateOS)");
+        println!("Apache Airflow 2.9.0 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  dags           Manage DAGs");

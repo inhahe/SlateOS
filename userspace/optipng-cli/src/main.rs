@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_optipng(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "-?") || args.is_empty() {
         println!("Usage: optipng [OPTIONS] FILES...");
-        println!("OptiPNG 0.7.8 (SlateOS) — Advanced PNG optimizer");
+        println!("OptiPNG 0.7.8 (Slate OS) — Advanced PNG optimizer");
         println!();
         println!("Options:");
         println!("  -o N               Optimization level (0-7, default 2)");
@@ -34,7 +34,7 @@ fn run_optipng(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("OptiPNG version 0.7.8 (SlateOS)");
+        println!("OptiPNG version 0.7.8 (Slate OS)");
         return 0;
     }
     let files: Vec<&str> = args.iter()

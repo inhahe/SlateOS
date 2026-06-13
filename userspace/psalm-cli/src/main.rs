@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_psalm(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: psalm [OPTIONS] [FILE|DIR ...]");
-        println!("Psalm 5.25.0 (SlateOS)");
+        println!("Psalm 5.25.0 (Slate OS)");
         println!();
         println!("Options:");
         println!("  --init                 Create psalm.xml config");
@@ -97,7 +97,7 @@ fn run_psalm(args: &[String]) -> i32 {
 fn run_psalter(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: psalter [OPTIONS] [FILE|DIR ...]");
-        println!("Psalter 5.25.0 — Psalm's code fixer (SlateOS)");
+        println!("Psalter 5.25.0 — Psalm's code fixer (Slate OS)");
         println!();
         println!("Options:");
         println!("  --issues ISSUES    Comma-separated issue types to fix");
@@ -128,7 +128,7 @@ fn run_psalter(args: &[String]) -> i32 {
 fn run_psalm_plugin(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: psalm-plugin COMMAND [OPTIONS]");
-        println!("Psalm Plugin Manager 5.25.0 (SlateOS)");
+        println!("Psalm Plugin Manager 5.25.0 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  enable PLUGIN   Enable a plugin");

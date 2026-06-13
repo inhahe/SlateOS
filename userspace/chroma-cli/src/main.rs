@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ch(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: chroma [OPTIONS]");
-        println!("Chroma (SlateOS) — open-source embedding database, AI-application-first DX");
+        println!("Chroma (Slate OS) — open-source embedding database, AI-application-first DX");
         println!();
         println!("Options:");
         println!("  --ephemeral            In-memory client (default for prototyping)");
@@ -21,8 +21,8 @@ fn run_ch(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Chroma 2024 (SlateOS) — chromadb CLI 0.5.x"); return 0; }
-    println!("Chroma 2024 (SlateOS) — Open-Source Embedding Database for AI Apps");
+    if args.iter().any(|a| a == "--version") { println!("Chroma 2024 (Slate OS) — chromadb CLI 0.5.x"); return 0; }
+    println!("Chroma 2024 (Slate OS) — Open-Source Embedding Database for AI Apps");
     println!("  Vendor: Chroma Inc. (San Francisco, CA — private)");
     println!("  Founders: Jeff Huber + Anton Troynikov, 2022");
     println!("          Jeff Huber: ex-Google ML, ex-product at Standard Cyborg, ex-Two Sigma");

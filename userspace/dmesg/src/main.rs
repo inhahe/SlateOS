@@ -317,7 +317,7 @@ fn current_uptime_us() -> u64 {
 // ============================================================================
 
 fn print_usage() {
-    println!("SlateOS Kernel Message Viewer v0.1.0");
+    println!("Slate OS Kernel Message Viewer v0.1.0");
     println!();
     println!("Display kernel ring buffer messages for boot diagnostics and debugging.");
     println!();

@@ -22,14 +22,14 @@ fn run_postgres(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("postgres (PostgreSQL) 16.3 (SlateOS)");
+        println!("postgres (PostgreSQL) 16.3 (Slate OS)");
         return 0;
     }
     let port = args.iter().position(|a| a == "-p")
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or(5432);
-    println!("2025-05-22 10:00:00.000 UTC [12345] LOG:  starting PostgreSQL 16.3 (SlateOS) on x86_64");
+    println!("2025-05-22 10:00:00.000 UTC [12345] LOG:  starting PostgreSQL 16.3 (Slate OS) on x86_64");
     println!("2025-05-22 10:00:00.001 UTC [12345] LOG:  listening on IPv4 address \"0.0.0.0\", port {}", port);
     println!("2025-05-22 10:00:00.002 UTC [12345] LOG:  listening on IPv6 address \"::\", port {}", port);
     println!("2025-05-22 10:00:00.010 UTC [12345] LOG:  listening on Unix socket \"/tmp/.s.PGSQL.{}\"", port);
@@ -54,7 +54,7 @@ fn run_psql(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("psql (PostgreSQL) 16.3 (SlateOS)");
+        println!("psql (PostgreSQL) 16.3 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "-l" || a == "--list") {
@@ -94,13 +94,13 @@ fn run_psql(args: Vec<String>) -> i32 {
     }
 
     // Interactive mode
-    println!("psql (16.3 SlateOS)");
+    println!("psql (16.3 Slate OS)");
     println!("Type \"help\" for help.");
     println!();
     println!("postgres=# SELECT version();");
     println!("                                   version");
     println!("-----------------------------------------------------------------------------");
-    println!(" PostgreSQL 16.3 (SlateOS) on x86_64, compiled by rustc, 64-bit");
+    println!(" PostgreSQL 16.3 (Slate OS) on x86_64, compiled by rustc, 64-bit");
     println!("(1 row)");
     println!();
     println!("postgres=# \\q");
@@ -122,7 +122,7 @@ fn run_pg_dump(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("pg_dump (PostgreSQL) 16.3 (SlateOS)");
+        println!("pg_dump (PostgreSQL) 16.3 (Slate OS)");
         return 0;
     }
     let db = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("myapp");
@@ -130,8 +130,8 @@ fn run_pg_dump(args: Vec<String>) -> i32 {
     println!("-- PostgreSQL database dump");
     println!("--");
     println!();
-    println!("-- Dumped from database version 16.3 (SlateOS)");
-    println!("-- Dumped by pg_dump version 16.3 (SlateOS)");
+    println!("-- Dumped from database version 16.3 (Slate OS)");
+    println!("-- Dumped by pg_dump version 16.3 (Slate OS)");
     println!();
     println!("SET statement_timeout = 0;");
     println!("SET client_encoding = 'UTF8';");
@@ -165,7 +165,7 @@ fn run_pg_restore(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("pg_restore (PostgreSQL) 16.3 (SlateOS)");
+        println!("pg_restore (PostgreSQL) 16.3 (Slate OS)");
         return 0;
     }
     println!("pg_restore: restoring data... (simulated)");
@@ -179,7 +179,7 @@ fn run_createdb(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("createdb (PostgreSQL) 16.3 (SlateOS)");
+        println!("createdb (PostgreSQL) 16.3 (Slate OS)");
         return 0;
     }
     let db = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("newdb");
@@ -194,7 +194,7 @@ fn run_dropdb(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("dropdb (PostgreSQL) 16.3 (SlateOS)");
+        println!("dropdb (PostgreSQL) 16.3 (Slate OS)");
         return 0;
     }
     println!("DROP DATABASE");
@@ -212,7 +212,7 @@ fn run_pg_isready(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("pg_isready (PostgreSQL) 16.3 (SlateOS)");
+        println!("pg_isready (PostgreSQL) 16.3 (Slate OS)");
         return 0;
     }
     let host = args.iter().position(|a| a == "-h" || a == "--host")
@@ -239,7 +239,7 @@ fn run_initdb(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("initdb (PostgreSQL) 16.3 (SlateOS)");
+        println!("initdb (PostgreSQL) 16.3 (Slate OS)");
         return 0;
     }
     let datadir = args.iter().position(|a| a == "-D" || a == "--pgdata")

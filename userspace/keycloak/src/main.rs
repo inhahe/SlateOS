@@ -28,7 +28,7 @@ fn run_keycloak(args: Vec<String>) -> i32 {
             0
         }
         "version" | "--version" => {
-            println!("Keycloak 24.0.4 (SlateOS)");
+            println!("Keycloak 24.0.4 (Slate OS)");
             0
         }
         "start" | "start-dev" => {
@@ -41,7 +41,7 @@ fn run_keycloak(args: Vec<String>) -> i32 {
             if is_dev {
                 println!("2025-05-22 10:00:00,100 WARN  [org.keycloak.quarkus.runtime.KeycloakMain] Running the server in development mode. DO NOT use this configuration in production.");
             }
-            println!("2025-05-22 10:00:01,000 INFO  [org.keycloak.services] (main) Keycloak 24.0.4 (SlateOS) on JVM (build 21.0.2)");
+            println!("2025-05-22 10:00:01,000 INFO  [org.keycloak.services] (main) Keycloak 24.0.4 (Slate OS) on JVM (build 21.0.2)");
             println!("2025-05-22 10:00:01,500 INFO  [io.quarkus] (main) Installed features: [cdi, hibernate-orm, jdbc-h2, keycloak, narayana-jta, resteasy-reactive, smallrye-context-propagation, vertx]");
             println!("2025-05-22 10:00:02,000 INFO  [io.quarkus] (main) Keycloak started in 2.0s. Listening on: http://0.0.0.0:{}", port);
             println!("2025-05-22 10:00:02,001 INFO  [io.quarkus] (main) Installed features: 8");

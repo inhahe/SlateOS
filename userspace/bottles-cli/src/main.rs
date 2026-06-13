@@ -13,13 +13,13 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_bottles(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: bottles [OPTIONS]");
-        println!("bottles v51.0 (SlateOS) — Wine prefix manager");
+        println!("bottles v51.0 (Slate OS) — Wine prefix manager");
         println!();
         println!("Options:");
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("bottles v51.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("bottles v51.0 (Slate OS)"); return 0; }
     println!("bottles: Wine prefix manager started");
     println!("  Bottles: 3 configured");
     println!("    Gaming (Caffe 8.21, DXVK 2.3)");

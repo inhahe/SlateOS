@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_c4d(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: cinema4d [OPTIONS] [FILE]");
-        println!("Maxon Cinema 4D 2024 (SlateOS) — 3D modeling, animation, motion graphics");
+        println!("Maxon Cinema 4D 2024 (Slate OS) — 3D modeling, animation, motion graphics");
         println!();
         println!("Options:");
         println!("  -nogui                Headless mode");
@@ -26,8 +26,8 @@ fn run_c4d(args: &[String], _prog: &str) -> i32 {
         println!("  --version             Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Maxon Cinema 4D 2024.4.0 (SlateOS)"); return 0; }
-    println!("Maxon Cinema 4D 2024.4.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Maxon Cinema 4D 2024.4.0 (Slate OS)"); return 0; }
+    println!("Maxon Cinema 4D 2024.4.0 (Slate OS)");
     println!("  Renderers: Redshift (default), Standard, Physical, Arnold, V-Ray");
     println!("  Modules: MoGraph, Sculpt, Hair, Particles, Cloth");
     println!("  Scripting: Python, C.O.F.F.E.E.");

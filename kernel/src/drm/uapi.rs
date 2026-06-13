@@ -299,7 +299,7 @@ pub const DRIVER_NAME: &[u8] = b"slateos";
 /// Driver "date" string (build/ABI date), `DRM_IOCTL_VERSION`.
 pub const DRIVER_DATE: &[u8] = b"20260613";
 /// Human-readable driver description, `DRM_IOCTL_VERSION`.
-pub const DRIVER_DESC: &[u8] = b"SlateOS virtual display (KMS compatibility)";
+pub const DRIVER_DESC: &[u8] = b"Slate OS virtual display (KMS compatibility)";
 /// Unique bus-id string reported by `DRM_IOCTL_GET_UNIQUE`.
 pub const DRIVER_UNIQUE: &[u8] = b"slateos-drm";
 

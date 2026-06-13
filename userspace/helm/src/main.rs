@@ -35,7 +35,7 @@ fn run_helm(args: Vec<String>) -> i32 {
             println!("  --version   Show version");
             0
         }
-        "version" | "--version" => { println!("v3.14.0+g (SlateOS)"); 0 }
+        "version" | "--version" => { println!("v3.14.0+g (Slate OS)"); 0 }
         "install" => {
             let name = cmd_args.first().map(|s| s.as_str()).unwrap_or("myrelease");
             let chart = cmd_args.get(1).map(|s| s.as_str()).unwrap_or("stable/nginx");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_evidently(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: evidently COMMAND [OPTIONS]");
-        println!("Evidently v0.4 (SlateOS) — ML model monitoring & evaluation");
+        println!("Evidently v0.4 (Slate OS) — ML model monitoring & evaluation");
         println!();
         println!("Commands:");
         println!("  ui             Launch monitoring dashboard");
@@ -35,8 +35,8 @@ fn run_evidently(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Evidently v0.4.33 (SlateOS)"); return 0; }
-    println!("Evidently v0.4.33 (SlateOS) — Model Monitoring");
+    if args.iter().any(|a| a == "--version") { println!("Evidently v0.4.33 (Slate OS)"); return 0; }
+    println!("Evidently v0.4.33 (Slate OS) — Model Monitoring");
     println!("  Report: Data Drift");
     println!("  Reference: train_data.csv (50,000 rows)");
     println!("  Current: prod_data.csv (10,000 rows)");

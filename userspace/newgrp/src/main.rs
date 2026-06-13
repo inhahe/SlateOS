@@ -235,7 +235,7 @@ fn newgrp_main(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("newgrp (SlateOS coreutils) {VERSION}");
+                println!("newgrp (Slate OS coreutils) {VERSION}");
                 return 0;
             }
             s if !s.starts_with('-') => {
@@ -323,7 +323,7 @@ fn sg_main(args: &[String]) -> i32 {
             return 0;
         }
         "--version" => {
-            println!("sg (SlateOS coreutils) {VERSION}");
+            println!("sg (Slate OS coreutils) {VERSION}");
             return 0;
         }
         _ => {}

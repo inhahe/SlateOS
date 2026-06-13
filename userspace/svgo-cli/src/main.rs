@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_svgo(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: svgo [OPTIONS] [INPUT] [-o OUTPUT]");
-        println!("SVGO 3.3.2 (SlateOS) — SVG Optimizer");
+        println!("SVGO 3.3.2 (Slate OS) — SVG Optimizer");
         println!();
         println!("Options:");
         println!("  -i, --input FILE     Input file(s)");
@@ -33,7 +33,7 @@ fn run_svgo(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("svgo 3.3.2 (SlateOS)");
+        println!("svgo 3.3.2 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "--show-plugins") {

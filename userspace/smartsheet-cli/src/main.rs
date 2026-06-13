@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ss(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: smartsheet [OPTIONS]");
-        println!("Smartsheet (SlateOS) — spreadsheet-meets-project-management for enterprise");
+        println!("Smartsheet (Slate OS) — spreadsheet-meets-project-management for enterprise");
         println!();
         println!("Options:");
         println!("  --pro                  Pro — $9/user/mo (annual)");
@@ -23,8 +23,8 @@ fn run_ss(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Smartsheet 2024 (SlateOS)"); return 0; }
-    println!("Smartsheet 2024 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Smartsheet 2024 (Slate OS)"); return 0; }
+    println!("Smartsheet 2024 (Slate OS)");
     println!("  Vendor: Smartsheet Inc. (Bellevue, WA — NYSE:SMAR, taken private 2024)");
     println!("  Founders: Brent Frei, Mark Mader (CEO since 2006), John Creason, Maria Colacurcio, 2005");
     println!("          Mader was VP at Onyx Software, took CEO role early and is still CEO 19 years later");

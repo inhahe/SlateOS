@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_hardhat(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: hardhat [COMMAND] [OPTIONS]");
-        println!("Hardhat 2.22.3 (SlateOS) — Ethereum development environment");
+        println!("Hardhat 2.22.3 (Slate OS) — Ethereum development environment");
         println!();
         println!("Commands:");
         println!("  compile        Compile contracts");

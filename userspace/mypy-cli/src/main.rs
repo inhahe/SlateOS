@@ -11,7 +11,7 @@ fn run_mypy(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mypy [OPTIONS] [FILES/DIRS...]");
         println!();
-        println!("mypy — static type checker for Python (SlateOS).");
+        println!("mypy — static type checker for Python (Slate OS).");
         println!();
         println!("Options:");
         println!("  --strict             Enable all strict checks");
@@ -25,7 +25,7 @@ fn run_mypy(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("mypy 1.8.0 (SlateOS)");
+        println!("mypy 1.8.0 (Slate OS)");
         return 0;
     }
 

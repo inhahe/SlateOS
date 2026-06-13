@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_lance(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lancedb [OPTIONS]");
-        println!("LanceDB (SlateOS) — multi-modal Rust vector DB on Lance columnar format");
+        println!("LanceDB (Slate OS) — multi-modal Rust vector DB on Lance columnar format");
         println!();
         println!("Options:");
         println!("  --lance                Lance columnar format (the underlying file format)");
@@ -21,8 +21,8 @@ fn run_lance(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("LanceDB 2024 (SlateOS) — lancedb CLI 0.x"); return 0; }
-    println!("LanceDB 2024 (SlateOS) — Multi-Modal Vector Database on Lance Columnar Format");
+    if args.iter().any(|a| a == "--version") { println!("LanceDB 2024 (Slate OS) — lancedb CLI 0.x"); return 0; }
+    println!("LanceDB 2024 (Slate OS) — Multi-Modal Vector Database on Lance Columnar Format");
     println!("  Vendor: LanceDB, Inc. (San Francisco, CA — private)");
     println!("  Founders: Chang She + Lei Xu, 2022");
     println!("          Chang She: co-creator of pandas (yes, *that* pandas), ex-Tubi, ex-Aviary");

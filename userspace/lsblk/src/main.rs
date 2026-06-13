@@ -823,7 +823,7 @@ fn print_json_fields(dev: &BlockDevice, columns: &[Column], bytes_mode: bool) {
 // ============================================================================
 
 fn print_usage() {
-    println!("SlateOS Block Device Lister v0.1.0");
+    println!("Slate OS Block Device Lister v0.1.0");
     println!();
     println!("List information about block devices.");
     println!();

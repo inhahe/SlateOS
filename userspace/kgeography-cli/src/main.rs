@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_kgeography(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: kgeography [OPTIONS]");
-        println!("kgeography v23.08 (SlateOS) — Geography learning tool");
+        println!("kgeography v23.08 (Slate OS) — Geography learning tool");
         println!();
         println!("Options:");
         println!("  --version         Show version");
@@ -26,7 +26,7 @@ fn run_kgeography(args: &[String], _prog: &str) -> i32 {
         println!("  Quiz: Flag       Identify flag of a division");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("kgeography v23.08 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("kgeography v23.08 (Slate OS)"); return 0; }
     println!("kgeography: geography learning started");
     println!("  Maps: World, Europe, Africa, Asia, Americas, Oceania");
     println!("  Quizzes: capitals, flags, locations");

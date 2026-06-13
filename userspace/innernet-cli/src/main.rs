@@ -15,7 +15,7 @@ fn run_innernet(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [COMMAND] [OPTIONS]", prog);
         match prog {
             "innernet-server" => {
-                println!("innernet-server (SlateOS) — innernet WireGuard server");
+                println!("innernet-server (Slate OS) — innernet WireGuard server");
                 println!("  new                Create new network");
                 println!("  serve INTERFACE    Start server");
                 println!("  add-peer IFACE     Add peer invitation");
@@ -24,7 +24,7 @@ fn run_innernet(args: &[String], prog: &str) -> i32 {
                 println!("  delete-peer IFACE  Delete peer");
             }
             _ => {
-                println!("innernet (SlateOS) — innernet WireGuard client");
+                println!("innernet (Slate OS) — innernet WireGuard client");
                 println!("  install INVITE     Install invitation");
                 println!("  up INTERFACE       Bring up interface");
                 println!("  down INTERFACE     Bring down interface");
@@ -36,10 +36,10 @@ fn run_innernet(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("innernet v1.6.1 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("innernet v1.6.1 (Slate OS)"); return 0; }
     match prog {
         "innernet-server" => {
-            println!("innernet Server v1.6.1 (SlateOS)");
+            println!("innernet Server v1.6.1 (Slate OS)");
             println!("  Network: mycompany");
             println!("  CIDR: 10.42.0.0/16");
             println!("  Peers: 15");
@@ -47,7 +47,7 @@ fn run_innernet(args: &[String], prog: &str) -> i32 {
             println!("  API: 0.0.0.0:51821");
         }
         _ => {
-            println!("innernet v1.6.1 (SlateOS)");
+            println!("innernet v1.6.1 (Slate OS)");
             println!("  Interface: mycompany");
             println!("  Address: 10.42.1.5/16");
             println!("  Peers: 14 (12 reachable)");

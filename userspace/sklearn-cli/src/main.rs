@@ -16,11 +16,11 @@ fn run_sklearn(args: &[String]) -> i32 {
     }
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match subcmd {
-        "version" | "--version" => println!("scikit-learn 1.4.0 (SlateOS)"),
+        "version" | "--version" => println!("scikit-learn 1.4.0 (Slate OS)"),
         "info" | "show-versions" => {
             println!("scikit-learn 1.4.0");
             println!("System:");
-            println!("    python: 3.12.0 (SlateOS)");
+            println!("    python: 3.12.0 (Slate OS)");
             println!("    machine: x86_64");
             println!("Python dependencies:");
             println!("    numpy: 1.26.4");

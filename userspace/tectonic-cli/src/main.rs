@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_tectonic(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: tectonic [OPTIONS] INPUT");
-        println!("Tectonic v0.15 (SlateOS) — Modernized TeX/LaTeX engine");
+        println!("Tectonic v0.15 (Slate OS) — Modernized TeX/LaTeX engine");
         println!();
         println!("Options:");
         println!("  -o DIR         Output directory");
@@ -28,8 +28,8 @@ fn run_tectonic(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Tectonic v0.15.0 (SlateOS)"); return 0; }
-    println!("Tectonic v0.15.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Tectonic v0.15.0 (Slate OS)"); return 0; }
+    println!("Tectonic v0.15.0 (Slate OS)");
     println!("  Input: paper.tex");
     println!("  Bundle: https://data.tectonic-typesetting.com/default");
     println!("  Running TeX...");

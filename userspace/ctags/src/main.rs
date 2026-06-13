@@ -1940,7 +1940,7 @@ fn run_main() -> i32 {
             0
         }
         ParseResult::Version => {
-            println!("ctags (SlateOS) {VERSION}");
+            println!("ctags (Slate OS) {VERSION}");
             0
         }
         ParseResult::Run(config) => run(&config),

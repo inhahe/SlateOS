@@ -21,7 +21,7 @@ fn run_mutt(args: &[String], neo: bool) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: {} [OPTIONS] [-s subject] [-c cc] [-b bcc] [address ...]", name);
         println!();
-        println!("{} — text-based email client (SlateOS).", name);
+        println!("{} — text-based email client (Slate OS).", name);
         println!();
         println!("Options:");
         println!("  -s SUBJECT         Subject of the message");
@@ -44,9 +44,9 @@ fn run_mutt(args: &[String], neo: bool) -> i32 {
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
         if neo {
-            println!("NeoMutt 20240201 (SlateOS)");
+            println!("NeoMutt 20240201 (Slate OS)");
         } else {
-            println!("Mutt 2.2.12 (SlateOS)");
+            println!("Mutt 2.2.12 (Slate OS)");
         }
         return 0;
     }
@@ -77,7 +77,7 @@ fn run_mutt(args: &[String], neo: bool) -> i32 {
         println!("  3     2024-01-14  friend@email.com     Re: Weekend plans");
         println!("  4     2024-01-13  news@list.org        Weekly digest #42");
     } else {
-        println!("{} version {} (SlateOS)", name,
+        println!("{} version {} (Slate OS)", name,
             if neo { "20240201" } else { "2.2.12" });
         println!();
         println!("  1  N  2024-01-15  user@example.com     Hello");

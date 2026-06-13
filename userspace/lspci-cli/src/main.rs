@@ -19,7 +19,7 @@ fn run_lspci(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lspci [OPTIONS]");
         println!();
-        println!("lspci — list PCI devices (SlateOS).");
+        println!("lspci — list PCI devices (Slate OS).");
         println!();
         println!("Options:");
         println!("  -v              Verbose");
@@ -36,7 +36,7 @@ fn run_lspci(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("lspci version 3.11.1 (SlateOS)");
+        println!("lspci version 3.11.1 (Slate OS)");
         return 0;
     }
 
@@ -98,7 +98,7 @@ fn run_setpci(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: setpci [OPTIONS] DEVICE REGISTER[=VALUE]");
         println!();
-        println!("setpci — configure PCI devices (SlateOS).");
+        println!("setpci — configure PCI devices (Slate OS).");
         println!();
         println!("Options:");
         println!("  -v              Verbose");
@@ -108,11 +108,11 @@ fn run_setpci(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("setpci version 3.11.1 (SlateOS)");
+        println!("setpci version 3.11.1 (Slate OS)");
         return 0;
     }
 
-    println!("setpci: configuration space access simulated (SlateOS)");
+    println!("setpci: configuration space access simulated (Slate OS)");
     0
 }
 

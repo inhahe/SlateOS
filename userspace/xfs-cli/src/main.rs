@@ -15,26 +15,26 @@ fn run_xfs(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS] DEVICE", prog);
         match prog {
             "xfs_repair" => {
-                println!("xfs_repair (SlateOS) — Repair XFS filesystem");
+                println!("xfs_repair (Slate OS) — Repair XFS filesystem");
                 println!("  -n         No modify (dry run)");
                 println!("  -L         Zero log (force repair)");
                 println!("  -v         Verbose");
             }
             "xfs_info" => {
-                println!("xfs_info (SlateOS) — Display XFS filesystem info");
+                println!("xfs_info (Slate OS) — Display XFS filesystem info");
             }
             "xfs_growfs" => {
-                println!("xfs_growfs (SlateOS) — Grow XFS filesystem");
+                println!("xfs_growfs (Slate OS) — Grow XFS filesystem");
                 println!("  -D SIZE    New data size (blocks)");
                 println!("  -d         Grow to fill device");
             }
             "xfs_admin" => {
-                println!("xfs_admin (SlateOS) — Change XFS parameters");
+                println!("xfs_admin (Slate OS) — Change XFS parameters");
                 println!("  -L LABEL   Set label");
                 println!("  -U UUID    Set UUID");
             }
             _ => {
-                println!("mkfs.xfs (SlateOS) — Create XFS filesystem");
+                println!("mkfs.xfs (Slate OS) — Create XFS filesystem");
                 println!("  -b size=N  Block size");
                 println!("  -d size=N  Data section size");
                 println!("  -l size=N  Log size");
@@ -45,7 +45,7 @@ fn run_xfs(args: &[String], prog: &str) -> i32 {
         println!("  --version  Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("xfsprogs v6.6.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("xfsprogs v6.6.0 (Slate OS)"); return 0; }
     match prog {
         "xfs_repair" => {
             println!("xfs_repair: checking filesystem...");
@@ -66,7 +66,7 @@ fn run_xfs(args: &[String], prog: &str) -> i32 {
             println!("  realtime =none         extsz=4096   blocks=0, rtextents=0");
         }
         _ => {
-            println!("mkfs.xfs (SlateOS)");
+            println!("mkfs.xfs (Slate OS)");
             println!("  Device: /dev/sda2 (100 GiB)");
             println!("  Block size: 4096");
             println!("  Inodes: 26,214,400");

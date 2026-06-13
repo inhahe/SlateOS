@@ -27,7 +27,7 @@ fn run_zwcli(args: &[String]) -> i32 {
     }
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match subcmd {
-        "version" | "--version" => println!("zwcli 12.4.0 (Z-Wave JS, SlateOS)"),
+        "version" | "--version" => println!("zwcli 12.4.0 (Z-Wave JS, Slate OS)"),
         "nodes" => {
             println!("Z-Wave nodes:");
             println!("  #1   Controller              ready    USB (Aeotec Z-Stick 7)");
@@ -77,7 +77,7 @@ fn run_zwave_js(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Z-Wave JS 12.4.0 (SlateOS)");
+        println!("Z-Wave JS 12.4.0 (Slate OS)");
         return 0;
     }
     let port = args.windows(2).find(|w| w[0] == "--port").map(|w| w[1].as_str()).unwrap_or("/dev/ttyACM0");

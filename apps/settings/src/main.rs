@@ -995,7 +995,7 @@ impl SettingsState {
             narrator_verbosity: NarratorVerbosity::Medium,
 
             // Update defaults
-            os_version: "SlateOS 1.0.0 Build 2600".into(),
+            os_version: "Slate OS 1.0.0 Build 2600".into(),
             update_history: vec![
                 UpdateEntry {
                     date: "2026-05-15".into(),
@@ -2527,7 +2527,7 @@ impl SettingsState {
         // Version info
         y = render_section_header(tree, x, y, "System Information");
         fill_rounded(tree, x, y, 580.0, 60.0, COL_SURFACE0, 8.0);
-        text_bold(tree, x + 16.0, y + 12.0, "SlateOS", COL_TEXT, 16.0);
+        text_bold(tree, x + 16.0, y + 12.0, "Slate OS", COL_TEXT, 16.0);
         tree.text(x + 16.0, y + 36.0, &self.os_version, COL_SUBTEXT0, 13.0);
         y += 72.0;
 

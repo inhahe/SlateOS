@@ -412,7 +412,7 @@ impl Crontab {
 
     fn save(&self) -> Result<(), String> {
         let mut out = String::new();
-        out.push_str("# SlateOS crontab — managed by crond\n");
+        out.push_str("# Slate OS crontab — managed by crond\n");
         out.push_str("# min hour day month weekday command\n\n");
 
         for job in &self.jobs {
@@ -798,7 +798,7 @@ fn cmd_status() {
 // ============================================================================
 
 fn print_usage() {
-    println!("SlateOS Cron Daemon v0.1.0");
+    println!("Slate OS Cron Daemon v0.1.0");
     println!();
     println!("Time-based task scheduler. Runs commands at specified times.");
     println!();

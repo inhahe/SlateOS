@@ -11,7 +11,7 @@ fn run_dvc(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: dvc <COMMAND> [OPTIONS]");
         println!();
-        println!("DVC: Data Version Control (SlateOS).");
+        println!("DVC: Data Version Control (Slate OS).");
         println!();
         println!("Commands:");
         println!("  init         Initialize DVC");
@@ -29,7 +29,7 @@ fn run_dvc(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("3.42.0 (SlateOS)");
+        println!("3.42.0 (Slate OS)");
         return 0;
     }
 

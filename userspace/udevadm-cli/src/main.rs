@@ -19,7 +19,7 @@ fn run_udevadm(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: udevadm COMMAND [OPTIONS]");
         println!();
-        println!("udevadm — udev device management tool (SlateOS).");
+        println!("udevadm — udev device management tool (Slate OS).");
         println!();
         println!("Commands:");
         println!("  info         Query device information");
@@ -33,7 +33,7 @@ fn run_udevadm(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("udevadm 255 (SlateOS)");
+        println!("udevadm 255 (Slate OS)");
         return 0;
     }
 

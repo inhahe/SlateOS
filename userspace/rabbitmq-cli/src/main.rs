@@ -11,7 +11,7 @@ fn run_rabbitmqctl(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: rabbitmqctl <COMMAND> [OPTIONS]");
         println!();
-        println!("RabbitMQ management CLI (SlateOS).");
+        println!("RabbitMQ management CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  status           Show node status");
@@ -31,7 +31,7 @@ fn run_rabbitmqctl(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("rabbitmqctl 3.13.0 (SlateOS)");
+        println!("rabbitmqctl 3.13.0 (Slate OS)");
         return 0;
     }
 

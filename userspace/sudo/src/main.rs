@@ -1280,7 +1280,7 @@ fn log_command(
 
 /// Format an epoch timestamp as a human-readable string.
 fn format_timestamp(epoch: u64) -> String {
-    // Simple epoch-based formatting (SlateOS will have its own time formatting).
+    // Simple epoch-based formatting (Slate OS will have its own time formatting).
     // Format: YYYY-MM-DD HH:MM:SS (approximate, using basic calculation).
     let secs_per_minute = 60u64;
     let secs_per_hour = 3600u64;
@@ -1488,7 +1488,7 @@ fn replay_session(
         let adjusted_delay = delay_secs / speed_factor;
         if adjusted_delay > 0.001 {
             // Sleep for the adjusted delay.
-            // On SlateOS, this would use the real sleep syscall.
+            // On Slate OS, this would use the real sleep syscall.
             // For now, spin-wait approximation.
             let target = current_epoch_nanos().saturating_add((adjusted_delay * 1_000_000_000.0) as u64);
             while current_epoch_nanos() < target {
@@ -1570,10 +1570,10 @@ fn prompt_password(prompt: &str) -> Result<String, SudoError> {
 
 /// Authenticate the user. Returns Ok(()) on success.
 ///
-/// On SlateOS, this would use the PAM equivalent or shadow password file.
+/// On Slate OS, this would use the PAM equivalent or shadow password file.
 /// For now, this checks against `/etc/shadow` (simplified).
 fn authenticate(username: &str, _password: &str) -> Result<(), SudoError> {
-    // In SlateOS, authentication will be handled by the auth service via IPC.
+    // In Slate OS, authentication will be handled by the auth service via IPC.
     // This stub checks if the user exists in the user database.
     let user_db = Path::new("/etc/users.yaml");
     if !user_db.exists() {

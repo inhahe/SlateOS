@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_blueberry(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: blueberry");
-        println!("blueberry v1.4 (SlateOS) — Bluetooth configuration (Cinnamon)");
+        println!("blueberry v1.4 (Slate OS) — Bluetooth configuration (Cinnamon)");
         println!();
         println!("Bluetooth device manager from Linux Mint / Cinnamon.");
         return 0;

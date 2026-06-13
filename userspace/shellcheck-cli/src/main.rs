@@ -11,7 +11,7 @@ fn run_shellcheck(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: shellcheck [OPTIONS] [FILES...]");
         println!();
-        println!("ShellCheck — shell script static analysis tool (SlateOS).");
+        println!("ShellCheck — shell script static analysis tool (Slate OS).");
         println!();
         println!("Options:");
         println!("  -f, --format FORMAT  Output format (tty, gcc, checkstyle, json, diff)");
@@ -24,7 +24,7 @@ fn run_shellcheck(args: Vec<String>) -> i32 {
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("ShellCheck - shell script analysis tool");
-        println!("version: 0.9.0 (SlateOS)");
+        println!("version: 0.9.0 (Slate OS)");
         return 0;
     }
 

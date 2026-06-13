@@ -34,7 +34,7 @@ fn run_zig(args: Vec<String>) -> i32 {
 
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match cmd {
-        "version" => println!("0.13.0 (SlateOS)"),
+        "version" => println!("0.13.0 (Slate OS)"),
         "env" => {
             println!("{{");
             println!("  \"zig_exe\": \"/usr/bin/zig\",");

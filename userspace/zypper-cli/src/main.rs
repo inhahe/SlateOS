@@ -10,7 +10,7 @@ use std::process;
 fn run_zypper(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: zypper [GLOBAL-OPTIONS] COMMAND [OPTIONS] [ARGUMENTS]");
-        println!("Zypper 1.14.68 (SlateOS)");
+        println!("Zypper 1.14.68 (Slate OS)");
         println!();
         println!("Repository management:");
         println!("  repos, lr          List repos");

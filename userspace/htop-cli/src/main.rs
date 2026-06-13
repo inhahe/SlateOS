@@ -11,7 +11,7 @@ fn run_htop(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: htop [OPTIONS]");
         println!();
-        println!("htop — interactive process viewer (SlateOS).");
+        println!("htop — interactive process viewer (Slate OS).");
         println!();
         println!("Options:");
         println!("  -d DELAY       Update delay in tenths of seconds");
@@ -23,7 +23,7 @@ fn run_htop(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("htop 3.3.0 (SlateOS)");
+        println!("htop 3.3.0 (Slate OS)");
         return 0;
     }
 

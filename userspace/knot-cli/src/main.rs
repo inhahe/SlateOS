@@ -15,7 +15,7 @@ fn run_knot(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "knotc" => {
-                println!("knotc (SlateOS) — Knot DNS control utility");
+                println!("knotc (Slate OS) — Knot DNS control utility");
                 println!("  status        Show server status");
                 println!("  reload        Reload configuration");
                 println!("  zone-status   Show zone status");
@@ -23,19 +23,19 @@ fn run_knot(args: &[String], prog: &str) -> i32 {
                 println!("  conf-read     Read configuration");
             }
             "kdig" => {
-                println!("kdig (SlateOS) — DNS lookup utility");
+                println!("kdig (Slate OS) — DNS lookup utility");
                 println!("  kdig [@SERVER] NAME [TYPE]");
                 println!("  +dnssec   Request DNSSEC");
                 println!("  +tcp      Use TCP");
                 println!("  +tls      Use DNS over TLS");
             }
             "kzonecheck" => {
-                println!("kzonecheck (SlateOS) — Zone file validator");
+                println!("kzonecheck (Slate OS) — Zone file validator");
                 println!("  -d DOMAIN  Zone origin");
                 println!("  -o ORIGIN  Zone origin");
             }
             _ => {
-                println!("knotd v3.3 (SlateOS) — Knot DNS authoritative server");
+                println!("knotd v3.3 (Slate OS) — Knot DNS authoritative server");
                 println!("  -c FILE    Config file");
                 println!("  -d         Daemonize");
                 println!("  -s DIR     Storage directory");
@@ -44,10 +44,10 @@ fn run_knot(args: &[String], prog: &str) -> i32 {
         println!("  --version  Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Knot DNS v3.3.5 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("Knot DNS v3.3.5 (Slate OS)"); return 0; }
     match prog {
         "kdig" => {
-            println!(";; kdig v3.3.5 (SlateOS)");
+            println!(";; kdig v3.3.5 (Slate OS)");
             println!(";; ->>HEADER<<- opcode: QUERY; status: NOERROR; id: 12345");
             println!(";; ANSWER SECTION:");
             println!("example.com.  3600  IN  A  93.184.216.34");
@@ -61,7 +61,7 @@ fn run_knot(args: &[String], prog: &str) -> i32 {
             println!("  Workers: 4");
         }
         _ => {
-            println!("Knot DNS v3.3.5 (SlateOS)");
+            println!("Knot DNS v3.3.5 (Slate OS)");
             println!("  Zones: 45 loaded");
             println!("  DNSSEC: automatic signing");
             println!("  Listening: 0.0.0.0:53 (UDP+TCP)");

@@ -26,7 +26,7 @@ fn run_duplicity(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("duplicity 2.2.1 (SlateOS)");
+        println!("duplicity 2.2.1 (Slate OS)");
         return 0;
     }
 

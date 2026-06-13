@@ -15,7 +15,7 @@ fn run_lakefs(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [COMMAND] [OPTIONS]", prog);
         match prog {
             "lakectl" => {
-                println!("lakectl (SlateOS) — lakeFS command-line client");
+                println!("lakectl (Slate OS) — lakeFS command-line client");
                 println!();
                 println!("Commands:");
                 println!("  repo list|create|delete  Manage repositories");
@@ -28,7 +28,7 @@ fn run_lakefs(args: &[String], prog: &str) -> i32 {
                 println!("  fs upload|download|cat   File operations");
             }
             _ => {
-                println!("lakeFS v1.20 (SlateOS) — Git-like version control for data lakes");
+                println!("lakeFS v1.20 (Slate OS) — Git-like version control for data lakes");
                 println!();
                 println!("Commands:");
                 println!("  run                Start lakeFS server");
@@ -40,16 +40,16 @@ fn run_lakefs(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("lakeFS v1.20.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("lakeFS v1.20.0 (Slate OS)"); return 0; }
     match prog {
         "lakectl" => {
-            println!("lakectl v1.20.0 (SlateOS)");
+            println!("lakectl v1.20.0 (Slate OS)");
             println!("  Server: https://lakefs.example.com");
             println!("  Repositories: 5 accessible");
             println!("  Current branch: main");
         }
         _ => {
-            println!("lakeFS v1.20.0 (SlateOS)");
+            println!("lakeFS v1.20.0 (Slate OS)");
             println!("  API: http://0.0.0.0:8000");
             println!("  Repositories: 5");
             println!("  Storage: s3://lakefs-data");

@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_census(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: census [OPTIONS]");
-        println!("Census (SlateOS) — operational analytics + reverse ETL (warehouse → SaaS sync)");
+        println!("Census (Slate OS) — operational analytics + reverse ETL (warehouse → SaaS sync)");
         println!();
         println!("Options:");
         println!("  --free                 Free — up to 10 destinations, 30 syncs");
@@ -24,8 +24,8 @@ fn run_census(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Census 2024 (SlateOS)"); return 0; }
-    println!("Census 2024 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Census 2024 (Slate OS)"); return 0; }
+    println!("Census 2024 (Slate OS)");
     println!("  Vendor: Census, Inc. (San Francisco, CA — private)");
     println!("  Founders: Boris Jabes (CEO), Sean Lynch, Bill Marrs, 2018");
     println!("          Jabes ex-product at Couchbase + Mixpanel, repeat founder (sold a startup to Salesforce)");

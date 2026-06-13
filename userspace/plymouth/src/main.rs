@@ -330,7 +330,7 @@ fn plymouth_main(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("plymouth (SlateOS) {VERSION}");
+                println!("plymouth (Slate OS) {VERSION}");
                 return 0;
             }
             other => {
@@ -393,7 +393,7 @@ fn plymouthd_main(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("plymouthd (SlateOS) {VERSION}");
+                println!("plymouthd (Slate OS) {VERSION}");
                 return 0;
             }
             s if s.starts_with("--mode=") => {
@@ -463,7 +463,7 @@ fn set_theme_main(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("plymouth-set-default-theme (SlateOS) {VERSION}");
+                println!("plymouth-set-default-theme (Slate OS) {VERSION}");
                 return 0;
             }
             s if !s.starts_with('-') => {

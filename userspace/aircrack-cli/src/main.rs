@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_aircrack(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: aircrack-ng [OPTIONS] <capture-file>");
-        println!("aircrack-ng v1.7 (SlateOS) — Wireless key recovery");
+        println!("aircrack-ng v1.7 (Slate OS) — Wireless key recovery");
         println!();
         println!("Options:");
         println!("  -w WORDLIST    Dictionary file for WPA");
@@ -23,7 +23,7 @@ fn run_aircrack(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("aircrack-ng v1.7 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("aircrack-ng v1.7 (Slate OS)"); return 0; }
     println!("aircrack-ng: wireless key recovery tool");
     println!("  Use with capture files from airodump-ng");
     0
@@ -32,13 +32,13 @@ fn run_aircrack(args: &[String], _prog: &str) -> i32 {
 fn run_airodump(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: airodump-ng [OPTIONS] <interface>");
-        println!("airodump-ng v1.7 (SlateOS) — Wireless packet capture");
+        println!("airodump-ng v1.7 (Slate OS) — Wireless packet capture");
         println!("  -c CHAN        Channel");
         println!("  --bssid MAC    Filter by BSSID");
         println!("  -w PREFIX      Output file prefix");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("airodump-ng v1.7 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("airodump-ng v1.7 (Slate OS)"); return 0; }
     println!("airodump-ng: packet capture (requires monitor mode)");
     0
 }
@@ -46,10 +46,10 @@ fn run_airodump(args: &[String], _prog: &str) -> i32 {
 fn run_aireplay(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: aireplay-ng [OPTIONS] <interface>");
-        println!("aireplay-ng v1.7 (SlateOS) — Wireless packet injection");
+        println!("aireplay-ng v1.7 (Slate OS) — Wireless packet injection");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("aireplay-ng v1.7 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("aireplay-ng v1.7 (Slate OS)"); return 0; }
     println!("aireplay-ng: packet injection tool");
     0
 }
@@ -57,10 +57,10 @@ fn run_aireplay(args: &[String], _prog: &str) -> i32 {
 fn run_airmon(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: airmon-ng [start|stop] <interface> [channel]");
-        println!("airmon-ng v1.7 (SlateOS) — Monitor mode control");
+        println!("airmon-ng v1.7 (Slate OS) — Monitor mode control");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("airmon-ng v1.7 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("airmon-ng v1.7 (Slate OS)"); return 0; }
     match args.first().map(|s| s.as_str()) {
         Some("start") => {
             println!("airmon-ng: enabling monitor mode on wlan0");

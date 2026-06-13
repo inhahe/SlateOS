@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gz(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: gz COMMAND [OPTIONS]");
-        println!("Gazebo Harmonic (SlateOS)");
+        println!("Gazebo Harmonic (Slate OS)");
         println!();
         println!("Commands:");
         println!("  sim          Run simulation");
@@ -30,7 +30,7 @@ fn run_gz(args: &[String]) -> i32 {
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match subcmd {
         "version" | "--version" => {
-            println!("Gazebo Harmonic (SlateOS)");
+            println!("Gazebo Harmonic (Slate OS)");
             println!("gz-sim version 8.3.0");
             println!("gz-transport version 13.1.0");
             println!("gz-math version 7.3.0");

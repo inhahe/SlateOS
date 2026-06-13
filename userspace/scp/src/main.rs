@@ -403,7 +403,7 @@ fn parse_args(args: &[String]) -> Result<ParseResult, ScpError> {
 
 fn print_help() {
     let help = "\
-scp 0.1.0 -- SlateOS secure file copy
+scp 0.1.0 -- Slate OS secure file copy
 
 Usage: scp [OPTION]... SOURCE... TARGET
 
@@ -1133,7 +1133,7 @@ fn main() {
             process::exit(0);
         }
         Ok(ParseResult::Version) => {
-            println!("scp {VERSION} (SlateOS)");
+            println!("scp {VERSION} (Slate OS)");
             process::exit(0);
         }
         Ok(ParseResult::Run(config)) => {

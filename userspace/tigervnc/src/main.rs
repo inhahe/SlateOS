@@ -60,9 +60,9 @@ fn run_vncviewer(args: Vec<String>) -> i32 {
     }
 
     let host = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("localhost:1");
-    println!("TigerVNC Viewer 1.13.1 (SlateOS)");
+    println!("TigerVNC Viewer 1.13.1 (Slate OS)");
     println!("Connected to VNC server at {}", host);
-    println!("Desktop name: \"SlateOS Desktop\"");
+    println!("Desktop name: \"Slate OS Desktop\"");
     println!("Desktop size: 1920x1080");
     0
 }

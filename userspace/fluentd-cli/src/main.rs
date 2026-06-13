@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_fluentd(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: fluentd [OPTIONS]");
-        println!("Fluentd v1.17 (SlateOS) — Unified logging layer");
+        println!("Fluentd v1.17 (Slate OS) — Unified logging layer");
         println!();
         println!("Options:");
         println!("  -c, --config FILE  Config file (default: fluent.conf)");
@@ -28,8 +28,8 @@ fn run_fluentd(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("fluentd v1.17.1 (SlateOS)"); return 0; }
-    println!("Fluentd v1.17.1 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("fluentd v1.17.1 (Slate OS)"); return 0; }
+    println!("Fluentd v1.17.1 (Slate OS)");
     println!("  Inputs: tail (3), forward (1), syslog (1)");
     println!("  Outputs: elasticsearch (2), s3 (1), stdout (1)");
     println!("  Filters: record_transformer (2), grep (1)");

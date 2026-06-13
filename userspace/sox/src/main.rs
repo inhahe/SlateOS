@@ -41,7 +41,7 @@ fn run_sox(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("sox:      SoX v14.4.2 (SlateOS)");
+        println!("sox:      SoX v14.4.2 (Slate OS)");
         return 0;
     }
 

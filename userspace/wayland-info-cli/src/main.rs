@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wayland_info(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wayland-info [OPTIONS]");
-        println!("wayland-info v1.0 (SlateOS) — Display Wayland compositor information");
+        println!("wayland-info v1.0 (Slate OS) — Display Wayland compositor information");
         println!();
         println!("Options:");
         println!("  --version         Show version");
@@ -21,7 +21,7 @@ fn run_wayland_info(args: &[String], _prog: &str) -> i32 {
         println!("Lists all global objects advertised by the compositor.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("wayland-info v1.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("wayland-info v1.0 (Slate OS)"); return 0; }
     println!("interface: 'wl_compositor', version: 5");
     println!("interface: 'wl_shm', version: 1");
     println!("interface: 'wl_seat', version: 8");

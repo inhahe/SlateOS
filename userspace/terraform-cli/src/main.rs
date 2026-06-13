@@ -44,7 +44,7 @@ fn run_terraform(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
         "version" | "-version" => {
-            println!("Terraform v1.7.4 (SlateOS)");
+            println!("Terraform v1.7.4 (Slate OS)");
             println!("on slateos_amd64");
             0
         }

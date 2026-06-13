@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_do(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: digitalocean [OPTIONS]");
-        println!("DigitalOcean (SlateOS) — developer cloud (Droplets + App Platform + Managed services, NYSE:DOCN)");
+        println!("DigitalOcean (Slate OS) — developer cloud (Droplets + App Platform + Managed services, NYSE:DOCN)");
         println!();
         println!("Options:");
         println!("  --droplets             Droplets (the iconic VMs)");
@@ -23,8 +23,8 @@ fn run_do(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("DigitalOcean 2024 (SlateOS) — doctl 1.x"); return 0; }
-    println!("DigitalOcean 2024 (SlateOS) — Developer Cloud Platform");
+    if args.iter().any(|a| a == "--version") { println!("DigitalOcean 2024 (Slate OS) — doctl 1.x"); return 0; }
+    println!("DigitalOcean 2024 (Slate OS) — Developer Cloud Platform");
     println!("  Vendor: DigitalOcean Holdings, Inc. (New York, NY — NYSE:DOCN since 2021)");
     println!("  Founders: Ben Uretsky + Moisey Uretsky + Mitch Wainer + Jeff Carr + Alec Hartman, 2011");
     println!("          founded in NYC — early cloud-for-developers focus");

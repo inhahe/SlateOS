@@ -19,7 +19,7 @@ fn run_cadabra(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Cadabra 2.4.4 (SlateOS)");
+        println!("Cadabra 2.4.4 (Slate OS)");
         println!("Python 3.12.0");
         println!("SymPy 1.12");
         return 0;
@@ -49,7 +49,7 @@ fn run_cadabra_cli(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("cadabra2-cli 2.4.4 (SlateOS)");
+        println!("cadabra2-cli 2.4.4 (Slate OS)");
         return 0;
     }
     let script = args.iter().find(|a| a.ends_with(".cdb")).map(|s| s.as_str());

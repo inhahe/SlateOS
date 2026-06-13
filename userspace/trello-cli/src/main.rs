@@ -11,7 +11,7 @@ fn run_trello(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: trello <COMMAND> [OPTIONS]");
         println!();
-        println!("Trello board management CLI (SlateOS).");
+        println!("Trello board management CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  boards       Manage boards");

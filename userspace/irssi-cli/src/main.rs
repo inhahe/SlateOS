@@ -11,7 +11,7 @@ fn run_irssi(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: irssi [OPTIONS]");
         println!();
-        println!("Irssi — terminal IRC client (SlateOS).");
+        println!("Irssi — terminal IRC client (Slate OS).");
         println!();
         println!("Options:");
         println!("  -c, --connect SERVER   Connect to server");
@@ -25,7 +25,7 @@ fn run_irssi(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("irssi 1.4.5 (SlateOS)");
+        println!("irssi 1.4.5 (Slate OS)");
         return 0;
     }
 
@@ -40,7 +40,7 @@ fn run_irssi(args: Vec<String>) -> i32 {
 
     let noconnect = args.iter().any(|a| a == "--noconnect");
 
-    println!("Irssi v1.4.5 (SlateOS) - https://irssi.org");
+    println!("Irssi v1.4.5 (Slate OS) - https://irssi.org");
     println!();
 
     if noconnect {

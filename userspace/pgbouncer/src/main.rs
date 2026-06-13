@@ -21,7 +21,7 @@ fn run_pgbouncer(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("PgBouncer 1.22.1 (SlateOS)");
+        println!("PgBouncer 1.22.1 (Slate OS)");
         println!("libevent 2.1.12-stable");
         println!("TLS: OpenSSL 3.2.1");
         return 0;

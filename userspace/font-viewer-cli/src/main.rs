@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_font_viewer(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gnome-font-viewer [OPTIONS] [FILE.ttf|.otf]");
-        println!("gnome-font-viewer v46.0 (SlateOS) — Font preview application");
+        println!("gnome-font-viewer v46.0 (Slate OS) — Font preview application");
         println!();
         println!("Options:");
         println!("  --version         Show version");
@@ -22,7 +22,7 @@ fn run_font_viewer(args: &[String], _prog: &str) -> i32 {
         println!("character coverage, and font metadata.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("gnome-font-viewer v46.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("gnome-font-viewer v46.0 (Slate OS)"); return 0; }
     println!("gnome-font-viewer: font viewer started");
     println!("  Installed fonts: 142 families");
     println!("  Preview: sample text at multiple sizes");

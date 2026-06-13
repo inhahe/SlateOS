@@ -20,7 +20,7 @@ fn run_micro(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-version") {
-        println!("Version: 2.0.13 (SlateOS)");
+        println!("Version: 2.0.13 (Slate OS)");
         println!("Compiled with: Go 1.22");
         println!("Clipboard: external");
         return 0;
@@ -77,7 +77,7 @@ fn run_micro(args: Vec<String>) -> i32 {
             println!("Opening: {}", f);
         }
     }
-    println!("micro 2.0.13 (SlateOS) — Ctrl-Q to quit, Ctrl-S to save");
+    println!("micro 2.0.13 (Slate OS) — Ctrl-Q to quit, Ctrl-S to save");
     println!("(TUI launched — simulated)");
     0
 }

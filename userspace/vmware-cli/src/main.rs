@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_vmw(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: vmware [OPTIONS]");
-        println!("VMware Workstation Pro 17 (SlateOS) — Type-2 hypervisor (Linux/Win host)");
+        println!("VMware Workstation Pro 17 (Slate OS) — Type-2 hypervisor (Linux/Win host)");
         println!();
         println!("Options:");
         println!("  --new                  Create new VM");
@@ -25,8 +25,8 @@ fn run_vmw(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("VMware Workstation 17.6.2 build-24409262 (SlateOS)"); return 0; }
-    println!("VMware Workstation Pro 17.6.2 build-24409262 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("VMware Workstation 17.6.2 build-24409262 (Slate OS)"); return 0; }
+    println!("VMware Workstation Pro 17.6.2 build-24409262 (Slate OS)");
     println!("  Vendor: VMware LLC (Palo Alto, CA), founded 1998");
     println!("  History: Acquired by Dell-EMC 2016; Broadcom acquired VMware Nov 2023 ($61B)");
     println!("  Broadcom era: drastic licensing changes — perpetual licenses sunset,");

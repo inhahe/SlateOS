@@ -116,7 +116,7 @@ fn run_lz4(args: Vec<String>, personality: &str) -> i32 {
                 return 0;
             }
             "-V" | "--version" => {
-                println!("*** LZ4 command line interface 0.1.0 (SlateOS) ***");
+                println!("*** LZ4 command line interface 0.1.0 (Slate OS) ***");
                 println!("LZ4 library version: 0.1.0");
                 return 0;
             }

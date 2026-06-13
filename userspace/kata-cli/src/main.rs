@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_kata_runtime(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: kata-runtime COMMAND [OPTIONS]");
-        println!("kata-runtime v3.3 (SlateOS) — Kata Containers VM-isolated runtime");
+        println!("kata-runtime v3.3 (Slate OS) — Kata Containers VM-isolated runtime");
         println!();
         println!("Commands:");
         println!("  create            Create a container (VM-isolated)");
@@ -33,7 +33,7 @@ fn run_kata_runtime(args: &[String], _prog: &str) -> i32 {
             println!("System check:");
             println!("  CPU: x86_64 (VMX: supported)");
             println!("  KVM: /dev/kvm accessible");
-            println!("  Kernel: SlateOS (vhost-net: yes)");
+            println!("  Kernel: Slate OS (vhost-net: yes)");
             println!("  Guest kernel: vmlinuz-kata");
             println!("  Guest image: kata-containers.img");
             println!("  Result: PASS");
@@ -52,7 +52,7 @@ fn run_kata_runtime(args: &[String], _prog: &str) -> i32 {
             println!("ID              PID    STATUS    HYPERVISOR");
             println!("kata-c1         4567   running   qemu");
         }
-        "version" | "--version" => println!("kata-runtime v3.3 (SlateOS)"),
+        "version" | "--version" => println!("kata-runtime v3.3 (Slate OS)"),
         _ => println!("kata-runtime {}: completed", cmd),
     }
     0
@@ -61,7 +61,7 @@ fn run_kata_runtime(args: &[String], _prog: &str) -> i32 {
 fn run_kata_monitor(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: kata-monitor [OPTIONS]");
-        println!("kata-monitor v3.3 (SlateOS) — Monitor Kata sandboxes");
+        println!("kata-monitor v3.3 (Slate OS) — Monitor Kata sandboxes");
         println!();
         println!("Options:");
         println!("  --listen-address ADDR  Listen address");

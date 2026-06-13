@@ -176,7 +176,7 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
     // -- OS-specific --------------------------------------------------------
     FileTypeInfo {
         extension: ".nx",
-        description: "SlateOS Native Executable",
+        description: "Slate OS Native Executable",
         mime_type: "application/x-slateos-executable",
         category: FileCategory::Executable,
         icon_glyph: '\u{2699}', // gear
@@ -206,7 +206,7 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
     },
     FileTypeInfo {
         extension: ".pkg",
-        description: "SlateOS Package Archive",
+        description: "Slate OS Package Archive",
         mime_type: "application/x-slateos-package",
         category: FileCategory::Package,
         icon_glyph: '\u{1F4E6}',
@@ -2104,7 +2104,7 @@ mod tests {
     #[test]
     fn file_type_info_fields() {
         let info = detect_from_extension(".nx");
-        assert_eq!(info.description, "SlateOS Native Executable");
+        assert_eq!(info.description, "Slate OS Native Executable");
         assert_eq!(info.default_app, None);
         assert!(info.is_executable);
         assert!(!info.is_text);

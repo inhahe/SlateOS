@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_dr(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: descript [OPTIONS] [PROJECT]");
-        println!("Descript (SlateOS) — Edit audio & video by editing the transcript");
+        println!("Descript (Slate OS) — Edit audio & video by editing the transcript");
         println!();
         println!("Options:");
         println!("  --transcribe FILE      Transcribe file (Overdub-grade AI)");
@@ -24,8 +24,8 @@ fn run_dr(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Descript 70.0.0 (SlateOS)"); return 0; }
-    println!("Descript 70.0.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Descript 70.0.0 (Slate OS)"); return 0; }
+    println!("Descript 70.0.0 (Slate OS)");
     println!("  Workflow: Transcript-driven editing (delete words = delete audio)");
     println!("  AI: Overdub voice cloning, Studio Sound, Filler Word Removal");
     println!("  Video: AI Eye Contact, Green Screen, Auto-zoom");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_fsi(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: fsi [OPTIONS] [FILE.fsx]");
-        println!("F# Interactive 12.8.0.0 (SlateOS)");
+        println!("F# Interactive 12.8.0.0 (Slate OS)");
         println!("  --exec           Execute and exit");
         println!("  --use:FILE       Use file at startup");
         println!("  --define:SYMBOL  Define conditional symbol");
@@ -41,7 +41,7 @@ fn run_fsi(args: &[String]) -> i32 {
 fn run_fsharpc(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: fsharpc [OPTIONS] FILE.fs [FILE.fs ...]");
-        println!("F# Compiler 12.8.0.0 (SlateOS)");
+        println!("F# Compiler 12.8.0.0 (Slate OS)");
         println!("  -o:FILE          Output file");
         println!("  -a               Build library");
         println!("  --target:TYPE    Target (exe, library, winexe)");

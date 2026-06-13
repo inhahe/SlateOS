@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_memphis(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: memphis COMMAND [OPTIONS]");
-        println!("Memphis v1.3.0 (SlateOS) — Event streaming platform CLI");
+        println!("Memphis v1.3.0 (Slate OS) — Event streaming platform CLI");
         println!();
         println!("Commands:");
         println!("  station         Manage stations");
@@ -32,7 +32,7 @@ fn run_memphis(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("Memphis CLI v1.3.0 (SlateOS)");
+        println!("Memphis CLI v1.3.0 (Slate OS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("station");

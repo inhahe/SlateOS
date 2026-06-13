@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_scons(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: scons [OPTIONS] [TARGET [TARGET ...]]");
-        println!("SCons 4.7.0 (SlateOS)");
+        println!("SCons 4.7.0 (Slate OS)");
         println!();
         println!("Options:");
         println!("  -c, --clean          Remove targets");
@@ -88,7 +88,7 @@ fn run_sconsign(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("sconsign 4.7.0 (SlateOS)");
+        println!("sconsign 4.7.0 (Slate OS)");
         return 0;
     }
     let file = args.iter()

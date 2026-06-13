@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_vespa(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: vespa [OPTIONS]");
-        println!("Vespa (SlateOS) — big-data search + ranking + vectors + LLM platform (Yahoo open-source)");
+        println!("Vespa (Slate OS) — big-data search + ranking + vectors + LLM platform (Yahoo open-source)");
         println!();
         println!("Options:");
         println!("  --search               Full-text + structured search (Yahoo origin)");
@@ -21,8 +21,8 @@ fn run_vespa(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Vespa 2024 (SlateOS) — vespa-cli 8.x"); return 0; }
-    println!("Vespa 2024 (SlateOS) — Big-Data Serving Engine (Search + Ranking + Vectors + LLM)");
+    if args.iter().any(|a| a == "--version") { println!("Vespa 2024 (Slate OS) — vespa-cli 8.x"); return 0; }
+    println!("Vespa 2024 (Slate OS) — Big-Data Serving Engine (Search + Ranking + Vectors + LLM)");
     println!("  Vendor: Vespa.ai (Trondheim, Norway — private, Yahoo spin-off Aug 2023)");
     println!("  Origins:");
     println!("         FAST Search & Transfer founded 1997 (Norway) — acquired by Microsoft 2008 ($1.2B)");

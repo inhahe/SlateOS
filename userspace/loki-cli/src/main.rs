@@ -35,7 +35,7 @@ fn run_logcli(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("logcli version 2.9.4 (SlateOS)");
+        println!("logcli version 2.9.4 (Slate OS)");
         return 0;
     }
 

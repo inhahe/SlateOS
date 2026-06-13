@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_btop(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: btop [OPTIONS]");
-        println!("btop 1.3.2 (SlateOS) — Resource monitor");
+        println!("btop 1.3.2 (Slate OS) — Resource monitor");
         println!();
         println!("Options:");
         println!("  -lc, --low-color      Disable truecolor");
@@ -26,7 +26,7 @@ fn run_btop(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-v" || a == "--version") {
-        println!("btop version: 1.3.2 (SlateOS)");
+        println!("btop version: 1.3.2 (Slate OS)");
         return 0;
     }
     println!("btop: Starting system monitor...");

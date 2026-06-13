@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_direnv(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: direnv COMMAND [ARGS...]");
-        println!("direnv 2.35.0 (SlateOS) — Unclutter your shell");
+        println!("direnv 2.35.0 (Slate OS) — Unclutter your shell");
         println!();
         println!("Commands:");
         println!("  allow [PATH]      Allow .envrc for a directory");

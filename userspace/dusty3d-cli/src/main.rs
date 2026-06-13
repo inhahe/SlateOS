@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_dust3d(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: dust3d [OPTIONS] [FILE.ds3]");
-        println!("dust3d v1.0 (SlateOS) — Auto-rigging 3D modeling tool");
+        println!("dust3d v1.0 (Slate OS) — Auto-rigging 3D modeling tool");
         println!();
         println!("Options:");
         println!("  --version         Show version");
@@ -25,7 +25,7 @@ fn run_dust3d(args: &[String], _prog: &str) -> i32 {
         println!("Export: glTF, FBX, OBJ");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("dust3d v1.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("dust3d v1.0 (Slate OS)"); return 0; }
     println!("dust3d: auto-rigging modeler started");
     println!("  Modeling: node-based mesh generation");
     println!("  Rigging: automatic skeleton generation");

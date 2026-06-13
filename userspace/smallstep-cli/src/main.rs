@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_step_ca(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: step-ca [CONFIG] [OPTIONS]");
-        println!("step-ca v0.26 (SlateOS) — Online certificate authority");
+        println!("step-ca v0.26 (Slate OS) — Online certificate authority");
         println!();
         println!("Options:");
         println!("  --password-file F  Password file for decrypting CA key");
@@ -24,8 +24,8 @@ fn run_step_ca(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("step-ca v0.26.2 (SlateOS)"); return 0; }
-    println!("step-ca v0.26.2 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("step-ca v0.26.2 (Slate OS)"); return 0; }
+    println!("step-ca v0.26.2 (Slate OS)");
     println!("  HTTPS: https://0.0.0.0:9000");
     println!("  Root: /etc/step-ca/certs/root_ca.crt");
     println!("  Provisioners: 3 (JWK, ACME, OIDC)");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_cdk8s(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: cdk8s COMMAND [OPTIONS]");
-        println!("cdk8s 2.68.0 (SlateOS) — CDK for Kubernetes");
+        println!("cdk8s 2.68.0 (Slate OS) — CDK for Kubernetes");
         println!();
         println!("Commands:");
         println!("  init           Create a new cdk8s project");

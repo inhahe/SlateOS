@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_auto_cpufreq(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: auto-cpufreq COMMAND [OPTIONS]");
-        println!("auto-cpufreq v2.3 (SlateOS) — Automatic CPU frequency optimizer");
+        println!("auto-cpufreq v2.3 (Slate OS) — Automatic CPU frequency optimizer");
         println!();
         println!("Commands:");
         println!("  --monitor         Monitor CPU stats in real time");
@@ -25,7 +25,7 @@ fn run_auto_cpufreq(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("auto-cpufreq v2.3 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("auto-cpufreq v2.3 (Slate OS)"); return 0; }
     if args.iter().any(|a| a == "--stats") {
         println!("CPU: 12x Intel Core i7 @ 4.5GHz");
         println!("  Governor: powersave");

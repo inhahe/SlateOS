@@ -29,9 +29,9 @@ fn run_wrk(args: Vec<String>, is_wrk2: bool) -> i32 {
     }
     if args.iter().any(|a| a == "-v" || a == "--version") {
         if is_wrk2 {
-            println!("wrk2 4.2.0 (SlateOS)");
+            println!("wrk2 4.2.0 (Slate OS)");
         } else {
-            println!("wrk 4.2.0 (SlateOS)");
+            println!("wrk 4.2.0 (Slate OS)");
         }
         return 0;
     }

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ds(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: draftsight [OPTIONS] [FILE]");
-        println!("Dassault DraftSight 2025 (SlateOS) — Professional 2D/3D DWG CAD");
+        println!("Dassault DraftSight 2025 (Slate OS) — Professional 2D/3D DWG CAD");
         println!();
         println!("Options:");
         println!("  /b SCRIPT              Run script");
@@ -22,8 +22,8 @@ fn run_ds(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Dassault DraftSight 2025 SP1 (SlateOS)"); return 0; }
-    println!("Dassault DraftSight 2025 SP1 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Dassault DraftSight 2025 SP1 (Slate OS)"); return 0; }
+    println!("Dassault DraftSight 2025 SP1 (Slate OS)");
     println!("  Editions: Standard, Professional, Premium, Enterprise, Mechanical");
     println!("  Format: DWG (native), DXF, DWT, PDF — drop-in AutoCAD alternative");
     println!("  Scripting: LISP, Visual Basic Scripting, C++ API");

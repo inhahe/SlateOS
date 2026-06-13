@@ -32,7 +32,7 @@ fn run_promtool(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("promtool, version 2.49.1 (SlateOS)");
+        println!("promtool, version 2.49.1 (Slate OS)");
         return 0;
     }
 

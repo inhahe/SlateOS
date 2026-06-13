@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_nox(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: nox [OPTIONS]");
-        println!("nox 2024.4.15 (SlateOS)");
+        println!("nox 2024.4.15 (Slate OS)");
         println!();
         println!("Options:");
         println!("  -s, --sessions SESSIONS  Sessions to run");

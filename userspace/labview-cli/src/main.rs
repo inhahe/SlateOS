@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_lv(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: labview [OPTIONS] [VI]");
-        println!("NI LabVIEW 2024 Q3 (SlateOS) — Graphical dataflow programming");
+        println!("NI LabVIEW 2024 Q3 (Slate OS) — Graphical dataflow programming");
         println!();
         println!("Options:");
         println!("  -- VI                  Open .vi virtual instrument");
@@ -23,8 +23,8 @@ fn run_lv(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("NI LabVIEW 24.3 (2024 Q3) (SlateOS)"); return 0; }
-    println!("NI LabVIEW 24.3 (2024 Q3) (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("NI LabVIEW 24.3 (2024 Q3) (Slate OS)"); return 0; }
+    println!("NI LabVIEW 24.3 (2024 Q3) (Slate OS)");
     println!("  Paradigm: graphical dataflow ('G' language), block-diagram VIs");
     println!("  Hardware: DAQ, GPIB, VISA, instrument drivers (10,000+)");
     println!("  Modules: Real-Time, FPGA, Vision, DSP, Sound & Vibration");

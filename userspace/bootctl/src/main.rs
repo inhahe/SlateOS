@@ -142,7 +142,7 @@ fn discover_entries(esp: &Path) -> Vec<BootEntry> {
     if entries.is_empty() {
         entries.push(BootEntry {
             id: "slateos.conf".to_string(),
-            title: "SlateOS".to_string(),
+            title: "Slate OS".to_string(),
             _source: "loader/entries/slateos.conf".to_string(),
             linux: "/vmlinuz-slateos".to_string(),
             initrd: vec!["/initramfs-slateos.img".to_string()],
@@ -153,7 +153,7 @@ fn discover_entries(esp: &Path) -> Vec<BootEntry> {
         });
         entries.push(BootEntry {
             id: "slateos-fallback.conf".to_string(),
-            title: "SlateOS (fallback)".to_string(),
+            title: "Slate OS (fallback)".to_string(),
             _source: "loader/entries/slateos-fallback.conf".to_string(),
             linux: "/vmlinuz-slateos".to_string(),
             initrd: vec!["/initramfs-slateos-fallback.img".to_string()],
@@ -253,7 +253,7 @@ fn cmd_status(esp: &Path) -> i32 {
     }
     println!();
     println!("Current Boot Loader:");
-    println!("      Product: systemd-boot (SlateOS {VERSION})");
+    println!("      Product: systemd-boot (Slate OS {VERSION})");
     println!("          ESP: {}", esp.display());
     println!();
     println!("Boot Loader Configuration:");
@@ -465,7 +465,7 @@ fn main() {
                 process::exit(0);
             }
             "--version" => {
-                println!("bootctl (SlateOS) {VERSION}");
+                println!("bootctl (Slate OS) {VERSION}");
                 process::exit(0);
             }
             s if !s.starts_with('-') => {

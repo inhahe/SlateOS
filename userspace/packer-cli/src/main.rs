@@ -36,7 +36,7 @@ fn run_packer(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
         "version" => {
-            println!("Packer v1.10.1 (SlateOS)");
+            println!("Packer v1.10.1 (Slate OS)");
             0
         }
         "build" => {

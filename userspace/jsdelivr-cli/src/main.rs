@@ -28,7 +28,7 @@ fn print_help(prog: &str) {
 }
 
 fn print_version() {
-    println!("jsdelivr-cli 0.1.0 — SlateOS personality binary");
+    println!("jsdelivr-cli 0.1.0 — Slate OS personality binary");
     println!("jsDelivr — Free, fast, reliable open-source CDN");
 }
 

@@ -21,7 +21,7 @@ fn run_espeak(args: &[String], ng: bool) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: {} [OPTIONS] [WORDS]", name);
         println!();
-        println!("{} — text to speech synthesizer (SlateOS).", name);
+        println!("{} — text to speech synthesizer (Slate OS).", name);
         println!();
         println!("Options:");
         println!("  -v VOICE         Voice name (default en)");
@@ -45,9 +45,9 @@ fn run_espeak(args: &[String], ng: bool) -> i32 {
     }
     if args.iter().any(|a| a == "--version") {
         if ng {
-            println!("eSpeak NG text-to-speech: 1.51.1 (SlateOS)");
+            println!("eSpeak NG text-to-speech: 1.51.1 (Slate OS)");
         } else {
-            println!("eSpeak text-to-speech: 1.48.15 (SlateOS)");
+            println!("eSpeak text-to-speech: 1.48.15 (Slate OS)");
         }
         return 0;
     }

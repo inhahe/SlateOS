@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_instana(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: instana [OPTIONS]");
-        println!("IBM Instana (SlateOS) — automatic full-stack APM + observability");
+        println!("IBM Instana (Slate OS) — automatic full-stack APM + observability");
         println!();
         println!("Options:");
         println!("  --apm                  Application Performance Monitoring (auto-discovery)");
@@ -23,8 +23,8 @@ fn run_instana(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("IBM Instana 2024 (SlateOS)"); return 0; }
-    println!("IBM Instana 2024 (SlateOS) — Enterprise Observability");
+    if args.iter().any(|a| a == "--version") { println!("IBM Instana 2024 (Slate OS)"); return 0; }
+    println!("IBM Instana 2024 (Slate OS) — Enterprise Observability");
     println!("  Vendor: IBM Corporation, via Instana (Solingen Germany + Chicago — IBM subsidiary since 2020)");
     println!("  Founders: Mirko Novakovic + Pavlo Baron + Pete Abrams + Fabian Lange, 2015");
     println!("          founded in Solingen, Germany (technical depth + DACH enterprise focus)");

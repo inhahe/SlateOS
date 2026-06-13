@@ -33,7 +33,7 @@ fn run_shfmt(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("shfmt 3.8.0 (SlateOS)");
+        println!("shfmt 3.8.0 (Slate OS)");
         return 0;
     }
 

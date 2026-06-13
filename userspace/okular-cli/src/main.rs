@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_okular(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: okular [OPTIONS] [FILE...]");
-        println!("okular v23.08 (SlateOS) — KDE Document Viewer");
+        println!("okular v23.08 (Slate OS) — KDE Document Viewer");
         println!();
         println!("Options:");
         println!("  -p PAGE           Open at page");
@@ -23,7 +23,7 @@ fn run_okular(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("okular v23.08 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("okular v23.08 (Slate OS)"); return 0; }
     println!("okular: document viewer started");
     println!("  Supported: PDF, PS, DjVu, CHM, XPS, ePub, TIFF, Fax, CBR/CBZ, Markdown");
     println!("  Annotations: yes");

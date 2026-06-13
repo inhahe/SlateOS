@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rivery(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: rivery [OPTIONS]");
-        println!("Rivery (SlateOS) — ELT + transformation + reverse-ETL + orchestration in one platform");
+        println!("Rivery (Slate OS) — ELT + transformation + reverse-ETL + orchestration in one platform");
         println!();
         println!("Options:");
         println!("  --starter              Starter — from $599/mo (5 sources, basic ELT)");
@@ -23,8 +23,8 @@ fn run_rivery(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Rivery 2024 (SlateOS)"); return 0; }
-    println!("Rivery 2024 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Rivery 2024 (Slate OS)"); return 0; }
+    println!("Rivery 2024 (Slate OS)");
     println!("  Vendor: Rivery Ltd. (Tel Aviv, Israel — private)");
     println!("  Founders: Itamar Ben Hemo (CEO), Aviv Noy (CTO), Eldad Stern, Asaf Yigal, 2019");
     println!("          founders had previously sold Logz.io (ELK log management) — repeat data infrastructure operators");

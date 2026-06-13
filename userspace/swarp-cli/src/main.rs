@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_swarp(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: swarp [OPTIONS] IMAGE1 [IMAGE2 ...]");
-        println!("SWarp v2.41 (SlateOS) — Image resampling and co-addition");
+        println!("SWarp v2.41 (Slate OS) — Image resampling and co-addition");
         println!();
         println!("Options:");
         println!("  -c FILE               Configuration file");
@@ -29,7 +29,7 @@ fn run_swarp(args: &[String], _prog: &str) -> i32 {
         println!("  --version             Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("SWarp v2.41.5 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("SWarp v2.41.5 (Slate OS)"); return 0; }
     if args.iter().any(|a| a == "-d") {
         println!("# Default configuration file for SWarp");
         println!("IMAGEOUT_NAME    coadd.fits");
@@ -40,7 +40,7 @@ fn run_swarp(args: &[String], _prog: &str) -> i32 {
     }
     let files: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
     if files.is_empty() { eprintln!("swarp: error: no input images"); return 1; }
-    println!("SWarp v2.41.5 (SlateOS)");
+    println!("SWarp v2.41.5 (Slate OS)");
     println!("  Input: {} images", files.len());
     println!("  Resampling {} images...", files.len());
     println!("  Co-adding with median combine...");

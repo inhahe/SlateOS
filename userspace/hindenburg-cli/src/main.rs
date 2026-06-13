@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_hb(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: hindenburg [OPTIONS] [PROJECT]");
-        println!("Hindenburg PRO 2 (SlateOS) — Radio & podcast production");
+        println!("Hindenburg PRO 2 (Slate OS) — Radio & podcast production");
         println!();
         println!("Options:");
         println!("  --open FILE            Open .nhsx project");
@@ -23,8 +23,8 @@ fn run_hb(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Hindenburg PRO 2.4.0 (SlateOS)"); return 0; }
-    println!("Hindenburg PRO 2.4.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Hindenburg PRO 2.4.0 (Slate OS)"); return 0; }
+    println!("Hindenburg PRO 2.4.0 (Slate OS)");
     println!("  Editions: Hindenburg PRO (was Journalist), Narrator (audiobooks)");
     println!("  Features: Auto Leveler, Voice Profiler, automatic transcripts");
     println!("  Workflow: Magic clipboard, multi-track non-destructive editing");

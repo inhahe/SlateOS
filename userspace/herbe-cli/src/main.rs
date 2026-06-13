@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_herbe(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: herbe [BODY]");
-        println!("herbe v1.0 (SlateOS) — Minimal X11 notification daemon");
+        println!("herbe v1.0 (Slate OS) — Minimal X11 notification daemon");
         println!();
         println!("Displays a minimal, daemon-less notification.");
         println!("Click to dismiss, middle-click to perform action.");
@@ -21,7 +21,7 @@ fn run_herbe(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("herbe v1.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("herbe v1.0 (Slate OS)"); return 0; }
     let body = if args.is_empty() { "notification" } else { &args[0] };
     println!("herbe: {}", body);
     0

@@ -51,7 +51,7 @@ fn run_openvpn(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("OpenVPN 2.6.10 (SlateOS) x86_64 [SSL (OpenSSL)] [LZO] [LZ4] [EPOLL] [MH/PKTINFO] [AEAD]");
+        println!("OpenVPN 2.6.10 (Slate OS) x86_64 [SSL (OpenSSL)] [LZO] [LZ4] [EPOLL] [MH/PKTINFO] [AEAD]");
         println!("library versions: OpenSSL 3.2.1, LZO 2.10");
         println!("Originally developed by James Yonan");
         println!("Copyright (C) 2002-2024 OpenVPN Inc <sales@openvpn.net>");
@@ -115,7 +115,7 @@ fn run_openvpn(args: Vec<String>) -> i32 {
         .map(|s| s.as_str())
         .unwrap_or("tun0");
 
-    println!("2025-05-22 10:00:00 OpenVPN 2.6.10 (SlateOS) x86_64");
+    println!("2025-05-22 10:00:00 OpenVPN 2.6.10 (Slate OS) x86_64");
     println!("2025-05-22 10:00:00 library versions: OpenSSL 3.2.1, LZO 2.10");
 
     if is_server {

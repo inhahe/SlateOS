@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mz(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: materialize [OPTIONS]");
-        println!("Materialize (SlateOS) — streaming SQL database with incremental view maintenance");
+        println!("Materialize (Slate OS) — streaming SQL database with incremental view maintenance");
         println!();
         println!("Options:");
         println!("  --materialized-views   Always-fresh materialized views (key innovation)");
@@ -20,8 +20,8 @@ fn run_mz(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Materialize 2024 (SlateOS) — mz CLI 2.x"); return 0; }
-    println!("Materialize 2024 (SlateOS) — Streaming SQL Database (Incremental View Maintenance)");
+    if args.iter().any(|a| a == "--version") { println!("Materialize 2024 (Slate OS) — mz CLI 2.x"); return 0; }
+    println!("Materialize 2024 (Slate OS) — Streaming SQL Database (Incremental View Maintenance)");
     println!("  Vendor: Materialize, Inc. (New York, NY — private)");
     println!("  Founders: Arjun Narayan (CEO) + Frank McSherry + Nikhil Benesch, 2019");
     println!("          Frank McSherry: researcher behind Timely Dataflow + Differential Dataflow");

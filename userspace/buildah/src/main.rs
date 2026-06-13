@@ -37,7 +37,7 @@ fn run_buildah(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match cmd {
         "version" => {
-            println!("Version:         1.35.4 (SlateOS)");
+            println!("Version:         1.35.4 (Slate OS)");
             println!("Go Version:      go1.22");
             println!("Image Spec:      1.1.0");
             println!("Runtime Spec:    1.2.0");

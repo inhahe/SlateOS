@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_collectd(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: collectd [OPTIONS]");
-        println!("collectd v5.12 (SlateOS) — System statistics collection daemon");
+        println!("collectd v5.12 (Slate OS) — System statistics collection daemon");
         println!();
         println!("Options:");
         println!("  -C FILE       Configuration file");
@@ -24,7 +24,7 @@ fn run_collectd(args: &[String], _prog: &str) -> i32 {
         println!("Plugins: cpu, memory, disk, interface, load, uptime, swap");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("collectd v5.12 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("collectd v5.12 (Slate OS)"); return 0; }
     if args.iter().any(|a| a == "-T") {
         println!("collectd: configuration test OK");
         return 0;
@@ -39,7 +39,7 @@ fn run_collectd(args: &[String], _prog: &str) -> i32 {
 fn run_collectdctl(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: collectdctl <command> [OPTIONS]");
-        println!("collectdctl v5.12 (SlateOS) — Control collectd daemon");
+        println!("collectdctl v5.12 (Slate OS) — Control collectd daemon");
         println!("  listval       List all values");
         println!("  getval ID     Get specific value");
         println!("  putval ID     Submit a value");
@@ -61,7 +61,7 @@ fn run_collectdctl(args: &[String], _prog: &str) -> i32 {
 fn run_collectdmon(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: collectdmon [OPTIONS] -- collectd [ARGS]");
-        println!("collectdmon v5.12 (SlateOS) — Monitoring wrapper for collectd");
+        println!("collectdmon v5.12 (Slate OS) — Monitoring wrapper for collectd");
         return 0;
     }
     let _ = args;

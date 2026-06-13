@@ -19,7 +19,7 @@ fn run_gettext(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gettext [OPTIONS] [TEXTDOMAIN] MSGID");
         println!();
-        println!("gettext — translate message (SlateOS).");
+        println!("gettext — translate message (Slate OS).");
         println!();
         println!("Options:");
         println!("  -d DOMAIN    Text domain");
@@ -39,7 +39,7 @@ fn run_xgettext(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: xgettext [OPTIONS] [FILE ...]");
         println!();
-        println!("xgettext — extract translatable strings (SlateOS).");
+        println!("xgettext — extract translatable strings (Slate OS).");
         println!();
         println!("Options:");
         println!("  -o, --output FILE    Output file");
@@ -53,7 +53,7 @@ fn run_xgettext(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("xgettext (GNU gettext-tools) 0.22.4 (SlateOS)");
+        println!("xgettext (GNU gettext-tools) 0.22.4 (Slate OS)");
         return 0;
     }
     let output = args.windows(2).find(|w| w[0] == "-o" || w[0] == "--output").map(|w| w[1].as_str()).unwrap_or("messages.po");
@@ -66,7 +66,7 @@ fn run_msgfmt(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: msgfmt [OPTIONS] FILE.po ...");
         println!();
-        println!("msgfmt — compile message catalog (SlateOS).");
+        println!("msgfmt — compile message catalog (Slate OS).");
         println!();
         println!("Options:");
         println!("  -o, --output-file FILE  Output .mo file");
@@ -76,7 +76,7 @@ fn run_msgfmt(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("msgfmt (GNU gettext-tools) 0.22.4 (SlateOS)");
+        println!("msgfmt (GNU gettext-tools) 0.22.4 (Slate OS)");
         return 0;
     }
     let stats = args.iter().any(|a| a == "--statistics");
@@ -94,7 +94,7 @@ fn run_msginit(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: msginit [OPTIONS]");
         println!();
-        println!("msginit — initialize new message catalog (SlateOS).");
+        println!("msginit — initialize new message catalog (Slate OS).");
         println!();
         println!("Options:");
         println!("  -i, --input FILE    Input POT file");
@@ -113,7 +113,7 @@ fn run_msgmerge(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: msgmerge [OPTIONS] DEF.po REF.pot");
         println!();
-        println!("msgmerge — merge message catalogs (SlateOS).");
+        println!("msgmerge — merge message catalogs (Slate OS).");
         println!();
         println!("Options:");
         println!("  -o, --output FILE   Output file");
@@ -131,7 +131,7 @@ fn run_msgcat(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: msgcat [OPTIONS] FILE ...");
         println!();
-        println!("msgcat — concatenate message catalogs (SlateOS).");
+        println!("msgcat — concatenate message catalogs (Slate OS).");
         println!();
         println!("Options:");
         println!("  -o, --output FILE   Output file");

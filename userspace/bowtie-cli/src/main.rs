@@ -12,7 +12,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 
 fn run_bowtie2(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
-        println!("Bowtie 2 version 2.5.3 (SlateOS)");
+        println!("Bowtie 2 version 2.5.3 (Slate OS)");
         println!("Usage: bowtie2 [options] -x <bt2-idx> {{-1 <m1> -2 <m2> | -U <r>}} [-S <sam>]");
         println!();
         println!("  -x INDEX       Index filename prefix");
@@ -27,8 +27,8 @@ fn run_bowtie2(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("bowtie2-align-s version 2.5.3 (SlateOS)");
-        println!("64-bit, Built with Rust for SlateOS");
+        println!("bowtie2-align-s version 2.5.3 (Slate OS)");
+        println!("64-bit, Built with Rust for Slate OS");
         return 0;
     }
     let idx = args.windows(2).find(|w| w[0] == "-x").map(|w| w[1].as_str()).unwrap_or("genome");
@@ -51,7 +51,7 @@ fn run_bowtie2_build(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("bowtie2-build version 2.5.3 (SlateOS)");
+        println!("bowtie2-build version 2.5.3 (Slate OS)");
         return 0;
     }
     let reference = args.first().map(|s| s.as_str()).unwrap_or("genome.fa");
@@ -74,7 +74,7 @@ fn run_bowtie2_inspect(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("bowtie2-inspect version 2.5.3 (SlateOS)");
+        println!("bowtie2-inspect version 2.5.3 (Slate OS)");
         return 0;
     }
     let summary = args.iter().any(|a| a == "-s" || a == "--summary");

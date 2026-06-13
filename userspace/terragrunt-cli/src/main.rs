@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_terragrunt(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: terragrunt COMMAND [OPTIONS]");
-        println!("Terragrunt 0.67.0 (SlateOS)");
+        println!("Terragrunt 0.67.0 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  plan              Run terraform plan");

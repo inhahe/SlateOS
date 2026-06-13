@@ -38,7 +38,7 @@ fn run_cargo_bloat(args: Vec<String>) -> i32 {
         return 0;
     }
     if subargs.iter().any(|a| a == "-V" || a == "--version") {
-        println!("cargo-bloat 0.11.1 (SlateOS)");
+        println!("cargo-bloat 0.11.1 (Slate OS)");
         return 0;
     }
 

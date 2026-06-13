@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pads(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pads [OPTIONS] [FILE]");
-        println!("Siemens PADS Professional VX.2.13 (SlateOS) — Mid-range PCB EDA");
+        println!("Siemens PADS Professional VX.2.13 (Slate OS) — Mid-range PCB EDA");
         println!();
         println!("Options:");
         println!("  --logic FILE           PADS Logic (schematic)");
@@ -23,8 +23,8 @@ fn run_pads(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Siemens PADS Professional VX.2.13 (SlateOS)"); return 0; }
-    println!("Siemens PADS Professional VX.2.13 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Siemens PADS Professional VX.2.13 (Slate OS)"); return 0; }
+    println!("Siemens PADS Professional VX.2.13 (Slate OS)");
     println!("  Tools: PADS Logic (schematic), PADS Layout, PADS Router");
     println!("  Format: .sch (schematic), .pcb (PCB), HKP (HyperLynx), ASCII");
     println!("  HyperLynx: signal/power integrity, SerDes, thermal simulation");

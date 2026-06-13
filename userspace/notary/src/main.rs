@@ -28,7 +28,7 @@ fn run_notation(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match cmd {
         "version" => {
-            println!("notation version 1.1.1 (SlateOS)");
+            println!("notation version 1.1.1 (Slate OS)");
             println!("Go version: go1.22");
         }
         "sign" => {
@@ -43,7 +43,7 @@ fn run_notation(args: Vec<String>) -> i32 {
         "list" | "ls" => {
             let target = args.get(1).map(|s| s.as_str()).unwrap_or("image:tag");
             println!("Signatures for {}:", target);
-            println!("  sha256:abc123... (signed by: CN=SlateOS Signer)");
+            println!("  sha256:abc123... (signed by: CN=Slate OS Signer)");
             println!("  sha256:def456... (signed by: CN=CI Pipeline)");
         }
         "cert" => {

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_kib(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: kibana [OPTIONS]");
-        println!("Kibana 8.16 (SlateOS) — Visualization for Elasticsearch");
+        println!("Kibana 8.16 (Slate OS) — Visualization for Elasticsearch");
         println!();
         println!("Options:");
         println!("  start                  Start Kibana server");
@@ -23,8 +23,8 @@ fn run_kib(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Kibana 8.16.1 (SlateOS)"); return 0; }
-    println!("Kibana 8.16.1 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Kibana 8.16.1 (Slate OS)"); return 0; }
+    println!("Kibana 8.16.1 (Slate OS)");
     println!("  Vendor: Elastic N.V. (Mountain View / Amsterdam — NYSE:ESTC)");
     println!("  Original author: Rashid Khan (~2013, started as personal project to query Logstash data)");
     println!("                   joined Elastic, Kibana became official UI");

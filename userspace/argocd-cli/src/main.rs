@@ -11,7 +11,7 @@ fn run_argocd(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: argocd [FLAGS] COMMAND [ARGS]");
         println!();
-        println!("argocd — Argo CD GitOps CLI (SlateOS).");
+        println!("argocd — Argo CD GitOps CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  app          Manage applications");
@@ -28,7 +28,7 @@ fn run_argocd(args: &[String]) -> i32 {
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match subcmd {
         "version" | "--version" => {
-            println!("argocd: v2.10.0+abcdef1 (SlateOS)");
+            println!("argocd: v2.10.0+abcdef1 (Slate OS)");
             println!("  BuildDate: 2024-01-15T00:00:00Z");
             println!("  GoVersion: go1.22.0");
             println!("  Compiler:  gc");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_brevo(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: brevo [OPTIONS]");
-        println!("Brevo (SlateOS) — multi-channel marketing + sales + transactional from one platform");
+        println!("Brevo (Slate OS) — multi-channel marketing + sales + transactional from one platform");
         println!();
         println!("Options:");
         println!("  --free                 Free — unlimited contacts, 300 emails/day");
@@ -25,8 +25,8 @@ fn run_brevo(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Brevo 2024 (SlateOS)"); return 0; }
-    println!("Brevo 2024 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Brevo 2024 (Slate OS)"); return 0; }
+    println!("Brevo 2024 (Slate OS)");
     println!("  Vendor: Brevo SAS (Paris, France — private, fka Sendinblue)");
     println!("  Founders: Armand Thiberge (CEO), Kapil Sharma (CTO), 2012");
     println!("          Thiberge previously ran a consulting agency in India serving European SMBs");

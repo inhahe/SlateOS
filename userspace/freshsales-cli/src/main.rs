@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_freshsales(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: freshsales [OPTIONS]");
-        println!("Freshsales (SlateOS) — Freshworks AI-powered CRM");
+        println!("Freshsales (Slate OS) — Freshworks AI-powered CRM");
         println!();
         println!("Options:");
         println!("  --free                 Free (3 users, basic features)");
@@ -25,8 +25,8 @@ fn run_freshsales(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Freshsales 2024 (SlateOS)"); return 0; }
-    println!("Freshsales 2024 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Freshsales 2024 (Slate OS)"); return 0; }
+    println!("Freshsales 2024 (Slate OS)");
     println!("  Vendor: Freshworks Inc. (San Mateo, CA + Chennai, India — NASDAQ:FRSH)");
     println!("  Founder: Girish Mathrubootham (CEO) + Shan Krishnasamy (CTO), 2010");
     println!("          founded as Freshdesk after Girish read Hacker News post about Zendesk price hike");

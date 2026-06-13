@@ -11,7 +11,7 @@ fn run_virsh(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: virsh [OPTIONS] COMMAND [ARGS]");
         println!();
-        println!("virsh — libvirt management CLI (SlateOS).");
+        println!("virsh — libvirt management CLI (Slate OS).");
         println!();
         println!("Domain commands:");
         println!("  list              List domains");
@@ -41,7 +41,7 @@ fn run_virsh(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("virsh 10.0.0 (SlateOS)");
+        println!("virsh 10.0.0 (Slate OS)");
         println!("Using library: libvirt 10.0.0");
         return 0;
     }

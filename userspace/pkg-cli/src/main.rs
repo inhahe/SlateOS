@@ -10,7 +10,7 @@ use std::process;
 fn run_pkg(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: pkg COMMAND [OPTIONS]");
-        println!("pkg 1.21.0 (SlateOS)");
+        println!("pkg 1.21.0 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  install       Install packages");

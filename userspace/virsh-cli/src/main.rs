@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_virsh(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: virsh [OPTIONS] [COMMAND [ARGS]]");
-        println!("virsh v10.0 (SlateOS) — Libvirt management shell");
+        println!("virsh v10.0 (Slate OS) — Libvirt management shell");
         println!();
         println!("Domain commands:");
         println!("  list              List domains");
@@ -28,7 +28,7 @@ fn run_virsh(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("virsh v10.0 (SlateOS, libvirt)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("virsh v10.0 (Slate OS, libvirt)"); return 0; }
     match args.first().map(|s| s.as_str()) {
         Some("list") => {
             let all = args.iter().any(|a| a == "--all");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_testdisk(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: testdisk [OPTIONS] [DEVICE|IMAGE]");
-        println!("testdisk v7.2 (SlateOS) — Partition recovery & repair");
+        println!("testdisk v7.2 (Slate OS) — Partition recovery & repair");
         println!();
         println!("Options:");
         println!("  /log          Create testdisk.log");
@@ -25,7 +25,7 @@ fn run_testdisk(args: &[String], _prog: &str) -> i32 {
         println!("recovers FAT/NTFS/ext boot sectors, rebuilds partition tables.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("testdisk v7.2 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("testdisk v7.2 (Slate OS)"); return 0; }
     if args.iter().any(|a| a == "/list") {
         println!("Disk /dev/sda - 500 GiB");
         println!("  Partition 1: EFI System   512 MiB");
@@ -42,7 +42,7 @@ fn run_testdisk(args: &[String], _prog: &str) -> i32 {
 fn run_photorec(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: photorec [OPTIONS] [DEVICE|IMAGE]");
-        println!("photorec v7.2 (SlateOS) — File data recovery");
+        println!("photorec v7.2 (Slate OS) — File data recovery");
         println!();
         println!("Options:");
         println!("  /d DIR        Set recovery directory");
@@ -53,7 +53,7 @@ fn run_photorec(args: &[String], _prog: &str) -> i32 {
         println!("Works even after reformatting or severe filesystem damage.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("photorec v7.2 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("photorec v7.2 (Slate OS)"); return 0; }
     println!("photorec: file recovery utility");
     println!("  Supported formats: jpg, png, gif, bmp, tiff, pdf, doc,");
     println!("    xls, ppt, zip, mp3, mp4, avi, mov, and 480+ more");

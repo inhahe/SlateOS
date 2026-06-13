@@ -984,7 +984,7 @@ fn rsync_parse_args(args: &[String]) -> Result<RsyncParseResult, String> {
 
 fn rsync_print_help() {
     let help = b"\
-rsync 0.1.0 -- SlateOS file synchronization
+rsync 0.1.0 -- Slate OS file synchronization
 
 Usage: rsync [OPTION]... SOURCE DEST
        rsync [OPTION]... SOURCE... DEST/
@@ -1812,7 +1812,7 @@ fn scp_parse_args(args: &[String]) -> Result<ScpParseResult, String> {
 
 fn scp_print_help() {
     let help = b"\
-scp 0.1.0 -- SlateOS secure file copy
+scp 0.1.0 -- Slate OS secure file copy
 
 Usage: scp [OPTION]... SOURCE... TARGET
 
@@ -2053,7 +2053,7 @@ fn scp_run(args: &[String]) -> i32 {
         Ok(ScpParseResult::Version) => {
             write_stdout(b"scp ");
             write_stdout(VERSION.as_bytes());
-            write_stdout(b" (SlateOS)\n");
+            write_stdout(b" (Slate OS)\n");
             return 0;
         }
         Ok(ScpParseResult::Run(c)) => c,

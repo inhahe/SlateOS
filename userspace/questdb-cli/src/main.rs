@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_questdb(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: questdb [COMMAND] [OPTIONS]");
-        println!("QuestDB v7.4 (SlateOS) — High-performance time-series database");
+        println!("QuestDB v7.4 (Slate OS) — High-performance time-series database");
         println!();
         println!("Commands:");
         println!("  start              Start QuestDB server");
@@ -30,8 +30,8 @@ fn run_questdb(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("QuestDB v7.4.2 (SlateOS)"); return 0; }
-    println!("QuestDB v7.4.2 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("QuestDB v7.4.2 (Slate OS)"); return 0; }
+    println!("QuestDB v7.4.2 (Slate OS)");
     println!("  HTTP: http://0.0.0.0:9000");
     println!("  PostgreSQL wire: 0.0.0.0:8812");
     println!("  ILP (InfluxDB Line Protocol): 0.0.0.0:9009");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_remix(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: remix COMMAND [OPTIONS]");
-        println!("Remix 2.10.0 (SlateOS)");
+        println!("Remix 2.10.0 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  init         Initialize a new Remix project");

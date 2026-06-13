@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wine_mono(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wine-mono [OPTIONS]");
-        println!("wine-mono v9.0 (SlateOS) — .NET runtime replacement for Wine");
+        println!("wine-mono v9.0 (Slate OS) — .NET runtime replacement for Wine");
         println!();
         println!("Options:");
         println!("  --status          Show installation status");
@@ -23,7 +23,7 @@ fn run_wine_mono(args: &[String], _prog: &str) -> i32 {
         println!("providing compatibility for .NET/WPF applications.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("wine-mono v9.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("wine-mono v9.0 (Slate OS)"); return 0; }
     if args.iter().any(|a| a == "--status") {
         println!("Wine Mono status:");
         println!("  Version: 9.0.0");

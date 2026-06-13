@@ -501,7 +501,7 @@ fn run_unexpand(config: &Config) -> io::Result<i32> {
 // ============================================================================
 
 fn print_expand_help() {
-    println!("SlateOS expand v{VERSION}");
+    println!("Slate OS expand v{VERSION}");
     println!();
     println!("Convert tabs in each FILE to spaces, writing to standard output.");
     println!("With no FILE, or when FILE is -, read standard input.");
@@ -523,7 +523,7 @@ fn print_expand_help() {
 }
 
 fn print_unexpand_help() {
-    println!("SlateOS unexpand v{VERSION}");
+    println!("Slate OS unexpand v{VERSION}");
     println!();
     println!("Convert spaces in each FILE to tabs, writing to standard output.");
     println!("With no FILE, or when FILE is -, read standard input.");
@@ -564,7 +564,7 @@ fn main() {
                 Mode::Expand => "expand",
                 Mode::Unexpand => "unexpand",
             };
-            println!("{name} (SlateOS) {VERSION}");
+            println!("{name} (Slate OS) {VERSION}");
             process::exit(0);
         }
         ParseResult::Run(config) => {

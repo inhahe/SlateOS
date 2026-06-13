@@ -2237,7 +2237,7 @@ fn run() -> i32 {
 
 fn print_help(personality: &Personality) {
     let name = personality.prog_name();
-    println!("{name} v1.0.0 - SlateOS packet filtering utility");
+    println!("{name} v1.0.0 - Slate OS packet filtering utility");
     println!();
     println!("Usage: {name} [-t table] command chain [options]");
     println!();

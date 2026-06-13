@@ -14,7 +14,7 @@ fn run_smbclient(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: smbclient [OPTIONS] //server/share");
         println!();
-        println!("smbclient — SMB/CIFS client (SlateOS, Samba 4.19).");
+        println!("smbclient — SMB/CIFS client (Slate OS, Samba 4.19).");
         println!();
         println!("Options:");
         println!("  -U <user>      Username");
@@ -25,7 +25,7 @@ fn run_smbclient(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Version 4.19.4 (SlateOS)");
+        println!("Version 4.19.4 (Slate OS)");
         return 0;
     }
 
@@ -36,7 +36,7 @@ fn run_smbclient(args: &[String]) -> i32 {
         println!("public          Disk      Public files");
         println!("homes           Disk      Home directories");
         println!("printers        Printer   All Printers");
-        println!("IPC$            IPC       IPC Service (Samba {} SlateOS)", host);
+        println!("IPC$            IPC       IPC Service (Samba {} Slate OS)", host);
         return 0;
     }
 
@@ -62,7 +62,7 @@ fn run_smbstatus(args: &[String]) -> i32 {
         return 0;
     }
 
-    println!("Samba version 4.19.4 (SlateOS)");
+    println!("Samba version 4.19.4 (Slate OS)");
     println!("PID     Username     Group        Machine                            Protocol Version  Encryption           Signing");
     println!("----------------------------------------------------------------------------------------------------------------------------------------");
     println!("1234    user1        staff        192.168.1.50 (ipv4:192.168.1.50)   SMB3_11           -                    AES-128-GMAC");
@@ -91,7 +91,7 @@ fn run_testparm(args: &[String]) -> i32 {
     println!();
     println!("[global]");
     println!("\tworkgroup = WORKGROUP");
-    println!("\tserver string = Samba Server (SlateOS)");
+    println!("\tserver string = Samba Server (Slate OS)");
     println!("\tsecurity = USER");
     println!("\tmap to guest = Bad User");
     println!();

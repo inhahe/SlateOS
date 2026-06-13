@@ -40,7 +40,7 @@ fn run_mold(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("mold 2.31.0 (SlateOS; compatible with GNU ld)");
+        println!("mold 2.31.0 (Slate OS; compatible with GNU ld)");
         return 0;
     }
     if args.iter().any(|a| a == "--perf") {
@@ -79,7 +79,7 @@ fn run_mold(args: Vec<String>) -> i32 {
     let gc = args.iter().any(|a| a == "--gc-sections");
     let icf = args.iter().find_map(|a| a.strip_prefix("--icf="));
 
-    println!("mold 2.31.0 (SlateOS)");
+    println!("mold 2.31.0 (Slate OS)");
     if !inputs.is_empty() {
         println!("Linking {} input files -> {}", inputs.len(), output);
     } else {

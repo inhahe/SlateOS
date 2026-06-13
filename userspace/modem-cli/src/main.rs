@@ -14,7 +14,7 @@ fn run_mmcli(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: mmcli [OPTIONS]");
         println!();
-        println!("mmcli — ModemManager CLI (SlateOS).");
+        println!("mmcli — ModemManager CLI (Slate OS).");
         println!();
         println!("Options:");
         println!("  -L, --list-modems     List available modems");
@@ -27,7 +27,7 @@ fn run_mmcli(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("mmcli 1.22 (SlateOS)");
+        println!("mmcli 1.22 (Slate OS)");
         return 0;
     }
 
@@ -44,7 +44,7 @@ fn run_mmcli(args: &[String]) -> i32 {
         println!("         |   signal quality: 78% (recent)");
         println!("         |   access tech: lte");
         println!("  ----------------------------");
-        println!("  3GPP   |   operator name: SlateOS Mobile");
+        println!("  3GPP   |   operator name: Slate OS Mobile");
         println!("         |   registration: home");
         return 0;
     }
@@ -101,7 +101,7 @@ fn run_nmcli(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: nmcli [OPTIONS] OBJECT COMMAND");
         println!();
-        println!("nmcli — NetworkManager CLI (SlateOS).");
+        println!("nmcli — NetworkManager CLI (Slate OS).");
         println!();
         println!("Objects:");
         println!("  general      NetworkManager status");
@@ -113,7 +113,7 @@ fn run_nmcli(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("nmcli tool, version 1.44.0 (SlateOS)");
+        println!("nmcli tool, version 1.44.0 (Slate OS)");
         return 0;
     }
 

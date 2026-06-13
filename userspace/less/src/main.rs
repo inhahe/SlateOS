@@ -390,7 +390,7 @@ impl Config {
                     process::exit(0);
                 }
                 "--version" => {
-                    println!("less (SlateOS) {VERSION}");
+                    println!("less (Slate OS) {VERSION}");
                     process::exit(0);
                 }
                 other => {
@@ -1267,7 +1267,7 @@ impl Pager {
         write_str(ESC_CURSOR_HOME);
 
         let help = "\
-\x1b[1mless - SlateOS Terminal Pager - Help\x1b[0m
+\x1b[1mless - Slate OS Terminal Pager - Help\x1b[0m
 
   NAVIGATION
     j, Down          Scroll down one line

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_docspell(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: docspell [COMMAND] [OPTIONS]");
-        println!("Docspell v0.41 (SlateOS) — Document organizer with OCR");
+        println!("Docspell v0.41 (Slate OS) — Document organizer with OCR");
         println!();
         println!("Commands:");
         println!("  upload FILE        Upload document");
@@ -32,8 +32,8 @@ fn run_docspell(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Docspell v0.41.0 (SlateOS)"); return 0; }
-    println!("Docspell v0.41.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Docspell v0.41.0 (Slate OS)"); return 0; }
+    println!("Docspell v0.41.0 (Slate OS)");
     println!("  Items: 5,678");
     println!("  Tags: 156");
     println!("  Correspondents: 89");

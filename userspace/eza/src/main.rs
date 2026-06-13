@@ -50,7 +50,7 @@ fn run_eza(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("eza v0.18.17 (SlateOS)");
+        println!("eza v0.18.17 (Slate OS)");
         return 0;
     }
 

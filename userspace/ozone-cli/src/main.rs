@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ozone(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ozone [OPTIONS] [TRACK]");
-        println!("iZotope Ozone 11 Advanced (SlateOS) — AI-powered mastering suite");
+        println!("iZotope Ozone 11 Advanced (Slate OS) — AI-powered mastering suite");
         println!();
         println!("Options:");
         println!("  --assistant            Run Master Assistant (AI)");
@@ -23,8 +23,8 @@ fn run_ozone(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("iZotope Ozone 11.1.0 Advanced (SlateOS)"); return 0; }
-    println!("iZotope Ozone 11.1.0 Advanced (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("iZotope Ozone 11.1.0 Advanced (Slate OS)"); return 0; }
+    println!("iZotope Ozone 11.1.0 Advanced (Slate OS)");
     println!("  Modules: Master Assistant, Maximizer, Imager, Stabilizer, Match EQ");
     println!("  AI: Assistant View 2.0 (instrument-aware mastering)");
     println!("  Loudness: ITU-R BS.1770-4, integrated/short/momentary LUFS");

@@ -15,7 +15,7 @@ fn run_pandora(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "pandora_agent" => {
-                println!("pandora_agent (SlateOS) — Pandora FMS monitoring agent");
+                println!("pandora_agent (Slate OS) — Pandora FMS monitoring agent");
                 println!("  --config FILE      Agent config file");
                 println!("  --server HOST      Server address");
                 println!("  --group NAME       Agent group");
@@ -23,7 +23,7 @@ fn run_pandora(args: &[String], prog: &str) -> i32 {
                 println!("  --daemon           Run as daemon");
             }
             _ => {
-                println!("pandora_server (SlateOS) — Pandora FMS monitoring server");
+                println!("pandora_server (Slate OS) — Pandora FMS monitoring server");
                 println!("  --config FILE      Server config file");
                 println!("  --start            Start server");
                 println!("  --stop             Stop server");
@@ -34,10 +34,10 @@ fn run_pandora(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Pandora FMS v777 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("Pandora FMS v777 (Slate OS)"); return 0; }
     match prog {
         "pandora_agent" => {
-            println!("Pandora FMS Agent v777 (SlateOS)");
+            println!("Pandora FMS Agent v777 (Slate OS)");
             println!("  Server: pandora.example.com");
             println!("  Modules: 23 active");
             println!("  Interval: 300s");
@@ -45,7 +45,7 @@ fn run_pandora(args: &[String], prog: &str) -> i32 {
             println!("  Status: running");
         }
         _ => {
-            println!("Pandora FMS Server v777 (SlateOS)");
+            println!("Pandora FMS Server v777 (Slate OS)");
             println!("  Agents: 56 reporting");
             println!("  Modules: 1,234");
             println!("  Alerts: 12 fired (last 24h)");

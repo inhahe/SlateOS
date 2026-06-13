@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pbrt(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: pbrt [OPTIONS] FILE.pbrt");
-        println!("pbrt v4 (SlateOS) — Physically Based Rendering Toolkit");
+        println!("pbrt v4 (Slate OS) — Physically Based Rendering Toolkit");
         println!();
         println!("Options:");
         println!("  FILE.pbrt           Input scene description");
@@ -27,7 +27,7 @@ fn run_pbrt(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("pbrt v4 (SlateOS)");
+        println!("pbrt v4 (Slate OS)");
         return 0;
     }
     let file = args.iter()

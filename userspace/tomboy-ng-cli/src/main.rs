@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_tomboy(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: tomboy-ng [OPTIONS]");
-        println!("tomboy-ng v0.36 (SlateOS) — Desktop note-taking");
+        println!("tomboy-ng v0.36 (Slate OS) — Desktop note-taking");
         println!();
         println!("Options:");
         println!("  --open-note TITLE Open specific note");
@@ -22,7 +22,7 @@ fn run_tomboy(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("tomboy-ng v0.36 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("tomboy-ng v0.36 (Slate OS)"); return 0; }
     println!("tomboy-ng: desktop notes started");
     println!("  Notes: 35");
     println!("  Notebooks: 4");

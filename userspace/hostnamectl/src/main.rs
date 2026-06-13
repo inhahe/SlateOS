@@ -781,13 +781,13 @@ mod tests {
     #[test]
     fn test_os_release_defaults() {
         let info = OsRelease {
-            name: "SlateOS".to_string(),
+            name: "Slate OS".to_string(),
             version: "1.0".to_string(),
-            pretty_name: "SlateOS 1.0".to_string(),
+            pretty_name: "Slate OS 1.0".to_string(),
             id: "slateos".to_string(),
             cpe_name: String::new(),
         };
-        assert_eq!(info.name, "SlateOS");
+        assert_eq!(info.name, "Slate OS");
         assert_eq!(info.id, "slateos");
     }
 

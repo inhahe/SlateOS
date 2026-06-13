@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_desmume(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: desmume [OPTIONS] [ROM.nds]");
-        println!("DeSmuME v0.9.13 (SlateOS) — Nintendo DS emulator");
+        println!("DeSmuME v0.9.13 (Slate OS) — Nintendo DS emulator");
         println!();
         println!("Options:");
         println!("  --load-slot N     Load save state slot");
@@ -29,10 +29,10 @@ fn run_desmume(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("DeSmuME v0.9.13 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("DeSmuME v0.9.13 (Slate OS)"); return 0; }
     let files: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
     if files.is_empty() {
-        println!("DeSmuME v0.9.13 (SlateOS) — Nintendo DS Emulator");
+        println!("DeSmuME v0.9.13 (Slate OS) — Nintendo DS Emulator");
         println!("  ARM9: 67 MHz, ARM7: 33 MHz (emulated)");
         println!("  Screens: 256x192 x2 (top + bottom)");
         println!("  3D Engine: software renderer");

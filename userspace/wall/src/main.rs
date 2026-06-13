@@ -174,7 +174,7 @@ fn run_wall(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("wall (SlateOS) 0.1.0");
+                println!("wall (Slate OS) 0.1.0");
                 return 0;
             }
             "-n" | "--nobanner" => {
@@ -274,7 +274,7 @@ fn run_write(args: &[String]) -> i32 {
     }
 
     if args[0] == "--version" {
-        println!("write (SlateOS) 0.1.0");
+        println!("write (Slate OS) 0.1.0");
         return 0;
     }
 
@@ -359,7 +359,7 @@ fn run_mesg(args: &[String]) -> i32 {
     }
 
     if !args.is_empty() && args[0] == "--version" {
-        println!("mesg (SlateOS) 0.1.0");
+        println!("mesg (Slate OS) 0.1.0");
         return 0;
     }
 

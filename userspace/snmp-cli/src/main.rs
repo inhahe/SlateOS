@@ -18,13 +18,13 @@ fn run_snmpget(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("NET-SNMP version: 5.9.4 (SlateOS)");
+        println!("NET-SNMP version: 5.9.4 (Slate OS)");
         return 0;
     }
 
     let oid = args.last().map(|s| s.as_str()).unwrap_or("sysDescr.0");
     match oid {
-        "sysDescr.0" | ".1.3.6.1.2.1.1.1.0" => println!("SNMPv2-MIB::sysDescr.0 = STRING: SlateOS Desktop 1.0 (x86_64)"),
+        "sysDescr.0" | ".1.3.6.1.2.1.1.1.0" => println!("SNMPv2-MIB::sysDescr.0 = STRING: Slate OS Desktop 1.0 (x86_64)"),
         "sysUpTime.0" | ".1.3.6.1.2.1.1.3.0" => println!("DISMAN-EVENT-MIB::sysUpTimeInstance = Timeticks: (1440000) 4:00:00.00"),
         "sysName.0" | ".1.3.6.1.2.1.1.5.0" => println!("SNMPv2-MIB::sysName.0 = STRING: slateos-desktop"),
         "sysContact.0" | ".1.3.6.1.2.1.1.4.0" => println!("SNMPv2-MIB::sysContact.0 = STRING: admin@slateos.local"),
@@ -39,7 +39,7 @@ fn run_snmpwalk(args: &[String]) -> i32 {
         return 0;
     }
 
-    println!("SNMPv2-MIB::sysDescr.0 = STRING: SlateOS Desktop 1.0 (x86_64)");
+    println!("SNMPv2-MIB::sysDescr.0 = STRING: Slate OS Desktop 1.0 (x86_64)");
     println!("SNMPv2-MIB::sysObjectID.0 = OID: NET-SNMP-MIB::netSnmpAgentOIDs.10");
     println!("DISMAN-EVENT-MIB::sysUpTimeInstance = Timeticks: (1440000) 4:00:00.00");
     println!("SNMPv2-MIB::sysContact.0 = STRING: admin@slateos.local");

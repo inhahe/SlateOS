@@ -98,7 +98,7 @@ fn main() {
     let rest: Vec<String> = args.into_iter().skip(1).collect();
 
     if rest.iter().any(|a| a == "-V" || a == "--version") {
-        println!("TShark (Wireshark) 4.2.2 (SlateOS)");
+        println!("TShark (Wireshark) 4.2.2 (Slate OS)");
         process::exit(0);
     }
 

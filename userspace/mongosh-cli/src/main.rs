@@ -11,7 +11,7 @@ fn run_mongosh(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mongosh [OPTIONS] [CONNECTION_STRING] [SCRIPT]");
         println!();
-        println!("MongoDB Shell (SlateOS).");
+        println!("MongoDB Shell (Slate OS).");
         println!();
         println!("Options:");
         println!("  --host HOST       Server hostname (default: localhost)");
@@ -25,7 +25,7 @@ fn run_mongosh(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("mongosh 2.1.1 (SlateOS)");
+        println!("mongosh 2.1.1 (Slate OS)");
         return 0;
     }
 

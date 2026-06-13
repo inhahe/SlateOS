@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_bookstack(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: bookstack [COMMAND] [OPTIONS]");
-        println!("BookStack v24.02 (SlateOS) — Knowledge management wiki");
+        println!("BookStack v24.02 (Slate OS) — Knowledge management wiki");
         println!();
         println!("Commands:");
         println!("  serve              Start web server");
@@ -31,8 +31,8 @@ fn run_bookstack(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("BookStack v24.02.3 (SlateOS)"); return 0; }
-    println!("BookStack v24.02.3 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("BookStack v24.02.3 (Slate OS)"); return 0; }
+    println!("BookStack v24.02.3 (Slate OS)");
     println!("  Shelves: 12");
     println!("  Books: 45");
     println!("  Chapters: 234");

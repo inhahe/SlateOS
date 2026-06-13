@@ -11,7 +11,7 @@ fn run_notion(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: notion <COMMAND> [OPTIONS]");
         println!();
-        println!("Notion workspace CLI (SlateOS).");
+        println!("Notion workspace CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  pages        Manage pages");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_zabbix_agentd(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: zabbix_agentd [OPTIONS]");
-        println!("zabbix_agentd v6.4 (SlateOS) — Zabbix monitoring agent");
+        println!("zabbix_agentd v6.4 (Slate OS) — Zabbix monitoring agent");
         println!();
         println!("Options:");
         println!("  -c FILE       Configuration file");
@@ -23,7 +23,7 @@ fn run_zabbix_agentd(args: &[String], _prog: &str) -> i32 {
         println!("  --version     Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("zabbix_agentd v6.4 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("zabbix_agentd v6.4 (Slate OS)"); return 0; }
     if args.iter().any(|a| a == "-p") {
         println!("agent.hostname     [s|hostname]");
         println!("agent.ping         [u|1]");
@@ -43,14 +43,14 @@ fn run_zabbix_agentd(args: &[String], _prog: &str) -> i32 {
 fn run_zabbix_sender(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: zabbix_sender [OPTIONS] -k KEY -o VALUE");
-        println!("zabbix_sender v6.4 (SlateOS) — Send data to Zabbix server");
+        println!("zabbix_sender v6.4 (Slate OS) — Send data to Zabbix server");
         println!("  -z SERVER     Zabbix server");
         println!("  -s HOST       Technical hostname");
         println!("  -k KEY        Item key");
         println!("  -o VALUE      Item value");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("zabbix_sender v6.4 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("zabbix_sender v6.4 (Slate OS)"); return 0; }
     println!("info from server: \"processed: 1; failed: 0; total: 1\"");
     println!("sent: 1; skipped: 0; total: 1");
     0
@@ -59,10 +59,10 @@ fn run_zabbix_sender(args: &[String], _prog: &str) -> i32 {
 fn run_zabbix_get(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: zabbix_get -s HOST -k KEY");
-        println!("zabbix_get v6.4 (SlateOS) — Get data from Zabbix agent");
+        println!("zabbix_get v6.4 (Slate OS) — Get data from Zabbix agent");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("zabbix_get v6.4 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("zabbix_get v6.4 (Slate OS)"); return 0; }
     println!("0.150000");
     0
 }

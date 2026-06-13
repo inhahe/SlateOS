@@ -13,14 +13,14 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_upowerd(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: upowerd [OPTIONS]");
-        println!("upowerd v1.90 (SlateOS) — UPower system daemon");
+        println!("upowerd v1.90 (Slate OS) — UPower system daemon");
         println!();
         println!("Options:");
         println!("  --replace         Replace running daemon");
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("upowerd v1.90 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("upowerd v1.90 (Slate OS)"); return 0; }
     println!("upowerd: power management daemon started");
     0
 }
@@ -28,7 +28,7 @@ fn run_upowerd(args: &[String], _prog: &str) -> i32 {
 fn run_upower(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: upower [OPTIONS]");
-        println!("upower v1.90 (SlateOS) — Query power devices");
+        println!("upower v1.90 (Slate OS) — Query power devices");
         println!();
         println!("Options:");
         println!("  -e                Enumerate devices");
@@ -38,7 +38,7 @@ fn run_upower(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("upower v1.90 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("upower v1.90 (Slate OS)"); return 0; }
     if args.iter().any(|a| a == "-e") {
         println!("/org/freedesktop/UPower/devices/line_power_AC");
         println!("/org/freedesktop/UPower/devices/battery_BAT0");

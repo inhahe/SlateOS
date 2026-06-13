@@ -23,7 +23,7 @@ fn run_sd(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("sd 1.0.0 (SlateOS)");
+        println!("sd 1.0.0 (Slate OS)");
         return 0;
     }
 

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ox(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ox [OPTIONS] [FILE...]");
-        println!("ox 0.6.3 (SlateOS) — Fast terminal text editor");
+        println!("ox 0.6.3 (Slate OS) — Fast terminal text editor");
         println!();
         println!("Options:");
         println!("  --config FILE        Config file path");
@@ -31,7 +31,7 @@ fn run_ox(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("ox 0.6.3 (SlateOS)");
+        println!("ox 0.6.3 (Slate OS)");
         return 0;
     }
     let file = args.iter().find(|a| !a.starts_with('-'))

@@ -36,7 +36,7 @@ fn run_starship(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("starship 1.19.0 (SlateOS)");
+            println!("starship 1.19.0 (Slate OS)");
             0
         }
         "init" => {

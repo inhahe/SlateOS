@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rails(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: rails COMMAND [OPTIONS]");
-        println!("Rails 7.1.3.4 (SlateOS)");
+        println!("Rails 7.1.3.4 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  new          Create a new Rails application");

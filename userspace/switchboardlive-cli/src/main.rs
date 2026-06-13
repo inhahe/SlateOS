@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sbl(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: switchboardlive [COMMAND] [OPTIONS]");
-        println!("Switchboard Live (SlateOS) — Enterprise multi-streaming distribution");
+        println!("Switchboard Live (Slate OS) — Enterprise multi-streaming distribution");
         println!();
         println!("Commands:");
         println!("  workflows              List streaming workflows");
@@ -29,8 +29,8 @@ fn run_sbl(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Switchboard Live v3.4 (SlateOS)"); return 0; }
-    println!("Switchboard Live (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Switchboard Live v3.4 (Slate OS)"); return 0; }
+    println!("Switchboard Live (Slate OS)");
     println!("  Focus: Enterprise & broadcast-grade multi-distribution");
     println!("  Inputs: RTMP push/pull, SRT, NDI bridge");
     println!("  Destinations: 50+ platforms (YouTube, FB, Twitch, X, Trovo, etc.)");

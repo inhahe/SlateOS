@@ -36,7 +36,7 @@ fn run_onefetch(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("onefetch 2.21.0 (SlateOS)");
+        println!("onefetch 2.21.0 (Slate OS)");
         return 0;
     }
 

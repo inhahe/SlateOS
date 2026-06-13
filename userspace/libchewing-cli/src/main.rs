@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_chewing(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: chewing [OPTIONS]");
-        println!("chewing v0.9 (SlateOS) — Chinese (Zhuyin/Bopomofo) input engine");
+        println!("chewing v0.9 (Slate OS) — Chinese (Zhuyin/Bopomofo) input engine");
         println!();
         println!("Options:");
         println!("  --keyboard TYPE   Keyboard layout (default, hsu, et26, ibm, dvorak)");
@@ -23,7 +23,7 @@ fn run_chewing(args: &[String], _prog: &str) -> i32 {
         println!("phonetic symbols. Intelligent phrase selection.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("chewing v0.9 (SlateOS, libchewing)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("chewing v0.9 (Slate OS, libchewing)"); return 0; }
     println!("chewing: Zhuyin input engine");
     println!("  Keyboard: default");
     println!("  Dictionary: system (150k entries)");

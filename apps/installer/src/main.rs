@@ -93,7 +93,7 @@ fn parse_args() -> Mode {
 
 /// Print usage information.
 fn print_usage() {
-    println!("SlateOS Installer v0.1.0");
+    println!("Slate OS Installer v0.1.0");
     println!();
     println!("Usage:");
     println!("  installer --config <path.yaml>       Run unattended installation");
@@ -186,7 +186,7 @@ fn cmd_install(path: &str) {
 
     let plan = InstallPlan::from_config(&config);
 
-    println!("SlateOS Installer");
+    println!("Slate OS Installer");
     println!("===============");
     println!();
     println!("Target disk: {}", config.disk.target);

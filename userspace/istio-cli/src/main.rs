@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_istio(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: istioctl [COMMAND] [OPTIONS]");
-        println!("istioctl v1.21 (SlateOS) — Istio service mesh CLI");
+        println!("istioctl v1.21 (Slate OS) — Istio service mesh CLI");
         println!();
         println!("Commands:");
         println!("  install            Install Istio");
@@ -32,8 +32,8 @@ fn run_istio(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("istioctl v1.21.2 (SlateOS)"); return 0; }
-    println!("istioctl v1.21.2 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("istioctl v1.21.2 (Slate OS)"); return 0; }
+    println!("istioctl v1.21.2 (Slate OS)");
     println!("  Mesh: healthy");
     println!("  Control plane: istiod (1 replica)");
     println!("  Data plane: 23 proxies (Envoy v1.29)");

@@ -13,14 +13,14 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ociocheck(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: ociocheck [OPTIONS]");
-        println!("ociocheck v2.3 (SlateOS) — Validate OCIO config");
+        println!("ociocheck v2.3 (Slate OS) — Validate OCIO config");
         println!();
         println!("Options:");
         println!("  --iconfig FILE    Input OCIO config");
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("OCIO v2.3 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("OCIO v2.3 (Slate OS)"); return 0; }
     println!("OCIO config validation:");
     println!("  Config: ACES 1.2");
     println!("  Color spaces: 42");
@@ -33,7 +33,7 @@ fn run_ociocheck(args: &[String], _prog: &str) -> i32 {
 fn run_ocioconvert(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: ocioconvert INPUT OUTPUT --src CS --dst CS");
-        println!("ocioconvert v2.3 (SlateOS) — Convert image between color spaces");
+        println!("ocioconvert v2.3 (Slate OS) — Convert image between color spaces");
         return 0;
     }
     println!("Converting: ACEScg -> sRGB");
@@ -44,7 +44,7 @@ fn run_ocioconvert(args: &[String], _prog: &str) -> i32 {
 fn run_ociodisplay(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: ociodisplay [OPTIONS]");
-        println!("ociodisplay v2.3 (SlateOS) — Display color-managed image");
+        println!("ociodisplay v2.3 (Slate OS) — Display color-managed image");
         return 0;
     }
     println!("Display: sRGB");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_bluetuith(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: bluetuith [OPTIONS]");
-        println!("bluetuith v0.2 (SlateOS) — TUI Bluetooth manager");
+        println!("bluetuith v0.2 (Slate OS) — TUI Bluetooth manager");
         println!();
         println!("Options:");
         println!("  --adapter NAME    Use specific adapter");
@@ -24,7 +24,7 @@ fn run_bluetuith(args: &[String], _prog: &str) -> i32 {
         println!("connecting, file transfer, and adapter management.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("bluetuith v0.2 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("bluetuith v0.2 (Slate OS)"); return 0; }
     println!("bluetuith: TUI Bluetooth manager");
     println!("  Adapter: hci0 (powered, discoverable)");
     println!("  Scanning for devices...");

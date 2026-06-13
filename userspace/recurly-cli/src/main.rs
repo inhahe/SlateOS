@@ -31,7 +31,7 @@ fn print_help(prog: &str) {
 }
 
 fn print_version() {
-    println!("recurly-cli 0.1.0 — SlateOS personality binary");
+    println!("recurly-cli 0.1.0 — Slate OS personality binary");
     println!("Recurly, Inc. — San Francisco, California, USA");
 }
 

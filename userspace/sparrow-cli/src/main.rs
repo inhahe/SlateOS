@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sparrow(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: sparrow [OPTIONS]");
-        println!("Sparrow Wallet v1.9 (SlateOS) — Bitcoin desktop wallet");
+        println!("Sparrow Wallet v1.9 (Slate OS) — Bitcoin desktop wallet");
         println!();
         println!("Options:");
         println!("  --dir DIR         Data directory");
@@ -24,7 +24,7 @@ fn run_sparrow(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Sparrow Wallet v1.9 (SlateOS)");
+        println!("Sparrow Wallet v1.9 (Slate OS)");
         return 0;
     }
     println!("Sparrow Wallet v1.9");

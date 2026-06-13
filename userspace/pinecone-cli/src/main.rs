@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pinecone [OPTIONS]");
-        println!("Pinecone (SlateOS) — fully managed vector database for AI applications");
+        println!("Pinecone (Slate OS) — fully managed vector database for AI applications");
         println!();
         println!("Options:");
         println!("  --serverless           Serverless indexes (pay per query + storage)");
@@ -20,8 +20,8 @@ fn run_pc(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Pinecone 2024 (SlateOS) — pc CLI 1.x"); return 0; }
-    println!("Pinecone 2024 (SlateOS) — Fully Managed Vector Database");
+    if args.iter().any(|a| a == "--version") { println!("Pinecone 2024 (Slate OS) — pc CLI 1.x"); return 0; }
+    println!("Pinecone 2024 (Slate OS) — Fully Managed Vector Database");
     println!("  Vendor: Pinecone Systems, Inc. (New York, NY — private)");
     println!("  Founders: Edo Liberty, 2019 (sole founder, CEO)");
     println!("          Edo Liberty: ex-Sr Director Research at AWS (Amazon SageMaker), ex-Yahoo Research");

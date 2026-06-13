@@ -19,7 +19,7 @@ fn run_sysctl(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sysctl [OPTIONS] [VARIABLE[=VALUE]...]");
         println!();
-        println!("sysctl — configure kernel parameters at runtime (SlateOS).");
+        println!("sysctl — configure kernel parameters at runtime (Slate OS).");
         println!();
         println!("Options:");
         println!("  -a, --all         Display all values");
@@ -33,7 +33,7 @@ fn run_sysctl(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("sysctl from procps-ng 4.0.4 (SlateOS)");
+        println!("sysctl from procps-ng 4.0.4 (Slate OS)");
         return 0;
     }
 
@@ -50,7 +50,7 @@ fn run_sysctl(args: &[String]) -> i32 {
 
     let params = [
         ("kernel.hostname", "slateos"),
-        ("kernel.ostype", "SlateOS"),
+        ("kernel.ostype", "Slate OS"),
         ("kernel.osrelease", "1.0.0"),
         ("kernel.version", "#1 SMP PREEMPT_DYNAMIC"),
         ("kernel.pid_max", "4194304"),

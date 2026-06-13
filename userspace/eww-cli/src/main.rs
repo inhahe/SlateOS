@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_eww(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: eww COMMAND [OPTIONS]");
-        println!("eww v0.5 (SlateOS) — ElKowars wacky widgets");
+        println!("eww v0.5 (Slate OS) — ElKowars wacky widgets");
         println!();
         println!("Commands:");
         println!("  daemon            Start eww daemon");

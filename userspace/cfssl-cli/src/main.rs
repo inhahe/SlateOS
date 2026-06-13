@@ -15,17 +15,17 @@ fn run_cfssl(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [COMMAND] [OPTIONS]", prog);
         match prog {
             "cfssljson" => {
-                println!("cfssljson (SlateOS) — Extract certs/keys from cfssl JSON output");
+                println!("cfssljson (Slate OS) — Extract certs/keys from cfssl JSON output");
                 println!("  -bare              Output bare files (no prefix)");
                 println!("  -f FILE            Input JSON file (default: stdin)");
             }
             "mkbundle" => {
-                println!("mkbundle (SlateOS) — Build certificate pool bundle");
+                println!("mkbundle (Slate OS) — Build certificate pool bundle");
                 println!("  -f FILE            Bundle file output");
                 println!("  -nw N              Number of workers");
             }
             _ => {
-                println!("cfssl (SlateOS) — CloudFlare PKI/TLS toolkit");
+                println!("cfssl (Slate OS) — CloudFlare PKI/TLS toolkit");
                 println!("  gencert            Generate new cert/key pair");
                 println!("  sign               Sign a CSR");
                 println!("  serve              Start API server");
@@ -41,12 +41,12 @@ fn run_cfssl(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("cfssl v1.6.5 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("cfssl v1.6.5 (Slate OS)"); return 0; }
     match prog {
         "cfssljson" => println!("cfssljson: reading from stdin..."),
         "mkbundle" => println!("mkbundle: building certificate bundle..."),
         _ => {
-            println!("cfssl v1.6.5 (SlateOS)");
+            println!("cfssl v1.6.5 (Slate OS)");
             println!("  API server: http://0.0.0.0:8888");
             println!("  CA: /etc/cfssl/ca.pem");
             println!("  Profiles: server, client, peer, intermediate");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_phoronix(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: phoronix-test-suite <command> [OPTIONS]");
-        println!("phoronix-test-suite v10.8 (SlateOS) — Automated benchmarking");
+        println!("phoronix-test-suite v10.8 (Slate OS) — Automated benchmarking");
         println!();
         println!("Commands:");
         println!("  benchmark TEST    Run benchmark");
@@ -25,11 +25,11 @@ fn run_phoronix(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("phoronix-test-suite v10.8 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("phoronix-test-suite v10.8 (Slate OS)"); return 0; }
     match args.first().map(|s| s.as_str()) {
         Some("system-info") => {
             println!("Phoronix Test Suite System Info:");
-            println!("  OS: SlateOS 1.0");
+            println!("  OS: Slate OS 1.0");
             println!("  Kernel: 0.1.0-slateos (x86_64)");
             println!("  CPU: AMD Ryzen 7 3700X @ 3.60GHz (8 Cores)");
             println!("  RAM: 16384 MB");

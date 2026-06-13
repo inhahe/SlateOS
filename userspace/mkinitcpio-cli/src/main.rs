@@ -19,7 +19,7 @@ fn run_mkinitcpio(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mkinitcpio [OPTIONS]");
         println!();
-        println!("mkinitcpio — generate initramfs images (SlateOS).");
+        println!("mkinitcpio — generate initramfs images (Slate OS).");
         println!();
         println!("Options:");
         println!("  -g FILE        Generate image to FILE");
@@ -36,7 +36,7 @@ fn run_mkinitcpio(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("mkinitcpio 37 (SlateOS)");
+        println!("mkinitcpio 37 (Slate OS)");
         return 0;
     }
 
@@ -82,7 +82,7 @@ fn run_update_initramfs(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: update-initramfs [OPTIONS]");
         println!();
-        println!("update-initramfs — generate initramfs for given kernel (SlateOS).");
+        println!("update-initramfs — generate initramfs for given kernel (Slate OS).");
         println!();
         println!("Options:");
         println!("  -c    Create initramfs");

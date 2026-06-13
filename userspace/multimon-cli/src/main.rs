@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_multimon(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: multimon-ng [OPTIONS] [FILE]");
-        println!("multimon-ng v1.2 (SlateOS) — Digital signal decoder");
+        println!("multimon-ng v1.2 (Slate OS) — Digital signal decoder");
         println!();
         println!("Options:");
         println!("  -a MODE        Add decoder (POCSAG512, POCSAG1200, POCSAG2400,");
@@ -28,8 +28,8 @@ fn run_multimon(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("multimon-ng v1.2.0 (SlateOS)"); return 0; }
-    println!("multimon-ng v1.2.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("multimon-ng v1.2.0 (Slate OS)"); return 0; }
+    println!("multimon-ng v1.2.0 (Slate OS)");
     println!("  Decoders: POCSAG512, POCSAG1200, POCSAG2400, FLEX");
     println!("  Input: stdin (raw audio, 22050 Hz)");
     println!("  POCSAG1200: Address: 1234567 Function: 0");

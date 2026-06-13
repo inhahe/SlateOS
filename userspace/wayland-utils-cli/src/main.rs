@@ -13,16 +13,16 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wl_info(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wl-info [OPTIONS]");
-        println!("wl-info v0.1 (SlateOS) — Wayland display info");
+        println!("wl-info v0.1 (Slate OS) — Wayland display info");
         println!();
         println!("Options:");
         println!("  --json            Output as JSON");
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("wl-info v0.1 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("wl-info v0.1 (Slate OS)"); return 0; }
     println!("Display: wayland-0");
-    println!("Compositor: SlateOS compositor v1.0");
+    println!("Compositor: Slate OS compositor v1.0");
     println!("Outputs: 2");
     println!("  HDMI-A-1: 1920x1080@60Hz");
     println!("  DP-1: 2560x1440@144Hz");
@@ -32,7 +32,7 @@ fn run_wl_info(args: &[String], _prog: &str) -> i32 {
 fn run_wl_registry(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wl-registry [OPTIONS]");
-        println!("wl-registry v0.1 (SlateOS) — Dump Wayland registry");
+        println!("wl-registry v0.1 (Slate OS) — Dump Wayland registry");
         return 0;
     }
     let _ = args;

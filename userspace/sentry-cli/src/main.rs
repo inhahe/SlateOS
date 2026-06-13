@@ -38,7 +38,7 @@ fn run_sentry_cli(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("sentry-cli 2.28.0 (SlateOS)");
+        println!("sentry-cli 2.28.0 (Slate OS)");
         return 0;
     }
 

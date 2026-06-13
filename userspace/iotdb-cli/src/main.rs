@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_iotdb(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: iotdb [COMMAND] [OPTIONS]");
-        println!("Apache IoTDB v1.3 (SlateOS) — IoT time-series database");
+        println!("Apache IoTDB v1.3 (Slate OS) — IoT time-series database");
         println!();
         println!("Commands:");
         println!("  start              Start IoTDB server");
@@ -31,8 +31,8 @@ fn run_iotdb(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Apache IoTDB v1.3.1 (SlateOS)"); return 0; }
-    println!("Apache IoTDB v1.3.1 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Apache IoTDB v1.3.1 (Slate OS)"); return 0; }
+    println!("Apache IoTDB v1.3.1 (Slate OS)");
     println!("  RPC: 0.0.0.0:6667");
     println!("  REST: 0.0.0.0:18080");
     println!("  Storage groups: 8");

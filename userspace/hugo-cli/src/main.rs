@@ -10,7 +10,7 @@ use std::process;
 fn run_hugo(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Hugo is a fast and flexible static site generator");
-        println!("Hugo v0.122.0 (SlateOS)");
+        println!("Hugo v0.122.0 (Slate OS)");
         println!();
         println!("Usage: hugo [command] [flags]");
         println!();

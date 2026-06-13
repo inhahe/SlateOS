@@ -14,7 +14,7 @@ fn run_btrfs(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: btrfs [OPTIONS] <group> <command> [<args>]");
         println!();
-        println!("btrfs — Btrfs filesystem management (SlateOS).");
+        println!("btrfs — Btrfs filesystem management (Slate OS).");
         println!();
         println!("Command groups:");
         println!("  subvolume    Manage subvolumes");
@@ -29,7 +29,7 @@ fn run_btrfs(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("btrfs-progs v6.7 (SlateOS)");
+        println!("btrfs-progs v6.7 (Slate OS)");
         return 0;
     }
 
@@ -112,7 +112,7 @@ fn run_mkfs_btrfs(args: &[String]) -> i32 {
         return 0;
     }
     let dev = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("/dev/sda1");
-    println!("btrfs-progs v6.7 (SlateOS)");
+    println!("btrfs-progs v6.7 (Slate OS)");
     println!("Label:              (none)");
     println!("UUID:               aabbccdd-1122-3344-5566-778899001122");
     println!("Node size:          16384");

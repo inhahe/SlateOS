@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_vv(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: vivaldi [URL] [OPTIONS]");
-        println!("Vivaldi (SlateOS) — Power-user Chromium browser with deep customization");
+        println!("Vivaldi (Slate OS) — Power-user Chromium browser with deep customization");
         println!();
         println!("Options:");
         println!("  --private              Private window");
@@ -25,8 +25,8 @@ fn run_vv(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Vivaldi 7.0.3495.29 (Stable channel) (SlateOS, 64-bit)"); return 0; }
-    println!("Vivaldi 7.0.3495.29 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Vivaldi 7.0.3495.29 (Stable channel) (Slate OS, 64-bit)"); return 0; }
+    println!("Vivaldi 7.0.3495.29 (Slate OS)");
     println!("  Vendor: Vivaldi Technologies (Oslo, Norway, founded 2014)");
     println!("  Founder: Jon Stephenson von Tetzchner (co-founder of Opera)");
     println!("  Origin: built by ex-Opera engineers after Presto-era Opera died (2013)");

@@ -11,7 +11,7 @@ fn run_rdiff_backup(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: rdiff-backup [OPTIONS] COMMAND [ARGS ...]");
         println!();
-        println!("rdiff-backup — reverse differential backup (SlateOS).");
+        println!("rdiff-backup — reverse differential backup (Slate OS).");
         println!();
         println!("Commands:");
         println!("  backup SRC DEST       Create backup");
@@ -33,7 +33,7 @@ fn run_rdiff_backup(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("rdiff-backup 2.2.6 (SlateOS)");
+        println!("rdiff-backup 2.2.6 (Slate OS)");
         return 0;
     }
 

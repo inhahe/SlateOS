@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_xero(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: xero [OPTIONS]");
-        println!("Xero (SlateOS) — Cloud accounting for small business");
+        println!("Xero (Slate OS) — Cloud accounting for small business");
         println!();
         println!("Options:");
         println!("  --starter              Starter ($15/mo)");
@@ -23,8 +23,8 @@ fn run_xero(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Xero 2024 (SlateOS)"); return 0; }
-    println!("Xero 2024 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Xero 2024 (Slate OS)"); return 0; }
+    println!("Xero 2024 (Slate OS)");
     println!("  Vendor: Xero Limited (Wellington, New Zealand — ASX:XRO, $19B AUD market cap)");
     println!("  Founders: Rod Drury + Hamish Edwards (Wellington, 2006)");
     println!("           Drury: NZ tech entrepreneur, IRD veteran, prolific writer/speaker");

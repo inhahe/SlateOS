@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_influx(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: influx COMMAND [OPTIONS]");
-        println!("InfluxDB CLI 2.7.5 (SlateOS)");
+        println!("InfluxDB CLI 2.7.5 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  setup        Set up InfluxDB");

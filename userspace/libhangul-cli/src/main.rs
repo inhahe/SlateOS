@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_hangul(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: hangul [OPTIONS]");
-        println!("hangul v0.1 (SlateOS) — Korean Hangul input engine");
+        println!("hangul v0.1 (Slate OS) — Korean Hangul input engine");
         println!();
         println!("Options:");
         println!("  --keyboard TYPE   Keyboard layout (2set, 3set-final, 3set-390, romaja)");
@@ -26,7 +26,7 @@ fn run_hangul(args: &[String], _prog: &str) -> i32 {
         println!("  romaja              - Romanization input");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("hangul v0.1 (SlateOS, libhangul)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("hangul v0.1 (Slate OS, libhangul)"); return 0; }
     println!("hangul: Korean input engine");
     println!("  Keyboard: 2set (Dubeolsik)");
     println!("  Jamo composition: automatic");

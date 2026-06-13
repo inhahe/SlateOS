@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_fab(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: fab [OPTIONS] <task> [ARGS...]");
-        println!("fab v3.2 (SlateOS) — Remote execution and deployment");
+        println!("fab v3.2 (Slate OS) — Remote execution and deployment");
         println!();
         println!("Options:");
         println!("  -H HOSTS       Comma-separated host list");
@@ -26,7 +26,7 @@ fn run_fab(args: &[String], _prog: &str) -> i32 {
         println!("Run tasks on remote hosts via SSH.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("fab v3.2 (SlateOS, Fabric)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("fab v3.2 (Slate OS, Fabric)"); return 0; }
     if args.iter().any(|a| a == "-l") {
         println!("Available tasks:");
         println!("  deploy       Deploy application");

@@ -19,7 +19,7 @@ fn run_lp(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lp [OPTIONS] [FILE ...]");
         println!();
-        println!("lp — print files (SlateOS).");
+        println!("lp — print files (Slate OS).");
         println!();
         println!("Options:");
         println!("  -d PRINTER     Destination printer");
@@ -49,7 +49,7 @@ fn run_lpr(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lpr [OPTIONS] [FILE ...]");
         println!();
-        println!("lpr — print files (BSD style) (SlateOS).");
+        println!("lpr — print files (BSD style) (Slate OS).");
         println!();
         println!("Options:");
         println!("  -P PRINTER     Destination printer");
@@ -66,7 +66,7 @@ fn run_lpq(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lpq [OPTIONS] [USER ...]");
         println!();
-        println!("lpq — show print queue (SlateOS).");
+        println!("lpq — show print queue (Slate OS).");
         return 0;
     }
     let all = args.iter().any(|a| a == "-a");
@@ -84,7 +84,7 @@ fn run_lprm(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lprm [OPTIONS] [JOB-ID ...]");
         println!();
-        println!("lprm — cancel print jobs (SlateOS).");
+        println!("lprm — cancel print jobs (Slate OS).");
         return 0;
     }
     if args.iter().any(|a| a == "-") {
@@ -103,7 +103,7 @@ fn run_lpstat(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lpstat [OPTIONS]");
         println!();
-        println!("lpstat — print system status (SlateOS).");
+        println!("lpstat — print system status (Slate OS).");
         println!();
         println!("Options:");
         println!("  -a             Accepting status");
@@ -134,7 +134,7 @@ fn run_lpadmin(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lpadmin [OPTIONS]");
         println!();
-        println!("lpadmin — configure CUPS printers (SlateOS).");
+        println!("lpadmin — configure CUPS printers (Slate OS).");
         println!();
         println!("Options:");
         println!("  -p PRINTER     Add/modify printer");
@@ -159,7 +159,7 @@ fn run_lpoptions(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lpoptions [OPTIONS]");
         println!();
-        println!("lpoptions — display/set printer options (SlateOS).");
+        println!("lpoptions — display/set printer options (Slate OS).");
         println!();
         println!("Options:");
         println!("  -d PRINTER     Set default printer");

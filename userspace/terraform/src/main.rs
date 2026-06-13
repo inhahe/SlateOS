@@ -45,7 +45,7 @@ fn run_terraform(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-version" | "version" => {
-            println!("Terraform v1.8.0 (SlateOS)");
+            println!("Terraform v1.8.0 (Slate OS)");
             println!("on slateos_amd64");
             0
         }

@@ -19,7 +19,7 @@ fn run_kexec(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: kexec [OPTIONS] [KERNEL]");
         println!();
-        println!("kexec — load and boot a new kernel (SlateOS).");
+        println!("kexec — load and boot a new kernel (Slate OS).");
         println!();
         println!("Options:");
         println!("  -l, --load         Load a new kernel");
@@ -34,7 +34,7 @@ fn run_kexec(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("kexec-tools 2.0.27 (SlateOS)");
+        println!("kexec-tools 2.0.27 (Slate OS)");
         return 0;
     }
 
@@ -91,7 +91,7 @@ fn run_kdump_config(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: kdump-config COMMAND");
         println!();
-        println!("kdump-config — manage kdump crash recovery (SlateOS).");
+        println!("kdump-config — manage kdump crash recovery (Slate OS).");
         println!();
         println!("Commands:");
         println!("  show     Show kdump status");

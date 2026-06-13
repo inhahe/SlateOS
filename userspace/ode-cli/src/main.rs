@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ode(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: ode-test COMMAND [OPTIONS]");
-        println!("ODE v0.16 (SlateOS) — Open Dynamics Engine");
+        println!("ODE v0.16 (Slate OS) — Open Dynamics Engine");
         println!();
         println!("Commands:");
         println!("  bench             Run simulation benchmarks");
@@ -23,7 +23,7 @@ fn run_ode(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("ODE v0.16 (SlateOS)");
+        println!("ODE v0.16 (Slate OS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("info");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_helix(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: hx [OPTIONS] [FILE...]");
-        println!("helix 24.7 (SlateOS) — A post-modern text editor");
+        println!("helix 24.7 (Slate OS) — A post-modern text editor");
         println!();
         println!("Options:");
         println!("  -c, --config FILE     Config file");
@@ -28,7 +28,7 @@ fn run_helix(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("helix 24.7 (SlateOS)");
+        println!("helix 24.7 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "--health") {

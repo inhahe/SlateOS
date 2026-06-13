@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_phaser(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: phaser [COMMAND] [OPTIONS]");
-        println!("Phaser v3.85 (SlateOS) — HTML5 game framework");
+        println!("Phaser v3.85 (Slate OS) — HTML5 game framework");
         println!();
         println!("Commands:");
         println!("  new PROJECT [TEMPLATE]  Create new project");
@@ -31,8 +31,8 @@ fn run_phaser(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Phaser v3.85.2 (SlateOS)"); return 0; }
-    println!("Phaser v3.85.2 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Phaser v3.85.2 (Slate OS)"); return 0; }
+    println!("Phaser v3.85.2 (Slate OS)");
     println!("  Renderer: WebGL (auto-fallback to Canvas)");
     println!("  Templates: 15 (TypeScript, JavaScript, Vite, Webpack)");
     println!("  Physics: Arcade, Matter.js");

@@ -13,7 +13,7 @@ fn run_occ(args: Vec<String>) -> i32 {
 
     match cmd.as_str() {
         "--help" | "help" | "-h" | "list" => {
-            println!("Nextcloud 29.0.0 (SlateOS)");
+            println!("Nextcloud 29.0.0 (Slate OS)");
             println!();
             println!("Usage: occ <command> [options]");
             println!();
@@ -41,7 +41,7 @@ fn run_occ(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "version" => {
-            println!("Nextcloud 29.0.0 (SlateOS)");
+            println!("Nextcloud 29.0.0 (Slate OS)");
             0
         }
         "status" => {

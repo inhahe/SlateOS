@@ -15,7 +15,7 @@ fn run_openresty(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "resty" => {
-                println!("resty (SlateOS) — OpenResty Lua script runner");
+                println!("resty (Slate OS) — OpenResty Lua script runner");
                 println!("  -e CODE            Execute Lua code inline");
                 println!("  FILE               Execute Lua script file");
                 println!("  --shdict NAME=SIZE Shared memory zone");
@@ -23,7 +23,7 @@ fn run_openresty(args: &[String], prog: &str) -> i32 {
                 println!("  --errlog-level LVL Error log level");
             }
             _ => {
-                println!("OpenResty v1.25 (SlateOS) — Nginx + LuaJIT web platform");
+                println!("OpenResty v1.25 (Slate OS) — Nginx + LuaJIT web platform");
                 println!("  -c FILE            Config file");
                 println!("  -s SIGNAL          Send signal (stop/quit/reload)");
                 println!("  -t                 Test configuration");
@@ -35,7 +35,7 @@ fn run_openresty(args: &[String], prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-v" || a == "-V" || a == "--version") {
-        println!("OpenResty/1.25.3.1 (SlateOS)");
+        println!("OpenResty/1.25.3.1 (Slate OS)");
         println!("  nginx/1.25.3, LuaJIT 2.1.0");
         return 0;
     }
@@ -46,7 +46,7 @@ fn run_openresty(args: &[String], prog: &str) -> i32 {
             println!("  Modules: ngx.*, resty.*, cjson, redis, mysql");
         }
         _ => {
-            println!("OpenResty/1.25.3.1 (SlateOS)");
+            println!("OpenResty/1.25.3.1 (Slate OS)");
             println!("  Workers: 4");
             println!("  Listening: 0.0.0.0:80, 0.0.0.0:443");
             println!("  LuaJIT: 2.1.0-beta3");

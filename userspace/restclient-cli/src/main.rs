@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_restclient(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: restclient [OPTIONS] FILE");
-        println!("restclient v1.0.0 (SlateOS) — Execute .http/.rest request files");
+        println!("restclient v1.0.0 (Slate OS) — Execute .http/.rest request files");
         println!();
         println!("Options:");
         println!("  FILE             .http/.rest request file");
@@ -35,7 +35,7 @@ fn run_restclient(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("restclient v1.0.0 (SlateOS)");
+        println!("restclient v1.0.0 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "--dry-run") {

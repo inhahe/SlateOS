@@ -615,7 +615,7 @@ impl StartupManager {
             "",
             StartupType::Login,
             StartupImpact::Low,
-            "SlateOS",
+            "Slate OS",
             "System tray notification area",
             1700000000,
         );
@@ -625,7 +625,7 @@ impl StartupManager {
             "--daemon",
             StartupType::Service,
             StartupImpact::Medium,
-            "SlateOS",
+            "Slate OS",
             "Manages network connections and interfaces",
             1700000100,
         );
@@ -635,7 +635,7 @@ impl StartupManager {
             "",
             StartupType::Service,
             StartupImpact::Low,
-            "SlateOS",
+            "Slate OS",
             "Audio mixing and output service",
             1700000200,
         );
@@ -655,7 +655,7 @@ impl StartupManager {
             "",
             StartupType::Scheduled,
             StartupImpact::None,
-            "SlateOS",
+            "Slate OS",
             "Monitors disk health via SMART",
             1700000400,
         );
@@ -685,7 +685,7 @@ impl StartupManager {
             "",
             StartupType::Service,
             StartupImpact::Low,
-            "SlateOS",
+            "Slate OS",
             "Bluetooth device management service",
             1700000700,
         );
@@ -717,7 +717,7 @@ impl StartupConfig {
     /// Serialize a `StartupManager` to a line-based text format.
     pub fn serialize(manager: &StartupManager) -> String {
         let mut out = String::new();
-        out.push_str("# SlateOS Startup Manager Configuration\n");
+        out.push_str("# Slate OS Startup Manager Configuration\n");
         out.push_str("VERSION|1\n");
 
         for entry in manager.entries.values() {
@@ -2918,7 +2918,7 @@ mod tests {
             "",
             StartupType::Service,
             StartupImpact::High,
-            "SlateOS",
+            "Slate OS",
             "Core svc",
             2000,
         );

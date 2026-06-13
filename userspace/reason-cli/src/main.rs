@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_reason(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: reason [OPTIONS] [SONG]");
-        println!("Reason Studios Reason 12 (SlateOS) — Virtual rack DAW & instrument suite");
+        println!("Reason Studios Reason 12 (Slate OS) — Virtual rack DAW & instrument suite");
         println!();
         println!("Options:");
         println!("  --open FILE            Open .reason song");
@@ -23,8 +23,8 @@ fn run_reason(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Reason Studios Reason 12.7.5 (SlateOS)"); return 0; }
-    println!("Reason Studios Reason 12.7.5 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Reason Studios Reason 12.7.5 (Slate OS)"); return 0; }
+    println!("Reason Studios Reason 12.7.5 (Slate OS)");
     println!("  Mode: Standalone DAW or VST3/AU \"Reason Rack Plugin\"");
     println!("  Devices: Subtractor, Thor, Europa, Grain, Reason Drum Kits");
     println!("  Effects: 30+ classic & modern (Scream, RV-7, Pulveriser)");

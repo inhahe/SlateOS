@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_powerprofilesctl(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: powerprofilesctl <command>");
-        println!("powerprofilesctl v0.20 (SlateOS) — Power profile control");
+        println!("powerprofilesctl v0.20 (Slate OS) — Power profile control");
         println!();
         println!("Commands:");
         println!("  list           List available profiles");
@@ -23,7 +23,7 @@ fn run_powerprofilesctl(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("powerprofilesctl v0.20 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("powerprofilesctl v0.20 (Slate OS)"); return 0; }
     match args.first().map(|s| s.as_str()) {
         Some("list") => {
             println!("  power-saver:");
@@ -55,10 +55,10 @@ fn run_powerprofilesctl(args: &[String], _prog: &str) -> i32 {
 fn run_power_profiles_daemon(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: power-profiles-daemon [OPTIONS]");
-        println!("power-profiles-daemon v0.20 (SlateOS) — Power profile daemon");
+        println!("power-profiles-daemon v0.20 (Slate OS) — Power profile daemon");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("power-profiles-daemon v0.20 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("power-profiles-daemon v0.20 (Slate OS)"); return 0; }
     println!("power-profiles-daemon: started");
     println!("  Active profile: balanced");
     println!("  Drivers: intel_pstate, platform_profile");

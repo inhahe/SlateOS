@@ -19,7 +19,7 @@ fn run_crontab(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: crontab [OPTIONS] [FILE]");
         println!();
-        println!("crontab — manage cron tables (SlateOS).");
+        println!("crontab — manage cron tables (Slate OS).");
         println!();
         println!("Options:");
         println!("  -e         Edit crontab");
@@ -62,7 +62,7 @@ fn run_crond(args: &[String]) -> i32 {
         println!("Options: -f (foreground), -l N (log level), -L FILE (log file)");
         return 0;
     }
-    println!("crond: starting cron daemon (SlateOS)");
+    println!("crond: starting cron daemon (Slate OS)");
     println!("crond: loaded 3 crontabs");
     println!("crond: checking schedules every 60 seconds");
     0
@@ -72,7 +72,7 @@ fn run_anacron(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: anacron [OPTIONS]");
         println!();
-        println!("anacron — run periodic jobs (SlateOS).");
+        println!("anacron — run periodic jobs (Slate OS).");
         println!();
         println!("Options:");
         println!("  -f     Force run all jobs");
@@ -99,7 +99,7 @@ fn run_at(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: at TIME");
         println!();
-        println!("at — schedule commands for later execution (SlateOS).");
+        println!("at — schedule commands for later execution (Slate OS).");
         println!();
         println!("TIME formats: HH:MM, midnight, noon, teatime, now + N min/hours/days");
         return 0;

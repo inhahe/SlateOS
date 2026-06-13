@@ -19,7 +19,7 @@ fn run_ceph(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "version") {
-        println!("ceph version 18.2.1 (reef) (SlateOS)");
+        println!("ceph version 18.2.1 (reef) (Slate OS)");
         return 0;
     }
 

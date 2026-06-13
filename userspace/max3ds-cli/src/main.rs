@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_max(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: 3dsmax [OPTIONS] [FILE]");
-        println!("Autodesk 3ds Max 2025 (SlateOS) — 3D modeling, animation, rendering");
+        println!("Autodesk 3ds Max 2025 (Slate OS) — 3D modeling, animation, rendering");
         println!();
         println!("Options:");
         println!("  -U PythonHost SCRIPT  Run MaxScript/Python script");
@@ -27,8 +27,8 @@ fn run_max(args: &[String], _prog: &str) -> i32 {
         println!("  --version             Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Autodesk 3ds Max 2025.2 (SlateOS)"); return 0; }
-    println!("Autodesk 3ds Max 2025.2 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Autodesk 3ds Max 2025.2 (Slate OS)"); return 0; }
+    println!("Autodesk 3ds Max 2025.2 (Slate OS)");
     println!("  Renderer: Arnold (default), V-Ray, Corona, Scanline");
     println!("  Scripting: MaxScript, Python");
     println!("  Modifiers: 200+ available");

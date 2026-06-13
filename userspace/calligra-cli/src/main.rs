@@ -13,13 +13,13 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_calligra(args: &[String], prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: {} [OPTIONS] [FILE]", prog);
-        println!("calligra v3.2 (SlateOS) — KDE office suite");
+        println!("calligra v3.2 (Slate OS) — KDE office suite");
         println!();
         println!("Options:");
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("calligra v3.2 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("calligra v3.2 (Slate OS)"); return 0; }
     let component = match prog {
         "calligrawords" => "Words (word processor)",
         "calligrasheets" => "Sheets (spreadsheet)",

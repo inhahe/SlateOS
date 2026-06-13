@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wl_protocols(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: wl-protocols COMMAND [OPTIONS]");
-        println!("wl-protocols v1.36 (SlateOS) — Wayland protocol information");
+        println!("wl-protocols v1.36 (Slate OS) — Wayland protocol information");
         println!();
         println!("Commands:");
         println!("  list              List installed protocols");
@@ -38,7 +38,7 @@ fn run_wl_protocols(args: &[String], _prog: &str) -> i32 {
             println!("  Status: stable");
             println!("  Version: 5");
         }
-        "version" => println!("wayland-protocols v1.36 (SlateOS)"),
+        "version" => println!("wayland-protocols v1.36 (Slate OS)"),
         _ => println!("wl-protocols: unknown command '{}'", cmd),
     }
     0

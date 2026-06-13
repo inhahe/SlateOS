@@ -608,7 +608,7 @@ fn elide_empty_files(config: &Config, count: u64) {
 // ============================================================================
 
 fn print_help() {
-    println!("SlateOS split v{VERSION}");
+    println!("Slate OS split v{VERSION}");
     println!();
     println!("Split FILE into pieces. Output pieces are named PREFIXaa, PREFIXab, ...");
     println!("With no FILE, or when FILE is -, read standard input.");
@@ -654,7 +654,7 @@ fn main() {
             process::exit(0);
         }
         ParseResult::Version => {
-            println!("split (SlateOS) {VERSION}");
+            println!("split (Slate OS) {VERSION}");
             process::exit(0);
         }
         ParseResult::Run(config) => {

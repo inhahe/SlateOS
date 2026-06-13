@@ -858,7 +858,7 @@ fn osabi_str(o: u8) -> &'static str {
         ELFOSABI_NONE => "UNIX - System V",
         ELFOSABI_LINUX => "UNIX - Linux",
         ELFOSABI_FREEBSD => "UNIX - FreeBSD",
-        255 => "SlateOS",
+        255 => "Slate OS",
         _ => "Unknown",
     }
 }
@@ -3168,7 +3168,7 @@ mod tests {
     fn test_osabi_str() {
         assert_eq!(osabi_str(ELFOSABI_NONE), "UNIX - System V");
         assert_eq!(osabi_str(ELFOSABI_LINUX), "UNIX - Linux");
-        assert_eq!(osabi_str(255), "SlateOS");
+        assert_eq!(osabi_str(255), "Slate OS");
     }
 
     #[test]

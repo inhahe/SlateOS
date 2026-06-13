@@ -25,7 +25,7 @@ fn run_memcached(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("memcached 1.6.24 (SlateOS)");
+        println!("memcached 1.6.24 (Slate OS)");
         return 0;
     }
     let port = args.iter().position(|a| a == "-p")
@@ -41,7 +41,7 @@ fn run_memcached(args: Vec<String>) -> i32 {
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(4);
 
-    println!("memcached 1.6.24 (SlateOS)");
+    println!("memcached 1.6.24 (Slate OS)");
     println!("slab class   1: chunk size     96 perslab 10922");
     println!("slab class   2: chunk size    120 perslab  8738");
     println!("slab class   3: chunk size    152 perslab  6898");

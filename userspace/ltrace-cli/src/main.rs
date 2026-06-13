@@ -19,7 +19,7 @@ fn run_ltrace(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ltrace [OPTIONS] COMMAND [ARGS]");
         println!();
-        println!("ltrace — library call tracer (SlateOS).");
+        println!("ltrace — library call tracer (Slate OS).");
         println!();
         println!("Options:");
         println!("  -c              Count library calls");
@@ -37,7 +37,7 @@ fn run_ltrace(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("ltrace version 0.7.3 (SlateOS)");
+        println!("ltrace version 0.7.3 (Slate OS)");
         return 0;
     }
 

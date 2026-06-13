@@ -28,7 +28,7 @@ fn run_tldr(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("tealdeer 1.6.1 (SlateOS)");
+        println!("tealdeer 1.6.1 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "-u" || a == "--update") {

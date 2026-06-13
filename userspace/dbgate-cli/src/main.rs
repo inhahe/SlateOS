@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_dbgate(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: dbgate [COMMAND] [OPTIONS]");
-        println!("DbGate v5.5 (SlateOS) — Cross-platform database manager");
+        println!("DbGate v5.5 (Slate OS) — Cross-platform database manager");
         println!();
         println!("Commands:");
         println!("  serve              Start web server");
@@ -30,8 +30,8 @@ fn run_dbgate(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("DbGate v5.5.4 (SlateOS)"); return 0; }
-    println!("DbGate v5.5.4 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("DbGate v5.5.4 (Slate OS)"); return 0; }
+    println!("DbGate v5.5.4 (Slate OS)");
     println!("  Connections: 5 saved");
     println!("  Supported: MySQL, PostgreSQL, MongoDB, SQLite, Redis, MariaDB");
     println!("  Web: http://0.0.0.0:3000");

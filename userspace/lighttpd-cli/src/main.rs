@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_lighttpd(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lighttpd [OPTIONS]");
-        println!("lighttpd v1.4 (SlateOS) — Lightweight high-performance web server");
+        println!("lighttpd v1.4 (Slate OS) — Lightweight high-performance web server");
         println!();
         println!("Options:");
         println!("  -f FILE            Config file");
@@ -25,8 +25,8 @@ fn run_lighttpd(args: &[String], _prog: &str) -> i32 {
         println!("  -v                 Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "-v" || a == "--version") { println!("lighttpd/1.4.76 (SlateOS)"); return 0; }
-    println!("lighttpd/1.4.76 (SlateOS)");
+    if args.iter().any(|a| a == "-v" || a == "--version") { println!("lighttpd/1.4.76 (Slate OS)"); return 0; }
+    println!("lighttpd/1.4.76 (Slate OS)");
     println!("  Listening: 0.0.0.0:80, 0.0.0.0:443");
     println!("  Document root: /var/www");
     println!("  Modules: mod_access, mod_fastcgi, mod_rewrite, mod_redirect");

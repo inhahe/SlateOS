@@ -28,7 +28,7 @@ fn run_exiftool(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-ver") {
-        println!("12.85 (SlateOS)");
+        println!("12.85 (Slate OS)");
         return 0;
     }
 
@@ -60,8 +60,8 @@ fn run_exiftool(args: Vec<String>) -> i32 {
         println!("  \"FileType\": \"JPEG\",");
         println!("  \"ImageWidth\": 4032,");
         println!("  \"ImageHeight\": 3024,");
-        println!("  \"Make\": \"SlateOS Camera\",");
-        println!("  \"Model\": \"SlateOS Phone 1\",");
+        println!("  \"Make\": \"Slate OS Camera\",");
+        println!("  \"Model\": \"Slate OS Phone 1\",");
         println!("  \"DateTimeOriginal\": \"2025:05:22 10:00:00\",");
         println!("  \"ExposureTime\": \"1/250\",");
         println!("  \"FNumber\": 1.8,");
@@ -76,7 +76,7 @@ fn run_exiftool(args: Vec<String>) -> i32 {
     if csv_mode {
         println!("SourceFile,FileName,FileSize,ImageWidth,ImageHeight,Make,Model");
         for f in &files {
-            println!("{},photo.jpg,4.2 MB,4032,3024,SlateOS Camera,SlateOS Phone 1", f);
+            println!("{},photo.jpg,4.2 MB,4032,3024,Slate OS Camera,Slate OS Phone 1", f);
         }
         return 0;
     }
@@ -93,8 +93,8 @@ fn run_exiftool(args: Vec<String>) -> i32 {
         println!("Image Height                    : 3024");
         println!("Bits Per Sample                 : 8");
         println!("Color Space                     : sRGB");
-        println!("Make                            : SlateOS Camera");
-        println!("Camera Model Name               : SlateOS Phone 1");
+        println!("Make                            : Slate OS Camera");
+        println!("Camera Model Name               : Slate OS Phone 1");
         println!("Date/Time Original              : 2025:05:22 10:00:00");
         println!("Exposure Time                   : 1/250");
         println!("F Number                        : 1.8");

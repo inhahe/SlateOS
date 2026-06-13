@@ -19,7 +19,7 @@ fn run_vulkaninfo(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: vulkaninfo [OPTIONS]");
         println!();
-        println!("vulkaninfo — Vulkan GPU information (SlateOS).");
+        println!("vulkaninfo — Vulkan GPU information (Slate OS).");
         println!();
         println!("Options:");
         println!("  --json          JSON output");
@@ -78,7 +78,7 @@ fn run_vkcube(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: vkcube [OPTIONS]");
         println!();
-        println!("vkcube — Vulkan spinning cube demo (SlateOS).");
+        println!("vkcube — Vulkan spinning cube demo (Slate OS).");
         println!();
         println!("Options:");
         println!("  --gpu_number N   GPU index");
@@ -95,7 +95,7 @@ fn run_vkvia(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: vkvia [OPTIONS]");
         println!();
-        println!("vkvia — Vulkan installation analyzer (SlateOS).");
+        println!("vkvia — Vulkan installation analyzer (Slate OS).");
         return 0;
     }
     println!("Vulkan Installation Analyzer");

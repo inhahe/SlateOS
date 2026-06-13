@@ -27,12 +27,12 @@ fn run_nginx(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-v") {
-        println!("nginx version: nginx/1.26.1 (SlateOS)");
+        println!("nginx version: nginx/1.26.1 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "-V") {
-        println!("nginx version: nginx/1.26.1 (SlateOS)");
-        println!("built with SlateOS toolchain");
+        println!("nginx version: nginx/1.26.1 (Slate OS)");
+        println!("built with Slate OS toolchain");
         println!("TLS SNI support enabled");
         println!("configure arguments: --prefix=/etc/nginx --sbin-path=/usr/sbin/nginx --with-http_ssl_module --with-http_v2_module --with-http_realip_module --with-http_gzip_static_module --with-http_stub_status_module --with-stream --with-stream_ssl_module");
         return 0;
@@ -89,10 +89,10 @@ fn run_nginx(args: Vec<String>) -> i32 {
     }
 
     // Start server
-    println!("nginx/1.26.1 (SlateOS)");
+    println!("nginx/1.26.1 (Slate OS)");
     println!("2025/05/22 10:00:00 [notice] 12345#0: using the \"epoll\" event method");
     println!("2025/05/22 10:00:00 [notice] 12345#0: nginx/1.26.1");
-    println!("2025/05/22 10:00:00 [notice] 12345#0: OS: SlateOS x86_64");
+    println!("2025/05/22 10:00:00 [notice] 12345#0: OS: Slate OS x86_64");
     println!("2025/05/22 10:00:00 [notice] 12345#0: start worker processes");
     println!("2025/05/22 10:00:00 [notice] 12345#0: start worker process 12346");
     println!("2025/05/22 10:00:00 [notice] 12345#0: start worker process 12347");

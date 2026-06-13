@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_lout(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lout [OPTIONS] FILE");
-        println!("Lout v3.42 (SlateOS) — Document formatting system");
+        println!("Lout v3.42 (Slate OS) — Document formatting system");
         println!();
         println!("Options:");
         println!("  -o FILE       Output PostScript file");
@@ -27,8 +27,8 @@ fn run_lout(args: &[String], _prog: &str) -> i32 {
         println!("  --version     Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Lout v3.42 (SlateOS)"); return 0; }
-    println!("Lout v3.42 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Lout v3.42 (Slate OS)"); return 0; }
+    println!("Lout v3.42 (Slate OS)");
     println!("  Input: thesis.lout");
     println!("  Pass 1: structure and cross-references");
     println!("  Pass 2: page breaking");

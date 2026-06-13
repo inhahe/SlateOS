@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ac(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: activecampaign [OPTIONS]");
-        println!("ActiveCampaign (SlateOS) — SMB marketing automation + sales CRM");
+        println!("ActiveCampaign (Slate OS) — SMB marketing automation + sales CRM");
         println!();
         println!("Options:");
         println!("  --lite                 Lite — email marketing starter ($15/mo for 1K contacts)");
@@ -25,8 +25,8 @@ fn run_ac(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("ActiveCampaign 2024 (SlateOS)"); return 0; }
-    println!("ActiveCampaign 2024 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("ActiveCampaign 2024 (Slate OS)"); return 0; }
+    println!("ActiveCampaign 2024 (Slate OS)");
     println!("  Vendor: ActiveCampaign, LLC (Chicago, IL — private)");
     println!("  Founders: Jason VandeBoom (CEO), 2003");
     println!("          VandeBoom started ActiveCampaign as a consulting/services biz");

@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ht(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: hightouch [OPTIONS]");
-        println!("Hightouch (SlateOS) — reverse-ETL platform (warehouse → SaaS apps)");
+        println!("Hightouch (Slate OS) — reverse-ETL platform (warehouse → SaaS apps)");
         println!();
         println!("Options:");
         println!("  --starter              Starter — free (up to 3 syncs)");
@@ -22,8 +22,8 @@ fn run_ht(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Hightouch 2024 (SlateOS)"); return 0; }
-    println!("Hightouch 2024 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Hightouch 2024 (Slate OS)"); return 0; }
+    println!("Hightouch 2024 (Slate OS)");
     println!("  Vendor: Hightouch, Inc. (San Francisco, CA — private)");
     println!("  Founders: Kashish Gupta (CEO), Tejas Manohar (President), Joshua Curl (CTO), 2018");
     println!("          three engineers (ex-Segment, ex-Splunk, ex-startups), all under 30 at founding");

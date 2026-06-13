@@ -169,7 +169,7 @@ fn run_zramctl(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("zramctl 0.1.0 (SlateOS)");
+            println!("zramctl 0.1.0 (Slate OS)");
             0
         }
         "--algorithms" | "algorithms" => {
@@ -338,7 +338,7 @@ fn run_generator(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("zram-generator 0.1.0 (SlateOS)");
+            println!("zram-generator 0.1.0 (Slate OS)");
             0
         }
         "run" => generator_run(),

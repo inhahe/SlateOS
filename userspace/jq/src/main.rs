@@ -2088,7 +2088,7 @@ fn parse_args() -> Result<Options, String> {
                 std::process::exit(0);
             }
             "--version" => {
-                write_stdout("jq 0.1.0 (SlateOS)\n");
+                write_stdout("jq 0.1.0 (Slate OS)\n");
                 std::process::exit(0);
             }
             arg if arg.starts_with('-') && arg.len() > 1 => {

@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sysdig(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sysdig [OPTIONS]");
-        println!("Sysdig (SlateOS) — runtime cloud security (Falco creator)");
+        println!("Sysdig (Slate OS) — runtime cloud security (Falco creator)");
         println!();
         println!("Options:");
         println!("  csysdig                Interactive top-like view (OSS Sysdig)");
@@ -22,8 +22,8 @@ fn run_sysdig(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Sysdig + Falco 0.39 (SlateOS)"); return 0; }
-    println!("Sysdig 2024 (SlateOS) — Runtime Cloud Security");
+    if args.iter().any(|a| a == "--version") { println!("Sysdig + Falco 0.39 (Slate OS)"); return 0; }
+    println!("Sysdig 2024 (Slate OS) — Runtime Cloud Security");
     println!("  Vendor: Sysdig, Inc. (Davis, CA + Belgrade, Serbia + Tel Aviv)");
     println!("  Founders: Loris Degioanni (CEO/CTO), 2013");
     println!("          Loris: co-creator of Wireshark (original packet capture) — Italian engineer in Davis CA");

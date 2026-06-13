@@ -19,7 +19,7 @@ fn run_potrace(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: potrace [OPTIONS] [FILE ...]");
         println!();
-        println!("potrace — bitmap to vector tracing (SlateOS).");
+        println!("potrace — bitmap to vector tracing (Slate OS).");
         println!();
         println!("Options:");
         println!("  -b, --backend NAME    Output format (svg,eps,ps,pdf,dxf,pgm,gimppath)");
@@ -40,7 +40,7 @@ fn run_potrace(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("potrace 1.16 (SlateOS)");
+        println!("potrace 1.16 (Slate OS)");
         return 0;
     }
 
@@ -74,7 +74,7 @@ fn run_mkbitmap(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mkbitmap [OPTIONS] [FILE ...]");
         println!();
-        println!("mkbitmap — transform images for tracing (SlateOS).");
+        println!("mkbitmap — transform images for tracing (Slate OS).");
         println!();
         println!("Options:");
         println!("  -o, --output FILE   Output file");
@@ -87,7 +87,7 @@ fn run_mkbitmap(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("mkbitmap 1.16 (SlateOS)");
+        println!("mkbitmap 1.16 (Slate OS)");
         return 0;
     }
 

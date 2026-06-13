@@ -1629,7 +1629,7 @@ fn run_verify(args: &[String]) -> i32 {
 // ---------------------------------------------------------------------------
 
 fn print_help() {
-    println!("fio - flexible I/O tester for SlateOS");
+    println!("fio - flexible I/O tester for Slate OS");
     println!();
     println!("Usage: fio [OPTIONS] [JOBFILE]");
     println!();

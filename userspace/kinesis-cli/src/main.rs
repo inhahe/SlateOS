@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_kinesis(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: kinesis [OPTIONS]");
-        println!("AWS Kinesis (SlateOS) — real-time data streaming family on AWS");
+        println!("AWS Kinesis (Slate OS) — real-time data streaming family on AWS");
         println!();
         println!("Options:");
         println!("  --data-streams         Kinesis Data Streams (raw streaming, shards)");
@@ -21,8 +21,8 @@ fn run_kinesis(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("AWS Kinesis 2024 (SlateOS) — kinesis CLI (aws-cli v2)"); return 0; }
-    println!("AWS Kinesis 2024 (SlateOS) — Real-Time Data Streaming on AWS");
+    if args.iter().any(|a| a == "--version") { println!("AWS Kinesis 2024 (Slate OS) — kinesis CLI (aws-cli v2)"); return 0; }
+    println!("AWS Kinesis 2024 (Slate OS) — Real-Time Data Streaming on AWS");
     println!("  Vendor: Amazon Web Services (Seattle, WA — NASDAQ: AMZN)");
     println!("  History:");
     println!("    - Launched Nov 2013 at AWS re:Invent");

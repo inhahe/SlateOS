@@ -34,7 +34,7 @@ fn run_vault(args: Vec<String>) -> i32 {
             0
         }
         "version" | "--version" | "-v" => {
-            println!("Vault v1.16.2 (SlateOS), built 2025-05-22T00:00:00Z");
+            println!("Vault v1.16.2 (Slate OS), built 2025-05-22T00:00:00Z");
             0
         }
         "server" => {
@@ -52,7 +52,7 @@ fn run_vault(args: Vec<String>) -> i32 {
                 println!("                   Mlock: supported: false, enabled: false");
                 println!("           Recovery Mode: false");
                 println!("                 Storage: inmem");
-                println!("                 Version: Vault v1.16.2 (SlateOS)");
+                println!("                 Version: Vault v1.16.2 (Slate OS)");
                 println!();
                 println!("==> Vault server started! Log data will stream in below:");
                 println!();
@@ -68,7 +68,7 @@ fn run_vault(args: Vec<String>) -> i32 {
                 println!("              Listener 1: tcp (addr: \"0.0.0.0:8200\", tls: \"enabled\")");
                 println!("               Log Level: info");
                 println!("                 Storage: raft");
-                println!("                 Version: Vault v1.16.2 (SlateOS)");
+                println!("                 Version: Vault v1.16.2 (Slate OS)");
                 println!();
                 println!("==> Vault server started!");
             }

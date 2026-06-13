@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_bb(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: bitbucket [OPTIONS]");
-        println!("Bitbucket Cloud (SlateOS) — Atlassian's Git hosting platform");
+        println!("Bitbucket Cloud (Slate OS) — Atlassian's Git hosting platform");
         println!();
         println!("Options:");
         println!("  --pull-request         Create PR");
@@ -23,8 +23,8 @@ fn run_bb(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Bitbucket Cloud (SlateOS)"); return 0; }
-    println!("Bitbucket Cloud (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Bitbucket Cloud (Slate OS)"); return 0; }
+    println!("Bitbucket Cloud (Slate OS)");
     println!("  Vendor: Atlassian Corporation (Sydney, Australia → NASDAQ:TEAM)");
     println!("  Founders: Mike Cannon-Brookes + Scott Farquhar (Atlassian 2002)");
     println!("           Bitbucket originally founded by Jesper Nøhr in 2008 (Mercurial host)");

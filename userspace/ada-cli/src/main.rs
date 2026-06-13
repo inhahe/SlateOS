@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gnat(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: gnat COMMAND [OPTIONS]");
-        println!("GNAT 14.0.0 (SlateOS)");
+        println!("GNAT 14.0.0 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  make          Build project");
@@ -70,7 +70,7 @@ fn run_gnat(args: &[String]) -> i32 {
 fn run_gprbuild(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: gprbuild [OPTIONS] [-P PROJECT.gpr]");
-        println!("GPRbuild 24.0.0 (SlateOS)");
+        println!("GPRbuild 24.0.0 (Slate OS)");
         println!("  -P FILE       Project file");
         println!("  -j N          Parallel jobs");
         println!("  -p            Create missing dirs");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_anyrun(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: anyrun [OPTIONS]");
-        println!("anyrun v0.2 (SlateOS) — Wayland-native runner (krunner-like)");
+        println!("anyrun v0.2 (Slate OS) — Wayland-native runner (krunner-like)");
         println!();
         println!("Options:");
         println!("  -c CONFIG         Config file path");
@@ -25,7 +25,7 @@ fn run_anyrun(args: &[String], _prog: &str) -> i32 {
         println!("  Dictionary, Websearch, Randr, Stdin, Kidex");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("anyrun v0.2 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("anyrun v0.2 (Slate OS)"); return 0; }
     println!("anyrun: Wayland runner");
     println!("  Plugins: applications, shell, calculator, websearch");
     println!("  > ");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_airbyte(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: octavia COMMAND [OPTIONS]");
-        println!("Airbyte CLI (Octavia) 0.44.0 (SlateOS)");
+        println!("Airbyte CLI (Octavia) 0.44.0 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  init              Initialize local config");

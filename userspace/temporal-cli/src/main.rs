@@ -11,7 +11,7 @@ fn run_temporal(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: temporal <COMMAND> [OPTIONS]");
         println!();
-        println!("Temporal workflow orchestration CLI (SlateOS).");
+        println!("Temporal workflow orchestration CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  server       Start dev server");
@@ -25,7 +25,7 @@ fn run_temporal(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("temporal version 0.13.0 (SlateOS)");
+        println!("temporal version 0.13.0 (Slate OS)");
         return 0;
     }
 

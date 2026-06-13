@@ -21,7 +21,7 @@ fn run_paraview(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("ParaView 5.12.0 (SlateOS)");
+        println!("ParaView 5.12.0 (Slate OS)");
         println!("VTK 9.3.0");
         println!("Qt 6.6.1");
         println!("Python 3.12.0");
@@ -53,7 +53,7 @@ fn run_pvserver(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("pvserver 5.12.0 (ParaView, SlateOS)");
+        println!("pvserver 5.12.0 (ParaView, Slate OS)");
         return 0;
     }
     let host = args.windows(2).find(|w| w[0] == "--hostname").map(|w| w[1].as_str()).unwrap_or("localhost");
@@ -74,7 +74,7 @@ fn run_pvbatch(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("pvbatch 5.12.0 (ParaView, SlateOS)");
+        println!("pvbatch 5.12.0 (ParaView, Slate OS)");
         return 0;
     }
     let script = args.iter().find(|a| a.ends_with(".py")).map(|s| s.as_str()).unwrap_or("render.py");
@@ -93,7 +93,7 @@ fn run_pvpython(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("pvpython 5.12.0 (ParaView, SlateOS)");
+        println!("pvpython 5.12.0 (ParaView, Slate OS)");
         println!("Python 3.12.0");
         println!("VTK 9.3.0");
         return 0;

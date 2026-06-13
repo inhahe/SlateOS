@@ -19,7 +19,7 @@ fn run_sensors(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sensors [OPTIONS] [CHIP]");
         println!();
-        println!("sensors — print hardware monitoring sensor readings (SlateOS).");
+        println!("sensors — print hardware monitoring sensor readings (Slate OS).");
         println!();
         println!("Options:");
         println!("  -f, --fahrenheit     Show temperatures in Fahrenheit");
@@ -29,7 +29,7 @@ fn run_sensors(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("sensors version 3.6.0+git (SlateOS)");
+        println!("sensors version 3.6.0+git (Slate OS)");
         return 0;
     }
 
@@ -85,7 +85,7 @@ fn run_sensors(args: &[String]) -> i32 {
 }
 
 fn run_sensors_detect(_args: &[String]) -> i32 {
-    println!("# sensors-detect version 3.6.0+git (SlateOS)");
+    println!("# sensors-detect version 3.6.0+git (Slate OS)");
     println!("# Board: System manufacturer System Product Name");
     println!();
     println!("This program will help you determine which kernel modules you need");
@@ -109,7 +109,7 @@ fn run_sensors_detect(_args: &[String]) -> i32 {
 }
 
 fn run_pwmconfig(_args: &[String]) -> i32 {
-    println!("# pwmconfig — fan speed configuration (SlateOS)");
+    println!("# pwmconfig — fan speed configuration (Slate OS)");
     println!("Found the following PWM controls:");
     println!("  hwmon1/pwm1           current value: 150");
     println!("  hwmon1/pwm2           current value: 100");

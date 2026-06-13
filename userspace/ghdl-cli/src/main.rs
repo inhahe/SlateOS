@@ -10,7 +10,7 @@ use std::process;
 fn run_ghdl(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: ghdl COMMAND [OPTIONS]");
-        println!("GHDL 4.0.0 (SlateOS) [mcode backend]");
+        println!("GHDL 4.0.0 (Slate OS) [mcode backend]");
         println!();
         println!("Commands:");
         println!("  -a, --analyze FILE.vhd    Analyze VHDL source");
@@ -27,7 +27,7 @@ fn run_ghdl(args: &[String]) -> i32 {
     match subcmd {
         "--version" => {
             println!("GHDL 4.0.0 (4.0.0-dev) [Dunoon edition]");
-            println!(" Compiled with Rust for SlateOS");
+            println!(" Compiled with Rust for Slate OS");
             println!(" mcode code generator");
             println!(" Written by Tristan Gingold.");
         }

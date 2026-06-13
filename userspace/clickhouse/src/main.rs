@@ -20,10 +20,10 @@ fn run_ch_server(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("ClickHouse server version 24.4.1 (SlateOS).");
+        println!("ClickHouse server version 24.4.1 (Slate OS).");
         return 0;
     }
-    println!("{{}}'ts':'2025-05-22 10:00:00.000','level':'Information','msg':'Starting ClickHouse 24.4.1 (SlateOS)'}}");
+    println!("{{}}'ts':'2025-05-22 10:00:00.000','level':'Information','msg':'Starting ClickHouse 24.4.1 (Slate OS)'}}");
     println!("{{}}'ts':'2025-05-22 10:00:00.100','level':'Information','msg':'Listening for connections with native protocol on port 9000'}}");
     println!("{{}}'ts':'2025-05-22 10:00:00.200','level':'Information','msg':'Listening for HTTP on port 8123'}}");
     println!("{{}}'ts':'2025-05-22 10:00:00.300','level':'Information','msg':'Listening for MySQL on port 9004'}}");
@@ -49,7 +49,7 @@ fn run_ch_client(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("ClickHouse client version 24.4.1 (SlateOS).");
+        println!("ClickHouse client version 24.4.1 (Slate OS).");
         return 0;
     }
 
@@ -85,7 +85,7 @@ fn run_ch_client(args: Vec<String>) -> i32 {
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("localhost");
-    println!("ClickHouse client version 24.4.1 (SlateOS).");
+    println!("ClickHouse client version 24.4.1 (Slate OS).");
     println!("Connecting to {}:9000 as user default.", host);
     println!("Connected to ClickHouse server version 24.4.1.");
     println!();
@@ -115,7 +115,7 @@ fn run_ch_local(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("ClickHouse local version 24.4.1 (SlateOS).");
+        println!("ClickHouse local version 24.4.1 (Slate OS).");
         return 0;
     }
     let query = args.iter().position(|a| a == "--query" || a == "-q")

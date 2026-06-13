@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pdfpc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pdfpc [OPTIONS] FILE");
-        println!("pdfpc v4.6 (SlateOS) — PDF presenter console");
+        println!("pdfpc v4.6 (Slate OS) — PDF presenter console");
         println!();
         println!("Options:");
         println!("  -d DURATION       Presentation duration (minutes)");
@@ -26,7 +26,7 @@ fn run_pdfpc(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("pdfpc v4.6 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("pdfpc v4.6 (Slate OS)"); return 0; }
     println!("pdfpc: PDF presenter console started");
     println!("  Presenter screen: current + next slide, timer, notes");
     println!("  Audience screen: current slide fullscreen");

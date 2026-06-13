@@ -11,7 +11,7 @@ fn run_systemctl(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "help") {
         println!("Usage: systemctl [OPTIONS] COMMAND [UNIT...]");
         println!();
-        println!("systemctl — service manager control (SlateOS).");
+        println!("systemctl — service manager control (Slate OS).");
         println!();
         println!("Unit commands:");
         println!("  start UNIT            Start unit");
@@ -35,7 +35,7 @@ fn run_systemctl(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("systemd 255 (SlateOS)");
+        println!("systemd 255 (Slate OS)");
         return 0;
     }
 

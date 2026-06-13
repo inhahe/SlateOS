@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_skipper(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: skipper [OPTIONS]");
-        println!("Skipper v0.21 (SlateOS) — HTTP router and reverse proxy");
+        println!("Skipper v0.21 (Slate OS) — HTTP router and reverse proxy");
         println!();
         println!("Options:");
         println!("  -address ADDR       Listen address (default: :9090)");
@@ -28,8 +28,8 @@ fn run_skipper(args: &[String], _prog: &str) -> i32 {
         println!("  --version           Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Skipper v0.21.5 (SlateOS)"); return 0; }
-    println!("Skipper v0.21.5 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Skipper v0.21.5 (Slate OS)"); return 0; }
+    println!("Skipper v0.21.5 (Slate OS)");
     println!("  Listening: :9090");
     println!("  Routes: 45 loaded");
     println!("  Filters: 60+ available");

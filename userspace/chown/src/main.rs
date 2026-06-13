@@ -1115,7 +1115,7 @@ fn run_chown(
     // than silently chown the target. (Tracked in todo.txt.)
     if opts.no_deref && !opts.silent {
         eprintln!(
-            "chown: warning: -h/--no-dereference is not supported on SlateOS; symlink targets will be affected"
+            "chown: warning: -h/--no-dereference is not supported on Slate OS; symlink targets will be affected"
         );
     }
 
@@ -1288,7 +1288,7 @@ fn run_chmod(opts: &Options) -> bool {
 // ============================================================================
 
 fn print_chown_help() {
-    println!("SlateOS chown v0.1.0 -- Change file owner and group");
+    println!("Slate OS chown v0.1.0 -- Change file owner and group");
     println!();
     println!("USAGE:");
     println!("  chown [OPTIONS] OWNER[:GROUP] FILE...");
@@ -1316,7 +1316,7 @@ fn print_chown_help() {
 }
 
 fn print_chmod_help() {
-    println!("SlateOS chmod v0.1.0 -- Change file permissions");
+    println!("Slate OS chmod v0.1.0 -- Change file permissions");
     println!();
     println!("USAGE:");
     println!("  chmod [OPTIONS] MODE FILE...");

@@ -45,7 +45,7 @@ fn run_svgcleaner(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("svgcleaner 0.9.5 (SlateOS)");
+        println!("svgcleaner 0.9.5 (Slate OS)");
         return 0;
     }
 

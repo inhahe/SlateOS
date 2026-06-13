@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_linphone(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: linphone [OPTIONS]");
-        println!("linphone v5.2 (SlateOS) — SIP/VoIP desktop client");
+        println!("linphone v5.2 (Slate OS) — SIP/VoIP desktop client");
         println!();
         println!("Options:");
         println!("  --call URI        Place a call");
@@ -21,7 +21,7 @@ fn run_linphone(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("linphone v5.2 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("linphone v5.2 (Slate OS)"); return 0; }
     println!("linphone: SIP/VoIP client started");
     println!("  SIP account: registered");
     println!("  Audio codec: Opus");
@@ -33,14 +33,14 @@ fn run_linphone(args: &[String], _prog: &str) -> i32 {
 fn run_linphonec(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: linphonec [OPTIONS]");
-        println!("linphonec v5.2 (SlateOS) — Console SIP client");
+        println!("linphonec v5.2 (Slate OS) — Console SIP client");
         println!();
         println!("Options:");
         println!("  -c FILE           Config file");
         println!("  -s URI            SIP URI to call");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("linphonec v5.2 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("linphonec v5.2 (Slate OS)"); return 0; }
     println!("linphonec: console SIP client");
     println!("Ready.");
     0

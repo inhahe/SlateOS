@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_nethogs(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: nethogs [OPTIONS] [DEVICE...]");
-        println!("nethogs 0.8.7 (SlateOS) — Per-process network bandwidth monitor");
+        println!("nethogs 0.8.7 (Slate OS) — Per-process network bandwidth monitor");
         println!();
         println!("Options:");
         println!("  -d SECONDS     Refresh interval (default 1)");
@@ -27,7 +27,7 @@ fn run_nethogs(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V") {
-        println!("nethogs 0.8.7 (SlateOS)");
+        println!("nethogs 0.8.7 (Slate OS)");
         return 0;
     }
     let device = args.iter().rfind(|a| !a.starts_with('-'))

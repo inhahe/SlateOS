@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pktgen(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: pktgen [OPTIONS]");
-        println!("pktgen v4.0 (SlateOS) — High-performance packet generator");
+        println!("pktgen v4.0 (Slate OS) — High-performance packet generator");
         println!();
         println!("Options:");
         println!("  -i IFACE          Output interface");

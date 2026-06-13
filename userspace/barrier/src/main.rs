@@ -23,7 +23,7 @@ fn run_barriers(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("barriers 2.4.0 (SlateOS)");
+        println!("barriers 2.4.0 (Slate OS)");
         return 0;
     }
 

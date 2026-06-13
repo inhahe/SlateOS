@@ -11,7 +11,7 @@ fn run_celery(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: celery <COMMAND> [OPTIONS]");
         println!();
-        println!("Celery distributed task queue CLI (SlateOS).");
+        println!("Celery distributed task queue CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  worker       Start a worker");
@@ -25,7 +25,7 @@ fn run_celery(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("celery 5.3.6 (SlateOS)");
+        println!("celery 5.3.6 (Slate OS)");
         return 0;
     }
 
@@ -38,7 +38,7 @@ fn run_celery(args: Vec<String>) -> i32 {
                 .map(|w| w[1].as_str()).unwrap_or("celery");
             println!(" -------------- celery@myhost v5.3.6 (emerald-rush)");
             println!("--- ***** -----");
-            println!("-- ******* ---- SlateOS x86_64");
+            println!("-- ******* ---- Slate OS x86_64");
             println!("- *** --- * ---");
             println!("- ** ---------- [config]");
             println!("- ** ---------- .> app:         myapp:0x7f1234567890");

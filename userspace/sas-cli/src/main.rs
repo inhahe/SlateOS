@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sas(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sas [OPTIONS]");
-        println!("SAS Viya 4 / SAS 9.4 M8 (SlateOS) — Enterprise analytics platform");
+        println!("SAS Viya 4 / SAS 9.4 M8 (Slate OS) — Enterprise analytics platform");
         println!();
         println!("Options:");
         println!("  -sysin FILE            Run .sas program in batch");
@@ -24,8 +24,8 @@ fn run_sas(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("SAS Viya 4 (Stable 2024.10) / SAS 9.4 TS1M8 (SlateOS)"); return 0; }
-    println!("SAS Viya 4 (Stable 2024.10) / SAS 9.4 TS1M8 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("SAS Viya 4 (Stable 2024.10) / SAS 9.4 TS1M8 (Slate OS)"); return 0; }
+    println!("SAS Viya 4 (Stable 2024.10) / SAS 9.4 TS1M8 (Slate OS)");
     println!("  Editions: Viya 4 (cloud-native, Kubernetes), SAS 9.4 (traditional)");
     println!("  Language: SAS programming language (DATA step + PROC step)");
     println!("  Procs: PROC SQL, PROC GLM, PROC LOGISTIC, PROC FCMP, PROC SGPLOT, ...");

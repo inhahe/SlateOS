@@ -487,7 +487,7 @@ fn lsof_main(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("lsof (SlateOS) {VERSION}");
+                println!("lsof (Slate OS) {VERSION}");
                 return 0;
             }
             s if !s.starts_with('-') => {
@@ -597,7 +597,7 @@ fn fuser_main(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("fuser (SlateOS) {VERSION}");
+                println!("fuser (Slate OS) {VERSION}");
                 return 0;
             }
             s if !s.starts_with('-') => {

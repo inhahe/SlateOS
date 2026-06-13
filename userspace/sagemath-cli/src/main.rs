@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sage(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sage [OPTIONS] [FILE.sage]");
-        println!("sage v10.3 (SlateOS) — Open-source mathematics system");
+        println!("sage v10.3 (Slate OS) — Open-source mathematics system");
         println!();
         println!("Options:");
         println!("  -n, --notebook    Launch Jupyter notebook");
@@ -23,7 +23,7 @@ fn run_sage(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("sage v10.3 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("sage v10.3 (Slate OS)"); return 0; }
     if args.iter().any(|a| a == "-n" || a == "--notebook") {
         println!("sage: launching Jupyter notebook interface...");
         return 0;
@@ -38,14 +38,14 @@ fn run_sage(args: &[String], _prog: &str) -> i32 {
 fn run_notebook(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sage-notebook [OPTIONS]");
-        println!("sage-notebook v10.3 (SlateOS) — SageMath notebook server");
+        println!("sage-notebook v10.3 (Slate OS) — SageMath notebook server");
         println!();
         println!("Options:");
         println!("  --port PORT       Server port (default: 8888)");
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("sage-notebook v10.3 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("sage-notebook v10.3 (Slate OS)"); return 0; }
     println!("sage-notebook: server started at http://localhost:8888");
     0
 }

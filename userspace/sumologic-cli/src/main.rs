@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sumo(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: sumo COMMAND [OPTIONS]");
-        println!("sumo v1.0 (SlateOS) — Sumo Logic collector/client");
+        println!("sumo v1.0 (Slate OS) — Sumo Logic collector/client");
         println!();
         println!("Commands:");
         println!("  start             Start collector");
@@ -58,7 +58,7 @@ fn run_sumo(args: &[String], _prog: &str) -> i32 {
             println!("  Time range: last 15m");
             println!("  Results: 342 messages");
         }
-        "version" | "--version" => println!("sumo v1.0 (SlateOS)"),
+        "version" | "--version" => println!("sumo v1.0 (Slate OS)"),
         _ => println!("sumo {}: completed", cmd),
     }
     0

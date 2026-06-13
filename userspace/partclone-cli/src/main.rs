@@ -14,7 +14,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_partclone(args: &[String], prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: {} [OPTIONS]", prog);
-        println!("{} v0.3 (SlateOS) — Partition clone & restore", prog);
+        println!("{} v0.3 (Slate OS) — Partition clone & restore", prog);
         println!();
         println!("Options:");
         println!("  -s SOURCE     Source device or image file");
@@ -28,7 +28,7 @@ fn run_partclone(args: &[String], prog: &str) -> i32 {
         println!("Efficiently clone used blocks only, skip free space.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("{} v0.3 (SlateOS, Partclone)", prog); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("{} v0.3 (Slate OS, Partclone)", prog); return 0; }
     let fs_type = if prog.contains('.') {
         prog.rsplit_once('.').map(|(_, ext)| ext).unwrap_or("ext4")
     } else {

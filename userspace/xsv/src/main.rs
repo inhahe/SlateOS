@@ -41,7 +41,7 @@ fn run_xsv(args: Vec<String>) -> i32 {
             0
         }
         "--version" => {
-            println!("xsv 0.13.0 (SlateOS)");
+            println!("xsv 0.13.0 (Slate OS)");
             0
         }
         "headers" => {

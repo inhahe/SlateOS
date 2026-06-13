@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_knime(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: knime [OPTIONS] [WORKFLOW]");
-        println!("KNIME Analytics Platform 5.3 (SlateOS) — Open-source data analytics");
+        println!("KNIME Analytics Platform 5.3 (Slate OS) — Open-source data analytics");
         println!();
         println!("Options:");
         println!("  -nosplash              No splash screen");
@@ -24,8 +24,8 @@ fn run_knime(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("KNIME Analytics Platform 5.3.2 (SlateOS)"); return 0; }
-    println!("KNIME Analytics Platform 5.3.2 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("KNIME Analytics Platform 5.3.2 (Slate OS)"); return 0; }
+    println!("KNIME Analytics Platform 5.3.2 (Slate OS)");
     println!("  Architecture: Eclipse RCP + 6000+ visual programming nodes");
     println!("  Format: .knwf (workflow), node repository structured by category");
     println!("  Languages: Java nodes + Python/R/Bash/JavaScript scripting nodes");

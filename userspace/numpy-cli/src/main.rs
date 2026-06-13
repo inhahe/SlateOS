@@ -14,7 +14,7 @@ fn run_numpy(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: numpy COMMAND [OPTIONS]");
         println!();
-        println!("numpy — NumPy CLI tools (SlateOS).");
+        println!("numpy — NumPy CLI tools (Slate OS).");
         println!();
         println!("Commands:");
         println!("  info          Show NumPy configuration");
@@ -27,8 +27,8 @@ fn run_numpy(args: &[String]) -> i32 {
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match subcmd {
         "version" | "--version" => {
-            println!("NumPy 1.26.4 (SlateOS)");
-            println!("Python 3.12.0 (SlateOS)");
+            println!("NumPy 1.26.4 (Slate OS)");
+            println!("Python 3.12.0 (Slate OS)");
         }
         "info" => {
             println!("numpy version: 1.26.4");
@@ -73,7 +73,7 @@ fn run_f2py(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("f2py 2 (NumPy 1.26.4, SlateOS)");
+        println!("f2py 2 (NumPy 1.26.4, Slate OS)");
         return 0;
     }
     let file = args.iter().find(|a| a.ends_with(".f90") || a.ends_with(".f")).map(|s| s.as_str()).unwrap_or("module.f90");

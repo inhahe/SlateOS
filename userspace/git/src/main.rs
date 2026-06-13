@@ -97,7 +97,7 @@ fn run_git(args: Vec<String>) -> i32 {
             println!("   remote   Manage set of tracked repositories");
             0
         }
-        "--version" => { println!("git version 0.1.0 (SlateOS)"); 0 }
+        "--version" => { println!("git version 0.1.0 (Slate OS)"); 0 }
         "init" => { println!("Initialized empty Git repository in .git/ (simulated)"); 0 }
         "clone" => {
             let url = cmd_args.first().map(|s| s.as_str()).unwrap_or("https://example.com/repo.git");

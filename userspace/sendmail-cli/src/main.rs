@@ -19,7 +19,7 @@ fn run_sendmail(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sendmail [FLAGS] [ADDRESS ...]");
         println!();
-        println!("sendmail — mail transfer agent (SlateOS).");
+        println!("sendmail — mail transfer agent (Slate OS).");
         println!();
         println!("Options:");
         println!("  -t               Read recipients from headers");
@@ -63,7 +63,7 @@ fn run_msmtp(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: msmtp [OPTIONS] [RECIPIENT ...]");
         println!();
-        println!("msmtp — lightweight SMTP client (SlateOS).");
+        println!("msmtp — lightweight SMTP client (Slate OS).");
         println!();
         println!("Options:");
         println!("  -a, --account NAME    Use account NAME");
@@ -75,7 +75,7 @@ fn run_msmtp(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("msmtp version 1.8.25 (SlateOS)");
+        println!("msmtp version 1.8.25 (Slate OS)");
         return 0;
     }
 

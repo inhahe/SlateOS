@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pinyin(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pinyin [OPTIONS]");
-        println!("pinyin v2.8 (SlateOS) — Chinese Pinyin input engine");
+        println!("pinyin v2.8 (Slate OS) — Chinese Pinyin input engine");
         println!();
         println!("Options:");
         println!("  --train FILE      Train with text corpus");
@@ -25,7 +25,7 @@ fn run_pinyin(args: &[String], _prog: &str) -> i32 {
         println!("fuzzy matching, and cloud-style suggestions.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("pinyin v2.8 (SlateOS, libpinyin)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("pinyin v2.8 (Slate OS, libpinyin)"); return 0; }
     println!("pinyin: Chinese input engine");
     println!("  Dictionary: system (380k entries) + user");
     println!("  Fuzzy pinyin: enabled");

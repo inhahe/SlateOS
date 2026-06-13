@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_customerio(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: customerio [OPTIONS]");
-        println!("Customer.io (SlateOS) — event-driven cross-channel messaging");
+        println!("Customer.io (Slate OS) — event-driven cross-channel messaging");
         println!();
         println!("Options:");
         println!("  --essentials           Essentials from $100/mo (5K profiles)");
@@ -24,8 +24,8 @@ fn run_customerio(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Customer.io 2024 (SlateOS)"); return 0; }
-    println!("Customer.io 2024 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Customer.io 2024 (Slate OS)"); return 0; }
+    println!("Customer.io 2024 (Slate OS)");
     println!("  Vendor: Peaberry Software, Inc. dba Customer.io (Portland, OR — fully remote, bootstrapped+VC mix)");
     println!("  Founders: Colin Nederkoorn (CEO), John Allison (CTO), 2012");
     println!("          Nederkoorn famously runs an open-book + radical-transparency culture");

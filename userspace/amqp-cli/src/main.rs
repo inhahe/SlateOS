@@ -35,7 +35,7 @@ fn run_amqp(args: &[String], prog_name: &str) -> i32 {
                 println!("  --exclusive        Exclusive queue");
             }
         }
-        println!("AMQP CLI tools (amqp-tools 0.10.0, SlateOS)");
+        println!("AMQP CLI tools (amqp-tools 0.10.0, Slate OS)");
         return 0;
     }
     let url = args.windows(2).find(|w| w[0] == "--url")

@@ -11,7 +11,7 @@ fn run_borg(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: borg <COMMAND> [OPTIONS]");
         println!();
-        println!("BorgBackup deduplicating archiver (SlateOS).");
+        println!("BorgBackup deduplicating archiver (Slate OS).");
         println!();
         println!("Commands:");
         println!("  init         Initialize repository");
@@ -28,7 +28,7 @@ fn run_borg(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("borg 1.4.0 (SlateOS)");
+        println!("borg 1.4.0 (Slate OS)");
         return 0;
     }
 

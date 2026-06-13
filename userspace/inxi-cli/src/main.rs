@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_inxi(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: inxi [OPTIONS]");
-        println!("inxi v3.3 (SlateOS) — Full-featured system information");
+        println!("inxi v3.3 (Slate OS) — Full-featured system information");
         println!();
         println!("Options:");
         println!("  -F             Full output");
@@ -28,7 +28,7 @@ fn run_inxi(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("inxi v3.3 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("inxi v3.3 (Slate OS)"); return 0; }
     if args.iter().any(|a| a == "-F") {
         println!("System:  Host: slateos-host Kernel: 0.1.0-slateos x86_64");
         println!("Machine: Type: Desktop System: Custom");

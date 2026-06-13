@@ -11,7 +11,7 @@ fn run_logrotate(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: logrotate [OPTIONS] CONFIG_FILE...");
         println!();
-        println!("logrotate — rotate, compress, and remove log files (SlateOS).");
+        println!("logrotate — rotate, compress, and remove log files (Slate OS).");
         println!();
         println!("Options:");
         println!("  -d, --debug            Debug mode (dry run)");
@@ -23,7 +23,7 @@ fn run_logrotate(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("logrotate 3.21.0 (SlateOS)");
+        println!("logrotate 3.21.0 (Slate OS)");
         return 0;
     }
 

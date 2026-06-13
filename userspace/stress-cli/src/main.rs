@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_stress(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: stress [OPTIONS]");
-        println!("stress v1.0 (SlateOS) — System stress test tool");
+        println!("stress v1.0 (Slate OS) — System stress test tool");
         println!();
         println!("Options:");
         println!("  -c N, --cpu N     Spawn N CPU workers");
@@ -24,7 +24,7 @@ fn run_stress(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("stress v1.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("stress v1.0 (Slate OS)"); return 0; }
     println!("stress: info: dispatching workers");
     println!("  CPU workers: 4");
     println!("  I/O workers: 0");
@@ -37,7 +37,7 @@ fn run_stress(args: &[String], _prog: &str) -> i32 {
 fn run_stress_ng(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: stress-ng [OPTIONS]");
-        println!("stress-ng v0.17 (SlateOS) — Advanced stress test tool");
+        println!("stress-ng v0.17 (Slate OS) — Advanced stress test tool");
         println!();
         println!("Options:");
         println!("  --cpu N            CPU stress workers");
@@ -50,7 +50,7 @@ fn run_stress_ng(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("stress-ng v0.17 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("stress-ng v0.17 (Slate OS)"); return 0; }
     println!("stress-ng: info: dispatching workers");
     println!("stress-ng: info: successful run completed in 60.0s");
     if args.iter().any(|a| a == "--metrics") {

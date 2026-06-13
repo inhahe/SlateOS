@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_glyphslib(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: glyphslib COMMAND [OPTIONS]");
-        println!("GlyphsLib v6.7 (SlateOS) — Glyphs font source conversion tool");
+        println!("GlyphsLib v6.7 (Slate OS) — Glyphs font source conversion tool");
         println!();
         println!("Commands:");
         println!("  glyphs2ufo FILE   Convert .glyphs to UFO");
@@ -24,7 +24,7 @@ fn run_glyphslib(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("GlyphsLib v6.7 (SlateOS)");
+        println!("GlyphsLib v6.7 (Slate OS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("info");

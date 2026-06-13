@@ -78,7 +78,7 @@ fn run_fzf(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("fzf 0.53.0 (SlateOS)");
+        println!("fzf 0.53.0 (Slate OS)");
         return 0;
     }
 

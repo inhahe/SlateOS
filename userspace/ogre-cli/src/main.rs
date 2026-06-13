@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ogre(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ogre [COMMAND] [OPTIONS]");
-        println!("OGRE v14.3 (SlateOS) — Object-Oriented Graphics Rendering Engine");
+        println!("OGRE v14.3 (Slate OS) — Object-Oriented Graphics Rendering Engine");
         println!();
         println!("Commands:");
         println!("  sample list|run    Run sample browser");
@@ -31,8 +31,8 @@ fn run_ogre(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("OGRE v14.3.3 (SlateOS)"); return 0; }
-    println!("OGRE v14.3.3 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("OGRE v14.3.3 (Slate OS)"); return 0; }
+    println!("OGRE v14.3.3 (Slate OS)");
     println!("  Render systems: OpenGL3+, GLES2, D3D11, Vulkan, Metal");
     println!("  Scene managers: OctreeSceneManager, DefaultSceneManager");
     println!("  Material system: HLMS (PBS, Unlit)");

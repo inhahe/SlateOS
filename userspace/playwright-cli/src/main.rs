@@ -11,7 +11,7 @@ fn run_playwright(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: playwright <COMMAND> [OPTIONS]");
         println!();
-        println!("Playwright end-to-end testing CLI (SlateOS).");
+        println!("Playwright end-to-end testing CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  test         Run tests");
@@ -25,7 +25,7 @@ fn run_playwright(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Version 1.41.0 (SlateOS)");
+        println!("Version 1.41.0 (Slate OS)");
         return 0;
     }
 

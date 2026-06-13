@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_daemon(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: transmission-daemon [OPTIONS]");
-        println!("transmission-daemon v4.0 (SlateOS) — BitTorrent daemon");
+        println!("transmission-daemon v4.0 (Slate OS) — BitTorrent daemon");
         println!();
         println!("Options:");
         println!("  -f                Run in foreground");
@@ -23,7 +23,7 @@ fn run_daemon(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("transmission-daemon v4.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("transmission-daemon v4.0 (Slate OS)"); return 0; }
     println!("transmission-daemon: started on port 9091");
     println!("  Download dir: /home/user/Downloads");
     println!("  Peer port: 51413");
@@ -33,7 +33,7 @@ fn run_daemon(args: &[String], _prog: &str) -> i32 {
 fn run_remote(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: transmission-remote [HOST:PORT] [OPTIONS]");
-        println!("transmission-remote v4.0 (SlateOS) — Remote control client");
+        println!("transmission-remote v4.0 (Slate OS) — Remote control client");
         println!();
         println!("Options:");
         println!("  -a FILE           Add torrent");
@@ -45,7 +45,7 @@ fn run_remote(args: &[String], _prog: &str) -> i32 {
         println!("  -si               Session info");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("transmission-remote v4.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("transmission-remote v4.0 (Slate OS)"); return 0; }
     if args.iter().any(|a| a == "-l") {
         println!("  ID   Done  ETA         Status       Name");
         println!("   1   100%  Done        Seeding      ubuntu-24.04.iso");
@@ -67,10 +67,10 @@ fn run_remote(args: &[String], _prog: &str) -> i32 {
 fn run_cli_mode(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: transmission-cli [OPTIONS] TORRENT");
-        println!("transmission-cli v4.0 (SlateOS) — Lightweight CLI client");
+        println!("transmission-cli v4.0 (Slate OS) — Lightweight CLI client");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("transmission-cli v4.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("transmission-cli v4.0 (Slate OS)"); return 0; }
     println!("transmission-cli: downloading...");
     0
 }
@@ -78,10 +78,10 @@ fn run_cli_mode(args: &[String], _prog: &str) -> i32 {
 fn run_gtk(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: transmission-gtk [OPTIONS] [TORRENT...]");
-        println!("transmission-gtk v4.0 (SlateOS) — GTK BitTorrent client");
+        println!("transmission-gtk v4.0 (Slate OS) — GTK BitTorrent client");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("transmission-gtk v4.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("transmission-gtk v4.0 (Slate OS)"); return 0; }
     println!("transmission-gtk: BitTorrent client started");
     0
 }

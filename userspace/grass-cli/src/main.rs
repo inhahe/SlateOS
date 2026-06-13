@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_grass(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: grass [OPTIONS] [MAPSET_PATH]");
-        println!("GRASS GIS 8.3.2 (SlateOS)");
+        println!("GRASS GIS 8.3.2 (Slate OS)");
         println!();
         println!("  -c             Create new location/mapset");
         println!("  -e             Exit after creation");

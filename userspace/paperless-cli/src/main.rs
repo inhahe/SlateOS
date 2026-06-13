@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_paperless(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: paperless [COMMAND] [OPTIONS]");
-        println!("Paperless-ngx v2.4 (SlateOS) — Document management system");
+        println!("Paperless-ngx v2.4 (Slate OS) — Document management system");
         println!();
         println!("Commands:");
         println!("  consume PATH       Import documents from path");
@@ -30,8 +30,8 @@ fn run_paperless(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Paperless-ngx v2.4.3 (SlateOS)"); return 0; }
-    println!("Paperless-ngx v2.4.3 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Paperless-ngx v2.4.3 (Slate OS)"); return 0; }
+    println!("Paperless-ngx v2.4.3 (Slate OS)");
     println!("  Documents: 12,456");
     println!("  Tags: 78");
     println!("  Correspondents: 145");

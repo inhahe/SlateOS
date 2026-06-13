@@ -19,7 +19,7 @@ fn run_r(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: R [OPTIONS] [< infile] [> outfile]");
         println!();
-        println!("R — statistical computing (SlateOS).");
+        println!("R — statistical computing (Slate OS).");
         println!();
         println!("Options:");
         println!("  --vanilla              No init files");
@@ -32,7 +32,7 @@ fn run_r(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("R version 4.3.2 (2024-01-15) -- \"Eye Holes\" (SlateOS)");
+        println!("R version 4.3.2 (2024-01-15) -- \"Eye Holes\" (Slate OS)");
         return 0;
     }
 
@@ -45,7 +45,7 @@ fn run_r(args: &[String]) -> i32 {
         let _ = e;
     } else {
         if !quiet {
-            println!("R version 4.3.2 (2024-01-15) -- \"Eye Holes\" (SlateOS)");
+            println!("R version 4.3.2 (2024-01-15) -- \"Eye Holes\" (Slate OS)");
             println!("Copyright (C) 2024 The R Foundation for Statistical Computing");
             println!("Platform: x86_64-slateos (64-bit)");
             println!();
@@ -66,7 +66,7 @@ fn run_rscript(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("R scripting front-end version 4.3.2 (SlateOS)");
+        println!("R scripting front-end version 4.3.2 (Slate OS)");
         return 0;
     }
 

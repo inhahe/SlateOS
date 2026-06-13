@@ -19,7 +19,7 @@ fn run_fido2_token(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: fido2-token [OPTIONS] [DEVICE]");
         println!();
-        println!("fido2-token — manage FIDO2 tokens (SlateOS).");
+        println!("fido2-token — manage FIDO2 tokens (Slate OS).");
         println!();
         println!("Options:");
         println!("  -L             List available tokens");
@@ -66,7 +66,7 @@ fn run_fido2_cred(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: fido2-cred -M|-V [OPTIONS] DEVICE");
         println!();
-        println!("fido2-cred — create/verify FIDO2 credentials (SlateOS).");
+        println!("fido2-cred — create/verify FIDO2 credentials (Slate OS).");
         println!();
         println!("  -M              Make credential");
         println!("  -V              Verify credential");
@@ -91,7 +91,7 @@ fn run_fido2_assert(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: fido2-assert -G|-V [OPTIONS] DEVICE");
         println!();
-        println!("fido2-assert — get/verify FIDO2 assertions (SlateOS).");
+        println!("fido2-assert — get/verify FIDO2 assertions (Slate OS).");
         println!();
         println!("  -G              Get assertion");
         println!("  -V              Verify assertion");
@@ -111,7 +111,7 @@ fn run_fido2_assert(args: &[String]) -> i32 {
 }
 
 fn run_fido2_info(_args: &[String]) -> i32 {
-    println!("FIDO2 library version: 1.14.0 (SlateOS)");
+    println!("FIDO2 library version: 1.14.0 (Slate OS)");
     println!("FIDO2 API version: 0x01030000");
     println!();
     println!("Available transports: usb, nfc, ble, internal");

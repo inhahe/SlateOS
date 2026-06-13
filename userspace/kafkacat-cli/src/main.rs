@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_kcat(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: kcat [OPTIONS]");
-        println!("kcat 1.7.1 (formerly kafkacat, SlateOS)");
+        println!("kcat 1.7.1 (formerly kafkacat, Slate OS)");
         println!();
         println!("Modes:");
         println!("  -P           Producer mode");

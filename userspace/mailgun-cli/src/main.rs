@@ -11,7 +11,7 @@ fn run_mailgun(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mailgun <COMMAND> [OPTIONS]");
         println!();
-        println!("Mailgun email API CLI (SlateOS).");
+        println!("Mailgun email API CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  send         Send an email");

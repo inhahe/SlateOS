@@ -17,7 +17,7 @@ fn run_kafka_server(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Apache Kafka 3.7.0 (SlateOS) (Commit: abc1234)");
+        println!("Apache Kafka 3.7.0 (Slate OS) (Commit: abc1234)");
         return 0;
     }
     let config = args.first().map(|s| s.as_str()).unwrap_or("config/server.properties");

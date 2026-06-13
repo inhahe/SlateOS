@@ -21,7 +21,7 @@ fn run_gams(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("GAMS 45.1.0 (SlateOS)");
+        println!("GAMS 45.1.0 (Slate OS)");
         println!("Solvers: CPLEX 22.1, GUROBI 11.0, CONOPT 4, BARON 24");
         return 0;
     }
@@ -47,7 +47,7 @@ fn run_gamside(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("GAMS IDE 45.1.0 (SlateOS)");
+        println!("GAMS IDE 45.1.0 (Slate OS)");
         return 0;
     }
     println!("GAMS Studio 45.1.0");

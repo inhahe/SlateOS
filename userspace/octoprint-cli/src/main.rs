@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_octoprint(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: octoprint COMMAND [OPTIONS]");
-        println!("OctoPrint 1.9.3 (SlateOS)");
+        println!("OctoPrint 1.9.3 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  serve        Start OctoPrint server");
@@ -25,7 +25,7 @@ fn run_octoprint(args: &[String]) -> i32 {
     }
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match subcmd {
-        "version" | "--version" => println!("OctoPrint 1.9.3 (SlateOS, Python 3.12.0)"),
+        "version" | "--version" => println!("OctoPrint 1.9.3 (Slate OS, Python 3.12.0)"),
         "serve" => {
             let port = args.windows(2).find(|w| w[0] == "--port").map(|w| w[1].as_str()).unwrap_or("5000");
             println!("OctoPrint 1.9.3 starting...");

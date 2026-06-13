@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ed(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: edge [URL] [OPTIONS]");
-        println!("Microsoft Edge (SlateOS) — Chromium-based browser with MS integrations");
+        println!("Microsoft Edge (Slate OS) — Chromium-based browser with MS integrations");
         println!();
         println!("Options:");
         println!("  --inprivate            InPrivate browsing window");
@@ -24,8 +24,8 @@ fn run_ed(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Microsoft Edge 131.0.2903.86 (SlateOS, 64-bit)"); return 0; }
-    println!("Microsoft Edge 131.0.2903.86 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Microsoft Edge 131.0.2903.86 (Slate OS, 64-bit)"); return 0; }
+    println!("Microsoft Edge 131.0.2903.86 (Slate OS)");
     println!("  Vendor: Microsoft");
     println!("  History:");
     println!("    1995-2015: Internet Explorer (Trident engine, ActiveX)");

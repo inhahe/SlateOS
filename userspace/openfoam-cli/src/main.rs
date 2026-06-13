@@ -14,7 +14,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_openfoam(args: &[String], prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: {} [OPTIONS]", prog);
-        println!("OpenFOAM v11 (SlateOS) — Open-source CFD toolbox");
+        println!("OpenFOAM v11 (Slate OS) — Open-source CFD toolbox");
         println!();
         println!("Options:");
         println!("  -case DIR       Case directory");
@@ -25,7 +25,7 @@ fn run_openfoam(args: &[String], prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("OpenFOAM v11 (SlateOS)");
+        println!("OpenFOAM v11 (Slate OS)");
         println!("Build: SlateOS-x86_64");
         return 0;
     }

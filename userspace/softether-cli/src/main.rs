@@ -15,19 +15,19 @@ fn run_softether(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "vpnclient" => {
-                println!("vpnclient (SlateOS) — SoftEther VPN client");
+                println!("vpnclient (Slate OS) — SoftEther VPN client");
                 println!("  start              Start VPN client");
                 println!("  stop               Stop VPN client");
             }
             "vpncmd" => {
-                println!("vpncmd (SlateOS) — SoftEther VPN command-line admin");
+                println!("vpncmd (Slate OS) — SoftEther VPN command-line admin");
                 println!("  /SERVER HOST       Connect to VPN server");
                 println!("  /CLIENT            Connect to VPN client");
                 println!("  /TOOLS             Network tools");
                 println!("  /HUB HUB           Select virtual hub");
             }
             _ => {
-                println!("vpnserver (SlateOS) — SoftEther VPN server");
+                println!("vpnserver (Slate OS) — SoftEther VPN server");
                 println!("  start              Start VPN server");
                 println!("  stop               Stop VPN server");
                 println!("  execsvc            Run as service");
@@ -36,7 +36,7 @@ fn run_softether(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("SoftEther VPN v4.43 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("SoftEther VPN v4.43 (Slate OS)"); return 0; }
     match prog {
         "vpnclient" => {
             println!("SoftEther VPN Client v4.43");
@@ -50,7 +50,7 @@ fn run_softether(args: &[String], prog: &str) -> i32 {
             println!("  Server: SoftEther VPN Server");
         }
         _ => {
-            println!("SoftEther VPN Server v4.43 (SlateOS)");
+            println!("SoftEther VPN Server v4.43 (Slate OS)");
             println!("  Virtual Hubs: 3");
             println!("  Active Sessions: 12");
             println!("  Protocols: SSL-VPN, L2TP/IPsec, OpenVPN, SSTP");

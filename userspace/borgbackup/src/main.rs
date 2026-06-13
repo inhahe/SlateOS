@@ -34,7 +34,7 @@ fn run_borg(args: Vec<String>) -> i32 {
 
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match cmd {
-        "version" => println!("borg 1.4.0 (SlateOS)"),
+        "version" => println!("borg 1.4.0 (Slate OS)"),
         "init" => {
             let repo = args.get(1).map(|s| s.as_str()).unwrap_or("/backup/repo");
             println!("Initializing repository at {}", repo);

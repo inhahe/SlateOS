@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_btmgmt(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: btmgmt COMMAND [OPTIONS]");
-        println!("btmgmt v5.72 (SlateOS) — Bluetooth management interface");
+        println!("btmgmt v5.72 (Slate OS) — Bluetooth management interface");
         println!();
         println!("Commands:");
         println!("  info              Show adapter info");
@@ -29,7 +29,7 @@ fn run_btmgmt(args: &[String], _prog: &str) -> i32 {
     match cmd {
         "info" => {
             println!("hci0: addr AA:BB:CC:DD:EE:FF");
-            println!("  Name: SlateOS");
+            println!("  Name: Slate OS");
             println!("  Powered: yes, Discoverable: no");
             println!("  Supported settings: powered, connectable, discoverable, pairable");
         }
@@ -38,7 +38,7 @@ fn run_btmgmt(args: &[String], _prog: &str) -> i32 {
             println!("Power: {}", state);
         }
         "find" => println!("Discovery started..."),
-        "version" => println!("btmgmt v5.72 (SlateOS)"),
+        "version" => println!("btmgmt v5.72 (Slate OS)"),
         _ => println!("btmgmt {}: done", cmd),
     }
     0

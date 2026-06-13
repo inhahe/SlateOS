@@ -1418,7 +1418,7 @@ fn process_matches(proc_info: &ProcessInfo, opts: &Options, my_pid: u32) -> bool
 fn print_usage(mode: Mode) {
     match mode {
         Mode::Pgrep => {
-            println!("SlateOS pgrep v0.1.0 -- Find processes by pattern");
+            println!("Slate OS pgrep v0.1.0 -- Find processes by pattern");
             println!();
             println!("USAGE:");
             println!("  pgrep [options] <pattern>");
@@ -1457,7 +1457,7 @@ fn print_usage(mode: Mode) {
             println!("  pgrep -x init           Only exact match 'init'");
         }
         Mode::Pkill => {
-            println!("SlateOS pkill v0.1.0 -- Signal processes by pattern");
+            println!("Slate OS pkill v0.1.0 -- Signal processes by pattern");
             println!();
             println!("USAGE:");
             println!("  pkill [options] <pattern>");

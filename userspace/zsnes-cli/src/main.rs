@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_zsnes(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: zsnes [OPTIONS] [ROM]");
-        println!("zsnes v2.0 (SlateOS) — Super Nintendo Entertainment System emulator");
+        println!("zsnes v2.0 (Slate OS) — Super Nintendo Entertainment System emulator");
         println!();
         println!("Options:");
         println!("  -m            Start in mode 7 support");
@@ -27,10 +27,10 @@ fn run_zsnes(args: &[String], _prog: &str) -> i32 {
         println!("  --version     Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("ZSNES v2.0.12 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("ZSNES v2.0.12 (Slate OS)"); return 0; }
     let files: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
     if files.is_empty() {
-        println!("ZSNES v2.0.12 (SlateOS) — SNES Emulator");
+        println!("ZSNES v2.0.12 (Slate OS) — SNES Emulator");
         println!("  CPU: 65816 @ 3.58 MHz (emulated)");
         println!("  PPU: Mode 0-7, sprites, BG layers");
         println!("  APU: SPC700, 8-channel DSP");

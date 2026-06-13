@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_spin(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: spin [COMMAND] [OPTIONS]");
-        println!("Spinnaker CLI v1.30 (SlateOS) — Multi-cloud continuous delivery");
+        println!("Spinnaker CLI v1.30 (Slate OS) — Multi-cloud continuous delivery");
         println!();
         println!("Commands:");
         println!("  application list|get|save|delete  Manage applications");
@@ -29,8 +29,8 @@ fn run_spin(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("spin v1.30.0 (SlateOS)"); return 0; }
-    println!("Spinnaker CLI v1.30.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("spin v1.30.0 (Slate OS)"); return 0; }
+    println!("Spinnaker CLI v1.30.0 (Slate OS)");
     println!("  Gate: https://spinnaker.example.com");
     println!("  Applications: 12");
     println!("  Pipelines: 45");

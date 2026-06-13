@@ -36,7 +36,7 @@ fn run_analyseplugin(args: &[String]) -> i32 {
     println!("Plugin Name: \"Mono Amplifier\"");
     println!("Plugin Label: \"amp_mono\"");
     println!("Plugin Unique ID: 1048");
-    println!("Maker: \"SlateOS Audio Plugins\"");
+    println!("Maker: \"Slate OS Audio Plugins\"");
     println!("Copyright: \"None\"");
     println!("Must Run Real-Time: No");
     println!("Has activate() Function: No");

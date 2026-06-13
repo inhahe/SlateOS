@@ -21,7 +21,7 @@ fn run_qgis(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("QGIS 3.34.4 'Prizren' (SlateOS)");
+        println!("QGIS 3.34.4 'Prizren' (Slate OS)");
         println!("QGIS code revision: abcdef1");
         println!("Qt version: 6.6.1");
         println!("GDAL/OGR: 3.8.3");
@@ -42,7 +42,7 @@ fn run_qgis(args: &[String]) -> i32 {
 fn run_qgis_process(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: qgis_process <command> [options]");
-        println!("QGIS Processing CLI 3.34.4 (SlateOS)");
+        println!("QGIS Processing CLI 3.34.4 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  list              List available algorithms");

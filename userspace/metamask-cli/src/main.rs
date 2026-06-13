@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_metamask(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: metamask COMMAND [OPTIONS]");
-        println!("MetaMask CLI v12.0 (SlateOS) — Ethereum wallet");
+        println!("MetaMask CLI v12.0 (Slate OS) — Ethereum wallet");
         println!();
         println!("Commands:");
         println!("  create            Create new wallet");
@@ -27,7 +27,7 @@ fn run_metamask(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("MetaMask CLI v12.0 (SlateOS)");
+        println!("MetaMask CLI v12.0 (Slate OS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("balance");

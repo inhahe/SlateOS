@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_winecfg(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: winecfg [OPTIONS]");
-        println!("winecfg v9.0 (SlateOS) — Wine configuration dialog");
+        println!("winecfg v9.0 (Slate OS) — Wine configuration dialog");
         println!();
         println!("Options:");
         println!("  --version         Show version");
@@ -27,7 +27,7 @@ fn run_winecfg(args: &[String], _prog: &str) -> i32 {
         println!("  Staging           Wine Staging patch options");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("winecfg v9.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("winecfg v9.0 (Slate OS)"); return 0; }
     println!("winecfg: Wine configuration dialog opened");
     println!("  Prefix: ~/.wine");
     println!("  Windows version: Windows 10");

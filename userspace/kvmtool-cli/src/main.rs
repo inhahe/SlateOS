@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_lkvm(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: lkvm COMMAND [OPTIONS]");
-        println!("lkvm v3.18 (SlateOS) — Lightweight KVM tool");
+        println!("lkvm v3.18 (Slate OS) — Lightweight KVM tool");
         println!();
         println!("Commands:");
         println!("  run               Run a guest kernel");
@@ -49,7 +49,7 @@ fn run_lkvm(args: &[String], _prog: &str) -> i32 {
         }
         "stop" => println!("Guest stopped."),
         "setup" => println!("Host environment ready for KVM."),
-        "version" | "--version" => println!("lkvm v3.18 (SlateOS)"),
+        "version" | "--version" => println!("lkvm v3.18 (Slate OS)"),
         _ => println!("lkvm {}: completed", cmd),
     }
     0

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_nifi(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: nifi [COMMAND] [OPTIONS]");
-        println!("Apache NiFi v2.0 (SlateOS) — Data flow automation");
+        println!("Apache NiFi v2.0 (Slate OS) — Data flow automation");
         println!();
         println!("Commands:");
         println!("  start              Start NiFi");
@@ -29,8 +29,8 @@ fn run_nifi(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Apache NiFi v2.0.0 (SlateOS)"); return 0; }
-    println!("Apache NiFi v2.0.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Apache NiFi v2.0.0 (Slate OS)"); return 0; }
+    println!("Apache NiFi v2.0.0 (Slate OS)");
     println!("  Web UI: https://0.0.0.0:8443/nifi");
     println!("  Processors: 45 running, 3 stopped");
     println!("  Process groups: 8");

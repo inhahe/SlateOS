@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_otel_cli(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: otel-cli COMMAND [OPTIONS]");
-        println!("otel-cli 0.4.5 (SlateOS)");
+        println!("otel-cli 0.4.5 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  span         Create and send a span");
@@ -61,7 +61,7 @@ fn run_otel_cli(args: &[String]) -> i32 {
 fn run_otelcol(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: otelcol [OPTIONS]");
-        println!("OpenTelemetry Collector 0.104.0 (SlateOS)");
+        println!("OpenTelemetry Collector 0.104.0 (Slate OS)");
         println!("  --config FILE    Config file path");
         println!("  --version        Show version");
         return 0;

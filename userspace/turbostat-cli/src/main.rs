@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_turbostat(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: turbostat [OPTIONS] [COMMAND]");
-        println!("turbostat v2024.01 (SlateOS) — CPU frequency, idle, power stats");
+        println!("turbostat v2024.01 (Slate OS) — CPU frequency, idle, power stats");
         println!();
         println!("Options:");
         println!("  -i INTERVAL    Update interval (default: 5.0s)");
@@ -25,7 +25,7 @@ fn run_turbostat(args: &[String], _prog: &str) -> i32 {
         println!("Reports CPU C-states, P-states, temperature, and power.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("turbostat v2024.01 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("turbostat v2024.01 (Slate OS)"); return 0; }
     println!("Core CPU   Avg_MHz Busy%   Bzy_MHz TSC_MHz   CPU%c1  CPU%c6  PkgTmp  PkgWatt");
     println!("  -    -       125  3.47     3600    3600     4.53   92.00     42      15.2");
     println!("  0    0       200  5.56     3600    3600     6.44   88.00     42      ");

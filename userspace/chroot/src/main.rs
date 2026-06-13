@@ -505,7 +505,7 @@ fn validate_newroot(path: &str) -> Result<(), String> {
 // ============================================================================
 
 fn print_help() {
-    println!("SlateOS chroot v{VERSION} -- Change root directory and run command");
+    println!("Slate OS chroot v{VERSION} -- Change root directory and run command");
     println!();
     println!("USAGE:");
     println!("  chroot [OPTIONS] NEWROOT [COMMAND [ARGS...]]");
@@ -537,7 +537,7 @@ fn print_help() {
 }
 
 fn print_version() {
-    println!("chroot (SlateOS) {VERSION}");
+    println!("chroot (Slate OS) {VERSION}");
 }
 
 // ============================================================================

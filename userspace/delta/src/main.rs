@@ -55,7 +55,7 @@ fn run_delta(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("delta 0.17.0 (SlateOS)");
+        println!("delta 0.17.0 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "--list-syntax-themes") {

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_meilisearch(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: meilisearch [OPTIONS]");
-        println!("Meilisearch v1.7 (SlateOS) — Lightning-fast search engine");
+        println!("Meilisearch v1.7 (Slate OS) — Lightning-fast search engine");
         println!();
         println!("Options:");
         println!("  --http-addr ADDR   Listen address (default: localhost:7700)");
@@ -28,8 +28,8 @@ fn run_meilisearch(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Meilisearch v1.7.6 (SlateOS)"); return 0; }
-    println!("Meilisearch v1.7.6 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Meilisearch v1.7.6 (Slate OS)"); return 0; }
+    println!("Meilisearch v1.7.6 (Slate OS)");
     println!("  HTTP: http://localhost:7700");
     println!("  Database: /var/meilisearch/data.ms");
     println!("  Indexes: 5");

@@ -25,7 +25,7 @@ fn run_git_absorb(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("git-absorb 0.6.12 (SlateOS)");
+        println!("git-absorb 0.6.12 (Slate OS)");
         return 0;
     }
 

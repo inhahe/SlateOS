@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_marble(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: marble [OPTIONS] [FILE.kml|.gpx]");
-        println!("marble v23.08 (SlateOS) — KDE virtual globe and world atlas");
+        println!("marble v23.08 (Slate OS) — KDE virtual globe and world atlas");
         println!();
         println!("Options:");
         println!("  --latlon LAT,LON  Center on coordinates");
@@ -22,7 +22,7 @@ fn run_marble(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("marble v23.08 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("marble v23.08 (Slate OS)"); return 0; }
     println!("marble: virtual globe started");
     println!("  Maps: OpenStreetMap, satellite, atlas, historical");
     println!("  Layers: borders, cities, terrain, weather");

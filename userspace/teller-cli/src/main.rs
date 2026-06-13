@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_teller(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: teller COMMAND [OPTIONS]");
-        println!("Teller v2.0.0 (SlateOS) — Universal secret manager");
+        println!("Teller v2.0.0 (Slate OS) — Universal secret manager");
         println!();
         println!("Commands:");
         println!("  run CMD         Run with secrets injected");
@@ -31,7 +31,7 @@ fn run_teller(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("Teller v2.0.0 (SlateOS)");
+        println!("Teller v2.0.0 (Slate OS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("env");

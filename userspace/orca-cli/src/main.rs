@@ -11,7 +11,7 @@ fn run_orca(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: orca [OPTIONS]");
         println!();
-        println!("Orca — screen reader for visually impaired (SlateOS).");
+        println!("Orca — screen reader for visually impaired (Slate OS).");
         println!();
         println!("Options:");
         println!("  -s, --setup        GUI setup");
@@ -26,7 +26,7 @@ fn run_orca(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("Orca 45.1 (SlateOS)");
+        println!("Orca 45.1 (Slate OS)");
         return 0;
     }
 

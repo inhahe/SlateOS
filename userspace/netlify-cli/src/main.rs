@@ -11,7 +11,7 @@ fn run_netlify(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: netlify <COMMAND> [OPTIONS]");
         println!();
-        println!("Netlify command-line interface (SlateOS).");
+        println!("Netlify command-line interface (Slate OS).");
         println!();
         println!("Commands:");
         println!("  deploy       Deploy to Netlify");

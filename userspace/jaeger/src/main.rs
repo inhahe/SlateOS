@@ -27,7 +27,7 @@ fn run_jaeger_all_in_one(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("jaeger 1.57.0 (SlateOS)");
+        println!("jaeger 1.57.0 (Slate OS)");
         return 0;
     }
 
@@ -53,7 +53,7 @@ fn run_jaeger_component(args: Vec<String>, component: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("jaeger-{} 1.57.0 (SlateOS)", component);
+        println!("jaeger-{} 1.57.0 (Slate OS)", component);
         return 0;
     }
 

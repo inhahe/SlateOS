@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_yosys(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: yosys [OPTIONS] [SCRIPT.ys]");
-        println!("Yosys 0.38 (SlateOS)");
+        println!("Yosys 0.38 (Slate OS)");
         println!();
         println!("  -p CMD         Execute command");
         println!("  -s SCRIPT.ys   Execute script file");
@@ -24,7 +24,7 @@ fn run_yosys(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("Yosys 0.38 (SlateOS, git sha1 abcdef1)");
+        println!("Yosys 0.38 (Slate OS, git sha1 abcdef1)");
         return 0;
     }
     if args.iter().any(|a| a == "-p") {
@@ -66,7 +66,7 @@ fn run_yosys_abc(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("UC Berkeley, ABC 1.01 (compiled for Yosys 0.38, SlateOS)");
+        println!("UC Berkeley, ABC 1.01 (compiled for Yosys 0.38, Slate OS)");
         return 0;
     }
     println!("UC Berkeley, ABC 1.01");
@@ -83,7 +83,7 @@ fn run_yosys_smtbmc(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("yosys-smtbmc (Yosys 0.38, SlateOS)");
+        println!("yosys-smtbmc (Yosys 0.38, Slate OS)");
         return 0;
     }
     let file = args.iter().find(|a| a.ends_with(".smt2")).map(|s| s.as_str()).unwrap_or("design.smt2");

@@ -11,7 +11,7 @@ fn run_render(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "help") {
         println!("Usage: render <COMMAND> [OPTIONS]");
         println!();
-        println!("Render CLI — manage Render services (SlateOS).");
+        println!("Render CLI — manage Render services (Slate OS).");
         println!();
         println!("Commands:");
         println!("  services       Manage services");
@@ -27,7 +27,7 @@ fn run_render(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "version") {
-        println!("render-cli v1.0.0 (SlateOS)");
+        println!("render-cli v1.0.0 (Slate OS)");
         return 0;
     }
 

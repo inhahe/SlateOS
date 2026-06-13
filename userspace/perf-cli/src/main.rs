@@ -19,7 +19,7 @@ fn run_perf(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: perf [--version] [--help] COMMAND [ARGS]");
         println!();
-        println!("perf — performance analysis tools (SlateOS).");
+        println!("perf — performance analysis tools (Slate OS).");
         println!();
         println!("Commands:");
         println!("  stat       Run a command and gather performance counters");
@@ -39,7 +39,7 @@ fn run_perf(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("perf version 6.7.0 (SlateOS)");
+        println!("perf version 6.7.0 (Slate OS)");
         return 0;
     }
 

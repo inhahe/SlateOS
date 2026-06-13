@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ab(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "-?") || args.is_empty() {
         println!("Usage: ab [OPTIONS] URL");
-        println!("Apache HTTP server benchmarking tool (SlateOS)");
+        println!("Apache HTTP server benchmarking tool (Slate OS)");
         println!();
         println!("Options:");
         println!("  -n NUM       Number of requests");
@@ -29,7 +29,7 @@ fn run_ab(args: &[String]) -> i32 {
     }
     if args.iter().any(|a| a == "-V") {
         println!("This is ApacheBench, Version 2.3 <$Revision: 1913912 $>");
-        println!("SlateOS port");
+        println!("Slate OS port");
         return 0;
     }
     let url = args.iter().rfind(|a| !a.starts_with('-'))

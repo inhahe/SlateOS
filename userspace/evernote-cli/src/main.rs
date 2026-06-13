@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_en(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: evernote [OPTIONS]");
-        println!("Evernote (SlateOS) — Note-taking, web clipping, document scan");
+        println!("Evernote (Slate OS) — Note-taking, web clipping, document scan");
         println!();
         println!("Options:");
         println!("  --new                  Create new note");
@@ -24,8 +24,8 @@ fn run_en(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Evernote 10.107.4 (SlateOS)"); return 0; }
-    println!("Evernote 10.107.4 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Evernote 10.107.4 (Slate OS)"); return 0; }
+    println!("Evernote 10.107.4 (Slate OS)");
     println!("  Owner: Bending Spoons (Italy, acquired Evernote from owner Nov 2022)");
     println!("  Founded: 2008 by Stepan Pachikov; Phil Libin CEO 2010-15");
     println!("  Original 'remember everything' note-taking pioneer");

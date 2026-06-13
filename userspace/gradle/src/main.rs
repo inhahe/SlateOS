@@ -37,14 +37,14 @@ fn run_gradle(args: Vec<String>) -> i32 {
 
     if args.iter().any(|a| a == "--version" || a == "-v") {
         println!("------------------------------------------------------------");
-        println!("Gradle 8.7 (SlateOS)");
+        println!("Gradle 8.7 (Slate OS)");
         println!("------------------------------------------------------------");
         println!("Build time:   2025-05-22");
         println!("Revision:     abc1234");
         println!("Kotlin:       1.9.22");
         println!("Groovy:       3.0.17");
-        println!("JVM:          21.0.2 (SlateOS 64-Bit Server)");
-        println!("OS:           SlateOS x86_64");
+        println!("JVM:          21.0.2 (Slate OS 64-Bit Server)");
+        println!("OS:           Slate OS x86_64");
         return 0;
     }
 

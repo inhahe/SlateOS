@@ -31,10 +31,10 @@ fn run_pueued(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("pueued 3.4.0 (SlateOS)");
+        println!("pueued 3.4.0 (Slate OS)");
         return 0;
     }
-    println!("pueued 3.4.0 (SlateOS) — daemon started");
+    println!("pueued 3.4.0 (Slate OS) — daemon started");
     println!("Listening on /run/user/1000/pueue.socket");
     0
 }
@@ -75,7 +75,7 @@ fn run_pueue(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("pueue 3.4.0 (SlateOS)");
+            println!("pueue 3.4.0 (Slate OS)");
             0
         }
         "add" => {

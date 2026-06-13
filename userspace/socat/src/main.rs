@@ -53,7 +53,7 @@ fn print_help(prog: &str) {
 }
 
 fn print_version() {
-    println!("socat 0.1.0 (SlateOS personality CLI)");
+    println!("socat 0.1.0 (Slate OS personality CLI)");
 }
 
 fn run_about() {

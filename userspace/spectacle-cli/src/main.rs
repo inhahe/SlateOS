@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_spectacle(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: spectacle [OPTIONS]");
-        println!("spectacle v24.02 (SlateOS) — KDE screenshot utility");
+        println!("spectacle v24.02 (Slate OS) — KDE screenshot utility");
         println!();
         println!("Options:");
         println!("  -f, --fullscreen  Capture full screen");
@@ -25,7 +25,7 @@ fn run_spectacle(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("spectacle v24.02 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("spectacle v24.02 (Slate OS)"); return 0; }
     println!("spectacle: screenshot captured");
     println!("  Mode: full screen");
     println!("  Size: 1920x1080");

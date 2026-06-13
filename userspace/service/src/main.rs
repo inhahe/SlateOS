@@ -570,7 +570,7 @@ fn print_dep_tree(services: &[ServiceInfo], parent: &str, prefix: &str, visited:
 // ============================================================================
 
 fn print_usage() {
-    println!("SlateOS Service Manager v0.1.0");
+    println!("Slate OS Service Manager v0.1.0");
     println!();
     println!("Start, stop, and manage system services.");
     println!();

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pmtiles(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: pmtiles COMMAND [OPTIONS]");
-        println!("pmtiles v1.11 (SlateOS) — PMTiles archive utility");
+        println!("pmtiles v1.11 (Slate OS) — PMTiles archive utility");
         println!();
         println!("Commands:");
         println!("  show FILE         Show archive metadata");
@@ -26,7 +26,7 @@ fn run_pmtiles(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("pmtiles v1.11 (SlateOS)");
+        println!("pmtiles v1.11 (Slate OS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("show");

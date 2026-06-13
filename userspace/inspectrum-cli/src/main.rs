@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_inspectrum(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: inspectrum [OPTIONS] [FILE]");
-        println!("inspectrum v0.2 (SlateOS) — RF signal spectrum analyzer");
+        println!("inspectrum v0.2 (Slate OS) — RF signal spectrum analyzer");
         println!();
         println!("Options:");
         println!("  -r RATE        Sample rate in Hz");
@@ -23,10 +23,10 @@ fn run_inspectrum(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("inspectrum v0.2.3 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("inspectrum v0.2.3 (Slate OS)"); return 0; }
     let files: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
     if files.is_empty() {
-        println!("inspectrum v0.2.3 (SlateOS) — Signal Analyzer");
+        println!("inspectrum v0.2.3 (Slate OS) — Signal Analyzer");
         println!("  Supported formats: cf32, cs16, cu8, cs8, f32, s16");
         println!("  Status: waiting for file");
         return 0;

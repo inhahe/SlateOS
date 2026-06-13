@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mujoco(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: mujoco COMMAND [OPTIONS]");
-        println!("MuJoCo v3.2 (SlateOS) — Multi-Joint dynamics with Contact");
+        println!("MuJoCo v3.2 (Slate OS) — Multi-Joint dynamics with Contact");
         println!();
         println!("Commands:");
         println!("  simulate FILE     Run interactive simulation");
@@ -24,7 +24,7 @@ fn run_mujoco(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("MuJoCo v3.2 (SlateOS)");
+        println!("MuJoCo v3.2 (Slate OS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("info");

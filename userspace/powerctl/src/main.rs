@@ -347,7 +347,7 @@ fn direct_shutdown() -> ! {
 
     eprintln!(
         "powerctl: cannot power off directly — the service manager is \
-         unreachable and SlateOS exposes no power-off syscall or ACPI control \
+         unreachable and Slate OS exposes no power-off syscall or ACPI control \
          file.  System NOT powered off."
     );
     process::exit(1);
@@ -362,7 +362,7 @@ fn direct_reboot() -> ! {
 
     eprintln!(
         "powerctl: cannot reboot directly — the service manager is \
-         unreachable and SlateOS exposes no reboot syscall or ACPI control \
+         unreachable and Slate OS exposes no reboot syscall or ACPI control \
          file.  System NOT rebooted."
     );
     process::exit(1);
@@ -652,7 +652,7 @@ fn capacity_bar(pct: u32) -> String {
 // ============================================================================
 
 fn print_usage() {
-    println!("SlateOS Power Control v0.1.0");
+    println!("Slate OS Power Control v0.1.0");
     println!();
     println!("Manage system power state: shutdown, reboot, suspend, hibernate.");
     println!();

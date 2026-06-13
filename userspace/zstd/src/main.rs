@@ -109,7 +109,7 @@ fn run_zstd(args: Vec<String>, personality: &str) -> i32 {
                 return 0;
             }
             "--version" | "-V" => {
-                println!("*** zstd command line interface 0.1.0 (SlateOS) ***");
+                println!("*** zstd command line interface 0.1.0 (Slate OS) ***");
                 println!("zstd library version: 0.1.0");
                 return 0;
             }

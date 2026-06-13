@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_update_mime(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: update-mime-database [OPTIONS] MIME_DIR");
-        println!("update-mime-database v2.4 (SlateOS) — Update shared MIME info cache");
+        println!("update-mime-database v2.4 (Slate OS) — Update shared MIME info cache");
         println!();
         println!("Options:");
         println!("  -V                Verbose output");
@@ -21,7 +21,7 @@ fn run_update_mime(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("update-mime-database v2.4 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("update-mime-database v2.4 (Slate OS)"); return 0; }
     let dir = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("/usr/share/mime");
     println!("Updating MIME database: {}", dir);
     println!("  Processed: 1200 MIME types");

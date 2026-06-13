@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_makeindex(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: makeindex [OPTIONS] FILE.idx [FILE.idx ...]");
-        println!("MakeIndex 2.17 (SlateOS)");
+        println!("MakeIndex 2.17 (Slate OS)");
         println!();
         println!("Options:");
         println!("  -c             Compress blanks");
@@ -43,7 +43,7 @@ fn run_makeindex(args: &[String]) -> i32 {
     for f in &files {
         let base = f.rsplit_once('.').map_or(*f, |(b, _)| b);
         if !quiet {
-            println!("This is makeindex, version 2.17 [TeX Live 2024] (SlateOS).");
+            println!("This is makeindex, version 2.17 [TeX Live 2024] (Slate OS).");
             println!("Scanning input file {}...", f);
             if let Some(s) = style {
                 println!("Scanning style file {}...", s);
@@ -61,7 +61,7 @@ fn run_makeindex(args: &[String]) -> i32 {
 fn run_xindy(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: xindy [OPTIONS] FILE.raw");
-        println!("xindy 2.5.1 (SlateOS)");
+        println!("xindy 2.5.1 (Slate OS)");
         println!();
         println!("Options:");
         println!("  -L LANG        Language");
@@ -74,7 +74,7 @@ fn run_xindy(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("xindy release 2.5.1 (SlateOS)");
+        println!("xindy release 2.5.1 (Slate OS)");
         return 0;
     }
     let file = args.iter()
@@ -96,13 +96,13 @@ fn run_xindy(args: &[String]) -> i32 {
 fn run_splitindex(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: splitindex [OPTIONS] FILE.idx");
-        println!("splitindex 1.2a (SlateOS)");
+        println!("splitindex 1.2a (Slate OS)");
         println!("  -m COMMAND     MakeIndex command");
         println!("  --version      Show version");
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("splitindex 1.2a (SlateOS)");
+        println!("splitindex 1.2a (Slate OS)");
         return 0;
     }
     let file = args.iter()

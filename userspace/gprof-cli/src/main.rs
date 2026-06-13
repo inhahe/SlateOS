@@ -19,7 +19,7 @@ fn run_gprof(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gprof [OPTIONS] [EXECUTABLE [GMON_DATA...]]");
         println!();
-        println!("gprof — display call graph profile (SlateOS).");
+        println!("gprof — display call graph profile (Slate OS).");
         println!();
         println!("Options:");
         println!("  -b              Brief output (no explanations)");
@@ -33,7 +33,7 @@ fn run_gprof(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("gprof (GNU Binutils) 2.42 (SlateOS)");
+        println!("gprof (GNU Binutils) 2.42 (Slate OS)");
         return 0;
     }
 
@@ -85,7 +85,7 @@ fn run_gcov(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gcov [OPTIONS] FILES");
         println!();
-        println!("gcov — test coverage analysis (SlateOS).");
+        println!("gcov — test coverage analysis (Slate OS).");
         println!();
         println!("Options:");
         println!("  -a, --all-blocks      Show info for every basic block");
@@ -101,7 +101,7 @@ fn run_gcov(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("gcov (GCC) 14.0.0 (SlateOS)");
+        println!("gcov (GCC) 14.0.0 (Slate OS)");
         return 0;
     }
 

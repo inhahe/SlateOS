@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_nnn(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: nnn [OPTIONS] [PATH]");
-        println!("nnn v4.9 (SlateOS) — The unorthodox terminal file manager");
+        println!("nnn v4.9 (Slate OS) — The unorthodox terminal file manager");
         println!();
         println!("Options:");
         println!("  -a           Auto-setup temporary NNN_FIFO");
@@ -50,7 +50,7 @@ fn run_nnn(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V") {
-        println!("nnn v4.9 (SlateOS)");
+        println!("nnn v4.9 (Slate OS)");
         return 0;
     }
     let path = args.iter().rfind(|a| !a.starts_with('-'))

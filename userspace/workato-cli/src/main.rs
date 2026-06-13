@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_workato(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: workato [OPTIONS]");
-        println!("Workato (SlateOS) — modern enterprise iPaaS + automation (private unicorn)");
+        println!("Workato (Slate OS) — modern enterprise iPaaS + automation (private unicorn)");
         println!();
         println!("Options:");
         println!("  --recipes              Recipes (workflow automations)");
@@ -22,8 +22,8 @@ fn run_workato(args: &[String], _prog: &str) -> i32 {
         println!("  --version             Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Workato 2024 (SlateOS)"); return 0; }
-    println!("Workato 2024 (SlateOS) — Enterprise Automation Platform");
+    if args.iter().any(|a| a == "--version") { println!("Workato 2024 (Slate OS)"); return 0; }
+    println!("Workato 2024 (Slate OS) — Enterprise Automation Platform");
     println!("  Vendor: Workato, Inc. (Mountain View, CA — private unicorn)");
     println!("  Founders: Vijay Tella + Gautham Viswanathan + Harish Shetty, 2013");
     println!("          Vijay Tella: long-time CEO + ex-TIBCO + ex-Oracle Fusion Middleware");

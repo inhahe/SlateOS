@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_hurl(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: hurl [OPTIONS] [FILES...]");
-        println!("Hurl 4.3.0 (SlateOS)");
+        println!("Hurl 4.3.0 (Slate OS)");
         println!();
         println!("Options:");
         println!("  --test              Test mode (assert results)");

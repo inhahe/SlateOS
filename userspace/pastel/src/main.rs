@@ -44,7 +44,7 @@ fn run_pastel(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("pastel 0.9.0 (SlateOS)");
+            println!("pastel 0.9.0 (Slate OS)");
             0
         }
         "color" => {

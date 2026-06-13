@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_xsane(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: xsane [OPTIONS] [DEVICE]");
-        println!("xsane v0.999 (SlateOS) — Graphical scanner frontend");
+        println!("xsane v0.999 (Slate OS) — Graphical scanner frontend");
         println!();
         println!("Options:");
         println!("  -d DEVICE         Use specific SANE device");
@@ -24,7 +24,7 @@ fn run_xsane(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("xsane v0.999 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("xsane v0.999 (Slate OS)"); return 0; }
     println!("xsane: graphical scanner interface started");
     println!("  SANE version: 1.2");
     println!("  Devices found: 2");

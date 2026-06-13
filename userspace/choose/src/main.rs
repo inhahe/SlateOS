@@ -36,7 +36,7 @@ fn run_choose(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("choose 1.3.4 (SlateOS)");
+        println!("choose 1.3.4 (Slate OS)");
         return 0;
     }
 

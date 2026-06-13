@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_naemon(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: naemon [OPTIONS] [CONFIG_FILE]");
-        println!("Naemon v1.4 (SlateOS) — Monitoring engine (Nagios fork)");
+        println!("Naemon v1.4 (Slate OS) — Monitoring engine (Nagios fork)");
         println!();
         println!("Options:");
         println!("  -v, --verify       Verify configuration");
@@ -24,8 +24,8 @@ fn run_naemon(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Naemon v1.4.2 (SlateOS)"); return 0; }
-    println!("Naemon v1.4.2 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Naemon v1.4.2 (Slate OS)"); return 0; }
+    println!("Naemon v1.4.2 (Slate OS)");
     println!("  Hosts: 156 (148 up, 8 down)");
     println!("  Services: 2,345 (2,100 ok, 145 warning, 100 critical)");
     println!("  Workers: 4");

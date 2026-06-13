@@ -38,7 +38,7 @@ fn run_spt(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("spt 0.27.0 (SlateOS)");
+        println!("spt 0.27.0 (Slate OS)");
         return 0;
     }
 

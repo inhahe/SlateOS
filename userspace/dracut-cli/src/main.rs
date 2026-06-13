@@ -19,7 +19,7 @@ fn run_dracut(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: dracut [OPTIONS] [IMAGE [VERSION]]");
         println!();
-        println!("dracut — generate initramfs image (SlateOS).");
+        println!("dracut — generate initramfs image (Slate OS).");
         println!();
         println!("Options:");
         println!("  -f, --force              Overwrite existing image");
@@ -37,7 +37,7 @@ fn run_dracut(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("dracut 059 (SlateOS)");
+        println!("dracut 059 (Slate OS)");
         return 0;
     }
 

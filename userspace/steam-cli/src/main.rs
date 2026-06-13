@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_steam(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: steam [OPTIONS] [steam://URL]");
-        println!("steam v1.0 (SlateOS) — Steam client launcher");
+        println!("steam v1.0 (Slate OS) — Steam client launcher");
         println!();
         println!("Options:");
         println!("  -applaunch ID     Launch game by app ID");
@@ -25,7 +25,7 @@ fn run_steam(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("steam v1.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("steam v1.0 (Slate OS)"); return 0; }
     if args.iter().any(|a| a == "-bigpicture") {
         println!("steam: big picture mode started");
         return 0;

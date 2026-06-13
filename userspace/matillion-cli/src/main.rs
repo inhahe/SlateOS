@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_matillion(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: matillion [COMMAND] [OPTIONS]");
-        println!("Matillion v2.0 (SlateOS) — Data productivity cloud");
+        println!("Matillion v2.0 (Slate OS) — Data productivity cloud");
         println!();
         println!("Commands:");
         println!("  pipeline list|run|schedule    Manage pipelines");
@@ -30,8 +30,8 @@ fn run_matillion(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Matillion v2.0.0 (SlateOS)"); return 0; }
-    println!("Matillion v2.0.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Matillion v2.0.0 (Slate OS)"); return 0; }
+    println!("Matillion v2.0.0 (Slate OS)");
     println!("  Projects: 6");
     println!("  Pipelines: 34");
     println!("  Environments: 3 (dev, staging, prod)");

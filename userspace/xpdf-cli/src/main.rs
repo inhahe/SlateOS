@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pdfinfo(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: pdfinfo [OPTIONS] FILE.pdf");
-        println!("pdfinfo v4.05 (SlateOS) — PDF document info");
+        println!("pdfinfo v4.05 (Slate OS) — PDF document info");
         return 0;
     }
     let file = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("document.pdf");
@@ -33,7 +33,7 @@ fn run_pdfinfo(args: &[String], _prog: &str) -> i32 {
 fn run_pdffonts(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: pdffonts [OPTIONS] FILE.pdf");
-        println!("pdffonts v4.05 (SlateOS) — List fonts used in PDF");
+        println!("pdffonts v4.05 (Slate OS) — List fonts used in PDF");
         return 0;
     }
     println!("name                    type         emb sub uni");
@@ -48,7 +48,7 @@ fn run_pdffonts(args: &[String], _prog: &str) -> i32 {
 fn run_pdftoppm(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: pdftoppm [OPTIONS] PDF ROOT");
-        println!("pdftoppm v4.05 (SlateOS) — Convert PDF pages to PPM/PNG/JPEG");
+        println!("pdftoppm v4.05 (Slate OS) — Convert PDF pages to PPM/PNG/JPEG");
         println!();
         println!("Options:");
         println!("  -png              Output PNG format");

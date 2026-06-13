@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_love(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: love [OPTIONS] [GAME_DIR|GAME.love]");
-        println!("LOVE 11.5 (SlateOS) — 2D game framework");
+        println!("LOVE 11.5 (Slate OS) — 2D game framework");
         println!();
         println!("Options:");
         println!("  --version          Show version");

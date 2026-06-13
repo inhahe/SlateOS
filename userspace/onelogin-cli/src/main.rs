@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ol(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: onelogin [OPTIONS]");
-        println!("OneLogin by One Identity (SlateOS) — Workforce IAM");
+        println!("OneLogin by One Identity (Slate OS) — Workforce IAM");
         println!();
         println!("Options:");
         println!("  --sso                  SSO (SAML + OIDC + WS-Fed)");
@@ -23,8 +23,8 @@ fn run_ol(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("OneLogin 2024 (SlateOS)"); return 0; }
-    println!("OneLogin 2024 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("OneLogin 2024 (Slate OS)"); return 0; }
+    println!("OneLogin 2024 (Slate OS)");
     println!("  Vendor: OneLogin → acquired by One Identity (Quest Software, Clearlake Capital) Oct 2021");
     println!("          rebranded part of One Identity portfolio");
     println!("  Founders: Thomas Pedersen (Danish — also founded Zendesk, Snaplogic alum)");

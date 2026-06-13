@@ -39,7 +39,7 @@ fn run_act(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("act version 0.2.60 (SlateOS)");
+        println!("act version 0.2.60 (Slate OS)");
         return 0;
     }
 

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_aterix(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: alteryx [OPTIONS] [FILE]");
-        println!("Alteryx Designer 2024.2 (SlateOS) — Self-service analytics automation");
+        println!("Alteryx Designer 2024.2 (Slate OS) — Self-service analytics automation");
         println!();
         println!("Options:");
         println!("  --open FILE            Open workflow (.yxmd / .yxwz)");
@@ -23,8 +23,8 @@ fn run_aterix(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Alteryx Designer 2024.2.1.4 (SlateOS)"); return 0; }
-    println!("Alteryx Designer 2024.2.1.4 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Alteryx Designer 2024.2.1.4 (Slate OS)"); return 0; }
+    println!("Alteryx Designer 2024.2.1.4 (Slate OS)");
     println!("  Products: Designer, Server, AAS (Auto Insights / formerly ClearStory)");
     println!("  Workflow: drag-drop data prep + blending + analytics + automation");
     println!("  Tools: 250+ built-in tools (filter, join, transform, predictive, spatial)");

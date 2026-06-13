@@ -11,7 +11,7 @@ fn run_mdadm(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mdadm [MODE] DEVICE [OPTIONS]");
         println!();
-        println!("mdadm — manage MD (Software RAID) devices (SlateOS).");
+        println!("mdadm — manage MD (Software RAID) devices (Slate OS).");
         println!();
         println!("Modes:");
         println!("  --create, -C           Create array");
@@ -31,7 +31,7 @@ fn run_mdadm(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("mdadm - v4.3 (SlateOS)");
+        println!("mdadm - v4.3 (Slate OS)");
         return 0;
     }
 

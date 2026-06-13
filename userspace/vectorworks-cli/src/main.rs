@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_vw(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: vectorworks [OPTIONS] [FILE]");
-        println!("Nemetschek Vectorworks 2025 (SlateOS) — Architecture/landscape/spotlight design");
+        println!("Nemetschek Vectorworks 2025 (Slate OS) — Architecture/landscape/spotlight design");
         println!();
         println!("Options:");
         println!("  -open FILE             Open .vwx file");
@@ -23,8 +23,8 @@ fn run_vw(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Nemetschek Vectorworks 2025 SP1 (SlateOS)"); return 0; }
-    println!("Nemetschek Vectorworks 2025 SP1 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Nemetschek Vectorworks 2025 SP1 (Slate OS)"); return 0; }
+    println!("Nemetschek Vectorworks 2025 SP1 (Slate OS)");
     println!("  Products: Architect, Landmark (landscape), Spotlight (entertainment), Designer");
     println!("  Format: .vwx native + IFC, DWG/DXF, SKP, 3DS, OBJ");
     println!("  Modeling: hybrid 2D/3D, parametric, NURBS, subdivision");

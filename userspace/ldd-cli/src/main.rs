@@ -19,7 +19,7 @@ fn run_ldd(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ldd [OPTIONS] FILE...");
         println!();
-        println!("ldd — print shared object dependencies (SlateOS).");
+        println!("ldd — print shared object dependencies (Slate OS).");
         println!();
         println!("Options:");
         println!("  -v, --verbose     Verbose (include symbol versioning)");
@@ -29,7 +29,7 @@ fn run_ldd(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("ldd (SlateOS) 2.39");
+        println!("ldd (Slate OS) 2.39");
         return 0;
     }
 
@@ -63,7 +63,7 @@ fn run_pldd(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help") {
         println!("Usage: pldd PID");
         println!();
-        println!("pldd — list shared objects loaded by process (SlateOS).");
+        println!("pldd — list shared objects loaded by process (Slate OS).");
         return 0;
     }
 
@@ -86,7 +86,7 @@ fn run_sprof(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help") {
         println!("Usage: sprof [OPTIONS] SHLIB PROFILE_DATA");
         println!();
-        println!("sprof — shared object profiling data reader (SlateOS).");
+        println!("sprof — shared object profiling data reader (Slate OS).");
         println!();
         println!("Options:");
         println!("  -c, --call-pairs   Print call pairs");

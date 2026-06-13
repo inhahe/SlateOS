@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_qlik(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: qlik [OPTIONS] [APP]");
-        println!("Qlik Sense November 2024 / QlikView 12.90 (SlateOS) — Associative analytics");
+        println!("Qlik Sense November 2024 / QlikView 12.90 (Slate OS) — Associative analytics");
         println!();
         println!("Options:");
         println!("  --app FILE             Open .qvf (Sense) or .qvw (QlikView)");
@@ -23,8 +23,8 @@ fn run_qlik(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Qlik Sense Enterprise November 2024 (SlateOS)"); return 0; }
-    println!("Qlik Sense Enterprise November 2024 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Qlik Sense Enterprise November 2024 (Slate OS)"); return 0; }
+    println!("Qlik Sense Enterprise November 2024 (Slate OS)");
     println!("  Products: Sense (modern), QlikView (classic), Cloud, Talend, Stitch");
     println!("  Engine: Associative in-memory engine — explores all data relationships");
     println!("  Storage: QVD (Qlik Data) columnar files for fast extraction");

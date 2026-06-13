@@ -40,7 +40,7 @@ fn run_broot(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("broot 1.37.0 (SlateOS)");
+        println!("broot 1.37.0 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "--install") {

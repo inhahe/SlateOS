@@ -19,7 +19,7 @@ fn run_latex(prog: &str, args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-help" || a == "-h") {
         println!("Usage: {} [OPTIONS] FILE.tex", prog);
         println!();
-        println!("{} — TeX/LaTeX typesetter (SlateOS).", prog);
+        println!("{} — TeX/LaTeX typesetter (Slate OS).", prog);
         println!();
         println!("Options:");
         println!("  -output-directory DIR  Output directory");
@@ -50,7 +50,7 @@ fn run_latex(prog: &str, args: &[String]) -> i32 {
     let base = strip_ext(file);
     let halt = args.iter().any(|a| a == "-halt-on-error");
 
-    println!("This is {} (SlateOS)", prog);
+    println!("This is {} (Slate OS)", prog);
     println!("entering extended mode");
     println!(" restricted \\write18 enabled.");
     println!("({}",  file);

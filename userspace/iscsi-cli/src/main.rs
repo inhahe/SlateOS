@@ -14,7 +14,7 @@ fn run_iscsiadm(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: iscsiadm [OPTIONS]");
         println!();
-        println!("iscsiadm — iSCSI initiator admin (SlateOS).");
+        println!("iscsiadm — iSCSI initiator admin (Slate OS).");
         println!();
         println!("Options:");
         println!("  -m, --mode <mode>       discovery|node|session|iface");
@@ -26,7 +26,7 @@ fn run_iscsiadm(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("iscsiadm version 2.1.9 (SlateOS)");
+        println!("iscsiadm version 2.1.9 (Slate OS)");
         return 0;
     }
 
@@ -61,12 +61,12 @@ fn run_targetcli(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: targetcli [PATH] [COMMAND]");
         println!();
-        println!("targetcli — Linux-IO target configuration (SlateOS).");
+        println!("targetcli — Linux-IO target configuration (Slate OS).");
         println!("Interactive or scripted mode.");
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("targetcli 2.1.57 (SlateOS)");
+        println!("targetcli 2.1.57 (Slate OS)");
         return 0;
     }
 

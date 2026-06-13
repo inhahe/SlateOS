@@ -10,7 +10,7 @@ use std::process;
 fn run_typst(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: typst COMMAND [OPTIONS]");
-        println!("Typst 0.11.0 (SlateOS)");
+        println!("Typst 0.11.0 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  compile      Compile a Typst file to PDF");
@@ -23,7 +23,7 @@ fn run_typst(args: &[String]) -> i32 {
     }
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match subcmd {
-        "--version" => println!("typst 0.11.0 (SlateOS)"),
+        "--version" => println!("typst 0.11.0 (Slate OS)"),
         "compile" | "c" => {
             let file = args.get(1).map(|s| s.as_str()).unwrap_or("document.typ");
             let output = args.get(2).map(|s| s.as_str());

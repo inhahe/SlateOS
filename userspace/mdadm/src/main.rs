@@ -1265,7 +1265,7 @@ fn run_mdadm(args: &[String], out: &mut Vec<u8>, err: &mut Vec<u8>) -> i32 {
             0
         }
         MdadmMode::Version => {
-            let _ = writeln!(out, "mdadm - v{} - Software Raid management for SlateOS", VERSION);
+            let _ = writeln!(out, "mdadm - v{} - Software Raid management for Slate OS", VERSION);
             0
         }
         MdadmMode::Create => run_create(&opts, out, err),

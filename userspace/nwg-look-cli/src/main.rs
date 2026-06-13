@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_nwg_look(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: nwg-look [OPTIONS]");
-        println!("nwg-look v0.2 (SlateOS) — GTK3 settings editor for Wayland");
+        println!("nwg-look v0.2 (Slate OS) — GTK3 settings editor for Wayland");
         println!();
         println!("Options:");
         println!("  -a                Apply settings without GUI");
@@ -22,7 +22,7 @@ fn run_nwg_look(args: &[String], _prog: &str) -> i32 {
         println!("Configure GTK theme, icons, cursor, and font settings.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("nwg-look v0.2 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("nwg-look v0.2 (Slate OS)"); return 0; }
     if args.iter().any(|a| a == "-a") {
         println!("Applied GTK settings from ~/.config/gtk-3.0/settings.ini");
         return 0;

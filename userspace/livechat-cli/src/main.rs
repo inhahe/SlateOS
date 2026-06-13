@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_livechat(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: livechat [OPTIONS]");
-        println!("LiveChat (SlateOS) — pure-play live chat from Wroclaw, Poland");
+        println!("LiveChat (Slate OS) — pure-play live chat from Wroclaw, Poland");
         println!();
         println!("Options:");
         println!("  --starter              Starter $20/agent/mo");
@@ -26,8 +26,8 @@ fn run_livechat(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("LiveChat 2024 (SlateOS)"); return 0; }
-    println!("LiveChat 2024 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("LiveChat 2024 (Slate OS)"); return 0; }
+    println!("LiveChat 2024 (Slate OS)");
     println!("  Vendor: Text S.A. (Wroclaw, Poland — WSE:TXT, formerly LiveChat Software S.A.)");
     println!("        rebranded from LiveChat Software → Text in 2023 to reflect multi-product portfolio");
     println!("  Founders: Mariusz Cieply + Maciej Jarzębowski + Urszula Jarzębowska, 2002 (!!)");

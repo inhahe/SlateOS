@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_swayidle(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: swayidle [OPTIONS] [EVENTS]");
-        println!("swayidle v1.8 (SlateOS) — Idle management daemon for Wayland");
+        println!("swayidle v1.8 (Slate OS) — Idle management daemon for Wayland");
         println!();
         println!("Options:");
         println!("  -w                Wait for command to finish");

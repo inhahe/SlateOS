@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gitea(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gitea [OPTIONS]");
-        println!("Gitea 1.22 (SlateOS) — Painless self-hosted Git service");
+        println!("Gitea 1.22 (Slate OS) — Painless self-hosted Git service");
         println!();
         println!("Options:");
         println!("  web                    Start Gitea web server");
@@ -22,8 +22,8 @@ fn run_gitea(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Gitea v1.22.3 (SlateOS)"); return 0; }
-    println!("Gitea v1.22.3 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Gitea v1.22.3 (Slate OS)"); return 0; }
+    println!("Gitea v1.22.3 (Slate OS)");
     println!("  Project: community-driven, Go-based Git service");
     println!("  History: forked from Gogs (Go Git Service by Jiahua Chen) Nov 2016");
     println!("          fork triggered by trademark/governance disputes with upstream");

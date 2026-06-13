@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wechat [OPTIONS]");
-        println!("WeChat / Weixin (SlateOS) — Tencent super-app");
+        println!("WeChat / Weixin (Slate OS) — Tencent super-app");
         println!();
         println!("Options:");
         println!("  --chat                 Messages");
@@ -24,8 +24,8 @@ fn run_wc(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("WeChat 3.9.12 / Weixin 8.0.50 (SlateOS)"); return 0; }
-    println!("WeChat 3.9.12 / Weixin 8.0.50 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("WeChat 3.9.12 / Weixin 8.0.50 (Slate OS)"); return 0; }
+    println!("WeChat 3.9.12 / Weixin 8.0.50 (Slate OS)");
     println!("  Vendor: Tencent (Shenzhen, China)");
     println!("  Launched: Jan 2011 by Allen Zhang (creator of QQmail before)");
     println!("  Two products: Weixin (微信, China) and WeChat (overseas) — separate data");

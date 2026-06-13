@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_vsc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: vscode [OPTIONS]");
-        println!("Visual Studio Code 1.95 (SlateOS) — Microsoft's open-source code editor");
+        println!("Visual Studio Code 1.95 (Slate OS) — Microsoft's open-source code editor");
         println!();
         println!("Options:");
         println!("  --new                  New file");
@@ -25,8 +25,8 @@ fn run_vsc(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Visual Studio Code 1.95.3 (SlateOS)"); return 0; }
-    println!("Visual Studio Code 1.95.3 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Visual Studio Code 1.95.3 (Slate OS)"); return 0; }
+    println!("Visual Studio Code 1.95.3 (Slate OS)");
     println!("  Vendor: Microsoft Corporation");
     println!("  License: MIT (code OSS) — but distributed binaries have proprietary additions");
     println!("           VSCodium = MS-free build of the same source");

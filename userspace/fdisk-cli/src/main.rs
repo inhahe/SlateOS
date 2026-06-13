@@ -19,7 +19,7 @@ fn run_fdisk(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: fdisk [OPTIONS] DEVICE");
         println!();
-        println!("fdisk — partition table manipulator (SlateOS).");
+        println!("fdisk — partition table manipulator (Slate OS).");
         println!();
         println!("Options:");
         println!("  -l, --list             List partition tables");
@@ -47,7 +47,7 @@ fn run_fdisk(args: &[String]) -> i32 {
         println!("{}2    1050624  105908223  104857600    50G Linux filesystem", device);
         println!("{}3  105908224 1048575966  942667743 449.5G Linux filesystem", device);
     } else {
-        println!("Welcome to fdisk (SlateOS).");
+        println!("Welcome to fdisk (Slate OS).");
         println!("Changes will remain in memory only, until you decide to write them.");
         println!();
         println!("Command (m for help): ");
@@ -95,7 +95,7 @@ fn main() {
     let code = match prog.as_str() {
         "sfdisk" => run_sfdisk(&rest),
         "cfdisk" => {
-            println!("cfdisk: curses-based partition editor (SlateOS).");
+            println!("cfdisk: curses-based partition editor (Slate OS).");
             println!("  Use fdisk for non-interactive mode.");
             0
         }

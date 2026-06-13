@@ -10,7 +10,7 @@ use std::process;
 fn run_esphome(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: esphome COMMAND [OPTIONS] CONFIG.yaml");
-        println!("ESPHome 2024.1.2 (SlateOS)");
+        println!("ESPHome 2024.1.2 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  compile      Compile firmware");
@@ -26,7 +26,7 @@ fn run_esphome(args: &[String]) -> i32 {
     }
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match subcmd {
-        "version" | "--version" => println!("ESPHome 2024.1.2 (SlateOS, Python 3.12.0)"),
+        "version" | "--version" => println!("ESPHome 2024.1.2 (Slate OS, Python 3.12.0)"),
         "config" => {
             let config = args.get(1).map(|s| s.as_str()).unwrap_or("device.yaml");
             println!("Validating: {}", config);

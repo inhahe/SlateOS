@@ -11,7 +11,7 @@ fn run_asana(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: asana <COMMAND> [OPTIONS]");
         println!();
-        println!("Asana project management CLI (SlateOS).");
+        println!("Asana project management CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  tasks        Manage tasks");

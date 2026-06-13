@@ -13,15 +13,15 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sonic(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sonic [OPTIONS]");
-        println!("Sonic v1.4 (SlateOS) — Fast, lightweight search backend");
+        println!("Sonic v1.4 (Slate OS) — Fast, lightweight search backend");
         println!();
         println!("Options:");
         println!("  -c FILE            Config file (default: config.cfg)");
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Sonic v1.4.8 (SlateOS)"); return 0; }
-    println!("Sonic v1.4.8 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Sonic v1.4.8 (Slate OS)"); return 0; }
+    println!("Sonic v1.4.8 (Slate OS)");
     println!("  Channel: inet (0.0.0.0:1491)");
     println!("  Mode: search + ingest + control");
     println!("  Collections: 5");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_comsol(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: comsol [OPTIONS] [FILE]");
-        println!("COMSOL Multiphysics 6.3 (SlateOS) — Multiphysics simulation");
+        println!("COMSOL Multiphysics 6.3 (Slate OS) — Multiphysics simulation");
         println!();
         println!("Options:");
         println!("  -nodesktop             Headless mode");
@@ -23,8 +23,8 @@ fn run_comsol(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("COMSOL Multiphysics 6.3 (SlateOS)"); return 0; }
-    println!("COMSOL Multiphysics 6.3 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("COMSOL Multiphysics 6.3 (Slate OS)"); return 0; }
+    println!("COMSOL Multiphysics 6.3 (Slate OS)");
     println!("  Modules: AC/DC, RF, Wave Optics, Heat Transfer, Structural, CFD,");
     println!("           Chemical, Battery, Acoustics, MEMS, Plasma, Semiconductor");
     println!("  Strength: arbitrary multiphysics coupling, PDE-based modeling");

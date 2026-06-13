@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_arc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: arc [URL] [OPTIONS]");
-        println!("Arc (SlateOS) — The Browser Company's reimagined-UI browser");
+        println!("Arc (Slate OS) — The Browser Company's reimagined-UI browser");
         println!();
         println!("Options:");
         println!("  --space NAME           Switch Space (workspace, set of tabs+pinned)");
@@ -24,8 +24,8 @@ fn run_arc(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Arc 1.78.0 (62012) (SlateOS)"); return 0; }
-    println!("Arc 1.78.0 (62012) (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Arc 1.78.0 (62012) (Slate OS)"); return 0; }
+    println!("Arc 1.78.0 (62012) (Slate OS)");
     println!("  Vendor: The Browser Company of New York (founded 2019)");
     println!("  Founder: Josh Miller (ex-White House), Hursh Agrawal");
     println!("  Engine: Blink + V8 (Chromium fork), native Mac (Swift) and Win (C++/Swift) shells");

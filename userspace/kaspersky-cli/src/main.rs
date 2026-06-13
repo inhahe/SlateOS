@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ksp(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: kaspersky [OPTIONS]");
-        println!("Kaspersky Premium 21.18 (SlateOS) — Consumer + business security");
+        println!("Kaspersky Premium 21.18 (Slate OS) — Consumer + business security");
         println!();
         println!("Options:");
         println!("  --scan TYPE            quick/full/critical/custom");
@@ -24,8 +24,8 @@ fn run_ksp(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Kaspersky Premium 21.18.13.471 (SlateOS)"); return 0; }
-    println!("Kaspersky Premium 21.18.13.471 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Kaspersky Premium 21.18.13.471 (Slate OS)"); return 0; }
+    println!("Kaspersky Premium 21.18.13.471 (Slate OS)");
     println!("  Editions: Standard, Plus, Premium (consumer); KES (business)");
     println!("  KSN: Kaspersky Security Network (cloud reputation, 400M+ users)");
     println!("  Engines: signature + heuristics + behavioral + ML + anti-cryptor + IDS");

@@ -11,7 +11,7 @@ fn run_linear(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: linear <COMMAND> [OPTIONS]");
         println!();
-        println!("Linear issue tracker CLI (SlateOS).");
+        println!("Linear issue tracker CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  issue        Manage issues");

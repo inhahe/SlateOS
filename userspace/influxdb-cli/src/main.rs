@@ -11,7 +11,7 @@ fn run_influx(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "help") {
         println!("Usage: influx [COMMAND] [OPTIONS]");
         println!();
-        println!("influx — InfluxDB CLI (SlateOS).");
+        println!("influx — InfluxDB CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  setup            Setup InfluxDB");
@@ -29,7 +29,7 @@ fn run_influx(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "version") {
-        println!("Influx CLI 2.7.3 (SlateOS)");
+        println!("Influx CLI 2.7.3 (Slate OS)");
         return 0;
     }
 

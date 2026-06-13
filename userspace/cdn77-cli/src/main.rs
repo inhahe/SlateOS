@@ -28,7 +28,7 @@ fn print_help(prog: &str) {
 }
 
 fn print_version() {
-    println!("cdn77-cli 0.1.0 — SlateOS personality binary");
+    println!("cdn77-cli 0.1.0 — Slate OS personality binary");
     println!("DataCamp Limited / CDN77 — Prague, Czech Republic + London, UK");
 }
 

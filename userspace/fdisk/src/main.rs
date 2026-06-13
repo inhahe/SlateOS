@@ -2469,7 +2469,7 @@ fn print_type_list_gpt(out: &mut OutBuf) {
 fn print_help(out: &mut OutBuf, personality: Personality) {
     match personality {
         Personality::Fdisk => {
-            out.push(b"SlateOS fdisk - Partition Table Manipulator v0.1.0\n\n");
+            out.push(b"Slate OS fdisk - Partition Table Manipulator v0.1.0\n\n");
             out.push(b"USAGE:\n");
             out.push(b"  fdisk [options] [device]\n\n");
             out.push(b"LISTING:\n");
@@ -2495,7 +2495,7 @@ fn print_help(out: &mut OutBuf, personality: Personality) {
             out.push(b"  Name: linux, efi, swap, ntfs, lvm, raid, bios\n");
         }
         Personality::Gdisk => {
-            out.push(b"SlateOS gdisk - GPT Partition Editor v0.1.0\n\n");
+            out.push(b"Slate OS gdisk - GPT Partition Editor v0.1.0\n\n");
             out.push(b"USAGE:\n");
             out.push(b"  gdisk [options] [device]\n\n");
             out.push(b"OPTIONS:\n");
@@ -2507,7 +2507,7 @@ fn print_help(out: &mut OutBuf, personality: Personality) {
             out.push(b"GPT-only editor. Use fdisk for MBR disks.\n");
         }
         Personality::Sfdisk => {
-            out.push(b"SlateOS sfdisk - Scriptable Partition Tool v0.1.0\n\n");
+            out.push(b"Slate OS sfdisk - Scriptable Partition Tool v0.1.0\n\n");
             out.push(b"USAGE:\n");
             out.push(b"  sfdisk --list [device]             List partitions\n");
             out.push(b"  sfdisk --dump [device]             Dump in sfdisk format\n");
@@ -2521,14 +2521,14 @@ fn print_help(out: &mut OutBuf, personality: Personality) {
             out.push(b"  -V, --version   Show version\n");
         }
         Personality::Cfdisk => {
-            out.push(b"SlateOS cfdisk - Curses Partition Editor v0.1.0\n\n");
+            out.push(b"Slate OS cfdisk - Curses Partition Editor v0.1.0\n\n");
             out.push(b"USAGE:\n");
             out.push(b"  cfdisk [device]\n\n");
             out.push(b"Displays partition table in a simple visual format.\n");
             out.push(b"Options: -h/--help, -V/--version\n");
         }
         Personality::Partprobe => {
-            out.push(b"SlateOS partprobe - Inform Kernel of Partition Changes v0.1.0\n\n");
+            out.push(b"Slate OS partprobe - Inform Kernel of Partition Changes v0.1.0\n\n");
             out.push(b"USAGE:\n");
             out.push(b"  partprobe [device...]\n\n");
             out.push(b"Requests the kernel to re-read the partition table for the specified\n");
@@ -2540,7 +2540,7 @@ fn print_help(out: &mut OutBuf, personality: Personality) {
 
 fn print_version(out: &mut OutBuf, personality: Personality) {
     out.push(personality_name(personality));
-    out.push(b" (SlateOS) 0.1.0\n");
+    out.push(b" (Slate OS) 0.1.0\n");
 }
 
 // ── Simulated Disk Data for Testing ──────────────────────────────────

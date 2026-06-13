@@ -971,7 +971,7 @@ fn run(config: &Config) -> i32 {
 // ============================================================================
 
 fn print_help() {
-    println!("SlateOS nl v{VERSION}");
+    println!("Slate OS nl v{VERSION}");
     println!();
     println!("Write each FILE to standard output, with line numbers added.");
     println!("With no FILE, or when FILE is -, read standard input.");
@@ -1029,7 +1029,7 @@ fn main() {
             process::exit(0);
         }
         ParseResult::Version => {
-            println!("nl (SlateOS) {VERSION}");
+            println!("nl (Slate OS) {VERSION}");
             process::exit(0);
         }
         ParseResult::Run(config) => {

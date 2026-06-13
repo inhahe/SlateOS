@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rustic(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: rustic COMMAND [OPTIONS]");
-        println!("rustic v0.7 (SlateOS) — Fast, encrypted backup tool");
+        println!("rustic v0.7 (Slate OS) — Fast, encrypted backup tool");
         println!();
         println!("Commands:");
         println!("  init              Initialize repository");
@@ -28,7 +28,7 @@ fn run_rustic(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("rustic v0.7 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("rustic v0.7 (Slate OS)"); return 0; }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("snapshots");
     match cmd {
         "init" => {

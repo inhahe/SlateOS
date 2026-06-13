@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mg(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: monogame [OPTIONS]");
-        println!("MonoGame 3.8.2 (SlateOS) — Cross-platform .NET game framework (XNA spiritual successor)");
+        println!("MonoGame 3.8.2 (Slate OS) — Cross-platform .NET game framework (XNA spiritual successor)");
         println!();
         println!("Options:");
         println!("  --new TEMPLATE         New project (windowsdx/opengl/android/ios)");
@@ -23,8 +23,8 @@ fn run_mg(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("MonoGame 3.8.2.1105 (SlateOS)"); return 0; }
-    println!("MonoGame 3.8.2.1105 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("MonoGame 3.8.2.1105 (Slate OS)"); return 0; }
+    println!("MonoGame 3.8.2.1105 (Slate OS)");
     println!("  License: MS-PL (Microsoft Public License) — fully open source");
     println!("  Repo: github.com/MonoGame/MonoGame");
     println!("  Maintainer: MonoGame Foundation (501c6 non-profit, established 2023)");

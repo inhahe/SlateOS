@@ -14,22 +14,22 @@ fn run_lvm(args: &[String], prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
-            "pvcreate" => println!("pvcreate (SlateOS) — Initialize physical volume"),
-            "vgcreate" => println!("vgcreate (SlateOS) — Create volume group"),
+            "pvcreate" => println!("pvcreate (Slate OS) — Initialize physical volume"),
+            "vgcreate" => println!("vgcreate (Slate OS) — Create volume group"),
             "lvcreate" => {
-                println!("lvcreate (SlateOS) — Create logical volume");
+                println!("lvcreate (Slate OS) — Create logical volume");
                 println!("  -L SIZE   Volume size");
                 println!("  -n NAME   Volume name");
                 println!("  -T        Thin pool");
                 println!("  --mirrors N  Mirror copies");
             }
-            "pvs" | "vgs" | "lvs" => println!("{} (SlateOS) — Display {} information", prog, prog),
-            _ => println!("{} (SlateOS) — LVM2 tool", prog),
+            "pvs" | "vgs" | "lvs" => println!("{} (Slate OS) — Display {} information", prog, prog),
+            _ => println!("{} (Slate OS) — LVM2 tool", prog),
         }
         println!("  --version  Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("LVM2 v2.03.23 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("LVM2 v2.03.23 (Slate OS)"); return 0; }
     match prog {
         "pvs" => {
             println!("  PV         VG       Fmt  Attr PSize   PFree");
@@ -50,7 +50,7 @@ fn run_lvm(args: &[String], prog: &str) -> i32 {
             println!("  backup vg_data  -wi-ao---- 100.00g");
         }
         _ => {
-            println!("LVM2 v2.03.23 (SlateOS)");
+            println!("LVM2 v2.03.23 (Slate OS)");
             println!("  Operation: {}", prog);
             println!("  Completed successfully");
         }

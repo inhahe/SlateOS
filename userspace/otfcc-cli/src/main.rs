@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_otfccdump(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: otfccdump [OPTIONS] FONT");
-        println!("otfccdump v0.10 (SlateOS) — Dump OpenType font to JSON");
+        println!("otfccdump v0.10 (Slate OS) — Dump OpenType font to JSON");
         println!();
         println!("Options:");
         println!("  FONT              Input font file");
@@ -36,7 +36,7 @@ fn run_otfccdump(args: &[String], _prog: &str) -> i32 {
 fn run_otfccbuild(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: otfccbuild [OPTIONS] INPUT.json");
-        println!("otfccbuild v0.10 (SlateOS) — Build OpenType font from JSON");
+        println!("otfccbuild v0.10 (Slate OS) — Build OpenType font from JSON");
         println!();
         println!("Options:");
         println!("  INPUT.json        Input JSON dump");

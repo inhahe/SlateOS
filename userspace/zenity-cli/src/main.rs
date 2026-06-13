@@ -19,7 +19,7 @@ fn run_zenity(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: zenity [OPTIONS]");
         println!();
-        println!("Zenity — display GTK dialogs (SlateOS).");
+        println!("Zenity — display GTK dialogs (Slate OS).");
         println!();
         println!("Dialog types:");
         println!("  --info               Info dialog");
@@ -47,7 +47,7 @@ fn run_zenity(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("zenity 4.0.1 (SlateOS)");
+        println!("zenity 4.0.1 (Slate OS)");
         return 0;
     }
 
@@ -86,7 +86,7 @@ fn run_kdialog(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: kdialog [OPTIONS]");
         println!();
-        println!("kdialog — KDE dialog tool (SlateOS).");
+        println!("kdialog — KDE dialog tool (Slate OS).");
         println!();
         println!("Options:");
         println!("  --msgbox TEXT        Message box");

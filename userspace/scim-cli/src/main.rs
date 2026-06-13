@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_scim(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: scim [OPTIONS]");
-        println!("scim v1.4 (SlateOS) — Smart Common Input Method platform");
+        println!("scim v1.4 (Slate OS) — Smart Common Input Method platform");
         println!();
         println!("Options:");
         println!("  -d                Run as daemon");
@@ -21,7 +21,7 @@ fn run_scim(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("scim v1.4 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("scim v1.4 (Slate OS)"); return 0; }
     if args.iter().any(|a| a == "-l") {
         println!("Available input methods:");
         println!("  English/European");
@@ -37,10 +37,10 @@ fn run_scim(args: &[String], _prog: &str) -> i32 {
 fn run_setup(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: scim-setup [OPTIONS]");
-        println!("scim-setup v1.4 (SlateOS) — SCIM configuration");
+        println!("scim-setup v1.4 (Slate OS) — SCIM configuration");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("scim-setup v1.4 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("scim-setup v1.4 (Slate OS)"); return 0; }
     println!("scim-setup: configuration dialog opened");
     0
 }

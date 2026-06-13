@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pomfort(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pomfort [COMMAND] [OPTIONS]");
-        println!("Pomfort Suite (SlateOS) — DIT on-set data management & live color");
+        println!("Pomfort Suite (Slate OS) — DIT on-set data management & live color");
         println!();
         println!("Commands:");
         println!("  silverstack            Silverstack 8 (asset management)");
@@ -25,8 +25,8 @@ fn run_pomfort(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Pomfort Silverstack 8 / LiveGrade 6 (SlateOS)"); return 0; }
-    println!("Pomfort Suite (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Pomfort Silverstack 8 / LiveGrade 6 (Slate OS)"); return 0; }
+    println!("Pomfort Suite (Slate OS)");
     println!("  Silverstack: Camera card backup, MHL verification, metadata workflow");
     println!("  LiveGrade: On-set CDL/LUT live monitoring, multi-camera matching");
     println!("  Offload Manager: Free tool for camera card backup with verification");

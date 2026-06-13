@@ -15,7 +15,7 @@ fn run_griddb(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "gs_admin" => {
-                println!("gs_admin (SlateOS) — GridDB admin tool");
+                println!("gs_admin (Slate OS) — GridDB admin tool");
                 println!("  -u USER            Admin user");
                 println!("  -p PASSWORD        Admin password");
                 println!("  --cluster CLUSTER  Cluster name");
@@ -24,7 +24,7 @@ fn run_griddb(args: &[String], prog: &str) -> i32 {
                 println!("  --show-container   Show containers");
             }
             _ => {
-                println!("gridstore (SlateOS) — GridDB server node");
+                println!("gridstore (Slate OS) — GridDB server node");
                 println!("  --config DIR       Config directory");
                 println!("  --cluster NAME     Cluster name");
                 println!("  --mode MODE        Start mode (normal/maintenance)");
@@ -33,7 +33,7 @@ fn run_griddb(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("GridDB v5.5.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("GridDB v5.5.0 (Slate OS)"); return 0; }
     match prog {
         "gs_admin" => {
             println!("GridDB Admin v5.5.0");
@@ -44,7 +44,7 @@ fn run_griddb(args: &[String], prog: &str) -> i32 {
             println!("  Memory: 8 GB / 16 GB");
         }
         _ => {
-            println!("GridDB v5.5.0 (SlateOS)");
+            println!("GridDB v5.5.0 (Slate OS)");
             println!("  Cluster: myCluster");
             println!("  Node: node001 (MASTER)");
             println!("  Listening: 0.0.0.0:10001");

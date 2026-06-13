@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sl(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: streamlabs [OPTIONS]");
-        println!("Streamlabs Desktop 1.18 (SlateOS) — All-in-one streaming + alerts");
+        println!("Streamlabs Desktop 1.18 (Slate OS) — All-in-one streaming + alerts");
         println!();
         println!("Options:");
         println!("  --import-obs           Import OBS scenes");
@@ -24,8 +24,8 @@ fn run_sl(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Streamlabs Desktop 1.18.0 (SlateOS)"); return 0; }
-    println!("Streamlabs Desktop 1.18.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Streamlabs Desktop 1.18.0 (Slate OS)"); return 0; }
+    println!("Streamlabs Desktop 1.18.0 (Slate OS)");
     println!("  Core: Built on OBS Studio fork (Streamlabs OBS)");
     println!("  Alerts: Follow/Sub/Cheer/Donation/Raid overlays");
     println!("  Multistream: Twitch + YouTube + Facebook + Trovo simultaneously");

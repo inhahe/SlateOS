@@ -13,7 +13,7 @@ fn run_cmake(args: Vec<String>) -> i32 {
         println!("       cmake --build <dir> [OPTIONS]");
         println!("       cmake --install <dir>");
         println!();
-        println!("CMake — cross-platform build system generator (SlateOS).");
+        println!("CMake — cross-platform build system generator (Slate OS).");
         println!();
         println!("Options:");
         println!("  -S <path>              Source directory");
@@ -27,7 +27,7 @@ fn run_cmake(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("cmake version 3.28.1 (SlateOS)");
+        println!("cmake version 3.28.1 (Slate OS)");
         return 0;
     }
 

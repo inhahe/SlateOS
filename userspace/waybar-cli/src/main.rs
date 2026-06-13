@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_waybar(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: waybar [OPTIONS]");
-        println!("Waybar 0.10.3 (SlateOS) — Highly customizable Wayland bar");
+        println!("Waybar 0.10.3 (Slate OS) — Highly customizable Wayland bar");
         println!();
         println!("Options:");
         println!("  -c, --config FILE     Config file path");

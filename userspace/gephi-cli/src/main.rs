@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gephi(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gephi [OPTIONS] [FILE]");
-        println!("Gephi v0.10 (SlateOS) — Graph visualization and exploration");
+        println!("Gephi v0.10 (Slate OS) — Graph visualization and exploration");
         println!();
         println!("Options:");
         println!("  --open FILE      Open graph file (GEXF, GraphML, GML, CSV, etc.)");
@@ -24,8 +24,8 @@ fn run_gephi(args: &[String], _prog: &str) -> i32 {
         println!("  --version        Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Gephi v0.10.1 (SlateOS)"); return 0; }
-    println!("Gephi v0.10.1 (SlateOS) — Graph Visualization");
+    if args.iter().any(|a| a == "--version") { println!("Gephi v0.10.1 (Slate OS)"); return 0; }
+    println!("Gephi v0.10.1 (Slate OS) — Graph Visualization");
     println!("  Formats: GEXF, GraphML, GML, CSV, Pajek, DOT, DL, GDF");
     println!("  Layouts: ForceAtlas2, Fruchterman-Reingold, Yifan Hu, OpenOrd");
     println!("  Metrics: PageRank, betweenness, closeness, modularity");

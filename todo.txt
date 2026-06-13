@@ -16,11 +16,20 @@
 ##     target table + build/check/test aliases now x86_64-slateos; ouros-stubs crate
 ##     -> slateos-stubs (and libouros_stubs.a -> libslateos_stubs.a in build-sysroot.ps1).
 ##   - CLAUDE.md / claude.md.bak: operator-owned, left for the operator to update the
-##     `CC_x86_64_ouros` references (flagged, not auto-edited).
-##   - STILL OPEN (operator decision): whether user-visible display strings (boot banner,
-##     uname release, GRUB menu entry, About box) should read "Slate OS" (with a space)
-##     vs the identifier form "SlateOS". The mechanical pass produced "SlateOS" everywhere;
-##     a spaced-form pass over the user-facing shortlist is a separate follow-up if wanted.
+##     `CC_x86_64_ouros` references (RESOLVED: operator gave permission; applied in
+##     commit f90f336f7).
+##   - DISPLAY FORM (operator decided): user-visible text reads "Slate OS" (with a space);
+##     code identifiers/consts/env-vars/filenames stay "SlateOS"/"slateos"/"SLATEOS".
+##     Applied via scripts/display_rename.py, which rewrites "SlateOS" -> "Slate OS" ONLY
+##     inside Rust string literals and only as a standalone word (not adjacent to . / _ - :,
+##     so "SlateOS.installer", PRODID "//SlateOS//", "SlateOS::Foo", "SlateOSConfig" are
+##     left intact). Inserting a space inside an existing string literal can't break Rust
+##     syntax, and paired test assertions convert in lockstep (verified: readelf 48/48 host
+##     tests pass; kernel boot-test PASSED). Touched ~2538 .rs files.
+##     NOT changed by the display pass (intentional): code comments/module-docs (not
+##     user-facing), lowercase "slateos" (paths/domains/identifiers), all-caps "SLATEOS"
+##     (consts/banners). If a future need arises for "Slate OS" in non-.rs user-facing
+##     assets (yaml configs, generated /etc/os-release, docs prose), extend the same rule.
 ## ============================================================================
 
 ## IN PROGRESS (2026-06-13): ALSA/PulseAudio compatibility shim — roadmap 5.1 / 5095

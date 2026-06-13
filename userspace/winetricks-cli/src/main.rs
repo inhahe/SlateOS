@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_winetricks(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: winetricks [OPTIONS] [VERB...]");
-        println!("winetricks v20231124 (SlateOS) — Wine helper script");
+        println!("winetricks v20231124 (Slate OS) — Wine helper script");
         println!();
         println!("Verbs:");
         println!("  dlls              Install Windows DLL overrides");
@@ -29,7 +29,7 @@ fn run_winetricks(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("winetricks v20231124 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("winetricks v20231124 (Slate OS)"); return 0; }
     if args.iter().any(|a| a == "--gui") {
         println!("winetricks: GUI mode started");
         return 0;

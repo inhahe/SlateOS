@@ -57,7 +57,7 @@ fn run_kubectl(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
         "version" => {
-            println!("Client Version: v1.29.1 (SlateOS)");
+            println!("Client Version: v1.29.1 (Slate OS)");
             println!("Server Version: v1.29.0");
             0
         }

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rawtherapee(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: rawtherapee-cli [OPTIONS] -c FILE...");
-        println!("rawtherapee-cli v5.10 (SlateOS) — RAW photo processor (CLI)");
+        println!("rawtherapee-cli v5.10 (Slate OS) — RAW photo processor (CLI)");
         println!();
         println!("Options:");
         println!("  -c FILE...        Input files to process");

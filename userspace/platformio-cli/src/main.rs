@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pio(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: pio COMMAND [OPTIONS]");
-        println!("PlatformIO Core 6.1.13 (SlateOS)");
+        println!("PlatformIO Core 6.1.13 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  init         Initialize project");
@@ -30,7 +30,7 @@ fn run_pio(args: &[String]) -> i32 {
     }
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match subcmd {
-        "--version" => println!("PlatformIO Core 6.1.13 (SlateOS)"),
+        "--version" => println!("PlatformIO Core 6.1.13 (Slate OS)"),
         "init" => {
             let board = args.windows(2).find(|w| w[0] == "--board" || w[0] == "-b").map(|w| w[1].as_str()).unwrap_or("esp32dev");
             println!("Initializing project for board: {}", board);

@@ -15,9 +15,9 @@ fn run_wrk(args: &[String], is_wrk2: bool) -> i32 {
         let name = if is_wrk2 { "wrk2" } else { "wrk" };
         println!("Usage: {} [OPTIONS] <url>", name);
         if is_wrk2 {
-            println!("wrk2 4.2.0 (SlateOS) — constant-throughput HTTP benchmark");
+            println!("wrk2 4.2.0 (Slate OS) — constant-throughput HTTP benchmark");
         } else {
-            println!("wrk 4.2.0 (SlateOS) — HTTP benchmarking tool");
+            println!("wrk 4.2.0 (Slate OS) — HTTP benchmarking tool");
         }
         println!();
         println!("Options:");

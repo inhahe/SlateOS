@@ -19,7 +19,7 @@ fn run_picocom(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: picocom [OPTIONS] DEVICE");
         println!();
-        println!("picocom — minimal serial terminal (SlateOS).");
+        println!("picocom — minimal serial terminal (Slate OS).");
         println!();
         println!("Options:");
         println!("  -b, --baud BAUD       Baud rate (default 9600)");
@@ -41,7 +41,7 @@ fn run_picocom(args: &[String]) -> i32 {
         .and_then(|w| w[1].parse::<u32>().ok())
         .unwrap_or(9600);
 
-    println!("picocom v3.1 (SlateOS)");
+    println!("picocom v3.1 (Slate OS)");
     println!();
     println!("port is        : {}", device);
     println!("flowcontrol    : none");
@@ -61,7 +61,7 @@ fn run_cu(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: cu [OPTIONS] [SYSTEM|PHONE|HOST]");
         println!();
-        println!("cu — call another Unix system (serial/network) (SlateOS).");
+        println!("cu — call another Unix system (serial/network) (Slate OS).");
         println!();
         println!("Options:");
         println!("  -l LINE     Device line");

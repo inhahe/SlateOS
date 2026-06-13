@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_acpid(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: acpid [OPTIONS]");
-        println!("acpid v2.0 (SlateOS) — ACPI event daemon");
+        println!("acpid v2.0 (Slate OS) — ACPI event daemon");
         println!();
         println!("Options:");
         println!("  -d                Debug (foreground)");
@@ -24,7 +24,7 @@ fn run_acpid(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("acpid v2.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("acpid v2.0 (Slate OS)"); return 0; }
     println!("acpid: ACPI event daemon started");
     println!("  Socket: /var/run/acpid.socket");
     println!("  Handlers: lid, power, battery");
@@ -34,7 +34,7 @@ fn run_acpid(args: &[String], _prog: &str) -> i32 {
 fn run_listen(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: acpi_listen [OPTIONS]");
-        println!("acpi_listen v2.0 (SlateOS) — Listen for ACPI events");
+        println!("acpi_listen v2.0 (Slate OS) — Listen for ACPI events");
         println!();
         println!("Options:");
         println!("  -c COUNT          Number of events to capture");

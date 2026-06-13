@@ -993,7 +993,7 @@ fn parse_net_filter(arg: &str) -> NetFilter {
 }
 
 fn print_usage() {
-    println!("SlateOS List Open Files Utility v{VERSION}");
+    println!("Slate OS List Open Files Utility v{VERSION}");
     println!();
     println!("USAGE:");
     println!("  lsof [options]");

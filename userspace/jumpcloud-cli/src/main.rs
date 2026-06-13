@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_jc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: jumpcloud [OPTIONS]");
-        println!("JumpCloud (SlateOS) — Open Directory Platform (cloud AD replacement)");
+        println!("JumpCloud (Slate OS) — Open Directory Platform (cloud AD replacement)");
         println!();
         println!("Options:");
         println!("  --directory            JumpCloud Directory (users + groups + device identity)");
@@ -25,8 +25,8 @@ fn run_jc(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("JumpCloud 2024 (SlateOS)"); return 0; }
-    println!("JumpCloud 2024 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("JumpCloud 2024 (Slate OS)"); return 0; }
+    println!("JumpCloud 2024 (Slate OS)");
     println!("  Vendor: JumpCloud, Inc. (Louisville, Colorado — founded 2012)");
     println!("  Founders: Rajat Bhargava (chairman; serial entrepreneur — StillSecure, MyMail) + Larry Middle");
     println!("  Funding: General Atlantic, Sapphire Ventures, BlackRock + others");

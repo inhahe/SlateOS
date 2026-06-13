@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wl_gammactl(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wl-gammactl [OPTIONS]");
-        println!("wl-gammactl v0.1 (SlateOS) — Gamma/brightness/contrast control");
+        println!("wl-gammactl v0.1 (Slate OS) — Gamma/brightness/contrast control");
         println!();
         println!("Options:");
         println!("  -c CONTRAST       Contrast (0.0-?, default 1.0)");
@@ -28,7 +28,7 @@ fn run_wl_gammactl(args: &[String], _prog: &str) -> i32 {
         println!("Opens a GUI with sliders when no arguments given.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("wl-gammactl v0.1 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("wl-gammactl v0.1 (Slate OS)"); return 0; }
 
     if args.is_empty() {
         println!("wl-gammactl: opening gamma control GUI...");

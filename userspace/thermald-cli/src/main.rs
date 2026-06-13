@@ -19,7 +19,7 @@ fn run_thermald(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: thermald [OPTIONS]");
         println!();
-        println!("thermald — thermal management daemon (SlateOS).");
+        println!("thermald — thermal management daemon (Slate OS).");
         println!();
         println!("Options:");
         println!("  --no-daemon      Run in foreground");
@@ -30,11 +30,11 @@ fn run_thermald(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("thermald version 2.5.6 (SlateOS)");
+        println!("thermald version 2.5.6 (Slate OS)");
         return 0;
     }
 
-    println!("thermald: starting thermal daemon (SlateOS)");
+    println!("thermald: starting thermal daemon (Slate OS)");
     println!("thermald: detected CPU: Intel Core i9-13900K");
     println!("thermald: thermal zones: 2");
     println!("thermald:   zone 0: x86_pkg_temp (trip: 100°C)");
@@ -48,7 +48,7 @@ fn run_thermald(args: &[String]) -> i32 {
 }
 
 fn run_thermal_monitor(_args: &[String]) -> i32 {
-    println!("Thermal Monitor (SlateOS)");
+    println!("Thermal Monitor (Slate OS)");
     println!();
     println!("Zone                   Temperature  Trip Point  Status");
     println!("────────────────────   ───────────  ──────────  ──────");

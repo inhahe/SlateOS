@@ -14,7 +14,7 @@ fn run_openapi(args: &[String], prog_name: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         if prog_name == "openapi-generator" {
             println!("Usage: openapi-generator COMMAND [OPTIONS]");
-            println!("OpenAPI Generator 7.7.0 (SlateOS)");
+            println!("OpenAPI Generator 7.7.0 (Slate OS)");
             println!();
             println!("Commands:");
             println!("  generate     Generate client/server code");
@@ -23,7 +23,7 @@ fn run_openapi(args: &[String], prog_name: &str) -> i32 {
             println!("  config-help  Show generator config options");
         } else {
             println!("Usage: openapi COMMAND [OPTIONS]");
-            println!("OpenAPI CLI 0.68.0 (SlateOS)");
+            println!("OpenAPI CLI 0.68.0 (Slate OS)");
             println!();
             println!("Commands:");
             println!("  lint         Lint/validate OpenAPI spec");

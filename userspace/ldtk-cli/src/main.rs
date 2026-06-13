@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ldtk(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: ldtk COMMAND [OPTIONS]");
-        println!("LDtk v1.5 (SlateOS) — Level Designer Toolkit for 2D games");
+        println!("LDtk v1.5 (Slate OS) — Level Designer Toolkit for 2D games");
         println!();
         println!("Commands:");
         println!("  info FILE.ldtk    Show project info");
@@ -24,7 +24,7 @@ fn run_ldtk(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("LDtk v1.5 (SlateOS)");
+        println!("LDtk v1.5 (Slate OS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("info");

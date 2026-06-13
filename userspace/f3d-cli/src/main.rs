@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_f3d(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: f3d [OPTIONS] FILE...");
-        println!("F3D v2.5 (SlateOS) — Fast and minimalist 3D viewer");
+        println!("F3D v2.5 (Slate OS) — Fast and minimalist 3D viewer");
         println!();
         println!("Options:");
         println!("  FILE              3D model file(s) to view");
@@ -29,7 +29,7 @@ fn run_f3d(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("F3D v2.5 (SlateOS)");
+        println!("F3D v2.5 (Slate OS)");
         return 0;
     }
     let file = args.iter()

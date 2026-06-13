@@ -20,7 +20,7 @@ fn run_distcc(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("distcc 3.4 (SlateOS)");
+        println!("distcc 3.4 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "--show-hosts" || a == "--host-list") {
@@ -59,7 +59,7 @@ fn run_distccd(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("distccd 3.4 (SlateOS)");
+        println!("distccd 3.4 (Slate OS)");
         return 0;
     }
 

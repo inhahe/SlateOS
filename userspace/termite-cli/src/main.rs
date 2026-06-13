@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_termite(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: termite [OPTIONS]");
-        println!("termite v16 (SlateOS) — VTE-based terminal with vim keybindings");
+        println!("termite v16 (Slate OS) — VTE-based terminal with vim keybindings");
         println!();
         println!("Options:");
         println!("  -c FILE           Configuration file");
@@ -24,7 +24,7 @@ fn run_termite(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("termite v16 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("termite v16 (Slate OS)"); return 0; }
     println!("Termite terminal starting...");
     println!("  VTE: 0.72");
     println!("  Hints: url mode (Ctrl+Shift+X)");

@@ -157,7 +157,7 @@ fn read_all_boot_entries() -> Vec<BootEntry> {
 
 fn generate_default_entries() -> Vec<BootEntry> {
     vec![
-        BootEntry { num: 0, active: true, label: "SlateOS".to_string(), path: "HD(1,GPT)/EFI/slateos/bootx64.efi".to_string(), _optional: String::new() },
+        BootEntry { num: 0, active: true, label: "Slate OS".to_string(), path: "HD(1,GPT)/EFI/slateos/bootx64.efi".to_string(), _optional: String::new() },
         BootEntry { num: 1, active: true, label: "UEFI Shell".to_string(), path: "HD(1,GPT)/EFI/Shell/Shell.efi".to_string(), _optional: String::new() },
     ]
 }
@@ -420,7 +420,7 @@ mod tests {
         let entries = generate_default_entries();
         assert_eq!(entries.len(), 2);
         assert!(entries[0].active);
-        assert_eq!(entries[0].label, "SlateOS");
+        assert_eq!(entries[0].label, "Slate OS");
     }
 
     #[test]

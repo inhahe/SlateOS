@@ -10,7 +10,7 @@ use std::process;
 fn run_gatk(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: gatk <tool> [arguments]");
-        println!("GATK 4.5.0.0 (SlateOS)");
+        println!("GATK 4.5.0.0 (Slate OS)");
         println!();
         println!("Tools:");
         println!("  -- Variant Discovery");
@@ -36,7 +36,7 @@ fn run_gatk(args: &[String]) -> i32 {
     }
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match subcmd {
-        "--version" => println!("GATK 4.5.0.0 (SlateOS)"),
+        "--version" => println!("GATK 4.5.0.0 (Slate OS)"),
         "HaplotypeCaller" => {
             let input = args.windows(2).find(|w| w[0] == "-I").map(|w| w[1].as_str()).unwrap_or("input.bam");
             let reference = args.windows(2).find(|w| w[0] == "-R").map(|w| w[1].as_str()).unwrap_or("reference.fa");

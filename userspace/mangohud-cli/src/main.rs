@@ -14,7 +14,7 @@ fn run_mangohud(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: mangohud [OPTIONS] [COMMAND] [ARGS]");
         println!();
-        println!("mangohud — Vulkan/OpenGL performance overlay (SlateOS).");
+        println!("mangohud — Vulkan/OpenGL performance overlay (Slate OS).");
         println!();
         println!("Options:");
         println!("  --dlsym              Force dlsym hooking");
@@ -27,7 +27,7 @@ fn run_mangohud(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("MangoHud v0.7.1 (SlateOS)");
+        println!("MangoHud v0.7.1 (Slate OS)");
         return 0;
     }
 

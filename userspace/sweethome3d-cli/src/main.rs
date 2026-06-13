@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sweethome3d(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sweethome3d [OPTIONS] [FILE.sh3d]");
-        println!("sweethome3d v7.3 (SlateOS) — Interior design application");
+        println!("sweethome3d v7.3 (Slate OS) — Interior design application");
         println!();
         println!("Options:");
         println!("  --version         Show version");
@@ -24,7 +24,7 @@ fn run_sweethome3d(args: &[String], _prog: &str) -> i32 {
         println!("  1500+ furniture models, OBJ/DAE import");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("sweethome3d v7.3 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("sweethome3d v7.3 (Slate OS)"); return 0; }
     println!("sweethome3d: interior design application started");
     println!("  Furniture catalog: 1500+ items");
     println!("  Textures: 400+ materials");

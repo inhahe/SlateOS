@@ -27,7 +27,7 @@ fn run_howdoi(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("howdoi 2.0.20 (SlateOS)");
+        println!("howdoi 2.0.20 (Slate OS)");
         return 0;
     }
 

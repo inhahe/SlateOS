@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gloo(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: glooctl [COMMAND] [OPTIONS]");
-        println!("glooctl v1.16 (SlateOS) — Gloo Edge API gateway CLI");
+        println!("glooctl v1.16 (Slate OS) — Gloo Edge API gateway CLI");
         println!();
         println!("Commands:");
         println!("  install            Install Gloo Edge");
@@ -31,8 +31,8 @@ fn run_gloo(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("glooctl v1.16.12 (SlateOS)"); return 0; }
-    println!("Gloo Edge v1.16.12 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("glooctl v1.16.12 (Slate OS)"); return 0; }
+    println!("Gloo Edge v1.16.12 (Slate OS)");
     println!("  Status: healthy");
     println!("  Upstreams: 12 (10 accepted)");
     println!("  Virtual services: 8");

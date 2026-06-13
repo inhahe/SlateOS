@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_vllm(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: vllm COMMAND [OPTIONS]");
-        println!("vLLM 0.5.0 (SlateOS) — Fast LLM serving engine");
+        println!("vLLM 0.5.0 (Slate OS) — Fast LLM serving engine");
         println!();
         println!("Commands:");
         println!("  serve          Start OpenAI-compatible API server");

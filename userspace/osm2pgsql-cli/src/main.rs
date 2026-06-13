@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_osm2pgsql(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: osm2pgsql [OPTIONS] OSM_FILE");
-        println!("osm2pgsql v1.10 (SlateOS) — Import OSM data into PostgreSQL/PostGIS");
+        println!("osm2pgsql v1.10 (Slate OS) — Import OSM data into PostgreSQL/PostGIS");
         println!();
         println!("Options:");
         println!("  -d DATABASE    Database name");
@@ -30,8 +30,8 @@ fn run_osm2pgsql(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("osm2pgsql v1.10.0 (SlateOS)"); return 0; }
-    println!("osm2pgsql v1.10.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("osm2pgsql v1.10.0 (Slate OS)"); return 0; }
+    println!("osm2pgsql v1.10.0 (Slate OS)");
     println!("  Input: planet-latest.osm.pbf");
     println!("  Database: gis");
     println!("  Mode: create");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_revit(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: revit [OPTIONS] [FILE]");
-        println!("Autodesk Revit 2025 (SlateOS) — BIM for architecture/MEP/structural");
+        println!("Autodesk Revit 2025 (Slate OS) — BIM for architecture/MEP/structural");
         println!();
         println!("Options:");
         println!("  /language LANG         UI language (ENU/CHS/DEU/JPN/...)");
@@ -23,8 +23,8 @@ fn run_revit(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Autodesk Revit 2025.1 (SlateOS)"); return 0; }
-    println!("Autodesk Revit 2025.1 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Autodesk Revit 2025.1 (Slate OS)"); return 0; }
+    println!("Autodesk Revit 2025.1 (Slate OS)");
     println!("  Disciplines: Architecture, Structure, MEP (mechanical/electrical/plumbing)");
     println!("  Format: .rvt/.rfa/.rte native + IFC, DWG/DXF, gbXML");
     println!("  Collaboration: Worksets, Revit Server, BIM 360 / Autodesk Docs");

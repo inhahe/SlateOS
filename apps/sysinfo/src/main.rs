@@ -556,7 +556,7 @@ impl SysInfoState {
 
     fn populate_cpu() -> CpuInfo {
         CpuInfo {
-            brand: "SlateOS Virtual CPU @ 3.60GHz".to_string(),
+            brand: "Slate OS Virtual CPU @ 3.60GHz".to_string(),
             vendor: "GenuineIntel".to_string(),
             family: 6,
             model: 158,
@@ -636,7 +636,7 @@ impl SysInfoState {
                         mount_point: "/boot/efi".to_string(),
                     },
                     PartitionInfo {
-                        label: "SlateOS Root".to_string(),
+                        label: "Slate OS Root".to_string(),
                         filesystem: "ext4".to_string(),
                         capacity_gb: 500.0,
                         used_gb: 127.3,
@@ -1112,7 +1112,7 @@ impl SysInfoState {
         let cpu = &self.cpu_info;
         let mem = &self.memory_info;
         vec![
-            Property::new("OS Name", "SlateOS"),
+            Property::new("OS Name", "Slate OS"),
             Property::new("OS Version", "1.0.0"),
             Property::new("OS Build", "2026.05.17-nightly"),
             Property::new("Kernel Version", "0.1.0-slateos"),
@@ -1551,7 +1551,7 @@ impl SysInfoState {
     /// Export all system information as a text report.
     pub fn export_text(&self) -> String {
         let mut out = String::with_capacity(4096);
-        out.push_str("=== SlateOS System Information Report ===\n\n");
+        out.push_str("=== Slate OS System Information Report ===\n\n");
 
         let sections: &[(SysInfoCategory, &str)] = &[
             (SysInfoCategory::SystemSummary, "System Summary"),

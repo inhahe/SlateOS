@@ -13,13 +13,13 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_qt(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: protonup-qt [OPTIONS]");
-        println!("protonup-qt v2.9 (SlateOS) — Proton/Wine-GE installer GUI");
+        println!("protonup-qt v2.9 (Slate OS) — Proton/Wine-GE installer GUI");
         println!();
         println!("Options:");
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("protonup-qt v2.9 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("protonup-qt v2.9 (Slate OS)"); return 0; }
     println!("protonup-qt: compatibility tool manager started");
     println!("  Installed:");
     println!("    GE-Proton8-26");
@@ -32,7 +32,7 @@ fn run_qt(args: &[String], _prog: &str) -> i32 {
 fn run_cli(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: protonup [OPTIONS]");
-        println!("protonup v0.2 (SlateOS) — CLI Proton/Wine-GE installer");
+        println!("protonup v0.2 (Slate OS) — CLI Proton/Wine-GE installer");
         println!();
         println!("Options:");
         println!("  -l                List installed versions");

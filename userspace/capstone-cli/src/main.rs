@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_cstool(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: cstool [OPTIONS] ARCH MODE CODE");
-        println!("cstool (SlateOS) — Capstone disassembly engine CLI");
+        println!("cstool (Slate OS) — Capstone disassembly engine CLI");
         println!();
         println!("Architectures:");
         println!("  x86, x64       x86 16/32/64-bit");
@@ -31,8 +31,8 @@ fn run_cstool(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Capstone v5.0.1 (SlateOS)"); return 0; }
-    println!("Capstone v5.0.1 (SlateOS) — Disassembly");
+    if args.iter().any(|a| a == "--version") { println!("Capstone v5.0.1 (Slate OS)"); return 0; }
+    println!("Capstone v5.0.1 (Slate OS) — Disassembly");
     println!("  Architecture: x86_64");
     println!();
     println!("  0x1000: 55              push rbp");

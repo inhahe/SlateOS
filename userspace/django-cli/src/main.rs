@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_django(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: django-admin COMMAND [OPTIONS]");
-        println!("Django 5.0.7 (SlateOS)");
+        println!("Django 5.0.7 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  startproject   Create a new project");

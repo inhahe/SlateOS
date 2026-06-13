@@ -11,7 +11,7 @@ fn run_statsd(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: statsd <COMMAND> [OPTIONS]");
         println!();
-        println!("StatsD metrics daemon CLI (SlateOS).");
+        println!("StatsD metrics daemon CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  server       Start StatsD server");
@@ -23,7 +23,7 @@ fn run_statsd(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("statsd 0.10.0 (SlateOS)");
+        println!("statsd 0.10.0 (Slate OS)");
         return 0;
     }
 

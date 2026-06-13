@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_fuse_overlayfs(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: fuse-overlayfs [OPTIONS] MOUNTPOINT");
-        println!("fuse-overlayfs v1.13 (SlateOS) — FUSE overlay filesystem for rootless containers");
+        println!("fuse-overlayfs v1.13 (Slate OS) — FUSE overlay filesystem for rootless containers");
         println!();
         println!("Options:");
         println!("  -o lowerdir=DIR    Lower (read-only) directories (colon-separated)");
@@ -27,8 +27,8 @@ fn run_fuse_overlayfs(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("fuse-overlayfs v1.13 (SlateOS)"); return 0; }
-    println!("fuse-overlayfs v1.13 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("fuse-overlayfs v1.13 (Slate OS)"); return 0; }
+    println!("fuse-overlayfs v1.13 (Slate OS)");
     println!("  Lower: /var/lib/containers/storage/overlay/l1:/var/lib/containers/storage/overlay/l2");
     println!("  Upper: /var/lib/containers/storage/overlay/upper");
     println!("  Work: /var/lib/containers/storage/overlay/work");

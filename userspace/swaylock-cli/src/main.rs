@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_swaylock(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: swaylock [OPTIONS]");
-        println!("swaylock v1.7 (SlateOS) — Screen locker for Wayland");
+        println!("swaylock v1.7 (Slate OS) — Screen locker for Wayland");
         println!();
         println!("Options:");
         println!("  -c COLOR          Background color (#RRGGBB)");
@@ -27,7 +27,7 @@ fn run_swaylock(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("swaylock v1.7 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("swaylock v1.7 (Slate OS)"); return 0; }
     let color = args.iter().skip_while(|a| a.as_str() != "-c").nth(1).map(|s| s.as_str()).unwrap_or("#000000");
     let image = args.iter().skip_while(|a| a.as_str() != "-i").nth(1);
     println!("Screen locked.");

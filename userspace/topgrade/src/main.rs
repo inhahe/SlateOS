@@ -29,7 +29,7 @@ fn run_topgrade(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("topgrade 15.0.0 (SlateOS)");
+        println!("topgrade 15.0.0 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "--show-config") {
@@ -46,7 +46,7 @@ fn run_topgrade(args: Vec<String>) -> i32 {
     }
 
     println!("╔══════════════════════════════════════════╗");
-    println!("║          topgrade — SlateOS                ║");
+    println!("║          topgrade — Slate OS                ║");
     println!("╚══════════════════════════════════════════╝");
     println!();
     println!("── System package manager ─────────────────");

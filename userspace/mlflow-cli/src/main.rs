@@ -11,7 +11,7 @@ fn run_mlflow(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mlflow <COMMAND> [OPTIONS]");
         println!();
-        println!("MLflow ML lifecycle management CLI (SlateOS).");
+        println!("MLflow ML lifecycle management CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  server       Start tracking server");

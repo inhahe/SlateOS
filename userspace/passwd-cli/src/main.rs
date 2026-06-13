@@ -19,7 +19,7 @@ fn run_passwd(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: passwd [OPTIONS] [USER]");
         println!();
-        println!("passwd — change user password (SlateOS).");
+        println!("passwd — change user password (Slate OS).");
         println!();
         println!("Options:");
         println!("  -l, --lock         Lock account");

@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_eb(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: eventbridge [OPTIONS]");
-        println!("AWS EventBridge (SlateOS) — serverless event bus (formerly CloudWatch Events, 2019)");
+        println!("AWS EventBridge (Slate OS) — serverless event bus (formerly CloudWatch Events, 2019)");
         println!();
         println!("Options:");
         println!("  --bus                  Custom event bus or default bus");
@@ -22,8 +22,8 @@ fn run_eb(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("AWS EventBridge 2024 (SlateOS) — eventbridge CLI (aws-cli v2)"); return 0; }
-    println!("AWS EventBridge 2024 (SlateOS) — Serverless Event Bus + Routing + Schedule + Pipes");
+    if args.iter().any(|a| a == "--version") { println!("AWS EventBridge 2024 (Slate OS) — eventbridge CLI (aws-cli v2)"); return 0; }
+    println!("AWS EventBridge 2024 (Slate OS) — Serverless Event Bus + Routing + Schedule + Pipes");
     println!("  Vendor: Amazon Web Services (Seattle, WA — NASDAQ: AMZN)");
     println!("  History (the CloudWatch Events evolution):");
     println!("    - Started as CloudWatch Events (2016) — cron + event routing inside CloudWatch");

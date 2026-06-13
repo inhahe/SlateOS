@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_dex(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: dex [COMMAND] [OPTIONS]");
-        println!("Dex v2.39 (SlateOS) — OpenID Connect identity provider");
+        println!("Dex v2.39 (Slate OS) — OpenID Connect identity provider");
         println!();
         println!("Commands:");
         println!("  serve FILE         Start Dex server with config");
@@ -27,8 +27,8 @@ fn run_dex(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Dex v2.39.1 (SlateOS)"); return 0; }
-    println!("Dex v2.39.1 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Dex v2.39.1 (Slate OS)"); return 0; }
+    println!("Dex v2.39.1 (Slate OS)");
     println!("  Issuer: https://dex.example.com");
     println!("  Web: https://0.0.0.0:5556");
     println!("  gRPC: 0.0.0.0:5557");

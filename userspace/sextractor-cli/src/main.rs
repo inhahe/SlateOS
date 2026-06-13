@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sextractor(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sex [OPTIONS] IMAGE [IMAGE2]");
-        println!("SExtractor v2.28 (SlateOS) — Source Extractor for astronomical images");
+        println!("SExtractor v2.28 (Slate OS) — Source Extractor for astronomical images");
         println!();
         println!("Options:");
         println!("  -c FILE          Configuration file");
@@ -29,7 +29,7 @@ fn run_sextractor(args: &[String], _prog: &str) -> i32 {
         println!("  --version        Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("SExtractor v2.28.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("SExtractor v2.28.0 (Slate OS)"); return 0; }
     if args.iter().any(|a| a == "-d") {
         println!("# Default configuration file for SExtractor");
         println!("CATALOG_NAME    test.cat");
@@ -41,7 +41,7 @@ fn run_sextractor(args: &[String], _prog: &str) -> i32 {
     }
     let files: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
     if files.is_empty() { eprintln!("sex: error: no image file"); return 1; }
-    println!("SExtractor v2.28.0 (SlateOS)");
+    println!("SExtractor v2.28.0 (Slate OS)");
     println!("  Image: {} (4096 x 4096)", files[0]);
     println!("  Background: 1234.5 +/- 45.2 ADU");
     println!("  Threshold: 1.5 sigma = 67.8 ADU");

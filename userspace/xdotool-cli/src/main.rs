@@ -11,7 +11,7 @@ fn run_xdotool(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: xdotool COMMAND [OPTIONS] [ARGS]");
         println!();
-        println!("xdotool — X11 automation tool (SlateOS).");
+        println!("xdotool — X11 automation tool (Slate OS).");
         println!();
         println!("Window commands:");
         println!("  search [OPTIONS] PATTERN  Search for windows");
@@ -46,7 +46,7 @@ fn run_xdotool(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("xdotool version 3.20211022.1 (SlateOS)");
+        println!("xdotool version 3.20211022.1 (Slate OS)");
         return 0;
     }
 

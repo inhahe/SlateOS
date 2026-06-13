@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_st(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: soundtoys [PLUGIN] [OPTIONS]");
-        println!("Soundtoys 5.5 (SlateOS) — Creative effects bundle inspired by vintage hardware");
+        println!("Soundtoys 5.5 (Slate OS) — Creative effects bundle inspired by vintage hardware");
         println!();
         println!("Plugins:");
         println!("  echoboy            EchoBoy (echo/delay simulator)");
@@ -30,8 +30,8 @@ fn run_st(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Soundtoys 5.5.6 (SlateOS)"); return 0; }
-    println!("Soundtoys 5.5.6 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Soundtoys 5.5.6 (Slate OS)"); return 0; }
+    println!("Soundtoys 5.5.6 (Slate OS)");
     println!("  Bundle: 21 effects (full Soundtoys 5)");
     println!("  Effect Rack: chain Soundtoys plug-ins as a single instance");
     println!("  Companion: Little (free) versions, Tribute & TheEcho hardware");

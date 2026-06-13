@@ -38,7 +38,7 @@ fn run_cosign(args: Vec<String>) -> i32 {
             println!("| \\___/\\ | \\__/ |      |_____  |");
             println!(" \\_____/ \\______/       _____| |");
             println!("                       |_______|");
-            println!("cosign v2.2.4 (SlateOS)");
+            println!("cosign v2.2.4 (Slate OS)");
         }
         "generate-key-pair" => {
             println!("Enter password for private key:");

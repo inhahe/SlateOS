@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_nagios(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: nagios [OPTIONS] <config-file>");
-        println!("nagios v4.5 (SlateOS) — Host/service monitoring system");
+        println!("nagios v4.5 (Slate OS) — Host/service monitoring system");
         println!();
         println!("Options:");
         println!("  -v              Verify configuration");
@@ -24,7 +24,7 @@ fn run_nagios(args: &[String], _prog: &str) -> i32 {
         println!("Monitors hosts, services, and network infrastructure.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("nagios v4.5 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("nagios v4.5 (Slate OS)"); return 0; }
     if args.iter().any(|a| a == "-v") {
         println!("nagios: verifying configuration...");
         println!("  Total hosts: 12");
@@ -42,10 +42,10 @@ fn run_nagios(args: &[String], _prog: &str) -> i32 {
 fn run_nagiostats(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: nagiostats [OPTIONS]");
-        println!("nagiostats v4.5 (SlateOS) — Nagios performance statistics");
+        println!("nagiostats v4.5 (Slate OS) — Nagios performance statistics");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("nagiostats v4.5 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("nagiostats v4.5 (Slate OS)"); return 0; }
     println!("Nagios Stats:");
     println!("  Active host checks (1min):   12");
     println!("  Active service checks (1min): 48");
@@ -57,7 +57,7 @@ fn run_nagiostats(args: &[String], _prog: &str) -> i32 {
 fn run_nagios_check(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: nagios-check [OPTIONS] <plugin> [ARGS...]");
-        println!("nagios-check v4.5 (SlateOS) — Run Nagios check plugins");
+        println!("nagios-check v4.5 (Slate OS) — Run Nagios check plugins");
         return 0;
     }
     if args.is_empty() {

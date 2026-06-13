@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_zincsearch(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: zincsearch [OPTIONS]");
-        println!("ZincSearch v0.4 (SlateOS) — Lightweight Elasticsearch alternative");
+        println!("ZincSearch v0.4 (Slate OS) — Lightweight Elasticsearch alternative");
         println!();
         println!("Options:");
         println!("  --data-dir DIR     Data directory");
@@ -23,8 +23,8 @@ fn run_zincsearch(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("ZincSearch v0.4.10 (SlateOS)"); return 0; }
-    println!("ZincSearch v0.4.10 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("ZincSearch v0.4.10 (Slate OS)"); return 0; }
+    println!("ZincSearch v0.4.10 (Slate OS)");
     println!("  Web UI: http://0.0.0.0:4080");
     println!("  API: http://0.0.0.0:4080/api");
     println!("  Indexes: 6");

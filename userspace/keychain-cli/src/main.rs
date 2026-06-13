@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_keychain(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: keychain [OPTIONS] [KEY...]");
-        println!("keychain v2.8 (SlateOS) — SSH/GPG agent front-end");
+        println!("keychain v2.8 (Slate OS) — SSH/GPG agent front-end");
         println!();
         println!("Options:");
         println!("  --clear           Clear all cached keys");
@@ -25,7 +25,7 @@ fn run_keychain(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("keychain v2.8 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("keychain v2.8 (Slate OS)"); return 0; }
     if args.iter().any(|a| a == "--clear") {
         println!("* keychain: clearing all cached keys");
         return 0;

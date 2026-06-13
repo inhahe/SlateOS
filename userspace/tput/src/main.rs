@@ -469,7 +469,7 @@ fn run_tput() -> Result<(), String> {
                 process::exit(0);
             }
             "-V" | "--version" => {
-                println!("tput (SlateOS) 0.1.0");
+                println!("tput (Slate OS) 0.1.0");
                 process::exit(0);
             }
             "-T" => {
@@ -546,7 +546,7 @@ fn run_tput() -> Result<(), String> {
                     "vt100" => "DEC VT100",
                     "linux" => "Linux console",
                     "dumb" => "dumb terminal",
-                    "slateos" => "SlateOS terminal",
+                    "slateos" => "Slate OS terminal",
                     other => other,
                 };
                 println!("{name}");

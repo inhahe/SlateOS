@@ -243,7 +243,7 @@ fn run_bluetoothctl(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "version" => {
-            println!("bluetoothctl 0.1.0 (SlateOS)");
+            println!("bluetoothctl 0.1.0 (Slate OS)");
             0
         }
         "show" => bt_show(&cmd_args),
@@ -471,7 +471,7 @@ fn run_hciconfig(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("hciconfig 0.1.0 (SlateOS)");
+            println!("hciconfig 0.1.0 (Slate OS)");
             0
         }
         s if s.starts_with("hci") => {
@@ -631,7 +631,7 @@ fn run_btmon(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("btmon 0.1.0 (SlateOS)");
+            println!("btmon 0.1.0 (Slate OS)");
             0
         }
         _ => {
@@ -648,7 +648,7 @@ fn run_btmon(args: Vec<String>) -> i32 {
             println!("      HCI Revision: 0x0100");
             println!("      LMP Version: 5.3 (0x0c)");
             println!("      LMP Subversion: 0x0100");
-            println!("      Manufacturer: SlateOS Virtual (65535)");
+            println!("      Manufacturer: Slate OS Virtual (65535)");
             println!();
             println!("(Press Ctrl+C to stop monitoring)");
             0

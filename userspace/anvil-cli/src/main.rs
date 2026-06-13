@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_anvil(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: anvil [OPTIONS]");
-        println!("anvil 0.2.0 (SlateOS) — Local Ethereum node (Foundry)");
+        println!("anvil 0.2.0 (Slate OS) — Local Ethereum node (Foundry)");
         println!();
         println!("Options:");
         println!("  -p, --port N          Port (default 8545)");
@@ -33,7 +33,7 @@ fn run_anvil(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("anvil 0.2.0 (SlateOS)");
+        println!("anvil 0.2.0 (Slate OS)");
         return 0;
     }
     let port = args.windows(2).find(|w| w[0] == "-p" || w[0] == "--port")

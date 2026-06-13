@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_kops(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: kops COMMAND [OPTIONS]");
-        println!("kops v1.29.0 (SlateOS) — Kubernetes Operations");
+        println!("kops v1.29.0 (Slate OS) — Kubernetes Operations");
         println!();
         println!("Commands:");
         println!("  create          Create resources");
@@ -30,7 +30,7 @@ fn run_kops(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("kops v1.29.0 (SlateOS)");
+        println!("kops v1.29.0 (Slate OS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("get");

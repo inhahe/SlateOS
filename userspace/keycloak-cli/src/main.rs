@@ -15,7 +15,7 @@ fn run_keycloak(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [COMMAND] [OPTIONS]", prog);
         match prog {
             "kcadm" => {
-                println!("kcadm (SlateOS) — Keycloak Admin CLI");
+                println!("kcadm (Slate OS) — Keycloak Admin CLI");
                 println!("  config credentials  Set server/credentials");
                 println!("  create realms       Create realm");
                 println!("  create users        Create user");
@@ -25,7 +25,7 @@ fn run_keycloak(args: &[String], prog: &str) -> i32 {
                 println!("  delete users/ID     Delete user");
             }
             _ => {
-                println!("Keycloak v24.0 (SlateOS) — Identity and access management");
+                println!("Keycloak v24.0 (Slate OS) — Identity and access management");
                 println!("  start              Start in production mode");
                 println!("  start-dev          Start in dev mode");
                 println!("  build              Build optimized config");
@@ -37,7 +37,7 @@ fn run_keycloak(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Keycloak v24.0.4 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("Keycloak v24.0.4 (Slate OS)"); return 0; }
     match prog {
         "kcadm" => {
             println!("Keycloak Admin CLI");
@@ -46,7 +46,7 @@ fn run_keycloak(args: &[String], prog: &str) -> i32 {
             println!("  Authenticated as: admin");
         }
         _ => {
-            println!("Keycloak v24.0.4 (SlateOS)");
+            println!("Keycloak v24.0.4 (Slate OS)");
             println!("  Realms: 3 (master, production, staging)");
             println!("  Users: 1,234");
             println!("  Clients: 45");

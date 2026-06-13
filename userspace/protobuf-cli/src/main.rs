@@ -14,7 +14,7 @@ fn run_protoc(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: protoc [OPTIONS] PROTO_FILES");
         println!();
-        println!("protoc — Protocol Buffer compiler (SlateOS).");
+        println!("protoc — Protocol Buffer compiler (Slate OS).");
         println!();
         println!("Options:");
         println!("  --proto_path=PATH, -I PATH   Import path");
@@ -32,7 +32,7 @@ fn run_protoc(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("libprotoc 25.2 (SlateOS)");
+        println!("libprotoc 25.2 (Slate OS)");
         return 0;
     }
 
@@ -62,7 +62,7 @@ fn run_buf(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: buf [FLAGS] COMMAND [ARGS]");
         println!();
-        println!("buf — Protobuf build tool (SlateOS).");
+        println!("buf — Protobuf build tool (Slate OS).");
         println!();
         println!("Commands:");
         println!("  lint          Lint proto files");
@@ -76,7 +76,7 @@ fn run_buf(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("1.29.0 (SlateOS)");
+        println!("1.29.0 (Slate OS)");
         return 0;
     }
 

@@ -11,7 +11,7 @@ fn run_sendgrid(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sendgrid <COMMAND> [OPTIONS]");
         println!();
-        println!("SendGrid email API CLI (SlateOS).");
+        println!("SendGrid email API CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  send         Send an email");

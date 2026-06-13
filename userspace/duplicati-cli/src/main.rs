@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_cli(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: duplicati-cli COMMAND [OPTIONS]");
-        println!("duplicati-cli v2.0 (SlateOS) — Cloud backup tool");
+        println!("duplicati-cli v2.0 (Slate OS) — Cloud backup tool");
         println!();
         println!("Commands:");
         println!("  backup URL SRC    Run a backup");
@@ -26,7 +26,7 @@ fn run_cli(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("duplicati-cli v2.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("duplicati-cli v2.0 (Slate OS)"); return 0; }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("list");
     match cmd {
         "backup" => {
@@ -57,14 +57,14 @@ fn run_cli(args: &[String], _prog: &str) -> i32 {
 fn run_server(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: duplicati-server [OPTIONS]");
-        println!("duplicati-server v2.0 (SlateOS) — Duplicati web server");
+        println!("duplicati-server v2.0 (Slate OS) — Duplicati web server");
         println!();
         println!("Options:");
         println!("  --webservice-port PORT  Web UI port (default: 8200)");
         println!("  --no-hosted-server      Don't run tray icon");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("duplicati-server v2.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("duplicati-server v2.0 (Slate OS)"); return 0; }
     println!("duplicati-server: web interface started on http://localhost:8200");
     0
 }

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_smartctl(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: smartctl [OPTIONS] DEVICE");
-        println!("smartctl v7.4 (SlateOS) — SMART disk monitoring");
+        println!("smartctl v7.4 (Slate OS) — SMART disk monitoring");
         println!();
         println!("Options:");
         println!("  -i             Show device info");
@@ -25,7 +25,7 @@ fn run_smartctl(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("smartctl v7.4 (SlateOS, smartmontools)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("smartctl v7.4 (Slate OS, smartmontools)"); return 0; }
     if args.iter().any(|a| a == "--scan") {
         println!("/dev/sda -d sat   # /dev/sda, ATA device");
         println!("/dev/nvme0 -d nvme # /dev/nvme0, NVMe device");
@@ -51,12 +51,12 @@ fn run_smartctl(args: &[String], _prog: &str) -> i32 {
 fn run_smartd(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: smartd [OPTIONS]");
-        println!("smartd v7.4 (SlateOS) — SMART monitoring daemon");
+        println!("smartd v7.4 (Slate OS) — SMART monitoring daemon");
         println!("  -n              Don't fork (foreground)");
         println!("  -q LEVEL        Quiet mode (never, errors, nodev)");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("smartd v7.4 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("smartd v7.4 (Slate OS)"); return 0; }
     println!("smartd: SMART monitoring daemon started");
     println!("  Monitoring 2 devices");
     println!("  Check interval: 1800 seconds");

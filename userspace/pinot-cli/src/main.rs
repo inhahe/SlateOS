@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pinot(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pinot-admin [COMMAND] [OPTIONS]");
-        println!("Apache Pinot v1.1 (SlateOS) — Real-time distributed OLAP datastore");
+        println!("Apache Pinot v1.1 (Slate OS) — Real-time distributed OLAP datastore");
         println!();
         println!("Commands:");
         println!("  StartController    Start controller");
@@ -32,8 +32,8 @@ fn run_pinot(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Apache Pinot v1.1.0 (SlateOS)"); return 0; }
-    println!("Apache Pinot v1.1.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Apache Pinot v1.1.0 (Slate OS)"); return 0; }
+    println!("Apache Pinot v1.1.0 (Slate OS)");
     println!("  Controller: http://0.0.0.0:9000");
     println!("  Broker: http://0.0.0.0:8099");
     println!("  Server: 0.0.0.0:8098");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_foreman(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: foreman <command> [OPTIONS]");
-        println!("foreman v3.9 (SlateOS) — Lifecycle management tool");
+        println!("foreman v3.9 (Slate OS) — Lifecycle management tool");
         println!();
         println!("Manages provisioning, configuration, and monitoring");
         println!("of physical and virtual servers.");
@@ -22,7 +22,7 @@ fn run_foreman(args: &[String], _prog: &str) -> i32 {
         println!("  --version       Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("foreman v3.9 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("foreman v3.9 (Slate OS)"); return 0; }
     println!("foreman: lifecycle management server");
     println!("  Hosts managed: 24");
     println!("  Host groups: 4");
@@ -33,7 +33,7 @@ fn run_foreman(args: &[String], _prog: &str) -> i32 {
 fn run_hammer(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: hammer <resource> <action> [OPTIONS]");
-        println!("hammer v3.9 (SlateOS) — Foreman CLI client");
+        println!("hammer v3.9 (Slate OS) — Foreman CLI client");
         println!();
         println!("Resources:");
         println!("  host          Manage hosts");
@@ -44,15 +44,15 @@ fn run_hammer(args: &[String], _prog: &str) -> i32 {
         println!("  --version     Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("hammer v3.9 (SlateOS, Foreman CLI)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("hammer v3.9 (Slate OS, Foreman CLI)"); return 0; }
     if args.len() >= 2 {
         println!("hammer: {} {} completed", args[0], args[1]);
     } else if args.len() == 1 && args[0] == "host" {
         println!("hammer host: listing hosts");
         println!("  ID | NAME         | OS           | STATUS");
-        println!("  1  | web-01       | SlateOS 1.0    | OK");
-        println!("  2  | db-01        | SlateOS 1.0    | OK");
-        println!("  3  | app-01       | SlateOS 1.0    | OK");
+        println!("  1  | web-01       | Slate OS 1.0    | OK");
+        println!("  2  | db-01        | Slate OS 1.0    | OK");
+        println!("  3  | app-01       | Slate OS 1.0    | OK");
     } else {
         println!("hammer: use --help for available resources");
     }
@@ -62,7 +62,7 @@ fn run_hammer(args: &[String], _prog: &str) -> i32 {
 fn run_foreman_rake(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: foreman-rake <task> [OPTIONS]");
-        println!("foreman-rake v3.9 (SlateOS) — Foreman maintenance tasks");
+        println!("foreman-rake v3.9 (Slate OS) — Foreman maintenance tasks");
         println!("  db:migrate      Run database migrations");
         println!("  db:seed         Seed database");
         println!("  permissions:reset  Reset permissions cache");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_owncloud(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: owncloud [COMMAND] [OPTIONS]");
-        println!("ownCloud Infinite Scale v5.0 (SlateOS) — File sync & share");
+        println!("ownCloud Infinite Scale v5.0 (Slate OS) — File sync & share");
         println!();
         println!("Commands:");
         println!("  server             Start ownCloud server");
@@ -29,8 +29,8 @@ fn run_owncloud(args: &[String], _prog: &str) -> i32 {
         println!("  --log-level LEVEL  Log level");
         return 0;
     }
-    if args.iter().any(|a| a == "--version" || a == "version") { println!("ownCloud Infinite Scale v5.0.6 (SlateOS)"); return 0; }
-    println!("ownCloud Infinite Scale v5.0.6 (SlateOS)");
+    if args.iter().any(|a| a == "--version" || a == "version") { println!("ownCloud Infinite Scale v5.0.6 (Slate OS)"); return 0; }
+    println!("ownCloud Infinite Scale v5.0.6 (Slate OS)");
     println!("  Users: 23");
     println!("  Spaces: 8 (personal + project)");
     println!("  Storage: 89 GiB used");

@@ -11,7 +11,7 @@ fn run_gcloud(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gcloud [OPTIONS] <GROUP> <COMMAND> [ARGS]");
         println!();
-        println!("The Google Cloud CLI (SlateOS).");
+        println!("The Google Cloud CLI (Slate OS).");
         println!();
         println!("Groups:");
         println!("  compute      Compute Engine");
@@ -39,7 +39,7 @@ fn run_gcloud(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "version") {
-        println!("Google Cloud SDK 460.0.0 (SlateOS)");
+        println!("Google Cloud SDK 460.0.0 (Slate OS)");
         println!("bq 2.0.100");
         println!("core 2024.01.15");
         println!("gsutil 5.27");

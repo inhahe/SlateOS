@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_runc(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("NAME:");
-        println!("   runc — Open Container Initiative runtime (SlateOS)");
+        println!("   runc — Open Container Initiative runtime (Slate OS)");
         println!();
         println!("USAGE:");
         println!("   runc [global options] command [command options] [arguments...]");
@@ -37,7 +37,7 @@ fn run_runc(args: &[String]) -> i32 {
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("list");
     match subcmd {
         "--version" => {
-            println!("runc version 1.1.12 (SlateOS)");
+            println!("runc version 1.1.12 (Slate OS)");
             println!("commit: abcdef1234567890");
             println!("spec: 1.1.0");
             println!("go: go1.22.0");
@@ -93,7 +93,7 @@ fn main() {
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "crun" if rest.iter().any(|a| a == "--version") => {
-            println!("crun version 1.14 (SlateOS)");
+            println!("crun version 1.14 (Slate OS)");
             println!("commit: abcdef1234567890");
             println!("rundir: /run/crun");
             println!("spec: 1.0.0");

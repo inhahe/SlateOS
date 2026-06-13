@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_stellarium(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: stellarium [OPTIONS]");
-        println!("stellarium v24.1 (SlateOS) — Desktop planetarium");
+        println!("stellarium v24.1 (Slate OS) — Desktop planetarium");
         println!();
         println!("Options:");
         println!("  --full-screen     Start fullscreen");
@@ -24,7 +24,7 @@ fn run_stellarium(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("stellarium v24.1 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("stellarium v24.1 (Slate OS)"); return 0; }
     println!("stellarium: planetarium started");
     println!("  Stars: 600,000+ from Hipparcos catalog");
     println!("  Deep sky: 80,000+ nebulae, galaxies, clusters");

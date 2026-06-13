@@ -11,7 +11,7 @@ fn run_tg(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: tg <COMMAND> [OPTIONS]");
         println!();
-        println!("Telegram Bot API CLI (SlateOS).");
+        println!("Telegram Bot API CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  send         Send a message");

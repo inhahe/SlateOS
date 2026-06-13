@@ -1276,7 +1276,7 @@ fn cmd_delete(backup_path: &Path) {
 
 fn print_usage() {
     println!(
-        "backup — SlateOS backup utility
+        "backup — Slate OS backup utility
 
 Usage: backup <command> [options]
 

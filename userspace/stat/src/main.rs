@@ -1962,7 +1962,7 @@ fn run_mkfifo(opts: &MkfifoOpts) -> bool {
 // ============================================================================
 
 fn print_stat_help() {
-    println!("SlateOS stat v0.1.0 -- Display file or filesystem status");
+    println!("Slate OS stat v0.1.0 -- Display file or filesystem status");
     println!();
     println!("USAGE:");
     println!("  stat [OPTIONS] FILE...");
@@ -1991,7 +1991,7 @@ fn print_stat_help() {
 }
 
 fn print_touch_help() {
-    println!("SlateOS touch v0.1.0 -- Update file access and modification times");
+    println!("Slate OS touch v0.1.0 -- Update file access and modification times");
     println!();
     println!("USAGE:");
     println!("  touch [OPTIONS] FILE...");
@@ -2010,7 +2010,7 @@ fn print_touch_help() {
 }
 
 fn print_ln_help() {
-    println!("SlateOS ln v0.1.0 -- Create links between files");
+    println!("Slate OS ln v0.1.0 -- Create links between files");
     println!();
     println!("USAGE:");
     println!("  ln [OPTIONS] TARGET LINK_NAME");
@@ -2031,7 +2031,7 @@ fn print_ln_help() {
 }
 
 fn print_readlink_help() {
-    println!("SlateOS readlink v0.1.0 -- Print symlink target or canonical path");
+    println!("Slate OS readlink v0.1.0 -- Print symlink target or canonical path");
     println!();
     println!("USAGE:");
     println!("  readlink [OPTIONS] FILE...");
@@ -2046,7 +2046,7 @@ fn print_readlink_help() {
 }
 
 fn print_realpath_help() {
-    println!("SlateOS realpath v0.1.0 -- Print resolved absolute path");
+    println!("Slate OS realpath v0.1.0 -- Print resolved absolute path");
     println!();
     println!("USAGE:");
     println!("  realpath [OPTIONS] FILE...");
@@ -2061,7 +2061,7 @@ fn print_realpath_help() {
 }
 
 fn print_mkfifo_help() {
-    println!("SlateOS mkfifo v0.1.0 -- Create named pipes (FIFOs)");
+    println!("Slate OS mkfifo v0.1.0 -- Create named pipes (FIFOs)");
     println!();
     println!("USAGE:");
     println!("  mkfifo [OPTIONS] NAME...");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_dasher(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: dasher [OPTIONS]");
-        println!("dasher v6.0 (SlateOS) — Predictive text input system");
+        println!("dasher v6.0 (Slate OS) — Predictive text input system");
         println!();
         println!("Options:");
         println!("  --alphabet FILE   Custom alphabet file");
@@ -24,7 +24,7 @@ fn run_dasher(args: &[String], _prog: &str) -> i32 {
         println!("  joystick, head tracker, breath sensor");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("dasher v6.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("dasher v6.0 (Slate OS)"); return 0; }
     println!("dasher: predictive text input started");
     println!("  Language model: English");
     println!("  Input: mouse pointer");

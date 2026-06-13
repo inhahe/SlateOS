@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_xephem(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: xephem [OPTIONS]");
-        println!("XEphem v4.1 (SlateOS) — Interactive astronomical ephemeris");
+        println!("XEphem v4.1 (Slate OS) — Interactive astronomical ephemeris");
         println!();
         println!("Options:");
         println!("  -lat N         Observer latitude (degrees)");
@@ -25,8 +25,8 @@ fn run_xephem(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("XEphem v4.1.0 (SlateOS)"); return 0; }
-    println!("XEphem v4.1.0 (SlateOS) — Astronomical Ephemeris");
+    if args.iter().any(|a| a == "--version") { println!("XEphem v4.1.0 (Slate OS)"); return 0; }
+    println!("XEphem v4.1.0 (Slate OS) — Astronomical Ephemeris");
     println!("  Observer: 40.7128 N, 74.0060 W, 10m");
     println!("  Date: 2024-06-15 22:00:00 UTC");
     println!("  Sidereal time: 14h 23m 45s");

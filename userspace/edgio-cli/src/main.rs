@@ -29,7 +29,7 @@ fn print_help(prog: &str) {
 }
 
 fn print_version() {
-    println!("edgio-cli 0.1.0 — SlateOS personality binary");
+    println!("edgio-cli 0.1.0 — Slate OS personality binary");
     println!("Edgio, Inc. (formerly Limelight Networks) — Chapter 11 Sep 2024");
 }
 

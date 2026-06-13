@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_monit(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: monit [OPTIONS] <command>");
-        println!("monit v5.33 (SlateOS) — Process supervision and monitoring");
+        println!("monit v5.33 (Slate OS) — Process supervision and monitoring");
         println!();
         println!("Commands:");
         println!("  start <name>     Start a monitored service");
@@ -31,7 +31,7 @@ fn run_monit(args: &[String], _prog: &str) -> i32 {
         println!("  --version        Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("monit v5.33 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("monit v5.33 (Slate OS)"); return 0; }
     if args.iter().any(|a| a == "-t") {
         println!("monit: control file syntax OK");
         return 0;

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_kp(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: keepass [OPTIONS] [DATABASE]");
-        println!("KeePass 2.57 (SlateOS) — File-based open-source password manager");
+        println!("KeePass 2.57 (Slate OS) — File-based open-source password manager");
         println!();
         println!("Options:");
         println!("  DATABASE               Path to .kdbx file");
@@ -25,8 +25,8 @@ fn run_kp(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("KeePass 2.57 (SlateOS)"); return 0; }
-    println!("KeePass 2.57 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("KeePass 2.57 (Slate OS)"); return 0; }
+    println!("KeePass 2.57 (Slate OS)");
     println!("  Vendor: Dominik Reichl (single author, KeePass Password Safe Foundation)");
     println!("  License: GPL-2.0-or-later (free, open source)");
     println!("  Stack: .NET (KeePass 2.x), C++ (KeePass 1.x classic)");

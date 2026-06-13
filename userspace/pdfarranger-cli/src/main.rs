@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pdfarranger(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: pdfarranger [OPTIONS] [FILE...]");
-        println!("pdfarranger v1.10 (SlateOS) — Merge, split, rotate PDF pages");
+        println!("pdfarranger v1.10 (Slate OS) — Merge, split, rotate PDF pages");
         println!();
         println!("Options:");
         println!("  FILE...           PDF files to open");

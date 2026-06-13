@@ -11,7 +11,7 @@ fn run_square(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: square <COMMAND> [OPTIONS]");
         println!();
-        println!("Square developer CLI (SlateOS).");
+        println!("Square developer CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  payments     Manage payments");

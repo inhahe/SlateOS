@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_viewer(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: vncviewer [OPTIONS] HOST[:DISPLAY]");
-        println!("vncviewer v1.14 (SlateOS) — TigerVNC viewer");
+        println!("vncviewer v1.14 (Slate OS) — TigerVNC viewer");
         println!();
         println!("Options:");
         println!("  -FullScreen        Fullscreen mode");
@@ -22,7 +22,7 @@ fn run_viewer(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("vncviewer v1.14 (SlateOS, TigerVNC)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("vncviewer v1.14 (Slate OS, TigerVNC)"); return 0; }
     println!("vncviewer: connecting...");
     0
 }
@@ -30,7 +30,7 @@ fn run_viewer(args: &[String], _prog: &str) -> i32 {
 fn run_server(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: vncserver [:DISPLAY] [OPTIONS]");
-        println!("vncserver v1.14 (SlateOS) — TigerVNC server");
+        println!("vncserver v1.14 (Slate OS) — TigerVNC server");
         println!();
         println!("Options:");
         println!("  -geometry WxH     Screen size");
@@ -39,7 +39,7 @@ fn run_server(args: &[String], _prog: &str) -> i32 {
         println!("  -list             List running servers");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("vncserver v1.14 (SlateOS, TigerVNC)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("vncserver v1.14 (Slate OS, TigerVNC)"); return 0; }
     if args.iter().any(|a| a == "-list") {
         println!("TigerVNC server sessions:");
         println!("  (none running)");
@@ -52,7 +52,7 @@ fn run_server(args: &[String], _prog: &str) -> i32 {
 fn run_passwd(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: vncpasswd [PASSFILE]");
-        println!("vncpasswd v1.14 (SlateOS) — Set VNC password");
+        println!("vncpasswd v1.14 (Slate OS) — Set VNC password");
         return 0;
     }
     println!("vncpasswd: set VNC password");
@@ -62,10 +62,10 @@ fn run_passwd(args: &[String], _prog: &str) -> i32 {
 fn run_config(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: vncconfig [OPTIONS]");
-        println!("vncconfig v1.14 (SlateOS) — VNC server configuration");
+        println!("vncconfig v1.14 (Slate OS) — VNC server configuration");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("vncconfig v1.14 (SlateOS, TigerVNC)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("vncconfig v1.14 (Slate OS, TigerVNC)"); return 0; }
     println!("vncconfig: configuration utility started");
     0
 }

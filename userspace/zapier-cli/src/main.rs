@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_zapier(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: zapier [OPTIONS]");
-        println!("Zapier (SlateOS) — workflow automation for SMB + prosumers (private, profitable)");
+        println!("Zapier (Slate OS) — workflow automation for SMB + prosumers (private, profitable)");
         println!();
         println!("Options:");
         println!("  --zaps                 Zaps (automation workflows: trigger + action)");
@@ -23,8 +23,8 @@ fn run_zapier(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Zapier 2024 (SlateOS)"); return 0; }
-    println!("Zapier 2024 (SlateOS) — Automation for the Rest of Us");
+    if args.iter().any(|a| a == "--version") { println!("Zapier 2024 (Slate OS)"); return 0; }
+    println!("Zapier 2024 (Slate OS) — Automation for the Rest of Us");
     println!("  Vendor: Zapier, Inc. (incorporated Delaware, HQ San Francisco — fully remote since 2011)");
     println!("  Founders: Wade Foster + Bryan Helmig + Mike Knoop, 2011");
     println!("          founded in Columbia, MO during Y Combinator (W12 batch)");

@@ -300,7 +300,7 @@ const DEFAULT_ANON_ROOT: &str = "/srv/ftp";
 /// Default config file path.
 const DEFAULT_CONFIG_PATH: &str = "/etc/ftpd.conf";
 /// Default server greeting.
-const DEFAULT_BANNER: &str = "SlateOS FTP server ready.";
+const DEFAULT_BANNER: &str = "Slate OS FTP server ready.";
 /// Maximum command line length (RFC 959 allows 512 including CRLF).
 const MAX_CMD_LEN: usize = 4096;
 /// Buffer size for data transfers.
@@ -568,7 +568,7 @@ fn parse_cli() -> Result<CliArgs, FtpdError> {
 
 fn print_help() {
     let help = "\
-ftpd - SlateOS FTP server daemon
+ftpd - Slate OS FTP server daemon
 
 Usage: ftpd [OPTIONS]
 

@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_akamai(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: akamai [OPTIONS]");
-        println!("Akamai (SlateOS) — original CDN, security, edge compute, Linode cloud (NASDAQ:AKAM)");
+        println!("Akamai (Slate OS) — original CDN, security, edge compute, Linode cloud (NASDAQ:AKAM)");
         println!();
         println!("Options:");
         println!("  --cdn                  Akamai CDN (original 1998, 4000+ POPs)");
@@ -22,8 +22,8 @@ fn run_akamai(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Akamai 2024 (SlateOS) — akamai CLI 2.x"); return 0; }
-    println!("Akamai 2024 (SlateOS) — Cloud Computing, Security, and Content Delivery");
+    if args.iter().any(|a| a == "--version") { println!("Akamai 2024 (Slate OS) — akamai CLI 2.x"); return 0; }
+    println!("Akamai 2024 (Slate OS) — Cloud Computing, Security, and Content Delivery");
     println!("  Vendor: Akamai Technologies, Inc. (Cambridge, MA — NASDAQ:AKAM since 1999)");
     println!("  Founders: Tom Leighton (MIT prof) + Daniel Lewin (MIT student, killed on AA Flight 11 9/11/2001) + Jonathan Seelig, 1998");
     println!("          MIT spin-off — Leighton's research on consistent hashing");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_looker(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: looker [OPTIONS] [SUBCMD]");
-        println!("Google Cloud Looker 24.18 (SlateOS) — Modern BI + embedded analytics");
+        println!("Google Cloud Looker 24.18 (Slate OS) — Modern BI + embedded analytics");
         println!();
         println!("Options:");
         println!("  --instance URL         Looker instance URL");
@@ -24,8 +24,8 @@ fn run_looker(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Google Cloud Looker 24.18 (SlateOS)"); return 0; }
-    println!("Google Cloud Looker 24.18 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Google Cloud Looker 24.18 (Slate OS)"); return 0; }
+    println!("Google Cloud Looker 24.18 (Slate OS)");
     println!("  Products: Looker (governed BI), Looker Studio (free self-serve)");
     println!("  LookML: declarative semantic modeling language (Looker Markup Language)");
     println!("  Architecture: in-database analytics — queries pushed to warehouse");

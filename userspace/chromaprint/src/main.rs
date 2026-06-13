@@ -22,7 +22,7 @@ fn run_fpcalc(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-version") {
-        println!("fpcalc version 1.5.1 (SlateOS)");
+        println!("fpcalc version 1.5.1 (Slate OS)");
         println!("(Chromaprint library 1.5.1)");
         return 0;
     }

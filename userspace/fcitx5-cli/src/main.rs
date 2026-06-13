@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_fcitx5(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: fcitx5 [OPTIONS]");
-        println!("fcitx5 v5.1 (SlateOS) — Input method framework");
+        println!("fcitx5 v5.1 (Slate OS) — Input method framework");
         println!();
         println!("Options:");
         println!("  -d                Run as daemon");
@@ -25,7 +25,7 @@ fn run_fcitx5(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("fcitx5 v5.1 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("fcitx5 v5.1 (Slate OS)"); return 0; }
     let daemon = args.iter().any(|a| a == "-d");
     if daemon {
         println!("Starting fcitx5 daemon...");
@@ -40,7 +40,7 @@ fn run_fcitx5(args: &[String], _prog: &str) -> i32 {
 fn run_configtool(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: fcitx5-configtool [OPTIONS]");
-        println!("fcitx5-configtool v5.1 (SlateOS) — Fcitx5 configuration tool");
+        println!("fcitx5-configtool v5.1 (Slate OS) — Fcitx5 configuration tool");
         println!();
         println!("Options:");
         println!("  --addon NAME      Configure specific addon");
@@ -56,7 +56,7 @@ fn run_configtool(args: &[String], _prog: &str) -> i32 {
 fn run_diagnose(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: fcitx5-diagnose");
-        println!("fcitx5-diagnose v5.1 (SlateOS) — Diagnose fcitx5 issues");
+        println!("fcitx5-diagnose v5.1 (Slate OS) — Diagnose fcitx5 issues");
         return 0;
     }
     let _ = args;

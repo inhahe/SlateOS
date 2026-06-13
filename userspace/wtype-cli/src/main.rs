@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wtype(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: wtype [OPTIONS] TEXT...");
-        println!("wtype v0.4 (SlateOS) — Wayland keyboard/mouse input simulator");
+        println!("wtype v0.4 (Slate OS) — Wayland keyboard/mouse input simulator");
         println!();
         println!("Options:");
         println!("  TEXT              Text to type");
@@ -26,7 +26,7 @@ fn run_wtype(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("wtype v0.4 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("wtype v0.4 (Slate OS)"); return 0; }
 
     let mut i = 0;
     while i < args.len() {

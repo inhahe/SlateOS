@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gnote(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gnote [OPTIONS]");
-        println!("gnote v45.0 (SlateOS) — GNOME desktop notes");
+        println!("gnote v45.0 (Slate OS) — GNOME desktop notes");
         println!();
         println!("Options:");
         println!("  --new-note        Create a new note");
@@ -22,7 +22,7 @@ fn run_gnote(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("gnote v45.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("gnote v45.0 (Slate OS)"); return 0; }
     if args.iter().any(|a| a == "--new-note") {
         println!("gnote: new note created");
         return 0;

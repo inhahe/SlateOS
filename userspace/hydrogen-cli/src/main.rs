@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_hydrogen(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: hydrogen [OPTIONS] [SONG_FILE]");
-        println!("Hydrogen v1.2 (SlateOS) — Advanced drum machine");
+        println!("Hydrogen v1.2 (Slate OS) — Advanced drum machine");
         println!();
         println!("Options:");
         println!("  -d DRIVER     Audio driver (jack, alsa, oss)");
@@ -25,8 +25,8 @@ fn run_hydrogen(args: &[String], _prog: &str) -> i32 {
         println!("  --version     Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Hydrogen v1.2.3 (SlateOS)"); return 0; }
-    println!("Hydrogen v1.2.3 (SlateOS) — Drum Machine");
+    if args.iter().any(|a| a == "--version") { println!("Hydrogen v1.2.3 (Slate OS)"); return 0; }
+    println!("Hydrogen v1.2.3 (Slate OS) — Drum Machine");
     println!("  Audio: JACK @ 44100 Hz");
     println!("  Drumkit: GMRockKit");
     println!("    Instruments: 18");

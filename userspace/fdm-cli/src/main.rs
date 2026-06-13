@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_fdm(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: fdm [OPTIONS] COMMAND");
-        println!("fdm v2.2 (SlateOS) — Fetch, filter and deliver mail");
+        println!("fdm v2.2 (Slate OS) — Fetch, filter and deliver mail");
         println!();
         println!("Commands:");
         println!("  fetch             Fetch and deliver mail");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_slurp(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: slurp [OPTIONS]");
-        println!("slurp v1.5 (SlateOS) — Select a region in Wayland compositor");
+        println!("slurp v1.5 (Slate OS) — Select a region in Wayland compositor");
         println!();
         println!("Options:");
         println!("  -d                Show display dimensions");

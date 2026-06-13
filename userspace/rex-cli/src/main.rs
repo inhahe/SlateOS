@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rex(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: rex [OPTIONS] <task>");
-        println!("rex v1.14 (SlateOS) — Remote execution framework");
+        println!("rex v1.14 (Slate OS) — Remote execution framework");
         println!();
         println!("Options:");
         println!("  -H HOST       Target host(s)");
@@ -28,7 +28,7 @@ fn run_rex(args: &[String], _prog: &str) -> i32 {
         println!("Automate deployments and server management.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("rex v1.14 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("rex v1.14 (Slate OS)"); return 0; }
     if args.iter().any(|a| a == "-T") {
         println!("Tasks:");
         println!("  deploy         Deploy application");

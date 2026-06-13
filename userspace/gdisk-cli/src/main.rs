@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gdisk(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gdisk [DEVICE]");
-        println!("gdisk v1.0 (SlateOS) — Interactive GPT partition editor");
+        println!("gdisk v1.0 (Slate OS) — Interactive GPT partition editor");
         println!();
         println!("Commands (interactive):");
         println!("  p   Print partition table");
@@ -25,7 +25,7 @@ fn run_gdisk(args: &[String], _prog: &str) -> i32 {
         println!("  --version  Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("gdisk v1.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("gdisk v1.0 (Slate OS)"); return 0; }
     println!("gdisk: GPT fdisk");
     println!("  Disk /dev/sda: 976773168 sectors, 500.0 GiB");
     println!("  Disk identifier (GUID): A1B2C3D4-E5F6-7890-ABCD-EF1234567890");
@@ -36,7 +36,7 @@ fn run_gdisk(args: &[String], _prog: &str) -> i32 {
 fn run_sgdisk(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sgdisk [OPTIONS] DEVICE");
-        println!("sgdisk v1.0 (SlateOS) — Scriptable GPT partition editor");
+        println!("sgdisk v1.0 (Slate OS) — Scriptable GPT partition editor");
         println!("  -p            Print partition table");
         println!("  -n N:S:E      Add partition N from sector S to E");
         println!("  -d N          Delete partition N");
@@ -44,11 +44,11 @@ fn run_sgdisk(args: &[String], _prog: &str) -> i32 {
         println!("  -z            Zap (destroy) GPT structures");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("sgdisk v1.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("sgdisk v1.0 (Slate OS)"); return 0; }
     if args.iter().any(|a| a == "-p") {
         println!("Number  Start      End         Size       Code  Name");
         println!("   1    2048       1050623     512.0 MiB  EF00  EFI system");
-        println!("   2    1050624    967098367   461.0 GiB  8300  SlateOS root");
+        println!("   2    1050624    967098367   461.0 GiB  8300  Slate OS root");
         println!("   3    967098368  976773134   4.6 GiB    8200  Linux swap");
     }
     0
@@ -57,10 +57,10 @@ fn run_sgdisk(args: &[String], _prog: &str) -> i32 {
 fn run_cgdisk(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: cgdisk [DEVICE]");
-        println!("cgdisk v1.0 (SlateOS) — Curses-based GPT partition editor");
+        println!("cgdisk v1.0 (Slate OS) — Curses-based GPT partition editor");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("cgdisk v1.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("cgdisk v1.0 (Slate OS)"); return 0; }
     println!("cgdisk: curses GPT editor for /dev/sda");
     0
 }
@@ -68,10 +68,10 @@ fn run_cgdisk(args: &[String], _prog: &str) -> i32 {
 fn run_fixparts(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: fixparts [DEVICE]");
-        println!("fixparts v1.0 (SlateOS) — Fix MBR partition table problems");
+        println!("fixparts v1.0 (Slate OS) — Fix MBR partition table problems");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("fixparts v1.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("fixparts v1.0 (Slate OS)"); return 0; }
     println!("fixparts: MBR repair tool");
     0
 }

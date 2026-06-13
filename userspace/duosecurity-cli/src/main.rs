@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_duo(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: duosecurity [OPTIONS]");
-        println!("Duo Security (SlateOS) — the green push-button MFA (now Cisco Duo Trusted Access)");
+        println!("Duo Security (Slate OS) — the green push-button MFA (now Cisco Duo Trusted Access)");
         println!();
         println!("Options:");
         println!("  --mfa                  Multi-factor authentication (push, OTP, FIDO2)");
@@ -22,8 +22,8 @@ fn run_duo(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Duo Security 2024 (SlateOS) — duo-cli (Admin API)"); return 0; }
-    println!("Duo Security 2024 (SlateOS) — Cisco Duo (the green-button MFA, zero-trust access)");
+    if args.iter().any(|a| a == "--version") { println!("Duo Security 2024 (Slate OS) — duo-cli (Admin API)"); return 0; }
+    println!("Duo Security 2024 (Slate OS) — Cisco Duo (the green-button MFA, zero-trust access)");
     println!("  Vendor: Cisco Duo (Ann Arbor, MI — division of Cisco Systems NASDAQ:CSCO)");
     println!("  Founders: Dug Song + Jon Oberheide, 2009");
     println!("          Dug Song: ex-Arbor Networks (DDoS), security researcher, dsniff author");

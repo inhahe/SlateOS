@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pendo(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pendo [OPTIONS]");
-        println!("Pendo (SlateOS) — product experience platform (analytics + guides + feedback)");
+        println!("Pendo (Slate OS) — product experience platform (analytics + guides + feedback)");
         println!();
         println!("Options:");
         println!("  --free                 Free tier (≤500 MAU, 1 app)");
@@ -26,8 +26,8 @@ fn run_pendo(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Pendo 2024 (SlateOS)"); return 0; }
-    println!("Pendo 2024 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Pendo 2024 (Slate OS)"); return 0; }
+    println!("Pendo 2024 (Slate OS)");
     println!("  Vendor: Pendo.io, Inc. (Raleigh, NC — private)");
     println!("  Founders: Todd Olson (CEO), Eric Boduch, Erik Troan, Rahul Jain, 2013");
     println!("          all four had been at Red Hat / Rally Software before");

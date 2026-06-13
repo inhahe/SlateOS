@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_obsidian(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: obsidian [OPTIONS] [VAULT_PATH]");
-        println!("obsidian v1.5 (SlateOS) — Knowledge base & note editor");
+        println!("obsidian v1.5 (Slate OS) — Knowledge base & note editor");
         println!();
         println!("Options:");
         println!("  --vault PATH      Open specific vault");
@@ -21,7 +21,7 @@ fn run_obsidian(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("obsidian v1.5 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("obsidian v1.5 (Slate OS)"); return 0; }
     println!("obsidian: knowledge base started");
     println!("  Vault: ~/Documents/Notes");
     println!("  Notes: 342");

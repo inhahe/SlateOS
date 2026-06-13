@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_stapler(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: stapler COMMAND [OPTIONS] FILES...");
-        println!("stapler v1.0 (SlateOS) — PDF stapling toolkit");
+        println!("stapler v1.0 (Slate OS) — PDF stapling toolkit");
         println!();
         println!("Commands:");
         println!("  cat               Concatenate PDFs");

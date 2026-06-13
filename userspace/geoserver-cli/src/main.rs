@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_geoserver(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: geoserver [OPTIONS]");
-        println!("GeoServer v2.24 (SlateOS) — Open source geospatial server");
+        println!("GeoServer v2.24 (Slate OS) — Open source geospatial server");
         println!();
         println!("Options:");
         println!("  start          Start GeoServer");
@@ -25,8 +25,8 @@ fn run_geoserver(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("GeoServer v2.24.2 (SlateOS)"); return 0; }
-    println!("GeoServer v2.24.2 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("GeoServer v2.24.2 (Slate OS)"); return 0; }
+    println!("GeoServer v2.24.2 (Slate OS)");
     println!("  Data directory: /var/geoserver/data");
     println!("  Services: WMS, WFS, WCS, WMTS, CSW");
     println!("  Workspaces: 5");

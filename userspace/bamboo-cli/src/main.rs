@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_bamboo(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: bamboo [OPTIONS]");
-        println!("Bamboo Data Center 10.2 (SlateOS) — Atlassian on-prem CI/CD");
+        println!("Bamboo Data Center 10.2 (Slate OS) — Atlassian on-prem CI/CD");
         println!();
         println!("Options:");
         println!("  --plan                 Build plan (job + stages + tasks)");
@@ -22,8 +22,8 @@ fn run_bamboo(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Bamboo Data Center 10.2.1 (SlateOS)"); return 0; }
-    println!("Bamboo Data Center 10.2.1 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Bamboo Data Center 10.2.1 (Slate OS)"); return 0; }
+    println!("Bamboo Data Center 10.2.1 (Slate OS)");
     println!("  Vendor: Atlassian Corporation (Sydney, Australia → NASDAQ:TEAM)");
     println!("  History: launched 2007 — CI/CD complement to Jira + Bitbucket");
     println!("          Atlassian discontinued Bamboo Cloud Jan 2017 (Bitbucket Pipelines replaced it)");

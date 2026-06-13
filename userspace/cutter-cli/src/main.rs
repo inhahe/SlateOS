@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_cutter(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: cutter [OPTIONS] [FILE]");
-        println!("Cutter v2.3 (SlateOS) — GUI for Rizin reverse engineering");
+        println!("Cutter v2.3 (Slate OS) — GUI for Rizin reverse engineering");
         println!();
         println!("Options:");
         println!("  -A               Auto-analyze on open");
@@ -23,8 +23,8 @@ fn run_cutter(args: &[String], _prog: &str) -> i32 {
         println!("  --version        Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Cutter v2.3.4 (SlateOS) (Rizin v0.7.2)"); return 0; }
-    println!("Cutter v2.3.4 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Cutter v2.3.4 (Slate OS) (Rizin v0.7.2)"); return 0; }
+    println!("Cutter v2.3.4 (Slate OS)");
     println!("  Backend: Rizin v0.7.2");
     println!("  Loaded: malware_sample.exe");
     println!("  Format: PE32+, x86_64, Windows");

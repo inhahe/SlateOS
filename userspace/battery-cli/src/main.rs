@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_battery(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: battery [OPTIONS]");
-        println!("battery v1.0 (SlateOS) — Battery monitoring tool");
+        println!("battery v1.0 (Slate OS) — Battery monitoring tool");
         println!();
         println!("Options:");
         println!("  -s                Short output (percentage only)");
@@ -24,7 +24,7 @@ fn run_battery(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("battery v1.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("battery v1.0 (Slate OS)"); return 0; }
     if args.iter().any(|a| a == "-s") {
         println!("85%");
         return 0;

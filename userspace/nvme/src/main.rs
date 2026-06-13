@@ -262,7 +262,7 @@ fn run_nvme(args: Vec<String>) -> i32 {
             0
         }
         "version" | "--version" | "-V" => {
-            println!("nvme-cli 0.1.0 (SlateOS)");
+            println!("nvme-cli 0.1.0 (Slate OS)");
             0
         }
         "list" => cmd_list(),

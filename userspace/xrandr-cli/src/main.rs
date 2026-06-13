@@ -11,7 +11,7 @@ fn run_xrandr(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: xrandr [OPTIONS]");
         println!();
-        println!("xrandr — display configuration (SlateOS).");
+        println!("xrandr — display configuration (Slate OS).");
         println!();
         println!("Options:");
         println!("  --output NAME       Select output");
@@ -38,7 +38,7 @@ fn run_xrandr(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("xrandr program version 1.5.2 (SlateOS)");
+        println!("xrandr program version 1.5.2 (Slate OS)");
         return 0;
     }
 

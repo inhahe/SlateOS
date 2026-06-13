@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_genius(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: genius [OPTIONS] [FILE...]");
-        println!("Genius v1.0 (SlateOS) — General purpose calculator / math tool");
+        println!("Genius v1.0 (Slate OS) — General purpose calculator / math tool");
         println!();
         println!("Options:");
         println!("  -e EXPR        Evaluate expression");
@@ -28,7 +28,7 @@ fn run_genius(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Genius Calculator v1.0.27 (SlateOS)");
+        println!("Genius Calculator v1.0.27 (Slate OS)");
         println!("Using GMP for arbitrary precision arithmetic");
         return 0;
     }
@@ -37,7 +37,7 @@ fn run_genius(args: &[String], _prog: &str) -> i32 {
         println!("42");
         return 0;
     }
-    println!("Genius v1.0.27 (SlateOS) — Mathematics Tool");
+    println!("Genius v1.0.27 (Slate OS) — Mathematics Tool");
     println!("Type help for help, quit to exit.");
     println!();
     println!("genius> Fibonacci(20)");

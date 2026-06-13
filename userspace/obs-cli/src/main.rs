@@ -46,7 +46,7 @@ fn run_obs_cli(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("obs-cli 0.5.0 (SlateOS)");
+        println!("obs-cli 0.5.0 (Slate OS)");
         return 0;
     }
 
@@ -180,7 +180,7 @@ fn run_obs_cli(args: Vec<String>) -> i32 {
             0
         }
         ("version", _) => {
-            println!("OBS Studio 30.1.0 (SlateOS)");
+            println!("OBS Studio 30.1.0 (Slate OS)");
             println!("  Qt: 6.6.1");
             println!("  WebSocket: 5.4.0");
             0

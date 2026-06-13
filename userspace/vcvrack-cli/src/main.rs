@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_vcvrack(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: vcvrack [OPTIONS] [PATCH.vcv]");
-        println!("VCV Rack v2.5 (SlateOS) — Open-source virtual modular synthesizer");
+        println!("VCV Rack v2.5 (Slate OS) — Open-source virtual modular synthesizer");
         println!();
         println!("Options:");
         println!("  PATCH.vcv         Open patch file");
@@ -26,7 +26,7 @@ fn run_vcvrack(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("VCV Rack v2.5 (SlateOS)");
+        println!("VCV Rack v2.5 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "--plugin-scan") {

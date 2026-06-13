@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_emqx(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: emqx COMMAND [OPTIONS]");
-        println!("EMQX v5.5.0 (SlateOS) — MQTT Broker CLI");
+        println!("EMQX v5.5.0 (Slate OS) — MQTT Broker CLI");
         println!();
         println!("Commands:");
         println!("  start           Start EMQX broker");
@@ -36,7 +36,7 @@ fn run_emqx(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("EMQX v5.5.0 (SlateOS)");
+        println!("EMQX v5.5.0 (Slate OS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("status");

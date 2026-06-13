@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wv(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: weaviate [OPTIONS]");
-        println!("Weaviate (SlateOS) — open-source vector + AI-native database, modules-based architecture");
+        println!("Weaviate (Slate OS) — open-source vector + AI-native database, modules-based architecture");
         println!();
         println!("Options:");
         println!("  --modules              Modules (text2vec-openai, generative-openai, qna-transformers, etc.)");
@@ -21,8 +21,8 @@ fn run_wv(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Weaviate 2024 (SlateOS) — weaviate CLI 1.x"); return 0; }
-    println!("Weaviate 2024 (SlateOS) — Open-Source AI-Native Vector Database");
+    if args.iter().any(|a| a == "--version") { println!("Weaviate 2024 (Slate OS) — weaviate CLI 1.x"); return 0; }
+    println!("Weaviate 2024 (Slate OS) — Open-Source AI-Native Vector Database");
     println!("  Vendor: Weaviate B.V. (Amsterdam, Netherlands — private)");
     println!("  Founders: Bob van Luijt (CEO) + Etienne Dilocker (CTO), 2019");
     println!("          Bob van Luijt: ex-Apple designer + entrepreneur, conceived semantic search bet");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_geary(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: geary [OPTIONS] [MAILTO_URI]");
-        println!("geary v44.0 (SlateOS) — Lightweight GNOME email client");
+        println!("geary v44.0 (Slate OS) — Lightweight GNOME email client");
         println!();
         println!("Options:");
         println!("  --hidden          Start hidden in system tray");
@@ -23,7 +23,7 @@ fn run_geary(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("geary v44.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("geary v44.0 (Slate OS)"); return 0; }
     println!("geary: email client started");
     println!("  Accounts: 1 (IMAP/SMTP)");
     println!("  Inbox: 8 unread conversations");

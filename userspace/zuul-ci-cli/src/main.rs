@@ -15,19 +15,19 @@ fn run_zuul(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "zuul-scheduler" => {
-                println!("zuul-scheduler (SlateOS) — Zuul pipeline scheduler");
+                println!("zuul-scheduler (Slate OS) — Zuul pipeline scheduler");
                 println!("  --config FILE      Config file");
                 println!("  --foreground       Run in foreground");
                 println!("  --log-config FILE  Logging config");
             }
             "zuul-executor" => {
-                println!("zuul-executor (SlateOS) — Zuul job executor");
+                println!("zuul-executor (Slate OS) — Zuul job executor");
                 println!("  --config FILE      Config file");
                 println!("  --foreground       Run in foreground");
                 println!("  --keep-jobdir      Keep job working dirs");
             }
             _ => {
-                println!("Zuul v10.0 (SlateOS) — Project gating system");
+                println!("Zuul v10.0 (Slate OS) — Project gating system");
                 println!();
                 println!("Commands:");
                 println!("  tenant-list        List tenants");
@@ -43,10 +43,10 @@ fn run_zuul(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Zuul v10.0.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("Zuul v10.0.0 (Slate OS)"); return 0; }
     match prog {
         "zuul-scheduler" => {
-            println!("Zuul Scheduler v10.0.0 (SlateOS)");
+            println!("Zuul Scheduler v10.0.0 (Slate OS)");
             println!("  Tenants: 3");
             println!("  Pipelines: 12 (check, gate, post, periodic)");
             println!("  Projects: 45");
@@ -54,7 +54,7 @@ fn run_zuul(args: &[String], prog: &str) -> i32 {
             println!("  ZooKeeper: connected");
         }
         "zuul-executor" => {
-            println!("Zuul Executor v10.0.0 (SlateOS)");
+            println!("Zuul Executor v10.0.0 (Slate OS)");
             println!("  Status: accepting jobs");
             println!("  Running: 3 / 8 max");
             println!("  Completed: 1,234");
@@ -62,7 +62,7 @@ fn run_zuul(args: &[String], prog: &str) -> i32 {
             println!("  Merge mode: zuul");
         }
         _ => {
-            println!("Zuul v10.0.0 (SlateOS)");
+            println!("Zuul v10.0.0 (Slate OS)");
             println!("  Tenants: 3");
             println!("  Scheduler: running");
             println!("  Executors: 4 (3 accepting)");

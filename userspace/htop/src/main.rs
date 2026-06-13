@@ -1683,7 +1683,7 @@ impl App {
         let _ = write!(buf, "\x1b[2J\x1b[H");
         let _ = write!(
             buf,
-            "{BOLD}{REVERSE} htop {VERSION} -- SlateOS Interactive Process Viewer "
+            "{BOLD}{REVERSE} htop {VERSION} -- Slate OS Interactive Process Viewer "
         );
         // Pad to full width.
         let title_len = 47;
@@ -2102,7 +2102,7 @@ fn parse_sort_field(s: &str) -> Option<SortField> {
 }
 
 fn print_usage() {
-    println!("htop {VERSION} -- SlateOS Interactive Process Viewer");
+    println!("htop {VERSION} -- Slate OS Interactive Process Viewer");
     println!();
     println!("Usage: htop [OPTIONS]");
     println!();

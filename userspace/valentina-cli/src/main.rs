@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_valentina(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: valentina-studio [OPTIONS]");
-        println!("valentina-studio v13.5 (SlateOS) — Universal database IDE");
+        println!("valentina-studio v13.5 (Slate OS) — Universal database IDE");
         println!();
         println!("Options:");
         println!("  --project FILE  Open project file");
@@ -26,7 +26,7 @@ fn run_valentina(args: &[String], _prog: &str) -> i32 {
         println!("  data transfer, report designer, diagram editor");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("valentina-studio v13.5 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("valentina-studio v13.5 (Slate OS)"); return 0; }
     println!("valentina-studio: database IDE started");
     println!("  Connections: 2 registered");
     println!("  Projects: 1 recent");

@@ -473,7 +473,7 @@ fn parse_args(args: &[String]) -> Action {
 // ============================================================================
 
 fn print_usage() {
-    println!("SlateOS Kernel Parameter Utility v0.1.0");
+    println!("Slate OS Kernel Parameter Utility v0.1.0");
     println!();
     println!("View and modify kernel runtime parameters from /proc/sys/ and /sys/kernel/.");
     println!();

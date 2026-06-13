@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_clerk(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: clerk [OPTIONS]");
-        println!("Clerk (SlateOS) — modern React-first auth + user management for full-stack apps");
+        println!("Clerk (Slate OS) — modern React-first auth + user management for full-stack apps");
         println!();
         println!("Options:");
         println!("  --components           Pre-built React components (SignIn, SignUp, UserButton, OrgSwitcher)");
@@ -21,8 +21,8 @@ fn run_clerk(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Clerk 2024 (SlateOS) — clerk CLI (next-gen auth)"); return 0; }
-    println!("Clerk 2024 (SlateOS) — Modern React-First Auth + User Management Platform");
+    if args.iter().any(|a| a == "--version") { println!("Clerk 2024 (Slate OS) — clerk CLI (next-gen auth)"); return 0; }
+    println!("Clerk 2024 (Slate OS) — Modern React-First Auth + User Management Platform");
     println!("  Vendor: Clerk, Inc. (San Francisco, CA — private)");
     println!("  Founders: Colin Sidoti + Braden Sidoti + Brent Pinkerton, 2019");
     println!("          Colin Sidoti: CEO, ex-Aurelius (startup), Y Combinator W20 batch");

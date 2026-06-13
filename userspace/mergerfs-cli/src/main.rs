@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mergerfs(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mergerfs [OPTIONS] BRANCHES MOUNTPOINT");
-        println!("mergerfs v2.40 (SlateOS) — FUSE union filesystem");
+        println!("mergerfs v2.40 (Slate OS) — FUSE union filesystem");
         println!();
         println!("Options:");
         println!("  -o category.create=POLICY  Create policy (mfs, lfs, epmfs, etc.)");
@@ -27,8 +27,8 @@ fn run_mergerfs(args: &[String], _prog: &str) -> i32 {
         println!("  --version                  Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("mergerfs v2.40.2 (SlateOS)"); return 0; }
-    println!("mergerfs v2.40.2 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("mergerfs v2.40.2 (Slate OS)"); return 0; }
+    println!("mergerfs v2.40.2 (Slate OS)");
     println!("  Branches:");
     println!("    /mnt/disk1 (4.0 TiB, 1.2 TiB free)");
     println!("    /mnt/disk2 (4.0 TiB, 2.3 TiB free)");

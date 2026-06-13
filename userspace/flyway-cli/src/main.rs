@@ -11,7 +11,7 @@ fn run_flyway(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: flyway <COMMAND> [OPTIONS]");
         println!();
-        println!("Flyway database migration tool (SlateOS).");
+        println!("Flyway database migration tool (Slate OS).");
         println!();
         println!("Commands:");
         println!("  migrate      Apply pending migrations");
@@ -24,7 +24,7 @@ fn run_flyway(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("Flyway Community Edition 10.6.0 (SlateOS)");
+        println!("Flyway Community Edition 10.6.0 (Slate OS)");
         return 0;
     }
 

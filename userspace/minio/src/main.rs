@@ -19,7 +19,7 @@ fn run_minio_server(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("minio version RELEASE.2025-05-22 (SlateOS)");
+        println!("minio version RELEASE.2025-05-22 (Slate OS)");
         println!("Runtime: go1.22.2 slateos/amd64");
         return 0;
     }
@@ -32,7 +32,7 @@ fn run_minio_server(args: Vec<String>) -> i32 {
         println!("MinIO Object Storage Server");
         println!("Copyright: 2015-2025 MinIO, Inc.");
         println!("License: GNU AGPLv3 — https://www.gnu.org/licenses/agpl-3.0.html");
-        println!("Version: RELEASE.2025-05-22 (SlateOS)");
+        println!("Version: RELEASE.2025-05-22 (Slate OS)");
         println!();
         println!("API: http://0.0.0.0{}", addr);
         println!("WebUI: http://0.0.0.0:9001");
@@ -77,7 +77,7 @@ fn run_mc(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "version" => {
-            println!("mc version RELEASE.2025-05-22 (SlateOS)");
+            println!("mc version RELEASE.2025-05-22 (Slate OS)");
             0
         }
         "alias" => {

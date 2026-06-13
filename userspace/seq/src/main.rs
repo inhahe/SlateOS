@@ -70,7 +70,7 @@ fn run_seq(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("seq (SlateOS) 0.1.0");
+                println!("seq (Slate OS) 0.1.0");
                 return 0;
             }
             _ if arg.starts_with("--separator=") => {
@@ -278,7 +278,7 @@ fn run_yes(args: &[String]) -> i32 {
         return 0;
     }
     if args.first().map(|s| s.as_str()) == Some("--version") {
-        println!("yes (SlateOS) 0.1.0");
+        println!("yes (Slate OS) 0.1.0");
         return 0;
     }
 
@@ -918,7 +918,7 @@ fn run_expr(args: &[String]) -> i32 {
     }
 
     if args.first().map(|s| s.as_str()) == Some("--version") {
-        println!("expr (SlateOS) 0.1.0");
+        println!("expr (Slate OS) 0.1.0");
         return 0;
     }
 

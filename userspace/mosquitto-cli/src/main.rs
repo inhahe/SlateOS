@@ -21,7 +21,7 @@ fn run_pub(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mosquitto_pub [OPTIONS] -t <topic> -m <message>");
         println!();
-        println!("Publish MQTT messages (SlateOS).");
+        println!("Publish MQTT messages (Slate OS).");
         println!();
         println!("Options:");
         println!("  -h HOST       Broker hostname (default: localhost)");
@@ -62,7 +62,7 @@ fn run_sub(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mosquitto_sub [OPTIONS] -t <topic>");
         println!();
-        println!("Subscribe to MQTT topics (SlateOS).");
+        println!("Subscribe to MQTT topics (Slate OS).");
         println!();
         println!("Options:");
         println!("  -h HOST       Broker hostname (default: localhost)");

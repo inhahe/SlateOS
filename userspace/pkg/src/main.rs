@@ -744,7 +744,7 @@ impl PkgConfig {
     /// Serialize config to text format for saving.
     fn serialize(&self) -> String {
         let mut out = String::new();
-        out.push_str("# SlateOS package manager configuration\n");
+        out.push_str("# Slate OS package manager configuration\n");
         out.push_str("# Repositories are checked in priority order (lower = preferred).\n\n");
 
         for repo in &self.repos {
@@ -4735,7 +4735,7 @@ fn cmd_snapshot(db: &PackageDb, args: &[String], dry_run: bool) {
 
 fn print_usage() {
     println!(
-        "pkg — SlateOS package manager
+        "pkg — Slate OS package manager
 
 Usage: pkg <command> [options] [arguments]
 

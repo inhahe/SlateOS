@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_config_printer(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: system-config-printer [OPTIONS]");
-        println!("system-config-printer v1.5 (SlateOS) — Printer configuration tool");
+        println!("system-config-printer v1.5 (Slate OS) — Printer configuration tool");
         println!();
         println!("Options:");
         println!("  --add             Add new printer wizard");
@@ -23,7 +23,7 @@ fn run_config_printer(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("system-config-printer v1.5 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("system-config-printer v1.5 (Slate OS)"); return 0; }
     if args.iter().any(|a| a == "--list") {
         println!("Configured printers:");
         println!("  HP-LaserJet-Pro  (default)  idle");

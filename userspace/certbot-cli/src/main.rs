@@ -39,7 +39,7 @@ fn run_certbot(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("certbot 2.9.0 (SlateOS)");
+        println!("certbot 2.9.0 (Slate OS)");
         return 0;
     }
 

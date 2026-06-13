@@ -64,7 +64,7 @@ fn parse_args(args: &[String]) -> Options {
                 process::exit(0);
             }
             "--version" => {
-                println!("look (SlateOS coreutils) 0.1.0");
+                println!("look (Slate OS coreutils) 0.1.0");
                 process::exit(0);
             }
             _ if arg.starts_with('-') && arg.len() > 1 && !arg.starts_with("--") => {

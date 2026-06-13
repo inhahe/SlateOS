@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_cherrytree(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: cherrytree [OPTIONS] [FILE]");
-        println!("cherrytree v1.0 (SlateOS) — Hierarchical note-taking");
+        println!("cherrytree v1.0 (Slate OS) — Hierarchical note-taking");
         println!();
         println!("Options:");
         println!("  -n NODE           Open at specific node");
@@ -22,7 +22,7 @@ fn run_cherrytree(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("cherrytree v1.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("cherrytree v1.0 (Slate OS)"); return 0; }
     println!("cherrytree: hierarchical note-taking started");
     println!("  Storage: SQLite database");
     println!("  Nodes: 150");

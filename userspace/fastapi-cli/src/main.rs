@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_fastapi(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: fastapi COMMAND [OPTIONS]");
-        println!("FastAPI CLI 0.0.4 (SlateOS)");
+        println!("FastAPI CLI 0.0.4 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  dev          Run development server");
@@ -47,7 +47,7 @@ fn run_fastapi(args: &[String]) -> i32 {
 fn run_uvicorn(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: uvicorn [OPTIONS] APP");
-        println!("Uvicorn 0.30.1 (SlateOS)");
+        println!("Uvicorn 0.30.1 (Slate OS)");
         println!("  --host HOST      Bind address (default: 127.0.0.1)");
         println!("  --port PORT      Port (default: 8000)");
         println!("  --workers N      Worker processes");

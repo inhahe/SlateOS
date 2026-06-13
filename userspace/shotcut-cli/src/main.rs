@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: shotcut [OPTIONS] [PROJECT]");
-        println!("Shotcut 24.06 (SlateOS) — Cross-platform free video editor (MLT framework)");
+        println!("Shotcut 24.06 (Slate OS) — Cross-platform free video editor (MLT framework)");
         println!();
         println!("Options:");
         println!("  --open FILE            Open .mlt project");
@@ -23,8 +23,8 @@ fn run_sc(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Shotcut 24.06.26 (SlateOS)"); return 0; }
-    println!("Shotcut 24.06.26 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Shotcut 24.06.26 (Slate OS)"); return 0; }
+    println!("Shotcut 24.06.26 (Slate OS)");
     println!("  Engine: MLT framework (open source)");
     println!("  Tracks: Unlimited video, audio, subtitle tracks");
     println!("  Effects: 200+ video/audio filters");

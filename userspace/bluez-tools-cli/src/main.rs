@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_bt_adapter(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: bt-adapter [OPTIONS]");
-        println!("bt-adapter v0.3 (SlateOS) — BlueZ adapter control");
+        println!("bt-adapter v0.3 (Slate OS) — BlueZ adapter control");
         println!();
         println!("Options:");
         println!("  -l                List adapters");
@@ -39,7 +39,7 @@ fn run_bt_adapter(args: &[String], _prog: &str) -> i32 {
 fn run_bt_device(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: bt-device [OPTIONS]");
-        println!("bt-device v0.3 (SlateOS) — BlueZ device control");
+        println!("bt-device v0.3 (Slate OS) — BlueZ device control");
         println!();
         println!("Options:");
         println!("  -l                List known devices");
@@ -59,7 +59,7 @@ fn run_bt_device(args: &[String], _prog: &str) -> i32 {
 fn run_default(args: &[String], prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: {} [OPTIONS]", prog);
-        println!("{} v0.3 (SlateOS) — BlueZ tool", prog);
+        println!("{} v0.3 (Slate OS) — BlueZ tool", prog);
         return 0;
     }
     println!("{}: running", prog);

@@ -11,7 +11,7 @@ fn run_vultr(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "help") {
         println!("Usage: vultr-cli <COMMAND> [OPTIONS]");
         println!();
-        println!("vultr-cli — Vultr cloud CLI (SlateOS).");
+        println!("vultr-cli — Vultr cloud CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  instance       Manage cloud instances");
@@ -30,7 +30,7 @@ fn run_vultr(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "version") {
-        println!("vultr-cli v3.0.3 (SlateOS)");
+        println!("vultr-cli v3.0.3 (Slate OS)");
         return 0;
     }
 

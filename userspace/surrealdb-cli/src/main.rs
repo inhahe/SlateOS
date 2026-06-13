@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_surreal(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: surreal COMMAND [OPTIONS]");
-        println!("SurrealDB 2.0.0 (SlateOS)");
+        println!("SurrealDB 2.0.0 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  start        Start a SurrealDB server");

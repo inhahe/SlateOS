@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_logic(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: logic [OPTIONS] [PROJECT]");
-        println!("Apple Logic Pro 11 (SlateOS) — Professional DAW for Mac");
+        println!("Apple Logic Pro 11 (Slate OS) — Professional DAW for Mac");
         println!();
         println!("Options:");
         println!("  --open FILE            Open .logicx project");
@@ -24,8 +24,8 @@ fn run_logic(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Apple Logic Pro 11.0.1 (SlateOS)"); return 0; }
-    println!("Apple Logic Pro 11.0.1 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Apple Logic Pro 11.0.1 (Slate OS)"); return 0; }
+    println!("Apple Logic Pro 11.0.1 (Slate OS)");
     println!("  Engine: 192 kHz, 32-bit float");
     println!("  Plug-ins: AU (Audio Units), 70+ built-in instruments/effects");
     println!("  Features: Live Loops, Step Sequencer, Drummer (AI), Flex Time/Pitch");

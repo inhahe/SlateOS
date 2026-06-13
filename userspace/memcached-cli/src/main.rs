@@ -11,7 +11,7 @@ fn run_memcached(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: memcached [OPTIONS]");
         println!();
-        println!("memcached — high-performance memory caching (SlateOS).");
+        println!("memcached — high-performance memory caching (Slate OS).");
         println!();
         println!("Options:");
         println!("  -p, --port PORT        TCP port (default 11211)");
@@ -29,7 +29,7 @@ fn run_memcached(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("memcached 1.6.22 (SlateOS)");
+        println!("memcached 1.6.22 (Slate OS)");
         return 0;
     }
 
@@ -41,7 +41,7 @@ fn run_memcached(args: Vec<String>) -> i32 {
         .map(|w| w[1].as_str()).unwrap_or("4");
     let verbose = args.iter().filter(|a| a.as_str() == "-v" || a.as_str() == "-vv" || a.as_str() == "-vvv").count() > 0;
 
-    println!("memcached 1.6.22 (SlateOS)");
+    println!("memcached 1.6.22 (Slate OS)");
     println!("  Port: {}", port);
     println!("  Max memory: {} MB", memory);
     println!("  Threads: {}", threads);

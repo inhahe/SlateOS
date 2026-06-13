@@ -15,14 +15,14 @@ fn run_seafile(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [COMMAND] [OPTIONS]", prog);
         match prog {
             "seaf-daemon" => {
-                println!("seaf-daemon (SlateOS) — Seafile sync daemon");
+                println!("seaf-daemon (Slate OS) — Seafile sync daemon");
                 println!("  -c DIR       Config directory");
                 println!("  -d DIR       Data directory");
                 println!("  -w DIR       Worktree directory");
                 println!("  -l FILE      Log file");
             }
             _ => {
-                println!("seaf-cli (SlateOS) — Seafile command-line client");
+                println!("seaf-cli (Slate OS) — Seafile command-line client");
                 println!();
                 println!("Commands:");
                 println!("  init -d DIR        Initialize config");
@@ -38,17 +38,17 @@ fn run_seafile(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Seafile v9.0.9 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("Seafile v9.0.9 (Slate OS)"); return 0; }
     match prog {
         "seaf-daemon" => {
-            println!("Seafile Daemon v9.0.9 (SlateOS)");
+            println!("Seafile Daemon v9.0.9 (Slate OS)");
             println!("  Status: running");
             println!("  Libraries synced: 5");
             println!("  Upload rate: 2.3 MiB/s");
             println!("  Download rate: 0 B/s");
         }
         _ => {
-            println!("Seafile CLI v9.0.9 (SlateOS)");
+            println!("Seafile CLI v9.0.9 (Slate OS)");
             println!("  Server: https://seafile.example.com");
             println!("  Libraries: 5 synced");
             println!("  Total size: 45 GiB");

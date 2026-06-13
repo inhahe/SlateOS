@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_logwatch(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: logwatch [OPTIONS]");
-        println!("logwatch v7.9 (SlateOS) — System log analyzer and reporter");
+        println!("logwatch v7.9 (Slate OS) — System log analyzer and reporter");
         println!();
         println!("Options:");
         println!("  --detail LEVEL    Detail level (low, med, high)");
@@ -24,7 +24,7 @@ fn run_logwatch(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("logwatch v7.9 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("logwatch v7.9 (Slate OS)"); return 0; }
     println!("logwatch: system log report");
     println!("  Date range: today");
     println!("  Services: sshd, kernel, cron, sudo");

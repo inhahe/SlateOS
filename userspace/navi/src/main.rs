@@ -55,7 +55,7 @@ fn run_navi(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("navi 2.23.0 (SlateOS)");
+            println!("navi 2.23.0 (Slate OS)");
             0
         }
         "repo" => {

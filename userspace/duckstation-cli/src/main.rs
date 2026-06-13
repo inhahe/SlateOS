@@ -18,7 +18,7 @@ fn run_duckstation(args: &[String], prog: &str) -> i32 {
         } else {
             println!("Usage: duckstation [OPTIONS] [IMAGE]");
         }
-        println!("duckstation v0.1-6292 (SlateOS) — PlayStation 1 emulator");
+        println!("duckstation v0.1-6292 (Slate OS) — PlayStation 1 emulator");
         println!();
         println!("Options:");
         println!("  -disc FILE        Boot disc image");
@@ -28,7 +28,7 @@ fn run_duckstation(args: &[String], prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("duckstation v0.1-6292 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("duckstation v0.1-6292 (Slate OS)"); return 0; }
     if nogui {
         println!("duckstation: headless PS1 emulation started");
     } else {

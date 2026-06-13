@@ -36,7 +36,7 @@ fn run_crane(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
         "version" => {
-            println!("crane 0.19.0 (SlateOS)");
+            println!("crane 0.19.0 (Slate OS)");
             0
         }
         "ls" => {

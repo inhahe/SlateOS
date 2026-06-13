@@ -11,7 +11,7 @@ fn run_handbrake(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: HandBrakeCLI [OPTIONS]");
         println!();
-        println!("HandBrake — video transcoder (SlateOS).");
+        println!("HandBrake — video transcoder (Slate OS).");
         println!();
         println!("Source options:");
         println!("  -i, --input FILE       Input file or device");
@@ -42,7 +42,7 @@ fn run_handbrake(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("HandBrake 1.7.2 (SlateOS)");
+        println!("HandBrake 1.7.2 (Slate OS)");
         return 0;
     }
 

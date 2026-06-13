@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_zoho(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: zoho [OPTIONS]");
-        println!("Zoho One (SlateOS) — All-in-one business operating system");
+        println!("Zoho One (Slate OS) — All-in-one business operating system");
         println!();
         println!("Options:");
         println!("  --app NAME             crm/mail/writer/sheet/show/projects/books/people");
@@ -24,8 +24,8 @@ fn run_zoho(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Zoho One 2024.11 (SlateOS)"); return 0; }
-    println!("Zoho One (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Zoho One 2024.11 (Slate OS)"); return 0; }
+    println!("Zoho One (Slate OS)");
     println!("  Vendor: Zoho Corporation (Chennai, India + Pleasanton, CA)");
     println!("  Founded: 1996 (originally AdventNet); rebranded Zoho 2009");
     println!("  Privately held — no IPO, no outside investors (Sridhar Vembu, founder/CEO)");

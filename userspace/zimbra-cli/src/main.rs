@@ -15,7 +15,7 @@ fn run_zimbra(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "zmcertmgr" => {
-                println!("zmcertmgr (SlateOS) — Zimbra certificate manager");
+                println!("zmcertmgr (Slate OS) — Zimbra certificate manager");
                 println!("  viewdeployedcrt    View deployed certificates");
                 println!("  createcsr DOMAIN   Create CSR");
                 println!("  deploycrt TYPE FILE  Deploy certificate");
@@ -23,13 +23,13 @@ fn run_zimbra(args: &[String], prog: &str) -> i32 {
                 println!("  verifycrt CERT     Verify certificate");
             }
             "zmhsm" => {
-                println!("zmhsm (SlateOS) — Zimbra hierarchical storage management");
+                println!("zmhsm (Slate OS) — Zimbra hierarchical storage management");
                 println!("  start              Start HSM session");
                 println!("  status             Show HSM status");
                 println!("  abort              Abort running session");
             }
             _ => {
-                println!("zmcontrol (SlateOS) — Zimbra service controller");
+                println!("zmcontrol (Slate OS) — Zimbra service controller");
                 println!("  start              Start all services");
                 println!("  stop               Stop all services");
                 println!("  restart            Restart all services");
@@ -40,7 +40,7 @@ fn run_zimbra(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Zimbra v10.0.5 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("Zimbra v10.0.5 (Slate OS)"); return 0; }
     match prog {
         "zmcertmgr" => {
             println!("Zimbra Certificate Manager");
@@ -55,7 +55,7 @@ fn run_zimbra(args: &[String], prog: &str) -> i32 {
             println!("  Last session: completed 2 hours ago");
         }
         _ => {
-            println!("Zimbra v10.0.5 (SlateOS) Status:");
+            println!("Zimbra v10.0.5 (Slate OS) Status:");
             println!("  antispam: Running");
             println!("  antivirus: Running");
             println!("  ldap: Running");

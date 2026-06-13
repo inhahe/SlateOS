@@ -92,7 +92,7 @@ fn read_keyring() -> Vec<GpgKey> {
         GpgKey {
             keyid: "ABCDEF1234567890".to_string(),
             fingerprint: "ABCD EF12 3456 7890 DEAD BEEF CAFE BABE 1234 5678".to_string(),
-            uid: "SlateOS Developer <dev@slateos.local>".to_string(),
+            uid: "Slate OS Developer <dev@slateos.local>".to_string(),
             _email: "dev@slateos.local".to_string(),
             created: "2024-01-15".to_string(),
             expires: "2026-01-15".to_string(),
@@ -167,7 +167,7 @@ fn run_gpg(args: Vec<String>) -> i32 {
             0
         }
         "--version" => {
-            println!("gpg (GnuPG) 0.1.0 (SlateOS)");
+            println!("gpg (GnuPG) 0.1.0 (Slate OS)");
             println!("libgcrypt 0.1.0");
             println!("Home: ~/.gnupg");
             println!("Supported algorithms:");
@@ -239,7 +239,7 @@ fn gpg_gen_key() -> i32 {
     println!("   (3) NIST P-256");
     println!("Your selection? 1 (simulated)");
     println!();
-    println!("Real name: SlateOS User");
+    println!("Real name: Slate OS User");
     println!("Email address: user@slateos.local");
     println!();
     println!("gpg: key AABBCCDD11223344 marked as ultimately trusted");
@@ -248,7 +248,7 @@ fn gpg_gen_key() -> i32 {
     println!();
     println!("pub   ed25519 2025-05-22 [SC] [expires: 2027-05-22]");
     println!("      AABB CCDD 1122 3344 5566 7788 9900 AABB CCDD 1122");
-    println!("uid                      SlateOS User <user@slateos.local>");
+    println!("uid                      Slate OS User <user@slateos.local>");
     println!("sub   cv25519 2025-05-22 [E] [expires: 2027-05-22]");
     0
 }
@@ -297,7 +297,7 @@ fn gpg_verify(args: &[String]) -> i32 {
 
     println!("gpg: Signature made Thu May 22 10:30:00 2025 UTC");
     println!("gpg:                using EDDSA key ABCDEF1234567890");
-    println!("gpg: Good signature from \"SlateOS Developer <dev@slateos.local>\" [ultimate]");
+    println!("gpg: Good signature from \"Slate OS Developer <dev@slateos.local>\" [ultimate]");
     println!("gpg: verified {}", file);
     0
 }
@@ -408,7 +408,7 @@ fn run_gpg_agent(args: Vec<String>) -> i32 {
             println!("  --version         Show version");
             0
         }
-        "--version" => { println!("gpg-agent 0.1.0 (SlateOS)"); 0 }
+        "--version" => { println!("gpg-agent 0.1.0 (Slate OS)"); 0 }
         "--daemon" | "--server" | "--supervised" => {
             println!("gpg-agent: starting (simulated)");
             println!("gpg-agent: listening on {}", _GPG_AGENT_SOCK);
@@ -440,7 +440,7 @@ fn run_gpgconf(args: Vec<String>) -> i32 {
             println!("  --version            Show version");
             0
         }
-        "--version" => { println!("gpgconf 0.1.0 (SlateOS)"); 0 }
+        "--version" => { println!("gpgconf 0.1.0 (Slate OS)"); 0 }
         "--list-components" => {
             println!("gpg:OpenPGP:/usr/bin/gpg");
             println!("gpg-agent:Private Keys:/usr/bin/gpg-agent");

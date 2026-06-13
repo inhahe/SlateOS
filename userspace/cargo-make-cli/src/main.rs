@@ -11,7 +11,7 @@ fn run_makers(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: makers [OPTIONS] [TASK]");
         println!();
-        println!("cargo-make — Rust task runner and build tool (SlateOS).");
+        println!("cargo-make — Rust task runner and build tool (Slate OS).");
         println!();
         println!("Options:");
         println!("  --makefile FILE      Makefile.toml path");
@@ -23,7 +23,7 @@ fn run_makers(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("cargo-make 0.37.8 (SlateOS)");
+        println!("cargo-make 0.37.8 (Slate OS)");
         return 0;
     }
 

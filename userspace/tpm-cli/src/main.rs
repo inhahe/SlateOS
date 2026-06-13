@@ -20,7 +20,7 @@ fn run_tpm2_getcap(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: tpm2_getcap [OPTIONS] CAPABILITY");
         println!();
-        println!("tpm2_getcap — display TPM capabilities (SlateOS).");
+        println!("tpm2_getcap — display TPM capabilities (Slate OS).");
         println!();
         println!("Capabilities: algorithms, commands, properties-fixed, properties-variable");
         return 0;
@@ -79,7 +79,7 @@ fn run_tpm2_getrandom(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: tpm2_getrandom [OPTIONS] SIZE");
         println!();
-        println!("tpm2_getrandom — get random bytes from TPM (SlateOS).");
+        println!("tpm2_getrandom — get random bytes from TPM (Slate OS).");
         return 0;
     }
 
@@ -102,7 +102,7 @@ fn run_tpm2_pcrread(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: tpm2_pcrread [OPTIONS] [PCR_LIST]");
         println!();
-        println!("tpm2_pcrread — read PCR values from TPM (SlateOS).");
+        println!("tpm2_pcrread — read PCR values from TPM (Slate OS).");
         return 0;
     }
     let _ = args;
@@ -135,7 +135,7 @@ fn run_tpm2_createprimary(args: &[String]) -> i32 {
 fn run_default(prog: &str, args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: {} [OPTIONS]", prog);
-        println!("TPM2 tool (SlateOS). See tpm2-tools documentation.");
+        println!("TPM2 tool (Slate OS). See tpm2-tools documentation.");
         return 0;
     }
     println!("{}: operation completed successfully", prog);

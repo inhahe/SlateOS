@@ -23,7 +23,7 @@ fn run_etcd(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("etcd Version: 3.5.13 (SlateOS)");
+        println!("etcd Version: 3.5.13 (Slate OS)");
         println!("Git SHA: abc1234");
         println!("Go Version: go1.22.2");
         println!("Go OS/Arch: slateos/amd64");
@@ -72,7 +72,7 @@ fn run_etcdctl(args: Vec<String>) -> i32 {
             0
         }
         "version" | "--version" => {
-            println!("etcdctl version: 3.5.13 (SlateOS)");
+            println!("etcdctl version: 3.5.13 (Slate OS)");
             println!("API version: 3.5");
             0
         }
@@ -212,7 +212,7 @@ fn run_etcdutl(args: Vec<String>) -> i32 {
             0
         }
         "version" | "--version" => {
-            println!("etcdutl version: 3.5.13 (SlateOS)");
+            println!("etcdutl version: 3.5.13 (Slate OS)");
             0
         }
         "defrag" => {

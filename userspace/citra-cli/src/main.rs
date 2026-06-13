@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_citra(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: citra [OPTIONS] [ROM]");
-        println!("citra v2104 (SlateOS) — Nintendo 3DS emulator");
+        println!("citra v2104 (Slate OS) — Nintendo 3DS emulator");
         println!();
         println!("Options:");
         println!("  --fullscreen      Start fullscreen");
@@ -22,7 +22,7 @@ fn run_citra(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("citra v2104 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("citra v2104 (Slate OS)"); return 0; }
     println!("citra: Nintendo 3DS emulator started");
     println!("  Backend: Vulkan");
     println!("  Resolution: 4x native");
@@ -34,7 +34,7 @@ fn run_citra(args: &[String], _prog: &str) -> i32 {
 fn run_room(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: citra-room [OPTIONS]");
-        println!("citra-room v2104 (SlateOS) — Citra multiplayer server");
+        println!("citra-room v2104 (Slate OS) — Citra multiplayer server");
         println!();
         println!("Options:");
         println!("  --port PORT       Server port (default: 24872)");
@@ -43,7 +43,7 @@ fn run_room(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("citra-room v2104 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("citra-room v2104 (Slate OS)"); return 0; }
     println!("citra-room: multiplayer server started on port 24872");
     0
 }

@@ -29,7 +29,7 @@ fn run_gping(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("gping 1.17.3 (SlateOS)");
+        println!("gping 1.17.3 (Slate OS)");
         return 0;
     }
 
@@ -45,7 +45,7 @@ fn run_gping(args: Vec<String>) -> i32 {
     }
 
     // Simulate a TUI graph
-    println!("gping 1.17.3 (SlateOS) — TUI launched");
+    println!("gping 1.17.3 (Slate OS) — TUI launched");
     println!();
 
     for host in &hosts {

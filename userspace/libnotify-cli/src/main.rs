@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_notify_send(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: notify-send [OPTIONS] SUMMARY [BODY]");
-        println!("notify-send v0.8 (SlateOS) — Send desktop notifications");
+        println!("notify-send v0.8 (Slate OS) — Send desktop notifications");
         println!();
         println!("Options:");
         println!("  -u URGENCY        low, normal, critical");

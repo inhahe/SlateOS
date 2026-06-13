@@ -11,7 +11,7 @@ fn run_tensorboard(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: tensorboard <COMMAND> [OPTIONS]");
         println!();
-        println!("TensorBoard visualization toolkit CLI (SlateOS).");
+        println!("TensorBoard visualization toolkit CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  serve        Start TensorBoard server");
@@ -21,7 +21,7 @@ fn run_tensorboard(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("TensorBoard 2.16.0 (SlateOS)");
+        println!("TensorBoard 2.16.0 (Slate OS)");
         return 0;
     }
 

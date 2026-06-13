@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sk(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sketch [OPTIONS]");
-        println!("Sketch 100 (SlateOS) — macOS-native vector design tool");
+        println!("Sketch 100 (Slate OS) — macOS-native vector design tool");
         println!();
         println!("Options:");
         println!("  --new                  New document");
@@ -24,8 +24,8 @@ fn run_sk(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Sketch 100.3 (SlateOS)"); return 0; }
-    println!("Sketch 100.3 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Sketch 100.3 (Slate OS)"); return 0; }
+    println!("Sketch 100.3 (Slate OS)");
     println!("  Vendor: Sketch B.V. (Den Haag, Netherlands; founded 2010)");
     println!("  Founders: Pieter Omvlee, Emanuel Sa");
     println!("  Platform: macOS only (no Windows, no Linux native — Sketch for Teams web)");

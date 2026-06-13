@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_labplot(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: labplot [OPTIONS] [FILE.lml]");
-        println!("labplot v2.10 (SlateOS) — Scientific data analysis and visualization");
+        println!("labplot v2.10 (Slate OS) — Scientific data analysis and visualization");
         println!();
         println!("Options:");
         println!("  --version         Show version");
@@ -24,7 +24,7 @@ fn run_labplot(args: &[String], _prog: &str) -> i32 {
         println!("  import from CSV/HDF5/FITS/netCDF/ROOT");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("labplot v2.10 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("labplot v2.10 (Slate OS)"); return 0; }
     println!("labplot: data analysis application started");
     println!("  Plot types: scatter, line, bar, histogram, box, polar, 3D");
     println!("  Analysis: fitting, smoothing, interpolation, differentiation");

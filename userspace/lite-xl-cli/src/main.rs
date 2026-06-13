@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_lite_xl(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lite-xl [OPTIONS] [FILE|DIR...]");
-        println!("Lite XL 2.1.5 (SlateOS) — Lightweight, extensible text editor");
+        println!("Lite XL 2.1.5 (Slate OS) — Lightweight, extensible text editor");
         println!();
         println!("Options:");
         println!("  --core-dir DIR       Core script directory");
@@ -24,7 +24,7 @@ fn run_lite_xl(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("Lite XL 2.1.5 (SlateOS)");
+        println!("Lite XL 2.1.5 (Slate OS)");
         return 0;
     }
     let paths: Vec<&str> = args.iter()

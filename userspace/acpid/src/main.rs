@@ -238,7 +238,7 @@ fn run_acpid(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-v" => {
-            println!("acpid 0.1.0 (SlateOS)");
+            println!("acpid 0.1.0 (Slate OS)");
             0
         }
         "--status" | "status" => daemon_status(),
@@ -392,7 +392,7 @@ fn run_acpi(args: Vec<String>) -> i32 {
             0
         }
         "--version" => {
-            println!("acpi 0.1.0 (SlateOS)");
+            println!("acpi 0.1.0 (Slate OS)");
             0
         }
         "-b" | "--battery" => show_battery(false),

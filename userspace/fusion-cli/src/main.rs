@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_fusion(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: fusion [OPTIONS] [COMP]");
-        println!("Blackmagic Fusion 19 Studio (SlateOS) — Node-based compositing & motion graphics");
+        println!("Blackmagic Fusion 19 Studio (Slate OS) — Node-based compositing & motion graphics");
         println!();
         println!("Options:");
         println!("  -render COMP           Render composition");
@@ -24,8 +24,8 @@ fn run_fusion(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Blackmagic Fusion 19.0 Studio (SlateOS)"); return 0; }
-    println!("Blackmagic Fusion 19.0 Studio (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Blackmagic Fusion 19.0 Studio (Slate OS)"); return 0; }
+    println!("Blackmagic Fusion 19.0 Studio (Slate OS)");
     println!("  Renderer: GPU-accelerated (CUDA, Metal, Vulkan)");
     println!("  Scripting: Lua, Python");
     println!("  Tools: 250+ (Camera Tracker, Planar Tracker, Particles)");

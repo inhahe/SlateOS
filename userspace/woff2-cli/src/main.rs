@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_compress(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: woff2_compress FONT.ttf");
-        println!("woff2_compress v1.0.2 (SlateOS) — Compress TTF/OTF to WOFF2");
+        println!("woff2_compress v1.0.2 (Slate OS) — Compress TTF/OTF to WOFF2");
         return 0;
     }
     let file = args.iter()
@@ -30,7 +30,7 @@ fn run_compress(args: &[String], _prog: &str) -> i32 {
 fn run_decompress(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: woff2_decompress FONT.woff2");
-        println!("woff2_decompress v1.0.2 (SlateOS) — Decompress WOFF2 to TTF/OTF");
+        println!("woff2_decompress v1.0.2 (Slate OS) — Decompress WOFF2 to TTF/OTF");
         return 0;
     }
     let file = args.iter()

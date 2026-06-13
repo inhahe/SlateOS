@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mage(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mage [COMMAND] [OPTIONS]");
-        println!("Mage v0.9 (SlateOS) — Open-source data pipeline tool");
+        println!("Mage v0.9 (Slate OS) — Open-source data pipeline tool");
         println!();
         println!("Commands:");
         println!("  start              Start Mage server");
@@ -30,8 +30,8 @@ fn run_mage(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Mage v0.9.73 (SlateOS)"); return 0; }
-    println!("Mage v0.9.73 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Mage v0.9.73 (Slate OS)"); return 0; }
+    println!("Mage v0.9.73 (Slate OS)");
     println!("  Server: http://0.0.0.0:6789");
     println!("  Pipelines: 12 (8 batch, 3 streaming, 1 integration)");
     println!("  Blocks: 67 total");

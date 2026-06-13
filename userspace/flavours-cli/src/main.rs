@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_flavours(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: flavours COMMAND [OPTIONS]");
-        println!("flavours v0.7 (SlateOS) — Base16 color scheme manager");
+        println!("flavours v0.7 (Slate OS) — Base16 color scheme manager");
         println!();
         println!("Commands:");
         println!("  apply [SCHEME]    Apply a Base16 scheme");

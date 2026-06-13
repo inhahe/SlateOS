@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gtkwave(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gtkwave [OPTIONS] [FILE.vcd | FILE.fst | FILE.ghw]");
-        println!("GTKWave 3.3.118 (SlateOS)");
+        println!("GTKWave 3.3.118 (Slate OS)");
         println!();
         println!("  -a FILE.gtkw    Load save file");
         println!("  -f FILE         Dump file to open");
@@ -24,7 +24,7 @@ fn run_gtkwave(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("GTKWave Analyzer v3.3.118 (SlateOS)");
+        println!("GTKWave Analyzer v3.3.118 (Slate OS)");
         return 0;
     }
     let file = args.iter().find(|a| {
@@ -55,7 +55,7 @@ fn run_vcd2fst(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("vcd2fst (GTKWave) 3.3.118 (SlateOS)");
+        println!("vcd2fst (GTKWave) 3.3.118 (Slate OS)");
         return 0;
     }
     let input = args.first().map(|s| s.as_str()).unwrap_or("dump.vcd");
@@ -73,7 +73,7 @@ fn run_fst2vcd(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("fst2vcd (GTKWave) 3.3.118 (SlateOS)");
+        println!("fst2vcd (GTKWave) 3.3.118 (Slate OS)");
         return 0;
     }
     let input = args.first().map(|s| s.as_str()).unwrap_or("dump.fst");
@@ -90,7 +90,7 @@ fn run_fstminer(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("fstminer (GTKWave) 3.3.118 (SlateOS)");
+        println!("fstminer (GTKWave) 3.3.118 (Slate OS)");
         return 0;
     }
     let file = args.first().map(|s| s.as_str()).unwrap_or("dump.fst");

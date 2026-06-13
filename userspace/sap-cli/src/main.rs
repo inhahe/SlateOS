@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sap(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sap [OPTIONS]");
-        println!("SAP S/4HANA 2023 + SAP GUI 8.00 (SlateOS) — Enterprise ERP");
+        println!("SAP S/4HANA 2023 + SAP GUI 8.00 (Slate OS) — Enterprise ERP");
         println!();
         println!("Options:");
         println!("  -conn SYSID            Connect to system (e.g. PRD/QAS/DEV)");
@@ -25,8 +25,8 @@ fn run_sap(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("SAP S/4HANA 2023 FPS02 + SAP GUI for Windows 8.00 (SlateOS)"); return 0; }
-    println!("SAP S/4HANA 2023 FPS02 + SAP GUI for Windows 8.00 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("SAP S/4HANA 2023 FPS02 + SAP GUI for Windows 8.00 (Slate OS)"); return 0; }
+    println!("SAP S/4HANA 2023 FPS02 + SAP GUI for Windows 8.00 (Slate OS)");
     println!("  Editions: S/4HANA Cloud (Public/Private), S/4HANA on-prem, ECC (legacy)");
     println!("  Database: SAP HANA (in-memory columnar) — required for S/4HANA");
     println!("  Modules: FI/CO, MM, SD, PP, QM, PM, HR (now SuccessFactors), CRM, EWM");

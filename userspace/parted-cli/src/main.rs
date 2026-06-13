@@ -11,7 +11,7 @@ fn run_parted(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: parted [OPTIONS] [DEVICE [COMMAND [ARGS...]]]");
         println!();
-        println!("GNU Parted — partition editor (SlateOS).");
+        println!("GNU Parted — partition editor (Slate OS).");
         println!();
         println!("Options:");
         println!("  -l, --list             List all block devices");
@@ -31,7 +31,7 @@ fn run_parted(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("parted (GNU parted) 3.6 (SlateOS)");
+        println!("parted (GNU parted) 3.6 (Slate OS)");
         return 0;
     }
 

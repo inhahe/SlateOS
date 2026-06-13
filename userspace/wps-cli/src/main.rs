@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wps(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wps [OPTIONS]");
-        println!("WPS Office 2024 (SlateOS) — Kingsoft cross-platform office suite");
+        println!("WPS Office 2024 (Slate OS) — Kingsoft cross-platform office suite");
         println!();
         println!("Options:");
         println!("  --app NAME             writer/spreadsheets/presentation/pdf");
@@ -23,8 +23,8 @@ fn run_wps(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("WPS Office 2024 12.2.0.16909 (SlateOS)"); return 0; }
-    println!("WPS Office 2024 12.2.0.16909 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("WPS Office 2024 12.2.0.16909 (Slate OS)"); return 0; }
+    println!("WPS Office 2024 12.2.0.16909 (Slate OS)");
     println!("  Vendor: Kingsoft Office Software (Beijing, founded 1988)");
     println!("  History: WPS = 'Word Processing System' — predates Microsoft Word in China");
     println!("  Components: Writer (Word-compat), Spreadsheets (Excel-compat), Presentation");

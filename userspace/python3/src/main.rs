@@ -33,7 +33,7 @@ fn run_python(args: Vec<String>) -> i32 {
     }
 
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("Python 3.13.0 (SlateOS)");
+        println!("Python 3.13.0 (Slate OS)");
         return 0;
     }
 
@@ -64,13 +64,13 @@ fn run_python(args: Vec<String>) -> i32 {
     }
 
     // Interactive mode
-    println!("Python 3.13.0 (SlateOS) [GCC 13.2.0 compatible]");
+    println!("Python 3.13.0 (Slate OS) [GCC 13.2.0 compatible]");
     println!("Type \"help\", \"copyright\", \"credits\" or \"license\" for more information.");
     println!(">>> import sys");
     println!(">>> sys.platform");
     println!("'slateos'");
     println!(">>> sys.version");
-    println!("'3.13.0 (SlateOS)'");
+    println!("'3.13.0 (Slate OS)'");
     println!(">>> exit()");
     0
 }
@@ -164,7 +164,7 @@ fn run_pydoc(args: Vec<String>) -> i32 {
             println!();
             println!("DATA");
             println!("    platform = 'slateos'");
-            println!("    version = '3.13.0 (SlateOS)'");
+            println!("    version = '3.13.0 (Slate OS)'");
         }
         _ => println!("Help on '{}': (simulated)", topic),
     }

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mbmon(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mbmon [OPTIONS]");
-        println!("mbmon v2.0 (SlateOS) — Motherboard hardware monitor");
+        println!("mbmon v2.0 (Slate OS) — Motherboard hardware monitor");
         println!();
         println!("Options:");
         println!("  -c COUNT          Number of readings");
@@ -25,7 +25,7 @@ fn run_mbmon(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("mbmon v2.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("mbmon v2.0 (Slate OS)"); return 0; }
     if args.iter().any(|a| a == "-d") {
         println!("mbmon: daemon started on port 411");
         return 0;

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_usdcat(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: usdcat [OPTIONS] FILE.usd...");
-        println!("usdcat (SlateOS) — Print/convert USD scene files");
+        println!("usdcat (Slate OS) — Print/convert USD scene files");
         println!();
         println!("Options:");
         println!("  -o FILE           Output file");
@@ -39,7 +39,7 @@ fn run_usdcat(args: &[String], _prog: &str) -> i32 {
 fn run_usdchecker(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: usdchecker [OPTIONS] FILE.usd");
-        println!("usdchecker (SlateOS) — Validate USD files for compliance");
+        println!("usdchecker (Slate OS) — Validate USD files for compliance");
         return 0;
     }
     let file = args.iter()
@@ -56,7 +56,7 @@ fn run_usdchecker(args: &[String], _prog: &str) -> i32 {
 fn run_usdview(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: usdview [OPTIONS] FILE.usd");
-        println!("usdview (SlateOS) — Interactive USD scene viewer");
+        println!("usdview (Slate OS) — Interactive USD scene viewer");
         return 0;
     }
     let file = args.iter()
@@ -72,7 +72,7 @@ fn run_usdview(args: &[String], _prog: &str) -> i32 {
 fn run_usdzip(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: usdzip [OPTIONS] FILE.usd -o OUTPUT.usdz");
-        println!("usdzip (SlateOS) — Create USDZ packages");
+        println!("usdzip (Slate OS) — Create USDZ packages");
         return 0;
     }
     let file = args.iter()

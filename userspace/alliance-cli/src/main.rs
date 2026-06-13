@@ -15,46 +15,46 @@ fn run_alliance(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "vasy" => {
-                println!("VASY (SlateOS) — VHDL analyzer and synthesizer");
+                println!("VASY (Slate OS) — VHDL analyzer and synthesizer");
                 println!("  vasy [-a] [-p] [-o] [-V] FILE");
             }
             "boom" => {
-                println!("BOOM (SlateOS) — Boolean minimization");
+                println!("BOOM (Slate OS) — Boolean minimization");
                 println!("  boom [-l N] [-d] FILE");
             }
             "boog" => {
-                println!("BOOG (SlateOS) — Binding and optimizing on gates");
+                println!("BOOG (Slate OS) — Binding and optimizing on gates");
                 println!("  boog [-l LIB] [-o OUT] FILE");
             }
             "loon" => {
-                println!("LOON (SlateOS) — Local optimizations on nets");
+                println!("LOON (Slate OS) — Local optimizations on nets");
                 println!("  loon [-l LIB] [-o OUT] FILE");
             }
             "ocp" => {
-                println!("OCP (SlateOS) — Standard cell placer");
+                println!("OCP (Slate OS) — Standard cell placer");
                 println!("  ocp [-v] [-ring] FILE OUT");
             }
             "nero" => {
-                println!("NERO (SlateOS) — Negotiated router");
+                println!("NERO (Slate OS) — Negotiated router");
                 println!("  nero [-V] [-6] FILE OUT");
             }
             "cougar" => {
-                println!("COUGAR (SlateOS) — Netlist extractor");
+                println!("COUGAR (Slate OS) — Netlist extractor");
                 println!("  cougar [-v] [-f FMT] FILE");
             }
             "druc" => {
-                println!("DRUC (SlateOS) — Design rule checker");
+                println!("DRUC (Slate OS) — Design rule checker");
                 println!("  druc FILE");
             }
             _ => {
-                println!("Alliance VLSI CAD v5.1 (SlateOS)");
+                println!("Alliance VLSI CAD v5.1 (Slate OS)");
                 println!("  Tools: vasy, boom, boog, loon, ocp, nero, cougar, druc");
             }
         }
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Alliance v5.1.1 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("Alliance v5.1.1 (Slate OS)"); return 0; }
     match prog {
         "vasy" => {
             println!("VASY: analyzing VHDL...");

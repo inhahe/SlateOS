@@ -22,7 +22,7 @@ fn run_loki(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-version") {
-        println!("loki, version 3.0.0 (SlateOS)");
+        println!("loki, version 3.0.0 (Slate OS)");
         println!("  branch: main");
         println!("  build date: 2025-05-22");
         return 0;
@@ -34,7 +34,7 @@ fn run_loki(args: Vec<String>) -> i32 {
     let target = args.iter().find_map(|a| a.strip_prefix("--target="))
         .unwrap_or("all");
 
-    println!("level=info ts=2025-05-22T10:00:00.000Z caller=main.go msg=\"Starting Loki\" version=\"3.0.0 (SlateOS)\"");
+    println!("level=info ts=2025-05-22T10:00:00.000Z caller=main.go msg=\"Starting Loki\" version=\"3.0.0 (Slate OS)\"");
     println!("level=info ts=2025-05-22T10:00:00.001Z caller=main.go msg=\"Loading configuration\" file=\"{}\"", config);
     println!("level=info ts=2025-05-22T10:00:00.010Z caller=modules.go msg=\"Running target\" target=\"{}\"", target);
     println!("level=info ts=2025-05-22T10:00:00.050Z caller=server.go msg=\"HTTP server listening\" address=:3100");
@@ -113,7 +113,7 @@ fn run_promtail(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("promtail, version 3.0.0 (SlateOS)");
+        println!("promtail, version 3.0.0 (Slate OS)");
         return 0;
     }
 

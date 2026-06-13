@@ -14,7 +14,7 @@ fn run_kinit(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: kinit [OPTIONS] [principal]");
         println!();
-        println!("kinit — Kerberos initial authentication (SlateOS, MIT Kerberos 1.21).");
+        println!("kinit — Kerberos initial authentication (Slate OS, MIT Kerberos 1.21).");
         println!();
         println!("Options:");
         println!("  -l <lifetime>    Ticket lifetime");
@@ -26,7 +26,7 @@ fn run_kinit(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("kinit (MIT Kerberos 1.21 SlateOS)");
+        println!("kinit (MIT Kerberos 1.21 Slate OS)");
         return 0;
     }
 
@@ -99,7 +99,7 @@ fn run_kadmin(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: kadmin [OPTIONS] [-q query]");
         println!();
-        println!("kadmin — Kerberos administration (SlateOS).");
+        println!("kadmin — Kerberos administration (Slate OS).");
         println!();
         println!("Options:");
         println!("  -p <principal>    Admin principal");

@@ -1196,7 +1196,7 @@ mod tests {
 
         let mut tree = RenderTree::new();
         tree.fill_rect(0.0, 0.0, 640.0, 480.0, guitk::color::Color::rgb(30, 30, 30));
-        tree.text(10.0, 20.0, "Hello, SlateOS!", guitk::color::Color::WHITE, 14.0);
+        tree.text(10.0, 20.0, "Hello, Slate OS!", guitk::color::Color::WHITE, 14.0);
 
         // Should not panic; verifies the submit path works.
         window.submit(&tree);

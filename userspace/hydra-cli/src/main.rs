@@ -11,7 +11,7 @@ fn run_hydra(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: hydra [OPTIONS] TARGET SERVICE");
         println!();
-        println!("Hydra — network login cracker (SlateOS).");
+        println!("Hydra — network login cracker (Slate OS).");
         println!();
         println!("Options:");
         println!("  -l LOGIN               Single login name");
@@ -49,7 +49,7 @@ fn run_hydra(args: Vec<String>) -> i32 {
     let target = positional.first().copied().unwrap_or("192.168.1.1");
     let service = positional.get(1).copied().unwrap_or("ssh");
 
-    println!("Hydra v9.5 (SlateOS) starting at 2024-01-15 12:00:00");
+    println!("Hydra v9.5 (Slate OS) starting at 2024-01-15 12:00:00");
     println!("[DATA] max {} tasks per 1 server, overall {} tasks", tasks, tasks);
     println!("[DATA] attacking {}://{}:{}", service, target, match service {
         "ssh" => "22",

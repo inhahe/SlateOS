@@ -10,7 +10,7 @@ use std::process;
 fn run_pants(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: pants [OPTIONS] GOAL [TARGET...]");
-        println!("Pants 2.20.0 (SlateOS)");
+        println!("Pants 2.20.0 (Slate OS)");
         println!();
         println!("Goals:");
         println!("  check        Type-check source code");

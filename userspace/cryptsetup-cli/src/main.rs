@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_cryptsetup(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: cryptsetup <action> [OPTIONS] <device>");
-        println!("cryptsetup v2.7 (SlateOS) — LUKS disk encryption setup");
+        println!("cryptsetup v2.7 (Slate OS) — LUKS disk encryption setup");
         println!();
         println!("Actions:");
         println!("  luksFormat DEVICE       Format LUKS partition");
@@ -31,7 +31,7 @@ fn run_cryptsetup(args: &[String], _prog: &str) -> i32 {
         println!("  --version        Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("cryptsetup v2.7 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("cryptsetup v2.7 (Slate OS)"); return 0; }
     match args.first().map(|s| s.as_str()) {
         Some("luksDump") => {
             println!("LUKS header information:");
@@ -59,10 +59,10 @@ fn run_cryptsetup(args: &[String], _prog: &str) -> i32 {
 fn run_veritysetup(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: veritysetup <action> [OPTIONS]");
-        println!("veritysetup v2.7 (SlateOS) — dm-verity volume setup");
+        println!("veritysetup v2.7 (Slate OS) — dm-verity volume setup");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("veritysetup v2.7 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("veritysetup v2.7 (Slate OS)"); return 0; }
     println!("veritysetup: dm-verity tool");
     0
 }
@@ -70,10 +70,10 @@ fn run_veritysetup(args: &[String], _prog: &str) -> i32 {
 fn run_integritysetup(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: integritysetup <action> [OPTIONS]");
-        println!("integritysetup v2.7 (SlateOS) — dm-integrity volume setup");
+        println!("integritysetup v2.7 (Slate OS) — dm-integrity volume setup");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("integritysetup v2.7 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("integritysetup v2.7 (Slate OS)"); return 0; }
     println!("integritysetup: dm-integrity tool");
     0
 }

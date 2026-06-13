@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_xmagnify(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: xmagnify [OPTIONS]");
-        println!("xmagnify v0.1 (SlateOS) — Simple screen magnifier");
+        println!("xmagnify v0.1 (Slate OS) — Simple screen magnifier");
         println!();
         println!("Options:");
         println!("  -mag FACTOR       Magnification factor (default 2)");

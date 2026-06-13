@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_omp(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: oh-my-posh [COMMAND]");
-        println!("Oh My Posh 23.6.4 (SlateOS) — Prompt theme engine");
+        println!("Oh My Posh 23.6.4 (Slate OS) — Prompt theme engine");
         println!();
         println!("Commands:");
         println!("  init SHELL          Print shell init script");
@@ -39,7 +39,7 @@ fn run_omp(args: &[String], _prog: &str) -> i32 {
     let cmd = args.iter().find(|a| !a.starts_with('-'))
         .map(|s| s.as_str()).unwrap_or("version");
     match cmd {
-        "version" => println!("oh-my-posh 23.6.4 (SlateOS)"),
+        "version" => println!("oh-my-posh 23.6.4 (Slate OS)"),
         "init" => {
             let shell = args.get(1).map(|s| s.as_str()).unwrap_or("bash");
             println!("# oh-my-posh init for {}", shell);

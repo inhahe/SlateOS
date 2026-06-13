@@ -47,7 +47,7 @@ fn run_redis_cli(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("redis-cli 7.2.4 (SlateOS)");
+        println!("redis-cli 7.2.4 (Slate OS)");
         return 0;
     }
 

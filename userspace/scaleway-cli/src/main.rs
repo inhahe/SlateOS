@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_scw(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: scw COMMAND [OPTIONS]");
-        println!("Scaleway CLI 2.30.0 (SlateOS)");
+        println!("Scaleway CLI 2.30.0 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  instance     Manage compute instances");

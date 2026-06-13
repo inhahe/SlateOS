@@ -123,7 +123,7 @@ fn run_cargo_edit(args: Vec<String>, mode: &str) -> i32 {
     }
 
     if subargs.iter().any(|a| a == "-V" || a == "--version") {
-        println!("cargo-edit 0.12.3 (SlateOS)");
+        println!("cargo-edit 0.12.3 (Slate OS)");
     }
     0
 }

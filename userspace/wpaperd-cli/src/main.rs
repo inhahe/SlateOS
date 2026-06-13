@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wpaperd(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wpaperd [OPTIONS]");
-        println!("wpaperd v1.0 (SlateOS) — Wallpaper daemon with slideshow support");
+        println!("wpaperd v1.0 (Slate OS) — Wallpaper daemon with slideshow support");
         println!();
         println!("Options:");
         println!("  -d                Daemonize");
@@ -23,7 +23,7 @@ fn run_wpaperd(args: &[String], _prog: &str) -> i32 {
         println!("Configure via ~/.config/wpaperd/wallpaper.toml");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("wpaperd v1.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("wpaperd v1.0 (Slate OS)"); return 0; }
     println!("wpaperd: wallpaper daemon started");
     println!("  Config: ~/.config/wpaperd/wallpaper.toml");
     println!("  Slideshow: enabled (interval: 30m)");
@@ -33,7 +33,7 @@ fn run_wpaperd(args: &[String], _prog: &str) -> i32 {
 fn run_wpaperctl(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: wpaperctl COMMAND [OUTPUT]");
-        println!("wpaperctl v1.0 (SlateOS) — Control wpaperd");
+        println!("wpaperctl v1.0 (Slate OS) — Control wpaperd");
         println!();
         println!("Commands:");
         println!("  next [OUTPUT]     Switch to next wallpaper");

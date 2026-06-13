@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_alloy(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: alloy [COMMAND] [OPTIONS]");
-        println!("Grafana Alloy v1.3 (SlateOS) — OpenTelemetry collector");
+        println!("Grafana Alloy v1.3 (Slate OS) — OpenTelemetry collector");
         println!();
         println!("Commands:");
         println!("  run                Start Alloy");
@@ -29,8 +29,8 @@ fn run_alloy(args: &[String], _prog: &str) -> i32 {
         println!("  --version            Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Grafana Alloy v1.3.1 (SlateOS)"); return 0; }
-    println!("Grafana Alloy v1.3.1 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Grafana Alloy v1.3.1 (Slate OS)"); return 0; }
+    println!("Grafana Alloy v1.3.1 (Slate OS)");
     println!("  Components: 23 active");
     println!("  Targets: 156 discovered");
     println!("  Metrics scraped: 12,345/s");

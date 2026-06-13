@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_watermill(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: watermill [COMMAND] [OPTIONS]");
-        println!("Watermill v1.3 (SlateOS) — Event-driven processing toolkit");
+        println!("Watermill v1.3 (Slate OS) — Event-driven processing toolkit");
         println!();
         println!("Commands:");
         println!("  pub TOPIC MSG      Publish message to topic");
@@ -29,8 +29,8 @@ fn run_watermill(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Watermill v1.3.7 (SlateOS)"); return 0; }
-    println!("Watermill v1.3.7 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Watermill v1.3.7 (Slate OS)"); return 0; }
+    println!("Watermill v1.3.7 (Slate OS)");
     println!("  Driver: GoChannel (in-memory)");
     println!("  Router: 5 handlers");
     println!("  Topics: 8 (pub/sub)");

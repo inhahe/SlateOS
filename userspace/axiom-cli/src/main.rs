@@ -21,7 +21,7 @@ fn run_fricas(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("FriCAS 1.3.10 (SlateOS)");
+        println!("FriCAS 1.3.10 (Slate OS)");
         println!("Based on Axiom");
         println!("SBCL 2.4.1");
         return 0;

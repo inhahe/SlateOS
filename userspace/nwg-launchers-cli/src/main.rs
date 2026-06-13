@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_drawer(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: nwg-drawer [OPTIONS]");
-        println!("nwg-drawer v0.3 (SlateOS) — Application drawer/launcher");
+        println!("nwg-drawer v0.3 (Slate OS) — Application drawer/launcher");
         println!();
         println!("Options:");
         println!("  -c COLUMNS        Number of columns");
@@ -33,7 +33,7 @@ fn run_drawer(args: &[String], _prog: &str) -> i32 {
 fn run_bar(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: nwg-bar [OPTIONS]");
-        println!("nwg-bar v0.3 (SlateOS) — Button bar (logout screen)");
+        println!("nwg-bar v0.3 (Slate OS) — Button bar (logout screen)");
         println!();
         println!("Options:");
         println!("  -t TEMPLATE       Template file");
@@ -48,7 +48,7 @@ fn run_bar(args: &[String], _prog: &str) -> i32 {
 fn run_menu(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: nwg-menu [OPTIONS]");
-        println!("nwg-menu v0.3 (SlateOS) — Grid menu launcher");
+        println!("nwg-menu v0.3 (Slate OS) — Grid menu launcher");
         println!();
         println!("Options:");
         println!("  -va VALIGN        Vertical alignment (top/center/bottom)");

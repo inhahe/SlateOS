@@ -19,7 +19,7 @@ fn run_qemu_system(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: qemu-system-x86_64 [OPTIONS]");
         println!();
-        println!("QEMU x86_64 system emulator (SlateOS).");
+        println!("QEMU x86_64 system emulator (Slate OS).");
         println!();
         println!("Options:");
         println!("  -m SIZE            Memory size (e.g., 2G)");
@@ -43,7 +43,7 @@ fn run_qemu_system(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-version") {
-        println!("QEMU emulator version 8.2.2 (SlateOS)");
+        println!("QEMU emulator version 8.2.2 (Slate OS)");
         return 0;
     }
 
@@ -69,7 +69,7 @@ fn run_qemu_img(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: qemu-img COMMAND [OPTIONS]");
         println!();
-        println!("qemu-img — QEMU disk image utility (SlateOS).");
+        println!("qemu-img — QEMU disk image utility (Slate OS).");
         println!();
         println!("Commands:");
         println!("  create       Create new disk image");
@@ -127,7 +127,7 @@ fn run_qemu_nbd(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: qemu-nbd [OPTIONS] FILE");
         println!();
-        println!("qemu-nbd — QEMU NBD server (SlateOS).");
+        println!("qemu-nbd — QEMU NBD server (Slate OS).");
         println!();
         println!("Options:");
         println!("  -c DEV       Connect to NBD device");

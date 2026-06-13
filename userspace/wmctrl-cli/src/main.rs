@@ -11,7 +11,7 @@ fn run_wmctrl(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wmctrl [OPTIONS]");
         println!();
-        println!("wmctrl — window manager control (SlateOS).");
+        println!("wmctrl — window manager control (Slate OS).");
         println!();
         println!("Options:");
         println!("  -l             List windows");
@@ -51,7 +51,7 @@ fn run_wmctrl(args: Vec<String>) -> i32 {
         println!("0  * DG: 1920x1080  VP: 0,0  WA: 0,32 1920x1048  Desktop 1");
         println!("1  - DG: 1920x1080  VP: N/A  WA: 0,32 1920x1048  Desktop 2");
     } else if args.iter().any(|a| a == "-m") {
-        println!("Name: SlateOS WM");
+        println!("Name: Slate OS WM");
         println!("Class: N/A");
         println!("PID: 1234");
         println!("Window manager's PID: 1234");

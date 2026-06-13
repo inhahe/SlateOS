@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_cacti(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: cacti [OPTIONS]");
-        println!("cacti v1.2 (SlateOS) — Network graphing & monitoring");
+        println!("cacti v1.2 (Slate OS) — Network graphing & monitoring");
         println!();
         println!("Options:");
         println!("  --import FILE   Import template");
@@ -24,7 +24,7 @@ fn run_cacti(args: &[String], _prog: &str) -> i32 {
         println!("RRDTool-based network graphing with SNMP polling.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("cacti v1.2 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("cacti v1.2 (Slate OS)"); return 0; }
     println!("cacti: graphing system active");
     println!("  Data sources: 156");
     println!("  Graphs: 48");
@@ -35,10 +35,10 @@ fn run_cacti(args: &[String], _prog: &str) -> i32 {
 fn run_cacti_poller(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: cacti-poller [OPTIONS]");
-        println!("cacti-poller v1.2 (SlateOS) — Data collection poller");
+        println!("cacti-poller v1.2 (Slate OS) — Data collection poller");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("cacti-poller v1.2 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("cacti-poller v1.2 (Slate OS)"); return 0; }
     println!("cacti-poller: polling cycle started");
     println!("  Hosts polled: 12");
     println!("  Data sources updated: 156");
@@ -49,10 +49,10 @@ fn run_cacti_poller(args: &[String], _prog: &str) -> i32 {
 fn run_cacti_spine(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: cacti-spine [OPTIONS]");
-        println!("cacti-spine v1.2 (SlateOS) — High-performance C-based poller");
+        println!("cacti-spine v1.2 (Slate OS) — High-performance C-based poller");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("cacti-spine v1.2 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("cacti-spine v1.2 (Slate OS)"); return 0; }
     println!("cacti-spine: fast poller started");
     println!("  Threads: 4");
     println!("  Hosts processed: 12");

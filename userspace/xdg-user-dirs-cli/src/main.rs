@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_update(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: xdg-user-dirs-update [OPTIONS]");
-        println!("xdg-user-dirs-update v0.18 (SlateOS) — Update XDG user directories");
+        println!("xdg-user-dirs-update v0.18 (Slate OS) — Update XDG user directories");
         println!();
         println!("Options:");
         println!("  --force           Force update even if dirs exist");
@@ -41,7 +41,7 @@ fn run_update(args: &[String], _prog: &str) -> i32 {
 fn run_dir(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: xdg-user-dir DIRNAME");
-        println!("xdg-user-dir v0.18 (SlateOS) — Query XDG user directory");
+        println!("xdg-user-dir v0.18 (Slate OS) — Query XDG user directory");
         println!();
         println!("Names: DESKTOP, DOCUMENTS, DOWNLOAD, MUSIC, PICTURES, PUBLICSHARE, TEMPLATES, VIDEOS");
         return 0;

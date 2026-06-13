@@ -796,7 +796,7 @@ fn sample_disks() -> Vec<Disk> {
                 },
                 Partition {
                     index: 2,
-                    label: String::from("SlateOS Root"),
+                    label: String::from("Slate OS Root"),
                     filesystem: FilesystemType::Ext4,
                     start_sector: 1_050_624,
                     end_sector: 839_909_375,

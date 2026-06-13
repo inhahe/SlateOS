@@ -30,7 +30,7 @@ fn run_alacritty(args: &[String], prog: &str) -> i32 {
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: alacritty [OPTIONS]");
-        println!("Alacritty 0.13.2 (SlateOS) — GPU-accelerated terminal emulator");
+        println!("Alacritty 0.13.2 (Slate OS) — GPU-accelerated terminal emulator");
         println!();
         println!("Options:");
         println!("  --config-file FILE     Config file");
@@ -47,7 +47,7 @@ fn run_alacritty(args: &[String], prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("alacritty 0.13.2 (SlateOS)");
+        println!("alacritty 0.13.2 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "--print-events") {

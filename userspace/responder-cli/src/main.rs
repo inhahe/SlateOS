@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_responder(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: responder [OPTIONS] -I INTERFACE");
-        println!("Responder v3.1 (SlateOS) — LLMNR/NBT-NS/MDNS poisoner");
+        println!("Responder v3.1 (Slate OS) — LLMNR/NBT-NS/MDNS poisoner");
         println!();
         println!("Options:");
         println!("  -I IFACE       Network interface");
@@ -28,8 +28,8 @@ fn run_responder(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Responder v3.1.4 (SlateOS)"); return 0; }
-    println!("Responder v3.1.4 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Responder v3.1.4 (Slate OS)"); return 0; }
+    println!("Responder v3.1.4 (Slate OS)");
     println!("  Interface: eth0 (192.168.1.50)");
     println!("  Servers:");
     println!("    HTTP:  ON  | SMB:    ON  | LDAP:  ON");

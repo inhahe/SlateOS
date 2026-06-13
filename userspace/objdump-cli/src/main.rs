@@ -19,7 +19,7 @@ fn run_objdump(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: objdump [OPTIONS] FILE");
         println!();
-        println!("objdump — display info from object files (SlateOS).");
+        println!("objdump — display info from object files (Slate OS).");
         println!();
         println!("Options:");
         println!("  -d, --disassemble      Disassemble executable sections");
@@ -36,7 +36,7 @@ fn run_objdump(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("GNU objdump (GNU Binutils) 2.42 (SlateOS)");
+        println!("GNU objdump (GNU Binutils) 2.42 (Slate OS)");
         return 0;
     }
 
@@ -90,7 +90,7 @@ fn run_objcopy(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("GNU objcopy (GNU Binutils) 2.42 (SlateOS)");
+        println!("GNU objcopy (GNU Binutils) 2.42 (Slate OS)");
         return 0;
     }
     // objcopy is silent on success
@@ -104,7 +104,7 @@ fn run_strip_bin(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("GNU strip (GNU Binutils) 2.42 (SlateOS)");
+        println!("GNU strip (GNU Binutils) 2.42 (Slate OS)");
         return 0;
     }
     0
@@ -132,7 +132,7 @@ fn run_strings(args: &[String]) -> i32 {
     println!("libc.so.6");
     println!("__libc_start_main");
     println!("GLIBC_2.34");
-    println!("GCC: (SlateOS 14.0.0) 14.0.0");
+    println!("GCC: (Slate OS 14.0.0) 14.0.0");
     println!(".text");
     println!(".rodata");
     println!(".data");

@@ -529,7 +529,7 @@ fn parse_args(args: &[String], domainname_mode: bool) -> Result<Action, String> 
 
 fn print_usage(domainname_mode: bool) {
     if domainname_mode {
-        println!("SlateOS Domain Name Utility v{VERSION}");
+        println!("Slate OS Domain Name Utility v{VERSION}");
         println!();
         println!("Display or set the NIS/YP domain name.");
         println!();
@@ -540,7 +540,7 @@ fn print_usage(domainname_mode: bool) {
         return;
     }
 
-    println!("SlateOS Hostname Utility v{VERSION}");
+    println!("Slate OS Hostname Utility v{VERSION}");
     println!();
     println!("Display or set the system hostname.");
     println!();
@@ -615,7 +615,7 @@ fn run(action: Action, domainname_mode: bool) -> i32 {
 
         Action::Version => {
             let name = if domainname_mode { "domainname" } else { "hostname" };
-            println!("{name} (SlateOS) {VERSION}");
+            println!("{name} (Slate OS) {VERSION}");
             0
         }
 

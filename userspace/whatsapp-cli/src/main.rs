@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wa(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: whatsapp [OPTIONS]");
-        println!("WhatsApp Messenger (SlateOS) — Meta's end-to-end encrypted messenger");
+        println!("WhatsApp Messenger (Slate OS) — Meta's end-to-end encrypted messenger");
         println!();
         println!("Options:");
         println!("  --chat CONTACT         Open chat");
@@ -24,8 +24,8 @@ fn run_wa(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("WhatsApp Desktop 2.2448.7.0 (SlateOS)"); return 0; }
-    println!("WhatsApp Desktop 2.2448.7.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("WhatsApp Desktop 2.2448.7.0 (Slate OS)"); return 0; }
+    println!("WhatsApp Desktop 2.2448.7.0 (Slate OS)");
     println!("  Owner: Meta Platforms (acquired Feb 2014 from Koum/Acton for $19B — largest of era)");
     println!("  Founded: 2009 by Jan Koum and Brian Acton (both ex-Yahoo!)");
     println!("  Crypto: Signal Protocol (Open Whisper Systems) end-to-end by default since 2016");

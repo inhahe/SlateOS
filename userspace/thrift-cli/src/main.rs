@@ -10,7 +10,7 @@ use std::process;
 fn run_thrift(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: thrift [OPTIONS] FILE.thrift");
-        println!("Apache Thrift 0.20.0 (SlateOS)");
+        println!("Apache Thrift 0.20.0 (Slate OS)");
         println!();
         println!("Options:");
         println!("  --gen LANG    Generate code for language");
@@ -24,7 +24,7 @@ fn run_thrift(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Thrift version 0.20.0 (SlateOS)");
+        println!("Thrift version 0.20.0 (Slate OS)");
         return 0;
     }
     let file = args.iter()

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_tempo(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: tempo-cli COMMAND [OPTIONS]");
-        println!("Grafana Tempo CLI 2.5.0 (SlateOS)");
+        println!("Grafana Tempo CLI 2.5.0 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  query        Query traces");

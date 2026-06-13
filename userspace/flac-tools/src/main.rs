@@ -173,7 +173,7 @@ fn main() {
     let rest: Vec<String> = args.into_iter().skip(1).collect();
 
     if rest.iter().any(|a| a == "--version") {
-        println!("flac 1.4.3 (SlateOS)");
+        println!("flac 1.4.3 (Slate OS)");
         process::exit(0);
     }
 

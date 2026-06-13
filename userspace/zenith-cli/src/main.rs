@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_zenith(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: zenith [OPTIONS]");
-        println!("zenith 0.14.0 (SlateOS) — Terminal system monitor with zoom and scroll");
+        println!("zenith 0.14.0 (Slate OS) — Terminal system monitor with zoom and scroll");
         println!();
         println!("Options:");
         println!("  -c, --cpu-height N     CPU chart height (default 10)");
@@ -26,7 +26,7 @@ fn run_zenith(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("zenith 0.14.0 (SlateOS)");
+        println!("zenith 0.14.0 (Slate OS)");
         return 0;
     }
     println!("zenith: Starting system monitor...");

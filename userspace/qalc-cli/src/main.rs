@@ -11,7 +11,7 @@ fn run_qalc(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: qalc [OPTIONS] [EXPRESSION]");
         println!();
-        println!("Qalculate! — powerful calculator (SlateOS).");
+        println!("Qalculate! — powerful calculator (Slate OS).");
         println!();
         println!("Options:");
         println!("  -s, --set OPTION       Set option");
@@ -24,7 +24,7 @@ fn run_qalc(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("Qalculate! 4.9.0 (SlateOS)");
+        println!("Qalculate! 4.9.0 (Slate OS)");
         return 0;
     }
 

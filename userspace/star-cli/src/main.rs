@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_star(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: STAR --runMode MODE [OPTIONS]");
-        println!("STAR v2.7.11b (SlateOS) — Spliced Transcripts Alignment to a Reference");
+        println!("STAR v2.7.11b (Slate OS) — Spliced Transcripts Alignment to a Reference");
         println!();
         println!("Run modes:");
         println!("  --runMode genomeGenerate  Build genome index");
@@ -29,7 +29,7 @@ fn run_star(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("STAR v2.7.11b (SlateOS)");
+        println!("STAR v2.7.11b (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "genomeGenerate") {

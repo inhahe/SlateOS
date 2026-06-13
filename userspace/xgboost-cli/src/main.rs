@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_xgboost(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: xgboost CONFIG_FILE");
-        println!("XGBoost v2.0 (SlateOS) — Scalable gradient boosting");
+        println!("XGBoost v2.0 (Slate OS) — Scalable gradient boosting");
         println!();
         println!("Config file options:");
         println!("  task = train|predict|dump");
@@ -29,8 +29,8 @@ fn run_xgboost(args: &[String], _prog: &str) -> i32 {
         println!("  --version                Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("XGBoost v2.0.3 (SlateOS)"); return 0; }
-    println!("XGBoost v2.0.3 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("XGBoost v2.0.3 (Slate OS)"); return 0; }
+    println!("XGBoost v2.0.3 (Slate OS)");
     println!("  Task: train");
     println!("  Objective: binary:logistic");
     println!("  Data: train.libsvm (50,000 samples)");

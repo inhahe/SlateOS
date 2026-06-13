@@ -25,7 +25,7 @@ fn run_r(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("R version 4.4.1 (2025-05-22) -- \"SlateOS\"");
+        println!("R version 4.4.1 (2025-05-22) -- \"Slate OS\"");
         println!("Platform: x86_64-slateos (64-bit)");
         return 0;
     }
@@ -40,7 +40,7 @@ fn run_r(args: Vec<String>) -> i32 {
 
     let quiet = args.iter().any(|a| a == "--quiet" || a == "-q");
     if !quiet {
-        println!("R version 4.4.1 (2025-05-22) -- \"SlateOS\"");
+        println!("R version 4.4.1 (2025-05-22) -- \"Slate OS\"");
         println!("Copyright (C) 2025 The R Foundation for Statistical Computing");
         println!("Platform: x86_64-slateos (64-bit)");
         println!();
@@ -63,7 +63,7 @@ fn run_rscript(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("R scripting front-end version 4.4.1 (2025-05-22) (SlateOS)");
+        println!("R scripting front-end version 4.4.1 (2025-05-22) (Slate OS)");
         return 0;
     }
 

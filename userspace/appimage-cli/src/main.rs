@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_appimagetool(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: appimagetool [OPTIONS] SOURCE [TARGET]");
-        println!("appimagetool 13 (SlateOS)");
+        println!("appimagetool 13 (Slate OS)");
         println!();
         println!("Options:");
         println!("  -n            Do not embed desktop integration");
@@ -26,7 +26,7 @@ fn run_appimagetool(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("appimagetool 13 (SlateOS), build abc123");
+        println!("appimagetool 13 (Slate OS), build abc123");
         return 0;
     }
     let source = args.iter()
@@ -63,7 +63,7 @@ fn run_appimaged(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("appimaged 1.0.0 (SlateOS)");
+        println!("appimaged 1.0.0 (Slate OS)");
         return 0;
     }
     println!("appimaged: monitoring ~/Applications/ for AppImages...");
@@ -83,7 +83,7 @@ fn run_appimage_update(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("AppImageUpdate 2.0.0 (SlateOS)");
+        println!("AppImageUpdate 2.0.0 (Slate OS)");
         return 0;
     }
     let file = args.iter()

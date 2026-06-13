@@ -114,7 +114,7 @@ fn run_tlp(args: Vec<String>) -> i32 {
             println!("  --version     Show version");
             0
         }
-        "--version" | "-V" => { println!("tlp 0.1.0 (SlateOS)"); 0 }
+        "--version" | "-V" => { println!("tlp 0.1.0 (Slate OS)"); 0 }
         "start" => tlp_start(),
         "ac" => tlp_apply(PowerMode::AC),
         "bat" => tlp_apply(PowerMode::Battery),
@@ -181,7 +181,7 @@ fn run_tlp_stat(args: Vec<String>) -> i32 {
             println!("  -w, --wifi      WiFi");
             0
         }
-        "--version" | "-V" => { println!("tlp-stat 0.1.0 (SlateOS)"); 0 }
+        "--version" | "-V" => { println!("tlp-stat 0.1.0 (Slate OS)"); 0 }
         "-b" | "--battery" => stat_battery(),
         "-c" | "--config" => stat_config(),
         "-p" | "--processor" => stat_processor(),
@@ -223,7 +223,7 @@ fn stat_config() -> i32 {
 
 fn stat_processor() -> i32 {
     println!("--- TLP Processor Status");
-    println!("  CPU model: SlateOS Virtual CPU @ 3.6GHz");
+    println!("  CPU model: Slate OS Virtual CPU @ 3.6GHz");
     println!("  Cores: 8");
     println!("  Governor: performance");
     println!("  Energy perf policy: performance");
@@ -237,7 +237,7 @@ fn stat_system() -> i32 {
     println!("  TLP version: 0.1.0");
     println!("  Power source: AC");
     println!("  Kernel: 6.1.0-slateos");
-    println!("  Model: SlateOS Virtual Desktop");
+    println!("  Model: Slate OS Virtual Desktop");
     0
 }
 

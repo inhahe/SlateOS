@@ -39,7 +39,7 @@ fn run_oxipng(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("oxipng 9.1.1 (SlateOS)");
+        println!("oxipng 9.1.1 (Slate OS)");
         return 0;
     }
 

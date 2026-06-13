@@ -37,7 +37,7 @@ fn run_nsq(args: &[String], prog_name: &str) -> i32 {
                 println!("  --lookupd-http URL     nsqlookupd address");
             }
         }
-        println!("NSQ 1.3.0 (SlateOS)");
+        println!("NSQ 1.3.0 (Slate OS)");
         return 0;
     }
     match prog_name {

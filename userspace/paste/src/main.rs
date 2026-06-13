@@ -547,7 +547,7 @@ fn paste_serial(config: &Config) -> io::Result<i32> {
 // ============================================================================
 
 fn print_help() {
-    println!("SlateOS paste v{VERSION}");
+    println!("Slate OS paste v{VERSION}");
     println!();
     println!("Merge corresponding lines from each FILE, separated by TABs.");
     println!("With no FILE, or when FILE is -, read standard input.");
@@ -585,7 +585,7 @@ fn main() {
             process::exit(0);
         }
         ParseResult::Version => {
-            println!("paste (SlateOS) {VERSION}");
+            println!("paste (Slate OS) {VERSION}");
             process::exit(0);
         }
         ParseResult::Run(config) => {

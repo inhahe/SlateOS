@@ -11,7 +11,7 @@ fn run_pylint(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pylint [OPTIONS] [FILES/MODULES...]");
         println!();
-        println!("Pylint — Python code static analyzer (SlateOS).");
+        println!("Pylint — Python code static analyzer (Slate OS).");
         println!();
         println!("Options:");
         println!("  --rcfile FILE        Config file");
@@ -24,7 +24,7 @@ fn run_pylint(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("pylint 3.0.3 (SlateOS)");
+        println!("pylint 3.0.3 (Slate OS)");
         return 0;
     }
 

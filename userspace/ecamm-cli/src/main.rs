@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ecamm(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ecamm [OPTIONS]");
-        println!("Ecamm Live 4 (SlateOS) — Mac-native live streaming");
+        println!("Ecamm Live 4 (Slate OS) — Mac-native live streaming");
         println!();
         println!("Options:");
         println!("  --interview            Open Interview Mode (multi-guest)");
@@ -23,8 +23,8 @@ fn run_ecamm(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Ecamm Live 4.2.1 (SlateOS)"); return 0; }
-    println!("Ecamm Live 4.2.1 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Ecamm Live 4.2.1 (Slate OS)"); return 0; }
+    println!("Ecamm Live 4.2.1 (Slate OS)");
     println!("  Inputs: Camera, screen, iOS/iPadOS device, NDI, virtual cameras");
     println!("  Outputs: YouTube/Facebook/Twitch/LinkedIn/Custom RTMP");
     println!("  Interview Mode: invite up to 4 guests via browser URL");

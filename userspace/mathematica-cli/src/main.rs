@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mma(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mathematica [OPTIONS] [FILE]");
-        println!("Wolfram Mathematica 14.1 (SlateOS) — Symbolic/numeric computation");
+        println!("Wolfram Mathematica 14.1 (Slate OS) — Symbolic/numeric computation");
         println!();
         println!("Options:");
         println!("  -script FILE           Run Wolfram Language script (.wls)");
@@ -22,8 +22,8 @@ fn run_mma(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Wolfram Mathematica 14.1.0 (SlateOS)"); return 0; }
-    println!("Wolfram Mathematica 14.1.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Wolfram Mathematica 14.1.0 (Slate OS)"); return 0; }
+    println!("Wolfram Mathematica 14.1.0 (Slate OS)");
     println!("  Language: Wolfram Language — symbolic, functional, pattern-based");
     println!("  Domains: symbolic algebra, calculus, ODE/PDE, statistics, graph theory,");
     println!("           ML, image/signal processing, finance, chemistry, biology");

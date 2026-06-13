@@ -14,7 +14,7 @@ fn run_tailscale(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: tailscale [FLAGS] COMMAND [ARGS]");
         println!();
-        println!("tailscale — Tailscale mesh VPN client (SlateOS).");
+        println!("tailscale — Tailscale mesh VPN client (Slate OS).");
         println!();
         println!("Commands:");
         println!("  up               Connect to Tailscale");

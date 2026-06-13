@@ -1238,7 +1238,7 @@ fn parse_args() -> Result<Args, Error> {
 // ============================================================================
 
 fn print_usage() {
-    eprintln!("at (SlateOS) v0.1.0 -- schedule one-time commands");
+    eprintln!("at (Slate OS) v0.1.0 -- schedule one-time commands");
     eprintln!();
     eprintln!("USAGE:");
     eprintln!("  at <timespec>                Schedule commands from stdin");

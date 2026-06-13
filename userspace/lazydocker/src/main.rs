@@ -19,12 +19,12 @@ fn run_lazydocker(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-v" || a == "--version") {
-        println!("Version: 0.23.1 (SlateOS)");
+        println!("Version: 0.23.1 (Slate OS)");
         println!("Date: 2025-05-22");
         return 0;
     }
 
-    println!("lazydocker 0.23.1 (SlateOS)");
+    println!("lazydocker 0.23.1 (Slate OS)");
     println!("(TUI launched — simulated)");
     let _ = args;
     0

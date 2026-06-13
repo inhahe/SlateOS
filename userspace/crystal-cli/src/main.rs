@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_crystal(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: crystal COMMAND [OPTIONS]");
-        println!("Crystal 1.11.2 (SlateOS)");
+        println!("Crystal 1.11.2 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  init           Initialize project");
@@ -87,7 +87,7 @@ fn run_crystal(args: &[String]) -> i32 {
 fn run_shards(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: shards COMMAND [OPTIONS]");
-        println!("Shards 0.17.4 (SlateOS)");
+        println!("Shards 0.17.4 (Slate OS)");
         println!("  install    Install dependencies");
         println!("  update     Update dependencies");
         println!("  list       List dependencies");
@@ -99,7 +99,7 @@ fn run_shards(args: &[String]) -> i32 {
     }
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("install");
     match subcmd {
-        "--version" => println!("Shards 0.17.4 (SlateOS)"),
+        "--version" => println!("Shards 0.17.4 (Slate OS)"),
         "install" => {
             println!("Resolving dependencies...");
             println!("Fetching https://github.com/crystal-lang/...");

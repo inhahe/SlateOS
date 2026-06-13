@@ -10,7 +10,7 @@ use std::process;
 fn run_apk(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: apk COMMAND [OPTIONS]");
-        println!("apk-tools 2.14.0 (SlateOS)");
+        println!("apk-tools 2.14.0 (Slate OS)");
         println!();
         println!("Package management:");
         println!("  add          Install packages");

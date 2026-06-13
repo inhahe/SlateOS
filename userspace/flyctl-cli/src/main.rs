@@ -19,7 +19,7 @@ fn run_fly(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "help") {
         println!("Usage: fly <COMMAND> [OPTIONS]");
         println!();
-        println!("flyctl — Fly.io CLI (SlateOS).");
+        println!("flyctl — Fly.io CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  launch          Create and configure a new app");
@@ -41,7 +41,7 @@ fn run_fly(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "version") {
-        println!("flyctl v0.2.15 (SlateOS)");
+        println!("flyctl v0.2.15 (Slate OS)");
         return 0;
     }
 

@@ -704,7 +704,7 @@ fn format_size(bytes: u64) -> String {
 // ============================================================================
 
 fn print_usage() {
-    println!("SlateOS System Log Daemon v0.1.0");
+    println!("Slate OS System Log Daemon v0.1.0");
     println!();
     println!("JSON-lines structured log aggregation and query service.");
     println!("Logs are stored at {LOG_DIR}/{MAIN_LOG}.");

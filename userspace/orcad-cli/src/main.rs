@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_orcad(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: orcad [OPTIONS] [FILE]");
-        println!("Cadence OrCAD 23.1 (SlateOS) — PCB design suite");
+        println!("Cadence OrCAD 23.1 (Slate OS) — PCB design suite");
         println!();
         println!("Options:");
         println!("  --capture FILE         Open OrCAD Capture schematic (.dsn)");
@@ -23,8 +23,8 @@ fn run_orcad(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Cadence OrCAD 23.1 (SlateOS)"); return 0; }
-    println!("Cadence OrCAD 23.1 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Cadence OrCAD 23.1 (Slate OS)"); return 0; }
+    println!("Cadence OrCAD 23.1 (Slate OS)");
     println!("  Tools: Capture (schematic), PCB Designer, PSpice (SPICE simulation)");
     println!("  Format: .dsn/.olb (schematic), .brd (PCB), .cir (PSpice)");
     println!("  Editions: OrCAD X — Professional, Standard, Capture/PCB");

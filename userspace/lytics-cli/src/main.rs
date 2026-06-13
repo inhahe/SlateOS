@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_lytics(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lytics [OPTIONS]");
-        println!("Lytics (SlateOS) — composable CDP + behavioral scoring (Portland)");
+        println!("Lytics (Slate OS) — composable CDP + behavioral scoring (Portland)");
         println!();
         println!("Options:");
         println!("  --conductor            Lytics Conductor — composable CDP control plane");
@@ -21,8 +21,8 @@ fn run_lytics(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Lytics 2024 (SlateOS)"); return 0; }
-    println!("Lytics 2024 (SlateOS) — Composable CDP");
+    if args.iter().any(|a| a == "--version") { println!("Lytics 2024 (Slate OS)"); return 0; }
+    println!("Lytics 2024 (Slate OS) — Composable CDP");
     println!("  Vendor: Lytics, Inc. (Portland, OR)");
     println!("  Founders: James McDermott (CEO) + Aaron Raddon (CTO), 2012");
     println!("          James: ex-Webtrends VP (Portland web analytics legacy)");

@@ -24,7 +24,7 @@ fn run_doxygen(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("1.10.0 (SlateOS)");
+        println!("1.10.0 (Slate OS)");
         return 0;
     }
 
@@ -50,7 +50,7 @@ fn run_doxygen(args: Vec<String>) -> i32 {
     }
 
     let config = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("Doxyfile");
-    println!("Doxygen version 1.10.0 (SlateOS)");
+    println!("Doxygen version 1.10.0 (Slate OS)");
     println!("Searching for include files...");
     println!("Searching for example files...");
     println!("Searching for images...");

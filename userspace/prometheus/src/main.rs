@@ -23,7 +23,7 @@ fn run_prometheus(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("prometheus, version 2.50.0 (SlateOS)");
+        println!("prometheus, version 2.50.0 (Slate OS)");
         println!("  build date: 2025-05-22");
         println!("  go version: go1.22.0");
         return 0;

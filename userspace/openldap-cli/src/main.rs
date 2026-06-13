@@ -15,7 +15,7 @@ fn run_openldap(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "ldapsearch" => {
-                println!("ldapsearch (SlateOS) — LDAP search tool");
+                println!("ldapsearch (Slate OS) — LDAP search tool");
                 println!("  -H URI             LDAP URI");
                 println!("  -b BASE            Search base DN");
                 println!("  -D BINDDN          Bind DN");
@@ -24,28 +24,28 @@ fn run_openldap(args: &[String], prog: &str) -> i32 {
                 println!("  FILTER [ATTRS]     Search filter and attributes");
             }
             "ldapadd" => {
-                println!("ldapadd (SlateOS) — LDAP add entries");
+                println!("ldapadd (Slate OS) — LDAP add entries");
                 println!("  -H URI             LDAP URI");
                 println!("  -D BINDDN          Bind DN");
                 println!("  -w PASSWD          Bind password");
                 println!("  -f FILE            LDIF file to add");
             }
             "ldapmodify" => {
-                println!("ldapmodify (SlateOS) — LDAP modify entries");
+                println!("ldapmodify (Slate OS) — LDAP modify entries");
                 println!("  -H URI             LDAP URI");
                 println!("  -D BINDDN          Bind DN");
                 println!("  -w PASSWD          Bind password");
                 println!("  -f FILE            LDIF modification file");
             }
             "ldapdelete" => {
-                println!("ldapdelete (SlateOS) — LDAP delete entries");
+                println!("ldapdelete (Slate OS) — LDAP delete entries");
                 println!("  -H URI             LDAP URI");
                 println!("  -D BINDDN          Bind DN");
                 println!("  -w PASSWD          Bind password");
                 println!("  DN [DN ...]        DNs to delete");
             }
             _ => {
-                println!("slapd (SlateOS) — OpenLDAP directory server");
+                println!("slapd (Slate OS) — OpenLDAP directory server");
                 println!("  -f FILE            Config file (slapd.conf)");
                 println!("  -F DIR             Config directory (slapd.d)");
                 println!("  -h URLS            Listener URLs");
@@ -56,7 +56,7 @@ fn run_openldap(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version" || a == "-VV") { println!("OpenLDAP v2.6.7 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version" || a == "-VV") { println!("OpenLDAP v2.6.7 (Slate OS)"); return 0; }
     match prog {
         "ldapsearch" | "ldapadd" | "ldapmodify" | "ldapdelete" => {
             println!("LDAP operation completed");
@@ -64,7 +64,7 @@ fn run_openldap(args: &[String], prog: &str) -> i32 {
             println!("  Result: Success (0)");
         }
         _ => {
-            println!("slapd v2.6.7 (SlateOS)");
+            println!("slapd v2.6.7 (Slate OS)");
             println!("  Listening: ldap://0.0.0.0:389/ ldaps://0.0.0.0:636/");
             println!("  Backend: MDB (/var/openldap/data)");
             println!("  Suffix: dc=example,dc=com");

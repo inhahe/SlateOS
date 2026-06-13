@@ -150,8 +150,8 @@ fn generate_default_entries() -> Vec<DmiEntry> {
             length: 18,
             data: vec![0; 18],
             strings: vec![
-                "SlateOS".to_string(),
-                "SlateOS BIOS".to_string(),
+                "Slate OS".to_string(),
+                "Slate OS BIOS".to_string(),
                 "01/01/2026".to_string(),
             ],
         },
@@ -162,8 +162,8 @@ fn generate_default_entries() -> Vec<DmiEntry> {
             length: 27,
             data: vec![1; 27],
             strings: vec![
-                "SlateOS Project".to_string(),
-                "SlateOS System".to_string(),
+                "Slate OS Project".to_string(),
+                "Slate OS System".to_string(),
                 "1.0".to_string(),
                 "SN-00000001".to_string(),
             ],
@@ -175,8 +175,8 @@ fn generate_default_entries() -> Vec<DmiEntry> {
             length: 8,
             data: vec![2; 8],
             strings: vec![
-                "SlateOS Project".to_string(),
-                "SlateOS Baseboard".to_string(),
+                "Slate OS Project".to_string(),
+                "Slate OS Baseboard".to_string(),
                 "1.0".to_string(),
                 "BSN-00000001".to_string(),
             ],
@@ -187,7 +187,7 @@ fn generate_default_entries() -> Vec<DmiEntry> {
             handle: 3,
             length: 13,
             data: vec![3; 13],
-            strings: vec!["SlateOS Project".to_string(), "Desktop".to_string()],
+            strings: vec!["Slate OS Project".to_string(), "Desktop".to_string()],
         },
         // Processor.
         DmiEntry {
@@ -195,7 +195,7 @@ fn generate_default_entries() -> Vec<DmiEntry> {
             handle: 4,
             length: 28,
             data: vec![4; 28],
-            strings: vec!["CPU0".to_string(), "SlateOS Processor".to_string()],
+            strings: vec!["CPU0".to_string(), "Slate OS Processor".to_string()],
         },
         // Physical Memory Array.
         DmiEntry {

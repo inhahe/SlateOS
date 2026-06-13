@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ray(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: ray COMMAND [OPTIONS]");
-        println!("Ray 2.31.0 (SlateOS) — Distributed computing framework");
+        println!("Ray 2.31.0 (Slate OS) — Distributed computing framework");
         println!();
         println!("Commands:");
         println!("  start          Start Ray processes");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sdrpp(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sdrpp [OPTIONS]");
-        println!("SDR++ v1.1 (SlateOS) — Bloat-free SDR receiver");
+        println!("SDR++ v1.1 (Slate OS) — Bloat-free SDR receiver");
         println!();
         println!("Options:");
         println!("  -r DIR         Root/config directory");
@@ -23,14 +23,14 @@ fn run_sdrpp(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("SDR++ v1.1.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("SDR++ v1.1.0 (Slate OS)"); return 0; }
     if args.iter().any(|a| a == "--server") {
         println!("SDR++ Server Mode");
         println!("  Port: 5259");
         println!("  Status: listening");
         return 0;
     }
-    println!("SDR++ v1.1.0 (SlateOS)");
+    println!("SDR++ v1.1.0 (Slate OS)");
     println!("  Sources: RTL-SDR, Airspy, HackRF, SDRPlay, PlutoSDR");
     println!("  Demodulators: NFM, WFM, AM, DSB, USB, LSB, CW, RAW");
     println!("  FFT: 65536-point");

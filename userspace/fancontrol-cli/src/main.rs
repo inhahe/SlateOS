@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_fancontrol(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: fancontrol [CONFIG_FILE]");
-        println!("fancontrol v3.6 (SlateOS) — Automated fan speed control");
+        println!("fancontrol v3.6 (Slate OS) — Automated fan speed control");
         println!();
         println!("Options:");
         println!("  -d                Debug mode");
@@ -21,7 +21,7 @@ fn run_fancontrol(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("fancontrol v3.6 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("fancontrol v3.6 (Slate OS)"); return 0; }
     println!("fancontrol: loading configuration from /etc/fancontrol");
     println!("  Device: hwmon0/pwm1 → hwmon0/temp1_input");
     println!("  MINTEMP=30  MAXTEMP=70  MINPWM=80  MAXPWM=255");
@@ -32,7 +32,7 @@ fn run_fancontrol(args: &[String], _prog: &str) -> i32 {
 fn run_pwmconfig(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pwmconfig [OPTIONS]");
-        println!("pwmconfig v3.6 (SlateOS) — Configure fan PWM settings");
+        println!("pwmconfig v3.6 (Slate OS) — Configure fan PWM settings");
         println!();
         println!("Options:");
         println!("  --nocheck         Skip safety checks");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_lyx(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lyx [OPTIONS] [FILE...]");
-        println!("lyx v2.4 (SlateOS) — Document processor (LaTeX frontend)");
+        println!("lyx v2.4 (Slate OS) — Document processor (LaTeX frontend)");
         println!();
         println!("Options:");
         println!("  -e FMT            Export to format (pdf, dvi, ps, html)");
@@ -22,7 +22,7 @@ fn run_lyx(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("lyx v2.4 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("lyx v2.4 (Slate OS)"); return 0; }
     println!("lyx: document processor started");
     println!("  LaTeX backend: pdflatex");
     println!("  BibTeX: available");
@@ -33,10 +33,10 @@ fn run_lyx(args: &[String], _prog: &str) -> i32 {
 fn run_lyxclient(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lyxclient [OPTIONS] -c COMMAND");
-        println!("lyxclient v2.4 (SlateOS) — LyX remote client");
+        println!("lyxclient v2.4 (Slate OS) — LyX remote client");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("lyxclient v2.4 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("lyxclient v2.4 (Slate OS)"); return 0; }
     println!("lyxclient: connected to LyX server");
     0
 }

@@ -300,7 +300,7 @@ fn cmd_hdparm(args: &HdparmArgs) -> i32 {
     }
 
     if args.show_version {
-        print_out(b"hdparm (SlateOS) v1.0.0\n");
+        print_out(b"hdparm (Slate OS) v1.0.0\n");
         return 0;
     }
 
@@ -387,7 +387,7 @@ fn cmd_hdparm(args: &HdparmArgs) -> i32 {
 // representative output without consulting the device.
 fn hdparm_identify(_device: &[u8]) -> i32 {
     // In real implementation: ATA IDENTIFY DEVICE command
-    print_out(b" Model Number:       SlateOS Virtual Disk\n");
+    print_out(b" Model Number:       Slate OS Virtual Disk\n");
     print_out(b" Serial Number:      VD00000001\n");
     print_out(b" Firmware Revision:  1.0\n");
     print_out(b" Transport:          Serial, SATA 3.0\n");
@@ -457,7 +457,7 @@ fn cmd_sdparm(args: &HdparmArgs) -> i32 {
     }
 
     if args.show_version {
-        print_out(b"sdparm (SlateOS) v1.0.0\n");
+        print_out(b"sdparm (Slate OS) v1.0.0\n");
         return 0;
     }
 
@@ -467,7 +467,7 @@ fn cmd_sdparm(args: &HdparmArgs) -> i32 {
     }
 
     print_out(&args.device);
-    print_out(b": ATA       SlateOS Virtual Disk  1.0\n");
+    print_out(b": ATA       Slate OS Virtual Disk  1.0\n");
 
     if args.show_info {
         print_out(b"    Peripheral device type: disk\n");

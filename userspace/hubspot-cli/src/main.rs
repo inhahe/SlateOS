@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_hubspot(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: hubspot [OPTIONS]");
-        println!("HubSpot (SlateOS) — inbound CRM (marketing + sales + service)");
+        println!("HubSpot (Slate OS) — inbound CRM (marketing + sales + service)");
         println!();
         println!("Options:");
         println!("  --marketing-hub        Marketing Hub (email, landing pages, automation)");
@@ -26,8 +26,8 @@ fn run_hubspot(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("HubSpot 2024 (SlateOS)"); return 0; }
-    println!("HubSpot 2024 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("HubSpot 2024 (Slate OS)"); return 0; }
+    println!("HubSpot 2024 (Slate OS)");
     println!("  Vendor: HubSpot, Inc. (Cambridge, MA — NYSE:HUBS)");
     println!("  Founders: Brian Halligan + Dharmesh Shah (MIT Sloan grads, 2006)");
     println!("          Halligan: coined 'inbound marketing' — antithesis of cold-calling outbound");

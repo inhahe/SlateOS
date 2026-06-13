@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_norton(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: norton [OPTIONS]");
-        println!("Norton 360 Deluxe 24.10 (SlateOS) — Consumer security suite (Gen Digital)");
+        println!("Norton 360 Deluxe 24.10 (Slate OS) — Consumer security suite (Gen Digital)");
         println!();
         println!("Options:");
         println!("  --scan TYPE            quick/full/custom");
@@ -25,8 +25,8 @@ fn run_norton(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Norton 360 Deluxe 24.10.0.13 (SlateOS)"); return 0; }
-    println!("Norton 360 Deluxe 24.10.0.13 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Norton 360 Deluxe 24.10.0.13 (Slate OS)"); return 0; }
+    println!("Norton 360 Deluxe 24.10.0.13 (Slate OS)");
     println!("  Owner: Gen Digital (Symantec → NortonLifeLock → Gen after Avast merger 2022)");
     println!("  Editions: AntiVirus Plus, 360 Standard, 360 Deluxe, 360 Premium, LifeLock");
     println!("  Engines: SONAR (heuristics), Insight (reputation), IPS, ML, exploit prevention");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mproxy(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: mproxy [OPTIONS]");
-        println!("mproxy v1.0.0 (SlateOS) — Multi-protocol proxy");
+        println!("mproxy v1.0.0 (Slate OS) — Multi-protocol proxy");
         println!();
         println!("Options:");
         println!("  -l, --listen ADDR:PORT  Listen address");
@@ -27,7 +27,7 @@ fn run_mproxy(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("mproxy v1.0.0 (SlateOS)");
+        println!("mproxy v1.0.0 (Slate OS)");
         return 0;
     }
     println!("mproxy v1.0.0 starting...");

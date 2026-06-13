@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_arnold(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: arnold [OPTIONS]");
-        println!("Autodesk Arnold 7 (SlateOS) — Unbiased Monte Carlo path tracer");
+        println!("Autodesk Arnold 7 (Slate OS) — Unbiased Monte Carlo path tracer");
         println!();
         println!("Options:");
         println!("  --render SCENE.ass     Render .ass (Arnold Scene Source) file");
@@ -23,8 +23,8 @@ fn run_arnold(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Arnold 7.3.4.0 (SlateOS)"); return 0; }
-    println!("Arnold 7.3.4.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Arnold 7.3.4.0 (Slate OS)"); return 0; }
+    println!("Arnold 7.3.4.0 (Slate OS)");
     println!("  Vendor: Autodesk Inc. — acquired Solid Angle (original Arnold dev) Apr 2016 for $60M");
     println!("  Original developer: Solid Angle SL (Madrid, Spain) — Marcos Fajardo (founder 2004)");
     println!("  History: Arnold 1.0 internal use Sony Pictures Imageworks 2009, public 2013");

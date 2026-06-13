@@ -11,7 +11,7 @@ fn run_vcpkg(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "help") {
         println!("Usage: vcpkg <COMMAND> [OPTIONS]");
         println!();
-        println!("vcpkg — C/C++ package manager (SlateOS).");
+        println!("vcpkg — C/C++ package manager (Slate OS).");
         println!();
         println!("Commands:");
         println!("  install      Install packages");
@@ -24,7 +24,7 @@ fn run_vcpkg(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("vcpkg package management program version 2024.01.12 (SlateOS)");
+        println!("vcpkg package management program version 2024.01.12 (Slate OS)");
         return 0;
     }
 

@@ -249,7 +249,7 @@ fn parse_args() -> Options {
             process::exit(EXIT_CLEAN);
         }
         Err(ParseTerminal::Version) => {
-            println!("fsck (SlateOS) 0.1.0");
+            println!("fsck (Slate OS) 0.1.0");
             process::exit(EXIT_CLEAN);
         }
         Err(ParseTerminal::UsageError(msg)) => {
@@ -260,7 +260,7 @@ fn parse_args() -> Options {
 }
 
 fn print_usage() {
-    println!("fsck (SlateOS) 0.1.0 -- check and repair filesystems");
+    println!("fsck (Slate OS) 0.1.0 -- check and repair filesystems");
     println!();
     println!("USAGE:");
     println!("  fsck [options] <device> ...");
@@ -842,7 +842,7 @@ fn main() {
     };
 
     if opts.verbose && !opts.json {
-        println!("fsck (SlateOS) 0.1.0");
+        println!("fsck (Slate OS) 0.1.0");
         if let Some(ref t) = opts.fstype {
             println!("  Filesystem type: {t}");
         }

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_deepin_screenshot(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: deepin-screenshot [OPTIONS]");
-        println!("deepin-screenshot v5.0 (SlateOS) — Deepin screenshot tool");
+        println!("deepin-screenshot v5.0 (Slate OS) — Deepin screenshot tool");
         println!();
         println!("Options:");
         println!("  -f, --fullscreen  Full screen capture");
@@ -25,7 +25,7 @@ fn run_deepin_screenshot(args: &[String], _prog: &str) -> i32 {
         println!("  text, blur, mosaic, marker, counter");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("deepin-screenshot v5.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("deepin-screenshot v5.0 (Slate OS)"); return 0; }
     println!("deepin-screenshot: screenshot tool started");
     println!("  OCR: text recognition available");
     println!("  Pin: pin screenshot to desktop");

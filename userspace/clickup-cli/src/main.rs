@@ -11,7 +11,7 @@ fn run_clickup(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: clickup <COMMAND> [OPTIONS]");
         println!();
-        println!("ClickUp project management CLI (SlateOS).");
+        println!("ClickUp project management CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  tasks        Manage tasks");

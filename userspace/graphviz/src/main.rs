@@ -56,7 +56,7 @@ fn run_graphviz(layout: &str, args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V") {
-        println!("{} - graphviz version 10.0.1 (SlateOS)", layout);
+        println!("{} - graphviz version 10.0.1 (Slate OS)", layout);
         return 0;
     }
 

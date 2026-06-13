@@ -556,7 +556,7 @@ impl AssociationRegistry {
     /// Export all associations to a line-based config string.
     /// Format: `extension=app_id` per line, with a header comment.
     pub fn export_config(&self) -> String {
-        let mut out = String::from("# SlateOS File Associations\n");
+        let mut out = String::from("# Slate OS File Associations\n");
         for (ext, assoc) in &self.associations {
             out.push_str(ext);
             out.push('=');
@@ -2454,7 +2454,7 @@ mod tests {
         let _ = reg.set_default_app("txt", "myapp");
         let config = reg.export_config();
         assert!(config.contains("txt=myapp"));
-        assert!(config.starts_with("# SlateOS File Associations"));
+        assert!(config.starts_with("# Slate OS File Associations"));
     }
 
     #[test]

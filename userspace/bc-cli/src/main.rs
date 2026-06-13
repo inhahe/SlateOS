@@ -19,7 +19,7 @@ fn run_bc(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: bc [OPTIONS] [FILE...]");
         println!();
-        println!("bc — arbitrary precision calculator (SlateOS).");
+        println!("bc — arbitrary precision calculator (Slate OS).");
         println!();
         println!("Options:");
         println!("  -l, --mathlib          Load math library");
@@ -30,7 +30,7 @@ fn run_bc(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("bc 6.7.4 (SlateOS)");
+        println!("bc 6.7.4 (Slate OS)");
         return 0;
     }
 
@@ -47,7 +47,7 @@ fn run_bc(args: &[String]) -> i32 {
         }
     } else {
         if !quiet {
-            println!("bc 6.7.4 (SlateOS)");
+            println!("bc 6.7.4 (Slate OS)");
             println!("Copyright 1991-2024, Free Software Foundation, Inc.");
         }
     }
@@ -58,7 +58,7 @@ fn run_dc(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: dc [OPTIONS] [FILE...]");
         println!();
-        println!("dc — reverse-polish desk calculator (SlateOS).");
+        println!("dc — reverse-polish desk calculator (Slate OS).");
         println!();
         println!("Options:");
         println!("  -e, --expression EXPR  Evaluate expression");
@@ -66,7 +66,7 @@ fn run_dc(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("dc 1.4.1 (SlateOS)");
+        println!("dc 1.4.1 (Slate OS)");
         return 0;
     }
 

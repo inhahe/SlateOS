@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_tray(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: tray [OPTIONS]");
-        println!("Tray.io (SlateOS) — general automation platform (Merlin AI, private)");
+        println!("Tray.io (Slate OS) — general automation platform (Merlin AI, private)");
         println!();
         println!("Options:");
         println!("  --workflows            Workflows (the core automations)");
@@ -21,8 +21,8 @@ fn run_tray(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Tray.io 2024 (SlateOS) — Merlin GPT 1.0"); return 0; }
-    println!("Tray.io 2024 (SlateOS) — General Automation Platform");
+    if args.iter().any(|a| a == "--version") { println!("Tray.io 2024 (Slate OS) — Merlin GPT 1.0"); return 0; }
+    println!("Tray.io 2024 (Slate OS) — General Automation Platform");
     println!("  Vendor: Tray.io, Inc. (San Francisco + London, private)");
     println!("  Founders: Rich Waldron + Alistair Russell + Dom Lewis, 2012");
     println!("          founded in London — early UK-founded iPaaS unicorn");

@@ -23,7 +23,7 @@ fn run_mc(args: &[String], prog: &str) -> i32 {
                 return 0;
             }
             if args.iter().any(|a| a == "-V" || a == "--version") {
-                println!("mcedit (mc) 4.8.31 (SlateOS)");
+                println!("mcedit (mc) 4.8.31 (Slate OS)");
                 return 0;
             }
             let file = args.iter().rfind(|a| !a.starts_with('-'))
@@ -58,7 +58,7 @@ fn run_mc(args: &[String], prog: &str) -> i32 {
     // mc
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mc [OPTIONS] [THIS_DIR [OTHER_DIR]]");
-        println!("GNU Midnight Commander 4.8.31 (SlateOS)");
+        println!("GNU Midnight Commander 4.8.31 (Slate OS)");
         println!();
         println!("Options:");
         println!("  -a, --stickchars       No langstrstrstrstrstrstrstr strstrstrstrstr");
@@ -81,7 +81,7 @@ fn run_mc(args: &[String], prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("GNU Midnight Commander 4.8.31 (SlateOS)");
+        println!("GNU Midnight Commander 4.8.31 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "-f" || a == "--datadir") {

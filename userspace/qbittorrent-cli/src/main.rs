@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_qbittorrent(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: qbittorrent [OPTIONS] [TORRENT...]");
-        println!("qbittorrent v4.6 (SlateOS) — BitTorrent client");
+        println!("qbittorrent v4.6 (Slate OS) — BitTorrent client");
         println!();
         println!("Options:");
         println!("  --no-splash       Disable splash screen");
@@ -21,7 +21,7 @@ fn run_qbittorrent(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("qbittorrent v4.6 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("qbittorrent v4.6 (Slate OS)"); return 0; }
     println!("qbittorrent: desktop client started");
     println!("  libtorrent version: 2.0.9");
     println!("  Web UI: http://localhost:8080");
@@ -31,7 +31,7 @@ fn run_qbittorrent(args: &[String], _prog: &str) -> i32 {
 fn run_nox(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: qbittorrent-nox [OPTIONS]");
-        println!("qbittorrent-nox v4.6 (SlateOS) — Headless BitTorrent client");
+        println!("qbittorrent-nox v4.6 (Slate OS) — Headless BitTorrent client");
         println!();
         println!("Options:");
         println!("  -d                Daemon mode");
@@ -39,7 +39,7 @@ fn run_nox(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("qbittorrent-nox v4.6 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("qbittorrent-nox v4.6 (Slate OS)"); return 0; }
     println!("qbittorrent-nox: headless client started");
     println!("  Web UI: http://localhost:8080");
     println!("  Default credentials: admin/adminadmin");

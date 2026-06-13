@@ -10,7 +10,7 @@ use std::process;
 fn run_waypoint(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: waypoint COMMAND [OPTIONS]");
-        println!("HashiCorp Waypoint 0.11.4 (SlateOS)");
+        println!("HashiCorp Waypoint 0.11.4 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  init         Initialize a new project");

@@ -11,7 +11,7 @@ fn run_postman(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: postman <COMMAND> [OPTIONS]");
         println!();
-        println!("Postman/Newman API testing CLI (SlateOS).");
+        println!("Postman/Newman API testing CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  run          Run a collection");

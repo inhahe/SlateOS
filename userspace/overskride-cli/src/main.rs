@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_overskride(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: overskride [OPTIONS]");
-        println!("overskride v0.6 (SlateOS) — Bluetooth & WiFi manager (GTK4/libadwaita)");
+        println!("overskride v0.6 (Slate OS) — Bluetooth & WiFi manager (GTK4/libadwaita)");
         println!();
         println!("Options:");
         println!("  --version         Show version");
@@ -22,7 +22,7 @@ fn run_overskride(args: &[String], _prog: &str) -> i32 {
         println!("Features: device management, file transfer, audio profiles.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("overskride v0.6 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("overskride v0.6 (Slate OS)"); return 0; }
     println!("overskride: Bluetooth & WiFi manager");
     println!("  Bluetooth: ON — 2 paired, 1 connected");
     println!("  WiFi: Connected to 'HomeNetwork'");

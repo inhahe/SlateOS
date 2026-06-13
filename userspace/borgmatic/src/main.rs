@@ -36,7 +36,7 @@ fn run_borgmatic(args: Vec<String>) -> i32 {
     }
 
     if cmd == Some("version") || cmd == Some("--version") {
-        println!("borgmatic 1.8.12 (SlateOS)");
+        println!("borgmatic 1.8.12 (Slate OS)");
         return 0;
     }
 

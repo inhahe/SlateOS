@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_vdj(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: virtualdj [OPTIONS]");
-        println!("VirtualDJ 2024 (SlateOS) — Atomix Productions DJ mixing software");
+        println!("VirtualDJ 2024 (Slate OS) — Atomix Productions DJ mixing software");
         println!();
         println!("Options:");
         println!("  --new                  New session (2/4/6 decks)");
@@ -24,8 +24,8 @@ fn run_vdj(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("VirtualDJ 2024 (build 8189) (SlateOS)"); return 0; }
-    println!("VirtualDJ 2024 (build 8189) (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("VirtualDJ 2024 (build 8189) (Slate OS)"); return 0; }
+    println!("VirtualDJ 2024 (build 8189) (Slate OS)");
     println!("  Vendor: Atomix Productions (HQ Paris, France — founded 1997)");
     println!("  Founder: Stéphane Clavel");
     println!("  Origin: AtomixMP3 (1999) → VirtualDJ 1.0 (2003) → present");

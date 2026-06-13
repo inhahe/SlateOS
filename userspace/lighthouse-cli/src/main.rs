@@ -11,7 +11,7 @@ fn run_lighthouse(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lighthouse <URL> [OPTIONS]");
         println!();
-        println!("Lighthouse web performance auditing CLI (SlateOS).");
+        println!("Lighthouse web performance auditing CLI (Slate OS).");
         println!();
         println!("Options:");
         println!("  --output <FMT>       Output format (html/json/csv)");

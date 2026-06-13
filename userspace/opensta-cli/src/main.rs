@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sta(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sta [OPTIONS] [TCL_SCRIPT]");
-        println!("OpenSTA v2.5 (SlateOS) — Static Timing Analysis");
+        println!("OpenSTA v2.5 (Slate OS) — Static Timing Analysis");
         println!();
         println!("Options:");
         println!("  -f SCRIPT      Execute TCL script");
@@ -24,8 +24,8 @@ fn run_sta(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("OpenSTA v2.5.0 (SlateOS)"); return 0; }
-    println!("OpenSTA v2.5.0 (SlateOS) — Static Timing Analysis");
+    if args.iter().any(|a| a == "--version") { println!("OpenSTA v2.5.0 (Slate OS)"); return 0; }
+    println!("OpenSTA v2.5.0 (Slate OS) — Static Timing Analysis");
     println!("  Reading liberty: sky130_fd_sc_hd.lib");
     println!("  Reading verilog: design.v");
     println!("  Reading SDC: constraints.sdc");

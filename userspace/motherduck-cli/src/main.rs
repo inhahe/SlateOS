@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_md(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: motherduck [OPTIONS]");
-        println!("MotherDuck (SlateOS) — DuckDB-in-the-cloud, hybrid local/cloud query execution");
+        println!("MotherDuck (Slate OS) — DuckDB-in-the-cloud, hybrid local/cloud query execution");
         println!();
         println!("Options:");
         println!("  --hybrid               Hybrid execution (local DuckDB + MotherDuck cloud)");
@@ -20,8 +20,8 @@ fn run_md(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("MotherDuck 2024 (SlateOS) — DuckDB CLI 1.x with MotherDuck extension"); return 0; }
-    println!("MotherDuck 2024 (SlateOS) — DuckDB-in-the-Cloud (Hybrid Local + Cloud)");
+    if args.iter().any(|a| a == "--version") { println!("MotherDuck 2024 (Slate OS) — DuckDB CLI 1.x with MotherDuck extension"); return 0; }
+    println!("MotherDuck 2024 (Slate OS) — DuckDB-in-the-Cloud (Hybrid Local + Cloud)");
     println!("  Vendor: MotherDuck, Inc. (Seattle, WA — private since 2022)");
     println!("  Founders: Jordan Tigani (ex-BigQuery founding engineer) + Tino Tereshko (ex-BigQuery PM), 2022");
     println!("          Jordan Tigani: famous '$1 query' BigQuery talks, blog 'Big Data is Dead' (2023)");

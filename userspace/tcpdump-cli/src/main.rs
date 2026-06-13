@@ -11,7 +11,7 @@ fn run_tcpdump(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: tcpdump [OPTIONS] [EXPRESSION]");
         println!();
-        println!("tcpdump — network packet analyzer (SlateOS).");
+        println!("tcpdump — network packet analyzer (Slate OS).");
         println!();
         println!("Options:");
         println!("  -i IFACE       Listen on interface");
@@ -27,7 +27,7 @@ fn run_tcpdump(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("tcpdump version 4.99.4 (SlateOS)");
+        println!("tcpdump version 4.99.4 (Slate OS)");
         return 0;
     }
 

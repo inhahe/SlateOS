@@ -11,7 +11,7 @@ fn run_hunspell(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: hunspell [OPTIONS] [FILE ...]");
         println!();
-        println!("Hunspell — spell checker (SlateOS).");
+        println!("Hunspell — spell checker (Slate OS).");
         println!();
         println!("Options:");
         println!("  -d DICT      Dictionary to use");
@@ -28,7 +28,7 @@ fn run_hunspell(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("Hunspell 1.7.2 (SlateOS)");
+        println!("Hunspell 1.7.2 (Slate OS)");
         return 0;
     }
 
@@ -49,7 +49,7 @@ fn run_hunspell(args: Vec<String>) -> i32 {
     let pipe_mode = args.iter().any(|a| a == "-a");
 
     if pipe_mode {
-        println!("@(#) Hunspell 1.7.2 (SlateOS)");
+        println!("@(#) Hunspell 1.7.2 (Slate OS)");
         // In real mode, would read stdin word-by-word
     } else if list_mode {
         println!("teh");

@@ -168,7 +168,7 @@ fn cmd_timedatectl(args: &TimedateArgs) -> i32 {
             0
         }
         TimedateCommand::Version => {
-            print_out(b"timedatectl (SlateOS systemd-compat) 1.0.0\n");
+            print_out(b"timedatectl (Slate OS systemd-compat) 1.0.0\n");
             0
         }
         TimedateCommand::Status => timedate_status(),
@@ -454,7 +454,7 @@ fn cmd_hostnamectl(args: &HostnameArgs) -> i32 {
             0
         }
         HostnameCommand::Version => {
-            print_out(b"hostnamectl (SlateOS systemd-compat) 1.0.0\n");
+            print_out(b"hostnamectl (Slate OS systemd-compat) 1.0.0\n");
             0
         }
         HostnameCommand::Status => hostname_status(),
@@ -505,8 +505,8 @@ fn hostname_status() -> i32 {
     print_out(b"           Chassis: desktop\n");
     print_out(b"        Machine ID: 00000000000000000000000000000000\n");
     print_out(b"           Boot ID: 00000000000000000000000000000000\n");
-    print_out(b"  Operating System: SlateOS\n");
-    print_out(b"            Kernel: SlateOS Microkernel\n");
+    print_out(b"  Operating System: Slate OS\n");
+    print_out(b"            Kernel: Slate OS Microkernel\n");
     print_out(b"      Architecture: x86-64\n");
     0
 }
@@ -516,7 +516,7 @@ fn hostname_get(args: &HostnameArgs) -> i32 {
     // and default cases all report the kernel hostname; only --pretty
     // produces the human-readable form.
     if args.pretty {
-        print_out(b"SlateOS Desktop\n");
+        print_out(b"Slate OS Desktop\n");
     } else {
         print_out(b"slateos\n");
     }
@@ -714,7 +714,7 @@ fn cmd_localectl(args: &LocaleArgs) -> i32 {
             0
         }
         LocaleCommand::Version => {
-            print_out(b"localectl (SlateOS systemd-compat) 1.0.0\n");
+            print_out(b"localectl (Slate OS systemd-compat) 1.0.0\n");
             0
         }
         LocaleCommand::Status => locale_status(),

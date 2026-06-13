@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_duo(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: duo [OPTIONS]");
-        println!("Cisco Duo (SlateOS) — Multi-factor authentication & zero-trust access");
+        println!("Cisco Duo (Slate OS) — Multi-factor authentication & zero-trust access");
         println!();
         println!("Options:");
         println!("  --mfa                  Multi-factor authentication");
@@ -25,8 +25,8 @@ fn run_duo(args: &[String], _prog: &str) -> i32 {
         println!("  --version               Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Cisco Duo 2024 (SlateOS)"); return 0; }
-    println!("Cisco Duo 2024 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Cisco Duo 2024 (Slate OS)"); return 0; }
+    println!("Cisco Duo 2024 (Slate OS)");
     println!("  Vendor: Duo Security, Inc. → acquired by Cisco Oct 2018 for $2.35B");
     println!("          now Cisco's Duo product line under Cisco Secure Access portfolio");
     println!("  Founders: Dug Song + Jon Oberheide (Ann Arbor, MI — founded 2009)");

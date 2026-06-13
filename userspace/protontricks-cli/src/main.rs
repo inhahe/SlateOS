@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_protontricks(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: protontricks [OPTIONS] APPID [VERB...]");
-        println!("protontricks v1.11 (SlateOS) — Winetricks wrapper for Proton games");
+        println!("protontricks v1.11 (Slate OS) — Winetricks wrapper for Proton games");
         println!();
         println!("Options:");
         println!("  -s PATTERN        Search for game by name");
@@ -23,7 +23,7 @@ fn run_protontricks(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("protontricks v1.11 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("protontricks v1.11 (Slate OS)"); return 0; }
     if args.iter().any(|a| a == "-s") {
         println!("Found games:");
         println!("  292030  The Witcher 3: Wild Hunt");
@@ -42,14 +42,14 @@ fn run_protontricks(args: &[String], _prog: &str) -> i32 {
 fn run_launch(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: protontricks-launch [OPTIONS] EXE [ARGS...]");
-        println!("protontricks-launch v1.11 (SlateOS) — Launch exe in Proton prefix");
+        println!("protontricks-launch v1.11 (Slate OS) — Launch exe in Proton prefix");
         println!();
         println!("Options:");
         println!("  --appid ID        Steam app ID");
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("protontricks-launch v1.11 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("protontricks-launch v1.11 (Slate OS)"); return 0; }
     println!("protontricks-launch: launching executable in Proton prefix...");
     0
 }

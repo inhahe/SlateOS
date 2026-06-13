@@ -1552,7 +1552,7 @@ fn detect_partition_table_type(disk_name: &str) -> &'static str {
 // ============================================================================
 
 fn print_usage() {
-    println!("SlateOS Disk Utility v0.1.0");
+    println!("Slate OS Disk Utility v0.1.0");
     println!();
     println!("Disk management, diagnostics, and benchmarking.");
     println!();

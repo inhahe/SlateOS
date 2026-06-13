@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rhvoice(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: rhvoice [OPTIONS] TEXT");
-        println!("RHVoice v1.8 (SlateOS) — Free and open-source speech synthesizer");
+        println!("RHVoice v1.8 (Slate OS) — Free and open-source speech synthesizer");
         println!();
         println!("Options:");
         println!("  -p VOICE          Voice name");
@@ -25,7 +25,7 @@ fn run_rhvoice(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("RHVoice v1.8 (SlateOS)");
+        println!("RHVoice v1.8 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "--voices") {

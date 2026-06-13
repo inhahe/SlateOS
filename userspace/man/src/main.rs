@@ -1034,7 +1034,7 @@ enum Mode {
 fn print_help() {
     println!("Usage: man [OPTIONS] [SECTION] NAME");
     println!();
-    println!("Display manual pages for SlateOS commands and system interfaces.");
+    println!("Display manual pages for Slate OS commands and system interfaces.");
     println!();
     println!("Options:");
     println!("  -k KEYWORD    Search page names and descriptions (apropos)");
@@ -1174,7 +1174,7 @@ fn main() {
             print_help();
         }
         Mode::Version => {
-            println!("man (SlateOS) {VERSION}");
+            println!("man (Slate OS) {VERSION}");
         }
         Mode::Display => {
             cmd_display(&args.name, args.section, args.show_all);

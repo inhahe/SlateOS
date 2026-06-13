@@ -11,7 +11,7 @@ fn run_jira(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: jira <COMMAND> [OPTIONS]");
         println!();
-        println!("Jira project management CLI (SlateOS).");
+        println!("Jira project management CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  issue        Manage issues");

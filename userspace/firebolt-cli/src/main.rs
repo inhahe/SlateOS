@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_fb(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: firebolt [OPTIONS]");
-        println!("Firebolt (SlateOS) — cloud data warehouse for data-intensive apps + sub-second analytics");
+        println!("Firebolt (Slate OS) — cloud data warehouse for data-intensive apps + sub-second analytics");
         println!();
         println!("Options:");
         println!("  --engines              Compute engines (independent scalable per-workload)");
@@ -20,8 +20,8 @@ fn run_fb(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Firebolt 2024 (SlateOS) — firebolt CLI 2.x"); return 0; }
-    println!("Firebolt 2024 (SlateOS) — Cloud Data Warehouse for Data-Intensive Apps");
+    if args.iter().any(|a| a == "--version") { println!("Firebolt 2024 (Slate OS) — firebolt CLI 2.x"); return 0; }
+    println!("Firebolt 2024 (Slate OS) — Cloud Data Warehouse for Data-Intensive Apps");
     println!("  Vendor: Firebolt Analytics, Inc. (Tel Aviv, Israel + NYC — private)");
     println!("  Founders: Eldad Farkash + Saar Bitner + Ariel Yaroshevich + Eran Levy, 2019");
     println!("          Eldad Farkash: ex-CTO + co-founder Sisense (BI platform)");

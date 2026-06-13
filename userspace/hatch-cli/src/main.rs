@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_hatch(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: hatch COMMAND [OPTIONS]");
-        println!("Hatch 1.12.0 (SlateOS)");
+        println!("Hatch 1.12.0 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  new          Create a new project");
@@ -150,7 +150,7 @@ fn run_hatch(args: &[String]) -> i32 {
 fn run_hatchling(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: hatchling COMMAND [OPTIONS]");
-        println!("Hatchling 1.25.0 — Build backend (SlateOS)");
+        println!("Hatchling 1.25.0 — Build backend (Slate OS)");
         println!();
         println!("Commands:");
         println!("  build        Build the project");

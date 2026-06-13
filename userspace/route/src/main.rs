@@ -484,7 +484,7 @@ fn flush_routes() {
 // ============================================================================
 
 fn print_usage() {
-    println!("SlateOS Route Management v0.1.0");
+    println!("Slate OS Route Management v0.1.0");
     println!();
     println!("Display and manage the kernel IP routing table.");
     println!();
@@ -550,7 +550,7 @@ fn main() {
                 return;
             }
             "--version" => {
-                println!("route (SlateOS) 0.1.0");
+                println!("route (Slate OS) 0.1.0");
                 return;
             }
             "add" | "del" | "delete" | "flush" => {

@@ -1024,7 +1024,7 @@ impl TaskSchedulerConfig {
     /// Serialize all tasks to a text config string.
     pub fn serialize(scheduler: &TaskScheduler) -> String {
         let mut lines = Vec::new();
-        lines.push(String::from("# SlateOS Task Scheduler Config"));
+        lines.push(String::from("# Slate OS Task Scheduler Config"));
         lines.push("VERSION|1".to_string());
 
         for task in scheduler.tasks.values() {

@@ -252,7 +252,7 @@ pub struct TestServer {
 fn default_servers() -> Vec<TestServer> {
     vec![
         TestServer {
-            name: "SlateOS Central".into(),
+            name: "Slate OS Central".into(),
             url: "speedtest.slateos.local".into(),
             location: "Local Network".into(),
             distance_km: 0,

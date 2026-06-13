@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_bl(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: baselight [OPTIONS] [SCENE]");
-        println!("FilmLight Baselight 6 (SlateOS) — High-end DI color grading & finishing");
+        println!("FilmLight Baselight 6 (Slate OS) — High-end DI color grading & finishing");
         println!();
         println!("Options:");
         println!("  --open FILE            Open scene");
@@ -24,8 +24,8 @@ fn run_bl(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("FilmLight Baselight 6.0.13720 (SlateOS)"); return 0; }
-    println!("FilmLight Baselight 6.0.13720 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("FilmLight Baselight 6.0.13720 (Slate OS)"); return 0; }
+    println!("FilmLight Baselight 6.0.13720 (Slate OS)");
     println!("  Editions: Baselight, Baselight Studio, Baselight One, Daylight, Editions");
     println!("  Hardware: Blackboard Classic/2, Slate panel");
     println!("  Features: Truelight color science, Boris FX integration, ARRI/RED/SONY native");

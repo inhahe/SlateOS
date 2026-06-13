@@ -14,7 +14,7 @@ fn run_traefik(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: traefik [OPTIONS] [COMMAND]");
         println!();
-        println!("traefik — cloud-native edge router (SlateOS).");
+        println!("traefik — cloud-native edge router (Slate OS).");
         println!();
         println!("Commands:");
         println!("  version          Show version");

@@ -30,7 +30,7 @@ fn print_help(prog: &str) {
 }
 
 fn print_version() {
-    println!("paddle-cli 0.1.0 — SlateOS personality binary");
+    println!("paddle-cli 0.1.0 — Slate OS personality binary");
     println!("Paddle.com Market Ltd — London, United Kingdom");
 }
 

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_hv(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: hyperv [OPTIONS]");
-        println!("Microsoft Hyper-V (SlateOS) — Type-1 hypervisor for Windows + Windows Server");
+        println!("Microsoft Hyper-V (Slate OS) — Type-1 hypervisor for Windows + Windows Server");
         println!();
         println!("Options:");
         println!("  --manager              Hyper-V Manager (MMC console)");
@@ -24,8 +24,8 @@ fn run_hv(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Microsoft Hyper-V 10.0.26100 (Windows 11 24H2 / Server 2025) (SlateOS)"); return 0; }
-    println!("Microsoft Hyper-V 10.0.26100 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Microsoft Hyper-V 10.0.26100 (Windows 11 24H2 / Server 2025) (Slate OS)"); return 0; }
+    println!("Microsoft Hyper-V 10.0.26100 (Slate OS)");
     println!("  Vendor: Microsoft");
     println!("  Type: Type-1 (bare-metal) — Windows boots as 'root partition' on hypervisor");
     println!("  Launched: Windows Server 2008 (Jun 2008); Client Hyper-V on Windows 8+ Pro/Ent");

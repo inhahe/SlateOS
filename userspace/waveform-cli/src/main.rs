@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wf(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: waveform [OPTIONS] [PROJECT]");
-        println!("Tracktion Waveform Pro 13 (SlateOS) — Unlimited-track single-screen DAW");
+        println!("Tracktion Waveform Pro 13 (Slate OS) — Unlimited-track single-screen DAW");
         println!();
         println!("Options:");
         println!("  --open FILE            Open .tracktionedit");
@@ -22,8 +22,8 @@ fn run_wf(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Tracktion Waveform Pro 13.0.41 (SlateOS)"); return 0; }
-    println!("Tracktion Waveform Pro 13.0.41 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Tracktion Waveform Pro 13.0.41 (Slate OS)"); return 0; }
+    println!("Tracktion Waveform Pro 13.0.41 (Slate OS)");
     println!("  Editions: Free, Standard, Pro");
     println!("  Tracks: unlimited audio/MIDI on one timeline");
     println!("  Engine: JUCE-based (Tracktion Engine open source)");

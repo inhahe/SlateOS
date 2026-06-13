@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ocaml(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ocaml [OPTIONS] [FILE]");
-        println!("OCaml 5.1.1 (SlateOS)");
+        println!("OCaml 5.1.1 (Slate OS)");
         println!("  -stdin      Read from stdin");
         println!("  -noprompt   No prompt");
         println!("  --version   Show version");
@@ -52,7 +52,7 @@ fn run_ocamlc(args: &[String]) -> i32 {
 fn run_opam(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: opam COMMAND [OPTIONS]");
-        println!("opam 2.1.5 (SlateOS)");
+        println!("opam 2.1.5 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  init         Initialize opam");
@@ -110,7 +110,7 @@ fn run_opam(args: &[String]) -> i32 {
 fn run_dune(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: dune COMMAND [OPTIONS]");
-        println!("dune 3.14.0 (SlateOS)");
+        println!("dune 3.14.0 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  build        Build project");

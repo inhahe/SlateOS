@@ -24,7 +24,7 @@ fn run_cni_plugin(args: Vec<String>, plugin: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("{}: CNI plugin v1.4.1 (SlateOS)", plugin);
+        println!("{}: CNI plugin v1.4.1 (Slate OS)", plugin);
         return 0;
     }
 

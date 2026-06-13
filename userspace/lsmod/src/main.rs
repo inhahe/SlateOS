@@ -33,13 +33,13 @@ use std::process;
 // nonexistent syscall. The read-only `lsmod` listing and modprobe's dependency
 // resolution / dry-run / show-depends remain useful and work unchanged.
 //
-// See todo.txt ("DESIGN GAP — no kernel-module loading: SlateOS is a microkernel")
+// See todo.txt ("DESIGN GAP — no kernel-module loading: Slate OS is a microkernel")
 // for the tracking note and the correct future direction (route driver
 // load/unload requests to the userspace driver framework over IPC).
 
 /// Human-readable explanation returned whenever a caller attempts to load or
 /// unload a kernel module.
-const MODULE_UNSUPPORTED: &str = "kernel modules are not supported on SlateOS \
+const MODULE_UNSUPPORTED: &str = "kernel modules are not supported on Slate OS \
 (microkernel: device drivers run as userspace processes managed by the driver \
 framework, not as loadable kernel modules)";
 
@@ -281,7 +281,7 @@ fn get_kernel_version() -> String {
         }
     }
 
-    // Try /proc/version (format: "SlateOS version X.Y.Z ...").
+    // Try /proc/version (format: "Slate OS version X.Y.Z ...").
     if let Ok(ver) = fs::read_to_string("/proc/version")
         && let Some(third) = ver.split_whitespace().nth(2)
     {

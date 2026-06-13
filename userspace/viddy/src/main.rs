@@ -29,7 +29,7 @@ fn run_viddy(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("viddy 0.4.0 (SlateOS)");
+        println!("viddy 0.4.0 (Slate OS)");
         return 0;
     }
 

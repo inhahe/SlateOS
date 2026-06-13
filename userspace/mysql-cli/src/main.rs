@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mysql(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help") {
         println!("Usage: mysql [OPTIONS] [DATABASE]");
-        println!("mysql Ver 8.4.0 for SlateOS (x86_64)");
+        println!("mysql Ver 8.4.0 for Slate OS (x86_64)");
         println!();
         println!("Options:");
         println!("  -h HOST      Server host");
@@ -27,7 +27,7 @@ fn run_mysql(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("mysql  Ver 8.4.0 for SlateOS on x86_64");
+        println!("mysql  Ver 8.4.0 for Slate OS on x86_64");
         return 0;
     }
     let stmt = args.windows(2).find(|w| w[0] == "-e").map(|w| w[1].as_str());
@@ -39,7 +39,7 @@ fn run_mysql(args: &[String]) -> i32 {
     let host = args.windows(2).find(|w| w[0] == "-h").map(|w| w[1].as_str()).unwrap_or("localhost");
     let db = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str());
     println!("Welcome to the MySQL monitor.  Commands end with ; or \\g.");
-    println!("Server version: 8.4.0 SlateOS");
+    println!("Server version: 8.4.0 Slate OS");
     println!();
     println!("Connected to {} at {}", db.unwrap_or("(none)"), host);
     println!("mysql> ");
@@ -91,7 +91,7 @@ fn run_mysqladmin(args: &[String]) -> i32 {
         }
         "ping" => println!("mysqld is alive"),
         "version" => {
-            println!("mysqladmin  Ver 8.4.0 for SlateOS on x86_64");
+            println!("mysqladmin  Ver 8.4.0 for Slate OS on x86_64");
             println!("Server version\t\t8.4.0");
             println!("Protocol version\t10");
         }

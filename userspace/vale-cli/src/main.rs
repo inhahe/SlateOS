@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_vale(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: vale [OPTIONS] [FILES/DIRS...]");
-        println!("Vale 3.4.0 (SlateOS) — Prose linter");
+        println!("Vale 3.4.0 (Slate OS) — Prose linter");
         println!();
         println!("Options:");
         println!("  --config FILE   Config file (.vale.ini)");

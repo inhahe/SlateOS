@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_deluged(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: deluged [OPTIONS]");
-        println!("deluged v2.1 (SlateOS) — Deluge BitTorrent daemon");
+        println!("deluged v2.1 (Slate OS) — Deluge BitTorrent daemon");
         println!();
         println!("Options:");
         println!("  -d                Do not daemonize");
@@ -23,7 +23,7 @@ fn run_deluged(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("deluged v2.1 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("deluged v2.1 (Slate OS)"); return 0; }
     println!("deluged: Deluge daemon started on port 58846");
     0
 }
@@ -31,7 +31,7 @@ fn run_deluged(args: &[String], _prog: &str) -> i32 {
 fn run_console(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: deluge-console [COMMAND] [OPTIONS]");
-        println!("deluge-console v2.1 (SlateOS) — Deluge console interface");
+        println!("deluge-console v2.1 (Slate OS) — Deluge console interface");
         println!();
         println!("Commands:");
         println!("  info              Show torrent info");
@@ -42,7 +42,7 @@ fn run_console(args: &[String], _prog: &str) -> i32 {
         println!("  status            Show session status");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("deluge-console v2.1 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("deluge-console v2.1 (Slate OS)"); return 0; }
     println!("deluge-console: connected to localhost:58846");
     println!("  Active: 2 torrents");
     println!("  Down: 2.5 MiB/s  Up: 500 KiB/s");
@@ -52,10 +52,10 @@ fn run_console(args: &[String], _prog: &str) -> i32 {
 fn run_gtk(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: deluge-gtk [OPTIONS]");
-        println!("deluge-gtk v2.1 (SlateOS) — Deluge GTK client");
+        println!("deluge-gtk v2.1 (Slate OS) — Deluge GTK client");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("deluge-gtk v2.1 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("deluge-gtk v2.1 (Slate OS)"); return 0; }
     println!("deluge-gtk: GTK client started");
     0
 }
@@ -63,13 +63,13 @@ fn run_gtk(args: &[String], _prog: &str) -> i32 {
 fn run_web(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: deluge-web [OPTIONS]");
-        println!("deluge-web v2.1 (SlateOS) — Deluge web interface");
+        println!("deluge-web v2.1 (Slate OS) — Deluge web interface");
         println!();
         println!("Options:");
         println!("  -p PORT           Web UI port (default: 8112)");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("deluge-web v2.1 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("deluge-web v2.1 (Slate OS)"); return 0; }
     println!("deluge-web: web interface started on http://localhost:8112");
     0
 }

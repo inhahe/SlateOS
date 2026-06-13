@@ -44,7 +44,7 @@ fn run_kitty(args: &[String], prog: &str) -> i32 {
     // kitty
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: kitty [OPTIONS] [COMMAND...]");
-        println!("kitty 0.35.2 (SlateOS) — GPU-accelerated terminal emulator");
+        println!("kitty 0.35.2 (Slate OS) — GPU-accelerated terminal emulator");
         println!();
         println!("Options:");
         println!("  --config FILE, -c FILE     Config file");
@@ -62,7 +62,7 @@ fn run_kitty(args: &[String], prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("kitty 0.35.2 created by Kovid Goyal (SlateOS)");
+        println!("kitty 0.35.2 created by Kovid Goyal (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "--dump-theme") {

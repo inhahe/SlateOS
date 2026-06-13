@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sensors(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sensors [OPTIONS] [CHIP]");
-        println!("sensors v3.6 (SlateOS) — Print hardware sensor readings");
+        println!("sensors v3.6 (Slate OS) — Print hardware sensor readings");
         println!();
         println!("Options:");
         println!("  -f                Show temps in Fahrenheit");
@@ -23,7 +23,7 @@ fn run_sensors(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("sensors v3.6 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("sensors v3.6 (Slate OS)"); return 0; }
     if args.iter().any(|a| a == "-j") {
         println!("{{");
         println!("  \"coretemp-isa-0000\": {{");
@@ -50,7 +50,7 @@ fn run_sensors(args: &[String], _prog: &str) -> i32 {
 fn run_detect(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sensors-detect [OPTIONS]");
-        println!("sensors-detect v3.6 (SlateOS) — Detect hardware monitoring chips");
+        println!("sensors-detect v3.6 (Slate OS) — Detect hardware monitoring chips");
         println!();
         println!("Options:");
         println!("  --auto            Auto-detect without prompting");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_icinga2(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: icinga2 <command> [OPTIONS]");
-        println!("icinga2 v2.14 (SlateOS) — Monitoring and alerting system");
+        println!("icinga2 v2.14 (Slate OS) — Monitoring and alerting system");
         println!();
         println!("Commands:");
         println!("  daemon        Run as daemon");
@@ -23,7 +23,7 @@ fn run_icinga2(args: &[String], _prog: &str) -> i32 {
         println!("  --version     Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("icinga2 v2.14 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("icinga2 v2.14 (Slate OS)"); return 0; }
     if args.first().map(|s| s.as_str()) == Some("daemon") {
         println!("icinga2: starting daemon...");
         println!("  Zones: master");
@@ -39,7 +39,7 @@ fn run_icinga2(args: &[String], _prog: &str) -> i32 {
 fn run_icinga2_check(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: icinga2-check <plugin> [OPTIONS]");
-        println!("icinga2-check v2.14 (SlateOS) — Run check plugins");
+        println!("icinga2-check v2.14 (Slate OS) — Run check plugins");
         return 0;
     }
     println!("CHECK OK - All checks passing");
@@ -49,7 +49,7 @@ fn run_icinga2_check(args: &[String], _prog: &str) -> i32 {
 fn run_icinga2_api(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: icinga2-api [OPTIONS]");
-        println!("icinga2-api v2.14 (SlateOS) — REST API client");
+        println!("icinga2-api v2.14 (Slate OS) — REST API client");
         println!("  --host HOST   API host (default: localhost)");
         println!("  --port PORT   API port (default: 5665)");
         return 0;

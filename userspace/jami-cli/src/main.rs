@@ -13,14 +13,14 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_jami(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: jami [OPTIONS]");
-        println!("jami v2024.01 (SlateOS) — Peer-to-peer communicator");
+        println!("jami v2024.01 (Slate OS) — Peer-to-peer communicator");
         println!();
         println!("Options:");
         println!("  --minimized       Start minimized");
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("jami v2024.01 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("jami v2024.01 (Slate OS)"); return 0; }
     println!("jami: P2P communicator started");
     println!("  Account: registered (DHT)");
     println!("  Encryption: end-to-end (TLS/SRTP)");
@@ -32,10 +32,10 @@ fn run_jami(args: &[String], _prog: &str) -> i32 {
 fn run_daemon(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: jami-daemon [OPTIONS]");
-        println!("jami-daemon v2024.01 (SlateOS) — Jami daemon service");
+        println!("jami-daemon v2024.01 (Slate OS) — Jami daemon service");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("jami-daemon v2024.01 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("jami-daemon v2024.01 (Slate OS)"); return 0; }
     println!("jami-daemon: service started");
     println!("  DHT: bootstrap complete");
     0

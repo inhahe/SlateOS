@@ -759,7 +759,7 @@ fn process(
 // ============================================================================
 
 fn print_help() {
-    println!("SlateOS uniq v{VERSION}");
+    println!("Slate OS uniq v{VERSION}");
     println!();
     println!("Filter adjacent matching lines from INPUT (or standard input),");
     println!("writing to OUTPUT (or standard output).");
@@ -811,7 +811,7 @@ fn main() {
             process::exit(0);
         }
         ParseResult::Version => {
-            println!("uniq (SlateOS) {VERSION}");
+            println!("uniq (Slate OS) {VERSION}");
             process::exit(0);
         }
         ParseResult::Run(config) => {

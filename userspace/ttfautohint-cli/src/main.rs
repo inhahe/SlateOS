@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ttfautohint(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: ttfautohint [OPTIONS] INPUT.ttf OUTPUT.ttf");
-        println!("ttfautohint v1.8 (SlateOS) — Automatic TrueType font hinting");
+        println!("ttfautohint v1.8 (Slate OS) — Automatic TrueType font hinting");
         println!();
         println!("Options:");
         println!("  -l MIN            Minimum PPEM for hinting (default: 8)");
@@ -24,7 +24,7 @@ fn run_ttfautohint(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("ttfautohint v1.8 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("ttfautohint v1.8 (Slate OS)"); return 0; }
     let input = args.first().map(|s| s.as_str()).unwrap_or("input.ttf");
     println!("ttfautohint: processing '{}'...", input);
     println!("  Hinting range: 8-50 ppem");

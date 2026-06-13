@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_magento(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: magento [OPTIONS]");
-        println!("Adobe Commerce / Magento (SlateOS) — enterprise self-hosted + cloud e-commerce");
+        println!("Adobe Commerce / Magento (Slate OS) — enterprise self-hosted + cloud e-commerce");
         println!();
         println!("Options:");
         println!("  --opensource           Magento Open Source (free, self-hosted)");
@@ -22,8 +22,8 @@ fn run_magento(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Adobe Commerce / Magento 2.4 (SlateOS)"); return 0; }
-    println!("Adobe Commerce / Magento 2.4 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Adobe Commerce / Magento 2.4 (Slate OS)"); return 0; }
+    println!("Adobe Commerce / Magento 2.4 (Slate OS)");
     println!("  Vendor: Adobe Inc. (San Jose, CA — NASDAQ:ADBE)");
     println!("  Originally: Magento Inc. acquired by eBay 2011 ($180M), spun out 2015, acquired by Adobe May 2018 ($1.68B)");
     println!("  Founders: Roy Rubin (CEO), Yoav Kutner (CTO), Bob Schwartz, 2008 — originally Varien LLC consultancy in 2007");

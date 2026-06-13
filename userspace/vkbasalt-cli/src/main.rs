@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_vkbasalt(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: vkbasalt [OPTIONS]");
-        println!("vkbasalt v0.3 (SlateOS) — Vulkan post-processing layer");
+        println!("vkbasalt v0.3 (Slate OS) — Vulkan post-processing layer");
         println!();
         println!("Options:");
         println!("  --config FILE     Configuration file");
@@ -24,7 +24,7 @@ fn run_vkbasalt(args: &[String], _prog: &str) -> i32 {
         println!("  ENABLE_VKBASALT=1 Enable the layer");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("vkbasalt v0.3 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("vkbasalt v0.3 (Slate OS)"); return 0; }
     if args.iter().any(|a| a == "--list-effects") {
         println!("Available effects:");
         println!("  cas              Contrast Adaptive Sharpening");

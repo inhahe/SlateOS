@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ls(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lightstep [OPTIONS]");
-        println!("Lightstep / ServiceNow Cloud Observability (SlateOS) — Distributed tracing pioneer");
+        println!("Lightstep / ServiceNow Cloud Observability (Slate OS) — Distributed tracing pioneer");
         println!();
         println!("Options:");
         println!("  --traces               Trace view");
@@ -21,8 +21,8 @@ fn run_ls(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("ServiceNow Cloud Observability (formerly Lightstep) 2024 (SlateOS)"); return 0; }
-    println!("ServiceNow Cloud Observability (formerly Lightstep) 2024 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("ServiceNow Cloud Observability (formerly Lightstep) 2024 (Slate OS)"); return 0; }
+    println!("ServiceNow Cloud Observability (formerly Lightstep) 2024 (Slate OS)");
     println!("  Vendor: ServiceNow Inc. (NYSE:NOW) — acquired Lightstep May 2021 (~$300M, undisclosed)");
     println!("          rebranded 'ServiceNow Cloud Observability' 2023");
     println!("  Founders: Ben Sigelman + Daniel Spoonhower + Spencer Rugaber (San Francisco, 2015)");

@@ -19,7 +19,7 @@ fn run_flac(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: flac [OPTIONS] FILE...");
         println!();
-        println!("flac — Free Lossless Audio Codec encoder/decoder (SlateOS).");
+        println!("flac — Free Lossless Audio Codec encoder/decoder (Slate OS).");
         println!();
         println!("Encoding options:");
         println!("  -0 to -8               Compression level (0=fast, 8=best)");
@@ -40,7 +40,7 @@ fn run_flac(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("flac 1.4.3 (SlateOS)");
+        println!("flac 1.4.3 (Slate OS)");
         return 0;
     }
 
@@ -86,7 +86,7 @@ fn run_metaflac(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: metaflac [OPTIONS] FILE...");
         println!();
-        println!("metaflac — FLAC metadata editor (SlateOS).");
+        println!("metaflac — FLAC metadata editor (Slate OS).");
         println!();
         println!("Options:");
         println!("  --list                 List all metadata blocks");

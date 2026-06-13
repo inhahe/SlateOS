@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_agrind(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: agrind [OPTIONS] QUERY");
-        println!("agrind v0.19 (SlateOS) — Slice and dice logs on the command line");
+        println!("agrind v0.19 (Slate OS) — Slice and dice logs on the command line");
         println!();
         println!("Options:");
         println!("  QUERY             agrind query expression");
@@ -31,7 +31,7 @@ fn run_agrind(args: &[String], _prog: &str) -> i32 {
         println!("  * | limit N       Limit output rows");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("agrind v0.19 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("agrind v0.19 (Slate OS)"); return 0; }
     let query = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("* | count");
     println!("Query: {}", query);
     println!();

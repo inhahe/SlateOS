@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_humio(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: humio [OPTIONS]");
-        println!("Humio (now Falcon LogScale) (SlateOS) — index-free log management (CrowdStrike subsidiary)");
+        println!("Humio (now Falcon LogScale) (Slate OS) — index-free log management (CrowdStrike subsidiary)");
         println!();
         println!("Options:");
         println!("  --logscale             Falcon LogScale (the rebranded product)");
@@ -23,8 +23,8 @@ fn run_humio(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Falcon LogScale 2024 (was Humio, SlateOS)"); return 0; }
-    println!("Humio / Falcon LogScale 2024 (SlateOS) — Index-Free Log Management");
+    if args.iter().any(|a| a == "--version") { println!("Falcon LogScale 2024 (was Humio, Slate OS)"); return 0; }
+    println!("Humio / Falcon LogScale 2024 (Slate OS) — Index-Free Log Management");
     println!("  Vendor: CrowdStrike Holdings (Falcon LogScale division, integrated since 2021)");
     println!("  Original Humio: Humio ApS — Aarhus, Denmark + London (founded 2016)");
     println!("  Founders: Geeta Schmidt (CEO) + Kresten Krab Thorup (CTO) + Christian Hvitved (Chief Architect)");

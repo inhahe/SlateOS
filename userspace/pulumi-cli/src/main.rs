@@ -11,7 +11,7 @@ fn run_pulumi(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: pulumi [FLAGS] COMMAND [ARGS]");
         println!();
-        println!("pulumi — infrastructure as code (SlateOS).");
+        println!("pulumi — infrastructure as code (Slate OS).");
         println!();
         println!("Commands:");
         println!("  new            Create new project");
@@ -29,7 +29,7 @@ fn run_pulumi(args: &[String]) -> i32 {
 
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match subcmd {
-        "version" | "--version" => println!("v3.105.0 (SlateOS)"),
+        "version" | "--version" => println!("v3.105.0 (Slate OS)"),
         "whoami" => {
             println!("User: admin");
             println!("Backend URL: https://app.pulumi.com/admin");

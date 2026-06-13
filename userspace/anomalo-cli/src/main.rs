@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_anomalo(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: anomalo [OPTIONS]");
-        println!("Anomalo (SlateOS) — ML-first data quality (Instacart founders)");
+        println!("Anomalo (Slate OS) — ML-first data quality (Instacart founders)");
         println!();
         println!("Options:");
         println!("  --checks               View ML auto-checks + custom rules");
@@ -21,8 +21,8 @@ fn run_anomalo(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Anomalo 2024 (SlateOS)"); return 0; }
-    println!("Anomalo 2024 (SlateOS) — ML-first Data Quality");
+    if args.iter().any(|a| a == "--version") { println!("Anomalo 2024 (Slate OS)"); return 0; }
+    println!("Anomalo 2024 (Slate OS) — ML-first Data Quality");
     println!("  Vendor: Anomalo, Inc. (Palo Alto / San Francisco)");
     println!("  Founders: Elliot Shmukler (CEO) + Jeremy Stanley (CTO), 2018");
     println!("          Elliot: ex-Instacart VP Product, LinkedIn growth team");

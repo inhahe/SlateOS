@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wlogout(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wlogout [OPTIONS]");
-        println!("wlogout v1.2 (SlateOS) — Wayland session logout menu");
+        println!("wlogout v1.2 (Slate OS) — Wayland session logout menu");
         println!();
         println!("Options:");
         println!("  -l LAYOUT         Layout file path");
@@ -26,7 +26,7 @@ fn run_wlogout(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("wlogout v1.2 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("wlogout v1.2 (Slate OS)"); return 0; }
     println!("wlogout: session menu");
     println!("  [Lock]  [Logout]  [Suspend]  [Hibernate]  [Shutdown]  [Reboot]");
     0

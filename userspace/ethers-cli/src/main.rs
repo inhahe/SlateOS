@@ -20,7 +20,7 @@ fn run_cast(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: cast <COMMAND> [OPTIONS]");
         println!();
-        println!("Ethereum CLI for interacting with EVM chains (SlateOS).");
+        println!("Ethereum CLI for interacting with EVM chains (Slate OS).");
         println!();
         println!("Commands:");
         println!("  balance      Get ETH balance");
@@ -123,7 +123,7 @@ fn run_anvil(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: anvil [OPTIONS]");
         println!();
-        println!("Local Ethereum development node (SlateOS).");
+        println!("Local Ethereum development node (Slate OS).");
         println!();
         println!("Options:");
         println!("  --port <PORT>      Port (default: 8545)");

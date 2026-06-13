@@ -13,14 +13,14 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_desktop(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: bitwarden-desktop [OPTIONS]");
-        println!("bitwarden-desktop v2024.1 (SlateOS) — Bitwarden desktop client");
+        println!("bitwarden-desktop v2024.1 (Slate OS) — Bitwarden desktop client");
         println!();
         println!("Options:");
         println!("  --hidden          Start hidden");
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("bitwarden-desktop v2024.1 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("bitwarden-desktop v2024.1 (Slate OS)"); return 0; }
     println!("bitwarden-desktop: password manager started");
     println!("  Vault: 120 items");
     println!("  Sync: last 10 min ago");
@@ -31,7 +31,7 @@ fn run_desktop(args: &[String], _prog: &str) -> i32 {
 fn run_bw(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: bw COMMAND [OPTIONS]");
-        println!("bw v2024.1 (SlateOS) — Bitwarden CLI");
+        println!("bw v2024.1 (Slate OS) — Bitwarden CLI");
         println!();
         println!("Commands:");
         println!("  login             Log in");

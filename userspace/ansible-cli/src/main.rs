@@ -181,7 +181,7 @@ fn main() {
     let rest: Vec<String> = args.into_iter().skip(1).collect();
 
     if rest.iter().any(|a| a == "-V" || a == "--version") {
-        println!("ansible [core 2.16.3] (SlateOS)");
+        println!("ansible [core 2.16.3] (Slate OS)");
         process::exit(0);
     }
 

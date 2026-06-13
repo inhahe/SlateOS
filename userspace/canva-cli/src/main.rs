@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_canva(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: canva [OPTIONS]");
-        println!("Canva 1.103 (SlateOS) — Online graphic design platform (Sydney, Australia)");
+        println!("Canva 1.103 (Slate OS) — Online graphic design platform (Sydney, Australia)");
         println!();
         println!("Options:");
         println!("  --new TYPE             social-post/presentation/doc/video/print/web");
@@ -25,8 +25,8 @@ fn run_canva(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Canva 1.103.0 (SlateOS)"); return 0; }
-    println!("Canva 1.103.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Canva 1.103.0 (Slate OS)"); return 0; }
+    println!("Canva 1.103.0 (Slate OS)");
     println!("  Vendor: Canva Pty Ltd (HQ Sydney, Australia — founded 2013)");
     println!("  Founders: Melanie Perkins (CEO), Cliff Obrecht, Cameron Adams");
     println!("  Valuation: ~$26B USD (2024 secondary sale) — one of largest private tech firms");

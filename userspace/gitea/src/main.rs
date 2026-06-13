@@ -32,7 +32,7 @@ fn run_gitea(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "version" => {
-            println!("Gitea version 1.22.0 built with Go 1.22.2 (SlateOS)");
+            println!("Gitea version 1.22.0 built with Go 1.22.2 (Slate OS)");
             println!("Git Version: 2.45.0");
             0
         }

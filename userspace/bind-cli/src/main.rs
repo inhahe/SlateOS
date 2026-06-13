@@ -14,11 +14,11 @@ fn run_dig(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: dig [@server] name [type] [options]");
         println!();
-        println!("dig — DNS lookup utility (SlateOS, BIND 9.18).");
+        println!("dig — DNS lookup utility (Slate OS, BIND 9.18).");
         return 0;
     }
     if args.iter().any(|a| a == "-v") {
-        println!("DiG 9.18.24 (SlateOS)");
+        println!("DiG 9.18.24 (Slate OS)");
         return 0;
     }
 
@@ -91,8 +91,8 @@ fn run_rndc(args: &[String]) -> i32 {
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("status");
     match subcmd {
         "status" => {
-            println!("version: BIND 9.18.24 (SlateOS)");
-            println!("running on slateos-dns: SlateOS");
+            println!("version: BIND 9.18.24 (Slate OS)");
+            println!("running on slateos-dns: Slate OS");
             println!("boot time: Wed, 22 May 2024 08:00:00 GMT");
             println!("server is up and running");
             println!("number of zones: 42");
@@ -114,10 +114,10 @@ fn run_named(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-v") {
-        println!("BIND 9.18.24 (SlateOS)");
+        println!("BIND 9.18.24 (Slate OS)");
         return 0;
     }
-    println!("named: starting BIND 9.18.24 (SlateOS)");
+    println!("named: starting BIND 9.18.24 (Slate OS)");
     println!("named: loading configuration from '/etc/named.conf'");
     println!("named: listening on IPv4 interface lo, 127.0.0.1#53");
     println!("named: listening on IPv4 interface eth0, 192.168.1.100#53");

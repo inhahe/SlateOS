@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_subfinder(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: subfinder [OPTIONS]");
-        println!("subfinder v2.6 (SlateOS) — Subdomain discovery tool");
+        println!("subfinder v2.6 (Slate OS) — Subdomain discovery tool");
         println!();
         println!("Options:");
         println!("  -d DOMAIN      Target domain");
@@ -28,8 +28,8 @@ fn run_subfinder(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("subfinder v2.6.6 (SlateOS)"); return 0; }
-    println!("subfinder v2.6.6 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("subfinder v2.6.6 (Slate OS)"); return 0; }
+    println!("subfinder v2.6.6 (Slate OS)");
     println!("  Domain: example.com");
     println!("  Sources: crtsh, virustotal, censys, shodan, dnsdumpster, ...");
     println!();

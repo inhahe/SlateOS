@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_kfp(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: kfp COMMAND [OPTIONS]");
-        println!("Kubeflow Pipelines CLI 2.7.0 (SlateOS)");
+        println!("Kubeflow Pipelines CLI 2.7.0 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  run            Manage pipeline runs");

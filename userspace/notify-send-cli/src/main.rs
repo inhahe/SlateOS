@@ -11,7 +11,7 @@ fn run_notify_send(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: notify-send [OPTIONS] SUMMARY [BODY]");
         println!();
-        println!("notify-send — desktop notification sender (SlateOS).");
+        println!("notify-send — desktop notification sender (Slate OS).");
         println!();
         println!("Options:");
         println!("  -u, --urgency LEVEL  Urgency (low/normal/critical)");
@@ -27,7 +27,7 @@ fn run_notify_send(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("notify-send 0.8.3 (SlateOS)");
+        println!("notify-send 0.8.3 (Slate OS)");
         return 0;
     }
 

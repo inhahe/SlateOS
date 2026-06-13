@@ -348,7 +348,7 @@ fn split_name_ext(name: &str) -> (String, String) {
 // ============================================================================
 
 fn print_usage() {
-    println!("SlateOS Filename Sanitizer v0.1.0");
+    println!("Slate OS Filename Sanitizer v0.1.0");
     println!();
     println!("Clean up problematic filenames (spaces, special chars, control chars).");
     println!();

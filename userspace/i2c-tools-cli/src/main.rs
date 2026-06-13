@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_i2cdetect(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: i2cdetect [-y] [-l] BUS");
-        println!("i2cdetect v4.3 (SlateOS) — Detect I2C devices");
+        println!("i2cdetect v4.3 (Slate OS) — Detect I2C devices");
         println!();
         println!("Options:");
         println!("  -y                Non-interactive mode");
@@ -22,7 +22,7 @@ fn run_i2cdetect(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("i2cdetect v4.3 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("i2cdetect v4.3 (Slate OS)"); return 0; }
     if args.iter().any(|a| a == "-l") {
         println!("i2c-0\ti2c       \tSMBus I801 adapter at e000");
         println!("i2c-1\ti2c       \tNVIDIA i2c adapter 0");
@@ -43,10 +43,10 @@ fn run_i2cdetect(args: &[String], _prog: &str) -> i32 {
 fn run_i2cget(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: i2cget [-y] BUS CHIP [ADDR [MODE]]");
-        println!("i2cget v4.3 (SlateOS) — Read I2C register");
+        println!("i2cget v4.3 (Slate OS) — Read I2C register");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("i2cget v4.3 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("i2cget v4.3 (Slate OS)"); return 0; }
     println!("0x42");
     0
 }
@@ -54,10 +54,10 @@ fn run_i2cget(args: &[String], _prog: &str) -> i32 {
 fn run_i2cset(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: i2cset [-y] BUS CHIP ADDR VALUE [MODE]");
-        println!("i2cset v4.3 (SlateOS) — Write I2C register");
+        println!("i2cset v4.3 (Slate OS) — Write I2C register");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("i2cset v4.3 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("i2cset v4.3 (Slate OS)"); return 0; }
     println!("Value 0x42 written to register 0x00");
     0
 }
@@ -65,10 +65,10 @@ fn run_i2cset(args: &[String], _prog: &str) -> i32 {
 fn run_i2cdump(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: i2cdump [-y] BUS CHIP [MODE]");
-        println!("i2cdump v4.3 (SlateOS) — Dump I2C device registers");
+        println!("i2cdump v4.3 (Slate OS) — Dump I2C device registers");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("i2cdump v4.3 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("i2cdump v4.3 (Slate OS)"); return 0; }
     println!("     0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f");
     println!("00: 42 00 ff 00 00 00 00 00 00 00 00 00 00 00 00 00");
     println!("10: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00");

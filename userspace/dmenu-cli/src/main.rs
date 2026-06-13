@@ -27,11 +27,11 @@ fn run_dmenu(args: &[String], prog: &str) -> i32 {
     }
     if args.iter().any(|a| a == "--help" || a == "-h") || args.iter().any(|a| a == "-v") {
         if args.iter().any(|a| a == "-v") {
-            println!("dmenu-5.2 (SlateOS)");
+            println!("dmenu-5.2 (Slate OS)");
             return 0;
         }
         println!("Usage: dmenu [OPTIONS]");
-        println!("dmenu 5.2 (SlateOS) — Dynamic menu for X/Wayland");
+        println!("dmenu 5.2 (Slate OS) — Dynamic menu for X/Wayland");
         println!();
         println!("Options:");
         println!("  -b             Bottom of screen");

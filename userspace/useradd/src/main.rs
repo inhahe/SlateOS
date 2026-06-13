@@ -1552,7 +1552,7 @@ fn detect_personality(argv0: &str) -> &str {
 }
 
 fn usage_all() {
-    write_stderr("SlateOS User/Group Management Tools");
+    write_stderr("Slate OS User/Group Management Tools");
     write_stderr("");
     write_stderr("This binary responds to its invocation name:");
     write_stderr("  useradd  - add a user account");

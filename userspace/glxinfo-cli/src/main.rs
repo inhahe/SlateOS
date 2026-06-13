@@ -19,7 +19,7 @@ fn run_glxinfo(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: glxinfo [OPTIONS]");
         println!();
-        println!("glxinfo — display OpenGL information (SlateOS).");
+        println!("glxinfo — display OpenGL information (Slate OS).");
         println!();
         println!("Options:");
         println!("  -B           Brief output");
@@ -63,7 +63,7 @@ fn run_glxgears(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: glxgears [OPTIONS]");
         println!();
-        println!("glxgears — OpenGL gears demo (SlateOS).");
+        println!("glxgears — OpenGL gears demo (Slate OS).");
         println!();
         println!("Options:");
         println!("  -display D   X display");

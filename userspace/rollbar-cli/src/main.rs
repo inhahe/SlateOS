@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_roll(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: rollbar [OPTIONS]");
-        println!("Rollbar (SlateOS) — Real-time error tracking & monitoring");
+        println!("Rollbar (Slate OS) — Real-time error tracking & monitoring");
         println!();
         println!("Options:");
         println!("  --items                List error items");
@@ -22,8 +22,8 @@ fn run_roll(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Rollbar (SlateOS)"); return 0; }
-    println!("Rollbar (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Rollbar (Slate OS)"); return 0; }
+    println!("Rollbar (Slate OS)");
     println!("  Vendor: Rollbar, Inc. (San Francisco, founded 2012 — Y Combinator W12)");
     println!("  Founders: Brian Rue + Cory Virok (ex-Lookout engineers)");
     println!("  Origin: built it for their own sites — productized after demand from other engineers");

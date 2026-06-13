@@ -32,7 +32,7 @@ fn run_timeshift(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Timeshift v24.06.3 (SlateOS)");
+        println!("Timeshift v24.06.3 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "--list") {

@@ -58,7 +58,7 @@ fn run_sk(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("sk 0.10.4 (SlateOS)");
+        println!("sk 0.10.4 (Slate OS)");
         return 0;
     }
 

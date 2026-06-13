@@ -903,7 +903,7 @@ fn run(config: &Config) {
 // ============================================================================
 
 fn print_usage() {
-    println!("SlateOS I/O Statistics Utility v0.1.0");
+    println!("Slate OS I/O Statistics Utility v0.1.0");
     println!();
     println!("Report CPU utilization and I/O device statistics.");
     println!();

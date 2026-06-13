@@ -11,7 +11,7 @@ fn run_selenium(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: selenium <COMMAND> [OPTIONS]");
         println!();
-        println!("Selenium WebDriver management CLI (SlateOS).");
+        println!("Selenium WebDriver management CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  server       Start Selenium server");
@@ -23,7 +23,7 @@ fn run_selenium(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("Selenium 4.17.0 (SlateOS)");
+        println!("Selenium 4.17.0 (Slate OS)");
         return 0;
     }
 
@@ -47,8 +47,8 @@ fn run_selenium(args: Vec<String>) -> i32 {
         "sessions" => {
             println!("Active Sessions:");
             println!("  ID                                   Browser     Platform");
-            println!("  abc123-def456-ghi789                 chrome 120  SlateOS");
-            println!("  jkl012-mno345-pqr678                 firefox 121 SlateOS");
+            println!("  abc123-def456-ghi789                 chrome 120  Slate OS");
+            println!("  jkl012-mno345-pqr678                 firefox 121 Slate OS");
             0
         }
         "drivers" => {

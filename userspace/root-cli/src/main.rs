@@ -22,7 +22,7 @@ fn run_root(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("ROOT 6.30.04 (SlateOS)");
+        println!("ROOT 6.30.04 (Slate OS)");
         println!("Built for linuxx8664gcc on Jan 15 2024");
         println!("LLVM/Clang 16.0.6");
         println!("Python 3.12.0");
@@ -48,7 +48,7 @@ fn run_root(args: &[String]) -> i32 {
         println!("   -------------------------------------------------------");
         println!("  | Welcome to ROOT 6.30.04               https://root.cern |");
         println!("  | (c) 1995-2024, The ROOT Team; conception R. Brun, F. Rademakers |");
-        println!("  | Built for SlateOS on Jan 15 2024                          |");
+        println!("  | Built for Slate OS on Jan 15 2024                          |");
         println!("  | From tag v6-30-04, 15 January 2024                      |");
         println!("   -------------------------------------------------------");
         println!();
@@ -66,7 +66,7 @@ fn run_rootcling(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("rootcling 6.30.04 (SlateOS)");
+        println!("rootcling 6.30.04 (Slate OS)");
         return 0;
     }
     let dict = args.iter().find(|a| a.ends_with(".cxx")).map(|s| s.as_str()).unwrap_or("Dict.cxx");

@@ -396,7 +396,7 @@ fn parse_args(mode: Mode) -> Args {
                 process::exit(0);
             }
             "-V" | "--version" => {
-                println!("{} (SlateOS) 0.1.0", match mode {
+                println!("{} (Slate OS) 0.1.0", match mode {
                     Mode::Base64 => "base64",
                     Mode::Base32 => "base32",
                     Mode::Uuencode => "uuencode",

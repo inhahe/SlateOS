@@ -13,12 +13,12 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_meshlab(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: meshlab [OPTIONS] [FILE.stl | FILE.obj | FILE.ply | FILE.off]");
-        println!("MeshLab 2023.12 (SlateOS)");
+        println!("MeshLab 2023.12 (Slate OS)");
         println!("  --version    Show version");
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("MeshLab 2023.12 (SlateOS)");
+        println!("MeshLab 2023.12 (Slate OS)");
         println!("VCG Library 2023.12");
         return 0;
     }
@@ -48,7 +48,7 @@ fn run_meshlabserver(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("MeshLab Server 2023.12 (SlateOS)");
+        println!("MeshLab Server 2023.12 (Slate OS)");
         return 0;
     }
     let input = args.windows(2).find(|w| w[0] == "-i").map(|w| w[1].as_str()).unwrap_or("input.stl");

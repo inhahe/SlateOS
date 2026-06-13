@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_freshdesk(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: freshdesk [OPTIONS]");
-        println!("Freshdesk (SlateOS) — Freshworks helpdesk + omnichannel support");
+        println!("Freshdesk (Slate OS) — Freshworks helpdesk + omnichannel support");
         println!();
         println!("Options:");
         println!("  --free                 Free plan (up to 10 agents)");
@@ -25,8 +25,8 @@ fn run_freshdesk(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Freshdesk 2024 (SlateOS)"); return 0; }
-    println!("Freshdesk 2024 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Freshdesk 2024 (Slate OS)"); return 0; }
+    println!("Freshdesk 2024 (Slate OS)");
     println!("  Vendor: Freshworks Inc. (San Mateo, CA + Chennai, India — NASDAQ:FRSH)");
     println!("  Origin story: Girish Mathrubootham read a Hacker News thread about Zendesk's 60-300% price hike");
     println!("              built Freshdesk as the cheaper, friendlier alternative — launched 2011");

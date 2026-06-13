@@ -14,7 +14,7 @@ fn run_elasticsearch(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: elasticsearch [OPTIONS]");
         println!();
-        println!("Elasticsearch — distributed search and analytics engine (SlateOS).");
+        println!("Elasticsearch — distributed search and analytics engine (Slate OS).");
         println!();
         println!("Options:");
         println!("  -d, --daemonize    Run as daemon");
@@ -24,7 +24,7 @@ fn run_elasticsearch(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("Version: 8.12.0 (SlateOS)");
+        println!("Version: 8.12.0 (Slate OS)");
         println!("Build flavor: default");
         println!("Build type: tar");
         println!("JVM: 21.0.1");

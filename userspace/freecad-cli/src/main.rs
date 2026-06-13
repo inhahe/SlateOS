@@ -21,7 +21,7 @@ fn run_freecad(args: &[String], cmd_mode: bool) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: {} [OPTIONS] [FILE ...]", name);
         println!();
-        println!("FreeCAD — parametric 3D CAD (SlateOS).");
+        println!("FreeCAD — parametric 3D CAD (Slate OS).");
         println!();
         println!("Options:");
         println!("  --run-macro FILE    Run macro");
@@ -37,7 +37,7 @@ fn run_freecad(args: &[String], cmd_mode: bool) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("FreeCAD 0.21.2 (SlateOS)");
+        println!("FreeCAD 0.21.2 (Slate OS)");
         return 0;
     }
 
@@ -55,7 +55,7 @@ fn run_freecad(args: &[String], cmd_mode: bool) -> i32 {
         println!(">>> ");
     } else {
         if files.is_empty() {
-            println!("FreeCAD 0.21.2 (SlateOS)");
+            println!("FreeCAD 0.21.2 (Slate OS)");
             println!("Starting FreeCAD GUI...");
         } else {
             for f in &files {

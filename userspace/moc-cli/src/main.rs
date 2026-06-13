@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_moc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mocp [OPTIONS] [FILE|DIR...]");
-        println!("MOC 2.5.2 (SlateOS) — Music on Console");
+        println!("MOC 2.5.2 (Slate OS) — Music on Console");
         println!();
         println!("Options:");
         println!("  -S, --server          Start server");
@@ -36,7 +36,7 @@ fn run_moc(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("MOC (music on console) 2.5.2 (SlateOS)");
+        println!("MOC (music on console) 2.5.2 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "-i" || a == "--info") {

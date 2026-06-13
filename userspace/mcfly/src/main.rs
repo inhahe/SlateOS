@@ -30,7 +30,7 @@ fn run_mcfly(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("mcfly 0.9.1 (SlateOS)");
+            println!("mcfly 0.9.1 (Slate OS)");
             0
         }
         "init" => {

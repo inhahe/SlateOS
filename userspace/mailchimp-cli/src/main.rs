@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mailchimp [OPTIONS] [SUBCMD]");
-        println!("Intuit Mailchimp (SlateOS) — Email marketing + automation");
+        println!("Intuit Mailchimp (Slate OS) — Email marketing + automation");
         println!();
         println!("Options:");
         println!("  --apikey KEY           Mailchimp API key (dc-key format)");
@@ -23,8 +23,8 @@ fn run_mc(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Intuit Mailchimp Marketing API v3.0 (SlateOS)"); return 0; }
-    println!("Intuit Mailchimp (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Intuit Mailchimp Marketing API v3.0 (Slate OS)"); return 0; }
+    println!("Intuit Mailchimp (Slate OS)");
     println!("  Owner: Intuit (acquired 2021 for $12B)");
     println!("  Products: Email Marketing, Marketing Automation, Audience CDP,");
     println!("            Websites, Stores (e-commerce), Mandrill (transactional)");

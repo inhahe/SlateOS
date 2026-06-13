@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ff(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: fabfilter [PLUGIN] [OPTIONS]");
-        println!("FabFilter Pro Bundle (SlateOS) — Premium mixing & mastering plug-ins");
+        println!("FabFilter Pro Bundle (Slate OS) — Premium mixing & mastering plug-ins");
         println!();
         println!("Plugins:");
         println!("  pro-q              Pro-Q 4 (EQ + dynamic, spectrum analyzer)");
@@ -31,8 +31,8 @@ fn run_ff(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("FabFilter Pro Bundle (Pro-Q 4 v4.0.0, etc.) (SlateOS)"); return 0; }
-    println!("FabFilter Pro Bundle (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("FabFilter Pro Bundle (Pro-Q 4 v4.0.0, etc.) (Slate OS)"); return 0; }
+    println!("FabFilter Pro Bundle (Slate OS)");
     println!("  Pro-Q 4: dynamic EQ, brickwall ±30 dB, transparent/natural/linear phase");
     println!("  Pro-C 2: 8 styles, look-ahead, side chain, ratio knee");
     println!("  Pro-L 2: 8 limiting algorithms, true-peak metering");

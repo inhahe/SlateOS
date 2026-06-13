@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_qb(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: quickbooks [OPTIONS] [FILE]");
-        println!("Intuit QuickBooks Desktop Enterprise 24.0 / QuickBooks Online (SlateOS)");
+        println!("Intuit QuickBooks Desktop Enterprise 24.0 / QuickBooks Online (Slate OS)");
         println!();
         println!("Options:");
         println!("  --online               QuickBooks Online (cloud)");
@@ -23,8 +23,8 @@ fn run_qb(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Intuit QuickBooks Desktop Enterprise Solutions 24.0 (SlateOS)"); return 0; }
-    println!("Intuit QuickBooks Desktop Enterprise Solutions 24.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Intuit QuickBooks Desktop Enterprise Solutions 24.0 (Slate OS)"); return 0; }
+    println!("Intuit QuickBooks Desktop Enterprise Solutions 24.0 (Slate OS)");
     println!("  Editions: Online (QBO), Desktop Pro/Premier/Enterprise/Accountant");
     println!("  QBO Tiers: Simple Start, Essentials, Plus, Advanced, Self-Employed");
     println!("  Features: Invoicing, Bills, Banking, Payroll, Inventory, Reports, 1099");

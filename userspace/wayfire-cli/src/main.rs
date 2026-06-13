@@ -13,14 +13,14 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wayfire(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wayfire [OPTIONS]");
-        println!("wayfire v0.8 (SlateOS) — 3D Wayland compositor");
+        println!("wayfire v0.8 (Slate OS) — 3D Wayland compositor");
         println!();
         println!("Options:");
         println!("  -c FILE           Configuration file");
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("wayfire v0.8 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("wayfire v0.8 (Slate OS)"); return 0; }
     println!("Wayfire compositor starting...");
     println!("  Backend: DRM/KMS");
     println!("  Plugins: animate, cube, expo, grid, move, resize, switcher, vswitch");
@@ -31,7 +31,7 @@ fn run_wayfire(args: &[String], _prog: &str) -> i32 {
 fn run_wf_msg(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: wf-msg COMMAND [ARGS]");
-        println!("wf-msg v0.8 (SlateOS) — Wayfire IPC client");
+        println!("wf-msg v0.8 (Slate OS) — Wayfire IPC client");
         println!();
         println!("Commands:");
         println!("  list_views        List views");

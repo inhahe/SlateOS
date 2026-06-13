@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_freerdp(args: &[String], prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: {} [OPTIONS] /v:HOST[:PORT]", prog);
-        println!("{} v3.4 (SlateOS) — FreeRDP client", prog);
+        println!("{} v3.4 (Slate OS) — FreeRDP client", prog);
         println!();
         println!("Options:");
         println!("  /v:HOST[:PORT]    Server address");
@@ -28,7 +28,7 @@ fn run_freerdp(args: &[String], prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("{} v3.4 (SlateOS, FreeRDP)", prog); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("{} v3.4 (Slate OS, FreeRDP)", prog); return 0; }
     println!("{}: connecting to RDP server...", prog);
     0
 }

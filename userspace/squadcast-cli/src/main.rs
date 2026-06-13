@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: squadcast [COMMAND] [OPTIONS]");
-        println!("SquadCast (Descript) (SlateOS) — Studio-quality remote recording");
+        println!("SquadCast (Descript) (Slate OS) — Studio-quality remote recording");
         println!();
         println!("Commands:");
         println!("  schedule TITLE         Schedule a recording session");
@@ -26,8 +26,8 @@ fn run_sc(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("SquadCast (Descript Acquired) v4.0 (SlateOS)"); return 0; }
-    println!("SquadCast (SlateOS) — now part of Descript");
+    if args.iter().any(|a| a == "--version") { println!("SquadCast (Descript Acquired) v4.0 (Slate OS)"); return 0; }
+    println!("SquadCast (Slate OS) — now part of Descript");
     println!("  Recording: Progressive Upload (local + uploads as you record)");
     println!("  Quality: 48 kHz WAV per guest, up to 1080p video");
     println!("  Reliability: Crash recovery, automatic file integrity");

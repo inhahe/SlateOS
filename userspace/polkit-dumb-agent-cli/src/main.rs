@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_agent(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: polkit-dumb-agent [OPTIONS]");
-        println!("polkit-dumb-agent v0.1 (SlateOS) — Minimal PolicyKit agent");
+        println!("polkit-dumb-agent v0.1 (Slate OS) — Minimal PolicyKit agent");
         println!();
         println!("Options:");
         println!("  --version         Show version");
@@ -23,7 +23,7 @@ fn run_agent(args: &[String], _prog: &str) -> i32 {
         println!("Shows a simple password prompt via terminal or dmenu.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("polkit-dumb-agent v0.1 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("polkit-dumb-agent v0.1 (Slate OS)"); return 0; }
     println!("polkit-dumb-agent: minimal authentication agent started");
     println!("  Will prompt via terminal when authorization is needed");
     0

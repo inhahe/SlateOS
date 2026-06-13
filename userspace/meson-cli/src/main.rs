@@ -11,7 +11,7 @@ fn run_meson(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: meson <COMMAND> [OPTIONS]");
         println!();
-        println!("Meson Build System (SlateOS).");
+        println!("Meson Build System (Slate OS).");
         println!();
         println!("Commands:");
         println!("  setup        Configure build directory");
@@ -25,7 +25,7 @@ fn run_meson(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("1.3.1 (SlateOS)");
+        println!("1.3.1 (Slate OS)");
         return 0;
     }
 

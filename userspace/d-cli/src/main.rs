@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_dmd(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: dmd [OPTIONS] FILE.d [FILE.d ...]");
-        println!("DMD D Compiler v2.107.0 (SlateOS)");
+        println!("DMD D Compiler v2.107.0 (Slate OS)");
         println!("  -of=FILE      Output file");
         println!("  -c            Compile only");
         println!("  -O            Optimize");
@@ -48,7 +48,7 @@ fn run_dmd(args: &[String]) -> i32 {
 fn run_dub(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: dub COMMAND [OPTIONS]");
-        println!("DUB Package Manager 1.37.0 (SlateOS)");
+        println!("DUB Package Manager 1.37.0 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  build        Build project");
@@ -65,7 +65,7 @@ fn run_dub(args: &[String]) -> i32 {
     }
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("build");
     match subcmd {
-        "--version" => println!("DUB version 1.37.0 (SlateOS)"),
+        "--version" => println!("DUB version 1.37.0 (Slate OS)"),
         "build" => {
             println!("Compiling myproject...");
             println!("  Linking...");

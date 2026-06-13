@@ -35,7 +35,7 @@ fn run_ddog(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("ddog 1.0.0 (SlateOS)");
+        println!("ddog 1.0.0 (Slate OS)");
         return 0;
     }
 

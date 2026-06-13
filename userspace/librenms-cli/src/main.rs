@@ -15,12 +15,12 @@ fn run_librenms(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "librenms-service" => {
-                println!("librenms-service (SlateOS) — LibreNMS dispatcher service");
+                println!("librenms-service (Slate OS) — LibreNMS dispatcher service");
                 println!("  -g GROUP    Poller group");
                 println!("  -t THREADS  Thread count");
             }
             _ => {
-                println!("lnms v24.5 (SlateOS) — LibreNMS CLI");
+                println!("lnms v24.5 (Slate OS) — LibreNMS CLI");
                 println!("  device:add HOST       Add device");
                 println!("  device:remove HOST    Remove device");
                 println!("  device:poll HOST      Poll device");
@@ -33,8 +33,8 @@ fn run_librenms(args: &[String], prog: &str) -> i32 {
         println!("  --version             Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("LibreNMS v24.5.0 (SlateOS)"); return 0; }
-    println!("LibreNMS v24.5.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("LibreNMS v24.5.0 (Slate OS)"); return 0; }
+    println!("LibreNMS v24.5.0 (Slate OS)");
     println!("  Devices: 100 (95 up, 5 down)");
     println!("  Ports: 2,345 interfaces");
     println!("  Sensors: 890");

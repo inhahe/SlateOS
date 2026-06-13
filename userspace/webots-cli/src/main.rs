@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_webots(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: webots [OPTIONS] [WORLD.wbt]");
-        println!("Webots R2024a (SlateOS) — Open-source robot simulator");
+        println!("Webots R2024a (Slate OS) — Open-source robot simulator");
         println!();
         println!("Options:");
         println!("  WORLD.wbt         World file to load");
@@ -25,7 +25,7 @@ fn run_webots(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Webots R2024a (SlateOS)");
+        println!("Webots R2024a (Slate OS)");
         return 0;
     }
     let world = args.iter()

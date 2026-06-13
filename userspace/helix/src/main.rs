@@ -24,7 +24,7 @@ fn run_hx(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("helix 24.07 (SlateOS)");
+        println!("helix 24.07 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "--health") {
@@ -58,7 +58,7 @@ fn run_hx(args: Vec<String>) -> i32 {
 
     let files: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
     if files.is_empty() {
-        println!("helix 24.07 (SlateOS) — post-modern modal editor");
+        println!("helix 24.07 (Slate OS) — post-modern modal editor");
     } else {
         for f in &files {
             println!("Opening: {}", f);

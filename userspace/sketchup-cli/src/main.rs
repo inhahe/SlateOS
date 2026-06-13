@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sketchup(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sketchup [OPTIONS] [FILE]");
-        println!("Trimble SketchUp Pro 2024 (SlateOS) — 3D modeling for architecture & design");
+        println!("Trimble SketchUp Pro 2024 (Slate OS) — 3D modeling for architecture & design");
         println!();
         println!("Options:");
         println!("  --rubyconsole          Open Ruby console");
@@ -24,8 +24,8 @@ fn run_sketchup(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Trimble SketchUp Pro 2024.0.484 (SlateOS)"); return 0; }
-    println!("Trimble SketchUp Pro 2024.0.484 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Trimble SketchUp Pro 2024.0.484 (Slate OS)"); return 0; }
+    println!("Trimble SketchUp Pro 2024.0.484 (Slate OS)");
     println!("  Components: 3D Warehouse access (4.5M+ models)");
     println!("  Extensions: 1,200+ in Extension Warehouse");
     println!("  Scripting: Ruby API");

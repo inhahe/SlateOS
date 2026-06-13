@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_edius(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: edius [OPTIONS] [PROJECT]");
-        println!("Grass Valley EDIUS X Pro (SlateOS) — Broadcast-grade NLE");
+        println!("Grass Valley EDIUS X Pro (Slate OS) — Broadcast-grade NLE");
         println!();
         println!("Options:");
         println!("  --open FILE            Open .ezp project");
@@ -22,8 +22,8 @@ fn run_edius(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Grass Valley EDIUS X Pro 11.30 (SlateOS)"); return 0; }
-    println!("Grass Valley EDIUS X Pro 11.30 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Grass Valley EDIUS X Pro 11.30 (Slate OS)"); return 0; }
+    println!("Grass Valley EDIUS X Pro 11.30 (Slate OS)");
     println!("  Editions: Pro, Workgroup, Elite");
     println!("  Used in: News broadcast, sports production, documentary");
     println!("  Realtime editing: 4K/8K HDR, multi-format timeline");

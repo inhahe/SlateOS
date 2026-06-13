@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_bnet(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: battlenet [OPTIONS]");
-        println!("Battle.net 2.39 (SlateOS) — Blizzard/Activision/King launcher");
+        println!("Battle.net 2.39 (Slate OS) — Blizzard/Activision/King launcher");
         println!();
         println!("Options:");
         println!("  --library              Game library (WoW, Diablo, Overwatch, SC, HS, etc.)");
@@ -24,8 +24,8 @@ fn run_bnet(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Battle.net 2.39.0.15573 (SlateOS)"); return 0; }
-    println!("Battle.net 2.39.0.15573 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Battle.net 2.39.0.15573 (Slate OS)"); return 0; }
+    println!("Battle.net 2.39.0.15573 (Slate OS)");
     println!("  Vendor: Blizzard Entertainment — part of Activision Blizzard, owned by Microsoft since Oct 2023");
     println!("  Originally launched: Battle.net 1.0 — Nov 30 1996 (Diablo 1's online matchmaking)");
     println!("  Founded: Blizzard 1991 by Allen Adham, Mike Morhaime, Frank Pearce");

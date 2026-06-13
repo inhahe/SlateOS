@@ -46,7 +46,7 @@ fn run_watchexec(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("watchexec 2.1.1 (SlateOS)");
+        println!("watchexec 2.1.1 (Slate OS)");
         return 0;
     }
 

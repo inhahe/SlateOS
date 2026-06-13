@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_falco(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: falco [OPTIONS]");
-        println!("Falco v0.38.0 (SlateOS) — Runtime security monitoring");
+        println!("Falco v0.38.0 (Slate OS) — Runtime security monitoring");
         println!();
         println!("Options:");
         println!("  -r, --rules FILE     Rules file");
@@ -28,7 +28,7 @@ fn run_falco(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Falco v0.38.0 (SlateOS)");
+        println!("Falco v0.38.0 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "-l") {
@@ -59,7 +59,7 @@ fn run_falco(args: &[String], _prog: &str) -> i32 {
 fn run_falcoctl(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: falcoctl COMMAND [OPTIONS]");
-        println!("falcoctl v0.8.0 (SlateOS) — Falco artifact management");
+        println!("falcoctl v0.8.0 (Slate OS) — Falco artifact management");
         println!();
         println!("Commands:");
         println!("  artifact        Manage artifacts");
@@ -70,7 +70,7 @@ fn run_falcoctl(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("falcoctl v0.8.0 (SlateOS)");
+        println!("falcoctl v0.8.0 (Slate OS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("artifact");

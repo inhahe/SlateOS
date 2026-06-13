@@ -11,7 +11,7 @@ fn run_flux(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: flux [FLAGS] COMMAND [ARGS]");
         println!();
-        println!("flux — Flux GitOps toolkit CLI (SlateOS).");
+        println!("flux — Flux GitOps toolkit CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  bootstrap      Bootstrap Flux");
@@ -30,7 +30,7 @@ fn run_flux(args: &[String]) -> i32 {
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match subcmd {
         "version" | "--version" => {
-            println!("flux version 2.2.3 (SlateOS)");
+            println!("flux version 2.2.3 (Slate OS)");
             println!("build date: 2024-01-15T00:00:00Z");
         }
         "check" => {

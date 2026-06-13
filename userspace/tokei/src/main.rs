@@ -28,7 +28,7 @@ fn run_tokei(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("tokei 12.1.2 (SlateOS)");
+        println!("tokei 12.1.2 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "-l" || a == "--languages") {

@@ -402,7 +402,7 @@ fn eject_main(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("eject (SlateOS coreutils) {VERSION}");
+                println!("eject (Slate OS coreutils) {VERSION}");
                 return 0;
             }
             s if !s.starts_with('-') => {
@@ -436,7 +436,7 @@ fn volname_main(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("volname (SlateOS coreutils) {VERSION}");
+                println!("volname (Slate OS coreutils) {VERSION}");
                 return 0;
             }
             s => resolve_device(s),

@@ -19,7 +19,7 @@ fn run_oathtool(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: oathtool [OPTIONS] [SECRET]");
         println!();
-        println!("oathtool — OATH one-time password tool (SlateOS).");
+        println!("oathtool — OATH one-time password tool (Slate OS).");
         println!();
         println!("Options:");
         println!("  --totp          Time-based OTP (default)");
@@ -34,7 +34,7 @@ fn run_oathtool(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("oathtool (oath-toolkit) 2.6.7 (SlateOS)");
+        println!("oathtool (oath-toolkit) 2.6.7 (Slate OS)");
         return 0;
     }
 
@@ -66,7 +66,7 @@ fn run_ykman(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: ykman [OPTIONS] COMMAND");
         println!();
-        println!("ykman — YubiKey Manager CLI (SlateOS).");
+        println!("ykman — YubiKey Manager CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  info          Show YubiKey device info");
@@ -80,7 +80,7 @@ fn run_ykman(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("YubiKey Manager (ykman) version: 5.3.0 (SlateOS)");
+        println!("YubiKey Manager (ykman) version: 5.3.0 (Slate OS)");
         return 0;
     }
 
@@ -132,7 +132,7 @@ fn run_pamu2fcfg(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pamu2fcfg [OPTIONS]");
         println!();
-        println!("pamu2fcfg — generate U2F configuration (SlateOS).");
+        println!("pamu2fcfg — generate U2F configuration (Slate OS).");
         println!();
         println!("Options:");
         println!("  -u USER    Username");
@@ -143,7 +143,7 @@ fn run_pamu2fcfg(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("pamu2fcfg 1.3.0 (SlateOS)");
+        println!("pamu2fcfg 1.3.0 (Slate OS)");
         return 0;
     }
 

@@ -32,7 +32,7 @@ fn run_grex(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("grex 1.4.1 (SlateOS)");
+        println!("grex 1.4.1 (Slate OS)");
         return 0;
     }
 

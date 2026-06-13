@@ -35,7 +35,7 @@ fn run_deno(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match cmd {
         "--version" | "-V" => {
-            println!("deno 1.44.0 (SlateOS)");
+            println!("deno 1.44.0 (Slate OS)");
             println!("v8 12.6.228.9");
             println!("typescript 5.4.5");
         }
@@ -55,7 +55,7 @@ fn run_deno(args: Vec<String>) -> i32 {
         "lint" => println!("Checked 5 files (no diagnostics)"),
         "check" => println!("Check file:///project/main.ts (no errors)"),
         "repl" => {
-            println!("Deno 1.44.0 (SlateOS)");
+            println!("Deno 1.44.0 (Slate OS)");
             println!("> (REPL — simulated)");
         }
         "eval" => {

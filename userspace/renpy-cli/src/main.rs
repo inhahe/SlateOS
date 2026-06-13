@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rp(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: renpy [OPTIONS]");
-        println!("Ren'Py 8.3.4 (SlateOS) — FOSS visual novel + storytelling engine");
+        println!("Ren'Py 8.3.4 (Slate OS) — FOSS visual novel + storytelling engine");
         println!();
         println!("Options:");
         println!("  --new                  New project (visual novel template)");
@@ -24,8 +24,8 @@ fn run_rp(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Ren'Py 8.3.4 (SlateOS)"); return 0; }
-    println!("Ren'Py 8.3.4 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Ren'Py 8.3.4 (Slate OS)"); return 0; }
+    println!("Ren'Py 8.3.4 (Slate OS)");
     println!("  Created by: PyTom (Tom Rothamel, Pittsburgh PA) — initial release 2004");
     println!("  License: MIT (engine), free for commercial use");
     println!("  Built on: Python 3 (since Ren'Py 8.0, Aug 2022 — was Python 2 for 18 years)");

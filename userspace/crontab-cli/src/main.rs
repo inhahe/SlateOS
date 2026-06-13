@@ -11,7 +11,7 @@ fn run_crontab(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: crontab [OPTIONS] [FILE]");
         println!();
-        println!("crontab — maintain crontab files (SlateOS).");
+        println!("crontab — maintain crontab files (Slate OS).");
         println!();
         println!("Options:");
         println!("  -l               List crontab entries");

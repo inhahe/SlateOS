@@ -19,7 +19,7 @@ fn run_bluetoothctl(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: bluetoothctl [OPTIONS] [COMMAND]");
         println!();
-        println!("bluetoothctl — BlueZ Bluetooth control (SlateOS).");
+        println!("bluetoothctl — BlueZ Bluetooth control (Slate OS).");
         println!();
         println!("Commands: list, show, power on|off, scan on|off, devices,");
         println!("  pair ADDR, connect ADDR, disconnect ADDR, trust ADDR,");
@@ -27,7 +27,7 @@ fn run_bluetoothctl(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("bluetoothctl: 5.72 (SlateOS)");
+        println!("bluetoothctl: 5.72 (Slate OS)");
         return 0;
     }
 
@@ -121,7 +121,7 @@ fn main() {
     let code = match prog.as_str() {
         "hcitool" => run_hcitool(&rest),
         "hciconfig" => run_hciconfig(&rest),
-        "btmon" => { println!("Bluetooth monitor ver 5.72 (SlateOS)"); println!("= Open Index: AA:BB:CC:DD:EE:FF"); 0 }
+        "btmon" => { println!("Bluetooth monitor ver 5.72 (Slate OS)"); println!("= Open Index: AA:BB:CC:DD:EE:FF"); 0 }
         "sdptool" => { println!("Inquiring..."); println!("Service Name: Audio Sink"); 0 }
         _ => run_bluetoothctl(&rest),
     };

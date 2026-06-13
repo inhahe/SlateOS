@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_betterstack(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: betterstack [OPTIONS]");
-        println!("Better Stack (SlateOS) — beautifully designed observability + incident mgmt for devs");
+        println!("Better Stack (Slate OS) — beautifully designed observability + incident mgmt for devs");
         println!();
         println!("Options:");
         println!("  --uptime               Uptime monitoring (was Better Uptime)");
@@ -22,8 +22,8 @@ fn run_betterstack(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Better Stack 2024 (SlateOS)"); return 0; }
-    println!("Better Stack 2024 (SlateOS) — Observability + Incident Management");
+    if args.iter().any(|a| a == "--version") { println!("Better Stack 2024 (Slate OS)"); return 0; }
+    println!("Better Stack 2024 (Slate OS) — Observability + Incident Management");
     println!("  Vendor: Better Stack (Tomáš Hromada + team — Prague, Czech Republic, private)");
     println!("  Founder: Tomáš Hromada, 2017 (started as 'Better Uptime')");
     println!("          Originally: Better Uptime — uptime monitoring + incident mgmt + status pages");

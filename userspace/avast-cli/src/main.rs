@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_avast(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: avast [OPTIONS]");
-        println!("Avast One 24.10 (SlateOS) — Consumer security/privacy/performance");
+        println!("Avast One 24.10 (Slate OS) — Consumer security/privacy/performance");
         println!();
         println!("Options:");
         println!("  --scan TYPE            smart/deep/targeted/boot-time/usb");
@@ -24,8 +24,8 @@ fn run_avast(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Avast One 24.10.9223 (SlateOS)"); return 0; }
-    println!("Avast One 24.10.9223 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Avast One 24.10.9223 (Slate OS)"); return 0; }
+    println!("Avast One 24.10.9223 (Slate OS)");
     println!("  Owner: Gen Digital (Avast + AVG + Norton + LifeLock + CCleaner merged)");
     println!("  Avast One: unified product replacing Avast Free/Premium Security");
     println!("  Free tier: AV, basic firewall, web shield, ransomware shield, smart scan");

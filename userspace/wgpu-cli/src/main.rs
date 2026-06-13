@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wgpu(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: wgpu COMMAND [OPTIONS]");
-        println!("wgpu v0.20.0 (SlateOS) — WebGPU graphics tool");
+        println!("wgpu v0.20.0 (Slate OS) — WebGPU graphics tool");
         println!();
         println!("Commands:");
         println!("  info            Show GPU adapter info");
@@ -26,7 +26,7 @@ fn run_wgpu(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("wgpu v0.20.0 (SlateOS)");
+        println!("wgpu v0.20.0 (Slate OS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("info");

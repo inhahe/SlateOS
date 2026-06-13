@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_supercluster(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: supercluster [OPTIONS] INPUT.geojson");
-        println!("Supercluster v8.0 (SlateOS) — Fast geospatial point clustering");
+        println!("Supercluster v8.0 (Slate OS) — Fast geospatial point clustering");
         println!();
         println!("Options:");
         println!("  INPUT.geojson     Input point features");
@@ -26,7 +26,7 @@ fn run_supercluster(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Supercluster v8.0 (SlateOS)");
+        println!("Supercluster v8.0 (Slate OS)");
         return 0;
     }
     let file = args.iter()

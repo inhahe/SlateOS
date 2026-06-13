@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: rocketchat [OPTIONS]");
-        println!("Rocket.Chat (SlateOS) — Open-source self-hostable team chat");
+        println!("Rocket.Chat (Slate OS) — Open-source self-hostable team chat");
         println!();
         println!("Options:");
         println!("  --server URL           Connect to Rocket.Chat workspace");
@@ -24,8 +24,8 @@ fn run_rc(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Rocket.Chat Desktop 4.4.0 (SlateOS)"); return 0; }
-    println!("Rocket.Chat Desktop 4.4.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Rocket.Chat Desktop 4.4.0 (Slate OS)"); return 0; }
+    println!("Rocket.Chat Desktop 4.4.0 (Slate OS)");
     println!("  Vendor: Rocket.Chat Technologies Corp (founded 2015, Porto Alegre, Brazil)");
     println!("  License: MIT (Community), Enterprise license for advanced features");
     println!("  Stack: Meteor.js (Node.js), MongoDB, React (UI), Apollo GraphQL");

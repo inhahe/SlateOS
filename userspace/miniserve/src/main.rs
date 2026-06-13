@@ -46,7 +46,7 @@ fn run_miniserve(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("miniserve 0.27.1 (SlateOS)");
+        println!("miniserve 0.27.1 (Slate OS)");
         return 0;
     }
 
@@ -63,7 +63,7 @@ fn run_miniserve(args: Vec<String>) -> i32 {
     let upload = args.iter().any(|a| a == "-u" || a == "--upload-files");
     let qrcode = args.iter().any(|a| a == "-q" || a == "--qrcode");
 
-    println!("miniserve 0.27.1 (SlateOS)");
+    println!("miniserve 0.27.1 (Slate OS)");
     println!();
     println!("Serving path: {}", path);
     println!("Available at:");

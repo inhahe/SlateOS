@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_xs(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: xsplit [OPTIONS]");
-        println!("XSplit Broadcaster 4.6 (SlateOS) — Pro streaming & recording");
+        println!("XSplit Broadcaster 4.6 (Slate OS) — Pro streaming & recording");
         println!();
         println!("Options:");
         println!("  --gamecaster           Launch XSplit Gamecaster (game streaming)");
@@ -24,8 +24,8 @@ fn run_xs(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("XSplit Broadcaster 4.6.2402 (SlateOS)"); return 0; }
-    println!("XSplit Broadcaster 4.6.2402 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("XSplit Broadcaster 4.6.2402 (Slate OS)"); return 0; }
+    println!("XSplit Broadcaster 4.6.2402 (Slate OS)");
     println!("  Apps: Broadcaster, Gamecaster, VCam, Presenter, Connect");
     println!("  Sources: Game, Window, Display, Webcam, Image, Video, Browser");
     println!("  Outputs: YouTube/Twitch/Facebook/Custom RTMP, NDI, multi-stream");

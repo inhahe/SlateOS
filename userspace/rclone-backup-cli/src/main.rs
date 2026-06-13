@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rclone_backup(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: rclone-backup COMMAND [OPTIONS]");
-        println!("rclone-backup v1.0 (SlateOS) — Simplified rclone backup profiles");
+        println!("rclone-backup v1.0 (Slate OS) — Simplified rclone backup profiles");
         println!();
         println!("Commands:");
         println!("  sync PROFILE      Sync profile to remote");
@@ -25,7 +25,7 @@ fn run_rclone_backup(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("rclone-backup v1.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("rclone-backup v1.0 (Slate OS)"); return 0; }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("status");
     match cmd {
         "sync" => {

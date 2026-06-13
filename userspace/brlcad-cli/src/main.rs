@@ -13,14 +13,14 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mged(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mged [OPTIONS] [DATABASE.g]");
-        println!("mged v7.38 (SlateOS) — Multi-device Geometry Editor");
+        println!("mged v7.38 (Slate OS) — Multi-device Geometry Editor");
         println!();
         println!("Options:");
         println!("  -c              Command-line mode");
         println!("  --version       Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("mged v7.38 (SlateOS, BRL-CAD)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("mged v7.38 (Slate OS, BRL-CAD)"); return 0; }
     println!("mged: BRL-CAD geometry editor started");
     println!("  CSG primitives: sphere, box, cylinder, cone, torus, pipe");
     println!("  Boolean ops: union, intersection, subtraction");
@@ -31,10 +31,10 @@ fn run_mged(args: &[String], _prog: &str) -> i32 {
 fn run_archer(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: archer [OPTIONS] [DATABASE.g]");
-        println!("archer v7.38 (SlateOS) — BRL-CAD GUI geometry editor");
+        println!("archer v7.38 (Slate OS) — BRL-CAD GUI geometry editor");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("archer v7.38 (SlateOS, BRL-CAD)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("archer v7.38 (Slate OS, BRL-CAD)"); return 0; }
     println!("archer: BRL-CAD GUI editor started");
     0
 }
@@ -42,7 +42,7 @@ fn run_archer(args: &[String], _prog: &str) -> i32 {
 fn run_rt(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: rt [OPTIONS] MODEL.g OBJECTS...");
-        println!("rt v7.38 (SlateOS) — BRL-CAD ray tracer");
+        println!("rt v7.38 (Slate OS) — BRL-CAD ray tracer");
         println!();
         println!("Options:");
         println!("  -s SIZE         Image size");
@@ -51,7 +51,7 @@ fn run_rt(args: &[String], _prog: &str) -> i32 {
         println!("  -e ELEVATION    View elevation");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("rt v7.38 (SlateOS, BRL-CAD)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("rt v7.38 (Slate OS, BRL-CAD)"); return 0; }
     println!("rt: ray tracing...");
     0
 }
@@ -59,10 +59,10 @@ fn run_rt(args: &[String], _prog: &str) -> i32 {
 fn run_nirt(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: nirt [OPTIONS] MODEL.g OBJECTS...");
-        println!("nirt v7.38 (SlateOS) — BRL-CAD interactive ray tracer");
+        println!("nirt v7.38 (Slate OS) — BRL-CAD interactive ray tracer");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("nirt v7.38 (SlateOS, BRL-CAD)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("nirt v7.38 (Slate OS, BRL-CAD)"); return 0; }
     println!("nirt: interactive ray tracing started");
     0
 }

@@ -6801,8 +6801,8 @@ fn alsa_pcm_ioctl_info(entry: &FdEntry, argp: u64) -> SyscallResult {
     info.card = 0;
     info.subdevices_count = 1;
     info.subdevices_avail = 0;
-    write_cstr_field(&mut info.id, b"SlateOS");
-    write_cstr_field(&mut info.name, b"SlateOS Virtual Audio");
+    write_cstr_field(&mut info.id, b"Slate OS");
+    write_cstr_field(&mut info.name, b"Slate OS Virtual Audio");
     write_cstr_field(&mut info.subname, b"subdevice #0");
     match write_user_struct(argp, &info) {
         Ok(()) => SyscallResult::ok(0),
@@ -7012,11 +7012,11 @@ fn alsa_control_ioctl_card_info(argp: u64) -> SyscallResult {
     let mut info: ctl::SndCtlCardInfo = unsafe { core::mem::zeroed() };
     info.card = 0;
     info.pad = 0;
-    write_cstr_field(&mut info.id, b"SlateOS");
-    write_cstr_field(&mut info.driver, b"SlateOS");
-    write_cstr_field(&mut info.name, b"SlateOS Virtual Audio");
-    write_cstr_field(&mut info.longname, b"SlateOS Virtual Audio - software mixer");
-    write_cstr_field(&mut info.mixername, b"SlateOS Mixer");
+    write_cstr_field(&mut info.id, b"Slate OS");
+    write_cstr_field(&mut info.driver, b"Slate OS");
+    write_cstr_field(&mut info.name, b"Slate OS Virtual Audio");
+    write_cstr_field(&mut info.longname, b"Slate OS Virtual Audio - software mixer");
+    write_cstr_field(&mut info.mixername, b"Slate OS Mixer");
     match write_user_struct(argp, &info) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => linux_err(e),
@@ -52480,7 +52480,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // release are Linux-ABI-only surfaces — in our architecture
         // native code uses native APIs, so the only callers of uname(2)
         // are Linux binaries that expect Linux values.  Two invariants:
-        //   - sysname == "Linux" (was "SlateOS"): a Linux binary that
+        //   - sysname == "Linux" (was "Slate OS"): a Linux binary that
         //     branches on `uname().sysname` must see "Linux".
         //   - release leads with "6.6" (was "0.1.0-slateos"): glibc's
         //     startup gate parses the leading MAJOR.MINOR and aborts

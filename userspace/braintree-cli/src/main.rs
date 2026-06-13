@@ -11,7 +11,7 @@ fn run_braintree(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: braintree <COMMAND> [OPTIONS]");
         println!();
-        println!("Braintree payment gateway CLI (SlateOS).");
+        println!("Braintree payment gateway CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  transactions  Manage transactions");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_qpdf(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: qpdf [OPTIONS] INPUT [OUTPUT]");
-        println!("QPDF 11.9.1 (SlateOS) — PDF transformation tool");
+        println!("QPDF 11.9.1 (Slate OS) — PDF transformation tool");
         println!();
         println!("Options:");
         println!("  --linearize            Linearize (web-optimize)");
@@ -36,7 +36,7 @@ fn run_qpdf(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("qpdf version 11.9.1 (SlateOS)");
+        println!("qpdf version 11.9.1 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "--check") {

@@ -90,7 +90,7 @@ fn run_pkgconf(args: Vec<String>) -> i32 {
     }
 
     if args.iter().any(|a| a == "--version") {
-        println!("2.1.0 (SlateOS)");
+        println!("2.1.0 (Slate OS)");
         return 0;
     }
 

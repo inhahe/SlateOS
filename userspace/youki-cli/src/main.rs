@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_youki(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: youki COMMAND [OPTIONS]");
-        println!("youki v0.4 (SlateOS) — Container runtime in Rust");
+        println!("youki v0.4 (Slate OS) — Container runtime in Rust");
         println!();
         println!("Commands:");
         println!("  create ID BUNDLE  Create a container");

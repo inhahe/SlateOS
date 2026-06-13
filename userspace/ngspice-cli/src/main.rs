@@ -18,7 +18,7 @@ fn run_ngspice(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("ngspice-42 (SlateOS)");
+        println!("ngspice-42 (Slate OS)");
         println!("Compiled with KLU sparse solver");
         println!("XSPICE enabled");
         println!("OSDI enabled");
@@ -44,7 +44,7 @@ fn run_ngspice(args: &[String]) -> i32 {
     } else if let Some(f) = file {
         println!("******");
         println!("** ngspice-42 : Circuit level simulation program");
-        println!("** Compiled for SlateOS");
+        println!("** Compiled for Slate OS");
         println!("******");
         println!("Loading: {}", f);
         println!("Circuit loaded. Type 'run' to simulate.");
@@ -52,7 +52,7 @@ fn run_ngspice(args: &[String]) -> i32 {
     } else {
         println!("******");
         println!("** ngspice-42 : Circuit level simulation program");
-        println!("** Compiled for SlateOS");
+        println!("** Compiled for Slate OS");
         println!("******");
         println!("ngspice 1 ->");
     }

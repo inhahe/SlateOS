@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wiz(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wiz [OPTIONS]");
-        println!("Wiz (SlateOS) — Cloud-Native Application Protection Platform (CNAPP)");
+        println!("Wiz (Slate OS) — Cloud-Native Application Protection Platform (CNAPP)");
         println!();
         println!("Options:");
         println!("  --scan                 Scan AWS/Azure/GCP/Kubernetes/OCI");
@@ -22,8 +22,8 @@ fn run_wiz(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Wiz 2024 (SlateOS)"); return 0; }
-    println!("Wiz 2024 (SlateOS) — Cloud-Native Application Protection Platform");
+    if args.iter().any(|a| a == "--version") { println!("Wiz 2024 (Slate OS)"); return 0; }
+    println!("Wiz 2024 (Slate OS) — Cloud-Native Application Protection Platform");
     println!("  Vendor: Wiz, Inc. (New York City + Tel Aviv)");
     println!("  Founders: Assaf Rappaport (CEO), Yinon Costica, Roy Reznik, Ami Luttwak, 2020");
     println!("          all four: Israeli Unit 8200 (IDF intelligence) alumni + ex-Microsoft");

@@ -11,7 +11,7 @@ fn run_scribus(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: scribus [OPTIONS] [FILE]");
         println!();
-        println!("Scribus — desktop publishing (SlateOS).");
+        println!("Scribus — desktop publishing (Slate OS).");
         println!();
         println!("Options:");
         println!("  -g, --no-gui           Batch mode (no GUI)");
@@ -25,7 +25,7 @@ fn run_scribus(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("Scribus 1.6.1 (SlateOS)");
+        println!("Scribus 1.6.1 (Slate OS)");
         return 0;
     }
 
@@ -72,7 +72,7 @@ fn run_scribus(args: Vec<String>) -> i32 {
         println!("Scribus: opening '{}'...", f);
         println!("  Document loaded: 4 pages, A4, CMYK");
     } else {
-        println!("Scribus 1.6.1 (SlateOS)");
+        println!("Scribus 1.6.1 (Slate OS)");
         println!("Starting Scribus GUI...");
     }
     0

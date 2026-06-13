@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sysbench(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sysbench [OPTIONS] TEST [COMMAND]");
-        println!("sysbench v1.0 (SlateOS) — System performance benchmark");
+        println!("sysbench v1.0 (Slate OS) — System performance benchmark");
         println!();
         println!("Tests:");
         println!("  cpu            CPU benchmark");
@@ -30,7 +30,7 @@ fn run_sysbench(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("sysbench v1.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("sysbench v1.0 (Slate OS)"); return 0; }
     match args.first().map(|s| s.as_str()) {
         Some("cpu") => {
             println!("sysbench: CPU speed benchmark");

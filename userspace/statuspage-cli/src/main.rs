@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_statuspage(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: statuspage [COMMAND] [OPTIONS]");
-        println!("Statuspage v2.0 (SlateOS) — Hosted status page service");
+        println!("Statuspage v2.0 (Slate OS) — Hosted status page service");
         println!();
         println!("Commands:");
         println!("  page list|get          List status pages");
@@ -30,8 +30,8 @@ fn run_statuspage(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Statuspage CLI v2.0.0 (SlateOS)"); return 0; }
-    println!("Statuspage v2.0.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Statuspage CLI v2.0.0 (Slate OS)"); return 0; }
+    println!("Statuspage v2.0.0 (Slate OS)");
     println!("  Pages: 2");
     println!("  Components: 15 (12 operational, 2 degraded, 1 outage)");
     println!("  Open incidents: 1");

@@ -51,7 +51,7 @@ fn run_fsck(prog: &str, args: &[String]) -> i32 {
 
     match prog {
         "e2fsck" | "fsck.ext4" => {
-            println!("e2fsck 1.47.0 (SlateOS)");
+            println!("e2fsck 1.47.0 (Slate OS)");
             println!("{}: clean, 45678/3276800 files, 1234567/13107200 blocks", device);
             if verbose {
                 println!();
@@ -76,8 +76,8 @@ fn run_fsck(prog: &str, args: &[String]) -> i32 {
             println!("done");
         }
         _ => {
-            println!("fsck from util-linux 2.39.3 (SlateOS)");
-            println!("e2fsck 1.47.0 (SlateOS)");
+            println!("fsck from util-linux 2.39.3 (Slate OS)");
+            println!("e2fsck 1.47.0 (Slate OS)");
             println!("{}: clean, 45678/3276800 files, 1234567/13107200 blocks", device);
         }
     }

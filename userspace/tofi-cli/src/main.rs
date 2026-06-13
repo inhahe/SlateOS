@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_tofi(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: tofi [OPTIONS]");
-        println!("tofi v0.9 (SlateOS) — Tiny dynamic menu for Wayland");
+        println!("tofi v0.9 (Slate OS) — Tiny dynamic menu for Wayland");
         println!();
         println!("Options:");
         println!("  --prompt TEXT     Prompt text");
@@ -36,7 +36,7 @@ fn run_tofi(args: &[String], _prog: &str) -> i32 {
 fn run_tofi_run(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: tofi-run [OPTIONS]");
-        println!("tofi-run v0.9 (SlateOS) — Run commands from PATH");
+        println!("tofi-run v0.9 (Slate OS) — Run commands from PATH");
         return 0;
     }
     let _ = args;
@@ -47,7 +47,7 @@ fn run_tofi_run(args: &[String], _prog: &str) -> i32 {
 fn run_tofi_drun(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: tofi-drun [OPTIONS]");
-        println!("tofi-drun v0.9 (SlateOS) — Launch desktop applications");
+        println!("tofi-drun v0.9 (Slate OS) — Launch desktop applications");
         return 0;
     }
     let _ = args;

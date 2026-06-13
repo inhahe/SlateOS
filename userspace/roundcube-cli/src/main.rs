@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_roundcube(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: roundcube [COMMAND] [OPTIONS]");
-        println!("Roundcube v1.6 (SlateOS) — Webmail client");
+        println!("Roundcube v1.6 (Slate OS) — Webmail client");
         println!();
         println!("Commands:");
         println!("  serve              Start webmail server");
@@ -29,8 +29,8 @@ fn run_roundcube(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Roundcube v1.6.6 (SlateOS)"); return 0; }
-    println!("Roundcube v1.6.6 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Roundcube v1.6.6 (Slate OS)"); return 0; }
+    println!("Roundcube v1.6.6 (Slate OS)");
     println!("  IMAP: connected to localhost:143");
     println!("  SMTP: localhost:25");
     println!("  Database: SQLite");

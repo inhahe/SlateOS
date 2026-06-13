@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_st2(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: st2 [COMMAND] [OPTIONS]");
-        println!("StackStorm v3.9 (SlateOS) — Event-driven automation (IFTTT for ops)");
+        println!("StackStorm v3.9 (Slate OS) — Event-driven automation (IFTTT for ops)");
         println!();
         println!("Commands:");
         println!("  action list|get|execute   Manage actions");
@@ -33,8 +33,8 @@ fn run_st2(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("st2 v3.9.0 (SlateOS)"); return 0; }
-    println!("StackStorm v3.9.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("st2 v3.9.0 (Slate OS)"); return 0; }
+    println!("StackStorm v3.9.0 (Slate OS)");
     println!("  Packs: 23 installed");
     println!("  Actions: 456");
     println!("  Rules: 34 active");

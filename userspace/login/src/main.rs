@@ -624,7 +624,7 @@ fn print_help() {
 }
 
 fn print_version() {
-    println!("login (SlateOS) 0.1.0");
+    println!("login (Slate OS) 0.1.0");
 }
 
 // ---------------------------------------------------------------------------

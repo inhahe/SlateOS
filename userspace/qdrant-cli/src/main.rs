@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_qd(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: qdrant [OPTIONS]");
-        println!("Qdrant (SlateOS) — open-source Rust vector database with filterable HNSW");
+        println!("Qdrant (Slate OS) — open-source Rust vector database with filterable HNSW");
         println!();
         println!("Options:");
         println!("  --filterable-hnsw      Filterable HNSW (filter + vector search combined)");
@@ -21,8 +21,8 @@ fn run_qd(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Qdrant 2024 (SlateOS) — qdrant CLI 1.x"); return 0; }
-    println!("Qdrant 2024 (SlateOS) — Open-Source Rust Vector Database");
+    if args.iter().any(|a| a == "--version") { println!("Qdrant 2024 (Slate OS) — qdrant CLI 1.x"); return 0; }
+    println!("Qdrant 2024 (Slate OS) — Open-Source Rust Vector Database");
     println!("  Vendor: Qdrant Solutions GmbH (Berlin, Germany — private)");
     println!("  Founders: Andrey Vasnetsov (CTO) + Andre Zayarni (CEO), 2021");
     println!("          Andrey Vasnetsov: Rust + ML engineer, built Qdrant prototype");

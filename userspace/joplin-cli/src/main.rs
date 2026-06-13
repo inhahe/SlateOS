@@ -13,13 +13,13 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_desktop(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: joplin-desktop [OPTIONS]");
-        println!("joplin-desktop v2.14 (SlateOS) — Note-taking & to-do app");
+        println!("joplin-desktop v2.14 (Slate OS) — Note-taking & to-do app");
         println!();
         println!("Options:");
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("joplin-desktop v2.14 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("joplin-desktop v2.14 (Slate OS)"); return 0; }
     println!("joplin-desktop: note-taking application started");
     println!("  Notebooks: 8");
     println!("  Notes: 256");
@@ -31,7 +31,7 @@ fn run_desktop(args: &[String], _prog: &str) -> i32 {
 fn run_terminal(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: joplin COMMAND [OPTIONS]");
-        println!("joplin v2.14 (SlateOS) — Terminal note-taking client");
+        println!("joplin v2.14 (Slate OS) — Terminal note-taking client");
         println!();
         println!("Commands:");
         println!("  ls                List notebooks/notes");
@@ -43,7 +43,7 @@ fn run_terminal(args: &[String], _prog: &str) -> i32 {
         println!("  search QUERY      Search notes");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("joplin v2.14 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("joplin v2.14 (Slate OS)"); return 0; }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("ls");
     match cmd {
         "ls" => {

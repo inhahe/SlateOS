@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_nuclei(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: nuclei [OPTIONS]");
-        println!("Nuclei 3.2.0 (SlateOS) — Fast vulnerability scanner");
+        println!("Nuclei 3.2.0 (Slate OS) — Fast vulnerability scanner");
         println!();
         println!("Target:");
         println!("  -u, --target URL       Target URL");

@@ -17,7 +17,7 @@ fn run_ltspice(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("LTspice XVII (24.0.12) (SlateOS)");
+        println!("LTspice XVII (24.0.12) (Slate OS)");
         return 0;
     }
     let batch = args.iter().any(|a| a == "-b");

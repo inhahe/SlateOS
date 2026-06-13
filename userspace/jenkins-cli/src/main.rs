@@ -11,7 +11,7 @@ fn run_jenkins_cli(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: jenkins-cli [OPTIONS] COMMAND [ARGS]");
         println!();
-        println!("jenkins-cli — Jenkins CI/CD management (SlateOS).");
+        println!("jenkins-cli — Jenkins CI/CD management (Slate OS).");
         println!();
         println!("Commands:");
         println!("  build <job>          Trigger a build");
@@ -27,7 +27,7 @@ fn run_jenkins_cli(args: &[String]) -> i32 {
 
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match subcmd {
-        "version" => println!("Jenkins 2.440.1 (SlateOS)"),
+        "version" => println!("Jenkins 2.440.1 (Slate OS)"),
         "who-am-i" => {
             println!("Authenticated as: admin");
             println!("Authorities:");

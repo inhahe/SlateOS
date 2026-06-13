@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pdftk(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: pdftk INPUT [INPUT...] [OPERATION] [OPTIONS] output OUTPUT");
-        println!("pdftk 3.3.3 (SlateOS) — PDF toolkit");
+        println!("pdftk 3.3.3 (Slate OS) — PDF toolkit");
         println!();
         println!("Operations:");
         println!("  cat              Merge/assemble pages");

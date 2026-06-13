@@ -11,7 +11,7 @@ fn run_tmux(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: tmux <COMMAND> [OPTIONS]");
         println!();
-        println!("tmux — terminal multiplexer (SlateOS).");
+        println!("tmux — terminal multiplexer (Slate OS).");
         println!();
         println!("Commands:");
         println!("  new-session, new    Create a new session");
@@ -27,7 +27,7 @@ fn run_tmux(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V") {
-        println!("tmux 3.4 (SlateOS)");
+        println!("tmux 3.4 (Slate OS)");
         return 0;
     }
 

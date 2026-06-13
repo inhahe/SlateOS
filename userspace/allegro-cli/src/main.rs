@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_allegro(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: allegro [OPTIONS] [FILE]");
-        println!("Cadence Allegro X 23.1 (SlateOS) — High-speed PCB design");
+        println!("Cadence Allegro X 23.1 (Slate OS) — High-speed PCB design");
         println!();
         println!("Options:");
         println!("  -nograph FILE          Run script on board without GUI");
@@ -23,8 +23,8 @@ fn run_allegro(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Cadence Allegro X 23.1 (SlateOS)"); return 0; }
-    println!("Cadence Allegro X 23.1 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Cadence Allegro X 23.1 (Slate OS)"); return 0; }
+    println!("Cadence Allegro X 23.1 (Slate OS)");
     println!("  Industry-leading high-speed PCB design (servers, telecom, ASIC interposers)");
     println!("  Constraint Manager: rule-driven design for SI/PI/EMI");
     println!("  Routing: ActiHS auto, dynamic differential pairs, flex/rigid-flex");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_hexo(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: hexo COMMAND [OPTIONS]");
-        println!("Hexo v7.2.0 (SlateOS) — Fast blog framework");
+        println!("Hexo v7.2.0 (Slate OS) — Fast blog framework");
         println!();
         println!("Commands:");
         println!("  init [DIR]      Initialize new blog");
@@ -31,7 +31,7 @@ fn run_hexo(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--version") {
         println!("hexo: 7.2.0");
         println!("hexo-cli: 4.3.1");
-        println!("os: SlateOS x86_64");
+        println!("os: Slate OS x86_64");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("generate");

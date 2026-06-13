@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_duf(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: duf [OPTIONS] [PATH...]");
-        println!("duf 0.8.1 (SlateOS) — Disk Usage/Free utility");
+        println!("duf 0.8.1 (Slate OS) — Disk Usage/Free utility");
         println!();
         println!("Options:");
         println!("  -all                 Show all filesystems");
@@ -31,7 +31,7 @@ fn run_duf(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-version") {
-        println!("duf 0.8.1 (SlateOS)");
+        println!("duf 0.8.1 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "-json") {

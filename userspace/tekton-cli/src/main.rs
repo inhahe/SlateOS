@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_tkn(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: tkn COMMAND [OPTIONS]");
-        println!("Tekton CLI 0.37.0 (SlateOS)");
+        println!("Tekton CLI 0.37.0 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  pipeline       Manage Pipelines");

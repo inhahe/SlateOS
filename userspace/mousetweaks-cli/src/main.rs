@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mousetweaks(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mousetweaks [OPTIONS]");
-        println!("mousetweaks v3.32 (SlateOS) — Mouse accessibility enhancements");
+        println!("mousetweaks v3.32 (Slate OS) — Mouse accessibility enhancements");
         println!();
         println!("Options:");
         println!("  --dwell           Enable dwell click");
@@ -23,7 +23,7 @@ fn run_mousetweaks(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("mousetweaks v3.32 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("mousetweaks v3.32 (Slate OS)"); return 0; }
     println!("mousetweaks: mouse accessibility active");
     println!("  Dwell click: hover to click");
     println!("  Dwell time: 1200ms");

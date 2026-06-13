@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sklearn(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sklearn [OPTIONS] COMMAND");
-        println!("scikit-learn v1.4 (SlateOS) — Machine learning library");
+        println!("scikit-learn v1.4 (Slate OS) — Machine learning library");
         println!();
         println!("Commands:");
         println!("  train          Train a model");
@@ -31,8 +31,8 @@ fn run_sklearn(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("scikit-learn v1.4.2 (SlateOS)"); return 0; }
-    println!("scikit-learn v1.4.2 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("scikit-learn v1.4.2 (Slate OS)"); return 0; }
+    println!("scikit-learn v1.4.2 (Slate OS)");
     println!("  Model: RandomForestClassifier");
     println!("  Data: dataset.csv (10,000 samples, 25 features)");
     println!("  Train/Test split: 80/20");

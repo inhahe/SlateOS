@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rustdoc(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: rustdoc [OPTIONS] INPUT");
-        println!("rustdoc (SlateOS)");
+        println!("rustdoc (Slate OS)");
         println!();
         println!("Options:");
         println!("  --crate-name NAME     Crate name");
@@ -33,7 +33,7 @@ fn run_rustdoc(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("rustdoc 1.77.0 (SlateOS)");
+        println!("rustdoc 1.77.0 (Slate OS)");
         return 0;
     }
     let crate_name = args.windows(2)
@@ -70,7 +70,7 @@ fn run_rustdoc(args: &[String]) -> i32 {
 fn run_cargo_doc(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: cargo doc [OPTIONS]");
-        println!("Build Rust documentation (SlateOS)");
+        println!("Build Rust documentation (Slate OS)");
         println!();
         println!("Options:");
         println!("  --open              Open docs in browser");

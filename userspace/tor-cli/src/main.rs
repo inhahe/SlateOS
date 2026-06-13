@@ -14,7 +14,7 @@ fn run_tor(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: tor [OPTIONS]");
         println!();
-        println!("tor — The Tor anonymity network daemon (SlateOS).");
+        println!("tor — The Tor anonymity network daemon (Slate OS).");
         println!();
         println!("Options:");
         println!("  -f <file>       Config file (default: /etc/tor/torrc)");
@@ -27,8 +27,8 @@ fn run_tor(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Tor version 0.4.8.10 (SlateOS).");
-        println!("Tor is running on SlateOS with Libevent 2.1.12-stable, OpenSSL 3.2.1,");
+        println!("Tor version 0.4.8.10 (Slate OS).");
+        println!("Tor is running on Slate OS with Libevent 2.1.12-stable, OpenSSL 3.2.1,");
         println!("Zlib 1.3.1, Liblzma 5.4.5, Libzstd 1.5.5, and Unknown N/A as libc.");
         return 0;
     }
@@ -70,7 +70,7 @@ fn run_torsocks(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: torsocks [OPTIONS] <command> [args...]");
         println!();
-        println!("torsocks — wrapper to transparently route through Tor (SlateOS).");
+        println!("torsocks — wrapper to transparently route through Tor (Slate OS).");
         println!();
         println!("Options:");
         println!("  --shell        Spawn a shell with torsocks enabled");

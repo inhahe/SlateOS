@@ -435,7 +435,7 @@ fn run(config: &Config) -> i32 {
 // ============================================================================
 
 fn print_usage() {
-    println!("SlateOS Memory Information Display v0.1.0");
+    println!("Slate OS Memory Information Display v0.1.0");
     println!();
     println!("Display amount of free and used memory in the system.");
     println!();

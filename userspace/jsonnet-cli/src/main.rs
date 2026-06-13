@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_jsonnet(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: jsonnet [OPTIONS] FILE");
-        println!("Jsonnet 0.20.0 (SlateOS) — Data templating language");
+        println!("Jsonnet 0.20.0 (Slate OS) — Data templating language");
         println!();
         println!("Options:");
         println!("  -e CODE        Evaluate expression");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ukg(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ukg [OPTIONS]");
-        println!("UKG Pro (SlateOS) — Enterprise HCM (formerly UltiPro)");
+        println!("UKG Pro (Slate OS) — Enterprise HCM (formerly UltiPro)");
         println!();
         println!("Options:");
         println!("  --pro                  UKG Pro (large enterprise, formerly UltiPro)");
@@ -22,8 +22,8 @@ fn run_ukg(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("UKG Pro 2024 (SlateOS)"); return 0; }
-    println!("UKG Pro 2024 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("UKG Pro 2024 (Slate OS)"); return 0; }
+    println!("UKG Pro 2024 (Slate OS)");
     println!("  Vendor: Ultimate Kronos Group (Lowell, MA + Weston, FL)");
     println!("  Formation: April 2020 merger of Kronos Incorporated + Ultimate Software ($22B)");
     println!("            taken private 2017 (Kronos Hellman & Friedman) + 2019 (Ultimate Software H&F + Blackstone)");

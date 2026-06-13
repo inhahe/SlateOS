@@ -212,7 +212,7 @@ fn run_timeout(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("timeout (SlateOS) 0.1.0");
+                println!("timeout (Slate OS) 0.1.0");
                 return 0;
             }
             "-s" | "--signal" => {
@@ -431,7 +431,7 @@ fn run_nohup(args: &[String]) -> i32 {
     }
 
     if args[0] == "--version" {
-        println!("nohup (SlateOS) 0.1.0");
+        println!("nohup (Slate OS) 0.1.0");
         return 0;
     }
 
@@ -528,7 +528,7 @@ fn run_nice(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("nice (SlateOS) 0.1.0");
+                println!("nice (Slate OS) 0.1.0");
                 return 0;
             }
             "-n" | "--adjustment" => {
@@ -655,7 +655,7 @@ fn run_renice(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("renice (SlateOS) 0.1.0");
+                println!("renice (Slate OS) 0.1.0");
                 return 0;
             }
             "-n" | "--priority" => {

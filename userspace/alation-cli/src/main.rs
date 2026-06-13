@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_alation(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: alation [OPTIONS]");
-        println!("Alation (SlateOS) — enterprise data catalog (the category creator)");
+        println!("Alation (Slate OS) — enterprise data catalog (the category creator)");
         println!();
         println!("Options:");
         println!("  --catalog              Browse cataloged data assets");
@@ -22,8 +22,8 @@ fn run_alation(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Alation 2024.3 (SlateOS)"); return 0; }
-    println!("Alation 2024.3 (SlateOS) — Enterprise Data Catalog");
+    if args.iter().any(|a| a == "--version") { println!("Alation 2024.3 (Slate OS)"); return 0; }
+    println!("Alation 2024.3 (Slate OS) — Enterprise Data Catalog");
     println!("  Vendor: Alation, Inc. (Redwood City, CA)");
     println!("  Founders: Satyen Sangani (CEO) + Aaron Kalb + Feng Niu + Venky Ganti, 2012");
     println!("          Satyen: ex-Oracle, ex-McKinsey + Stanford CS + Goldman Sachs analyst");

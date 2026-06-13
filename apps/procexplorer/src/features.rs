@@ -150,7 +150,7 @@ impl WindowPicker {
             window_id: 0x1A3F,
             pid: 203,
             process_name: "editor".to_string(),
-            window_title: "untitled.rs - SlateOS Editor".to_string(),
+            window_title: "untitled.rs - Slate OS Editor".to_string(),
         }
     }
 

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_headscale(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: headscale [COMMAND] [OPTIONS]");
-        println!("Headscale v0.23 (SlateOS) — Self-hosted Tailscale coordination server");
+        println!("Headscale v0.23 (Slate OS) — Self-hosted Tailscale coordination server");
         println!();
         println!("Commands:");
         println!("  serve              Start server");
@@ -31,8 +31,8 @@ fn run_headscale(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Headscale v0.23.0 (SlateOS)"); return 0; }
-    println!("Headscale v0.23.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Headscale v0.23.0 (Slate OS)"); return 0; }
+    println!("Headscale v0.23.0 (Slate OS)");
     println!("  Users: 5");
     println!("  Nodes: 23 (18 online)");
     println!("  Pre-auth keys: 3 active");

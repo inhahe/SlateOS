@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_psensor(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: psensor [OPTIONS]");
-        println!("psensor v1.2 (SlateOS) — Hardware temperature monitor (GUI)");
+        println!("psensor v1.2 (Slate OS) — Hardware temperature monitor (GUI)");
         println!();
         println!("Options:");
         println!("  -u URL            Connect to psensor-server");
@@ -21,7 +21,7 @@ fn run_psensor(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("psensor v1.2 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("psensor v1.2 (Slate OS)"); return 0; }
     println!("psensor: hardware temperature monitor started");
     println!("  Sensors detected: 4");
     println!("  CPU Core 0: 45.0\u{00b0}C");
@@ -34,7 +34,7 @@ fn run_psensor(args: &[String], _prog: &str) -> i32 {
 fn run_server(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: psensor-server [OPTIONS]");
-        println!("psensor-server v1.2 (SlateOS) — Remote temperature monitoring server");
+        println!("psensor-server v1.2 (Slate OS) — Remote temperature monitoring server");
         println!();
         println!("Options:");
         println!("  -p PORT           Listen port (default: 3131)");
@@ -42,7 +42,7 @@ fn run_server(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("psensor-server v1.2 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("psensor-server v1.2 (Slate OS)"); return 0; }
     println!("psensor-server: listening on port 3131");
     println!("  Serving sensor data via JSON API");
     0

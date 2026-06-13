@@ -31,7 +31,7 @@ fn run_bat(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("bat 0.24.0 (SlateOS)");
+        println!("bat 0.24.0 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "--list-themes") {

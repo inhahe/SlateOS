@@ -1079,7 +1079,7 @@ fn spawn_and_trace(command: &[String]) -> Option<u32> {
 
 fn print_usage() {
     let usage = "\
-SlateOS Syscall Trace Utility v0.1.0
+Slate OS Syscall Trace Utility v0.1.0
 
 USAGE:
   strace [options] -p <pid>

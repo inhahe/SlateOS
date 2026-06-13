@@ -43,7 +43,7 @@ fn run_just(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("just 1.25.2 (SlateOS)");
+        println!("just 1.25.2 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "--init") {

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_irsim(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: irsim [OPTIONS] PRMS_FILE SIM_FILE");
-        println!("IRSIM v9.7 (SlateOS) — Switch-level digital circuit simulator");
+        println!("IRSIM v9.7 (Slate OS) — Switch-level digital circuit simulator");
         println!();
         println!("Options:");
         println!("  -s             Run in batch mode");
@@ -25,8 +25,8 @@ fn run_irsim(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("IRSIM v9.7.103 (SlateOS)"); return 0; }
-    println!("IRSIM v9.7.103 (SlateOS) — Switch-Level Simulator");
+    if args.iter().any(|a| a == "--version") { println!("IRSIM v9.7.103 (Slate OS)"); return 0; }
+    println!("IRSIM v9.7.103 (Slate OS) — Switch-Level Simulator");
     println!("  Loading network: inverter_chain.sim");
     println!("  Nodes: 256, Transistors: 512");
     println!("  Technology: scmos 0.35um");

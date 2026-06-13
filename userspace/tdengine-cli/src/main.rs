@@ -15,7 +15,7 @@ fn run_tdengine(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "taos" => {
-                println!("taos (SlateOS) — TDengine command-line client");
+                println!("taos (Slate OS) — TDengine command-line client");
                 println!("  -h HOST            Server host");
                 println!("  -P PORT            Server port (default: 6030)");
                 println!("  -u USER            Username");
@@ -25,7 +25,7 @@ fn run_tdengine(args: &[String], prog: &str) -> i32 {
                 println!("  -f FILE            Execute SQL file");
             }
             _ => {
-                println!("taosd (SlateOS) — TDengine server daemon");
+                println!("taosd (Slate OS) — TDengine server daemon");
                 println!("  -c DIR             Config directory");
                 println!("  -C                 Print config");
                 println!("  -k                 Check config syntax");
@@ -34,7 +34,7 @@ fn run_tdengine(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version" || a == "-V") { println!("TDengine v3.3.2 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version" || a == "-V") { println!("TDengine v3.3.2 (Slate OS)"); return 0; }
     match prog {
         "taos" => {
             println!("TDengine CLI v3.3.2");
@@ -44,7 +44,7 @@ fn run_tdengine(args: &[String], prog: &str) -> i32 {
             println!("  Enter SQL or \\q to quit");
         }
         _ => {
-            println!("TDengine Server v3.3.2 (SlateOS)");
+            println!("TDengine Server v3.3.2 (Slate OS)");
             println!("  Listening: 0.0.0.0:6030");
             println!("  REST API: 0.0.0.0:6041");
             println!("  Databases: 5");

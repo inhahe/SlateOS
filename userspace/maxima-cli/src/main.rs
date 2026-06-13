@@ -11,7 +11,7 @@ fn run_maxima(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: maxima [OPTIONS]");
         println!();
-        println!("Maxima — computer algebra system (SlateOS).");
+        println!("Maxima — computer algebra system (Slate OS).");
         println!();
         println!("Options:");
         println!("  --batch FILE           Run FILE in batch mode");
@@ -24,7 +24,7 @@ fn run_maxima(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Maxima 5.47.0 (SlateOS)");
+        println!("Maxima 5.47.0 (Slate OS)");
         return 0;
     }
 
@@ -47,7 +47,7 @@ fn run_maxima(args: Vec<String>) -> i32 {
         println!("(%o3) -cos(x)");
     } else {
         if !quiet {
-            println!("Maxima 5.47.0 (SlateOS)");
+            println!("Maxima 5.47.0 (Slate OS)");
             println!("Using Lisp SBCL 2.4.0");
             println!("Distributed under the GNU Public License. See the file COPYING.");
             println!("Dedicated to the memory of William Schelter.");

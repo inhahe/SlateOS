@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_kismet(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: kismet [OPTIONS]");
-        println!("kismet v2023.07 (SlateOS) — Wireless network detector/sniffer");
+        println!("kismet v2023.07 (Slate OS) — Wireless network detector/sniffer");
         println!();
         println!("Options:");
         println!("  -c SOURCE      Capture source (e.g., wlan0)");
@@ -26,7 +26,7 @@ fn run_kismet(args: &[String], _prog: &str) -> i32 {
         println!("Web UI: http://localhost:2501");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("kismet v2023.07 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("kismet v2023.07 (Slate OS)"); return 0; }
     println!("kismet: wireless network detector");
     println!("  Web UI: http://localhost:2501");
     println!("  Sources: wlan0 (Wi-Fi)");
@@ -38,7 +38,7 @@ fn run_kismet(args: &[String], _prog: &str) -> i32 {
 fn run_kismet_cap(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: kismet_cap_linux_wifi [OPTIONS]");
-        println!("kismet_cap_linux_wifi v2023.07 (SlateOS) — Wi-Fi capture helper");
+        println!("kismet_cap_linux_wifi v2023.07 (Slate OS) — Wi-Fi capture helper");
         return 0;
     }
     let _ = args;

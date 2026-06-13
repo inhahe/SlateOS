@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ibmcloud(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ibmcloud [OPTIONS]");
-        println!("IBM Cloud (SlateOS) — hybrid cloud + Red Hat OpenShift + watsonx AI (parent NYSE:IBM)");
+        println!("IBM Cloud (Slate OS) — hybrid cloud + Red Hat OpenShift + watsonx AI (parent NYSE:IBM)");
         println!();
         println!("Options:");
         println!("  --openshift            Red Hat OpenShift on IBM Cloud (the strategic flagship)");
@@ -22,8 +22,8 @@ fn run_ibmcloud(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("IBM Cloud 2024 (SlateOS) — ibmcloud CLI 2.x"); return 0; }
-    println!("IBM Cloud 2024 (SlateOS) — Hybrid Cloud + Red Hat + watsonx AI");
+    if args.iter().any(|a| a == "--version") { println!("IBM Cloud 2024 (Slate OS) — ibmcloud CLI 2.x"); return 0; }
+    println!("IBM Cloud 2024 (Slate OS) — Hybrid Cloud + Red Hat + watsonx AI");
     println!("  Vendor: IBM Corporation (Armonk, NY — NYSE:IBM since 1924, oldest IT company)");
     println!("  Founder: Charles Ranlett Flint (CTR merger 1911) — renamed IBM 1924 by Thomas J. Watson Sr.");
     println!("          Thomas J. Watson Sr.: CEO 1914-1956 — built IBM, motto 'THINK'");

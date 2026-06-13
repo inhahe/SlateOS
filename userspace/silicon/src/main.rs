@@ -42,7 +42,7 @@ fn run_silicon(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("silicon 0.5.2 (SlateOS)");
+        println!("silicon 0.5.2 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "--list-themes") {

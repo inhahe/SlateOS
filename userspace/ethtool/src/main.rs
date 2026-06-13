@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 
 // ── Constants ──────────────────────────────────────────────────────────
 
-const VERSION: &[u8] = b"ethtool (SlateOS) 1.0.0";
+const VERSION: &[u8] = b"ethtool (Slate OS) 1.0.0";
 
 // Link speeds in Mbps
 const SPEED_UNKNOWN: u32 = 0xFFFF_FFFF;

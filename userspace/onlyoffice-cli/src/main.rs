@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_onlyoffice(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: onlyoffice-desktopeditors [OPTIONS] [FILE]");
-        println!("onlyoffice v8.0 (SlateOS) — Desktop document editors");
+        println!("onlyoffice v8.0 (Slate OS) — Desktop document editors");
         println!();
         println!("Options:");
         println!("  --new:word        New document");
@@ -22,7 +22,7 @@ fn run_onlyoffice(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("onlyoffice v8.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("onlyoffice v8.0 (Slate OS)"); return 0; }
     println!("onlyoffice: desktop editors started");
     println!("  Document editor: ready");
     println!("  Spreadsheet editor: ready");

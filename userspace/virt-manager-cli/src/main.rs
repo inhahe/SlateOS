@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_virt_manager(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: virt-manager [OPTIONS]");
-        println!("virt-manager v4.1 (SlateOS) — Virtual Machine Manager");
+        println!("virt-manager v4.1 (Slate OS) — Virtual Machine Manager");
         println!();
         println!("Options:");
         println!("  -c URI          Connect to hypervisor URI");
@@ -25,7 +25,7 @@ fn run_virt_manager(args: &[String], _prog: &str) -> i32 {
         println!("GUI for managing KVM/QEMU/libvirt virtual machines.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("virt-manager v4.1 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("virt-manager v4.1 (Slate OS)"); return 0; }
     println!("virt-manager: Virtual Machine Manager");
     println!("  Connection: qemu:///system");
     println!("  VMs: 3 defined (1 running, 2 shutoff)");

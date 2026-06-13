@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_oc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: openshift [OPTIONS] [SUBCMD]");
-        println!("Red Hat OpenShift Container Platform 4.17 / oc 4.17 (SlateOS)");
+        println!("Red Hat OpenShift Container Platform 4.17 / oc 4.17 (Slate OS)");
         println!();
         println!("Options:");
         println!("  oc login URL           Login to OCP cluster");
@@ -25,8 +25,8 @@ fn run_oc(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Client Version: 4.17.4 / Kubernetes Version: v1.30.5 / Server Version: 4.17.4 (SlateOS)"); return 0; }
-    println!("Red Hat OpenShift Container Platform 4.17 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Client Version: 4.17.4 / Kubernetes Version: v1.30.5 / Server Version: 4.17.4 (Slate OS)"); return 0; }
+    println!("Red Hat OpenShift Container Platform 4.17 (Slate OS)");
     println!("  Foundation: Kubernetes 1.30 + Red Hat opinionated additions");
     println!("  CRI-O container runtime (not Docker); RHEL CoreOS host OS");
     println!("  S2I: Source-to-Image — Git URL → built container image");

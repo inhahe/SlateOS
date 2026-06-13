@@ -14,7 +14,7 @@ fn run_avahi_browse(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: avahi-browse [OPTIONS] <service-type>");
         println!();
-        println!("avahi-browse — browse for mDNS/DNS-SD services (SlateOS).");
+        println!("avahi-browse — browse for mDNS/DNS-SD services (Slate OS).");
         println!();
         println!("Options:");
         println!("  -a, --all             Browse all services");
@@ -85,7 +85,7 @@ fn run_avahi_daemon(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("avahi-daemon 0.8 (SlateOS)");
+        println!("avahi-daemon 0.8 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "-c" || a == "--check") {

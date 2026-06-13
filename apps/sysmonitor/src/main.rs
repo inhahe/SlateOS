@@ -2676,7 +2676,7 @@ impl SysMonitorState {
     pub fn load_demo_data(&mut self) {
         self.system_info = SystemInfo {
             hostname: "slateos-desktop".to_string(),
-            os_version: "SlateOS 0.1.0".to_string(),
+            os_version: "Slate OS 0.1.0".to_string(),
             kernel_version: "0.1.0-alpha".to_string(),
             cpu_model: "x86_64 4-core @ 3.6GHz".to_string(),
             uptime_secs: 86472,

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_cubicsdr(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: CubicSDR [OPTIONS]");
-        println!("CubicSDR v0.2 (SlateOS) — Cross-platform SDR application");
+        println!("CubicSDR v0.2 (Slate OS) — Cross-platform SDR application");
         println!();
         println!("Options:");
         println!("  -d DEVICE      Device index or serial");
@@ -25,8 +25,8 @@ fn run_cubicsdr(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("CubicSDR v0.2.7 (SlateOS)"); return 0; }
-    println!("CubicSDR v0.2.7 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("CubicSDR v0.2.7 (Slate OS)"); return 0; }
+    println!("CubicSDR v0.2.7 (Slate OS)");
     println!("  Device: RTL-SDR");
     println!("  Center: 100.0 MHz");
     println!("  Bandwidth: 2.4 MHz");

@@ -11,7 +11,7 @@ fn run_journalctl(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: journalctl [OPTIONS]");
         println!();
-        println!("journalctl — query the systemd journal (SlateOS).");
+        println!("journalctl — query the systemd journal (Slate OS).");
         println!();
         println!("Options:");
         println!("  -u, --unit UNIT        Show logs for unit");
@@ -31,7 +31,7 @@ fn run_journalctl(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("systemd 255 (SlateOS)");
+        println!("systemd 255 (Slate OS)");
         return 0;
     }
 

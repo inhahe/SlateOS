@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_deadd(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: deadd-notification-center [OPTIONS]");
-        println!("deadd-notification-center v2.1 (SlateOS) — Notification center");
+        println!("deadd-notification-center v2.1 (Slate OS) — Notification center");
         println!();
         println!("Options:");
         println!("  --version      Show version");
@@ -22,7 +22,7 @@ fn run_deadd(args: &[String], _prog: &str) -> i32 {
         println!("popup notifications, and Do Not Disturb mode.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("deadd-notification-center v2.1 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("deadd-notification-center v2.1 (Slate OS)"); return 0; }
     println!("deadd-notification-center: running");
     println!("  Notifications stored: 5");
     println!("  DND: off");

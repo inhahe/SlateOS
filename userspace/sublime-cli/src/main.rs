@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_st(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sublime [OPTIONS]");
-        println!("Sublime Text 4 (build 4180) (SlateOS) — Fast cross-platform text editor");
+        println!("Sublime Text 4 (build 4180) (Slate OS) — Fast cross-platform text editor");
         println!();
         println!("Options:");
         println!("  --new                  New file");
@@ -24,8 +24,8 @@ fn run_st(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Sublime Text 4 Build 4180 (SlateOS)"); return 0; }
-    println!("Sublime Text 4 Build 4180 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Sublime Text 4 Build 4180 (Slate OS)"); return 0; }
+    println!("Sublime Text 4 Build 4180 (Slate OS)");
     println!("  Vendor: Sublime HQ Pty Ltd (Sydney, Australia)");
     println!("  Creator: Jon Skinner (ex-Google, solo dev until 2017)");
     println!("  History: 1.0 in 2008, 2.0 in 2013, 3.0 in 2017, ST4 stable Aug 2021");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_librecad(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: librecad [OPTIONS] [FILE]");
-        println!("librecad v2.2.0 (SlateOS) — 2D CAD application");
+        println!("librecad v2.2.0 (Slate OS) — 2D CAD application");
         println!();
         println!("Options:");
         println!("  --version         Show version");
@@ -22,7 +22,7 @@ fn run_librecad(args: &[String], _prog: &str) -> i32 {
         println!("Features: layers, blocks, hatching, dimensioning, snapping");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("librecad v2.2.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("librecad v2.2.0 (Slate OS)"); return 0; }
     println!("librecad: 2D CAD application started");
     println!("  Drawing tools: line, arc, circle, ellipse, polyline, spline");
     println!("  Modification: move, rotate, scale, mirror, trim, offset");

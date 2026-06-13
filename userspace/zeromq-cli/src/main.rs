@@ -31,7 +31,7 @@ fn run_zmq(args: &[String], prog_name: &str) -> i32 {
                 println!("  --type TYPE           Proxy type (forwarder, streamer, queue)");
             }
         }
-        println!("ZeroMQ CLI tools (libzmq 4.3.5, SlateOS)");
+        println!("ZeroMQ CLI tools (libzmq 4.3.5, Slate OS)");
         return 0;
     }
     match prog_name {

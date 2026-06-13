@@ -1964,7 +1964,7 @@ fn run_pacmd(args: &[String]) -> i32 {
 
     if args.is_empty() {
         println!("Welcome to PulseAudio {VERSION}! Use \"help\" for usage information.");
-        println!(">>> (interactive mode not supported in SlateOS simulation)");
+        println!(">>> (interactive mode not supported in Slate OS simulation)");
         return 0;
     }
 

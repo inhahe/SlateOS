@@ -27,7 +27,7 @@ fn run_sway(args: &[String], prog: &str) -> i32 {
     }
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: swaymsg [OPTIONS] MESSAGE");
-        println!("swaymsg (sway 1.9) (SlateOS)");
+        println!("swaymsg (sway 1.9) (Slate OS)");
         println!();
         println!("Options:");
         println!("  -t TYPE      Message type (same as i3-msg plus get_inputs,");

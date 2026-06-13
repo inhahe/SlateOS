@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rm(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: rpgmaker [OPTIONS]");
-        println!("RPG Maker MZ (SlateOS) — Kadokawa's classic JRPG-style maker (current 'MZ' version)");
+        println!("RPG Maker MZ (Slate OS) — Kadokawa's classic JRPG-style maker (current 'MZ' version)");
         println!();
         println!("Options:");
         println!("  --new                  New project");
@@ -24,8 +24,8 @@ fn run_rm(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("RPG Maker MZ 1.7.0 (SlateOS)"); return 0; }
-    println!("RPG Maker MZ 1.7.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("RPG Maker MZ 1.7.0 (Slate OS)"); return 0; }
+    println!("RPG Maker MZ 1.7.0 (Slate OS)");
     println!("  Vendor: Gotcha Gotcha Games (Tokyo, Japan) — part of Kadokawa Corporation");
     println!("         Originally by ASCII (1992), then Enterbrain, then Kadokawa Future Publishing");
     println!("  Series history: RPG Maker (Super Famicom 1995) → 95 → 2000 → 2003 → XP →");

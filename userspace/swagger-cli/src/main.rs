@@ -11,7 +11,7 @@ fn run_swagger(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: swagger <COMMAND> [OPTIONS]");
         println!();
-        println!("OpenAPI/Swagger specification CLI (SlateOS).");
+        println!("OpenAPI/Swagger specification CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  validate     Validate an OpenAPI spec");

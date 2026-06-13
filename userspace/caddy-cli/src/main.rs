@@ -14,7 +14,7 @@ fn run_caddy(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: caddy <command> [<args...>]");
         println!();
-        println!("caddy — fast, multi-platform web server with auto HTTPS (SlateOS).");
+        println!("caddy — fast, multi-platform web server with auto HTTPS (Slate OS).");
         println!();
         println!("Commands:");
         println!("  adapt           Adapt config to JSON");
@@ -37,7 +37,7 @@ fn run_caddy(args: &[String]) -> i32 {
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match subcmd {
         "version" => {
-            println!("v2.7.6 h1:SlateOS (SlateOS)");
+            println!("v2.7.6 h1:SlateOS (Slate OS)");
         }
         "build-info" => {
             println!("path: github.com/caddyserver/caddy/v2");

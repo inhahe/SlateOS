@@ -11,7 +11,7 @@ fn run_pass(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pass <COMMAND> [OPTIONS]");
         println!();
-        println!("pass — the standard Unix password manager (SlateOS).");
+        println!("pass — the standard Unix password manager (Slate OS).");
         println!();
         println!("Commands:");
         println!("  init         Initialize password store");
@@ -29,7 +29,7 @@ fn run_pass(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("pass 1.7.4 (SlateOS)");
+        println!("pass 1.7.4 (Slate OS)");
         return 0;
     }
 

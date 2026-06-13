@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_nwg_panel(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: nwg-panel [OPTIONS]");
-        println!("nwg-panel v0.9 (SlateOS) — GTK3 panel for sway/Wayland compositors");
+        println!("nwg-panel v0.9 (Slate OS) — GTK3 panel for sway/Wayland compositors");
         println!();
         println!("Options:");
         println!("  -c FILE           Configuration file (JSON)");
@@ -21,7 +21,7 @@ fn run_nwg_panel(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("nwg-panel v0.9 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("nwg-panel v0.9 (Slate OS)"); return 0; }
     println!("nwg-panel: GTK3 panel running");
     println!("  Config: ~/.config/nwg-panel/config");
     println!("  Modules: clock, tray, workspaces, playerctl, brightness");

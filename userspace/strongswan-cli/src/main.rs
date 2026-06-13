@@ -15,7 +15,7 @@ fn run_strongswan(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "swanctl" => {
-                println!("swanctl (SlateOS) — strongSwan configuration interface");
+                println!("swanctl (Slate OS) — strongSwan configuration interface");
                 println!("  --load-all         Load all configs");
                 println!("  --list-sas         List active SAs");
                 println!("  --list-conns       List connections");
@@ -25,12 +25,12 @@ fn run_strongswan(args: &[String], prog: &str) -> i32 {
                 println!("  --log              Follow log output");
             }
             "charon" => {
-                println!("charon (SlateOS) — strongSwan IKE daemon");
+                println!("charon (Slate OS) — strongSwan IKE daemon");
                 println!("  --debug-ike LEVEL  IKE debug level (0-4)");
                 println!("  --debug-net LEVEL  Network debug level");
             }
             _ => {
-                println!("ipsec (SlateOS) — strongSwan IPsec control");
+                println!("ipsec (Slate OS) — strongSwan IPsec control");
                 println!("  start              Start strongSwan");
                 println!("  stop               Stop strongSwan");
                 println!("  restart            Restart strongSwan");
@@ -44,7 +44,7 @@ fn run_strongswan(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("strongSwan v5.9.14 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("strongSwan v5.9.14 (Slate OS)"); return 0; }
     match prog {
         "swanctl" => {
             println!("strongSwan connections:");
@@ -54,7 +54,7 @@ fn run_strongswan(args: &[String], prog: &str) -> i32 {
             println!("    child: site-a-tunnel, ESP, AES256-GCM");
         }
         _ => {
-            println!("strongSwan v5.9.14 (SlateOS)");
+            println!("strongSwan v5.9.14 (Slate OS)");
             println!("  Status: running (charon PID 1234)");
             println!("  IKE SAs: 3 established");
             println!("  Child SAs: 5 installed");

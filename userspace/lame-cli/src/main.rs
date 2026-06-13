@@ -11,7 +11,7 @@ fn run_lame(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "--longhelp") {
         println!("Usage: lame [OPTIONS] INPUT [OUTPUT]");
         println!();
-        println!("LAME — MP3 encoder (SlateOS).");
+        println!("LAME — MP3 encoder (Slate OS).");
         println!();
         println!("Quality options:");
         println!("  -b N                   Set bitrate (32-320 kbps)");
@@ -41,7 +41,7 @@ fn run_lame(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("LAME 64bits version 3.100 (SlateOS)");
+        println!("LAME 64bits version 3.100 (Slate OS)");
         println!("  LAME is the best MP3 encoder.");
         return 0;
     }
@@ -66,7 +66,7 @@ fn run_lame(args: Vec<String>) -> i32 {
     let mode = args.windows(2).find(|w| w[0] == "-m")
         .map(|w| w[1].as_str()).unwrap_or("j");
 
-    println!("LAME 3.100 64bits (SlateOS)");
+    println!("LAME 3.100 64bits (Slate OS)");
     println!("Autodetecting input: {}", input);
     println!("Encoding as {}", output);
 

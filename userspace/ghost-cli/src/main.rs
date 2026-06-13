@@ -187,7 +187,7 @@ fn cmd_foundation() {
     println!("  - 11+ years profitable, no layoffs");
     println!();
     println!("This is the OS-foundation model (Mozilla, Apache, Linux) applied");
-    println!("to publishing software. It is the model SlateOS most aligns with.");
+    println!("to publishing software. It is the model Slate OS most aligns with.");
 }
 
 fn cmd_customers() {

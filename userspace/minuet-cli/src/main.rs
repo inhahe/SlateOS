@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_minuet(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: minuet [OPTIONS]");
-        println!("minuet v23.08 (SlateOS) — Music education software");
+        println!("minuet v23.08 (Slate OS) — Music education software");
         println!();
         println!("Options:");
         println!("  --version         Show version");
@@ -25,7 +25,7 @@ fn run_minuet(args: &[String], _prog: &str) -> i32 {
         println!("  Rhythms          Rhythm dictation");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("minuet v23.08 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("minuet v23.08 (Slate OS)"); return 0; }
     println!("minuet: music education started");
     println!("  MIDI backend: FluidSynth");
     println!("  Exercises: intervals, chords, scales, rhythms");

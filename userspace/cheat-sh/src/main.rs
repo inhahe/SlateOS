@@ -24,7 +24,7 @@ fn run_cht(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("cht 1.0.0 (SlateOS)");
+        println!("cht 1.0.0 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "-l" || a == "--list") {

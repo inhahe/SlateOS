@@ -11,7 +11,7 @@ fn run_xsel(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: xsel [OPTIONS]");
         println!();
-        println!("xsel — X11 selection manipulation (SlateOS).");
+        println!("xsel — X11 selection manipulation (Slate OS).");
         println!();
         println!("Options:");
         println!("  -i, --input          Read stdin into selection");
@@ -30,7 +30,7 @@ fn run_xsel(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("xsel version 1.2.1 (SlateOS)");
+        println!("xsel version 1.2.1 (Slate OS)");
         return 0;
     }
 

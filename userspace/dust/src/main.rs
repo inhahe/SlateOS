@@ -43,7 +43,7 @@ fn run_dust(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("dust 1.1.1 (SlateOS)");
+        println!("dust 1.1.1 (Slate OS)");
         return 0;
     }
 

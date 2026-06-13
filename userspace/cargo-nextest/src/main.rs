@@ -37,7 +37,7 @@ fn run_cargo_nextest(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("cargo-nextest 0.9.72 (SlateOS)");
+            println!("cargo-nextest 0.9.72 (Slate OS)");
             0
         }
         "run" => {

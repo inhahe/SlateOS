@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_matlab(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: matlab [OPTIONS]");
-        println!("MathWorks MATLAB R2024b (SlateOS) — Numerical computing environment");
+        println!("MathWorks MATLAB R2024b (Slate OS) — Numerical computing environment");
         println!();
         println!("Options:");
         println!("  -nodisplay -nojvm      Headless (no display, no Java)");
@@ -24,8 +24,8 @@ fn run_matlab(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("MathWorks MATLAB 9.17.0.2403282 (R2024b) (SlateOS)"); return 0; }
-    println!("MathWorks MATLAB R2024b (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("MathWorks MATLAB 9.17.0.2403282 (R2024b) (Slate OS)"); return 0; }
+    println!("MathWorks MATLAB R2024b (Slate OS)");
     println!("  Language: high-level array-oriented (.m files)");
     println!("  Toolboxes: Signal Processing, Image Processing, Control Systems,");
     println!("             Communications, Deep Learning, Optimization, Statistics,");

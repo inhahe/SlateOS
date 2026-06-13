@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rustdesk(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: rustdesk [OPTIONS]");
-        println!("rustdesk v1.2 (SlateOS) — Open-source remote desktop");
+        println!("rustdesk v1.2 (Slate OS) — Open-source remote desktop");
         println!();
         println!("Options:");
         println!("  --id              Show your ID");
@@ -25,7 +25,7 @@ fn run_rustdesk(args: &[String], _prog: &str) -> i32 {
         println!("End-to-end encryption, no account required.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("rustdesk v1.2 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("rustdesk v1.2 (Slate OS)"); return 0; }
     if args.iter().any(|a| a == "--id") {
         println!("Your ID: 847293651");
         return 0;

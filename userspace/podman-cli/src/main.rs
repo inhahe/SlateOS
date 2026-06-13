@@ -33,7 +33,7 @@ fn run_podman(args: Vec<String>) -> i32 {
     match cmd {
         "version" => {
             println!("Client:       Podman Engine");
-            println!("Version:      5.0.0 (SlateOS)");
+            println!("Version:      5.0.0 (Slate OS)");
             println!("API Version:  5.0.0");
             println!("Go Version:   go1.21.6");
             println!("Built:        Thu Jan 15 2024");
@@ -88,7 +88,7 @@ fn run_podman(args: Vec<String>) -> i32 {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("info");
             if sub == "info" {
                 println!("host:");
-                println!("  os: SlateOS");
+                println!("  os: Slate OS");
                 println!("  arch: amd64");
                 println!("  cpus: 4");
                 println!("  memTotal: 8589934592");

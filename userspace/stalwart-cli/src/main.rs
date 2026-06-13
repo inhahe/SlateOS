@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_stalwart(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: stalwart-mail [COMMAND] [OPTIONS]");
-        println!("Stalwart Mail v0.8 (SlateOS) — All-in-one mail server");
+        println!("Stalwart Mail v0.8 (Slate OS) — All-in-one mail server");
         println!();
         println!("Commands:");
         println!("  serve              Start mail server");
@@ -29,8 +29,8 @@ fn run_stalwart(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Stalwart Mail v0.8.5 (SlateOS)"); return 0; }
-    println!("Stalwart Mail v0.8.5 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Stalwart Mail v0.8.5 (Slate OS)"); return 0; }
+    println!("Stalwart Mail v0.8.5 (Slate OS)");
     println!("  SMTP: 0.0.0.0:25, 0.0.0.0:587");
     println!("  IMAP4: 0.0.0.0:143, 0.0.0.0:993");
     println!("  JMAP: 0.0.0.0:8080");

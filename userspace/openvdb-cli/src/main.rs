@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_vdb_print(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: vdb_print [OPTIONS] FILE.vdb");
-        println!("vdb_print v11.0 (SlateOS) — Print OpenVDB file metadata");
+        println!("vdb_print v11.0 (Slate OS) — Print OpenVDB file metadata");
         println!();
         println!("Options:");
         println!("  FILE.vdb          Input VDB file");
@@ -24,7 +24,7 @@ fn run_vdb_print(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("OpenVDB v11.0 (SlateOS)");
+        println!("OpenVDB v11.0 (Slate OS)");
         return 0;
     }
     let file = args.iter()
@@ -42,7 +42,7 @@ fn run_vdb_print(args: &[String], _prog: &str) -> i32 {
 fn run_vdb_render(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: vdb_render [OPTIONS] FILE.vdb OUTPUT.exr");
-        println!("vdb_render v11.0 (SlateOS) — Render OpenVDB volumes");
+        println!("vdb_render v11.0 (Slate OS) — Render OpenVDB volumes");
         println!();
         println!("Options:");
         println!("  -res WxH          Resolution (default: 1920x1080)");
@@ -52,7 +52,7 @@ fn run_vdb_render(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("vdb_render v11.0 (SlateOS)");
+        println!("vdb_render v11.0 (Slate OS)");
         return 0;
     }
     let file = args.iter()

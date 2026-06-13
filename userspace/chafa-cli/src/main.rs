@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_chafa(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: chafa [OPTIONS] [FILE...]");
-        println!("chafa 1.14.1 (SlateOS) — Terminal graphics");
+        println!("chafa 1.14.1 (Slate OS) — Terminal graphics");
         println!();
         println!("Options:");
         println!("  -c, --colors MODE        Color mode (none, 2, 16, 256, full)");
@@ -35,7 +35,7 @@ fn run_chafa(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("chafa 1.14.1 (SlateOS)");
+        println!("chafa 1.14.1 (Slate OS)");
         return 0;
     }
     let file = args.iter().rfind(|a| !a.starts_with('-'))

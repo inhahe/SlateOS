@@ -20,14 +20,14 @@ fn run_mattermost_server(args: Vec<String>) -> i32 {
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("server");
     if cmd == "version" || args.iter().any(|a| a == "--version") {
-        println!("Mattermost v9.8.0 (SlateOS)");
+        println!("Mattermost v9.8.0 (Slate OS)");
         println!("Build Number: 12345");
         println!("Build Date: 2025-05-22");
         println!("Build Hash: abc1234");
         return 0;
     }
     println!("{{\"level\":\"info\",\"ts\":1716368400.000,\"caller\":\"app/server.go:100\",\"msg\":\"Starting Mattermost Server...\"}}");
-    println!("{{\"level\":\"info\",\"ts\":1716368400.100,\"msg\":\"Server version: 9.8.0 (SlateOS)\"}}");
+    println!("{{\"level\":\"info\",\"ts\":1716368400.100,\"msg\":\"Server version: 9.8.0 (Slate OS)\"}}");
     println!("{{\"level\":\"info\",\"ts\":1716368400.200,\"msg\":\"Database: postgres\"}}");
     println!("{{\"level\":\"info\",\"ts\":1716368400.500,\"msg\":\"Loaded config from database\"}}");
     println!("{{\"level\":\"info\",\"ts\":1716368401.000,\"msg\":\"Starting workers\"}}");
@@ -58,7 +58,7 @@ fn run_mmctl(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "version" => {
-            println!("mmctl v9.8.0 (SlateOS)");
+            println!("mmctl v9.8.0 (Slate OS)");
             0
         }
         "user" => {

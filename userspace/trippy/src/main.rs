@@ -47,7 +47,7 @@ fn run_trip(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("trippy 0.11.0 (SlateOS)");
+        println!("trippy 0.11.0 (Slate OS)");
         return 0;
     }
 
@@ -96,7 +96,7 @@ fn run_trip(args: Vec<String>) -> i32 {
         }
         _ => {
             // TUI mode
-            println!("trippy 0.11.0 (SlateOS) — TUI launched");
+            println!("trippy 0.11.0 (Slate OS) — TUI launched");
             println!("Tracing route to {} ...", target);
             println!();
             println!("  Hop  Host              Loss%  Sent  Recv  Last   Avg   Best  Worst  StdDev");

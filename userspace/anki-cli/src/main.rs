@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_anki(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: anki [OPTIONS] [PROFILE]");
-        println!("anki v24.04 (SlateOS) — Spaced-repetition flashcard application");
+        println!("anki v24.04 (Slate OS) — Spaced-repetition flashcard application");
         println!();
         println!("Options:");
         println!("  --base DIR        Data directory");
@@ -22,7 +22,7 @@ fn run_anki(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("anki v24.04 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("anki v24.04 (Slate OS)"); return 0; }
     println!("anki: flashcard application started");
     println!("  Decks: 5 active");
     println!("  Due today: 42 cards");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_godot(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: godot [OPTIONS] [SCENE]");
-        println!("Godot Engine 4.3.0 (SlateOS)");
+        println!("Godot Engine 4.3.0 (Slate OS)");
         println!();
         println!("Options:");
         println!("  --headless          Run without display");
@@ -30,7 +30,7 @@ fn run_godot(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Godot Engine v4.3.stable.official (SlateOS)");
+        println!("Godot Engine v4.3.stable.official (Slate OS)");
         return 0;
     }
     let headless = args.iter().any(|a| a == "--headless");

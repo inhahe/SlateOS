@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_au(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: auphonic [COMMAND] [OPTIONS]");
-        println!("Auphonic (SlateOS) — Automated audio post-production for podcasts");
+        println!("Auphonic (Slate OS) — Automated audio post-production for podcasts");
         println!();
         println!("Commands:");
         println!("  upload FILE            Upload file for processing");
@@ -29,8 +29,8 @@ fn run_au(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Auphonic v2024.05 (SlateOS)"); return 0; }
-    println!("Auphonic (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Auphonic v2024.05 (Slate OS)"); return 0; }
+    println!("Auphonic (Slate OS)");
     println!("  Mode: Web service / desktop client / API");
     println!("  Processing: Intelligent leveler, noise/hum reduction, loudness norm");
     println!("  Multi-track: Per-track processing with crosstalk removal");

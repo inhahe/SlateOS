@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_fenics(args: &[String], prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: {} [OPTIONS] [SCRIPT]", prog);
-        println!("FEniCS/DOLFINx v0.8 (SlateOS) — Finite element framework");
+        println!("FEniCS/DOLFINx v0.8 (Slate OS) — Finite element framework");
         println!();
         println!("Options:");
         println!("  -np N           Number of MPI processes");
@@ -23,13 +23,13 @@ fn run_fenics(args: &[String], prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("FEniCS/DOLFINx v0.8.0 (SlateOS)");
+        println!("FEniCS/DOLFINx v0.8.0 (Slate OS)");
         println!("  PETSc: 3.20, SLEPc: 3.20");
         return 0;
     }
     match prog {
         "ffc" => {
-            println!("FFC: FEniCS Form Compiler v0.8 (SlateOS)");
+            println!("FFC: FEniCS Form Compiler v0.8 (Slate OS)");
             println!("  Compiling variational forms...");
             println!("  Generated C++ code for 2 forms");
             println!("  Output: poisson.h");
@@ -42,7 +42,7 @@ fn run_fenics(args: &[String], prog: &str) -> i32 {
             println!("  Done");
         }
         _ => {
-            println!("DOLFINx v0.8 (SlateOS) — Running FEM solver");
+            println!("DOLFINx v0.8 (Slate OS) — Running FEM solver");
             println!("  Mesh: 20,000 cells");
             println!("  Function space: CG1 (3,456 DOFs)");
             println!("  Assembling system...");

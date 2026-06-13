@@ -17,7 +17,7 @@ fn strip_ext(name: &str) -> &str {
 
 fn run_lvm(prog: &str, args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("{} — LVM2 tool (SlateOS). See man {}.", prog, prog);
+        println!("{} — LVM2 tool (Slate OS). See man {}.", prog, prog);
         return 0;
     }
 

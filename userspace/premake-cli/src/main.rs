@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_premake(args: &[String], version: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: premake{} [OPTIONS] ACTION", version);
-        println!("Premake {} (SlateOS)", if version == "5" { "5.0.0-beta2" } else { "4.4" });
+        println!("Premake {} (Slate OS)", if version == "5" { "5.0.0-beta2" } else { "4.4" });
         println!();
         println!("Actions:");
         println!("  gmake          GNU Makefiles");

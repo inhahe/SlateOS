@@ -11,7 +11,7 @@ fn run_xclip(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: xclip [OPTIONS] [FILE ...]");
         println!();
-        println!("xclip — X11 clipboard interface (SlateOS).");
+        println!("xclip — X11 clipboard interface (Slate OS).");
         println!();
         println!("Options:");
         println!("  -i, --in              Read into selection (default)");
@@ -28,7 +28,7 @@ fn run_xclip(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-version") {
-        println!("xclip version 0.13 (SlateOS)");
+        println!("xclip version 0.13 (Slate OS)");
         return 0;
     }
 

@@ -703,7 +703,7 @@ fn process_input(
 // ============================================================================
 
 fn print_help() {
-    println!("SlateOS cut v{VERSION}");
+    println!("Slate OS cut v{VERSION}");
     println!();
     println!("Remove sections from each line of files.");
     println!();
@@ -745,7 +745,7 @@ fn main() {
             process::exit(0);
         }
         ParseResult::Version => {
-            println!("cut (SlateOS) {VERSION}");
+            println!("cut (Slate OS) {VERSION}");
             process::exit(0);
         }
         ParseResult::Run(config) => {

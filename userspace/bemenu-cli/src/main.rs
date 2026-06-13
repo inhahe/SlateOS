@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_bemenu(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: bemenu [OPTIONS]");
-        println!("bemenu v0.6 (SlateOS) — Dynamic menu (dmenu clone for Wayland)");
+        println!("bemenu v0.6 (Slate OS) — Dynamic menu (dmenu clone for Wayland)");
         println!();
         println!("Options:");
         println!("  -l LINES          Number of lines to show");
@@ -38,7 +38,7 @@ fn run_bemenu(args: &[String], _prog: &str) -> i32 {
 fn run_bemenu_run(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: bemenu-run [OPTIONS]");
-        println!("bemenu-run v0.6 (SlateOS) — Application launcher (lists PATH commands)");
+        println!("bemenu-run v0.6 (Slate OS) — Application launcher (lists PATH commands)");
         println!();
         println!("  Same options as bemenu, plus:");
         println!("  --no-exec         Print selection, don't execute");

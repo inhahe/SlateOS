@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wings3d(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wings3d [OPTIONS] [FILE.wings]");
-        println!("wings3d v2.3 (SlateOS) — Subdivision surface modeler");
+        println!("wings3d v2.3 (Slate OS) — Subdivision surface modeler");
         println!();
         println!("Options:");
         println!("  --version         Show version");
@@ -24,7 +24,7 @@ fn run_wings3d(args: &[String], _prog: &str) -> i32 {
         println!("  Import/Export: OBJ, STL, 3DS, Collada, glTF");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("wings3d v2.3 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("wings3d v2.3 (Slate OS)"); return 0; }
     println!("wings3d: subdivision modeler started");
     println!("  Modes: vertex, edge, face, body");
     println!("  Tools: extrude, bevel, bridge, connect, smooth");

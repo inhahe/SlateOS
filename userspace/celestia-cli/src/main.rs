@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_celestia(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: celestia [OPTIONS] [SCRIPT.cel]");
-        println!("celestia v1.7 (SlateOS) — Real-time 3D space simulator");
+        println!("celestia v1.7 (Slate OS) — Real-time 3D space simulator");
         println!();
         println!("Options:");
         println!("  --fullscreen      Start fullscreen");
@@ -24,7 +24,7 @@ fn run_celestia(args: &[String], _prog: &str) -> i32 {
         println!("100,000+ stars, galaxies, nebulae, spacecraft.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("celestia v1.7 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("celestia v1.7 (Slate OS)"); return 0; }
     println!("celestia: space simulator started");
     println!("  Stars: Hipparcos + Tycho-2 catalog");
     println!("  Galaxies: 10,000+ rendered");

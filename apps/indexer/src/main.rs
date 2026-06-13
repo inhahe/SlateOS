@@ -159,7 +159,7 @@ impl Config {
     /// Serialize configuration to the config file format.
     fn serialize(&self) -> String {
         let mut out = String::new();
-        out.push_str("# SlateOS File Indexer Configuration\n\n");
+        out.push_str("# Slate OS File Indexer Configuration\n\n");
         out.push_str(&format!("enabled = {}\n", self.enabled));
         out.push_str(&format!("index_paths = {}\n", self.index_paths.join(", ")));
         out.push_str(&format!("exclude_paths = {}\n", self.exclude_paths.join(", ")));

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_screwdriver(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: screwdriver [COMMAND] [OPTIONS]");
-        println!("Screwdriver v2024 (SlateOS) — Continuous delivery build system");
+        println!("Screwdriver v2024 (Slate OS) — Continuous delivery build system");
         println!();
         println!("Commands:");
         println!("  pipeline list|get|create  Manage pipelines");
@@ -28,8 +28,8 @@ fn run_screwdriver(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Screwdriver CLI v2024.1 (SlateOS)"); return 0; }
-    println!("Screwdriver v2024.1 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Screwdriver CLI v2024.1 (Slate OS)"); return 0; }
+    println!("Screwdriver v2024.1 (Slate OS)");
     println!("  API: https://screwdriver.example.com");
     println!("  Pipelines: 34");
     println!("  Jobs: 156");

@@ -20,7 +20,7 @@ fn run_xrdp(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("xrdp 0.9.25 (SlateOS)");
+        println!("xrdp 0.9.25 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "-k" || a == "--kill") {
@@ -32,7 +32,7 @@ fn run_xrdp(args: Vec<String>) -> i32 {
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("3389");
-    println!("xrdp 0.9.25 (SlateOS)");
+    println!("xrdp 0.9.25 (Slate OS)");
     println!("Listening on 0.0.0.0:{}", port);
     0
 }

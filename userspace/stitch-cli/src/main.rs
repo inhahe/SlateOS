@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_stitch(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: stitch [COMMAND] [OPTIONS]");
-        println!("Stitch v4.0 (SlateOS) — Simple data pipeline / ELT");
+        println!("Stitch v4.0 (Slate OS) — Simple data pipeline / ELT");
         println!();
         println!("Commands:");
         println!("  source list|create|check     Manage sources");
@@ -30,8 +30,8 @@ fn run_stitch(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Stitch v4.0.0 (SlateOS)"); return 0; }
-    println!("Stitch v4.0.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Stitch v4.0.0 (Slate OS)"); return 0; }
+    println!("Stitch v4.0.0 (Slate OS)");
     println!("  Sources: 12 connected");
     println!("  Destinations: 2 (Snowflake, BigQuery)");
     println!("  Replications: 12 active");

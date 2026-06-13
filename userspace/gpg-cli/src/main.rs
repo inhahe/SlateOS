@@ -11,7 +11,7 @@ fn run_gpg(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gpg [OPTIONS] [FILE]");
         println!();
-        println!("GnuPG — OpenPGP encryption and signing (SlateOS).");
+        println!("GnuPG — OpenPGP encryption and signing (Slate OS).");
         println!();
         println!("Commands:");
         println!("  --gen-key           Generate a new key pair");
@@ -31,7 +31,7 @@ fn run_gpg(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("gpg (GnuPG) 2.4.4 (SlateOS)");
+        println!("gpg (GnuPG) 2.4.4 (Slate OS)");
         println!("libgcrypt 1.10.3");
         return 0;
     }

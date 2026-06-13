@@ -11,7 +11,7 @@ fn run_openvpn(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: openvpn [OPTIONS]");
         println!();
-        println!("OpenVPN — SSL/TLS VPN (SlateOS).");
+        println!("OpenVPN — SSL/TLS VPN (Slate OS).");
         println!();
         println!("Options:");
         println!("  --config FILE          Configuration file");
@@ -35,7 +35,7 @@ fn run_openvpn(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("OpenVPN 2.6.8 x86_64 (SlateOS)");
+        println!("OpenVPN 2.6.8 x86_64 (Slate OS)");
         println!("library versions: OpenSSL 3.2.0, LZO 2.10");
         return 0;
     }
@@ -58,7 +58,7 @@ fn run_openvpn(args: Vec<String>) -> i32 {
         .map(|w| w[1].as_str());
 
     let config_name = config.unwrap_or("client.ovpn");
-    println!("OpenVPN 2.6.8 (SlateOS)");
+    println!("OpenVPN 2.6.8 (Slate OS)");
     println!("  Config: {}", config_name);
 
     if server_mode {

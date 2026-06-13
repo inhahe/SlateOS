@@ -13,14 +13,14 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_logseq(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: logseq [OPTIONS] [GRAPH_DIR]");
-        println!("logseq v0.10 (SlateOS) — Outliner knowledge base");
+        println!("logseq v0.10 (Slate OS) — Outliner knowledge base");
         println!();
         println!("Options:");
         println!("  --graph DIR       Open specific graph");
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("logseq v0.10 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("logseq v0.10 (Slate OS)"); return 0; }
     println!("logseq: outliner knowledge base started");
     println!("  Graph: ~/Documents/logseq");
     println!("  Pages: 185");

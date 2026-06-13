@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_kmousetool(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: kmousetool [OPTIONS]");
-        println!("kmousetool v5.0 (SlateOS) — Automatic mouse click for accessibility");
+        println!("kmousetool v5.0 (Slate OS) — Automatic mouse click for accessibility");
         println!();
         println!("Options:");
         println!("  --dwell-time N     Dwell time in ms (default: 500)");
@@ -26,9 +26,9 @@ fn run_kmousetool(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("kmousetool v5.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("kmousetool v5.0 (Slate OS)"); return 0; }
     let dwell = args.windows(2).find(|w| w[0] == "--dwell-time").and_then(|w| w[1].parse::<u32>().ok()).unwrap_or(500);
-    println!("KMouseTool v5.0 (SlateOS) — Automatic Mouse Click");
+    println!("KMouseTool v5.0 (Slate OS) — Automatic Mouse Click");
     println!("  Dwell time: {}ms", dwell);
     println!("  Drag time: 300ms");
     println!("  Smart drag: enabled");

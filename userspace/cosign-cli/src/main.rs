@@ -31,7 +31,7 @@ fn run_cosign(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
         "version" => {
-            println!("cosign 2.2.3 (SlateOS)");
+            println!("cosign 2.2.3 (Slate OS)");
             0
         }
         "generate-key-pair" => {

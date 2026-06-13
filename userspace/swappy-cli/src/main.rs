@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_swappy(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: swappy -f FILE [OPTIONS]");
-        println!("swappy v1.5 (SlateOS) — Wayland screenshot editor");
+        println!("swappy v1.5 (Slate OS) — Wayland screenshot editor");
         println!();
         println!("Options:");
         println!("  -f FILE           Input image file");
@@ -23,7 +23,7 @@ fn run_swappy(args: &[String], _prog: &str) -> i32 {
         println!("Usage: grim -g \"$(slurp)\" - | swappy -f -");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("swappy v1.5 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("swappy v1.5 (Slate OS)"); return 0; }
     let file = args.iter().skip_while(|a| a.as_str() != "-f").nth(1).map(|s| s.as_str()).unwrap_or("-");
     println!("Opening editor: {}", file);
     println!("  Tools: pen, rectangle, arrow, text, blur");

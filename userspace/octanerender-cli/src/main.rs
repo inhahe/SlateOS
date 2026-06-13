@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_octane(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: octane [OPTIONS]");
-        println!("OTOY Octane Render 2024 (SlateOS) — GPU-only spectral path tracer");
+        println!("OTOY Octane Render 2024 (Slate OS) — GPU-only spectral path tracer");
         println!();
         println!("Options:");
         println!("  --render SCENE         Render an .orbx scene file");
@@ -24,8 +24,8 @@ fn run_octane(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Octane Render 2024.1.1 (SlateOS)"); return 0; }
-    println!("Octane Render 2024.1.1 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Octane Render 2024.1.1 (Slate OS)"); return 0; }
+    println!("Octane Render 2024.1.1 (Slate OS)");
     println!("  Vendor: OTOY Inc. (HQ Los Angeles, CA — founded 2008)");
     println!("  Founder/CEO: Jules Urbach");
     println!("  Pricing: Octane Studio+ $19.99/mo (one host) or $479.88/yr — extremely fair");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_kd(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: kdenlive [OPTIONS] [PROJECT]");
-        println!("Kdenlive 24.05 (SlateOS) — KDE-based open-source NLE");
+        println!("Kdenlive 24.05 (Slate OS) — KDE-based open-source NLE");
         println!();
         println!("Options:");
         println!("  -i FILE                Open project file");
@@ -22,8 +22,8 @@ fn run_kd(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Kdenlive 24.05.2 (SlateOS)"); return 0; }
-    println!("Kdenlive 24.05.2 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Kdenlive 24.05.2 (Slate OS)"); return 0; }
+    println!("Kdenlive 24.05.2 (Slate OS)");
     println!("  Engine: MLT framework + Qt/KF5");
     println!("  Tracks: Unlimited video & audio with grouping");
     println!("  Features: Proxy editing, Motion Tracker, AI Subtitle, Speech-to-text");

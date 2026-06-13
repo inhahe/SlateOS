@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_lemur(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lemur [COMMAND] [OPTIONS]");
-        println!("Lemur v1.0 (SlateOS) — TLS certificate management");
+        println!("Lemur v1.0 (Slate OS) — TLS certificate management");
         println!();
         println!("Commands:");
         println!("  start              Start Lemur server");
@@ -29,8 +29,8 @@ fn run_lemur(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Lemur v1.0.0 (SlateOS)"); return 0; }
-    println!("Lemur v1.0.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Lemur v1.0.0 (Slate OS)"); return 0; }
+    println!("Lemur v1.0.0 (Slate OS)");
     println!("  Web: http://0.0.0.0:8000");
     println!("  Certificates: 1,234 managed");
     println!("  Authorities: 3 (DigiCert, Let's Encrypt, Internal)");

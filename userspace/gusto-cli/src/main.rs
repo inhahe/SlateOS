@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gusto(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gusto [OPTIONS]");
-        println!("Gusto (SlateOS) — Self-serve payroll + benefits + HR for SMBs");
+        println!("Gusto (Slate OS) — Self-serve payroll + benefits + HR for SMBs");
         println!();
         println!("Options:");
         println!("  --run-payroll          Run payroll");
@@ -24,8 +24,8 @@ fn run_gusto(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Gusto 2024 (SlateOS)"); return 0; }
-    println!("Gusto 2024 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Gusto 2024 (Slate OS)"); return 0; }
+    println!("Gusto 2024 (Slate OS)");
     println!("  Vendor: ZenPayroll Inc. dba Gusto (San Francisco, founded 2011)");
     println!("  Founders: Joshua Reeves + Edward Kim + Tomer London (Y Combinator W12)");
     println!("  Rebrand: ZenPayroll → Gusto in 2015 (broader HR + benefits, not just payroll)");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_hexchat(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: hexchat [OPTIONS] [URL]");
-        println!("hexchat v2.16 (SlateOS) — IRC client");
+        println!("hexchat v2.16 (Slate OS) — IRC client");
         println!();
         println!("Options:");
         println!("  --existing        Open URL in running instance");
@@ -24,7 +24,7 @@ fn run_hexchat(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("hexchat v2.16 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("hexchat v2.16 (Slate OS)"); return 0; }
     println!("hexchat: IRC client started");
     println!("  Networks: Libera.Chat, OFTC");
     println!("  Plugins: 3 loaded");

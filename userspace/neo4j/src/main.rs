@@ -24,7 +24,7 @@ fn run_neo4j(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "version" => {
-            println!("neo4j 5.19.0 (SlateOS)");
+            println!("neo4j 5.19.0 (Slate OS)");
             0
         }
         "console" | "start" => {
@@ -82,7 +82,7 @@ fn run_cypher_shell(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Cypher-Shell 5.19.0 (SlateOS)");
+        println!("Cypher-Shell 5.19.0 (Slate OS)");
         return 0;
     }
 

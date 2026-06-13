@@ -19,7 +19,7 @@ fn run_dagster(args: &[String], is_dagit: bool) -> i32 {
     }
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: dagster COMMAND [OPTIONS]");
-        println!("Dagster 1.7.0 (SlateOS)");
+        println!("Dagster 1.7.0 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  dev            Start development webserver");

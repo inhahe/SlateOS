@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_segger(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: segger [OPTIONS] [PROJECT]");
-        println!("SEGGER Embedded Studio 8.20 (SlateOS) — Cross-platform embedded IDE");
+        println!("SEGGER Embedded Studio 8.20 (Slate OS) — Cross-platform embedded IDE");
         println!();
         println!("Options:");
         println!("  --open FILE            Open .emProject");
@@ -23,8 +23,8 @@ fn run_segger(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("SEGGER Embedded Studio for ARM 8.20a (SlateOS)"); return 0; }
-    println!("SEGGER Embedded Studio for ARM 8.20a (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("SEGGER Embedded Studio for ARM 8.20a (Slate OS)"); return 0; }
+    println!("SEGGER Embedded Studio for ARM 8.20a (Slate OS)");
     println!("  Targets: Arm Cortex-M/A/R, RISC-V (RV32I/RV32E/RV64)");
     println!("  Platforms: Windows, Linux, macOS (cross-platform IDE)");
     println!("  Compiler: SEGGER Compiler (LLVM-based) + GCC alternative");

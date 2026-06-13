@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_system_log(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gnome-system-log [OPTIONS] [FILE...]");
-        println!("gnome-system-log v43.0 (SlateOS) — System log viewer");
+        println!("gnome-system-log v43.0 (Slate OS) — System log viewer");
         println!();
         println!("Options:");
         println!("  --version         Show version");
@@ -22,7 +22,7 @@ fn run_system_log(args: &[String], _prog: &str) -> i32 {
         println!("Default logs: syslog, auth.log, kern.log, dpkg.log");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("gnome-system-log v43.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("gnome-system-log v43.0 (Slate OS)"); return 0; }
     println!("gnome-system-log: log viewer started");
     println!("  Logs: syslog, auth.log, kern.log");
     println!("  Filter: all priorities");

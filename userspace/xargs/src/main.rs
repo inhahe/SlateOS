@@ -156,7 +156,7 @@ fn parse_args(args: &[String]) -> Result<Config, i32> {
                     return Err(EXIT_SUCCESS);
                 }
                 "--version" => {
-                    println!("xargs (SlateOS) {VERSION}");
+                    println!("xargs (Slate OS) {VERSION}");
                     return Err(EXIT_SUCCESS);
                 }
                 "--null" => config.null_delimited = true,

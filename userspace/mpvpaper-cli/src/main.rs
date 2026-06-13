@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mpvpaper(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.len() < 2 {
         println!("Usage: mpvpaper [OPTIONS] OUTPUT VIDEO");
-        println!("mpvpaper v1.7 (SlateOS) — Video wallpaper for Wayland (via mpv)");
+        println!("mpvpaper v1.7 (Slate OS) — Video wallpaper for Wayland (via mpv)");
         println!();
         println!("Arguments:");
         println!("  OUTPUT            Output name (e.g. HDMI-A-1, or '*')");
@@ -28,7 +28,7 @@ fn run_mpvpaper(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("mpvpaper v1.7 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("mpvpaper v1.7 (Slate OS)"); return 0; }
     let output = args.first().map(|s| s.as_str()).unwrap_or("*");
     let video = args.get(1).map(|s| s.as_str()).unwrap_or("video.mp4");
     println!("mpvpaper: playing {} on {}", video, output);

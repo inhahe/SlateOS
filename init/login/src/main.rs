@@ -512,7 +512,7 @@ impl UserAccount {
 /// Simple YAML serialization for user database.
 /// Format: /etc/users.yaml
 fn serialize_users_yaml(users: &[UserAccount]) -> String {
-    let mut yaml = String::from("# SlateOS User Database\n# DO NOT EDIT MANUALLY\n\nusers:\n");
+    let mut yaml = String::from("# Slate OS User Database\n# DO NOT EDIT MANUALLY\n\nusers:\n");
     for user in users {
         yaml.push_str(&format!("  - uid: {}\n", user.uid));
         yaml.push_str(&format!("    username: \"{}\"\n", user.username));

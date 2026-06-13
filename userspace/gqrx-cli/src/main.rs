@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gqrx(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gqrx [OPTIONS]");
-        println!("gqrx v2.17 (SlateOS) — SDR receiver powered by GNU Radio");
+        println!("gqrx v2.17 (Slate OS) — SDR receiver powered by GNU Radio");
         println!();
         println!("Options:");
         println!("  -c FILE        Configuration file");
@@ -25,7 +25,7 @@ fn run_gqrx(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Gqrx v2.17.5 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("Gqrx v2.17.5 (Slate OS)"); return 0; }
     if args.iter().any(|a| a == "--list") {
         println!("Available SDR devices:");
         println!("  0: RTL-SDR (RTL2832U), Serial: 00000001");
@@ -34,7 +34,7 @@ fn run_gqrx(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     let freq = args.windows(2).find(|w| w[0] == "-f").map(|w| w[1].as_str()).unwrap_or("100000000");
-    println!("Gqrx v2.17.5 (SlateOS) — SDR Receiver");
+    println!("Gqrx v2.17.5 (Slate OS) — SDR Receiver");
     println!("  Device: RTL-SDR (RTL2832U)");
     println!("  Frequency: {} Hz", freq);
     println!("  Sample rate: 2.4 Msps");

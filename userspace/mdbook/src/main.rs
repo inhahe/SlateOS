@@ -29,7 +29,7 @@ fn run_mdbook(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("mdbook v0.4.37 (SlateOS)");
+            println!("mdbook v0.4.37 (Slate OS)");
             0
         }
         "init" => {

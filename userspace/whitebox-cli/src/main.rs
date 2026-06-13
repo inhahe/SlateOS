@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_whitebox(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: whitebox_tools [OPTIONS]");
-        println!("WhiteboxTools v2.3 (SlateOS) — Geospatial analysis platform");
+        println!("WhiteboxTools v2.3 (Slate OS) — Geospatial analysis platform");
         println!();
         println!("Options:");
         println!("  --run TOOL     Run a specific tool");
@@ -27,7 +27,7 @@ fn run_whitebox(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("WhiteboxTools v2.3.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("WhiteboxTools v2.3.0 (Slate OS)"); return 0; }
     if args.iter().any(|a| a == "--listtools") {
         println!("WhiteboxTools v2.3.0 — Available Tools (520):");
         println!("  Terrain Analysis: Slope, Aspect, Hillshade, Curvature, ...");
@@ -38,7 +38,7 @@ fn run_whitebox(args: &[String], _prog: &str) -> i32 {
         println!("  Math: Add, Subtract, Multiply, Raster Calculator, ...");
         return 0;
     }
-    println!("WhiteboxTools v2.3.0 (SlateOS)");
+    println!("WhiteboxTools v2.3.0 (Slate OS)");
     println!("  Running: Hillshade");
     println!("  Input: dem.tif (2048x2048)");
     println!("  Azimuth: 315.0, Altitude: 30.0");

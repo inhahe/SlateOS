@@ -890,7 +890,7 @@ fn build_system_font(style: FontStyle) -> Font {
     };
 
     Font {
-        name: String::from("SlateOS Mono"),
+        name: String::from("Slate OS Mono"),
         style,
         metrics: FontMetrics {
             ascent: 14.0,

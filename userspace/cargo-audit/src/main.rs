@@ -65,7 +65,7 @@ fn run_cargo_audit(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("cargo-audit 0.20.0 (SlateOS)");
+            println!("cargo-audit 0.20.0 (Slate OS)");
             0
         }
         "fix" => {

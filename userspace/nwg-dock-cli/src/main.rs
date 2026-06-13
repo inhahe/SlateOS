@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_nwg_dock(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: nwg-dock [OPTIONS]");
-        println!("nwg-dock v0.3 (SlateOS) — Wayland application dock");
+        println!("nwg-dock v0.3 (Slate OS) — Wayland application dock");
         println!();
         println!("Options:");
         println!("  -d                Dock position: top, bottom, left, right");

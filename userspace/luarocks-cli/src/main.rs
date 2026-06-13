@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_luarocks(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: luarocks COMMAND [OPTIONS]");
-        println!("LuaRocks 3.11.0 (SlateOS)");
+        println!("LuaRocks 3.11.0 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  install      Install a rock");
@@ -32,7 +32,7 @@ fn run_luarocks(args: &[String]) -> i32 {
     }
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match subcmd {
-        "--version" => println!("luarocks 3.11.0 (SlateOS)"),
+        "--version" => println!("luarocks 3.11.0 (Slate OS)"),
         "install" => {
             let rock = args.get(1).map(|s| s.as_str()).unwrap_or("luasocket");
             println!("Installing https://luarocks.org/{}", rock);

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_kubectx(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: kubectx [CONTEXT | -c | -d NAME | -]");
-        println!("kubectx (SlateOS) — Switch between kubectl contexts");
+        println!("kubectx (Slate OS) — Switch between kubectl contexts");
         println!();
         println!("Options:");
         println!("  (no args)       List contexts (current marked with *)");
@@ -48,7 +48,7 @@ fn run_kubectx(args: &[String], _prog: &str) -> i32 {
 fn run_kubens(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: kubens [NAMESPACE | -c | -]");
-        println!("kubens (SlateOS) — Switch between Kubernetes namespaces");
+        println!("kubens (Slate OS) — Switch between Kubernetes namespaces");
         println!();
         println!("Options:");
         println!("  (no args)       List namespaces (current marked with *)");

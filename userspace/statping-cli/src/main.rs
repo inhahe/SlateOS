@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_statping(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: statping [COMMAND] [OPTIONS]");
-        println!("Statping-ng v0.91 (SlateOS) — Status page & monitoring server");
+        println!("Statping-ng v0.91 (Slate OS) — Status page & monitoring server");
         println!();
         println!("Commands:");
         println!("  run                Start Statping server");
@@ -29,8 +29,8 @@ fn run_statping(args: &[String], _prog: &str) -> i32 {
         println!("  --db-conn STRING   Database connection string");
         return 0;
     }
-    if args.iter().any(|a| a == "--version" || a == "version") { println!("Statping-ng v0.91.0 (SlateOS)"); return 0; }
-    println!("Statping-ng v0.91.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version" || a == "version") { println!("Statping-ng v0.91.0 (Slate OS)"); return 0; }
+    println!("Statping-ng v0.91.0 (Slate OS)");
     println!("  Services: 15 (13 online, 2 offline)");
     println!("  Groups: 4");
     println!("  Notifiers: Slack, Email, Telegram");

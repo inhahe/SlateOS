@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_siege(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: siege [OPTIONS] URL");
-        println!("SIEGE 4.1.7 (SlateOS)");
+        println!("SIEGE 4.1.7 (Slate OS)");
         println!();
         println!("Options:");
         println!("  -c, --concurrent N   Concurrent users (default: 25)");
@@ -30,7 +30,7 @@ fn run_siege(args: &[String]) -> i32 {
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
         println!("SIEGE 4.1.7");
-        println!("SlateOS port");
+        println!("Slate OS port");
         return 0;
     }
     let url = args.iter().rfind(|a| !a.starts_with('-'))

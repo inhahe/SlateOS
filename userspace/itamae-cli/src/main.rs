@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_itamae(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: itamae COMMAND [OPTIONS] RECIPE...");
-        println!("itamae v1.14 (SlateOS) — Simple configuration management");
+        println!("itamae v1.14 (Slate OS) — Simple configuration management");
         println!();
         println!("Commands:");
         println!("  local             Apply recipes locally");
@@ -51,7 +51,7 @@ fn run_itamae(args: &[String], _prog: &str) -> i32 {
             println!("  Recipe: default.rb");
             println!("  Applied 5 resources.");
         }
-        "version" | "--version" => println!("itamae v1.14 (SlateOS)"),
+        "version" | "--version" => println!("itamae v1.14 (Slate OS)"),
         _ => println!("itamae {}: completed", cmd),
     }
     0

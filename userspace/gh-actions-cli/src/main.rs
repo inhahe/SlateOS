@@ -32,7 +32,7 @@ fn run_gh_actions(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("gh-actions 1.0.0 (SlateOS)");
+        println!("gh-actions 1.0.0 (Slate OS)");
         return 0;
     }
 

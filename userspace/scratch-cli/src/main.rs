@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: scratch [OPTIONS] [PROJECT]");
-        println!("Assimilate SCRATCH 9.5 (SlateOS) — Dailies, color, conform, deliverables, VR");
+        println!("Assimilate SCRATCH 9.5 (Slate OS) — Dailies, color, conform, deliverables, VR");
         println!();
         println!("Options:");
         println!("  --dailies              Open Dailies mode");
@@ -23,8 +23,8 @@ fn run_sc(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Assimilate SCRATCH 9.5.0.987 (SlateOS)"); return 0; }
-    println!("Assimilate SCRATCH 9.5.0.987 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Assimilate SCRATCH 9.5.0.987 (Slate OS)"); return 0; }
+    println!("Assimilate SCRATCH 9.5.0.987 (Slate OS)");
     println!("  Editions: SCRATCH, SCRATCH Lab (dailies), SCRATCH VR");
     println!("  Codecs: ARRI MXF, RED REDCODE RAW, Sony X-OCN, Phantom Cine");
     println!("  Color: Resolution-independent node-based grading");

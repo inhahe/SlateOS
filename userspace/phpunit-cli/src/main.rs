@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_phpunit(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: phpunit [OPTIONS] [FILE|DIR]");
-        println!("PHPUnit 11.2.0 (SlateOS)");
+        println!("PHPUnit 11.2.0 (Slate OS)");
         println!();
         println!("Options:");
         println!("  --filter PATTERN     Filter tests by name");

@@ -37,7 +37,7 @@ fn run_trivy(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match cmd {
         "version" => {
-            println!("Version: 0.52.0 (SlateOS)");
+            println!("Version: 0.52.0 (Slate OS)");
             println!("Vulnerability DB:");
             println!("  Version: 2");
             println!("  UpdatedAt: 2025-05-22 10:00:00");

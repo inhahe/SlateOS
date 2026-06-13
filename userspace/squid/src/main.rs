@@ -21,7 +21,7 @@ fn run_squid(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-v") {
-        println!("Squid Cache: Version 6.9 (SlateOS)");
+        println!("Squid Cache: Version 6.9 (Slate OS)");
         println!("Service Name: squid");
         println!("configure options: --prefix=/usr --sysconfdir=/etc/squid --with-openssl");
         return 0;

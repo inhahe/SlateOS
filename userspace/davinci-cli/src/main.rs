@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_davinci(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: davinci [OPTIONS]");
-        println!("DaVinci Resolve 19 Studio (SlateOS) — Editing, color, audio, VFX");
+        println!("DaVinci Resolve 19 Studio (Slate OS) — Editing, color, audio, VFX");
         println!();
         println!("Options:");
         println!("  --script FILE          Run Resolve script (Python/Lua)");
@@ -25,8 +25,8 @@ fn run_davinci(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("DaVinci Resolve 19.0 Studio (SlateOS)"); return 0; }
-    println!("DaVinci Resolve 19.0 Studio (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("DaVinci Resolve 19.0 Studio (Slate OS)"); return 0; }
+    println!("DaVinci Resolve 19.0 Studio (Slate OS)");
     println!("  Pages: Media, Cut, Edit, Fusion, Color, Fairlight, Deliver");
     println!("  GPU: CUDA, Metal, OpenCL acceleration");
     println!("  Codecs: H.264/265, ProRes, BRAW, RED, ARRI, DNxHR");

@@ -35,7 +35,7 @@ fn run_flux(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match cmd {
         "version" => {
-            println!("flux: v2.3.0 (SlateOS)");
+            println!("flux: v2.3.0 (Slate OS)");
             println!("distribution: flux-v2.3.0");
         }
         "check" => {

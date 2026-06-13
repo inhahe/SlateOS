@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_obnam(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: obnam <command> [OPTIONS]");
-        println!("obnam v0.4 (SlateOS) — Encrypted backup program");
+        println!("obnam v0.4 (Slate OS) — Encrypted backup program");
         println!();
         println!("Commands:");
         println!("  init            Initialize backup repository");
@@ -31,7 +31,7 @@ fn run_obnam(args: &[String], _prog: &str) -> i32 {
         println!("Features: chunk-based dedup, encryption, compression");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("obnam v0.4 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("obnam v0.4 (Slate OS)"); return 0; }
     match args.first().map(|s| s.as_str()) {
         Some("init") => {
             println!("obnam: repository initialized");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rs(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: redshift [OPTIONS]");
-        println!("Maxon Redshift 2024 (SlateOS) — Biased GPU production renderer");
+        println!("Maxon Redshift 2024 (Slate OS) — Biased GPU production renderer");
         println!();
         println!("Options:");
         println!("  --render SCENE         Render scene");
@@ -24,8 +24,8 @@ fn run_rs(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Redshift 2024.4.4 (SlateOS)"); return 0; }
-    println!("Redshift 2024.4.4 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Redshift 2024.4.4 (Slate OS)"); return 0; }
+    println!("Redshift 2024.4.4 (Slate OS)");
     println!("  Vendor: Maxon Computer GmbH (Germany) — acquired Redshift Rendering 2019");
     println!("  Original company: Redshift Rendering Technologies (Newport Beach CA, founded 2012)");
     println!("  Founders: Nicolas Burtnyk, Panagiotis Zompolas, Rob Slater");

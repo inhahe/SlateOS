@@ -19,7 +19,7 @@ fn run_fetchmail(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: fetchmail [OPTIONS] [SERVER ...]");
         println!();
-        println!("fetchmail — remote mail retrieval (SlateOS).");
+        println!("fetchmail — remote mail retrieval (Slate OS).");
         println!();
         println!("Options:");
         println!("  -p, --protocol PROTO   Protocol (auto/pop3/imap/apop)");
@@ -37,7 +37,7 @@ fn run_fetchmail(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("fetchmail 6.4.37 (SlateOS)");
+        println!("fetchmail 6.4.37 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "-q" || a == "--quit") {
@@ -75,7 +75,7 @@ fn run_getmail(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: getmail [OPTIONS]");
         println!();
-        println!("getmail — mail retriever (SlateOS).");
+        println!("getmail — mail retriever (Slate OS).");
         println!();
         println!("Options:");
         println!("  -r, --rcfile FILE  Config file");
@@ -87,7 +87,7 @@ fn run_getmail(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("getmail 6.19 (SlateOS)");
+        println!("getmail 6.19 (Slate OS)");
         return 0;
     }
 

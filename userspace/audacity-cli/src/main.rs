@@ -42,7 +42,7 @@ fn run_audacity(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("audacity-cli 3.5.0 (SlateOS)");
+        println!("audacity-cli 3.5.0 (Slate OS)");
         return 0;
     }
 

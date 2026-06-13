@@ -36,7 +36,7 @@ fn run_difft(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("difftastic 0.58.0 (SlateOS)");
+        println!("difftastic 0.58.0 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "--list-languages") {

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gimp(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gimp [OPTIONS] [FILE...]");
-        println!("GNU Image Manipulation Program 2.10.38 (SlateOS)");
+        println!("GNU Image Manipulation Program 2.10.38 (Slate OS)");
         println!();
         println!("Options:");
         println!("  -i, --no-interface        Run without UI");
@@ -32,7 +32,7 @@ fn run_gimp(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("GNU Image Manipulation Program version 2.10.38 (SlateOS)");
+        println!("GNU Image Manipulation Program version 2.10.38 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "-b" || a == "--batch") {

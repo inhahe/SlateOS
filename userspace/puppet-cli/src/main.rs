@@ -14,7 +14,7 @@ fn run_puppet(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: puppet <subcommand> [options] [<action>]");
         println!();
-        println!("puppet — configuration management (SlateOS).");
+        println!("puppet — configuration management (Slate OS).");
         println!();
         println!("Subcommands:");
         println!("  agent          Run puppet agent");
@@ -27,7 +27,7 @@ fn run_puppet(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("puppet 8.4.0 (SlateOS)");
+        println!("puppet 8.4.0 (Slate OS)");
         return 0;
     }
 
@@ -64,8 +64,8 @@ fn run_puppet(args: &[String]) -> i32 {
         "facts" => {
             println!("hostname => slateos-desktop");
             println!("fqdn => slateos-desktop.local");
-            println!("operatingsystem => SlateOS");
-            println!("osfamily => SlateOS");
+            println!("operatingsystem => Slate OS");
+            println!("osfamily => Slate OS");
             println!("kernel => slateos");
             println!("architecture => x86_64");
             println!("memorysize => 16.00 GB");
@@ -91,21 +91,21 @@ fn run_facter(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("4.6.1 (SlateOS)");
+        println!("4.6.1 (Slate OS)");
         return 0;
     }
 
     let query = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str());
     if let Some(fact) = query {
         match fact {
-            "os" => println!("{{name => SlateOS, family => SlateOS, release => {{major => 1, full => 1.0}}}}"),
+            "os" => println!("{{name => Slate OS, family => Slate OS, release => {{major => 1, full => 1.0}}}}"),
             "networking" => println!("{{hostname => slateos-desktop, ip => 192.168.1.100, mac => 00:11:22:33:44:55}}"),
             "memory" => println!("{{system => {{total => 16.00 GiB, used => 8.50 GiB, available => 7.50 GiB}}}}"),
             _ => println!("{} => (not found)", fact),
         }
     } else {
-        println!("os.name => SlateOS");
-        println!("os.family => SlateOS");
+        println!("os.name => Slate OS");
+        println!("os.family => Slate OS");
         println!("os.release.full => 1.0");
         println!("networking.hostname => slateos-desktop");
         println!("networking.ip => 192.168.1.100");

@@ -29,7 +29,7 @@ fn run_php(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-v" || a == "--version") {
-        println!("PHP 8.3.8 (cli) (SlateOS)");
+        println!("PHP 8.3.8 (cli) (Slate OS)");
         println!("Zend Engine v4.3.8");
         return 0;
     }
@@ -46,7 +46,7 @@ fn run_php(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "-i") {
         println!("phpinfo()");
         println!("PHP Version => 8.3.8");
-        println!("System => SlateOS");
+        println!("System => Slate OS");
         println!("Zend Engine v4.3.8");
         return 0;
     }
@@ -54,7 +54,7 @@ fn run_php(args: Vec<String>) -> i32 {
     let serve = args.iter().position(|a| a == "-S")
         .and_then(|i| args.get(i + 1));
     if let Some(addr) = serve {
-        println!("PHP 8.3.8 Development Server (SlateOS) started at {}", addr);
+        println!("PHP 8.3.8 Development Server (Slate OS) started at {}", addr);
         println!("Document root is /var/www/html");
         println!("Press Ctrl-C to quit.");
         return 0;
@@ -96,7 +96,7 @@ fn run_composer(args: Vec<String>) -> i32 {
 
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match cmd {
-        "--version" | "-V" => println!("Composer version 2.7.6 (SlateOS) 2025-05-22"),
+        "--version" | "-V" => println!("Composer version 2.7.6 (Slate OS) 2025-05-22"),
         "install" => {
             println!("Installing dependencies from lock file");
             println!("  - Installing psr/log (3.0.0): Extracting archive");

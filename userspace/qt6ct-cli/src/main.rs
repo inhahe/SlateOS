@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_qt6ct(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: qt6ct [OPTIONS]");
-        println!("qt6ct v0.9 (SlateOS) — Qt6 configuration tool");
+        println!("qt6ct v0.9 (Slate OS) — Qt6 configuration tool");
         println!();
         println!("Options:");
         println!("  --version         Show version");
@@ -24,7 +24,7 @@ fn run_qt6ct(args: &[String], _prog: &str) -> i32 {
         println!("Set QT_QPA_PLATFORMTHEME=qt6ct to enable.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("qt6ct v0.9 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("qt6ct v0.9 (Slate OS)"); return 0; }
     println!("qt6ct: Qt6 configuration");
     println!("  Style: Fusion");
     println!("  Color Scheme: darker");

@@ -14,7 +14,7 @@ fn run_zfs(args: &[String], prog: &str) -> i32 {
     if prog == "zpool" {
         if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
             println!("Usage: zpool COMMAND [OPTIONS]");
-            println!("zpool (ZFS 2.2.4, SlateOS)");
+            println!("zpool (ZFS 2.2.4, Slate OS)");
             println!();
             println!("Commands:");
             println!("  create NAME DEV...   Create pool");
@@ -57,7 +57,7 @@ fn run_zfs(args: &[String], prog: &str) -> i32 {
     // zfs
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: zfs COMMAND [OPTIONS]");
-        println!("zfs (ZFS 2.2.4, SlateOS)");
+        println!("zfs (ZFS 2.2.4, Slate OS)");
         println!();
         println!("Commands:");
         println!("  create NAME          Create dataset");

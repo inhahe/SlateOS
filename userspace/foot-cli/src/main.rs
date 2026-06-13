@@ -48,7 +48,7 @@ fn run_foot(args: &[String], prog: &str) -> i32 {
     // foot
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: foot [OPTIONS] [COMMAND...]");
-        println!("foot 1.18.1 (SlateOS) — Fast, lightweight Wayland terminal");
+        println!("foot 1.18.1 (Slate OS) — Fast, lightweight Wayland terminal");
         println!();
         println!("Options:");
         println!("  -c, --config FILE        Config file");
@@ -65,7 +65,7 @@ fn run_foot(args: &[String], prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-v" || a == "--version") {
-        println!("foot version: 1.18.1 (SlateOS)");
+        println!("foot version: 1.18.1 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "-C" || a == "--check-config") {

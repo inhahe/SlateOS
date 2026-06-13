@@ -709,7 +709,7 @@ fn update_alternatives_main(args: &[String]) -> i32 {
             0
         }
         "--version" => {
-            println!("update-alternatives (SlateOS) {VERSION}");
+            println!("update-alternatives (Slate OS) {VERSION}");
             0
         }
         other => {

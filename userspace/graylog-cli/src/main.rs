@@ -15,7 +15,7 @@ fn run_graylog(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "graylog-ctl" => {
-                println!("graylog-ctl (SlateOS) — Graylog management CLI");
+                println!("graylog-ctl (Slate OS) — Graylog management CLI");
                 println!("  status         Show server status");
                 println!("  start          Start Graylog");
                 println!("  stop           Stop Graylog");
@@ -24,7 +24,7 @@ fn run_graylog(args: &[String], prog: &str) -> i32 {
                 println!("  restore FILE   Restore from backup");
             }
             _ => {
-                println!("graylog-server v5.2 (SlateOS) — Log management server");
+                println!("graylog-server v5.2 (Slate OS) — Log management server");
                 println!("  -f FILE        Config file");
                 println!("  -p FILE        PID file");
                 println!("  -np            No PID file");
@@ -34,8 +34,8 @@ fn run_graylog(args: &[String], prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Graylog v5.2.5 (SlateOS)"); return 0; }
-    println!("Graylog v5.2.5 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Graylog v5.2.5 (Slate OS)"); return 0; }
+    println!("Graylog v5.2.5 (Slate OS)");
     println!("  Inputs: 5 (Syslog UDP, GELF TCP, Beats, Raw TCP, JSON)");
     println!("  Messages/sec: 12,345");
     println!("  Total messages: 456,789,012");

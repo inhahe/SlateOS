@@ -27,7 +27,7 @@ fn run_diesel(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("diesel 2.1.4 (SlateOS)");
+        println!("diesel 2.1.4 (Slate OS)");
         return 0;
     }
 

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pulsemixer(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pulsemixer [OPTIONS]");
-        println!("pulsemixer 1.5.1 (SlateOS) — CLI and curses mixer for PulseAudio");
+        println!("pulsemixer 1.5.1 (Slate OS) — CLI and curses mixer for PulseAudio");
         println!();
         println!("Options:");
         println!("  --id ID               Sink/source ID");

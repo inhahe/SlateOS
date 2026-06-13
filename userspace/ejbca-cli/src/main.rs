@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ejbca(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ejbca [COMMAND] [OPTIONS]");
-        println!("EJBCA v8.2 (SlateOS) — Enterprise PKI certificate authority");
+        println!("EJBCA v8.2 (Slate OS) — Enterprise PKI certificate authority");
         println!();
         println!("Commands:");
         println!("  ca list            List certificate authorities");
@@ -32,8 +32,8 @@ fn run_ejbca(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("EJBCA v8.2.0 (SlateOS)"); return 0; }
-    println!("EJBCA v8.2.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("EJBCA v8.2.0 (Slate OS)"); return 0; }
+    println!("EJBCA v8.2.0 (Slate OS)");
     println!("  CAs: 3 (Root, Issuing, SubCA)");
     println!("  Certificates: 45,678 issued");
     println!("  End entities: 12,345");

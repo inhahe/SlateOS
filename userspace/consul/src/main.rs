@@ -33,7 +33,7 @@ fn run_consul(args: Vec<String>) -> i32 {
             0
         }
         "version" | "--version" => {
-            println!("Consul v1.18.1 (SlateOS)");
+            println!("Consul v1.18.1 (Slate OS)");
             println!("Revision: abc1234");
             println!("Protocol: 2 (Understands back to: 1)");
             0

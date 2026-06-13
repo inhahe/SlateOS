@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mumble(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mumble [OPTIONS] [URL]");
-        println!("mumble v1.5 (SlateOS) — Low-latency voice chat client");
+        println!("mumble v1.5 (Slate OS) — Low-latency voice chat client");
         println!();
         println!("Options:");
         println!("  -n                Suppress notification sounds");
@@ -21,7 +21,7 @@ fn run_mumble(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("mumble v1.5 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("mumble v1.5 (Slate OS)"); return 0; }
     println!("mumble: voice chat client started");
     println!("  Audio backend: PulseAudio");
     println!("  Opus codec: enabled");
@@ -32,7 +32,7 @@ fn run_mumble(args: &[String], _prog: &str) -> i32 {
 fn run_murmurd(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: murmurd [OPTIONS]");
-        println!("murmurd v1.5 (SlateOS) — Mumble server (Murmur)");
+        println!("murmurd v1.5 (Slate OS) — Mumble server (Murmur)");
         println!();
         println!("Options:");
         println!("  -ini FILE         Config file");
@@ -40,7 +40,7 @@ fn run_murmurd(args: &[String], _prog: &str) -> i32 {
         println!("  -v                Verbose");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("murmurd v1.5 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("murmurd v1.5 (Slate OS)"); return 0; }
     println!("murmurd: Mumble server started");
     println!("  Port: 64738");
     println!("  Max users: 100");

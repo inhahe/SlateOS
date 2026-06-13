@@ -11,7 +11,7 @@ fn run_gamescope(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gamescope [OPTIONS] -- COMMAND [ARGS]");
         println!();
-        println!("gamescope — SteamOS session compositing WM (SlateOS).");
+        println!("gamescope — SteamOS session compositing WM (Slate OS).");
         println!();
         println!("Options:");
         println!("  -w <width>       Game render width");
@@ -32,7 +32,7 @@ fn run_gamescope(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("gamescope version 3.14.2 (SlateOS)");
+        println!("gamescope version 3.14.2 (Slate OS)");
         return 0;
     }
 

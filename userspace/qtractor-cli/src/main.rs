@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_qtractor(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: qtractor [OPTIONS] [SESSION_FILE]");
-        println!("Qtractor v0.9 (SlateOS) — Audio/MIDI multi-track sequencer");
+        println!("Qtractor v0.9 (Slate OS) — Audio/MIDI multi-track sequencer");
         println!();
         println!("Options:");
         println!("  -s FILE       Load session file (.qtr)");
@@ -24,8 +24,8 @@ fn run_qtractor(args: &[String], _prog: &str) -> i32 {
         println!("  --version     Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Qtractor v0.9.39 (SlateOS)"); return 0; }
-    println!("Qtractor v0.9.39 (SlateOS) — Audio/MIDI Sequencer");
+    if args.iter().any(|a| a == "--version") { println!("Qtractor v0.9.39 (Slate OS)"); return 0; }
+    println!("Qtractor v0.9.39 (Slate OS) — Audio/MIDI Sequencer");
     println!("  JACK audio: 48000 Hz, buffer 512");
     println!("  Session: studio_session.qtr");
     println!("  Tracks:");

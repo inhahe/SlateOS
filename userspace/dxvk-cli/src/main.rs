@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_dxvk(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: dxvk [OPTIONS]");
-        println!("dxvk v2.4 (SlateOS) — Vulkan-based D3D9/10/11 translation layer");
+        println!("dxvk v2.4 (Slate OS) — Vulkan-based D3D9/10/11 translation layer");
         println!();
         println!("Options:");
         println!("  --version         Show version");
@@ -24,7 +24,7 @@ fn run_dxvk(args: &[String], _prog: &str) -> i32 {
         println!("  DXVK_STATE_CACHE=1    Enable state cache");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("dxvk v2.4 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("dxvk v2.4 (Slate OS)"); return 0; }
     println!("dxvk: Vulkan-based DirectX translation layer");
     println!("  Version: 2.4");
     println!("  D3D9:  Vulkan translation active");
@@ -37,7 +37,7 @@ fn run_dxvk(args: &[String], _prog: &str) -> i32 {
 fn run_setup(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: dxvk-setup [install|uninstall] [OPTIONS]");
-        println!("dxvk-setup v2.4 (SlateOS) — DXVK installer");
+        println!("dxvk-setup v2.4 (Slate OS) — DXVK installer");
         println!();
         println!("Commands:");
         println!("  install           Install DXVK to Wine prefix");
@@ -48,7 +48,7 @@ fn run_setup(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("dxvk-setup v2.4 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("dxvk-setup v2.4 (Slate OS)"); return 0; }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("install");
     match cmd {
         "uninstall" => println!("dxvk-setup: removing DXVK from prefix..."),

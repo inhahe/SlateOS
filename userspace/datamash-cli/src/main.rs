@@ -11,7 +11,7 @@ fn run_datamash(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: datamash [OPTIONS] OPERATION [COLUMN] ...");
         println!();
-        println!("GNU datamash — textual data statistics (SlateOS).");
+        println!("GNU datamash — textual data statistics (Slate OS).");
         println!();
         println!("Operations:");
         println!("  count                  Count lines");
@@ -37,7 +37,7 @@ fn run_datamash(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("datamash (GNU datamash) 1.8 (SlateOS)");
+        println!("datamash (GNU datamash) 1.8 (Slate OS)");
         return 0;
     }
 

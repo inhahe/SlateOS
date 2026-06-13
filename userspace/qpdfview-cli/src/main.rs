@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_qpdfview(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: qpdfview [OPTIONS] [FILE[:PAGE]...]");
-        println!("qpdfview v0.5 (SlateOS) — Tabbed document viewer");
+        println!("qpdfview v0.5 (Slate OS) — Tabbed document viewer");
         println!();
         println!("Options:");
         println!("  --unique          Single instance mode");
@@ -22,7 +22,7 @@ fn run_qpdfview(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("qpdfview v0.5 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("qpdfview v0.5 (Slate OS)"); return 0; }
     println!("qpdfview: tabbed document viewer started");
     println!("  Backends: PDF (Poppler), PS (libspectre), DjVu");
     println!("  Tabs: supported");

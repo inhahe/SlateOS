@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_htmldoc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: htmldoc [OPTIONS] FILE...");
-        println!("htmldoc v1.9 (SlateOS) — HTML to PDF/PS/EPUB converter");
+        println!("htmldoc v1.9 (Slate OS) — HTML to PDF/PS/EPUB converter");
         println!();
         println!("Options:");
         println!("  -f FORMAT         Output format: pdf, ps, epub, html");
@@ -34,14 +34,14 @@ fn run_htmldoc(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("htmldoc v1.9 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("htmldoc v1.9 (Slate OS)"); return 0; }
     let files: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
     if files.is_empty() {
         eprintln!("htmldoc: error: no input files specified");
         return 1;
     }
     let format = args.windows(2).find(|w| w[0] == "-f").map(|w| w[1].as_str()).unwrap_or("pdf");
-    println!("HTMLDOC v1.9 (SlateOS)");
+    println!("HTMLDOC v1.9 (Slate OS)");
     for f in &files {
         println!("  Processing: {}", f);
     }

@@ -167,7 +167,7 @@ fn run_earlyoom(args: Vec<String>) -> i32 {
                 return 0;
             }
             "--version" | "-V" => {
-                println!("earlyoom 0.1.0 (SlateOS)");
+                println!("earlyoom 0.1.0 (Slate OS)");
                 return 0;
             }
             "-m" => {

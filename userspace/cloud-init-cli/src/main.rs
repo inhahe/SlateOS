@@ -11,7 +11,7 @@ fn run_cloud_init(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: cloud-init [OPTIONS] COMMAND [ARGS]");
         println!();
-        println!("cloud-init — cloud instance initialization (SlateOS).");
+        println!("cloud-init — cloud instance initialization (Slate OS).");
         println!();
         println!("Commands:");
         println!("  init             Run cloud-init init stage");
@@ -27,7 +27,7 @@ fn run_cloud_init(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("cloud-init 24.1 (SlateOS)");
+        println!("cloud-init 24.1 (Slate OS)");
         return 0;
     }
 

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pdfseparate(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: pdfseparate [OPTIONS] PDF PATTERN");
-        println!("pdfseparate v24.01 (SlateOS) — Extract pages from PDF");
+        println!("pdfseparate v24.01 (Slate OS) — Extract pages from PDF");
         println!();
         println!("Options:");
         println!("  PDF               Input PDF file");
@@ -23,7 +23,7 @@ fn run_pdfseparate(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("pdfseparate v24.01 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("pdfseparate v24.01 (Slate OS)"); return 0; }
     let file = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("document.pdf");
     println!("Separating: {}", file);
     println!("  page-1.pdf");

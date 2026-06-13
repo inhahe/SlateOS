@@ -23,7 +23,7 @@ fn run_sccache(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("sccache 0.8.1 (SlateOS)");
+        println!("sccache 0.8.1 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "--start-server") {

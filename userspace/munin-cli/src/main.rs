@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_munin_node(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: munin-node [OPTIONS]");
-        println!("munin-node v2.0 (SlateOS) — Munin monitoring node agent");
+        println!("munin-node v2.0 (Slate OS) — Munin monitoring node agent");
         println!();
         println!("Options:");
         println!("  --config FILE   Configuration file");
@@ -23,7 +23,7 @@ fn run_munin_node(args: &[String], _prog: &str) -> i32 {
         println!("Collects system metrics and serves them to munin-update.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("munin-node v2.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("munin-node v2.0 (Slate OS)"); return 0; }
     println!("munin-node: listening on port 4949");
     println!("  Plugins loaded: cpu, memory, disk, network, processes");
     println!("  Update interval: 5 minutes");
@@ -33,7 +33,7 @@ fn run_munin_node(args: &[String], _prog: &str) -> i32 {
 fn run_munin_run(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: munin-run <plugin> [config]");
-        println!("munin-run v2.0 (SlateOS) — Run a Munin plugin manually");
+        println!("munin-run v2.0 (Slate OS) — Run a Munin plugin manually");
         return 0;
     }
     if args.is_empty() {
@@ -49,10 +49,10 @@ fn run_munin_run(args: &[String], _prog: &str) -> i32 {
 fn run_munin_update(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: munin-update [OPTIONS]");
-        println!("munin-update v2.0 (SlateOS) — Fetch data from munin nodes");
+        println!("munin-update v2.0 (Slate OS) — Fetch data from munin nodes");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("munin-update v2.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("munin-update v2.0 (Slate OS)"); return 0; }
     println!("munin-update: fetching data from 3 nodes...");
     println!("  localhost: 12 plugins, 48 values collected");
     println!("  server1: 8 plugins, 32 values collected");
@@ -63,7 +63,7 @@ fn run_munin_update(args: &[String], _prog: &str) -> i32 {
 fn run_munin_cron(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: munin-cron [OPTIONS]");
-        println!("munin-cron v2.0 (SlateOS) — Periodic data collection");
+        println!("munin-cron v2.0 (Slate OS) — Periodic data collection");
         return 0;
     }
     let _ = args;

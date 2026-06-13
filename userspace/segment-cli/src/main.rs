@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_segment(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: segment [OPTIONS]");
-        println!("Twilio Segment (SlateOS) — Customer Data Platform (the category creator)");
+        println!("Twilio Segment (Slate OS) — Customer Data Platform (the category creator)");
         println!();
         println!("Options:");
         println!("  --sources              350+ sources (SDKs, server-side, cloud apps)");
@@ -22,8 +22,8 @@ fn run_segment(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Twilio Segment 2024 (SlateOS)"); return 0; }
-    println!("Twilio Segment 2024 (SlateOS) — Customer Data Platform");
+    if args.iter().any(|a| a == "--version") { println!("Twilio Segment 2024 (Slate OS)"); return 0; }
+    println!("Twilio Segment 2024 (Slate OS) — Customer Data Platform");
     println!("  Vendor: Twilio Segment (part of Twilio Inc., NYSE:TWLO since acquisition)");
     println!("  Founders: Peter Reinhardt, Calvin French-Owen, Ilya Volodarsky, Ian Storm Taylor, 2011");
     println!("          all four were MIT students — pivoted from classroom-feedback app to CDP");

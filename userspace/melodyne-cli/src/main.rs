@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mel(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: melodyne [OPTIONS] [AUDIO]");
-        println!("Celemony Melodyne 5 Studio (SlateOS) — DNA polyphonic pitch & time editor");
+        println!("Celemony Melodyne 5 Studio (Slate OS) — DNA polyphonic pitch & time editor");
         println!();
         println!("Options:");
         println!("  --algorithm ALG        Algorithm (universal/percussive/melodic/polyphonic)");
@@ -21,8 +21,8 @@ fn run_mel(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Celemony Melodyne 5.4.1 Studio (SlateOS)"); return 0; }
-    println!("Celemony Melodyne 5.4.1 Studio (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Celemony Melodyne 5.4.1 Studio (Slate OS)"); return 0; }
+    println!("Celemony Melodyne 5.4.1 Studio (Slate OS)");
     println!("  Editions: Essential, Assistant, Editor, Studio");
     println!("  Algorithms: Universal, Percussive, Melodic, Polyphonic, Polyphonic Sustain");
     println!("  DNA: Direct Note Access — edit individual notes within chords");

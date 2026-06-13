@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_kcat(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: kcat MODE [OPTIONS]");
-        println!("kcat v1.7.0 (SlateOS) — Kafka cat (producer/consumer/metadata)");
+        println!("kcat v1.7.0 (Slate OS) — Kafka cat (producer/consumer/metadata)");
         println!();
         println!("Modes:");
         println!("  -P              Producer mode");
@@ -37,7 +37,7 @@ fn run_kcat(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V") {
-        println!("kcat - 1.7.0 (SlateOS)");
+        println!("kcat - 1.7.0 (Slate OS)");
         println!("librdkafka - 2.3.0 (builtin.features=gzip,snappy,ssl,sasl)");
         return 0;
     }

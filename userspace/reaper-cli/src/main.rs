@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_reaper(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: reaper [OPTIONS] [FILE.rpp]");
-        println!("REAPER v7.10 (SlateOS) — Digital Audio Workstation");
+        println!("REAPER v7.10 (Slate OS) — Digital Audio Workstation");
         println!();
         println!("Options:");
         println!("  FILE.rpp          Open project file");
@@ -26,7 +26,7 @@ fn run_reaper(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("REAPER v7.10 (SlateOS)");
+        println!("REAPER v7.10 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "-renderproject") {

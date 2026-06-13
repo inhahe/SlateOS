@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sb(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: starburst [OPTIONS]");
-        println!("Starburst (SlateOS) — commercial Trino — query data wherever it lives (data lakehouse)");
+        println!("Starburst (Slate OS) — commercial Trino — query data wherever it lives (data lakehouse)");
         println!();
         println!("Options:");
         println!("  --galaxy               Starburst Galaxy (fully managed SaaS, cloud)");
@@ -22,8 +22,8 @@ fn run_sb(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Starburst 2024 (SlateOS)"); return 0; }
-    println!("Starburst 2024 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Starburst 2024 (Slate OS)"); return 0; }
+    println!("Starburst 2024 (Slate OS)");
     println!("  Vendor: Starburst Data, Inc. (Boston, MA — private)");
     println!("  Founders: Justin Borgman (CEO), Kamil Bajda-Pawlikowski (CTO), Matt Fuller, Martin Traverso, David Phillips, 2017");
     println!("          Borgman + Bajda-Pawlikowski had founded Hadapt (acquired Teradata 2014)");

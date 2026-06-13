@@ -67,7 +67,7 @@ fn run_restic(args: Vec<String>) -> i32 {
             println!("  --version     Show version");
             0
         }
-        "--version" | "version" => { println!("restic 0.1.0 (SlateOS) compiled with rustc"); 0 }
+        "--version" | "version" => { println!("restic 0.1.0 (Slate OS) compiled with rustc"); 0 }
         "init" => {
             let repo = cmd_args.iter().position(|a| a == "-r" || a == "--repo")
                 .and_then(|i| cmd_args.get(i + 1))

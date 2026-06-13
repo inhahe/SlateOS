@@ -24,7 +24,7 @@
 //! +--------+------+--------+----------+----------+-----+----------+
 //! ```
 //!
-//! * **magic** = `b"ORDR"` (0x4F 0x52 0x44 0x52 — "SlateOS Render")
+//! * **magic** = `b"ORDR"` (0x4F 0x52 0x44 0x52 — "Slate OS Render")
 //! * **ver** = [`PROTOCOL_VERSION`]
 //! * **flags** = reserved, must be zero
 //! * **n_cmds** = number of render commands in this frame, little-endian u32
@@ -694,7 +694,7 @@ mod tests {
         t.commands.push(RenderCommand::Text {
             x: 10.0,
             y: 20.0,
-            text: "Hello, SlateOS!".to_string(),
+            text: "Hello, Slate OS!".to_string(),
             color: Color::rgb(255, 255, 255),
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,

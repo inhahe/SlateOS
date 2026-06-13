@@ -15,7 +15,7 @@ fn run_keydb(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "keydb-cli" => {
-                println!("keydb-cli (SlateOS) — KeyDB command-line client");
+                println!("keydb-cli (Slate OS) — KeyDB command-line client");
                 println!("  -h HOST            Server hostname");
                 println!("  -p PORT            Server port (default: 6379)");
                 println!("  -a PASSWORD        Authentication password");
@@ -26,7 +26,7 @@ fn run_keydb(args: &[String], prog: &str) -> i32 {
                 println!("  --latency          Measure latency");
             }
             _ => {
-                println!("KeyDB v6.3 (SlateOS) — Multithreaded Redis fork");
+                println!("KeyDB v6.3 (Slate OS) — Multithreaded Redis fork");
                 println!("  --port PORT        Port (default: 6379)");
                 println!("  --bind IP          Bind address");
                 println!("  --server-threads N Worker threads");
@@ -39,7 +39,7 @@ fn run_keydb(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("KeyDB v6.3.4 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("KeyDB v6.3.4 (Slate OS)"); return 0; }
     match prog {
         "keydb-cli" => {
             println!("keydb-cli v6.3.4");
@@ -48,7 +48,7 @@ fn run_keydb(args: &[String], prog: &str) -> i32 {
             println!("  Database: 0");
         }
         _ => {
-            println!("KeyDB v6.3.4 (SlateOS)");
+            println!("KeyDB v6.3.4 (Slate OS)");
             println!("  Listening: 0.0.0.0:6379");
             println!("  Server threads: 4");
             println!("  Memory: 128 MB used / 1 GB max");

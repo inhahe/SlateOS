@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_solver(args: &[String], prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: {} [OPTIONS]", prog);
-        println!("ElmerSolver v9.0 (SlateOS) — Finite element method solver");
+        println!("ElmerSolver v9.0 (Slate OS) — Finite element method solver");
         println!();
         println!("Options:");
         println!("  -i FILE        Solver input file (default: case.sif)");
@@ -21,8 +21,8 @@ fn run_solver(args: &[String], prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("ElmerSolver v9.0 (SlateOS)"); return 0; }
-    println!("ELMER SOLVER v9.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("ElmerSolver v9.0 (Slate OS)"); return 0; }
+    println!("ELMER SOLVER v9.0 (Slate OS)");
     println!("  Reading case.sif...");
     println!("  Mesh: 15,234 nodes, 12,456 elements");
     println!("  Equations: Heat, Navier-Stokes");
@@ -35,13 +35,13 @@ fn run_solver(args: &[String], prog: &str) -> i32 {
 fn run_grid(args: &[String], prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: {} INPUTFILE OUTPUTFILE [OPTIONS]", prog);
-        println!("ElmerGrid v9.0 (SlateOS) — Mesh format converter");
+        println!("ElmerGrid v9.0 (Slate OS) — Mesh format converter");
         println!();
         println!("Input formats: 1=Elmer, 2=Gmsh, 3=Abaqus, 14=Universal");
         println!("Output formats: 1=Elmer, 2=ElmerPost");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("ElmerGrid v9.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("ElmerGrid v9.0 (Slate OS)"); return 0; }
     println!("ElmerGrid: converting mesh...");
     println!("  Input: Gmsh format");
     println!("  Output: Elmer format");
@@ -56,7 +56,7 @@ fn main() {
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "ElmerGrid" => run_grid(&rest, &prog),
-        "ElmerGUI" => { println!("ElmerGUI v9.0 (SlateOS) — Graphical interface"); 0 }
+        "ElmerGUI" => { println!("ElmerGUI v9.0 (Slate OS) — Graphical interface"); 0 }
         _ => run_solver(&rest, &prog),
     };
     process::exit(code);

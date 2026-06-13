@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_db(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: databricks [OPTIONS] [SUBCMD]");
-        println!("Databricks Data Intelligence Platform (SlateOS) — Lakehouse + AI");
+        println!("Databricks Data Intelligence Platform (Slate OS) — Lakehouse + AI");
         println!();
         println!("Options:");
         println!("  --profile PROF         Configuration profile");
@@ -24,8 +24,8 @@ fn run_db(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Databricks CLI v0.232.1 (SlateOS)"); return 0; }
-    println!("Databricks Data Intelligence Platform (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Databricks CLI v0.232.1 (Slate OS)"); return 0; }
+    println!("Databricks Data Intelligence Platform (Slate OS)");
     println!("  Foundation: Apache Spark + Delta Lake + MLflow + Unity Catalog");
     println!("  Lakehouse: data warehouse + data lake unified architecture");
     println!("  Languages: Python, SQL, Scala, R, Java in notebooks");

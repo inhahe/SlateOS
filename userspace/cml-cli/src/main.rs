@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_cml(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: cml COMMAND [OPTIONS]");
-        println!("CML 0.20.0 (SlateOS) — Continuous Machine Learning");
+        println!("CML 0.20.0 (Slate OS) — Continuous Machine Learning");
         println!();
         println!("Commands:");
         println!("  comment        Post comment to PR/MR");

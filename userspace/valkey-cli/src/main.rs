@@ -19,7 +19,7 @@ fn run_valkey_cli(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: valkey-cli [OPTIONS] [CMD [ARG...]]");
         println!();
-        println!("valkey-cli — Valkey command line interface (SlateOS).");
+        println!("valkey-cli — Valkey command line interface (Slate OS).");
         println!();
         println!("Options:");
         println!("  -h HOST               Server hostname");
@@ -35,7 +35,7 @@ fn run_valkey_cli(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("valkey-cli 8.0.0 (SlateOS)");
+        println!("valkey-cli 8.0.0 (Slate OS)");
         return 0;
     }
 
@@ -93,7 +93,7 @@ fn run_valkey_server(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("Valkey server v=8.0.0 (SlateOS)");
+        println!("Valkey server v=8.0.0 (Slate OS)");
         return 0;
     }
 

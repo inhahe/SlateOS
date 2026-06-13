@@ -24,7 +24,7 @@ fn run_vegeta(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match cmd {
         "version" => {
-            println!("vegeta v12.11.1 (SlateOS)");
+            println!("vegeta v12.11.1 (Slate OS)");
         }
         "attack" => {
             if args.iter().any(|a| a == "--help") {

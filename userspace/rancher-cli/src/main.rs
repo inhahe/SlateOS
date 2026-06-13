@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rancher(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: rancher [OPTIONS] [SUBCMD]");
-        println!("SUSE Rancher 2.9 (SlateOS) — Kubernetes management platform");
+        println!("SUSE Rancher 2.9 (Slate OS) — Kubernetes management platform");
         println!();
         println!("Options:");
         println!("  login URL --token T    Authenticate to Rancher server");
@@ -24,8 +24,8 @@ fn run_rancher(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("rancher version v2.9.2 (SlateOS)"); return 0; }
-    println!("SUSE Rancher 2.9.2 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("rancher version v2.9.2 (Slate OS)"); return 0; }
+    println!("SUSE Rancher 2.9.2 (Slate OS)");
     println!("  Mission: manage Kubernetes anywhere (any cloud, on-prem, edge)");
     println!("  K8s distros: RKE (Rancher K8s Engine), RKE2 (CNCF-certified), K3s (edge)");
     println!("  Multi-cluster: provision, import, observe 100s of clusters via Fleet");

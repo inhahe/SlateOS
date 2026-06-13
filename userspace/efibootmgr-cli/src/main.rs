@@ -19,7 +19,7 @@ fn run_efibootmgr(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: efibootmgr [OPTIONS]");
         println!();
-        println!("efibootmgr — EFI boot manager (SlateOS).");
+        println!("efibootmgr — EFI boot manager (Slate OS).");
         println!();
         println!("Options:");
         println!("  -v, --verbose      Verbose");
@@ -36,7 +36,7 @@ fn run_efibootmgr(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("efibootmgr version 18 (SlateOS)");
+        println!("efibootmgr version 18 (Slate OS)");
         return 0;
     }
 
@@ -44,7 +44,7 @@ fn run_efibootmgr(args: &[String]) -> i32 {
     let create = args.iter().any(|a| a == "-c" || a == "--create");
 
     if create {
-        let label = args.windows(2).find(|w| w[0] == "-L").map(|w| w[1].as_str()).unwrap_or("SlateOS");
+        let label = args.windows(2).find(|w| w[0] == "-L").map(|w| w[1].as_str()).unwrap_or("Slate OS");
         println!("Boot entry 0005 created: {label}");
     }
 
@@ -52,12 +52,12 @@ fn run_efibootmgr(args: &[String]) -> i32 {
     println!("Timeout: 5 seconds");
     println!("BootOrder: 0001,0002,0003,0004");
     if verbose {
-        println!("Boot0001* SlateOS\tHD(1,GPT,abcdef01-2345-6789-abcd-ef0123456789,0x800,0x100000)/File(\\EFI\\slateos\\grubx64.efi)");
+        println!("Boot0001* Slate OS\tHD(1,GPT,abcdef01-2345-6789-abcd-ef0123456789,0x800,0x100000)/File(\\EFI\\slateos\\grubx64.efi)");
         println!("Boot0002* Windows Boot Manager\tHD(1,GPT,12345678-9abc-def0-1234-567890abcdef,0x800,0x100000)/File(\\EFI\\Microsoft\\Boot\\bootmgfw.efi)");
         println!("Boot0003* USB\tPciRoot(0x0)/Pci(0x14,0x0)/USB(0,0)");
         println!("Boot0004* Network\tPciRoot(0x0)/Pci(0x1f,0x6)/MAC(aabbccddeeff,1)");
     } else {
-        println!("Boot0001* SlateOS");
+        println!("Boot0001* Slate OS");
         println!("Boot0002* Windows Boot Manager");
         println!("Boot0003* USB");
         println!("Boot0004* Network");

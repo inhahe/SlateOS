@@ -476,7 +476,7 @@ Options:
 }
 
 fn print_version() {
-    println!("df (SlateOS coreutils) 0.1.0");
+    println!("df (Slate OS coreutils) 0.1.0");
 }
 
 fn parse_args() -> Config {

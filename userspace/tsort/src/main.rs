@@ -125,7 +125,7 @@ fn run(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("tsort (SlateOS coreutils) 0.1.0");
+                println!("tsort (Slate OS coreutils) 0.1.0");
                 return 0;
             }
             _ if arg.starts_with('-') && arg.len() > 1 => {

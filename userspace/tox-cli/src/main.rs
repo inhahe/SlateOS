@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_tox(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: tox [OPTIONS] [COMMAND]");
-        println!("tox 4.16.0 (SlateOS)");
+        println!("tox 4.16.0 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  run          Run test environments (default)");

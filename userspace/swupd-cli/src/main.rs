@@ -10,7 +10,7 @@ use std::process;
 fn run_swupd(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: swupd COMMAND [OPTIONS]");
-        println!("swupd 4.5.0 (SlateOS)");
+        println!("swupd 4.5.0 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  update       Update to latest version");
@@ -31,7 +31,7 @@ fn run_swupd(args: &[String]) -> i32 {
     match subcmd {
         "--version" => println!("swupd 4.5.0"),
         "info" => {
-            println!("Distribution:      SlateOS");
+            println!("Distribution:      Slate OS");
             println!("Installed version: 40390");
             println!("Version URL:       https://update.clearlinux.org/update");
             println!("Content URL:       https://cdn.download.clearlinux.org/update/");

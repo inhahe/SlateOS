@@ -15,15 +15,15 @@ fn run_coriolis(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "blif2vst" => {
-                println!("blif2vst (SlateOS) — BLIF to VST netlist converter");
+                println!("blif2vst (Slate OS) — BLIF to VST netlist converter");
                 println!("  blif2vst INPUT.blif OUTPUT.vst");
             }
             "s2r" => {
-                println!("s2r (SlateOS) — Symbolic to real layout converter");
+                println!("s2r (Slate OS) — Symbolic to real layout converter");
                 println!("  s2r [-v] [-t TECH] INPUT OUTPUT");
             }
             _ => {
-                println!("Coriolis/CGT v2.5 (SlateOS) — VLSI Place & Route");
+                println!("Coriolis/CGT v2.5 (Slate OS) — VLSI Place & Route");
                 println!("  -c CELL       Top-level cell name");
                 println!("  -t TECH       Technology (freepdk45, sky130)");
                 println!("  --script FILE Python script to execute");
@@ -34,7 +34,7 @@ fn run_coriolis(args: &[String], prog: &str) -> i32 {
         println!("  --version     Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Coriolis v2.5 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("Coriolis v2.5 (Slate OS)"); return 0; }
     match prog {
         "blif2vst" => {
             println!("blif2vst: converting netlist...");
@@ -49,7 +49,7 @@ fn run_coriolis(args: &[String], prog: &str) -> i32 {
             println!("  Output: design.gds");
         }
         _ => {
-            println!("Coriolis v2.5 (SlateOS) — VLSI P&R");
+            println!("Coriolis v2.5 (Slate OS) — VLSI P&R");
             println!("  Technology: freepdk45 (45nm)");
             println!("  Cell: alu_top");
             println!("  Etesian placer:");

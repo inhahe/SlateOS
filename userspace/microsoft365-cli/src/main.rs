@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_m365(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: microsoft365 [OPTIONS]");
-        println!("Microsoft 365 (SlateOS) — Cloud productivity suite + Office apps");
+        println!("Microsoft 365 (Slate OS) — Cloud productivity suite + Office apps");
         println!();
         println!("Options:");
         println!("  --app NAME             word/excel/powerpoint/outlook/onenote/teams");
@@ -24,8 +24,8 @@ fn run_m365(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Microsoft 365 Apps for Enterprise 2410 build 18227.20140 (SlateOS)"); return 0; }
-    println!("Microsoft 365 Apps for Enterprise 2410 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Microsoft 365 Apps for Enterprise 2410 build 18227.20140 (Slate OS)"); return 0; }
+    println!("Microsoft 365 Apps for Enterprise 2410 (Slate OS)");
     println!("  Vendor: Microsoft (Redmond, Washington)");
     println!("  Rebrand: Office 365 → Microsoft 365 (Apr 2020), Office 2024 perpetual still sold");
     println!("  Apps: Word, Excel, PowerPoint, Outlook, OneNote, Access, Publisher (Win),");

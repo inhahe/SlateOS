@@ -43,7 +43,7 @@ fn run_wezterm(args: &[String], prog: &str) -> i32 {
     // wezterm
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: wezterm [OPTIONS] [COMMAND]");
-        println!("WezTerm 20240203 (SlateOS) — GPU-accelerated terminal");
+        println!("WezTerm 20240203 (Slate OS) — GPU-accelerated terminal");
         println!();
         println!("Commands:");
         println!("  start            Start the GUI (default)");
@@ -64,7 +64,7 @@ fn run_wezterm(args: &[String], prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("wezterm 20240203-110809-5046fc22 (SlateOS)");
+        println!("wezterm 20240203-110809-5046fc22 (Slate OS)");
         return 0;
     }
     let cmd = args.iter().find(|a| !a.starts_with('-'))

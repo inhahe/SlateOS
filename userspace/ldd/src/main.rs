@@ -162,7 +162,7 @@ struct Options {
 }
 
 fn print_version() -> ! {
-    println!("{PROGRAM_NAME} (SlateOS) {VERSION}");
+    println!("{PROGRAM_NAME} (Slate OS) {VERSION}");
     process::exit(0);
 }
 

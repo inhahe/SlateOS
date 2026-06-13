@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_a0(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: auth0 [OPTIONS]");
-        println!("Auth0 by Okta (SlateOS) — Identity-as-a-Service for developers");
+        println!("Auth0 by Okta (Slate OS) — Identity-as-a-Service for developers");
         println!();
         println!("Options:");
         println!("  --universal-login      Universal Login (hosted login page)");
@@ -24,8 +24,8 @@ fn run_a0(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Auth0 by Okta 2024 (SlateOS)"); return 0; }
-    println!("Auth0 by Okta 2024 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Auth0 by Okta 2024 (Slate OS)"); return 0; }
+    println!("Auth0 by Okta 2024 (Slate OS)");
     println!("  Vendor: Auth0, Inc. → acquired by Okta May 2021 for $6.5B (all-stock)");
     println!("          rebranded 'Customer Identity Cloud (Auth0)' under Okta");
     println!("  Founders: Eugenio Pace + Matías Woloski (Argentina → Bellevue WA)");

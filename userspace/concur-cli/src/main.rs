@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_concur(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: concur [OPTIONS]");
-        println!("SAP Concur (SlateOS) — Enterprise travel, expense & invoice");
+        println!("SAP Concur (Slate OS) — Enterprise travel, expense & invoice");
         println!();
         println!("Options:");
         println!("  --expense              Concur Expense");
@@ -23,8 +23,8 @@ fn run_concur(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("SAP Concur 2024 (SlateOS)"); return 0; }
-    println!("SAP Concur 2024 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("SAP Concur 2024 (Slate OS)"); return 0; }
+    println!("SAP Concur 2024 (Slate OS)");
     println!("  Vendor: Concur Technologies, Inc. (a subsidiary of SAP SE)");
     println!("  History: founded 1993 by Steve Singh + Mike Hilton (Redmond, WA)");
     println!("          early packaged-software era (CD-ROM expense report tool!)");

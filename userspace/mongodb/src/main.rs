@@ -26,7 +26,7 @@ fn run_mongod(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("db version v7.0.9 (SlateOS)");
+        println!("db version v7.0.9 (Slate OS)");
         println!("Build Info: {{");
         println!("    \"version\": \"7.0.9\",");
         println!("    \"gitVersion\": \"abc1234def5678\",");
@@ -68,7 +68,7 @@ fn run_mongos(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("mongos version v7.0.9 (SlateOS)");
+        println!("mongos version v7.0.9 (Slate OS)");
         return 0;
     }
     let port = args.iter().position(|a| a == "--port")
@@ -97,7 +97,7 @@ fn run_mongosh(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("2.2.5 (SlateOS)");
+        println!("2.2.5 (Slate OS)");
         return 0;
     }
 
@@ -141,7 +141,7 @@ fn run_mongosh(args: Vec<String>) -> i32 {
         .unwrap_or("27017");
     println!("Current Mongosh Log ID: 664e1234567890abcdef1234");
     println!("Connecting to:          mongodb://{}:{}/", host, port);
-    println!("Using MongoDB:          7.0.9 (SlateOS)");
+    println!("Using MongoDB:          7.0.9 (Slate OS)");
     println!("Using Mongosh:          2.2.5");
     println!();
     println!("For mongosh info see: https://docs.mongodb.com/mongodb-shell/");

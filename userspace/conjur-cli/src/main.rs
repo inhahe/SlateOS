@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_conjur(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: conjur [COMMAND] [OPTIONS]");
-        println!("Conjur v5.0 (SlateOS) — Secrets management for DevOps");
+        println!("Conjur v5.0 (Slate OS) — Secrets management for DevOps");
         println!();
         println!("Commands:");
         println!("  init               Initialize CLI");
@@ -32,8 +32,8 @@ fn run_conjur(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Conjur CLI v8.0.1 (SlateOS)"); return 0; }
-    println!("Conjur CLI v8.0.1 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Conjur CLI v8.0.1 (Slate OS)"); return 0; }
+    println!("Conjur CLI v8.0.1 (Slate OS)");
     println!("  Server: https://conjur.example.com");
     println!("  Account: myorg");
     println!("  Logged in as: admin");

@@ -23,7 +23,7 @@ fn run_sage(args: &[String]) -> i32 {
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
         println!("SageMath version 10.2, Release Date: 2024-01-20");
-        println!("Using Python 3.12.0 (SlateOS)");
+        println!("Using Python 3.12.0 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "--info") {

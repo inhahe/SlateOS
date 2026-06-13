@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_avid(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: avid [OPTIONS] [PROJECT]");
-        println!("Avid Media Composer 2024 (SlateOS) — Hollywood-standard NLE");
+        println!("Avid Media Composer 2024 (Slate OS) — Hollywood-standard NLE");
         println!();
         println!("Options:");
         println!("  --open FILE            Open .avb / .avp project");
@@ -23,8 +23,8 @@ fn run_avid(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Avid Media Composer 2024.4 (SlateOS)"); return 0; }
-    println!("Avid Media Composer 2024.4 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Avid Media Composer 2024.4 (Slate OS)"); return 0; }
+    println!("Avid Media Composer 2024.4 (Slate OS)");
     println!("  Editions: First (free), Media Composer, Symphony, Ultimate");
     println!("  Codec: DNxHD/DNxHR (Avid's open standard)");
     println!("  Used in: 90%+ of Hollywood films, network TV news, sports");

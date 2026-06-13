@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_d365(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: dynamics365 [OPTIONS]");
-        println!("Microsoft Dynamics 365 (SlateOS) — Modular cloud ERP/CRM + Power Platform");
+        println!("Microsoft Dynamics 365 (Slate OS) — Modular cloud ERP/CRM + Power Platform");
         println!();
         println!("Options:");
         println!("  --app APP              Sales/Customer Service/Field Service/Marketing/...");
@@ -24,8 +24,8 @@ fn run_d365(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Microsoft Dynamics 365 (2024 Wave 2) + pac CLI 1.34 (SlateOS)"); return 0; }
-    println!("Microsoft Dynamics 365 (2024 Wave 2) (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Microsoft Dynamics 365 (2024 Wave 2) + pac CLI 1.34 (Slate OS)"); return 0; }
+    println!("Microsoft Dynamics 365 (2024 Wave 2) (Slate OS)");
     println!("  CRM apps: Sales, Customer Service, Field Service, Marketing, Project Ops");
     println!("  ERP apps: Finance, Supply Chain Mgmt, Commerce, HR, Project Operations");
     println!("  SMB ERP: Business Central (formerly Navision/NAV)");

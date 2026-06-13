@@ -22,7 +22,7 @@ fn run_redis_server(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("Redis server v=7.2.0 sha=abc12345:0 malloc=jemalloc bits=64 build=abc1234 (SlateOS)");
+        println!("Redis server v=7.2.0 sha=abc12345:0 malloc=jemalloc bits=64 build=abc1234 (Slate OS)");
         return 0;
     }
     let port = args.iter().position(|a| a == "--port")
@@ -31,7 +31,7 @@ fn run_redis_server(args: Vec<String>) -> i32 {
         .unwrap_or(6379);
     println!("                _._");
     println!("           _.-``__ ''-._");
-    println!("      _.-``    `.  `_.  ''-._           Redis 7.2.0 (SlateOS) 64 bit");
+    println!("      _.-``    `.  `_.  ''-._           Redis 7.2.0 (Slate OS) 64 bit");
     println!("  .-`` .-```.  ```\\/    _.,_ ''-._");
     println!(" (    '      ,       .-`  | `,    )     Running in standalone mode");
     println!(" |`-._`-...-` __...-.``-._|'` _.-'|     Port: {}", port);
@@ -62,7 +62,7 @@ fn run_redis_cli(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("redis-cli 7.2.0 (SlateOS)");
+        println!("redis-cli 7.2.0 (Slate OS)");
         return 0;
     }
 

@@ -29,7 +29,7 @@ fn run_pydoc(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("pydoc 3.12.2 (SlateOS)");
+        println!("pydoc 3.12.2 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "-p") {

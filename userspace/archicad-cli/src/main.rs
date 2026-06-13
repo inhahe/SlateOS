@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_archicad(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: archicad [OPTIONS] [FILE]");
-        println!("Graphisoft Archicad 27 (SlateOS) — BIM for architects");
+        println!("Graphisoft Archicad 27 (Slate OS) — BIM for architects");
         println!();
         println!("Options:");
         println!("  -open FILE             Open .pln/.pla file");
@@ -23,8 +23,8 @@ fn run_archicad(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Graphisoft Archicad 27 build 5010 (SlateOS)"); return 0; }
-    println!("Graphisoft Archicad 27 build 5010 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Graphisoft Archicad 27 build 5010 (Slate OS)"); return 0; }
+    println!("Graphisoft Archicad 27 build 5010 (Slate OS)");
     println!("  Discipline: Architecture (BIM)");
     println!("  Format: .pln/.pla/.bpn native + IFC 4 (best-in-class), DWG, RVT, SKP");
     println!("  Library: GDL (Geometric Description Language) parametric objects");

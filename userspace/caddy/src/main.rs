@@ -35,7 +35,7 @@ fn run_caddy(args: Vec<String>) -> i32 {
             0
         }
         "version" | "--version" => {
-            println!("v2.8.4 (SlateOS) h1:abc1234=");
+            println!("v2.8.4 (Slate OS) h1:abc1234=");
             0
         }
         "build-info" => {

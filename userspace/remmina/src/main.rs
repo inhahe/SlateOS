@@ -27,7 +27,7 @@ fn run_remmina(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("remmina 1.4.35 (SlateOS)");
+        println!("remmina 1.4.35 (Slate OS)");
         println!("Protocols: RDP, VNC, SSH, SFTP, SPICE, HTTP, EXEC, NX");
         return 0;
     }
@@ -43,7 +43,7 @@ fn run_remmina(args: Vec<String>) -> i32 {
     } else if let Some(host) = server {
         println!("Connecting to {} via {} ...", host, protocol);
     } else {
-        println!("Remmina Remote Desktop Client 1.4.35 (SlateOS)");
+        println!("Remmina Remote Desktop Client 1.4.35 (Slate OS)");
         println!("(GUI launched — simulated)");
     }
     0

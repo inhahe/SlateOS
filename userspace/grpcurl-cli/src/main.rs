@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_grpcurl(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: grpcurl [OPTIONS] ADDRESS [SYMBOL]");
-        println!("grpcurl 1.9.1 (SlateOS)");
+        println!("grpcurl 1.9.1 (Slate OS)");
         println!();
         println!("Options:");
         println!("  -plaintext          Use plaintext (no TLS)");

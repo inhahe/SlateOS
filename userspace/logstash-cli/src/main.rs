@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_logstash(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: logstash [OPTIONS]");
-        println!("Logstash v8.14 (SlateOS) — Server-side data processing pipeline");
+        println!("Logstash v8.14 (Slate OS) — Server-side data processing pipeline");
         println!();
         println!("Options:");
         println!("  -f, --config FILE     Config file or directory");
@@ -28,8 +28,8 @@ fn run_logstash(args: &[String], _prog: &str) -> i32 {
         println!("  --version             Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("logstash v8.14.3 (SlateOS)"); return 0; }
-    println!("Logstash v8.14.3 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("logstash v8.14.3 (Slate OS)"); return 0; }
+    println!("Logstash v8.14.3 (Slate OS)");
     println!("  Pipelines: 2 running");
     println!("  Workers: 8 per pipeline");
     println!("  Batch size: 125 events");

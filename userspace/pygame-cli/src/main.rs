@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pygame(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pygame [COMMAND] [OPTIONS]");
-        println!("Pygame v2.6 (SlateOS) — Python game development library");
+        println!("Pygame v2.6 (Slate OS) — Python game development library");
         println!();
         println!("Commands:");
         println!("  new PROJECT        Create new pygame project");
@@ -29,8 +29,8 @@ fn run_pygame(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Pygame v2.6.0 (SlateOS)"); return 0; }
-    println!("Pygame v2.6.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Pygame v2.6.0 (Slate OS)"); return 0; }
+    println!("Pygame v2.6.0 (Slate OS)");
     println!("  Python: 3.12");
     println!("  SDL: 2.30.3");
     println!("  Display drivers: x11, wayland, dummy");

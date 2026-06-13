@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sv(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: sv COMMAND [OPTIONS]");
-        println!("SvelteKit CLI 2.0 (SlateOS)");
+        println!("SvelteKit CLI 2.0 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  create       Create a new SvelteKit project");

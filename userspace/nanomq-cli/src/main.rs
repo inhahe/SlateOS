@@ -15,7 +15,7 @@ fn run_nanomq(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [COMMAND] [OPTIONS]", prog);
         match prog {
             "nanomq_cli" => {
-                println!("nanomq_cli (SlateOS) — NanoMQ client tools");
+                println!("nanomq_cli (Slate OS) — NanoMQ client tools");
                 println!("  pub -t TOPIC -m MSG   Publish message");
                 println!("  sub -t TOPIC          Subscribe to topic");
                 println!("  conn                  Test connection");
@@ -23,7 +23,7 @@ fn run_nanomq(args: &[String], prog: &str) -> i32 {
                 println!("  nngproxy              NNG proxy");
             }
             _ => {
-                println!("NanoMQ v0.21 (SlateOS) — Ultra-lightweight MQTT broker");
+                println!("NanoMQ v0.21 (Slate OS) — Ultra-lightweight MQTT broker");
                 println!("  start              Start broker");
                 println!("  stop               Stop broker");
                 println!("  restart            Restart broker");
@@ -36,14 +36,14 @@ fn run_nanomq(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("NanoMQ v0.21.10 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("NanoMQ v0.21.10 (Slate OS)"); return 0; }
     match prog {
         "nanomq_cli" => {
             println!("NanoMQ CLI v0.21.10");
             println!("  Available tools: pub, sub, conn, bench, nngproxy");
         }
         _ => {
-            println!("NanoMQ v0.21.10 (SlateOS)");
+            println!("NanoMQ v0.21.10 (Slate OS)");
             println!("  MQTT: 0.0.0.0:1883");
             println!("  WebSocket: 0.0.0.0:8083/mqtt");
             println!("  Protocol: MQTT 3.1.1, 5.0");

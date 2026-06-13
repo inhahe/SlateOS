@@ -11,7 +11,7 @@ fn run_iconv(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: iconv [OPTIONS] [FILE ...]");
         println!();
-        println!("iconv — character set conversion (SlateOS).");
+        println!("iconv — character set conversion (Slate OS).");
         println!();
         println!("Options:");
         println!("  -f, --from-code ENC   Input encoding");
@@ -24,7 +24,7 @@ fn run_iconv(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("iconv (GNU libc) 2.39 (SlateOS)");
+        println!("iconv (GNU libc) 2.39 (Slate OS)");
         return 0;
     }
 

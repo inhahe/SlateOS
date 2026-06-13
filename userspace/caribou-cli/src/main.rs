@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_caribou(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: caribou [OPTIONS]");
-        println!("caribou v0.4 (SlateOS) — GNOME on-screen keyboard");
+        println!("caribou v0.4 (Slate OS) — GNOME on-screen keyboard");
         println!();
         println!("Options:");
         println!("  --version         Show version");
@@ -22,7 +22,7 @@ fn run_caribou(args: &[String], _prog: &str) -> i32 {
         println!("Integrates with AT-SPI accessibility framework.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("caribou v0.4 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("caribou v0.4 (Slate OS)"); return 0; }
     println!("caribou: on-screen keyboard daemon started");
     println!("  AT-SPI integration: active");
     println!("  Auto-show: on focus");
@@ -32,10 +32,10 @@ fn run_caribou(args: &[String], _prog: &str) -> i32 {
 fn run_preferences(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: caribou-preferences [OPTIONS]");
-        println!("caribou-preferences v0.4 (SlateOS) — Caribou settings");
+        println!("caribou-preferences v0.4 (Slate OS) — Caribou settings");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("caribou-preferences v0.4 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("caribou-preferences v0.4 (Slate OS)"); return 0; }
     println!("caribou-preferences: settings dialog opened");
     println!("  Keyboard layout: Full");
     println!("  Scanning: disabled");

@@ -19,7 +19,7 @@ fn run_lsusb(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lsusb [OPTIONS]");
         println!();
-        println!("lsusb — list USB devices (SlateOS).");
+        println!("lsusb — list USB devices (Slate OS).");
         println!();
         println!("Options:");
         println!("  -v              Verbose");
@@ -30,7 +30,7 @@ fn run_lsusb(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("lsusb (usbutils) 017 (SlateOS)");
+        println!("lsusb (usbutils) 017 (Slate OS)");
         return 0;
     }
 

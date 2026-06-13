@@ -14,7 +14,7 @@ fn run_hostapd(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: hostapd [OPTIONS] <config-file>");
         println!();
-        println!("hostapd — IEEE 802.11 AP, IEEE 802.1X/WPA authenticator (SlateOS).");
+        println!("hostapd — IEEE 802.11 AP, IEEE 802.1X/WPA authenticator (Slate OS).");
         println!();
         println!("Options:");
         println!("  -d            Debug output");
@@ -26,7 +26,7 @@ fn run_hostapd(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-v") {
-        println!("hostapd v2.10 (SlateOS)");
+        println!("hostapd v2.10 (Slate OS)");
         return 0;
     }
 

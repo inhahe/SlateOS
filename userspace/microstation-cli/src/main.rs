@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ms(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: microstation [OPTIONS] [FILE]");
-        println!("Bentley MicroStation CONNECT (SlateOS) — Infrastructure CAD/BIM");
+        println!("Bentley MicroStation CONNECT (Slate OS) — Infrastructure CAD/BIM");
         println!();
         println!("Options:");
         println!("  -wsRoot DIR            Workspace root");
@@ -23,8 +23,8 @@ fn run_ms(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Bentley MicroStation CONNECT Update 17 (SlateOS)"); return 0; }
-    println!("Bentley MicroStation CONNECT Update 17 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Bentley MicroStation CONNECT Update 17 (Slate OS)"); return 0; }
+    println!("Bentley MicroStation CONNECT Update 17 (Slate OS)");
     println!("  Industries: Infrastructure (roads/bridges/rail/utilities), plant, building");
     println!("  Format: .dgn native (V8) + DWG/DXF/IFC/SKP/3DS/OBJ");
     println!("  Modeling: 2D drafting, 3D solids/surfaces, parametric, mesh");

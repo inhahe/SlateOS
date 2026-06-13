@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_utm(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: utm [OPTIONS]");
-        println!("UTM 4.6 (SlateOS) — QEMU-based virtualization for macOS / iOS / visionOS");
+        println!("UTM 4.6 (Slate OS) — QEMU-based virtualization for macOS / iOS / visionOS");
         println!();
         println!("Options:");
         println!("  --new                  New VM (wizard)");
@@ -24,8 +24,8 @@ fn run_utm(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("UTM 4.6.4 (SlateOS)"); return 0; }
-    println!("UTM 4.6.4 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("UTM 4.6.4 (Slate OS)"); return 0; }
+    println!("UTM 4.6.4 (Slate OS)");
     println!("  Author: osy (Turing Software LLC), open-source maintainer-driven project");
     println!("  License: Apache 2.0 (some files), based on QEMU + libcocoa-helpers");
     println!("  Platforms: macOS 11+ (Big Sur), iOS 14+ (JIT-allowed devices), visionOS");

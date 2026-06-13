@@ -19,7 +19,7 @@ fn run_cpupower(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: cpupower COMMAND [OPTIONS]");
         println!();
-        println!("cpupower — CPU power management (SlateOS).");
+        println!("cpupower — CPU power management (Slate OS).");
         println!();
         println!("Commands:");
         println!("  frequency-info    Show CPU frequency info");
@@ -79,7 +79,7 @@ fn run_turbostat(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("turbostat version 2024.01.01 (SlateOS)");
+        println!("turbostat version 2024.01.01 (Slate OS)");
         return 0;
     }
 

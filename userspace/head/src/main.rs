@@ -1036,7 +1036,7 @@ fn is_broken_pipe(e: &io::Error) -> bool {
 // ============================================================================
 
 fn print_help_head() {
-    println!("SlateOS head v{VERSION}");
+    println!("Slate OS head v{VERSION}");
     println!();
     println!("Print the first 10 lines of each FILE to standard output.");
     println!("With more than one FILE, precede each with a header giving the file name.");
@@ -1061,7 +1061,7 @@ fn print_help_head() {
 }
 
 fn print_help_tail() {
-    println!("SlateOS tail v{VERSION}");
+    println!("Slate OS tail v{VERSION}");
     println!();
     println!("Print the last 10 lines of each FILE to standard output.");
     println!("With more than one FILE, precede each with a header giving the file name.");
@@ -1112,7 +1112,7 @@ fn main() {
                 Tool::Head => "head",
                 Tool::Tail => "tail",
             };
-            println!("{name} (SlateOS) {VERSION}");
+            println!("{name} (Slate OS) {VERSION}");
             process::exit(0);
         }
         ParseResult::Run(config) => {

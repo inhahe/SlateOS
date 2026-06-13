@@ -46,7 +46,7 @@ fn run_hyperfine(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("hyperfine 1.18.0 (SlateOS)");
+        println!("hyperfine 1.18.0 (Slate OS)");
         return 0;
     }
 

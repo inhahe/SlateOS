@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_n8n(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: n8n [COMMAND] [OPTIONS]");
-        println!("n8n v1.52 (SlateOS) — Workflow automation platform");
+        println!("n8n v1.52 (Slate OS) — Workflow automation platform");
         println!();
         println!("Commands:");
         println!("  start              Start n8n");
@@ -31,8 +31,8 @@ fn run_n8n(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("n8n v1.52.0 (SlateOS)"); return 0; }
-    println!("n8n v1.52.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("n8n v1.52.0 (Slate OS)"); return 0; }
+    println!("n8n v1.52.0 (Slate OS)");
     println!("  Editor: http://0.0.0.0:5678");
     println!("  Workflows: 34 (28 active)");
     println!("  Executions: 2,345 (last 24h)");

@@ -39,7 +39,7 @@ fn run_git_cliff(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("git-cliff 2.4.0 (SlateOS)");
+        println!("git-cliff 2.4.0 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "--init") {

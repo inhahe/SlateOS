@@ -47,8 +47,8 @@ impl fmt::Display for GrubError {
         match self {
             Self::GrubNotFound => write!(f, "no GRUB installation found"),
             Self::ConfigNotWritable(p) => write!(f, "GRUB config not writable: {p}"),
-            Self::EntryAlreadyExists => write!(f, "SlateOS GRUB entry already exists"),
-            Self::EntryNotFound => write!(f, "SlateOS GRUB entry not found"),
+            Self::EntryAlreadyExists => write!(f, "Slate OS GRUB entry already exists"),
+            Self::EntryNotFound => write!(f, "Slate OS GRUB entry not found"),
             Self::UpdateFailed(msg) => write!(f, "GRUB update failed: {msg}"),
             Self::InvalidPath(p) => write!(f, "invalid path: {p}"),
             Self::Io(e) => write!(f, "I/O error: {e}"),
@@ -128,7 +128,7 @@ pub enum GrubEntryType {
 /// A GRUB menu entry for SlateOS.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrubEntry {
-    /// Menu entry title shown in GRUB (e.g. "SlateOS 1.0").
+    /// Menu entry title shown in GRUB (e.g. "Slate OS 1.0").
     pub title: String,
     /// Path to the kernel binary or Limine EFI binary, relative to the root
     /// partition (e.g. `/EFI/slateos/limine.efi` or `/boot/kernel.elf`).
@@ -153,7 +153,7 @@ pub struct GrubEntry {
 pub const CUSTOM_SCRIPT_NAME: &str = "40_slateos";
 
 /// Marker embedded inside our generated script so we can reliably identify it.
-const SLATEOS_MARKER: &str = "### SlateOS GRUB entry — managed by SlateOS installer ###";
+const SLATEOS_MARKER: &str = "### Slate OS GRUB entry — managed by Slate OS installer ###";
 
 /// Generate the GRUB `menuentry` text for the given [`GrubEntry`].
 ///
@@ -670,7 +670,7 @@ mod tests {
 
     fn sample_entry_chainload() -> GrubEntry {
         GrubEntry {
-            title: "SlateOS 1.0".into(),
+            title: "Slate OS 1.0".into(),
             kernel_path: "/EFI/slateos/limine.efi".into(),
             root_partition: "(hd0,gpt1)".into(),
             uuid: "ABCD-1234".into(),
@@ -682,7 +682,7 @@ mod tests {
 
     fn sample_entry_direct() -> GrubEntry {
         GrubEntry {
-            title: "SlateOS 1.0".into(),
+            title: "Slate OS 1.0".into(),
             kernel_path: "/boot/kernel.elf".into(),
             root_partition: "(hd0,gpt3)".into(),
             uuid: "a1b2c3d4-e5f6-7890-abcd-ef1234567890".into(),
@@ -699,7 +699,7 @@ mod tests {
         let entry = sample_entry_chainload();
         let text = generate_entry(&entry);
 
-        assert!(text.contains("menuentry \"SlateOS 1.0\""));
+        assert!(text.contains("menuentry \"Slate OS 1.0\""));
         assert!(text.contains("insmod chain"));
         assert!(text.contains("insmod part_gpt"));
         assert!(text.contains("insmod fat"));
@@ -726,7 +726,7 @@ mod tests {
         let entry = sample_entry_direct();
         let text = generate_entry(&entry);
 
-        assert!(text.contains("menuentry \"SlateOS 1.0\""));
+        assert!(text.contains("menuentry \"Slate OS 1.0\""));
         assert!(text.contains("insmod multiboot2"));
         assert!(text.contains(
             "search --no-floppy --fs-uuid --set=root a1b2c3d4-e5f6-7890-abcd-ef1234567890"
@@ -936,7 +936,7 @@ mod tests {
         make_grub_tree(
             &tmp,
             "boot/grub/grub.cfg",
-            "set timeout=7\nset default=\"SlateOS\"\n",
+            "set timeout=7\nset default=\"Slate OS\"\n",
         );
         fs::create_dir_all(tmp.join("etc/grub.d")).unwrap();
         fs::create_dir_all(tmp.join("etc/default")).unwrap();
@@ -948,7 +948,7 @@ mod tests {
 
         let cfg = parse_grub_config(&tmp).expect("should parse");
         assert_eq!(cfg.timeout, 7);
-        assert_eq!(cfg.default_entry, "SlateOS");
+        assert_eq!(cfg.default_entry, "Slate OS");
         assert!(cfg.os_prober_enabled);
     }
 
@@ -1032,12 +1032,12 @@ mod tests {
         installer.install(&entry1).unwrap();
 
         let mut entry2 = sample_entry_chainload();
-        entry2.title = "SlateOS 2.0".into();
+        entry2.title = "Slate OS 2.0".into();
         installer.update(&entry2).expect("update should succeed");
 
         let contents = fs::read_to_string(installer.script_path()).unwrap();
-        assert!(contents.contains("SlateOS 2.0"));
-        assert!(!contents.contains("SlateOS 1.0"));
+        assert!(contents.contains("Slate OS 2.0"));
+        assert!(!contents.contains("Slate OS 1.0"));
     }
 
     #[test]

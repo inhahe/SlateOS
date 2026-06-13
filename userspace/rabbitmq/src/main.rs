@@ -18,7 +18,7 @@ fn run_server(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("RabbitMQ 3.13.2 (SlateOS)");
+        println!("RabbitMQ 3.13.2 (Slate OS)");
         println!("Erlang/OTP 26");
         return 0;
     }
@@ -26,7 +26,7 @@ fn run_server(args: Vec<String>) -> i32 {
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("rabbit@localhost");
-    println!("  ##  ##      RabbitMQ 3.13.2 (SlateOS)");
+    println!("  ##  ##      RabbitMQ 3.13.2 (Slate OS)");
     println!("  ##  ##");
     println!("  ##########  Copyright (c) 2007-2025 Broadcom Inc.");
     println!("  ######  ##");
@@ -80,7 +80,7 @@ fn run_ctl(args: Vec<String>) -> i32 {
             println!("Runtime");
             println!();
             println!("OS PID: 12345");
-            println!("OS: SlateOS — x86_64");
+            println!("OS: Slate OS — x86_64");
             println!("Uptime (seconds): 86400");
             println!("RabbitMQ version: 3.13.2");
             println!("Erlang version: 26.2.4");

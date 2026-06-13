@@ -11,7 +11,7 @@ fn run_john(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: john [OPTIONS] [PASSWORD_FILES]");
         println!();
-        println!("John the Ripper — password cracker (SlateOS).");
+        println!("John the Ripper — password cracker (Slate OS).");
         println!();
         println!("Options:");
         println!("  --single               \"Single crack\" mode");
@@ -31,7 +31,7 @@ fn run_john(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("John the Ripper 1.9.0-jumbo-1 (SlateOS)");
+        println!("John the Ripper 1.9.0-jumbo-1 (Slate OS)");
         return 0;
     }
 

@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_collibra(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: collibra [OPTIONS]");
-        println!("Collibra (SlateOS) — data intelligence platform (catalog + governance leader)");
+        println!("Collibra (Slate OS) — data intelligence platform (catalog + governance leader)");
         println!();
         println!("Options:");
         println!("  --catalog              Browse cataloged assets");
@@ -22,8 +22,8 @@ fn run_collibra(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Collibra 2024.07 (SlateOS)"); return 0; }
-    println!("Collibra 2024.07 (SlateOS) — Data Intelligence Platform");
+    if args.iter().any(|a| a == "--version") { println!("Collibra 2024.07 (Slate OS)"); return 0; }
+    println!("Collibra 2024.07 (Slate OS) — Data Intelligence Platform");
     println!("  Vendor: Collibra NV (Brussels, Belgium + New York City)");
     println!("  Founders: Felix Van de Maele (CEO) + Stijn Christiaens + Pieter De Leenheer, 2008");
     println!("          Felix: Belgian data scientist, also founded later companies");

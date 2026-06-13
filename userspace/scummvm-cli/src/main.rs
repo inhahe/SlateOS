@@ -11,7 +11,7 @@ fn run_scummvm(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: scummvm [OPTIONS] [GAME]");
         println!();
-        println!("scummvm — adventure game interpreter (SlateOS).");
+        println!("scummvm — adventure game interpreter (Slate OS).");
         println!();
         println!("Options:");
         println!("  -v, --version        Show version");
@@ -26,7 +26,7 @@ fn run_scummvm(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-v" || a == "--version") {
-        println!("ScummVM 2.8.1 (SlateOS)");
+        println!("ScummVM 2.8.1 (Slate OS)");
         println!("Features compiled in: Vorbis FLAC MP3 ALSA PNG MPEG2 Theora AAC");
         return 0;
     }

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_keepassxc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: keepassxc [OPTIONS] [DATABASE]");
-        println!("keepassxc v2.7 (SlateOS) — Password manager");
+        println!("keepassxc v2.7 (Slate OS) — Password manager");
         println!();
         println!("Options:");
         println!("  --pw-stdin        Read password from stdin");
@@ -21,7 +21,7 @@ fn run_keepassxc(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("keepassxc v2.7 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("keepassxc v2.7 (Slate OS)"); return 0; }
     println!("keepassxc: password manager started");
     println!("  Database: ~/passwords.kdbx");
     println!("  Entries: 85");
@@ -33,7 +33,7 @@ fn run_keepassxc(args: &[String], _prog: &str) -> i32 {
 fn run_cli(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: keepassxc-cli COMMAND [OPTIONS]");
-        println!("keepassxc-cli v2.7 (SlateOS) — CLI password manager");
+        println!("keepassxc-cli v2.7 (Slate OS) — CLI password manager");
         println!();
         println!("Commands:");
         println!("  ls DB             List entries");

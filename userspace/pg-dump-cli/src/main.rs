@@ -47,8 +47,8 @@ fn run_pg_dump(args: &[String]) -> i32 {
         println!("pg_dump: done.");
     } else {
         println!("-- PostgreSQL database dump");
-        println!("-- Dumped from database version 16.1 (SlateOS)");
-        println!("-- Dumped by pg_dump version 16.1 (SlateOS)");
+        println!("-- Dumped from database version 16.1 (Slate OS)");
+        println!("-- Dumped by pg_dump version 16.1 (Slate OS)");
         println!();
         println!("SET statement_timeout = 0;");
         println!("SET client_encoding = 'UTF8';");
@@ -107,7 +107,7 @@ fn run_pg_dumpall(args: &[String]) -> i32 {
         return 0;
     }
     println!("-- PostgreSQL database cluster dump");
-    println!("-- Dumped by pg_dumpall version 16.1 (SlateOS)");
+    println!("-- Dumped by pg_dumpall version 16.1 (Slate OS)");
     println!();
     println!("CREATE ROLE postgres;");
     println!("ALTER ROLE postgres WITH SUPERUSER LOGIN;");

@@ -25,7 +25,7 @@ fn run_mediainfo(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--Version" || a == "--version" || a == "-V") {
-        println!("MediaInfo 24.01 (SlateOS)");
+        println!("MediaInfo 24.01 (Slate OS)");
         return 0;
     }
 

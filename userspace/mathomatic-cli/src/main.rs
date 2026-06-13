@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mathomatic(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mathomatic [OPTIONS] [FILE...]");
-        println!("Mathomatic v16.0 (SlateOS) — Computer Algebra System");
+        println!("Mathomatic v16.0 (Slate OS) — Computer Algebra System");
         println!();
         println!("Options:");
         println!("  -e EXPR     Evaluate expression");
@@ -27,12 +27,12 @@ fn run_mathomatic(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Mathomatic version 16.0.5 (SlateOS)");
+        println!("Mathomatic version 16.0.5 (Slate OS)");
         return 0;
     }
     let quiet = args.iter().any(|a| a == "-q");
     if !quiet {
-        println!("Mathomatic version 16.0.5 (SlateOS)");
+        println!("Mathomatic version 16.0.5 (Slate OS)");
         println!("Copyright (C) Mathomatic project");
         println!("200 equation spaces available, currently using 1.");
     }

@@ -11,7 +11,7 @@ fn run_exiftool(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "-help") {
         println!("Usage: exiftool [OPTIONS] FILE...");
         println!();
-        println!("ExifTool — read/write metadata in files (SlateOS).");
+        println!("ExifTool — read/write metadata in files (Slate OS).");
         println!();
         println!("Options:");
         println!("  -TAG                   Extract specific tag");

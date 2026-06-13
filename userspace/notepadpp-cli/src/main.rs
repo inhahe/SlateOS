@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_npp(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: notepadpp [OPTIONS]");
-        println!("Notepad++ 8.7.5 (SlateOS) — Free Windows source code editor");
+        println!("Notepad++ 8.7.5 (Slate OS) — Free Windows source code editor");
         println!();
         println!("Options:");
         println!("  --new                  New tab");
@@ -24,8 +24,8 @@ fn run_npp(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Notepad++ v8.7.5 (SlateOS)"); return 0; }
-    println!("Notepad++ v8.7.5 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Notepad++ v8.7.5 (Slate OS)"); return 0; }
+    println!("Notepad++ v8.7.5 (Slate OS)");
     println!("  Author: Don Ho (Vietnam → France-based developer)");
     println!("  License: GPL v3 (free + open source)");
     println!("  First release: Nov 2003");

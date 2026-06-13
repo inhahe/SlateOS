@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_forgerock(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: forgerock [OPTIONS]");
-        println!("ForgeRock (SlateOS) — identity platform (now part of Ping Identity, Thoma Bravo)");
+        println!("ForgeRock (Slate OS) — identity platform (now part of Ping Identity, Thoma Bravo)");
         println!();
         println!("Options:");
         println!("  --identitycloud        ForgeRock Identity Cloud (SaaS, integrating with PingOne)");
@@ -22,8 +22,8 @@ fn run_forgerock(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("ForgeRock 2024 (SlateOS) — forgerock-cli (Identity Cloud + AM admin)"); return 0; }
-    println!("ForgeRock 2024 (SlateOS) — Identity Platform (Sun OpenAM Heritage, Now Ping Identity)");
+    if args.iter().any(|a| a == "--version") { println!("ForgeRock 2024 (Slate OS) — forgerock-cli (Identity Cloud + AM admin)"); return 0; }
+    println!("ForgeRock 2024 (Slate OS) — Identity Platform (Sun OpenAM Heritage, Now Ping Identity)");
     println!("  Vendor: ForgeRock Inc. (San Francisco, CA + Bristol, UK — now part of Ping Identity / Thoma Bravo)");
     println!("  Founders: Lasse Andresen + Jamie Nelson + Hermann Wittmann + others, 2010");
     println!("          Lasse Andresen: Norwegian, ex-Sun Microsystems identity engineer");

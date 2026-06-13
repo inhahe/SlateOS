@@ -10,7 +10,7 @@ use std::process;
 fn run_verilator(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: verilator [OPTIONS] [FILE.v | FILE.sv]");
-        println!("Verilator 5.020 (SlateOS)");
+        println!("Verilator 5.020 (Slate OS)");
         println!();
         println!("  --cc              Generate C++ output");
         println!("  --sc              Generate SystemC output");

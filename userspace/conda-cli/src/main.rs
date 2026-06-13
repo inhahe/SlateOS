@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_conda(args: &[String], prog_name: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: {} COMMAND [OPTIONS]", prog_name);
-        println!("{} 24.5.0 (SlateOS)", prog_name);
+        println!("{} 24.5.0 (Slate OS)", prog_name);
         println!();
         println!("Environment commands:");
         println!("  create      Create a new environment");

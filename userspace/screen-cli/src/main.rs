@@ -11,7 +11,7 @@ fn run_screen(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: screen [OPTIONS] [COMMAND]");
         println!();
-        println!("GNU Screen — terminal multiplexer (SlateOS).");
+        println!("GNU Screen — terminal multiplexer (Slate OS).");
         println!();
         println!("Options:");
         println!("  -S NAME       Create named session");
@@ -24,7 +24,7 @@ fn run_screen(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-v" || a == "--version") {
-        println!("Screen version 4.09.01 (SlateOS)");
+        println!("Screen version 4.09.01 (Slate OS)");
         return 0;
     }
 

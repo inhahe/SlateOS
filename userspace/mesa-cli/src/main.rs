@@ -19,7 +19,7 @@ fn run_eglinfo(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: eglinfo [OPTIONS]");
         println!();
-        println!("eglinfo — display EGL information (SlateOS).");
+        println!("eglinfo — display EGL information (Slate OS).");
         return 0;
     }
     println!("EGL client extensions:");
@@ -47,7 +47,7 @@ fn run_es2_info(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: es2_info");
         println!();
-        println!("es2_info — OpenGL ES 2.0 implementation info (SlateOS).");
+        println!("es2_info — OpenGL ES 2.0 implementation info (Slate OS).");
         return 0;
     }
     println!("GL_VERSION: OpenGL ES 3.2 Mesa 24.0.1");

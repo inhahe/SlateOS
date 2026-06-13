@@ -16,7 +16,7 @@ fn run_postfix(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "version" => {
-            println!("postfix (Postfix) 3.8.6 (SlateOS)");
+            println!("postfix (Postfix) 3.8.6 (Slate OS)");
             0
         }
         "start" => {
@@ -153,7 +153,7 @@ fn run_sendmail(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("sendmail: Postfix sendmail compatibility interface 3.8.6 (SlateOS)");
+        println!("sendmail: Postfix sendmail compatibility interface 3.8.6 (Slate OS)");
         return 0;
     }
     println!("(message queued for delivery — simulated)");

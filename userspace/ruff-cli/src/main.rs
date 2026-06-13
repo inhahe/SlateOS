@@ -11,7 +11,7 @@ fn run_ruff(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ruff <COMMAND> [OPTIONS]");
         println!();
-        println!("Ruff — extremely fast Python linter and formatter (SlateOS).");
+        println!("Ruff — extremely fast Python linter and formatter (Slate OS).");
         println!();
         println!("Commands:");
         println!("  check        Lint files");
@@ -22,7 +22,7 @@ fn run_ruff(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("ruff 0.2.0 (SlateOS)");
+        println!("ruff 0.2.0 (Slate OS)");
         return 0;
     }
 

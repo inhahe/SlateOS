@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_beekeeper(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: beekeeper-studio [OPTIONS] [CONNECTION]");
-        println!("beekeeper-studio v4.6 (SlateOS) — Cross-platform SQL editor & database manager");
+        println!("beekeeper-studio v4.6 (Slate OS) — Cross-platform SQL editor & database manager");
         println!();
         println!("Options:");
         println!("  --url URL       Connection URL");
@@ -26,7 +26,7 @@ fn run_beekeeper(args: &[String], _prog: &str) -> i32 {
         println!("  SSH tunneling, saved connections");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("beekeeper-studio v4.6 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("beekeeper-studio v4.6 (Slate OS)"); return 0; }
     println!("beekeeper-studio: database manager started");
     println!("  Saved connections: 3");
     println!("  Recent queries: 12");

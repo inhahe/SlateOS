@@ -455,7 +455,7 @@ fn print_version(personality: Personality) {
         Personality::WriteMsg => "write",
         Personality::Talk => "talk",
     };
-    println!("{name} (SlateOS) 0.1.0");
+    println!("{name} (Slate OS) 0.1.0");
 }
 
 // ---------------------------------------------------------------------------

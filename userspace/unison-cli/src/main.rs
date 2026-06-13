@@ -11,7 +11,7 @@ fn run_unison(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-help") {
         println!("Usage: unison [OPTIONS] [PROFILE | ROOT1 ROOT2]");
         println!();
-        println!("Unison — bidirectional file synchronizer (SlateOS).");
+        println!("Unison — bidirectional file synchronizer (Slate OS).");
         println!();
         println!("Options:");
         println!("  -auto            Accept non-conflicting actions");
@@ -32,7 +32,7 @@ fn run_unison(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-version") {
-        println!("unison version 2.53.5 (SlateOS)");
+        println!("unison version 2.53.5 (Slate OS)");
         return 0;
     }
 

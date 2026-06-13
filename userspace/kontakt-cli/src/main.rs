@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_kontakt(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: kontakt [OPTIONS] [INSTRUMENT]");
-        println!("Native Instruments Kontakt 7 (SlateOS) — Industry-standard software sampler");
+        println!("Native Instruments Kontakt 7 (Slate OS) — Industry-standard software sampler");
         println!();
         println!("Options:");
         println!("  --load FILE            Load .nki/.nkb instrument");
@@ -23,8 +23,8 @@ fn run_kontakt(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("NI Kontakt 7.10.5 (SlateOS)"); return 0; }
-    println!("NI Kontakt 7.10.5 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("NI Kontakt 7.10.5 (Slate OS)"); return 0; }
+    println!("NI Kontakt 7.10.5 (Slate OS)");
     println!("  Sample formats: WAV, AIFF, FLAC, NCW (lossless)");
     println!("  Scripting: KSP (Kontakt Script Processor)");
     println!("  Modes: Kontakt Player (free, runs Player-compatible libs only) / Full");

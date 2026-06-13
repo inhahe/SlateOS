@@ -20,7 +20,7 @@ fn run_julia(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("julia version 1.10.2 (SlateOS)");
+        println!("julia version 1.10.2 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "-e") {
@@ -39,7 +39,7 @@ fn run_julia(args: &[String]) -> i32 {
         println!("  (_)     | (_) (_)    |");
         println!("   _ _   _| |_  __ _   |  Type \"?\" for help, \"]?\" for Pkg help.");
         println!("  | | | | | | |/ _` |  |");
-        println!("  | | |_| | | | (_| |  |  Version 1.10.2 (SlateOS)");
+        println!("  | | |_| | | | (_| |  |  Version 1.10.2 (Slate OS)");
         println!(" _/ |\\__'_|_|_|\\__'_|  |");
         println!("|__/                   |");
         println!();

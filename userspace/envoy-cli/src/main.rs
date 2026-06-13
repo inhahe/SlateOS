@@ -14,7 +14,7 @@ fn run_envoy(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: envoy [OPTIONS]");
         println!();
-        println!("envoy — L7 proxy and communication bus (SlateOS).");
+        println!("envoy — L7 proxy and communication bus (Slate OS).");
         println!();
         println!("Options:");
         println!("  -c <path>          Config file");
@@ -49,7 +49,7 @@ fn run_istioctl(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: istioctl [OPTIONS] COMMAND");
         println!();
-        println!("istioctl — Istio service mesh CLI (SlateOS).");
+        println!("istioctl — Istio service mesh CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  version           Show version");
@@ -64,7 +64,7 @@ fn run_istioctl(args: &[String]) -> i32 {
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match subcmd {
         "version" => {
-            println!("client version: 1.21.0 (SlateOS)");
+            println!("client version: 1.21.0 (Slate OS)");
             println!("control plane version: 1.21.0");
             println!("data plane version: 1.21.0 (4 proxies)");
         }

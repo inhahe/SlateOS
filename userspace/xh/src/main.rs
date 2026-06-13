@@ -65,7 +65,7 @@ fn run_xh(args: Vec<String>, https_default: bool) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("xh 0.22.2 (SlateOS)");
+        println!("xh 0.22.2 (Slate OS)");
         return 0;
     }
 

@@ -29,7 +29,7 @@ fn run_wg(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "version" => {
-            println!("wireguard-tools v1.0.20210914 (SlateOS)");
+            println!("wireguard-tools v1.0.20210914 (Slate OS)");
             0
         }
         "show" => {

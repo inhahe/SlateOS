@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pcl_viewer(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: pcl_viewer [OPTIONS] FILE.pcd");
-        println!("PCL Viewer 1.14.0 (SlateOS)");
+        println!("PCL Viewer 1.14.0 (Slate OS)");
         println!("  -bc R,G,B     Background color");
         println!("  -fc R,G,B     Point color");
         println!("  -ps N         Point size");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_lp(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lastpass [OPTIONS]");
-        println!("LastPass (SlateOS) — GoTo (LogMeIn) password manager");
+        println!("LastPass (Slate OS) — GoTo (LogMeIn) password manager");
         println!();
         println!("Options:");
         println!("  --vault                Open vault");
@@ -24,8 +24,8 @@ fn run_lp(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("LastPass 4.137.0 (SlateOS)"); return 0; }
-    println!("LastPass 4.137.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("LastPass 4.137.0 (Slate OS)"); return 0; }
+    println!("LastPass 4.137.0 (Slate OS)");
     println!("  Owner: GoTo (formerly LogMeIn — acquired LastPass 2015 for $125M)");
     println!("  Founded: 2008 by Marvin Liao, Joe Siegrist, Bilal Hameed");
     println!("  Spun off from GoTo Sep 2024 (private, separate company)");

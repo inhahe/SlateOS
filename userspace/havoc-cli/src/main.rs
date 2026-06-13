@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_havoc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: havoc [OPTIONS] [CMD [ARGS...]]");
-        println!("havoc v0.5 (SlateOS) — Minimal Wayland terminal emulator");
+        println!("havoc v0.5 (Slate OS) — Minimal Wayland terminal emulator");
         println!();
         println!("Options:");
         println!("  CMD               Command to run (default: shell)");
@@ -21,7 +21,7 @@ fn run_havoc(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("havoc v0.5 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("havoc v0.5 (Slate OS)"); return 0; }
     println!("havoc: minimal Wayland terminal");
     println!("  Protocol: Wayland");
     println!("  Font: monospace 12pt");

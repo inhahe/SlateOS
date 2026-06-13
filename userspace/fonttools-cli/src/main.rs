@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ttx(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: ttx [OPTIONS] FILE...");
-        println!("ttx v4.51 (SlateOS) — Convert fonts to/from XML");
+        println!("ttx v4.51 (Slate OS) — Convert fonts to/from XML");
         println!();
         println!("Options:");
         println!("  FILE.ttf/.otf     Convert font to XML (.ttx)");
@@ -36,7 +36,7 @@ fn run_ttx(args: &[String], _prog: &str) -> i32 {
 fn run_pyftsubset(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: pyftsubset FONT [OPTIONS]");
-        println!("pyftsubset v4.51 (SlateOS) — Create font subsets");
+        println!("pyftsubset v4.51 (Slate OS) — Create font subsets");
         println!();
         println!("Options:");
         println!("  --text TEXT         Include glyphs for text");
@@ -59,7 +59,7 @@ fn run_pyftsubset(args: &[String], _prog: &str) -> i32 {
 fn run_pyftmerge(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: pyftmerge FONT1 FONT2 [OPTIONS]");
-        println!("pyftmerge v4.51 (SlateOS) — Merge multiple fonts");
+        println!("pyftmerge v4.51 (Slate OS) — Merge multiple fonts");
         return 0;
     }
     let files: Vec<&str> = args.iter()

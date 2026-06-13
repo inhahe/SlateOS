@@ -1214,7 +1214,7 @@ fn parse_args() -> Result<Options, String> {
                 process::exit(0);
             }
             "--version" => {
-                println!("gzip (SlateOS) 1.0");
+                println!("gzip (Slate OS) 1.0");
                 process::exit(0);
             }
             "-c" | "--stdout" | "--to-stdout" => stdout = true,

@@ -261,7 +261,7 @@ fn show_os() {
     if let Some(version) = read_proc("/proc/version") {
         println!("  Version:   {version}");
     } else {
-        println!("  Version:   SlateOS (version info not available)");
+        println!("  Version:   Slate OS (version info not available)");
     }
 
     if let Some(uptime_str) = read_proc("/proc/uptime") {
@@ -411,7 +411,7 @@ fn show_all() {
 // ============================================================================
 
 fn print_usage() {
-    println!("SlateOS System Information v0.1.0");
+    println!("Slate OS System Information v0.1.0");
     println!();
     println!("Query and display comprehensive system information.");
     println!();

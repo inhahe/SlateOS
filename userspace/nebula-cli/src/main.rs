@@ -14,7 +14,7 @@ fn run_nebula(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: nebula [OPTIONS]");
         println!();
-        println!("nebula — scalable overlay networking (SlateOS).");
+        println!("nebula — scalable overlay networking (Slate OS).");
         println!();
         println!("Options:");
         println!("  -config <path>    Config file (default: /etc/nebula/config.yml)");
@@ -24,7 +24,7 @@ fn run_nebula(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-version" || a == "--version") {
-        println!("Version: 1.9.0 (SlateOS)");
+        println!("Version: 1.9.0 (Slate OS)");
         println!("Build Date: 2024-01-15T00:00:00Z");
         return 0;
     }
@@ -85,7 +85,7 @@ fn run_nebula_cert(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: nebula-cert <command> [OPTIONS]");
         println!();
-        println!("nebula-cert — Nebula certificate management (SlateOS).");
+        println!("nebula-cert — Nebula certificate management (Slate OS).");
         println!();
         println!("Commands:");
         println!("  ca        Create a CA certificate");
@@ -101,7 +101,7 @@ fn run_nebula_cert(args: &[String]) -> i32 {
         "ca" => {
             let name = args.windows(2).find(|w| w[0] == "-name")
                 .map(|w| w[1].as_str())
-                .unwrap_or("SlateOS Nebula CA");
+                .unwrap_or("Slate OS Nebula CA");
             println!("Generated CA certificate for '{}':", name);
             println!("  ca.crt (certificate)");
             println!("  ca.key (private key)");

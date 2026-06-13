@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_xschem(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: xschem [OPTIONS] [FILE.sch]");
-        println!("Xschem v3.4 (SlateOS) — Schematic capture and netlisting");
+        println!("Xschem v3.4 (Slate OS) — Schematic capture and netlisting");
         println!();
         println!("Options:");
         println!("  FILE.sch          Open schematic file");
@@ -27,7 +27,7 @@ fn run_xschem(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Xschem v3.4 (SlateOS)");
+        println!("Xschem v3.4 (Slate OS)");
         return 0;
     }
     let file = args.iter()

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_conmon(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: conmon [OPTIONS]");
-        println!("conmon v2.1 (SlateOS) — OCI container runtime monitor");
+        println!("conmon v2.1 (Slate OS) — OCI container runtime monitor");
         println!();
         println!("Options:");
         println!("  -c CID            Container ID");
@@ -29,8 +29,8 @@ fn run_conmon(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("conmon v2.1.10 (SlateOS)"); return 0; }
-    println!("conmon v2.1.10 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("conmon v2.1.10 (Slate OS)"); return 0; }
+    println!("conmon v2.1.10 (Slate OS)");
     println!("  Container: abc123def456");
     println!("  Runtime: /usr/bin/crun");
     println!("  PID: 12345");

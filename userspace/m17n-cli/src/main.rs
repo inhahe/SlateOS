@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_m17n_db(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: m17n-db [OPTIONS]");
-        println!("m17n-db v1.8 (SlateOS) — m17n input method database");
+        println!("m17n-db v1.8 (Slate OS) — m17n input method database");
         println!();
         println!("Options:");
         println!("  --list            List available input methods");
@@ -21,7 +21,7 @@ fn run_m17n_db(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("m17n-db v1.8 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("m17n-db v1.8 (Slate OS)"); return 0; }
     if args.iter().any(|a| a == "--list") {
         println!("Available m17n input methods:");
         println!("  ar-kbd      Arabic keyboard");
@@ -42,7 +42,7 @@ fn run_m17n_db(args: &[String], _prog: &str) -> i32 {
 fn run_m17n_conv(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: m17n-conv [OPTIONS] -f FROM -t TO");
-        println!("m17n-conv v1.8 (SlateOS) — Character encoding converter");
+        println!("m17n-conv v1.8 (Slate OS) — Character encoding converter");
         println!();
         println!("Options:");
         println!("  -f ENCODING       Source encoding");
@@ -50,7 +50,7 @@ fn run_m17n_conv(args: &[String], _prog: &str) -> i32 {
         println!("  --list-coding     List supported encodings");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("m17n-conv v1.8 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("m17n-conv v1.8 (Slate OS)"); return 0; }
     println!("m17n-conv: converting...");
     0
 }

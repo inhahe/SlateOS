@@ -19,7 +19,7 @@ fn run_cmus(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("cmus v2.11.0 (SlateOS)");
+        println!("cmus v2.11.0 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "--plugins") {
@@ -28,7 +28,7 @@ fn run_cmus(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    println!("cmus v2.11.0 (SlateOS) — press :help for commands");
+    println!("cmus v2.11.0 (Slate OS) — press :help for commands");
     println!("(TUI music player — simulated)");
     0
 }

@@ -1520,7 +1520,7 @@ fn entry_passes_filters(entry: &JournalEntry, cfg: &Config) -> bool {
 // ============================================================================
 
 fn print_usage() {
-    println!("SlateOS Journal Log Viewer v0.1.0");
+    println!("Slate OS Journal Log Viewer v0.1.0");
     println!();
     println!("Query and display messages from the journal.");
     println!();

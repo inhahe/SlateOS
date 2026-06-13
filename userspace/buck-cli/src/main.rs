@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_buck2(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: buck2 COMMAND [OPTIONS]");
-        println!("Buck2 Build System (SlateOS)");
+        println!("Buck2 Build System (Slate OS)");
         println!();
         println!("Commands:");
         println!("  build        Build specified targets");
@@ -35,7 +35,7 @@ fn run_buck2(args: &[String]) -> i32 {
     }
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match subcmd {
-        "--version" => println!("buck2 20240215 (SlateOS)"),
+        "--version" => println!("buck2 20240215 (Slate OS)"),
         "build" => {
             let targets: Vec<&str> = args.iter().skip(1)
                 .filter(|a| !a.starts_with('-'))

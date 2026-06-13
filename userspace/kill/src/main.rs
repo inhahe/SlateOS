@@ -930,7 +930,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
 // ============================================================================
 
 fn print_signal_list() {
-    println!("Available signal names (SlateOS compatibility mapping):");
+    println!("Available signal names (Slate OS compatibility mapping):");
     println!();
     println!(" {:>3}  {:<6}  Description", "Num", "Name");
     println!(" {:>3}  {:<6}  -----------", "---", "------");
@@ -941,7 +941,7 @@ fn print_signal_list() {
         );
     }
     println!();
-    println!("Note: SlateOS uses IPC messages, not Unix signals.");
+    println!("Note: Slate OS uses IPC messages, not Unix signals.");
     println!("Signal names are provided for familiarity only.");
 }
 
@@ -951,7 +951,7 @@ fn print_signal_list() {
 
 fn print_usage(is_killall: bool) {
     if is_killall {
-        println!("SlateOS killall v0.1.0 -- Kill processes by name");
+        println!("Slate OS killall v0.1.0 -- Kill processes by name");
         println!();
         println!("USAGE:");
         println!("  killall [options] <name>");
@@ -976,7 +976,7 @@ fn print_usage(is_killall: bool) {
         println!("  killall -9 myserver        Force kill all 'myserver'");
         println!("  killall -i -w myserver     Confirm and wait for each");
     } else {
-        println!("SlateOS kill v0.1.0 -- Send termination messages to processes");
+        println!("Slate OS kill v0.1.0 -- Send termination messages to processes");
         println!();
         println!("USAGE:");
         println!("  kill [options] <pid> [pid...]");

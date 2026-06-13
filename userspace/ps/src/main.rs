@@ -841,7 +841,7 @@ fn parse_sort_field(name: &str) -> Option<SortField> {
 }
 
 fn print_usage() {
-    println!("SlateOS Process Listing Utility v0.1.0");
+    println!("Slate OS Process Listing Utility v0.1.0");
     println!();
     println!("USAGE:");
     println!("  ps [options]");

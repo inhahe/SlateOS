@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_swaybg(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: swaybg [OPTIONS]");
-        println!("swaybg v1.2 (SlateOS) — Wallpaper daemon for Wayland");
+        println!("swaybg v1.2 (Slate OS) — Wallpaper daemon for Wayland");
         println!();
         println!("Options:");
         println!("  -i IMAGE          Image path");
@@ -23,7 +23,7 @@ fn run_swaybg(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("swaybg v1.2 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("swaybg v1.2 (Slate OS)"); return 0; }
     let image = args.iter().skip_while(|a| a.as_str() != "-i").nth(1)
         .map(|s| s.as_str()).unwrap_or("wallpaper.png");
     let mode = args.iter().skip_while(|a| a.as_str() != "-m").nth(1)

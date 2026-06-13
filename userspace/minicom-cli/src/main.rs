@@ -19,7 +19,7 @@ fn run_minicom(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: minicom [OPTIONS] [DEVICE]");
         println!();
-        println!("minicom — serial communication program (SlateOS).");
+        println!("minicom — serial communication program (Slate OS).");
         println!();
         println!("Options:");
         println!("  -b BAUD         Set baud rate");
@@ -35,7 +35,7 @@ fn run_minicom(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("minicom version 2.8 (SlateOS)");
+        println!("minicom version 2.8 (Slate OS)");
         return 0;
     }
 
@@ -63,7 +63,7 @@ fn run_minicom(args: &[String]) -> i32 {
         return 0;
     }
 
-    println!("Welcome to minicom 2.8 (SlateOS)");
+    println!("Welcome to minicom 2.8 (Slate OS)");
     println!();
     println!("OPTIONS: I18n");
     println!("Port {device}, {baud} 8N1");

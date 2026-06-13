@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_meta(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: metaplane [OPTIONS]");
-        println!("Metaplane (SlateOS) — data observability (acquired by Datadog Oct 2024)");
+        println!("Metaplane (Slate OS) — data observability (acquired by Datadog Oct 2024)");
         println!();
         println!("Options:");
         println!("  --monitors             ML-based monitors");
@@ -21,8 +21,8 @@ fn run_meta(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Metaplane 2024 (SlateOS)"); return 0; }
-    println!("Metaplane 2024 (SlateOS) — Data Observability (now Datadog Data Observability)");
+    if args.iter().any(|a| a == "--version") { println!("Metaplane 2024 (Slate OS)"); return 0; }
+    println!("Metaplane 2024 (Slate OS) — Data Observability (now Datadog Data Observability)");
     println!("  Vendor: Metaplane, Inc. (Boston) — ACQUIRED by Datadog Oct 2024");
     println!("  Founders: Kevin Hu (CEO) + Peter Casinelli (CTO), 2020");
     println!("          Kevin: MIT PhD (CSAIL data systems research)");

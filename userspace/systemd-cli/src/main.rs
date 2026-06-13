@@ -20,7 +20,7 @@ fn run_systemctl(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: systemctl [OPTIONS] COMMAND [UNIT...]");
         println!();
-        println!("systemctl — service manager control (SlateOS).");
+        println!("systemctl — service manager control (Slate OS).");
         println!();
         println!("Commands:");
         println!("  start UNIT         Start a unit");
@@ -96,7 +96,7 @@ fn run_journalctl(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: journalctl [OPTIONS]");
         println!();
-        println!("journalctl — query the systemd journal (SlateOS).");
+        println!("journalctl — query the systemd journal (Slate OS).");
         println!();
         println!("Options:");
         println!("  -f, --follow     Follow new entries");
@@ -120,7 +120,7 @@ fn run_journalctl(args: &[String]) -> i32 {
     }
 
     println!("-- Journal begins at Thu 2025-01-01 00:00:00 UTC, ends at Thu 2025-01-01 12:00:00 UTC. --");
-    println!("Jan 01 00:00:00 slateos kernel: SlateOS version 1.0.0 booting");
+    println!("Jan 01 00:00:00 slateos kernel: Slate OS version 1.0.0 booting");
     println!("Jan 01 00:00:01 slateos systemd[1]: Starting system initialization...");
     println!("Jan 01 00:00:02 slateos systemd[1]: Started udev Kernel Device Manager.");
     println!("Jan 01 00:00:03 slateos systemd[1]: Started D-Bus System Message Bus.");
@@ -145,8 +145,8 @@ fn run_hostnamectl(args: &[String]) -> i32 {
             println!("           Chassis: desktop");
             println!("        Machine ID: 12345678901234567890123456789012");
             println!("           Boot ID: abcdefabcdefabcdefabcdefabcdefab");
-            println!("  Operating System: SlateOS 1.0");
-            println!("            Kernel: SlateOS 1.0.0");
+            println!("  Operating System: Slate OS 1.0");
+            println!("            Kernel: Slate OS 1.0.0");
             println!("      Architecture: x86-64");
         }
     }

@@ -24,7 +24,7 @@ fn run_bore(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("bore 0.5.1 (SlateOS)");
+            println!("bore 0.5.1 (Slate OS)");
             0
         }
         "local" => {

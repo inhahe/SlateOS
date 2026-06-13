@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rtorrent(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: rtorrent [OPTIONS] [URL|FILE...]");
-        println!("rtorrent v0.9.8 (SlateOS) — Terminal BitTorrent client");
+        println!("rtorrent v0.9.8 (Slate OS) — Terminal BitTorrent client");
         println!();
         println!("Options:");
         println!("  -d DIR            Download directory");
@@ -25,7 +25,7 @@ fn run_rtorrent(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("rtorrent v0.9.8 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("rtorrent v0.9.8 (Slate OS)"); return 0; }
     println!("rtorrent: ncurses BitTorrent client started");
     println!("  Session: ~/.local/share/rtorrent/session");
     println!("  Download: ~/Downloads");

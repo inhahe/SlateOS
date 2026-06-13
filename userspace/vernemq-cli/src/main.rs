@@ -15,7 +15,7 @@ fn run_vernemq(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [COMMAND] [OPTIONS]", prog);
         match prog {
             "vmq-admin" => {
-                println!("vmq-admin (SlateOS) — VerneMQ administration");
+                println!("vmq-admin (Slate OS) — VerneMQ administration");
                 println!("  cluster show       Show cluster status");
                 println!("  session show       Show sessions");
                 println!("  listener show      Show listeners");
@@ -24,12 +24,12 @@ fn run_vernemq(args: &[String], prog: &str) -> i32 {
                 println!("  trace              Trace client activity");
             }
             "vmq-passwd" => {
-                println!("vmq-passwd (SlateOS) — VerneMQ password management");
+                println!("vmq-passwd (Slate OS) — VerneMQ password management");
                 println!("  -c FILE USER       Create/update password file");
                 println!("  -D FILE USER       Delete user from file");
             }
             _ => {
-                println!("VerneMQ v2.0 (SlateOS) — Distributed MQTT broker");
+                println!("VerneMQ v2.0 (Slate OS) — Distributed MQTT broker");
                 println!("  start              Start broker");
                 println!("  stop               Stop broker");
                 println!("  restart            Restart broker");
@@ -40,7 +40,7 @@ fn run_vernemq(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("VerneMQ v2.0.1 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("VerneMQ v2.0.1 (Slate OS)"); return 0; }
     match prog {
         "vmq-admin" => {
             println!("VerneMQ Cluster Status:");
@@ -51,7 +51,7 @@ fn run_vernemq(args: &[String], prog: &str) -> i32 {
             println!("  Messages/sec: 456 in, 789 out");
         }
         _ => {
-            println!("VerneMQ v2.0.1 (SlateOS)");
+            println!("VerneMQ v2.0.1 (Slate OS)");
             println!("  MQTT: 0.0.0.0:1883, 0.0.0.0:8883 (TLS)");
             println!("  WebSocket: 0.0.0.0:8080/mqtt");
             println!("  Protocol: MQTT 3.1, 3.1.1, 5.0");

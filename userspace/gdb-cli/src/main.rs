@@ -19,7 +19,7 @@ fn run_gdb(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gdb [OPTIONS] [PROGRAM [COREFILE|PID]]");
         println!();
-        println!("gdb — GNU debugger (SlateOS).");
+        println!("gdb — GNU debugger (Slate OS).");
         println!();
         println!("Options:");
         println!("  -q, --quiet          Quiet mode (no banner)");
@@ -35,7 +35,7 @@ fn run_gdb(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("GNU gdb (SlateOS) 14.2");
+        println!("GNU gdb (Slate OS) 14.2");
         println!("Copyright (C) 2024 Free Software Foundation, Inc.");
         println!("This GDB was configured as \"x86_64-slateos\".");
         return 0;
@@ -46,7 +46,7 @@ fn run_gdb(args: &[String]) -> i32 {
     let program = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str());
 
     if !quiet {
-        println!("GNU gdb (SlateOS) 14.2");
+        println!("GNU gdb (Slate OS) 14.2");
         println!("Copyright (C) 2024 Free Software Foundation, Inc.");
         println!("License GPLv3+: GNU GPL version 3 or later");
         println!("This is free software: you are free to change and redistribute it.");
@@ -69,7 +69,7 @@ fn run_gdbserver(args: &[String]) -> i32 {
         println!("Usage: gdbserver [OPTIONS] COMM PROGRAM [ARGS]");
         println!("   or: gdbserver [OPTIONS] --attach COMM PID");
         println!();
-        println!("gdbserver — remote debugging server (SlateOS).");
+        println!("gdbserver — remote debugging server (Slate OS).");
         println!();
         println!("Options:");
         println!("  --multi          Multi-process mode");
@@ -79,7 +79,7 @@ fn run_gdbserver(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("GNU gdbserver (SlateOS) 14.2");
+        println!("GNU gdbserver (Slate OS) 14.2");
         return 0;
     }
 

@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_quip(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: quip [OPTIONS]");
-        println!("Quip (SlateOS) — collaborative docs + spreadsheets + chat (Salesforce-owned, end-of-life Jan 2025)");
+        println!("Quip (Slate OS) — collaborative docs + spreadsheets + chat (Salesforce-owned, end-of-life Jan 2025)");
         println!();
         println!("Options:");
         println!("  --starter              Starter — $10/user/mo (historical, legacy customers)");
@@ -22,8 +22,8 @@ fn run_quip(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Quip 2024 (SlateOS) — EOL Jan 2025"); return 0; }
-    println!("Quip 2024 (SlateOS) — END OF LIFE Jan 31 2025");
+    if args.iter().any(|a| a == "--version") { println!("Quip 2024 (Slate OS) — EOL Jan 2025"); return 0; }
+    println!("Quip 2024 (Slate OS) — END OF LIFE Jan 31 2025");
     println!("  Vendor: Salesforce, Inc. (San Francisco, CA — NYSE:CRM, acquired Quip 2016)");
     println!("  Original: Quip, Inc. — founded 2012 by Bret Taylor + Kevin Gibbs");
     println!("  Founders: Bret Taylor (CEO of Quip), Kevin Gibbs, 2012");

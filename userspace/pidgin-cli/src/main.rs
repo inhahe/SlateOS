@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pidgin(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pidgin [OPTIONS]");
-        println!("pidgin v3.0 (SlateOS) — Multi-protocol instant messenger");
+        println!("pidgin v3.0 (Slate OS) — Multi-protocol instant messenger");
         println!();
         println!("Options:");
         println!("  -c DIR            Config directory");
@@ -23,7 +23,7 @@ fn run_pidgin(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("pidgin v3.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("pidgin v3.0 (Slate OS)"); return 0; }
     println!("pidgin: multi-protocol IM client started");
     println!("  Protocols: XMPP, IRC, Matrix");
     println!("  Accounts: 2 connected");
@@ -34,10 +34,10 @@ fn run_pidgin(args: &[String], _prog: &str) -> i32 {
 fn run_remote(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: purple-remote COMMAND [ARGS]");
-        println!("purple-remote v3.0 (SlateOS) — Remote control for Pidgin");
+        println!("purple-remote v3.0 (Slate OS) — Remote control for Pidgin");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("purple-remote v3.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("purple-remote v3.0 (Slate OS)"); return 0; }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("status");
     println!("purple-remote: sent command '{}'", cmd);
     0

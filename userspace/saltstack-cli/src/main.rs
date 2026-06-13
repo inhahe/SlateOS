@@ -14,7 +14,7 @@ fn run_salt(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: salt [OPTIONS] <target> <function> [arguments]");
         println!();
-        println!("salt — SaltStack remote execution (SlateOS).");
+        println!("salt — SaltStack remote execution (Slate OS).");
         println!();
         println!("Options:");
         println!("  -G    Match by grain");
@@ -25,7 +25,7 @@ fn run_salt(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("salt 3007.0 (Potassium) (SlateOS)");
+        println!("salt 3007.0 (Potassium) (Slate OS)");
         return 0;
     }
 
@@ -41,13 +41,13 @@ fn run_salt(args: &[String]) -> i32 {
         "cmd.run" => {
             let cmd = args.get(2).map(|s| s.as_str()).unwrap_or("uname -a");
             println!("{}:", target);
-            println!("    SlateOS slateos-desktop 1.0 x86_64 ({})", cmd);
+            println!("    Slate OS slateos-desktop 1.0 x86_64 ({})", cmd);
         }
         "grains.items" | "grains.item" => {
             println!("slateos-node-1:");
             println!("    ----------");
             println!("    os:");
-            println!("        SlateOS");
+            println!("        Slate OS");
             println!("    osrelease:");
             println!("        1.0");
             println!("    kernel:");

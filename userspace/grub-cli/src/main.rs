@@ -20,7 +20,7 @@ fn run_grub_install(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: grub-install [OPTIONS] DEVICE");
         println!();
-        println!("grub-install — install GRUB bootloader (SlateOS).");
+        println!("grub-install — install GRUB bootloader (Slate OS).");
         println!();
         println!("Options:");
         println!("  --target=TARGET        Installation target");

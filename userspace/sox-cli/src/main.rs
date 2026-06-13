@@ -11,7 +11,7 @@ fn run_sox(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sox [OPTIONS] INPUT OUTPUT [EFFECTS...]");
         println!();
-        println!("SoX — Sound eXchange, the Swiss Army knife of audio (SlateOS).");
+        println!("SoX — Sound eXchange, the Swiss Army knife of audio (Slate OS).");
         println!();
         println!("Options:");
         println!("  -r, --rate RATE        Sample rate");
@@ -30,7 +30,7 @@ fn run_sox(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("sox: SoX v14.4.2 (SlateOS)");
+        println!("sox: SoX v14.4.2 (Slate OS)");
         return 0;
     }
 

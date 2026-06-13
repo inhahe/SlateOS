@@ -31,7 +31,7 @@ fn run_sphinx_build(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("sphinx-build 7.3.7 (SlateOS)");
+        println!("sphinx-build 7.3.7 (Slate OS)");
         return 0;
     }
 
@@ -46,7 +46,7 @@ fn run_sphinx_build(args: Vec<String>) -> i32 {
     let src = positional.first().copied().unwrap_or("source");
     let out = positional.get(1).copied().unwrap_or("build");
 
-    println!("Running Sphinx v7.3.7 (SlateOS)");
+    println!("Running Sphinx v7.3.7 (Slate OS)");
     println!("loading pickled environment... done");
     println!("building [mo]: targets for 0 po files that are out of date");
     println!("writing output... [ 25%] index");

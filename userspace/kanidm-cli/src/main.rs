@@ -15,7 +15,7 @@ fn run_kanidm(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [COMMAND] [OPTIONS]", prog);
         match prog {
             "kanidmd" => {
-                println!("kanidmd (SlateOS) — Kanidm identity server");
+                println!("kanidmd (Slate OS) — Kanidm identity server");
                 println!("  server              Start server");
                 println!("  cert-generate       Generate self-signed cert");
                 println!("  recover-account     Recover admin account");
@@ -24,7 +24,7 @@ fn run_kanidm(args: &[String], prog: &str) -> i32 {
                 println!("  db-scan             Scan database integrity");
             }
             _ => {
-                println!("kanidm (SlateOS) — Kanidm client CLI");
+                println!("kanidm (Slate OS) — Kanidm client CLI");
                 println!("  login               Authenticate");
                 println!("  logout              Clear sessions");
                 println!("  person create|get|list  Manage persons");
@@ -38,10 +38,10 @@ fn run_kanidm(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Kanidm v1.3.3 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("Kanidm v1.3.3 (Slate OS)"); return 0; }
     match prog {
         "kanidmd" => {
-            println!("Kanidm Server v1.3.3 (SlateOS)");
+            println!("Kanidm Server v1.3.3 (Slate OS)");
             println!("  HTTPS: 0.0.0.0:8443");
             println!("  LDAPS: 0.0.0.0:3636");
             println!("  Database: /var/kanidm/kanidm.db");

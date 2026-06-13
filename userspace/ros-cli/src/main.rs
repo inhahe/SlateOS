@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ros2(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("usage: ros2 [-h] COMMAND ...");
-        println!("ROS 2 Jazzy Jalisco (SlateOS)");
+        println!("ROS 2 Jazzy Jalisco (Slate OS)");
         println!();
         println!("Commands:");
         println!("  run          Run a ROS 2 node");
@@ -67,7 +67,7 @@ fn run_ros2(args: &[String]) -> i32 {
         }
         "doctor" => {
             println!("ROS 2 Doctor Report:");
-            println!("  Platform: SlateOS x86_64");
+            println!("  Platform: Slate OS x86_64");
             println!("  ROS 2 distro: Jazzy Jalisco");
             println!("  DDS middleware: FastDDS 2.14");
             println!("  All checks passed.");

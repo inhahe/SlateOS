@@ -1043,7 +1043,7 @@ fn output_json(
 // ============================================================================
 
 fn print_help() {
-    println!("SlateOS column v{VERSION}");
+    println!("Slate OS column v{VERSION}");
     println!();
     println!("Columnate lists or create aligned tables from delimited input.");
     println!("With no FILE, or when FILE is -, read standard input.");
@@ -1093,7 +1093,7 @@ fn main() {
             process::exit(0);
         }
         ParseResult::Version => {
-            println!("column (SlateOS) {VERSION}");
+            println!("column (Slate OS) {VERSION}");
             process::exit(0);
         }
         ParseResult::Run(config) => {

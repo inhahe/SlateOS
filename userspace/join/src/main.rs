@@ -1135,7 +1135,7 @@ fn run_join_json(
 // ============================================================================
 
 fn print_help() {
-    println!("SlateOS join v{VERSION}");
+    println!("Slate OS join v{VERSION}");
     println!();
     println!("Join lines of two sorted files on a common field.");
     println!();
@@ -1201,7 +1201,7 @@ fn main() {
             process::exit(0);
         }
         ParseResult::Version => {
-            println!("join (SlateOS) {VERSION}");
+            println!("join (Slate OS) {VERSION}");
             process::exit(0);
         }
         ParseResult::Run(config) => {

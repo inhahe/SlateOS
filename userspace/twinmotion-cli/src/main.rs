@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_tm(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: twinmotion [OPTIONS]");
-        println!("Twinmotion 2024 (SlateOS) — Real-time ArchViz on Unreal Engine 5");
+        println!("Twinmotion 2024 (Slate OS) — Real-time ArchViz on Unreal Engine 5");
         println!();
         println!("Options:");
         println!("  --import FILE          Import (Revit/SketchUp/Archicad/Rhino/Vectorworks)");
@@ -24,8 +24,8 @@ fn run_tm(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Twinmotion 2024.1 (SlateOS)"); return 0; }
-    println!("Twinmotion 2024.1 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Twinmotion 2024.1 (Slate OS)"); return 0; }
+    println!("Twinmotion 2024.1 (Slate OS)");
     println!("  Vendor: Epic Games (Cary, NC) — acquired Twinmotion's parent Abvent May 2019");
     println!("  Original developer: Ka-Ra → Abvent (French firm) → Epic");
     println!("  Pricing: $499/yr (perpetual licenses still available) — FREE for students/educators");

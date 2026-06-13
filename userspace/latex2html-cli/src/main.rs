@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_latex2html(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: latex2html [OPTIONS] FILE.tex");
-        println!("latex2html v2024 (SlateOS) — LaTeX to HTML converter");
+        println!("latex2html v2024 (Slate OS) — LaTeX to HTML converter");
         println!();
         println!("Options:");
         println!("  -dir DIR           Output directory");
@@ -32,7 +32,7 @@ fn run_latex2html(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-version" || a == "--version") {
-        println!("latex2html v2024 (SlateOS)");
+        println!("latex2html v2024 (Slate OS)");
         return 0;
     }
     let files: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
@@ -41,7 +41,7 @@ fn run_latex2html(args: &[String], _prog: &str) -> i32 {
         return 1;
     }
     let input = files[0];
-    println!("LaTeX2HTML v2024 (SlateOS)");
+    println!("LaTeX2HTML v2024 (Slate OS)");
     println!("Processing: {}", input);
     println!("  Translating document...");
     println!("  Processing sections: 5");

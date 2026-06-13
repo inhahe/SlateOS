@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_solace(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: solace [OPTIONS]");
-        println!("Solace (SlateOS) — PubSub+ event broker + event mesh + event portal (Kanata, Ontario)");
+        println!("Solace (Slate OS) — PubSub+ event broker + event mesh + event portal (Kanata, Ontario)");
         println!();
         println!("Options:");
         println!("  --event-broker         PubSub+ Event Broker (multi-protocol broker)");
@@ -22,8 +22,8 @@ fn run_solace(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Solace PubSub+ 2024 (SlateOS) — solace CLI 10.x"); return 0; }
-    println!("Solace PubSub+ 2024 (SlateOS) — Event Broker + Event Mesh + Event Portal");
+    if args.iter().any(|a| a == "--version") { println!("Solace PubSub+ 2024 (Slate OS) — solace CLI 10.x"); return 0; }
+    println!("Solace PubSub+ 2024 (Slate OS) — Event Broker + Event Mesh + Event Portal");
     println!("  Vendor: Solace Corporation (Kanata, Ontario, Canada — private)");
     println!("  Founders: Larry Neumann + Craig Betts + Greg Hyatt + others, 2001");
     println!("          Originally founded as Solace Systems for financial-services hardware messaging");

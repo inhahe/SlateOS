@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ae(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: aftereffects [OPTIONS] [PROJECT]");
-        println!("Adobe After Effects 2024 (SlateOS) — Motion graphics & VFX");
+        println!("Adobe After Effects 2024 (Slate OS) — Motion graphics & VFX");
         println!();
         println!("Options:");
         println!("  -project FILE          Open project (.aep)");
@@ -26,8 +26,8 @@ fn run_ae(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Adobe After Effects 2024 v24.6.0 (SlateOS)"); return 0; }
-    println!("Adobe After Effects 2024 v24.6.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Adobe After Effects 2024 v24.6.0 (Slate OS)"); return 0; }
+    println!("Adobe After Effects 2024 v24.6.0 (Slate OS)");
     println!("  Engine: Multi-Frame Rendering, GPU (CUDA/Metal)");
     println!("  Scripting: ExtendScript (JSX), CEP panels");
     println!("  Effects: 270+ built-in + plug-ins (Sapphire, Red Giant)");

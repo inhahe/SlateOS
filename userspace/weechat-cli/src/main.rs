@@ -11,7 +11,7 @@ fn run_weechat(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: weechat [OPTIONS]");
         println!();
-        println!("WeeChat — extensible chat client (SlateOS).");
+        println!("WeeChat — extensible chat client (Slate OS).");
         println!();
         println!("Options:");
         println!("  -a, --no-connect       Don't auto-connect");
@@ -29,7 +29,7 @@ fn run_weechat(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("WeeChat 4.2.1 (SlateOS)");
+        println!("WeeChat 4.2.1 (Slate OS)");
         return 0;
     }
 
@@ -53,7 +53,7 @@ fn run_weechat(args: Vec<String>) -> i32 {
         .find(|w| w[0] == "-r" || w[0] == "--run-command")
         .map(|w| w[1].as_str());
 
-    println!("WeeChat 4.2.1 (SlateOS)");
+    println!("WeeChat 4.2.1 (Slate OS)");
     println!();
 
     if !no_plugin {

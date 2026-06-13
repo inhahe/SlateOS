@@ -248,7 +248,7 @@ fn mount_all() {
 // ============================================================================
 
 fn print_usage() {
-    println!("SlateOS Mount Utility v0.1.0");
+    println!("Slate OS Mount Utility v0.1.0");
     println!();
     println!("List, mount, and unmount filesystems.");
     println!();

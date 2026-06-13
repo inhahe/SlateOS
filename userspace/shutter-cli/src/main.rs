@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_shutter(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: shutter [OPTIONS]");
-        println!("shutter v0.99 (SlateOS) — Feature-rich screenshot tool");
+        println!("shutter v0.99 (Slate OS) — Feature-rich screenshot tool");
         println!();
         println!("Options:");
         println!("  -f, --full        Full screen");
@@ -26,7 +26,7 @@ fn run_shutter(args: &[String], _prog: &str) -> i32 {
         println!("Editor: arrows, text, highlight, blur, crop, resize");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("shutter v0.99 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("shutter v0.99 (Slate OS)"); return 0; }
     println!("shutter: screenshot tool started");
     println!("  Editor: annotation tools available");
     println!("  Upload: imgur, Dropbox support");

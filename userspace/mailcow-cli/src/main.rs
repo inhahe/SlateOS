@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mailcow(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mailcow [COMMAND] [OPTIONS]");
-        println!("Mailcow v2024.04 (SlateOS) — Dockerized mail server suite");
+        println!("Mailcow v2024.04 (Slate OS) — Dockerized mail server suite");
         println!();
         println!("Commands:");
         println!("  status             Show service status");
@@ -31,8 +31,8 @@ fn run_mailcow(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Mailcow v2024.04 (SlateOS)"); return 0; }
-    println!("Mailcow v2024.04 (SlateOS) Status:");
+    if args.iter().any(|a| a == "--version") { println!("Mailcow v2024.04 (Slate OS)"); return 0; }
+    println!("Mailcow v2024.04 (Slate OS) Status:");
     println!("  Postfix (MTA): running");
     println!("  Dovecot (IMAP/POP3): running");
     println!("  Rspamd (antispam): running");

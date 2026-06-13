@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_etckeeper(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: etckeeper <command> [OPTIONS]");
-        println!("etckeeper v1.18 (SlateOS) — Store /etc in version control");
+        println!("etckeeper v1.18 (Slate OS) — Store /etc in version control");
         println!();
         println!("Commands:");
         println!("  init            Initialize repository in /etc");
@@ -25,7 +25,7 @@ fn run_etckeeper(args: &[String], _prog: &str) -> i32 {
         println!("  --version       Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("etckeeper v1.18 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("etckeeper v1.18 (Slate OS)"); return 0; }
     match args.first().map(|s| s.as_str()) {
         Some("init") => {
             println!("etckeeper: initializing /etc repository (git)");

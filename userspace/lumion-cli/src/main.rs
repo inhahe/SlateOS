@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_lum(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lumion [OPTIONS]");
-        println!("Lumion 2024 (SlateOS) — Real-time architectural visualization");
+        println!("Lumion 2024 (Slate OS) — Real-time architectural visualization");
         println!();
         println!("Options:");
         println!("  --import FILE          Import (SketchUp/Revit/ArchiCAD/Rhino/3ds/FBX/Collada/SKP)");
@@ -23,8 +23,8 @@ fn run_lum(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Lumion 2024.0.2 (build 24.0.2.4) (SlateOS)"); return 0; }
-    println!("Lumion 2024.0.2 (build 24.0.2.4) (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Lumion 2024.0.2 (build 24.0.2.4) (Slate OS)"); return 0; }
+    println!("Lumion 2024.0.2 (build 24.0.2.4) (Slate OS)");
     println!("  Vendor: Act-3D B.V. (Warmond, Netherlands — Lumion brand wholly owned)");
     println!("  Founded: 1989 (Act-3D), Lumion product launched 2010");
     println!("  Pricing: Lumion Pro €1499/yr, Lumion Standard €749/yr (NL pricing, regional variance)");

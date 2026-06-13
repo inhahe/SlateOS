@@ -19,7 +19,7 @@ fn run_readelf(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: readelf [OPTIONS] FILE...");
         println!();
-        println!("readelf — display ELF file information (SlateOS).");
+        println!("readelf — display ELF file information (Slate OS).");
         println!();
         println!("Options:");
         println!("  -a, --all            Display all info");
@@ -35,7 +35,7 @@ fn run_readelf(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("GNU readelf version 2.42 (SlateOS)");
+        println!("GNU readelf version 2.42 (Slate OS)");
         return 0;
     }
 

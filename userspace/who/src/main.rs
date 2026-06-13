@@ -1028,7 +1028,7 @@ fn print_json(records: &[&SessionRecord], opts: &Options) {
 // ============================================================================
 
 fn print_help() {
-    println!("SlateOS Logged-In Users Display v0.1.0");
+    println!("Slate OS Logged-In Users Display v0.1.0");
     println!();
     println!("Show who is logged in to the system.");
     println!();
@@ -1056,7 +1056,7 @@ fn print_help() {
 }
 
 fn print_version() {
-    println!("who (SlateOS) 0.1.0");
+    println!("who (Slate OS) 0.1.0");
 }
 
 /// Parse command-line arguments into Options.

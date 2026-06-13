@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_duckdb(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: duckdb [DATABASE] [OPTIONS]");
-        println!("DuckDB v0.10 (SlateOS) — In-process analytical database");
+        println!("DuckDB v0.10 (Slate OS) — In-process analytical database");
         println!();
         println!("Options:");
         println!("  -c COMMAND         Execute SQL command");
@@ -27,8 +27,8 @@ fn run_duckdb(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("DuckDB v0.10.3 (SlateOS)"); return 0; }
-    println!("DuckDB v0.10.3 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("DuckDB v0.10.3 (Slate OS)"); return 0; }
+    println!("DuckDB v0.10.3 (Slate OS)");
     println!("  Database: :memory: (in-process)");
     println!("  Extensions: parquet, httpfs, json, icu, fts");
     println!("  Threads: 8");

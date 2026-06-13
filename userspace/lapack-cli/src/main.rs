@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_lapack(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: lapack-test COMMAND [OPTIONS]");
-        println!("LAPACK v3.12 (SlateOS) — Linear algebra test/benchmark tool");
+        println!("LAPACK v3.12 (Slate OS) — Linear algebra test/benchmark tool");
         println!();
         println!("Commands:");
         println!("  bench N           Benchmark NxN operations");
@@ -23,7 +23,7 @@ fn run_lapack(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("LAPACK v3.12 (SlateOS)");
+        println!("LAPACK v3.12 (Slate OS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("info");

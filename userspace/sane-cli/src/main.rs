@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_scanimage(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: scanimage [OPTIONS]");
-        println!("scanimage v1.2 (SlateOS) — Scan an image");
+        println!("scanimage v1.2 (Slate OS) — Scan an image");
         println!();
         println!("Options:");
         println!("  -d DEVICE         Use specific device");
@@ -26,7 +26,7 @@ fn run_scanimage(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("scanimage v1.2 (SlateOS, SANE 1.2)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("scanimage v1.2 (Slate OS, SANE 1.2)"); return 0; }
     if args.iter().any(|a| a == "-L") {
         println!("device `epkowa:libusb:001:004' is a Epson Perfection V39 flatbed scanner");
         println!("device `pixma:04A91234' is a Canon PIXMA MG3600 multi-function peripheral");
@@ -44,10 +44,10 @@ fn run_scanimage(args: &[String], _prog: &str) -> i32 {
 fn run_find_scanner(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sane-find-scanner [OPTIONS]");
-        println!("sane-find-scanner v1.2 (SlateOS) — Find SCSI and USB scanners");
+        println!("sane-find-scanner v1.2 (Slate OS) — Find SCSI and USB scanners");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("sane-find-scanner v1.2 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("sane-find-scanner v1.2 (Slate OS)"); return 0; }
     println!("  # sane-find-scanner will now attempt to detect your scanner.");
     println!("found USB scanner (vendor=0x04b8, product=0x014a) at libusb:001:004");
     println!("found USB scanner (vendor=0x04a9, product=0x1234) at libusb:001:005");
@@ -58,7 +58,7 @@ fn run_find_scanner(args: &[String], _prog: &str) -> i32 {
 fn run_scanadf(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: scanadf [OPTIONS]");
-        println!("scanadf v1.2 (SlateOS) — Scan multiple pages from ADF");
+        println!("scanadf v1.2 (Slate OS) — Scan multiple pages from ADF");
         println!();
         println!("Options:");
         println!("  -d DEVICE         Use specific device");
@@ -66,7 +66,7 @@ fn run_scanadf(args: &[String], _prog: &str) -> i32 {
         println!("  -S                Start scanning immediately");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("scanadf v1.2 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("scanadf v1.2 (Slate OS)"); return 0; }
     println!("scanadf: waiting for feeder...");
     println!("  Scanned page 1 → out-0001.pnm");
     println!("  Scanned page 2 → out-0002.pnm");

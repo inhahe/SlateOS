@@ -208,7 +208,7 @@ fn parse_args() -> Args {
                 process::exit(0);
             }
             "--version" => {
-                println!("install (SlateOS) 0.1.0");
+                println!("install (Slate OS) 0.1.0");
                 process::exit(0);
             }
             "-d" | "--directory" => args.directory_mode = true,

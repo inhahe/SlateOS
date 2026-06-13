@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_xsensors(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: xsensors [OPTIONS]");
-        println!("xsensors v0.8 (SlateOS) — Graphical hardware sensor display");
+        println!("xsensors v0.8 (Slate OS) — Graphical hardware sensor display");
         println!();
         println!("Options:");
         println!("  -f                Fahrenheit display");
@@ -22,7 +22,7 @@ fn run_xsensors(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("xsensors v0.8 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("xsensors v0.8 (Slate OS)"); return 0; }
     println!("xsensors: graphical sensor display started");
     println!("  Chips found: coretemp-isa-0000, it8728-isa-0a30");
     println!("  Update interval: 2s");

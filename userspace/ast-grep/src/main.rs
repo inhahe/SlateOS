@@ -28,7 +28,7 @@ fn run_sg(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("ast-grep 0.25.0 (SlateOS)");
+            println!("ast-grep 0.25.0 (Slate OS)");
             0
         }
         "run" => {

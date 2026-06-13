@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_singular(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: singular [OPTIONS] [FILE]");
-        println!("Singular v4.3 (SlateOS) — Computer Algebra for Polynomial Computations");
+        println!("Singular v4.3 (Slate OS) — Computer Algebra for Polynomial Computations");
         println!();
         println!("Options:");
         println!("  -q              Quiet mode");

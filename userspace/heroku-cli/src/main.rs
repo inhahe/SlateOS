@@ -11,7 +11,7 @@ fn run_heroku(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: heroku <COMMAND> [OPTIONS]");
         println!();
-        println!("Heroku command-line interface (SlateOS).");
+        println!("Heroku command-line interface (Slate OS).");
         println!();
         println!("Commands:");
         println!("  apps         Manage apps");

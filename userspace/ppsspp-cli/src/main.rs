@@ -18,7 +18,7 @@ fn run_ppsspp(args: &[String], prog: &str) -> i32 {
         } else {
             println!("Usage: ppsspp [OPTIONS] [ISO]");
         }
-        println!("ppsspp v1.17.1 (SlateOS) — PlayStation Portable emulator");
+        println!("ppsspp v1.17.1 (Slate OS) — PlayStation Portable emulator");
         println!();
         println!("Options:");
         println!("  --fullscreen      Start fullscreen");
@@ -27,7 +27,7 @@ fn run_ppsspp(args: &[String], prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("ppsspp v1.17.1 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("ppsspp v1.17.1 (Slate OS)"); return 0; }
     if headless {
         println!("ppsspp: headless mode started");
     } else {

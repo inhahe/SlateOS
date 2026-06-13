@@ -1888,7 +1888,7 @@ fn create_demo_registry() -> ServiceRegistry {
 
     // HTTP web server
     let http_type = ServiceType::new("_http", TransportProtocol::Tcp);
-    let http_svc = ServiceEntry::new("SlateOS Web Server", http_type, "slateos-host", 80)
+    let http_svc = ServiceEntry::new("Slate OS Web Server", http_type, "slateos-host", 80)
         .with_txt(vec!["path=/".to_string(), "version=1.0".to_string()])
         .with_addr_v4(Ipv4Addr::new(192, 168, 1, 100))
         .with_iface_proto(InterfaceProto::new(2, PROTO_INET));
@@ -1896,7 +1896,7 @@ fn create_demo_registry() -> ServiceRegistry {
 
     // SSH server
     let ssh_type = ServiceType::new("_ssh", TransportProtocol::Tcp);
-    let ssh_svc = ServiceEntry::new("SlateOS SSH", ssh_type, "slateos-host", 22)
+    let ssh_svc = ServiceEntry::new("Slate OS SSH", ssh_type, "slateos-host", 22)
         .with_txt(vec!["ssh-version=2".to_string()])
         .with_addr_v4(Ipv4Addr::new(192, 168, 1, 100))
         .with_iface_proto(InterfaceProto::new(2, PROTO_INET));
@@ -1908,7 +1908,7 @@ fn create_demo_registry() -> ServiceRegistry {
         .with_txt(vec![
             "txtvers=1".to_string(),
             "pdl=application/postscript".to_string(),
-            "product=(SlateOS LaserJet)".to_string(),
+            "product=(Slate OS LaserJet)".to_string(),
         ])
         .with_addr_v4(Ipv4Addr::new(192, 168, 1, 50))
         .with_iface_proto(InterfaceProto::new(2, PROTO_INET));
@@ -1916,7 +1916,7 @@ fn create_demo_registry() -> ServiceRegistry {
 
     // SMB file sharing
     let smb_type = ServiceType::new("_smb", TransportProtocol::Tcp);
-    let smb_svc = ServiceEntry::new("SlateOS File Share", smb_type, "slateos-host", 445)
+    let smb_svc = ServiceEntry::new("Slate OS File Share", smb_type, "slateos-host", 445)
         .with_txt(vec![
             "share=public".to_string(),
             "workgroup=WORKGROUP".to_string(),
@@ -1927,7 +1927,7 @@ fn create_demo_registry() -> ServiceRegistry {
 
     // SFTP server
     let sftp_type = ServiceType::new("_sftp-ssh", TransportProtocol::Tcp);
-    let sftp_svc = ServiceEntry::new("SlateOS SFTP", sftp_type, "slateos-host", 22)
+    let sftp_svc = ServiceEntry::new("Slate OS SFTP", sftp_type, "slateos-host", 22)
         .with_txt(vec!["path=/".to_string()])
         .with_addr_v4(Ipv4Addr::new(192, 168, 1, 100))
         .with_addr_v6(Ipv6Addr::new(
@@ -1978,7 +1978,7 @@ fn create_demo_registry() -> ServiceRegistry {
 
     // VNC server
     let vnc_type = ServiceType::new("_rfb", TransportProtocol::Tcp);
-    let vnc_svc = ServiceEntry::new("SlateOS Remote Desktop", vnc_type, "slateos-host", 5900)
+    let vnc_svc = ServiceEntry::new("Slate OS Remote Desktop", vnc_type, "slateos-host", 5900)
         .with_txt(vec!["display=0".to_string()])
         .with_addr_v4(Ipv4Addr::new(192, 168, 1, 100))
         .with_addr_v6(Ipv6Addr::new(
@@ -2126,7 +2126,7 @@ fn run_daemon(args: &[String]) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("avahi-daemon 0.8 (SlateOS)");
+            println!("avahi-daemon 0.8 (Slate OS)");
             println!("Compiled with mDNS/DNS-SD support.");
             println!("Features: IPv4, IPv6, D-Bus, DNS-SD, wide-area DNS-SD");
             0
@@ -2313,7 +2313,7 @@ fn run_browse(args: &[String]) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("avahi-browse 0.8 (SlateOS)");
+            println!("avahi-browse 0.8 (Slate OS)");
             0
         }
         "--dump-db" | "-b" => {
@@ -2567,7 +2567,7 @@ fn run_resolve(args: &[String]) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("avahi-resolve 0.8 (SlateOS)");
+            println!("avahi-resolve 0.8 (Slate OS)");
             0
         }
         "-n" | "--name" => {
@@ -2722,7 +2722,7 @@ fn run_publish(args: &[String]) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("avahi-publish 0.8 (SlateOS)");
+            println!("avahi-publish 0.8 (Slate OS)");
             0
         }
         "service" | "-s" | "--service" => publish_service_cmd(&cmd_args),
@@ -2968,7 +2968,7 @@ fn run_autoipd(args: &[String]) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("avahi-autoipd 0.8 (SlateOS)");
+            println!("avahi-autoipd 0.8 (Slate OS)");
             0
         }
         "--kill" | "-k" => {
@@ -3067,7 +3067,7 @@ fn run_set_hostname(args: &[String]) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("avahi-set-host-name 0.8 (SlateOS)");
+            println!("avahi-set-host-name 0.8 (Slate OS)");
             0
         }
         _ => {
@@ -4963,7 +4963,7 @@ publish-hinfo=no\n\
     #[test]
     fn test_demo_registry_resolve_http() {
         let reg = create_demo_registry();
-        let result = reg.resolve("SlateOS Web Server", "_http._tcp");
+        let result = reg.resolve("Slate OS Web Server", "_http._tcp");
         assert!(result.is_ok());
     }
 

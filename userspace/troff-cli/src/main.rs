@@ -15,17 +15,17 @@ fn run_troff(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS] [FILE...]", prog);
         match prog {
             "nroff" => {
-                println!("nroff (SlateOS) — Format for terminal/TTY output");
+                println!("nroff (Slate OS) — Format for terminal/TTY output");
                 println!("  -man       Use man macros");
                 println!("  -ms        Use ms macros");
                 println!("  -T DEVICE  Output device (ascii, utf8, latin1)");
             }
-            "tbl" => println!("tbl (SlateOS) — Table preprocessor for troff"),
-            "eqn" => println!("eqn (SlateOS) — Equation preprocessor for troff"),
-            "pic" => println!("pic (SlateOS) — Picture preprocessor for troff"),
-            "refer" => println!("refer (SlateOS) — Bibliography preprocessor"),
+            "tbl" => println!("tbl (Slate OS) — Table preprocessor for troff"),
+            "eqn" => println!("eqn (Slate OS) — Equation preprocessor for troff"),
+            "pic" => println!("pic (Slate OS) — Picture preprocessor for troff"),
+            "refer" => println!("refer (Slate OS) — Bibliography preprocessor"),
             _ => {
-                println!("troff (SlateOS) — Text formatter");
+                println!("troff (Slate OS) — Text formatter");
                 println!("  -man       Use man macros");
                 println!("  -ms        Use ms macros");
                 println!("  -mm        Use mm macros");
@@ -35,7 +35,7 @@ fn run_troff(args: &[String], prog: &str) -> i32 {
         println!("  --version  Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("troff (Heirloom) v2.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("troff (Heirloom) v2.0 (Slate OS)"); return 0; }
     match prog {
         "nroff" => {
             println!("nroff: formatting for terminal...");
@@ -48,7 +48,7 @@ fn run_troff(args: &[String], prog: &str) -> i32 {
             println!("  Input processed, passing to troff");
         }
         _ => {
-            println!("troff (SlateOS)");
+            println!("troff (Slate OS)");
             println!("  Macros: ms");
             println!("  Device: ps (PostScript)");
             println!("  Input: paper.ms");

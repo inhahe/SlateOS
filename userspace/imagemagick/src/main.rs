@@ -46,7 +46,7 @@ fn run_convert(args: Vec<String>) -> i32 {
     }
 
     if args.iter().any(|a| a == "-version" || a == "--version") {
-        println!("Version: ImageMagick 7.1.0 (SlateOS)");
+        println!("Version: ImageMagick 7.1.0 (Slate OS)");
         println!("Features: DPC Modules OpenMP(4.5)");
         println!("Delegates (built-in): bzlib fontconfig freetype jng jpeg lcms lzma png tiff webp xml zlib");
         return 0;
@@ -221,7 +221,7 @@ fn run_magick(args: Vec<String>) -> i32 {
         "composite" => run_composite(rest),
         "montage" => run_montage(rest),
         "--version" | "-version" => {
-            println!("Version: ImageMagick 7.1.0 (SlateOS)");
+            println!("Version: ImageMagick 7.1.0 (Slate OS)");
             0
         }
         "--help" | "help" | "-h" => {

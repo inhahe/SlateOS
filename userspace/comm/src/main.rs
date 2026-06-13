@@ -574,7 +574,7 @@ fn open_input(path: &str) -> io::Result<Box<dyn BufRead>> {
 // ============================================================================
 
 fn print_help() {
-    println!("SlateOS comm v{VERSION}");
+    println!("Slate OS comm v{VERSION}");
     println!();
     println!("Compare two sorted files line by line.");
     println!();
@@ -627,7 +627,7 @@ fn main() {
             process::exit(0);
         }
         ParseResult::Version => {
-            println!("comm (SlateOS) {VERSION}");
+            println!("comm (Slate OS) {VERSION}");
             process::exit(0);
         }
         ParseResult::Run(config) => {

@@ -37,7 +37,7 @@ fn run_atuin(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("atuin 18.3.0 (SlateOS)");
+            println!("atuin 18.3.0 (Slate OS)");
             0
         }
         "init" => {

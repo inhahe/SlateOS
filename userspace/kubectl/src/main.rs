@@ -53,9 +53,9 @@ fn run_kubectl(args: Vec<String>) -> i32 {
         "version" | "--version" => {
             let short = cmd_args.iter().any(|a| a == "--short");
             if short {
-                println!("Client Version: v1.29.0 (SlateOS)");
+                println!("Client Version: v1.29.0 (Slate OS)");
             } else {
-                println!("Client Version: v1.29.0 (SlateOS)");
+                println!("Client Version: v1.29.0 (Slate OS)");
                 println!("Server Version: v1.29.0 (simulated)");
             }
             0

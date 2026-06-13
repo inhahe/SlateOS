@@ -15,7 +15,7 @@ fn run_ghidra(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "analyzeHeadless" => {
-                println!("analyzeHeadless (SlateOS) — Ghidra headless analyzer");
+                println!("analyzeHeadless (Slate OS) — Ghidra headless analyzer");
                 println!("  analyzeHeadless PROJECT_DIR PROJECT_NAME");
                 println!("  -import FILE       Import binary");
                 println!("  -process FILE      Process existing program");
@@ -25,7 +25,7 @@ fn run_ghidra(args: &[String], prog: &str) -> i32 {
                 println!("  -overwrite         Overwrite existing program");
             }
             _ => {
-                println!("Ghidra v11.0 (SlateOS) — Software Reverse Engineering Suite");
+                println!("Ghidra v11.0 (Slate OS) — Software Reverse Engineering Suite");
                 println!("  --project DIR    Project directory");
                 println!("  --import FILE    Import binary");
                 println!("  --script FILE    Run Ghidra script");
@@ -35,10 +35,10 @@ fn run_ghidra(args: &[String], prog: &str) -> i32 {
         println!("  --version        Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Ghidra v11.0.3 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("Ghidra v11.0.3 (Slate OS)"); return 0; }
     match prog {
         "analyzeHeadless" => {
-            println!("Ghidra analyzeHeadless v11.0.3 (SlateOS)");
+            println!("Ghidra analyzeHeadless v11.0.3 (Slate OS)");
             println!("  Project: /tmp/ghidra_project");
             println!("  Importing: target.exe");
             println!("  Language: x86:LE:64:default");
@@ -50,7 +50,7 @@ fn run_ghidra(args: &[String], prog: &str) -> i32 {
             println!("  Analysis complete in 4m 23s");
         }
         _ => {
-            println!("Ghidra v11.0.3 (SlateOS)");
+            println!("Ghidra v11.0.3 (Slate OS)");
             println!("  CodeBrowser: loaded target.exe");
             println!("  Program: x86_64, PE32+, Windows");
             println!("  Functions: 45,678");

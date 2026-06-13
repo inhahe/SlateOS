@@ -41,7 +41,7 @@ fn run_rustup(args: Vec<String>) -> i32 {
             println!("  --version   Show version");
             0
         }
-        "--version" | "-V" => { println!("rustup 1.27.0 (SlateOS)"); 0 }
+        "--version" | "-V" => { println!("rustup 1.27.0 (Slate OS)"); 0 }
         "show" => {
             println!("Default host: x86_64-slateos");
             println!("rustup home:  /home/user/.rustup");
@@ -54,7 +54,7 @@ fn run_rustup(args: Vec<String>) -> i32 {
             println!("active toolchain");
             println!("----------------");
             println!("stable-x86_64-slateos (default)");
-            println!("rustc 1.77.0 (SlateOS)");
+            println!("rustc 1.77.0 (Slate OS)");
             0
         }
         "update" => {
@@ -171,7 +171,7 @@ fn run_rustup(args: Vec<String>) -> i32 {
 
 fn run_rustc(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("rustc 1.77.0 (SlateOS)");
+        println!("rustc 1.77.0 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -186,7 +186,7 @@ fn run_rustc(args: Vec<String>) -> i32 {
 fn run_cargo(args: Vec<String>) -> i32 {
     let cmd = args.first().cloned().unwrap_or_else(|| "help".to_string());
     match cmd.as_str() {
-        "--version" | "-V" => { println!("cargo 1.77.0 (SlateOS)"); 0 }
+        "--version" | "-V" => { println!("cargo 1.77.0 (Slate OS)"); 0 }
         "build" | "b" => { println!("   Compiling myproject v0.1.0 (/project)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.5s"); 0 }
         "run" | "r" => { println!("   Compiling myproject v0.1.0\n    Finished `dev` profile\n     Running `target/debug/myproject`\n(simulated)"); 0 }
         "test" | "t" => { println!("   Compiling myproject v0.1.0\n    Finished `test` profile\n     Running tests\ntest result: ok. 5 passed; 0 failed (simulated)"); 0 }
@@ -225,7 +225,7 @@ fn main() {
         "cargo" => run_cargo(rest),
         "rustfmt" => { println!("(rustfmt — simulated)"); 0 }
         "clippy-driver" => { println!("(clippy — simulated)"); 0 }
-        "rust-analyzer" => { println!("rust-analyzer 1.77.0 (SlateOS) — language server"); 0 }
+        "rust-analyzer" => { println!("rust-analyzer 1.77.0 (Slate OS) — language server"); 0 }
         _ => run_rustup(rest),
     };
 

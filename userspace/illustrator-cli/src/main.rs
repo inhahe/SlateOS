@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ai(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: illustrator [OPTIONS] [FILE]");
-        println!("Adobe Illustrator 2024 (SlateOS) — Vector graphics design");
+        println!("Adobe Illustrator 2024 (Slate OS) — Vector graphics design");
         println!();
         println!("Options:");
         println!("  -r SCRIPT              Run ExtendScript / JSX");
@@ -23,8 +23,8 @@ fn run_ai(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Adobe Illustrator 2024 v28.4.1 (SlateOS)"); return 0; }
-    println!("Adobe Illustrator 2024 v28.4.1 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Adobe Illustrator 2024 v28.4.1 (Slate OS)"); return 0; }
+    println!("Adobe Illustrator 2024 v28.4.1 (Slate OS)");
     println!("  Engine: GPU acceleration");
     println!("  Scripting: ExtendScript, CEP, UXP");
     println!("  Features: Generative Recolor, Text to Vector, 3D & Materials");

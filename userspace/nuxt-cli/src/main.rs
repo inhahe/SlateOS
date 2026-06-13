@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_nuxi(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: nuxi COMMAND [OPTIONS]");
-        println!("Nuxt CLI (nuxi) 3.12.2 (SlateOS)");
+        println!("Nuxt CLI (nuxi) 3.12.2 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  init         Initialize a new project");

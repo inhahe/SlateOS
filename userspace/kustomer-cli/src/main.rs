@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_kustomer(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: kustomer [OPTIONS]");
-        println!("Kustomer (SlateOS) — customer-centric (not ticket-centric) support platform");
+        println!("Kustomer (Slate OS) — customer-centric (not ticket-centric) support platform");
         println!();
         println!("Options:");
         println!("  --enterprise           Enterprise tier (custom pricing, typically $89-$139/seat/mo)");
@@ -24,8 +24,8 @@ fn run_kustomer(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Kustomer 2024 (SlateOS)"); return 0; }
-    println!("Kustomer 2024 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Kustomer 2024 (Slate OS)"); return 0; }
+    println!("Kustomer 2024 (Slate OS)");
     println!("  Vendor: Kustomer, Inc. (NYC, NY — owned by Meta then divested back to founders 2023)");
     println!("  Founders: Brad Birnbaum (CEO) + Jeremy Suriel (CTO), 2015");
     println!("          previously co-founded eAssist (helpdesk) → sold to Kana 2002");

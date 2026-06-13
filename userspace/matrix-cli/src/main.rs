@@ -11,7 +11,7 @@ fn run_matrix(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: matrix <COMMAND> [OPTIONS]");
         println!();
-        println!("Matrix decentralized messaging CLI (SlateOS).");
+        println!("Matrix decentralized messaging CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  login        Login to homeserver");
@@ -58,7 +58,7 @@ fn run_matrix(args: Vec<String>) -> i32 {
                     println!("!abc123:matrix.org               General Chat         42       3");
                     println!("!def456:matrix.org               Development          18       0");
                     println!("!ghi789:matrix.org               Random               35       12");
-                    println!("!jkl012:matrix.org               SlateOS Dev            8        1");
+                    println!("!jkl012:matrix.org               Slate OS Dev            8        1");
                 }
                 "create" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("New Room");
@@ -92,7 +92,7 @@ fn run_matrix(args: Vec<String>) -> i32 {
             println!("[General Chat] @alice:matrix.org: Hey everyone!");
             println!("[General Chat] @bob:matrix.org: Working on the deploy");
             println!("[Development] @charlie:matrix.org: PR #42 ready for review");
-            println!("[SlateOS Dev] @dev:matrix.org: Build passed ✓");
+            println!("[Slate OS Dev] @dev:matrix.org: Build passed ✓");
             println!();
             println!("(press Ctrl+C to stop syncing)");
             0

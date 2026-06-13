@@ -15,17 +15,17 @@ fn run_geotiff(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS] FILE", prog);
         match prog {
             "geotifcp" => {
-                println!("geotifcp (SlateOS) — Copy TIFF with GeoTIFF metadata");
+                println!("geotifcp (Slate OS) — Copy TIFF with GeoTIFF metadata");
                 println!("  -g FILE   GeoTIFF metadata source file");
                 println!("  -e FILE   Export metadata to file");
                 println!("  -4 EPSG   Set EPSG code");
             }
             "applygeo" => {
-                println!("applygeo (SlateOS) — Apply geo metadata to TIFF");
+                println!("applygeo (Slate OS) — Apply geo metadata to TIFF");
                 println!("  applygeo GEOTIFF_FILE TIFF_FILE");
             }
             _ => {
-                println!("listgeo (SlateOS) — List GeoTIFF metadata");
+                println!("listgeo (Slate OS) — List GeoTIFF metadata");
                 println!("  -d          Dump all tags");
                 println!("  -t          Terse output");
                 println!("  -no_norm    Don't normalize values");
@@ -34,7 +34,7 @@ fn run_geotiff(args: &[String], prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("libgeotiff v1.7.1 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("libgeotiff v1.7.1 (Slate OS)"); return 0; }
     match prog {
         _ if prog != "geotifcp" && prog != "applygeo" => {
             println!("listgeo: GeoTIFF metadata");

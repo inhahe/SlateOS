@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pico2wave(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pico2wave [OPTIONS] -w FILE \"TEXT\"");
-        println!("pico2wave v1.0 (SlateOS) — SVOX Pico TTS wave file generator");
+        println!("pico2wave v1.0 (Slate OS) — SVOX Pico TTS wave file generator");
         println!();
         println!("Options:");
         println!("  -w FILE         Output WAV file");
@@ -21,7 +21,7 @@ fn run_pico2wave(args: &[String], _prog: &str) -> i32 {
         println!("  --version       Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("pico2wave v1.0 (SlateOS, SVOX Pico engine)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("pico2wave v1.0 (Slate OS, SVOX Pico engine)"); return 0; }
     let output = args.windows(2).find(|w| w[0] == "-w").map(|w| w[1].as_str());
     let lang = args.windows(2).find(|w| w[0] == "-l").map(|w| w[1].as_str()).unwrap_or("en-US");
     if output.is_none() {

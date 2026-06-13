@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_fastfetch(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: fastfetch [OPTIONS]");
-        println!("fastfetch v2.8 (SlateOS) — Fast system information tool");
+        println!("fastfetch v2.8 (Slate OS) — Fast system information tool");
         println!();
         println!("Options:");
         println!("  -c FILE        Config file");
@@ -24,7 +24,7 @@ fn run_fastfetch(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("fastfetch v2.8 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("fastfetch v2.8 (Slate OS)"); return 0; }
     if args.iter().any(|a| a == "-l") {
         println!("Available modules:");
         println!("  Title, OS, Host, Kernel, Uptime, Shell, DE, WM,");
@@ -34,7 +34,7 @@ fn run_fastfetch(args: &[String], _prog: &str) -> i32 {
     }
     println!("   ____            ___  ____    user@slateos-host");
     println!("  / __ \\__  ______/ _ \\/ __/    ---------------");
-    println!(" / /_/ / / / / __/ // /\\ \\      OS: SlateOS 1.0 x86_64");
+    println!(" / /_/ / / / / __/ // /\\ \\      OS: Slate OS 1.0 x86_64");
     println!(" \\____/\\_,_/_/  \\___/___/       Host: Custom PC");
     println!("                                Kernel: 0.1.0-slateos");
     println!("                                Uptime: 2h 15m");
@@ -48,10 +48,10 @@ fn run_fastfetch(args: &[String], _prog: &str) -> i32 {
 fn run_flashfetch(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: flashfetch");
-        println!("flashfetch v2.8 (SlateOS) — Minimal fastfetch preset");
+        println!("flashfetch v2.8 (Slate OS) — Minimal fastfetch preset");
         return 0;
     }
-    println!("SlateOS 1.0 | 0.1.0-slateos | AMD Ryzen 7 | 4.0/16.0 GiB");
+    println!("Slate OS 1.0 | 0.1.0-slateos | AMD Ryzen 7 | 4.0/16.0 GiB");
     0
 }
 

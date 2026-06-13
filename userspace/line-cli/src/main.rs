@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_line(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: line [OPTIONS]");
-        println!("LINE (SlateOS) — Japan-dominant messaging super-app");
+        println!("LINE (Slate OS) — Japan-dominant messaging super-app");
         println!();
         println!("Options:");
         println!("  --chat                 Chat");
@@ -24,8 +24,8 @@ fn run_line(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("LINE 8.5.0 (SlateOS)"); return 0; }
-    println!("LINE 8.5.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("LINE 8.5.0 (Slate OS)"); return 0; }
+    println!("LINE 8.5.0 (Slate OS)");
     println!("  Owner: LY Corporation (merger of LINE Corp + Yahoo! Japan, Oct 2023)");
     println!("  Parent: A Holdings (Naver + SoftBank JV)");
     println!("  Origin: built post-2011 Japan earthquake to replace failing voice networks");

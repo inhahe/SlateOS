@@ -37,7 +37,7 @@ fn run_openssl(args: Vec<String>) -> i32 {
     match cmd {
         "version" => {
             let full = args.iter().any(|a| a == "-a");
-            println!("OpenSSL 3.2.0 14 Nov 2023 (SlateOS)");
+            println!("OpenSSL 3.2.0 14 Nov 2023 (Slate OS)");
             if full {
                 println!("built on: Thu Jan 1 00:00:00 2024");
                 println!("platform: slateos-x86_64");

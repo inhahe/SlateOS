@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_x11vnc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: x11vnc [OPTIONS]");
-        println!("x11vnc v0.9 (SlateOS) — VNC server for real X displays");
+        println!("x11vnc v0.9 (Slate OS) — VNC server for real X displays");
         println!();
         println!("Options:");
         println!("  -display :N       X display to share");
@@ -25,7 +25,7 @@ fn run_x11vnc(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("x11vnc v0.9 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("x11vnc v0.9 (Slate OS)"); return 0; }
     println!("x11vnc: VNC server started on port 5900");
     println!("  Sharing display :0");
     println!("  XDamage: enabled");

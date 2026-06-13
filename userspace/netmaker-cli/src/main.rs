@@ -15,7 +15,7 @@ fn run_netmaker(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [COMMAND] [OPTIONS]", prog);
         match prog {
             "nmctl" => {
-                println!("nmctl (SlateOS) — Netmaker CLI client");
+                println!("nmctl (Slate OS) — Netmaker CLI client");
                 println!("  network list|create|delete  Manage networks");
                 println!("  node list|create|delete     Manage nodes");
                 println!("  key list|create|delete      Manage enrollment keys");
@@ -24,7 +24,7 @@ fn run_netmaker(args: &[String], prog: &str) -> i32 {
                 println!("  context set|list             Set API context");
             }
             _ => {
-                println!("netmaker (SlateOS) — Netmaker server");
+                println!("netmaker (Slate OS) — Netmaker server");
                 println!("  serve              Start Netmaker server");
                 println!("  --config FILE      Config file");
             }
@@ -32,7 +32,7 @@ fn run_netmaker(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Netmaker v0.24.2 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("Netmaker v0.24.2 (Slate OS)"); return 0; }
     match prog {
         "nmctl" => {
             println!("Netmaker Networks:");
@@ -41,7 +41,7 @@ fn run_netmaker(args: &[String], prog: &str) -> i32 {
             println!("  Total: 2 networks, 13 nodes");
         }
         _ => {
-            println!("Netmaker v0.24.2 (SlateOS)");
+            println!("Netmaker v0.24.2 (Slate OS)");
             println!("  Networks: 2");
             println!("  Nodes: 13");
             println!("  Egress gateways: 2");

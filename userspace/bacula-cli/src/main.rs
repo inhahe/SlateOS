@@ -19,7 +19,7 @@ fn run_bconsole(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "-?") {
         println!("Usage: bconsole [OPTIONS]");
         println!();
-        println!("bconsole — Bacula console (SlateOS).");
+        println!("bconsole — Bacula console (Slate OS).");
         println!();
         println!("Options:");
         println!("  -c FILE     Config file");
@@ -28,11 +28,11 @@ fn run_bconsole(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("bconsole 13.0.4 (SlateOS)");
+        println!("bconsole 13.0.4 (Slate OS)");
         return 0;
     }
     println!("Connecting to Director localhost:9101...");
-    println!("1000 OK: director version 13.0.4 (SlateOS)");
+    println!("1000 OK: director version 13.0.4 (Slate OS)");
     println!("Enter a period (.) to cancel a command.");
     println!("*");
     0
@@ -42,7 +42,7 @@ fn run_bscan(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: bscan [OPTIONS] DEVICE");
         println!();
-        println!("bscan — scan Bacula volumes into catalog (SlateOS).");
+        println!("bscan — scan Bacula volumes into catalog (Slate OS).");
         println!();
         println!("Options:");
         println!("  -b BS      Bootstrap file");
@@ -66,7 +66,7 @@ fn run_bls(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: bls [OPTIONS] DEVICE");
         println!();
-        println!("bls — list Bacula volume contents (SlateOS).");
+        println!("bls — list Bacula volume contents (Slate OS).");
         return 0;
     }
     println!("bls: listing volume contents");
@@ -82,7 +82,7 @@ fn run_bextract(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: bextract [OPTIONS] DEVICE DIRECTORY");
         println!();
-        println!("bextract — extract Bacula volume to directory (SlateOS).");
+        println!("bextract — extract Bacula volume to directory (Slate OS).");
         println!();
         println!("Options:");
         println!("  -b BS      Bootstrap file");

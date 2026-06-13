@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_olive(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: olive [OPTIONS] [PROJECT]");
-        println!("Olive Editor 0.2 (SlateOS) — Pro-grade open-source NLE (in active dev)");
+        println!("Olive Editor 0.2 (Slate OS) — Pro-grade open-source NLE (in active dev)");
         println!();
         println!("Options:");
         println!("  --open FILE            Open .ove project");
@@ -21,8 +21,8 @@ fn run_olive(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Olive Editor 0.2.0 (SlateOS)"); return 0; }
-    println!("Olive Editor 0.2.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Olive Editor 0.2.0 (Slate OS)"); return 0; }
+    println!("Olive Editor 0.2.0 (Slate OS)");
     println!("  Engine: Custom node-based composition graph");
     println!("  Color: OpenColorIO, 32-bit linear float internal");
     println!("  Node editor: Build effects from primitive nodes (similar to Nuke/Fusion)");

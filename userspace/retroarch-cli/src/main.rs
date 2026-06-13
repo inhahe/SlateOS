@@ -11,7 +11,7 @@ fn run_retroarch(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: retroarch [OPTIONS] [ROM]");
         println!();
-        println!("retroarch — multi-system emulator frontend (SlateOS).");
+        println!("retroarch — multi-system emulator frontend (Slate OS).");
         println!();
         println!("Options:");
         println!("  -L, --libretro <core>  Libretro core to load");
@@ -27,7 +27,7 @@ fn run_retroarch(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("RetroArch 1.17.0 (SlateOS)");
+        println!("RetroArch 1.17.0 (Slate OS)");
         println!("Git: abcdef1234567890");
         println!("Compiler: rustc");
         return 0;
@@ -60,7 +60,7 @@ fn run_retroarch(args: &[String]) -> i32 {
     if let Some(r) = rom {
         println!("[INFO] Loading ROM: {}", r);
     }
-    println!("[INFO] RetroArch 1.17.0 (SlateOS)");
+    println!("[INFO] RetroArch 1.17.0 (Slate OS)");
     println!("[INFO] Initializing video driver: vulkan");
     println!("[INFO] Initializing audio driver: pulseaudio");
     println!("[INFO] Initializing input driver: udev");

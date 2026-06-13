@@ -134,7 +134,7 @@ fn discover_block_devices() -> Vec<BlockDevice> {
             removable: false,
             read_only: false,
             model: "Virtual Disk".to_string(),
-            vendor: "SlateOS".to_string(),
+            vendor: "Slate OS".to_string(),
             serial: String::new(),
             _revision: String::new(),
             mountpoints: vec!["/".to_string()],
@@ -298,7 +298,7 @@ fn udisksctl_main(args: &[String]) -> i32 {
             0
         }
         "--version" => {
-            println!("udisksctl (SlateOS) {VERSION}");
+            println!("udisksctl (Slate OS) {VERSION}");
             0
         }
         other => {
@@ -638,7 +638,7 @@ fn udisksd_main(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("udisksd (SlateOS) {VERSION}");
+                println!("udisksd (Slate OS) {VERSION}");
                 return 0;
             }
             other => {
@@ -686,7 +686,7 @@ fn umount_main(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("umount (SlateOS) {VERSION}");
+                println!("umount (Slate OS) {VERSION}");
                 return 0;
             }
             s if !s.starts_with('-') => {

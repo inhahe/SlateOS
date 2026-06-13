@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_eeschema(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: eeschema [OPTIONS] [FILE.kicad_sch]");
-        println!("eeschema v8.0 (SlateOS) — KiCad schematic editor");
+        println!("eeschema v8.0 (Slate OS) — KiCad schematic editor");
         println!();
         println!("Options:");
         println!("  --version         Show version");
@@ -22,7 +22,7 @@ fn run_eeschema(args: &[String], _prog: &str) -> i32 {
         println!("  symbol library editor, annotation, bus support");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("eeschema v8.0 (SlateOS, KiCad)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("eeschema v8.0 (Slate OS, KiCad)"); return 0; }
     println!("eeschema: KiCad schematic editor started");
     0
 }
@@ -30,7 +30,7 @@ fn run_eeschema(args: &[String], _prog: &str) -> i32 {
 fn run_pcbnew(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pcbnew [OPTIONS] [FILE.kicad_pcb]");
-        println!("pcbnew v8.0 (SlateOS) — KiCad PCB layout editor");
+        println!("pcbnew v8.0 (Slate OS) — KiCad PCB layout editor");
         println!();
         println!("Options:");
         println!("  --version         Show version");
@@ -39,7 +39,7 @@ fn run_pcbnew(args: &[String], _prog: &str) -> i32 {
         println!("  3D viewer, DRC, footprint editor, zone fills");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("pcbnew v8.0 (SlateOS, KiCad)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("pcbnew v8.0 (Slate OS, KiCad)"); return 0; }
     println!("pcbnew: KiCad PCB layout editor started");
     println!("  Layers: 32 copper + technical layers");
     println!("  Router: interactive with DRC");
@@ -50,10 +50,10 @@ fn run_pcbnew(args: &[String], _prog: &str) -> i32 {
 fn run_gerbview(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gerbview [OPTIONS] [FILE.gbr...]");
-        println!("gerbview v8.0 (SlateOS) — KiCad Gerber file viewer");
+        println!("gerbview v8.0 (Slate OS) — KiCad Gerber file viewer");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("gerbview v8.0 (SlateOS, KiCad)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("gerbview v8.0 (Slate OS, KiCad)"); return 0; }
     println!("gerbview: Gerber viewer started");
     0
 }

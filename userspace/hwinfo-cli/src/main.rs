@@ -19,7 +19,7 @@ fn run_hwinfo(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: hwinfo [OPTIONS]");
         println!();
-        println!("hwinfo — probe for hardware (SlateOS).");
+        println!("hwinfo — probe for hardware (Slate OS).");
         println!();
         println!("Options:");
         println!("  --short        Short listing");
@@ -34,7 +34,7 @@ fn run_hwinfo(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("hwinfo version 21.82 (SlateOS)");
+        println!("hwinfo version 21.82 (Slate OS)");
         return 0;
     }
 
@@ -109,7 +109,7 @@ fn run_lshw(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lshw [OPTIONS]");
         println!();
-        println!("lshw — list hardware (SlateOS).");
+        println!("lshw — list hardware (Slate OS).");
         println!();
         println!("Options:");
         println!("  -short         Short listing");
@@ -122,7 +122,7 @@ fn run_lshw(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-version") {
-        println!("lshw B.02.19.2 (SlateOS)");
+        println!("lshw B.02.19.2 (Slate OS)");
         return 0;
     }
 

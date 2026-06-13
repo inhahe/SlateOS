@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_minikube(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: minikube COMMAND [OPTIONS]");
-        println!("minikube v1.33.0 (SlateOS) — Local Kubernetes cluster");
+        println!("minikube v1.33.0 (Slate OS) — Local Kubernetes cluster");
         println!();
         println!("Commands:");
         println!("  start           Start cluster");
@@ -42,7 +42,7 @@ fn run_minikube(args: &[String], _prog: &str) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("status");
     match cmd {
         "start" => {
-            println!("* minikube v1.33.0 on SlateOS");
+            println!("* minikube v1.33.0 on Slate OS");
             println!("* Using the docker driver based on user configuration");
             println!("* Starting control plane node minikube in cluster minikube");
             println!("* Pulling base image...");

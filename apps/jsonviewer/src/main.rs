@@ -3883,7 +3883,7 @@ fn char_to_byte_pos(s: &str, char_idx: usize) -> usize {
 // ============================================================================
 
 const SAMPLE_JSON: &str = r#"{
-  "name": "SlateOS JSON Viewer",
+  "name": "Slate OS JSON Viewer",
   "version": "0.1.0",
   "description": "A full-featured JSON viewer and editor",
   "features": [

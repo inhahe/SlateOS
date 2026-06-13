@@ -303,7 +303,7 @@ fn get_caller_uid(users: &[User]) -> u32 {
 
 /// Read a password from the terminal without echoing.
 ///
-/// On SlateOS the terminal may not yet support disabling echo, so we
+/// On Slate OS the terminal may not yet support disabling echo, so we
 /// read a line from stdin. The prompt is written to stderr so that it
 /// appears even when stdout is redirected.
 fn read_password(prompt: &str) -> Result<String, String> {
@@ -340,14 +340,14 @@ fn current_epoch_secs() -> u64 {
 
 /// Record a login session so that `who` and `w` can see it.
 ///
-/// Writes to both `/run/sessions/<pid>` (SlateOS native) and
+/// Writes to both `/run/sessions/<pid>` (Slate OS native) and
 /// `/tmp/.users/<username>` (fallback). Errors are non-fatal since
 /// the switch itself should still proceed.
 fn record_session(username: &str, tty: &str) {
     let now = current_epoch_secs();
     let pid = process::id();
 
-    // SlateOS native session file.
+    // Slate OS native session file.
     let session_dir = "/run/sessions";
     let _ = fs::create_dir_all(session_dir);
     let session_content = format!("user={username}\ntty={tty}\nhost=\ntime={now}\npid={pid}\n");
@@ -1010,7 +1010,7 @@ mod tests {
     // --- User database parsing ---
 
     fn sample_users_yaml() -> &'static str {
-        r#"# SlateOS user database
+        r#"# Slate OS user database
 users:
   - uid: 0
     username: "root"

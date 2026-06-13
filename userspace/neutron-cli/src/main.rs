@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_neutron(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: neutron [OPTIONS] [TRACK]");
-        println!("iZotope Neutron 4 (SlateOS) — AI mixing & channel-strip suite");
+        println!("iZotope Neutron 4 (Slate OS) — AI mixing & channel-strip suite");
         println!();
         println!("Options:");
         println!("  --assistant            Mix Assistant (AI track analysis)");
@@ -22,8 +22,8 @@ fn run_neutron(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("iZotope Neutron 4.5.0 (SlateOS)"); return 0; }
-    println!("iZotope Neutron 4.5.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("iZotope Neutron 4.5.0 (Slate OS)"); return 0; }
+    println!("iZotope Neutron 4.5.0 (Slate OS)");
     println!("  Modules: Equalizer, Compressor (×2), Exciter, Gate, Sculptor, Transient Shaper");
     println!("  AI: Mix Assistant, Unmask, Target Library");
     println!("  Visual Mixer: drag-and-drop pan/volume across session");

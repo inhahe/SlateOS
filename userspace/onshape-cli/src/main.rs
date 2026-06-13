@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_onshape(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: onshape [OPTIONS] [DOC_URL]");
-        println!("PTC Onshape (SlateOS) — Cloud-native parametric CAD");
+        println!("PTC Onshape (Slate OS) — Cloud-native parametric CAD");
         println!();
         println!("Options:");
         println!("  --document URL         Open Onshape document by URL");
@@ -23,8 +23,8 @@ fn run_onshape(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("PTC Onshape 1.193 (SlateOS)"); return 0; }
-    println!("PTC Onshape 1.193 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("PTC Onshape 1.193 (Slate OS)"); return 0; }
+    println!("PTC Onshape 1.193 (Slate OS)");
     println!("  Architecture: Cloud-native, runs in browser — no install needed");
     println!("  Branching/merging: Git-like version control for CAD documents");
     println!("  Collaboration: Real-time multi-user editing");

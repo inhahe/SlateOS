@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_odt2txt(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: odt2txt [OPTIONS] <file.odt>");
-        println!("odt2txt v0.5 (SlateOS) — OpenDocument to plain text converter");
+        println!("odt2txt v0.5 (Slate OS) — OpenDocument to plain text converter");
         println!();
         println!("Options:");
         println!("  -o FILE        Output to file (default: stdout)");
@@ -26,7 +26,7 @@ fn run_odt2txt(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("odt2txt v0.5 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("odt2txt v0.5 (Slate OS)"); return 0; }
     let files: Vec<&String> = args.iter().filter(|a| !a.starts_with('-') && {
         let idx = args.iter().position(|x| std::ptr::eq(x, *a)).unwrap_or(0);
         idx == 0 || !matches!(args.get(idx.wrapping_sub(1)).map(|s| s.as_str()), Some("-o" | "--encoding" | "--width" | "--subst"))

@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_observe(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: observe [OPTIONS]");
-        println!("Observe (SlateOS) — Snowflake-native observability cloud (private, Sutter Hill-backed)");
+        println!("Observe (Slate OS) — Snowflake-native observability cloud (private, Sutter Hill-backed)");
         println!();
         println!("Options:");
         println!("  --datastreams          Data Streams (logs, metrics, traces input)");
@@ -22,8 +22,8 @@ fn run_observe(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Observe 2024 (SlateOS)"); return 0; }
-    println!("Observe 2024 (SlateOS) — Observability Cloud on Snowflake");
+    if args.iter().any(|a| a == "--version") { println!("Observe 2024 (Slate OS)"); return 0; }
+    println!("Observe 2024 (Slate OS) — Observability Cloud on Snowflake");
     println!("  Vendor: Observe, Inc. (San Mateo, CA — private)");
     println!("  Founders: Jeremy Burton (CEO) + Jon Watte (CTO) + Yvan Sukur, 2018");
     println!("          Jeremy Burton: ex-Dell EMC CMO + ex-VMware EVP — enterprise marketing veteran");

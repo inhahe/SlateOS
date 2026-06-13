@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_bandwhich(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: bandwhich [OPTIONS]");
-        println!("bandwhich 0.22.2 (SlateOS) — Terminal bandwidth utilization tool");
+        println!("bandwhich 0.22.2 (Slate OS) — Terminal bandwidth utilization tool");
         println!();
         println!("Options:");
         println!("  -i, --interface IFACE   Listen on specific interface");
@@ -29,7 +29,7 @@ fn run_bandwhich(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("bandwhich 0.22.2 (SlateOS)");
+        println!("bandwhich 0.22.2 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "-r" || a == "--raw") {

@@ -493,7 +493,7 @@ fn main() {
             0
         }
         "--version" => {
-            println!("localectl (SlateOS) {VERSION}");
+            println!("localectl (Slate OS) {VERSION}");
             0
         }
         other => {

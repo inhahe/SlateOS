@@ -19,7 +19,7 @@ fn run_dmidecode(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: dmidecode [OPTIONS]");
         println!();
-        println!("dmidecode — DMI/SMBIOS table decoder (SlateOS).");
+        println!("dmidecode — DMI/SMBIOS table decoder (Slate OS).");
         println!();
         println!("Options:");
         println!("  -t TYPE        Only display given type");
@@ -31,7 +31,7 @@ fn run_dmidecode(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("dmidecode 3.5 (SlateOS)");
+        println!("dmidecode 3.5 (Slate OS)");
         return 0;
     }
 

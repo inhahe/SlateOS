@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_r7(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: rapid7 [OPTIONS]");
-        println!("Rapid7 (SlateOS) — Insight Platform (security operations, NASDAQ:RPD)");
+        println!("Rapid7 (Slate OS) — Insight Platform (security operations, NASDAQ:RPD)");
         println!();
         println!("Options:");
         println!("  msfconsole             Metasploit Framework (OSS)");
@@ -24,8 +24,8 @@ fn run_r7(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Rapid7 + Metasploit 6.4 (SlateOS)"); return 0; }
-    println!("Rapid7 2024 (SlateOS) — Insight Platform");
+    if args.iter().any(|a| a == "--version") { println!("Rapid7 + Metasploit 6.4 (Slate OS)"); return 0; }
+    println!("Rapid7 2024 (Slate OS) — Insight Platform");
     println!("  Vendor: Rapid7, Inc. (Boston, MA — NASDAQ:RPD since 2015)");
     println!("  Founders: Alan Matthews + Tas Giakouminakis + Chad Loder, 2000");
     println!("          founded in Manhattan, moved to Boston");

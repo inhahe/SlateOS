@@ -29,7 +29,7 @@ fn run_jackd(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("jackdmp version 1.9.22 (SlateOS)");
+        println!("jackdmp version 1.9.22 (Slate OS)");
         return 0;
     }
 
@@ -37,7 +37,7 @@ fn run_jackd(args: Vec<String>) -> i32 {
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("alsa");
-    println!("jackdmp 1.9.22 (SlateOS)");
+    println!("jackdmp 1.9.22 (Slate OS)");
     println!("JACK server starting in realtime mode with priority 10");
     println!("Using backend: {}", backend);
     println!("Sample rate: 48000");

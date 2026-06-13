@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_thruk(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: thruk [COMMAND] [OPTIONS]");
-        println!("Thruk v3.12 (SlateOS) — Monitoring web interface");
+        println!("Thruk v3.12 (Slate OS) — Monitoring web interface");
         println!();
         println!("Commands:");
         println!("  start              Start Thruk");
@@ -32,8 +32,8 @@ fn run_thruk(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Thruk v3.12.2 (SlateOS)"); return 0; }
-    println!("Thruk v3.12.2 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Thruk v3.12.2 (Slate OS)"); return 0; }
+    println!("Thruk v3.12.2 (Slate OS)");
     println!("  Backends: 3 (Naemon, Icinga2, Shinken)");
     println!("  Hosts: 234 (220 up, 14 down)");
     println!("  Services: 3,456 (3,201 ok, 123 warning, 132 critical)");

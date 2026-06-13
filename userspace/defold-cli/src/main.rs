@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_defold(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: defold [COMMAND] [OPTIONS]");
-        println!("Defold v1.9 (SlateOS) — Cross-platform 2D/3D game engine");
+        println!("Defold v1.9 (Slate OS) — Cross-platform 2D/3D game engine");
         println!();
         println!("Commands:");
         println!("  new PROJECT        Create new project");
@@ -30,8 +30,8 @@ fn run_defold(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Defold v1.9.4 (SlateOS)"); return 0; }
-    println!("Defold v1.9.4 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Defold v1.9.4 (Slate OS)"); return 0; }
+    println!("Defold v1.9.4 (Slate OS)");
     println!("  Editor: running on JavaFX");
     println!("  Targets: macOS, Windows, Linux, Android, iOS, HTML5, Switch, PS4");
     println!("  Scripting: Lua 5.1");

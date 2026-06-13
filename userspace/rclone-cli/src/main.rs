@@ -11,7 +11,7 @@ fn run_rclone(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: rclone <COMMAND> [OPTIONS]");
         println!();
-        println!("Rclone cloud storage sync CLI (SlateOS).");
+        println!("Rclone cloud storage sync CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  config       Manage configuration");
@@ -31,7 +31,7 @@ fn run_rclone(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("rclone v1.65.0 (SlateOS)");
+        println!("rclone v1.65.0 (Slate OS)");
         return 0;
     }
 

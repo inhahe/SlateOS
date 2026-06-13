@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_cocotb(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: cocotb COMMAND [OPTIONS]");
-        println!("cocotb v1.9 (SlateOS) — Coroutine-based co-simulation testbench");
+        println!("cocotb v1.9 (Slate OS) — Coroutine-based co-simulation testbench");
         println!();
         println!("Commands:");
         println!("  run               Run tests");
@@ -25,7 +25,7 @@ fn run_cocotb(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("cocotb v1.9 (SlateOS)");
+        println!("cocotb v1.9 (Slate OS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("config");

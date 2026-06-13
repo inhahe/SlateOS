@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_doxygen(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: doxygen [OPTIONS] [CONFIG_FILE]");
-        println!("Doxygen 1.10.0 (SlateOS)");
+        println!("Doxygen 1.10.0 (Slate OS)");
         println!();
         println!("Options:");
         println!("  -g [FILE]     Generate template configuration file");

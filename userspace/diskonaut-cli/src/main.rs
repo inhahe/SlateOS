@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_diskonaut(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: diskonaut [PATH]");
-        println!("diskonaut 0.11.0 (SlateOS) — Terminal disk space navigator");
+        println!("diskonaut 0.11.0 (Slate OS) — Terminal disk space navigator");
         println!();
         println!("Navigate disk usage with an interactive treemap.");
         println!("Press Enter to zoom in, Backspace to zoom out.");

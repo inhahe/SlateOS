@@ -15,20 +15,20 @@ fn run_varnish(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "varnishlog" => {
-                println!("varnishlog (SlateOS) — Display Varnish logs");
+                println!("varnishlog (Slate OS) — Display Varnish logs");
                 println!("  -q QUERY           VSL query expression");
                 println!("  -g GROUP           Group by (session/request/vxid/raw)");
                 println!("  -c                 Client-side logs");
                 println!("  -b                 Backend-side logs");
             }
             "varnishstat" => {
-                println!("varnishstat (SlateOS) — Varnish statistics");
+                println!("varnishstat (Slate OS) — Varnish statistics");
                 println!("  -1                 One-shot mode");
                 println!("  -f FIELD           Field filter");
                 println!("  -j                 JSON output");
             }
             "varnishadm" => {
-                println!("varnishadm (SlateOS) — Varnish admin interface");
+                println!("varnishadm (Slate OS) — Varnish admin interface");
                 println!("  vcl.list           List loaded VCL");
                 println!("  vcl.load NAME FILE Load VCL");
                 println!("  vcl.use NAME       Activate VCL");
@@ -36,7 +36,7 @@ fn run_varnish(args: &[String], prog: &str) -> i32 {
                 println!("  backend.list       List backends");
             }
             _ => {
-                println!("varnishd v7.5 (SlateOS) — HTTP accelerator daemon");
+                println!("varnishd v7.5 (Slate OS) — HTTP accelerator daemon");
                 println!("  -a ADDR:PORT       Listen address");
                 println!("  -b HOST:PORT       Backend server");
                 println!("  -f FILE            VCL config file");
@@ -47,7 +47,7 @@ fn run_varnish(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version" || a == "-V") { println!("Varnish v7.5.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version" || a == "-V") { println!("Varnish v7.5.0 (Slate OS)"); return 0; }
     match prog {
         "varnishstat" => {
             println!("Varnish Statistics:");
@@ -57,7 +57,7 @@ fn run_varnish(args: &[String], prog: &str) -> i32 {
             println!("  backend_req: 74,567");
         }
         _ => {
-            println!("Varnish v7.5.0 (SlateOS)");
+            println!("Varnish v7.5.0 (Slate OS)");
             println!("  Listen: 0.0.0.0:80");
             println!("  Admin: 127.0.0.1:6082");
             println!("  Backend: 127.0.0.1:8080");

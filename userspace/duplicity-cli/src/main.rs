@@ -11,7 +11,7 @@ fn run_duplicity(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: duplicity <COMMAND> [OPTIONS]");
         println!();
-        println!("Duplicity encrypted bandwidth-efficient backup (SlateOS).");
+        println!("Duplicity encrypted bandwidth-efficient backup (Slate OS).");
         println!();
         println!("Commands:");
         println!("  full         Full backup");
@@ -25,7 +25,7 @@ fn run_duplicity(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("duplicity 2.2.0 (SlateOS)");
+        println!("duplicity 2.2.0 (Slate OS)");
         return 0;
     }
 

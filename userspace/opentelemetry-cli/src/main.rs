@@ -34,7 +34,7 @@ fn run_otelcol(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
         "version" => {
-            println!("otelcol version 0.93.0 (SlateOS)");
+            println!("otelcol version 0.93.0 (Slate OS)");
             0
         }
         "validate" => {

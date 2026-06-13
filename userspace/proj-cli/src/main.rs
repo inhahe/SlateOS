@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_proj(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: proj [+PARAMS] [FILE]");
-        println!("PROJ 9.3.1 (SlateOS)");
+        println!("PROJ 9.3.1 (Slate OS)");
         println!("  +proj=TYPE    Projection type");
         println!("  +datum=NAME   Datum");
         println!("  +ellps=NAME   Ellipsoid");
@@ -51,7 +51,7 @@ fn run_projinfo(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("PROJ 9.3.1 (SlateOS)");
+        println!("PROJ 9.3.1 (Slate OS)");
         return 0;
     }
     let crs = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("EPSG:4326");

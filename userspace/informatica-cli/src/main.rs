@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_informatica(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: informatica [OPTIONS]");
-        println!("Informatica (SlateOS) — IDMC + PowerCenter (cloud + on-prem ETL/iPaaS/MDM)");
+        println!("Informatica (Slate OS) — IDMC + PowerCenter (cloud + on-prem ETL/iPaaS/MDM)");
         println!();
         println!("Options:");
         println!("  --idmc                 Intelligent Data Management Cloud (the cloud platform)");
@@ -23,8 +23,8 @@ fn run_informatica(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Informatica IDMC 2024 (SlateOS)"); return 0; }
-    println!("Informatica 2024 (SlateOS) — Intelligent Data Management Cloud (IDMC)");
+    if args.iter().any(|a| a == "--version") { println!("Informatica IDMC 2024 (Slate OS)"); return 0; }
+    println!("Informatica 2024 (Slate OS) — Intelligent Data Management Cloud (IDMC)");
     println!("  Vendor: Informatica, LLC (Redwood City, CA — NYSE:INFA 2021-2025, Salesforce acq pending)");
     println!("  Founder: Gaurav Dhillon + Diaz Nesamoney, 1993");
     println!("          founded as data integration pioneer — defined the ETL category");

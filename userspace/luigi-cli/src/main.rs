@@ -18,7 +18,7 @@ fn run_luigi(args: &[String], is_daemon: bool) -> i32 {
     }
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: luigi TASK [OPTIONS]");
-        println!("Luigi 3.5.0 (SlateOS) — Workflow orchestration");
+        println!("Luigi 3.5.0 (Slate OS) — Workflow orchestration");
         println!();
         println!("Options:");
         println!("  --module MODULE    Module containing task");

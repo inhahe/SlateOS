@@ -1106,7 +1106,7 @@ fn print_last_help(personality: Personality) {
         Personality::Lastb => "lastb",
         Personality::Lastlog => "lastlog",
     };
-    println!("SlateOS Login Records Viewer v0.1.0");
+    println!("Slate OS Login Records Viewer v0.1.0");
     println!();
     println!("Show listing of last logged-in users.");
     println!();
@@ -1133,7 +1133,7 @@ fn print_last_help(personality: Personality) {
 }
 
 fn print_lastlog_help() {
-    println!("SlateOS Last Login Viewer v0.1.0");
+    println!("Slate OS Last Login Viewer v0.1.0");
     println!();
     println!("Show last login information for all users.");
     println!();
@@ -1155,7 +1155,7 @@ fn print_version(personality: Personality) {
         Personality::Lastb => "lastb",
         Personality::Lastlog => "lastlog",
     };
-    println!("{name} (SlateOS) 0.1.0");
+    println!("{name} (Slate OS) 0.1.0");
 }
 
 // ============================================================================

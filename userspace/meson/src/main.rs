@@ -37,7 +37,7 @@ fn run_meson(args: Vec<String>) -> i32 {
             println!("  --version   Show version");
             0
         }
-        "--version" => { println!("0.1.0 (SlateOS)"); 0 }
+        "--version" => { println!("0.1.0 (Slate OS)"); 0 }
         "setup" => {
             let source = cmd_args.first().map(|s| s.as_str()).unwrap_or(".");
             let build = cmd_args.get(1).map(|s| s.as_str()).unwrap_or("builddir");
@@ -46,7 +46,7 @@ fn run_meson(args: Vec<String>) -> i32 {
                 .unwrap_or("debugoptimized");
 
             println!("The Meson build system");
-            println!("Version: 0.1.0 (SlateOS)");
+            println!("Version: 0.1.0 (Slate OS)");
             println!("Source dir: {}", source);
             println!("Build dir: {}", build);
             println!("Build type: {}", buildtype);

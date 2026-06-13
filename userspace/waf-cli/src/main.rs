@@ -10,7 +10,7 @@ use std::process;
 fn run_waf(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("waf [COMMANDS] [OPTIONS]");
-        println!("Waf 2.0.26 (SlateOS)");
+        println!("Waf 2.0.26 (Slate OS)");
         println!();
         println!("Main commands:");
         println!("  configure   Configure the project");

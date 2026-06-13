@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mgba(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mgba [OPTIONS] [ROM]");
-        println!("mGBA v0.10 (SlateOS) — Game Boy Advance emulator");
+        println!("mGBA v0.10 (Slate OS) — Game Boy Advance emulator");
         println!();
         println!("Options:");
         println!("  -1               1x window size");
@@ -31,13 +31,13 @@ fn run_mgba(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("mGBA v0.10.3 (SlateOS)");
+        println!("mGBA v0.10.3 (Slate OS)");
         println!("  Platforms: GBA, GB, GBC");
         return 0;
     }
     let files: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
     if files.is_empty() {
-        println!("mGBA v0.10.3 (SlateOS) — Game Boy Advance Emulator");
+        println!("mGBA v0.10.3 (Slate OS) — Game Boy Advance Emulator");
         println!("  CPU: ARM7TDMI @ 16.78 MHz (emulated)");
         println!("  Display: 240x160, 32768 colors");
         println!("  Sound: 6 channels (4 PSG + 2 PCM)");

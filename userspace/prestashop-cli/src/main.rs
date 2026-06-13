@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_presta(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: prestashop [OPTIONS]");
-        println!("PrestaShop (SlateOS) — French open-source self-hosted e-commerce platform");
+        println!("PrestaShop (Slate OS) — French open-source self-hosted e-commerce platform");
         println!();
         println!("Options:");
         println!("  --classic              Classic theme (free reference theme)");
@@ -22,8 +22,8 @@ fn run_presta(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("PrestaShop 8.x (SlateOS)"); return 0; }
-    println!("PrestaShop 8.x (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("PrestaShop 8.x (Slate OS)"); return 0; }
+    println!("PrestaShop 8.x (Slate OS)");
     println!("  Vendor: PrestaShop SA (Paris, France — private, ex-Igil/MBO Partenaires backed)");
     println!("  Founders: Igor Schlumberger + Bruno Lévêque, 2005-2007");
     println!("          started as 'PhpOpenStore' student project at EPITECH (French IT school)");

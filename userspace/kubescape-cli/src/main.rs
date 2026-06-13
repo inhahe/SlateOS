@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_kubescape(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: kubescape COMMAND [OPTIONS]");
-        println!("Kubescape v3.0.6 (SlateOS) — Kubernetes security scanner");
+        println!("Kubescape v3.0.6 (Slate OS) — Kubernetes security scanner");
         println!();
         println!("Commands:");
         println!("  scan            Scan cluster/file");
@@ -31,7 +31,7 @@ fn run_kubescape(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("Kubescape v3.0.6 (SlateOS)");
+        println!("Kubescape v3.0.6 (Slate OS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("scan");

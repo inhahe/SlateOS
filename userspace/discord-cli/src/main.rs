@@ -11,7 +11,7 @@ fn run_discord(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: discord <COMMAND> [OPTIONS]");
         println!();
-        println!("Discord bot and server management CLI (SlateOS).");
+        println!("Discord bot and server management CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  guilds       List/manage guilds (servers)");

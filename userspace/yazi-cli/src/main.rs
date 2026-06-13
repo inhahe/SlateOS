@@ -48,7 +48,7 @@ fn run_yazi(args: &[String], prog: &str) -> i32 {
     // yazi
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: yazi [OPTIONS] [ENTRY]");
-        println!("Yazi 0.3.3 (SlateOS) — Blazing fast terminal file manager");
+        println!("Yazi 0.3.3 (Slate OS) — Blazing fast terminal file manager");
         println!();
         println!("Options:");
         println!("  --cwd-file FILE       Write cwd on exit to file");
@@ -59,7 +59,7 @@ fn run_yazi(args: &[String], prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("yazi 0.3.3 (SlateOS)");
+        println!("yazi 0.3.3 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "--clear-cache") {
@@ -67,8 +67,8 @@ fn run_yazi(args: &[String], prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--debug") {
-        println!("Yazi 0.3.3 (SlateOS)");
-        println!("OS: SlateOS x86_64");
+        println!("Yazi 0.3.3 (Slate OS)");
+        println!("OS: Slate OS x86_64");
         println!("Config: ~/.config/yazi/");
         println!("Plugins: (none)");
         return 0;

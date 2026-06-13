@@ -21,7 +21,7 @@ fn run_dosbox(args: &[String], extended: bool) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: {} [OPTIONS] [FILE|DIR]", name);
         println!();
-        println!("{} — DOS emulator (SlateOS).", name);
+        println!("{} — DOS emulator (Slate OS).", name);
         println!();
         println!("Options:");
         println!("  -fullscreen        Start in fullscreen");
@@ -42,9 +42,9 @@ fn run_dosbox(args: &[String], extended: bool) -> i32 {
     }
     if args.iter().any(|a| a == "--version" || a == "-version") {
         if extended {
-            println!("DOSBox-X version 2024.03.01 (SlateOS)");
+            println!("DOSBox-X version 2024.03.01 (Slate OS)");
         } else {
-            println!("DOSBox version 0.74-3 (SlateOS)");
+            println!("DOSBox version 0.74-3 (Slate OS)");
         }
         return 0;
     }
@@ -58,9 +58,9 @@ fn run_dosbox(args: &[String], extended: bool) -> i32 {
     let fullscreen = args.iter().any(|a| a == "-fullscreen");
 
     if extended {
-        println!("DOSBox-X version 2024.03.01 (SlateOS)");
+        println!("DOSBox-X version 2024.03.01 (Slate OS)");
     } else {
-        println!("DOSBox version 0.74-3 (SlateOS)");
+        println!("DOSBox version 0.74-3 (Slate OS)");
     }
     println!("Copyright 2002-2024 DOSBox Team");
     println!();

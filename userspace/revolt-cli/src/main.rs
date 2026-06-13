@@ -13,14 +13,14 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_revolt(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: revolt-desktop [OPTIONS]");
-        println!("revolt-desktop v1.0 (SlateOS) — Open-source chat platform");
+        println!("revolt-desktop v1.0 (Slate OS) — Open-source chat platform");
         println!();
         println!("Options:");
         println!("  --minimized       Start minimized");
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("revolt-desktop v1.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("revolt-desktop v1.0 (Slate OS)"); return 0; }
     println!("revolt-desktop: chat client started");
     println!("  Servers: 4 joined");
     println!("  Channels: 15 active");

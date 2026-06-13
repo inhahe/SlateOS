@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_astropy(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: astropy [COMMAND] [OPTIONS]");
-        println!("astropy v6.0 (SlateOS) — Astronomical Python library tools");
+        println!("astropy v6.0 (Slate OS) — Astronomical Python library tools");
         println!();
         println!("Commands:");
         println!("  fitsinfo FILE        Show FITS file info");
@@ -28,7 +28,7 @@ fn run_astropy(args: &[String], _prog: &str) -> i32 {
         println!("  --version            Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("astropy v6.0.1 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("astropy v6.0.1 (Slate OS)"); return 0; }
     match args.first().map(|s| s.as_str()) {
         Some("fitsinfo") => {
             let file = args.get(1).map(|s| s.as_str()).unwrap_or("image.fits");

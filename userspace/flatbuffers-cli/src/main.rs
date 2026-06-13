@@ -10,7 +10,7 @@ use std::process;
 fn run_flatc(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: flatc [OPTIONS] FILE.fbs [FILE.fbs ...]");
-        println!("FlatBuffers compiler 24.3.25 (SlateOS)");
+        println!("FlatBuffers compiler 24.3.25 (Slate OS)");
         println!();
         println!("Options:");
         println!("  --cpp              Generate C++ files");
@@ -33,7 +33,7 @@ fn run_flatc(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("flatc version 24.3.25 (SlateOS)");
+        println!("flatc version 24.3.25 (Slate OS)");
         return 0;
     }
     let files: Vec<&str> = args.iter()

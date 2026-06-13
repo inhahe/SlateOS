@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_clonezilla(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: clonezilla [OPTIONS]");
-        println!("clonezilla v3.1 (SlateOS) — Disk/partition cloning");
+        println!("clonezilla v3.1 (Slate OS) — Disk/partition cloning");
         println!();
         println!("Modes:");
         println!("  device-image    Save/restore device to/from image");
@@ -24,7 +24,7 @@ fn run_clonezilla(args: &[String], _prog: &str) -> i32 {
         println!("  --version       Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("clonezilla v3.1 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("clonezilla v3.1 (Slate OS)"); return 0; }
     println!("clonezilla: disk cloning system");
     println!("  Mode: device-image");
     println!("  Select: savedisk / restoredisk / saveparts / restoreparts");
@@ -34,7 +34,7 @@ fn run_clonezilla(args: &[String], _prog: &str) -> i32 {
 fn run_ocs_sr(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ocs-sr [OPTIONS] <ACTION> <IMAGE> <DEVICES>");
-        println!("ocs-sr v3.1 (SlateOS) — Clonezilla save/restore");
+        println!("ocs-sr v3.1 (Slate OS) — Clonezilla save/restore");
         println!();
         println!("Actions:");
         println!("  savedisk       Save whole disk as image");
@@ -48,7 +48,7 @@ fn run_ocs_sr(args: &[String], _prog: &str) -> i32 {
         println!("  -j2            Clone hidden data");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("ocs-sr v3.1 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("ocs-sr v3.1 (Slate OS)"); return 0; }
     println!("ocs-sr: clonezilla save/restore");
     println!("  Image repository: /home/partimag");
     0
@@ -57,10 +57,10 @@ fn run_ocs_sr(args: &[String], _prog: &str) -> i32 {
 fn run_ocs_onthefly(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ocs-onthefly [OPTIONS] <SOURCE> <TARGET>");
-        println!("ocs-onthefly v3.1 (SlateOS) — Direct disk-to-disk clone");
+        println!("ocs-onthefly v3.1 (Slate OS) — Direct disk-to-disk clone");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("ocs-onthefly v3.1 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("ocs-onthefly v3.1 (Slate OS)"); return 0; }
     println!("ocs-onthefly: direct disk-to-disk clone");
     0
 }

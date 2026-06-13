@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_tiled(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: tiled [OPTIONS] [FILE...]");
-        println!("tiled v1.10 (SlateOS) — Tile map editor");
+        println!("tiled v1.10 (Slate OS) — Tile map editor");
         println!();
         println!("Options:");
         println!("  --export-map FORMAT FILE   Export map to format");
@@ -24,7 +24,7 @@ fn run_tiled(args: &[String], _prog: &str) -> i32 {
         println!("  --version                  Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Tiled v1.10 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("Tiled v1.10 (Slate OS)"); return 0; }
     if args.iter().any(|a| a == "--export-formats") {
         println!("Export formats:");
         println!("  tmx      Tiled XML map format");
@@ -35,7 +35,7 @@ fn run_tiled(args: &[String], _prog: &str) -> i32 {
         println!("  png      Image (render map)");
         return 0;
     }
-    println!("Tiled v1.10 (SlateOS) — Map Editor");
+    println!("Tiled v1.10 (Slate OS) — Map Editor");
     println!("  Renderer: Software");
     println!("  Map formats: TMX, JSON, CSV, Lua");
     println!("  Tileset formats: TSX, JSON");

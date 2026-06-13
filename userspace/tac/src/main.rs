@@ -67,7 +67,7 @@ fn parse_tac_args(args: &[String]) -> TacOptions {
                 process::exit(0);
             }
             "--version" => {
-                println!("tac (SlateOS coreutils) 0.1.0");
+                println!("tac (Slate OS coreutils) 0.1.0");
                 process::exit(0);
             }
             _ if arg.starts_with("--separator=") => {
@@ -469,7 +469,7 @@ fn parse_rev_args(args: &[String]) -> RevOptions {
                 process::exit(0);
             }
             "--version" => {
-                println!("rev (SlateOS coreutils) 0.1.0");
+                println!("rev (Slate OS coreutils) 0.1.0");
                 process::exit(0);
             }
             _ if arg.starts_with('-') && arg.len() > 1 => {

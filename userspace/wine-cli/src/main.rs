@@ -19,11 +19,11 @@ fn run_wine(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help") {
         println!("Usage: wine PROGRAM [ARGUMENTS]");
         println!();
-        println!("Wine — run Windows programs (SlateOS).");
+        println!("Wine — run Windows programs (Slate OS).");
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("wine-9.0 (SlateOS)");
+        println!("wine-9.0 (Slate OS)");
         return 0;
     }
     let program = args.first().map(|s| s.as_str()).unwrap_or("");
@@ -39,7 +39,7 @@ fn run_wineserver(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help") {
         println!("Usage: wineserver [OPTIONS]");
         println!();
-        println!("wineserver — Wine server (SlateOS).");
+        println!("wineserver — Wine server (Slate OS).");
         println!();
         println!("Options:");
         println!("  -d N    Debug level");
@@ -61,7 +61,7 @@ fn run_wineboot(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help") {
         println!("Usage: wineboot [OPTIONS]");
         println!();
-        println!("wineboot — Wine prefix initialization (SlateOS).");
+        println!("wineboot — Wine prefix initialization (Slate OS).");
         println!();
         println!("Options:");
         println!("  -i, --init       Initialize prefix");
@@ -106,7 +106,7 @@ fn run_regedit(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help") {
         println!("Usage: regedit [OPTIONS] [FILE]");
         println!();
-        println!("regedit — Wine registry editor (SlateOS).");
+        println!("regedit — Wine registry editor (Slate OS).");
         return 0;
     }
     if let Some(file) = args.iter().find(|a| !a.starts_with('-')) {

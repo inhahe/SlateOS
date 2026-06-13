@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rake(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "-H") {
         println!("Usage: rake [OPTIONS] [TASK ...]");
-        println!("Rake 13.2.1 (SlateOS)");
+        println!("Rake 13.2.1 (Slate OS)");
         println!();
         println!("Options:");
         println!("  -T, --tasks          List available tasks");

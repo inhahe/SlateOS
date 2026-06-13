@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_cam(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: camtasia [OPTIONS]");
-        println!("TechSmith Camtasia 2024 (SlateOS) — Screen recording + video editor");
+        println!("TechSmith Camtasia 2024 (Slate OS) — Screen recording + video editor");
         println!();
         println!("Options:");
         println!("  --record               Camtasia Recorder (screen + webcam + mic)");
@@ -24,8 +24,8 @@ fn run_cam(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Camtasia 2024 (24.1.5) (SlateOS)"); return 0; }
-    println!("Camtasia 2024 (24.1.5) (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Camtasia 2024 (24.1.5) (Slate OS)"); return 0; }
+    println!("Camtasia 2024 (24.1.5) (Slate OS)");
     println!("  Vendor: TechSmith Corporation (HQ Okemos, MI — founded 1987 by Bill Hamilton)");
     println!("  Platforms: Windows, macOS (cross-platform parity ~mid-2010s)");
     println!("  Pricing: Camtasia Pro $179.88/yr (was $299 perpetual until 2022 model shift)");

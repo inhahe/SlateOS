@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wl_screencast(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wl-screencast [OPTIONS]");
-        println!("wl-screencast v0.1 (SlateOS) — PipeWire screen sharing for Wayland");
+        println!("wl-screencast v0.1 (Slate OS) — PipeWire screen sharing for Wayland");
         println!();
         println!("Options:");
         println!("  -o OUTPUT         Output to share");
@@ -26,7 +26,7 @@ fn run_wl_screencast(args: &[String], _prog: &str) -> i32 {
         println!("xdg-desktop-portal for WebRTC/OBS/Teams screen sharing.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("wl-screencast v0.1 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("wl-screencast v0.1 (Slate OS)"); return 0; }
     let output = args.iter().skip_while(|a| a.as_str() != "-o").nth(1)
         .map(|s| s.as_str()).unwrap_or("*");
     println!("wl-screencast: sharing output {} via PipeWire", output);

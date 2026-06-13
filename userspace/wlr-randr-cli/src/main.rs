@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wlr_randr(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wlr-randr [OPTIONS]");
-        println!("wlr-randr v0.4 (SlateOS) — Wayland output configuration");
+        println!("wlr-randr v0.4 (Slate OS) — Wayland output configuration");
         println!();
         println!("Options:");
         println!("  (no args)         List outputs");

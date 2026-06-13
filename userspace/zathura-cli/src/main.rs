@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_zathura(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: zathura [OPTIONS] [FILE[:PAGE]] [FILE[:PAGE]...]");
-        println!("zathura 0.5.6 (SlateOS) — Document viewer");
+        println!("zathura 0.5.6 (Slate OS) — Document viewer");
         println!();
         println!("Options:");
         println!("  -e, --reparent XID     Reparent to window");
@@ -33,7 +33,7 @@ fn run_zathura(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("zathura 0.5.6 (SlateOS)");
+        println!("zathura 0.5.6 (Slate OS)");
         println!("(pdf, ps, djvu, cb)");
         return 0;
     }

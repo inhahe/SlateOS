@@ -278,7 +278,7 @@ fn build_request(
     let _ = writeln!(req, "{method} {target} HTTP/1.1\r");
     let _ = writeln!(req, "Host: {}\r", url.host);
     let _ = writeln!(req, "Connection: close\r");
-    let _ = writeln!(req, "User-Agent: fetch/1.0 (SlateOS)\r");
+    let _ = writeln!(req, "User-Agent: fetch/1.0 (Slate OS)\r");
 
     // Basic auth.
     if let Some(credentials) = user_pass {
@@ -861,7 +861,7 @@ fn parse_header_arg(raw: &str) -> Result<(String, String), String> {
 
 fn print_help() {
     let help = "\
-fetch - HTTP fetch utility for SlateOS
+fetch - HTTP fetch utility for Slate OS
 
 Usage: fetch [OPTIONS] URL [URL...]
 

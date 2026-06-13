@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sfml_config(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: sfml-config [OPTIONS]");
-        println!("SFML config 2.6.1 (SlateOS)");
+        println!("SFML config 2.6.1 (Slate OS)");
         println!();
         println!("Options:");
         println!("  --version        Print SFML version");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_backintime(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: backintime COMMAND [OPTIONS]");
-        println!("backintime v1.4 (SlateOS) — Snapshot-based backup tool");
+        println!("backintime v1.4 (Slate OS) — Snapshot-based backup tool");
         println!();
         println!("Commands:");
         println!("  backup            Start backup now");
@@ -25,7 +25,7 @@ fn run_backintime(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("backintime v1.4 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("backintime v1.4 (Slate OS)"); return 0; }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("backup");
     match cmd {
         "backup" => {
@@ -52,10 +52,10 @@ fn run_backintime(args: &[String], _prog: &str) -> i32 {
 fn run_qt(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: backintime-qt [OPTIONS]");
-        println!("backintime-qt v1.4 (SlateOS) — Back In Time GUI");
+        println!("backintime-qt v1.4 (Slate OS) — Back In Time GUI");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("backintime-qt v1.4 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("backintime-qt v1.4 (Slate OS)"); return 0; }
     println!("backintime-qt: graphical backup manager started");
     println!("  Snapshots: 4 available");
     0

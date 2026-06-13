@@ -24,7 +24,7 @@ fn run_sqlx(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("sqlx-cli 0.7.4 (SlateOS)");
+        println!("sqlx-cli 0.7.4 (Slate OS)");
         return 0;
     }
 

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_composer(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: composer COMMAND [OPTIONS]");
-        println!("Composer 2.7.7 (SlateOS)");
+        println!("Composer 2.7.7 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  init           Create a composer.json in current dir");

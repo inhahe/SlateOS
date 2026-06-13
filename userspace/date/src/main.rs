@@ -882,7 +882,7 @@ struct Options {
 const VERSION: &str = "0.1.0";
 
 fn print_usage() {
-    println!("date (SlateOS) {VERSION}");
+    println!("date (Slate OS) {VERSION}");
     println!();
     println!("Display or set the system date and time.");
     println!();
@@ -1077,7 +1077,7 @@ fn run(opts: Options) -> Result<(), String> {
             Ok(())
         }
         Action::Version => {
-            println!("date (SlateOS) {VERSION}");
+            println!("date (Slate OS) {VERSION}");
             Ok(())
         }
         Action::Display { format } => {

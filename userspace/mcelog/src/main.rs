@@ -260,7 +260,7 @@ fn run_mcelog(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "version" => {
-            println!("mcelog 0.1.0 (SlateOS)");
+            println!("mcelog 0.1.0 (Slate OS)");
             0
         }
         "summary" => cmd_summary(),

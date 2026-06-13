@@ -378,7 +378,7 @@ fn cmd_dpms(args: &[String]) {
 // ============================================================================
 
 fn print_usage() {
-    println!("SlateOS Monitor Control v0.1.0");
+    println!("Slate OS Monitor Control v0.1.0");
     println!();
     println!("Control display power state, brightness, and DPMS.");
     println!();

@@ -15,27 +15,27 @@ fn run_impacket(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS] TARGET", prog);
         match prog {
             "secretsdump" => {
-                println!("secretsdump (SlateOS) — Extract credentials from remote host");
+                println!("secretsdump (Slate OS) — Extract credentials from remote host");
                 println!("  -sam           Dump SAM database");
                 println!("  -ntds          Dump NTDS.dit");
                 println!("  -system FILE   SYSTEM hive file");
                 println!("  -just-dc       Extract NTDS.dit only");
             }
             "ntlmrelayx" => {
-                println!("ntlmrelayx (SlateOS) — NTLM relay attack");
+                println!("ntlmrelayx (Slate OS) — NTLM relay attack");
                 println!("  -t TARGET      Relay target");
                 println!("  -tf FILE       Target list file");
                 println!("  -smb2support   Enable SMB2 support");
                 println!("  -socks         Enable SOCKS proxy");
             }
             "psexec" | "wmiexec" | "dcomexec" => {
-                println!("{} (SlateOS) — Remote command execution", prog);
+                println!("{} (Slate OS) — Remote command execution", prog);
                 println!("  DOMAIN/USER:PASSWORD@TARGET");
                 println!("  -hashes LMHASH:NTHASH  Pass the hash");
                 println!("  -k                     Kerberos auth");
             }
             _ => {
-                println!("smbclient (SlateOS) — SMB client");
+                println!("smbclient (Slate OS) — SMB client");
                 println!("  -shares    List shares");
                 println!("  -upload    Upload file");
                 println!("  -download  Download file");
@@ -44,10 +44,10 @@ fn run_impacket(args: &[String], prog: &str) -> i32 {
         println!("  --version  Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Impacket v0.12.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("Impacket v0.12.0 (Slate OS)"); return 0; }
     match prog {
         "secretsdump" => {
-            println!("secretsdump v0.12.0 (SlateOS)");
+            println!("secretsdump v0.12.0 (Slate OS)");
             println!("  Target: 192.168.1.10");
             println!("  Dumping SAM hashes...");
             println!("    Administrator:500:aad3b435...:8846f7ea...");
@@ -57,14 +57,14 @@ fn run_impacket(args: &[String], prog: &str) -> i32 {
             println!("    DPAPI_SYSTEM: dpapi_machinekey + dpapi_userkey");
         }
         "ntlmrelayx" => {
-            println!("ntlmrelayx v0.12.0 (SlateOS)");
+            println!("ntlmrelayx v0.12.0 (Slate OS)");
             println!("  Relay targets: 5");
             println!("  SMB server started on 0.0.0.0:445");
             println!("  HTTP server started on 0.0.0.0:80");
             println!("  Waiting for connections...");
         }
         _ => {
-            println!("{} v0.12.0 (SlateOS)", prog);
+            println!("{} v0.12.0 (Slate OS)", prog);
             println!("  Target: DOMAIN/admin@192.168.1.10");
             println!("  Authentication: NTLM (pass-the-hash)");
             println!("  Session established");

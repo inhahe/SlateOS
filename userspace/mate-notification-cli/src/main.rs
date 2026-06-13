@@ -13,11 +13,11 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mate_notifyd(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mate-notification-daemon [OPTIONS]");
-        println!("mate-notification-daemon v1.28 (SlateOS) — MATE notifications");
+        println!("mate-notification-daemon v1.28 (Slate OS) — MATE notifications");
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("mate-notification-daemon v1.28 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("mate-notification-daemon v1.28 (Slate OS)"); return 0; }
     println!("mate-notification-daemon: running");
     println!("  Theme: standard");
     println!("  Position: top-right");

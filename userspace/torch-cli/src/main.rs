@@ -20,7 +20,7 @@ fn run_torch(args: &[String]) -> i32 {
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match subcmd {
         "version" | "--version" => {
-            println!("PyTorch 2.2.0 (SlateOS)");
+            println!("PyTorch 2.2.0 (Slate OS)");
             println!("CUDA: 12.1");
             println!("cuDNN: 8.9.7");
         }

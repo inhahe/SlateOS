@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_kong(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: kong [COMMAND] [OPTIONS]");
-        println!("Kong v3.6 (SlateOS) — Cloud-native API gateway");
+        println!("Kong v3.6 (Slate OS) — Cloud-native API gateway");
         println!();
         println!("Commands:");
         println!("  start              Start Kong");
@@ -31,8 +31,8 @@ fn run_kong(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Kong v3.6.1 (SlateOS)"); return 0; }
-    println!("Kong v3.6.1 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Kong v3.6.1 (Slate OS)"); return 0; }
+    println!("Kong v3.6.1 (Slate OS)");
     println!("  Proxy: http://0.0.0.0:8000, https://0.0.0.0:8443");
     println!("  Admin API: http://0.0.0.0:8001");
     println!("  Services: 15");

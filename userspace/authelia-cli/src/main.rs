@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_authelia(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: authelia [COMMAND] [OPTIONS]");
-        println!("Authelia v4.38 (SlateOS) — Single sign-on and 2FA server");
+        println!("Authelia v4.38 (Slate OS) — Single sign-on and 2FA server");
         println!();
         println!("Commands:");
         println!("  serve              Start server (default)");
@@ -29,8 +29,8 @@ fn run_authelia(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Authelia v4.38.8 (SlateOS)"); return 0; }
-    println!("Authelia v4.38.8 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Authelia v4.38.8 (Slate OS)"); return 0; }
+    println!("Authelia v4.38.8 (Slate OS)");
     println!("  Listening: 0.0.0.0:9091");
     println!("  Storage: SQLite (/var/authelia/db.sqlite3)");
     println!("  Auth backend: file (/etc/authelia/users.yml)");

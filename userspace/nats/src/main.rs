@@ -24,7 +24,7 @@ fn run_nats_server(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("nats-server: v2.10.14 (SlateOS)");
+        println!("nats-server: v2.10.14 (Slate OS)");
         return 0;
     }
     let port = args.iter().position(|a| a == "-p" || a == "--port")
@@ -37,7 +37,7 @@ fn run_nats_server(args: Vec<String>) -> i32 {
         .unwrap_or("slateos-nats-1");
     let js = args.iter().any(|a| a == "-js" || a == "--jetstream");
     println!("[12345] 2025/05/22 10:00:00.000000 [INF] Starting nats-server");
-    println!("[12345] 2025/05/22 10:00:00.000001 [INF]   Version:  2.10.14 (SlateOS)");
+    println!("[12345] 2025/05/22 10:00:00.000001 [INF]   Version:  2.10.14 (Slate OS)");
     println!("[12345] 2025/05/22 10:00:00.000002 [INF]   Git:      [abc1234]");
     println!("[12345] 2025/05/22 10:00:00.000003 [INF]   Name:     {}", name);
     println!("[12345] 2025/05/22 10:00:00.000004 [INF]   ID:       NABC123DEF456GHI789JKL012MNO345PQR678STU901");
@@ -77,7 +77,7 @@ fn run_nats_cli(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "version" => {
-            println!("nats CLI v0.1.3 (SlateOS)");
+            println!("nats CLI v0.1.3 (Slate OS)");
             0
         }
         "pub" => {

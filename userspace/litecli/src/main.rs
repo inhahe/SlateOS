@@ -25,7 +25,7 @@ fn run_litecli(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("litecli 1.10.0 (SlateOS)");
+        println!("litecli 1.10.0 (Slate OS)");
         return 0;
     }
 

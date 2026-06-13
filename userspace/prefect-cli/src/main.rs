@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_prefect(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: prefect COMMAND [OPTIONS]");
-        println!("Prefect 2.19.0 (SlateOS)");
+        println!("Prefect 2.19.0 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  flow           Manage flows");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_xkbcomp(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: xkbcomp [OPTIONS] SOURCE [DEST]");
-        println!("xkbcomp v1.4 (SlateOS) — XKB keyboard layout compiler");
+        println!("xkbcomp v1.4 (Slate OS) — XKB keyboard layout compiler");
         println!();
         println!("Options:");
         println!("  -xkb              Output XKB format");
@@ -24,7 +24,7 @@ fn run_xkbcomp(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("xkbcomp v1.4 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("xkbcomp v1.4 (Slate OS)"); return 0; }
     let source = args.first().map(|s| s.as_str()).unwrap_or("");
     println!("xkbcomp: compiling '{}'...", source);
     println!("  Symbols: loaded");

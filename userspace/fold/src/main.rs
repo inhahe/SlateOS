@@ -431,7 +431,7 @@ fn run(config: &Config) -> io::Result<i32> {
 // ============================================================================
 
 fn print_help() {
-    println!("SlateOS fold v{VERSION}");
+    println!("Slate OS fold v{VERSION}");
     println!();
     println!("Wrap input lines in each FILE, writing to standard output.");
     println!("With no FILE, or when FILE is -, read standard input.");
@@ -469,7 +469,7 @@ fn main() {
             process::exit(0);
         }
         ParseResult::Version => {
-            println!("fold (SlateOS) {VERSION}");
+            println!("fold (Slate OS) {VERSION}");
             process::exit(0);
         }
         ParseResult::Run(config) => match run(&config) {

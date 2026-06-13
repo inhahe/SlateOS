@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ha(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: ha COMMAND [OPTIONS]");
-        println!("Home Assistant CLI (SlateOS)");
+        println!("Home Assistant CLI (Slate OS)");
         println!();
         println!("Commands:");
         println!("  core         Core management");
@@ -31,7 +31,7 @@ fn run_ha(args: &[String]) -> i32 {
         "info" | "--version" => {
             println!("Home Assistant 2024.1.5");
             println!("  Supervisor: 2024.01.2");
-            println!("  Operating System: SlateOS");
+            println!("  Operating System: Slate OS");
             println!("  Architecture: x86_64");
         }
         "core" => {
@@ -81,7 +81,7 @@ fn run_ha(args: &[String]) -> i32 {
         "host" => {
             println!("Host info:");
             println!("  Hostname: homeassistant");
-            println!("  OS: SlateOS");
+            println!("  OS: Slate OS");
             println!("  Kernel: 6.6.0-slateos");
         }
         _ => println!("ha: '{}' completed", subcmd),

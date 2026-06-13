@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gespeaker(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gespeaker [OPTIONS] [TEXT]");
-        println!("gespeaker v0.8 (SlateOS) — GTK speech synthesis frontend");
+        println!("gespeaker v0.8 (Slate OS) — GTK speech synthesis frontend");
         println!();
         println!("Options:");
         println!("  -t TEXT        Text to speak");
@@ -29,7 +29,7 @@ fn run_gespeaker(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("gespeaker v0.8.6 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("gespeaker v0.8.6 (Slate OS)"); return 0; }
     if args.iter().any(|a| a == "--list-voices") {
         println!("Available voices:");
         println!("  default       Default voice (espeak)");
@@ -47,7 +47,7 @@ fn run_gespeaker(args: &[String], _prog: &str) -> i32 {
     }
     let voice = args.windows(2).find(|w| w[0] == "-v").map(|w| w[1].as_str()).unwrap_or("default");
     let speed = args.windows(2).find(|w| w[0] == "-s").map(|w| w[1].as_str()).unwrap_or("175");
-    println!("gespeaker v0.8.6 (SlateOS)");
+    println!("gespeaker v0.8.6 (Slate OS)");
     println!("  Backend: espeak");
     println!("  Voice: {}", voice);
     println!("  Speed: {} wpm", speed);

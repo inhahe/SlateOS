@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ij(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: intellij [OPTIONS]");
-        println!("IntelliJ IDEA 2024.3 (SlateOS) — JetBrains flagship Java/Kotlin IDE");
+        println!("IntelliJ IDEA 2024.3 (Slate OS) — JetBrains flagship Java/Kotlin IDE");
         println!();
         println!("Options:");
         println!("  --community            IntelliJ IDEA Community Edition (free, OSS)");
@@ -24,8 +24,8 @@ fn run_ij(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("IntelliJ IDEA 2024.3 (build 243.21565.193) (SlateOS)"); return 0; }
-    println!("IntelliJ IDEA 2024.3 (build 243.21565.193) (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("IntelliJ IDEA 2024.3 (build 243.21565.193) (Slate OS)"); return 0; }
+    println!("IntelliJ IDEA 2024.3 (build 243.21565.193) (Slate OS)");
     println!("  Vendor: JetBrains s.r.o. (HQ Prague, CZ — founded 2000 in St. Petersburg, RU)");
     println!("  Founders: Sergey Dmitriev, Valentin Kipiatkov, Eugene Belyaev");
     println!("  HQ relocation: 2022 moved EU + sold Russia operations after Ukraine invasion");

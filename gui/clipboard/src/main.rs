@@ -821,11 +821,11 @@ fn run_self_test(service: &mut ClipboardService) {
         formats: vec![
             (
                 ClipboardFormat::PlainText,
-                b"Hello, SlateOS!".to_vec(),
+                b"Hello, Slate OS!".to_vec(),
             ),
             (
                 ClipboardFormat::Html,
-                b"<b>Hello</b>, SlateOS!".to_vec(),
+                b"<b>Hello</b>, Slate OS!".to_vec(),
             ),
         ],
         source: SourceApp {
@@ -843,7 +843,7 @@ fn run_self_test(service: &mut ClipboardService) {
     };
     let response = service.handle_request(paste_request);
     if let ClipboardResponse::PasteOk { data, .. } = response {
-        assert_eq!(data, b"Hello, SlateOS!");
+        assert_eq!(data, b"Hello, Slate OS!");
     }
 }
 

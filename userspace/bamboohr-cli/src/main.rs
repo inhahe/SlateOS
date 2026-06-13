@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_bhr(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: bamboohr [OPTIONS]");
-        println!("BambooHR (SlateOS) — HRIS for small/medium business");
+        println!("BambooHR (Slate OS) — HRIS for small/medium business");
         println!();
         println!("Options:");
         println!("  --essentials           Essentials tier (per-employee/mo)");
@@ -22,8 +22,8 @@ fn run_bhr(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("BambooHR 2024 (SlateOS)"); return 0; }
-    println!("BambooHR 2024 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("BambooHR 2024 (Slate OS)"); return 0; }
+    println!("BambooHR 2024 (Slate OS)");
     println!("  Vendor: Bamboo HR LLC (Lindon, Utah — founded 2008)");
     println!("  Founders: Ben Peterson + Ryan Sanders (in Ben's basement)");
     println!("           bootstrapped — no VC funding for first decade");

@@ -564,7 +564,7 @@ fn print_json_output(
 // ============================================================================
 
 fn print_help() {
-    println!("SlateOS cmp v{VERSION}");
+    println!("Slate OS cmp v{VERSION}");
     println!();
     println!("Compare two files byte by byte.");
     println!();
@@ -603,7 +603,7 @@ fn main() {
             process::exit(0);
         }
         ParseResult::Version => {
-            println!("cmp (SlateOS) {VERSION}");
+            println!("cmp (Slate OS) {VERSION}");
             process::exit(0);
         }
         ParseResult::Run(config) => {

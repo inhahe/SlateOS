@@ -15,19 +15,19 @@ fn run_gluster(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [COMMAND] [OPTIONS]", prog);
         match prog {
             "glusterd" => {
-                println!("glusterd (SlateOS) — GlusterFS management daemon");
+                println!("glusterd (Slate OS) — GlusterFS management daemon");
                 println!("  --volfile-id ID    Volume file ID");
                 println!("  --pid-file FILE    PID file");
                 println!("  --log-file FILE    Log file");
                 println!("  --log-level LEVEL  Log level");
             }
             "glusterfsd" => {
-                println!("glusterfsd (SlateOS) — GlusterFS brick daemon");
+                println!("glusterfsd (Slate OS) — GlusterFS brick daemon");
                 println!("  --volfile-id ID    Volume file ID");
                 println!("  --brick-name NAME  Brick name");
             }
             _ => {
-                println!("GlusterFS v11.1 (SlateOS) — Scalable distributed filesystem");
+                println!("GlusterFS v11.1 (Slate OS) — Scalable distributed filesystem");
                 println!();
                 println!("Commands:");
                 println!("  volume create|start|stop|delete  Manage volumes");
@@ -40,14 +40,14 @@ fn run_gluster(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("GlusterFS v11.1.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("GlusterFS v11.1.0 (Slate OS)"); return 0; }
     match prog {
         "glusterd" | "glusterfsd" => {
-            println!("GlusterFS Daemon v11.1.0 (SlateOS)");
+            println!("GlusterFS Daemon v11.1.0 (Slate OS)");
             println!("  Status: running");
         }
         _ => {
-            println!("GlusterFS v11.1.0 (SlateOS)");
+            println!("GlusterFS v11.1.0 (Slate OS)");
             println!("  Peers: 4 connected");
             println!("  Volumes: 3 (2 distributed-replicate, 1 dispersed)");
             println!("  Bricks: 12 total");

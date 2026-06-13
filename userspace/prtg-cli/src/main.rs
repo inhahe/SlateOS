@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_prtg(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: prtg-probe [OPTIONS]");
-        println!("PRTG Probe v24.1 (SlateOS) — Network monitoring probe");
+        println!("PRTG Probe v24.1 (Slate OS) — Network monitoring probe");
         println!();
         println!("Options:");
         println!("  --server URL    Core server URL");
@@ -24,8 +24,8 @@ fn run_prtg(args: &[String], _prog: &str) -> i32 {
         println!("  --version       Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("PRTG Probe v24.1.0 (SlateOS)"); return 0; }
-    println!("PRTG Probe v24.1.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("PRTG Probe v24.1.0 (Slate OS)"); return 0; }
+    println!("PRTG Probe v24.1.0 (Slate OS)");
     println!("  Server: https://monitor.local:8443");
     println!("  Probe: linux-probe-01");
     println!("  Status: connected");

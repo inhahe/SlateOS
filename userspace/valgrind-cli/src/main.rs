@@ -20,7 +20,7 @@ fn run_valgrind(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: valgrind [OPTIONS] PROGRAM [ARGS]");
         println!();
-        println!("valgrind — memory debugging and profiling (SlateOS).");
+        println!("valgrind — memory debugging and profiling (Slate OS).");
         println!();
         println!("Tool selection:");
         println!("  --tool=memcheck      Memory error detector (default)");
@@ -45,7 +45,7 @@ fn run_valgrind(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("valgrind-3.22.0 (SlateOS)");
+        println!("valgrind-3.22.0 (Slate OS)");
         return 0;
     }
 
@@ -137,7 +137,7 @@ fn run_callgrind_annotate(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help") {
         println!("Usage: callgrind_annotate [OPTIONS] [CALLGRIND_OUT_FILE]");
         println!();
-        println!("callgrind_annotate — annotate callgrind output (SlateOS).");
+        println!("callgrind_annotate — annotate callgrind output (Slate OS).");
         return 0;
     }
 
@@ -156,7 +156,7 @@ fn run_cg_annotate(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help") {
         println!("Usage: cg_annotate [OPTIONS] CACHEGRIND_OUT_FILE");
         println!();
-        println!("cg_annotate — annotate cachegrind output (SlateOS).");
+        println!("cg_annotate — annotate cachegrind output (Slate OS).");
         return 0;
     }
 
@@ -172,7 +172,7 @@ fn run_ms_print(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help") {
         println!("Usage: ms_print [OPTIONS] MASSIF_OUT_FILE");
         println!();
-        println!("ms_print — display massif heap profiles (SlateOS).");
+        println!("ms_print — display massif heap profiles (Slate OS).");
         return 0;
     }
 

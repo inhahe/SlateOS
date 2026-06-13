@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_florence(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: florence [OPTIONS]");
-        println!("florence v0.6 (SlateOS) — Extensible virtual keyboard");
+        println!("florence v0.6 (Slate OS) — Extensible virtual keyboard");
         println!();
         println!("Options:");
         println!("  --no-gnome        Don't use GNOME settings");
@@ -25,7 +25,7 @@ fn run_florence(args: &[String], _prog: &str) -> i32 {
         println!("  ramble (gesture) input, extensions support");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("florence v0.6 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("florence v0.6 (Slate OS)"); return 0; }
     println!("florence: virtual keyboard started");
     println!("  Layout: QWERTY");
     println!("  Extensions: timer, media keys");

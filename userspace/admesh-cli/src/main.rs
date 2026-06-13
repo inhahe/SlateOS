@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_admesh(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: admesh [OPTIONS] FILE.stl");
-        println!("ADMesh v0.98 (SlateOS) — STL mesh processing tool");
+        println!("ADMesh v0.98 (Slate OS) — STL mesh processing tool");
         println!();
         println!("Options:");
         println!("  -x ROT          Rotate around X axis (degrees)");
@@ -33,7 +33,7 @@ fn run_admesh(args: &[String], _prog: &str) -> i32 {
         println!("  --version       Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("ADMesh v0.98.4 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("ADMesh v0.98.4 (Slate OS)"); return 0; }
     let files: Vec<&String> = args.iter().filter(|a| !a.starts_with('-') && {
         let idx = args.iter().position(|x| std::ptr::eq(x, *a)).unwrap_or(0);
         idx == 0 || !matches!(args.get(idx.wrapping_sub(1)).map(|s| s.as_str()), Some("-x" | "-y" | "-z" | "--scale" | "--translate" | "--merge" | "-a" | "-b" | "-e"))
@@ -42,7 +42,7 @@ fn run_admesh(args: &[String], _prog: &str) -> i32 {
         eprintln!("admesh: error: no input file");
         return 1;
     }
-    println!("ADMesh v0.98.4 (SlateOS)");
+    println!("ADMesh v0.98.4 (Slate OS)");
     println!("  Input: {}", files[0]);
     println!("  Facets: 12,456");
     println!("  Volume: 234.56 cm^3");

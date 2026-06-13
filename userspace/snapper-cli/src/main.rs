@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_snapper(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: snapper COMMAND [OPTIONS]");
-        println!("snapper v0.10 (SlateOS) — Filesystem snapshot manager");
+        println!("snapper v0.10 (Slate OS) — Filesystem snapshot manager");
         println!();
         println!("Commands:");
         println!("  list              List snapshots");
@@ -26,7 +26,7 @@ fn run_snapper(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("snapper v0.10 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("snapper v0.10 (Slate OS)"); return 0; }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("list");
     match cmd {
         "list" => {
@@ -60,10 +60,10 @@ fn run_snapper(args: &[String], _prog: &str) -> i32 {
 fn run_snapperd(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: snapperd [OPTIONS]");
-        println!("snapperd v0.10 (SlateOS) — Snapper D-Bus daemon");
+        println!("snapperd v0.10 (Slate OS) — Snapper D-Bus daemon");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("snapperd v0.10 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("snapperd v0.10 (Slate OS)"); return 0; }
     println!("snapperd: snapshot management daemon started");
     0
 }

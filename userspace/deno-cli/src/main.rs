@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_deno(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: deno COMMAND [OPTIONS]");
-        println!("Deno 1.45.2 (SlateOS)");
+        println!("Deno 1.45.2 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  run         Run a program");

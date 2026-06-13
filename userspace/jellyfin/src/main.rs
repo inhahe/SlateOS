@@ -23,7 +23,7 @@ fn run_jellyfin(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Jellyfin 10.9.6 (SlateOS)");
+        println!("Jellyfin 10.9.6 (Slate OS)");
         return 0;
     }
 
@@ -32,9 +32,9 @@ fn run_jellyfin(args: Vec<String>) -> i32 {
         .map(|s| s.as_str())
         .unwrap_or("/var/lib/jellyfin");
 
-    println!("[10:00:00] [INF] Jellyfin version: 10.9.6 (SlateOS)");
+    println!("[10:00:00] [INF] Jellyfin version: 10.9.6 (Slate OS)");
     println!("[10:00:00] [INF] Arguments: {:?}", args);
-    println!("[10:00:00] [INF] Operating System: SlateOS x86_64");
+    println!("[10:00:00] [INF] Operating System: Slate OS x86_64");
     println!("[10:00:00] [INF] Architecture: X64");
     println!("[10:00:00] [INF] Data path: {}", datadir);
     println!("[10:00:00] [INF] Web path: /usr/share/jellyfin-web");

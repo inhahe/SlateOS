@@ -2422,7 +2422,7 @@ fn run_parted(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("parted (SlateOS) 1.0.0");
+                println!("parted (Slate OS) 1.0.0");
                 return 0;
             }
             _ => {
@@ -2446,7 +2446,7 @@ fn run_parted(args: &[String]) -> i32 {
 
     if commands.is_empty() && !script_mode {
         // Interactive mode would read from stdin; for now just print usage
-        println!("GNU Parted (SlateOS) 1.0.0");
+        println!("GNU Parted (Slate OS) 1.0.0");
         println!("Usage: parted [OPTION]... [DEVICE [COMMAND [PARAMETERS]...]...]");
         println!("Try 'parted --help' for more information.");
         return 0;
@@ -2702,7 +2702,7 @@ fn execute_parted_command(editor: &mut DiskEditor, cmd: &PartedCommand) -> i32 {
             0
         }
         PartedCommand::Version => {
-            println!("parted (SlateOS) 1.0.0");
+            println!("parted (Slate OS) 1.0.0");
             0
         }
         PartedCommand::Quit => 0,
@@ -2730,7 +2730,7 @@ fn run_partprobe(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("partprobe (SlateOS) 1.0.0");
+                println!("partprobe (Slate OS) 1.0.0");
                 return 0;
             }
             _ => {
@@ -2820,7 +2820,7 @@ fn run_partx(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("partx (SlateOS) 1.0.0");
+                println!("partx (Slate OS) 1.0.0");
                 return 0;
             }
             _ => {

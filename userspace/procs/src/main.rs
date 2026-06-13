@@ -37,7 +37,7 @@ fn run_procs(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("procs 0.14.6 (SlateOS)");
+        println!("procs 0.14.6 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "-l" || a == "--list") {

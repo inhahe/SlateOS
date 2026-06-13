@@ -15,17 +15,17 @@ fn run_hevea(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS] FILE", prog);
         match prog {
             "hacha" => {
-                println!("hacha (SlateOS) — Split HeVeA HTML output into pages");
+                println!("hacha (Slate OS) — Split HeVeA HTML output into pages");
                 println!("  -o DIR     Output directory");
                 println!("  -tocter    Split at table of contents entries");
             }
             "imagen" => {
-                println!("imagen (SlateOS) — Generate images for HeVeA output");
+                println!("imagen (Slate OS) — Generate images for HeVeA output");
                 println!("  -png       Generate PNG images");
                 println!("  -pdf       Generate PDF images");
             }
             _ => {
-                println!("HeVeA v2.36 (SlateOS) — LaTeX to HTML translator");
+                println!("HeVeA v2.36 (Slate OS) — LaTeX to HTML translator");
                 println!("  -o FILE    Output file");
                 println!("  -text      Plain text output");
                 println!("  -fix       Fix point");
@@ -36,7 +36,7 @@ fn run_hevea(args: &[String], prog: &str) -> i32 {
         println!("  --version  Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("HeVeA v2.36 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("HeVeA v2.36 (Slate OS)"); return 0; }
     match prog {
         "hacha" => {
             println!("hacha: splitting HTML...");
@@ -46,7 +46,7 @@ fn run_hevea(args: &[String], prog: &str) -> i32 {
             println!("  Output: document/index.html + 11 chapter files");
         }
         _ => {
-            println!("HeVeA v2.36 (SlateOS)");
+            println!("HeVeA v2.36 (Slate OS)");
             println!("  Input: document.tex");
             println!("  Packages: amsmath, graphicx, hyperref");
             println!("  Sections: 12");

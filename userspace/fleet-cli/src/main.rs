@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_fleetctl(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: fleetctl COMMAND [OPTIONS]");
-        println!("fleetctl v4.40 (SlateOS) — Fleet device management CLI");
+        println!("fleetctl v4.40 (Slate OS) — Fleet device management CLI");
         println!();
         println!("Commands:");
         println!("  hosts list        List enrolled hosts");
@@ -49,7 +49,7 @@ fn run_fleetctl(args: &[String], _prog: &str) -> i32 {
             let file = args.get(1).map(|s| s.as_str()).unwrap_or("config.yml");
             println!("Applied: {}", file);
         }
-        "version" | "--version" => println!("fleetctl v4.40 (SlateOS)"),
+        "version" | "--version" => println!("fleetctl v4.40 (Slate OS)"),
         _ => println!("fleetctl {}: completed", cmd),
     }
     0

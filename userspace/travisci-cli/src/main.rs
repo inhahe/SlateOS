@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_travis(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: travisci [OPTIONS]");
-        println!("Travis CI (SlateOS) — Hosted continuous integration");
+        println!("Travis CI (Slate OS) — Hosted continuous integration");
         println!();
         println!("Options:");
         println!("  login                  Log in to Travis CI");
@@ -23,8 +23,8 @@ fn run_travis(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Travis CI (SlateOS)"); return 0; }
-    println!("Travis CI (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Travis CI (Slate OS)"); return 0; }
+    println!("Travis CI (Slate OS)");
     println!("  Vendor: Travis CI GmbH (Berlin, Germany)");
     println!("          acquired by Idera Inc. Jan 2019 (controversial — layoffs followed)");
     println!("  Founders: Sven Fuchs, Josh Kalderimis, Mathias Meyer + Konstantin Haase (Berlin 2011)");

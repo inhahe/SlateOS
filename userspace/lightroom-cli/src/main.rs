@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_lr(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lightroom [OPTIONS] [CATALOG]");
-        println!("Adobe Lightroom Classic 2024 (SlateOS) — Photo cataloging, editing & workflow");
+        println!("Adobe Lightroom Classic 2024 (Slate OS) — Photo cataloging, editing & workflow");
         println!();
         println!("Options:");
         println!("  -o CATALOG.lrcat       Open catalog");
@@ -23,8 +23,8 @@ fn run_lr(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Adobe Lightroom Classic 13.4 (SlateOS)"); return 0; }
-    println!("Adobe Lightroom Classic 13.4 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Adobe Lightroom Classic 13.4 (Slate OS)"); return 0; }
+    println!("Adobe Lightroom Classic 13.4 (Slate OS)");
     println!("  Modules: Library, Develop, Map, Book, Slideshow, Print, Web");
     println!("  Raw engine: Adobe Camera Raw (1000+ camera profiles)");
     println!("  AI: Lens Blur, Denoise, Adaptive Presets, Subject/Sky select");

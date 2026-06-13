@@ -33,12 +33,12 @@ fn run_haproxy(args: Vec<String>) -> i32 {
         println!("HAProxy version 2.9.7 2025/05/22 - https://haproxy.org/");
         println!("Status: stable branch - will stop receiving fixes around Q1 2025.");
         println!("Known bugs: http://www.haproxy.org/bugs/bugs-2.9.7.html");
-        println!("Running on: SlateOS x86_64");
+        println!("Running on: Slate OS x86_64");
         return 0;
     }
     if args.iter().any(|a| a == "-vv") {
         println!("HAProxy version 2.9.7 2025/05/22 - https://haproxy.org/");
-        println!("Running on: SlateOS x86_64");
+        println!("Running on: Slate OS x86_64");
         println!("Build options:");
         println!("  TARGET  = slateos");
         println!("  CPU     = generic");
@@ -66,7 +66,7 @@ fn run_haproxy(args: Vec<String>) -> i32 {
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("/etc/haproxy/haproxy.cfg");
-    println!("[NOTICE]   (12345) : haproxy version is 2.9.7 (SlateOS)");
+    println!("[NOTICE]   (12345) : haproxy version is 2.9.7 (Slate OS)");
     println!("[NOTICE]   (12345) : Loading {}", cfg);
     println!("[WARNING]  (12345) : config : 'option forwardfor' enabled on backend 'servers'.");
     println!("[NOTICE]   (12345) : New worker #1 (12346) forked");

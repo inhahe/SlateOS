@@ -775,7 +775,7 @@ fn parse_u8_arg(parts: &[&str], idx: usize, line: usize, name: &str) -> Result<u
 /// Serialize a list of timed actions back to the text-based script format.
 pub fn serialize_script(actions: &[TimedAction]) -> String {
     let mut lines = Vec::new();
-    lines.push("# SlateOS Automator Macro Script".to_string());
+    lines.push("# Slate OS Automator Macro Script".to_string());
     lines.push(String::new());
 
     for ta in actions {
@@ -3822,7 +3822,7 @@ mod tests {
     #[test]
     fn test_serialize_empty() {
         let text = serialize_script(&[]);
-        assert!(text.contains("SlateOS Automator"));
+        assert!(text.contains("Slate OS Automator"));
     }
 
     #[test]

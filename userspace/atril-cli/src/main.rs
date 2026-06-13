@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_atril(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: atril [OPTIONS] [FILE...]");
-        println!("atril v1.26 (SlateOS) — MATE Document Viewer");
+        println!("atril v1.26 (Slate OS) — MATE Document Viewer");
         println!();
         println!("Options:");
         println!("  -p PAGE           Open at page");
@@ -23,7 +23,7 @@ fn run_atril(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("atril v1.26 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("atril v1.26 (Slate OS)"); return 0; }
     println!("atril: MATE document viewer started");
     println!("  Supported: PDF, DjVu, PostScript, TIFF, XPS, CBR/CBZ");
     0

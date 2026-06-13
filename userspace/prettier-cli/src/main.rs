@@ -11,7 +11,7 @@ fn run_prettier(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: prettier [OPTIONS] [FILES...]");
         println!();
-        println!("Prettier — opinionated code formatter (SlateOS).");
+        println!("Prettier — opinionated code formatter (Slate OS).");
         println!();
         println!("Options:");
         println!("  --write              Write formatted files");
@@ -27,7 +27,7 @@ fn run_prettier(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("3.2.4 (SlateOS)");
+        println!("3.2.4 (Slate OS)");
         return 0;
     }
 

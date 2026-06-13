@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_htsfile(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: htsfile [OPTIONS] FILE...");
-        println!("htsfile v1.20 (SlateOS) — Identify high-throughput sequencing files");
+        println!("htsfile v1.20 (Slate OS) — Identify high-throughput sequencing files");
         return 0;
     }
     for f in args.iter().filter(|a| !a.starts_with('-')) {
@@ -25,7 +25,7 @@ fn run_htsfile(args: &[String], _prog: &str) -> i32 {
 fn run_bgzip(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: bgzip [OPTIONS] FILE");
-        println!("bgzip v1.20 (SlateOS) — Block gzip compress/decompress");
+        println!("bgzip v1.20 (Slate OS) — Block gzip compress/decompress");
         println!();
         println!("Options:");
         println!("  -d                Decompress");
@@ -49,7 +49,7 @@ fn run_bgzip(args: &[String], _prog: &str) -> i32 {
 fn run_tabix(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: tabix [OPTIONS] FILE [REGION]");
-        println!("tabix v1.20 (SlateOS) — Index/query tabix-indexed files");
+        println!("tabix v1.20 (Slate OS) — Index/query tabix-indexed files");
         println!();
         println!("Options:");
         println!("  -p TYPE           Preset (gff, bed, sam, vcf)");

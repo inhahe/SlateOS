@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ffplay(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "-help") || args.is_empty() {
         println!("Usage: ffplay [OPTIONS] INPUT");
-        println!("ffplay 7.0 (SlateOS) — Simple media player");
+        println!("ffplay 7.0 (Slate OS) — Simple media player");
         println!();
         println!("Options:");
         println!("  -x WIDTH           Window width");
@@ -34,8 +34,8 @@ fn run_ffplay(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-version") {
-        println!("ffplay version 7.0 (SlateOS)");
-        println!("built with gcc (SlateOS)");
+        println!("ffplay version 7.0 (Slate OS)");
+        println!("built with gcc (Slate OS)");
         println!("libavutil      59.  8.100");
         println!("libavcodec     61.  3.100");
         println!("libavformat    61.  1.100");

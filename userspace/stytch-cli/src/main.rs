@@ -358,7 +358,7 @@ fn run_stytch(args: &[String], prog: &str) -> i32 {
     match args[0].as_str() {
         "help" | "--help" | "-h" => { print_help(prog); 0 }
         "version" | "--version" | "-V" => {
-            println!("{prog} 0.1.0 (SlateOS personality CLI)");
+            println!("{prog} 0.1.0 (Slate OS personality CLI)");
             0
         }
         "about" => { print_about(); 0 }

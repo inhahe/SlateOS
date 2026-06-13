@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_capnp(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: capnp COMMAND [OPTIONS]");
-        println!("Cap'n Proto 1.0.2 (SlateOS)");
+        println!("Cap'n Proto 1.0.2 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  compile      Compile Cap'n Proto schemas");
@@ -27,7 +27,7 @@ fn run_capnp(args: &[String]) -> i32 {
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match subcmd {
         "version" | "--version" => {
-            println!("Cap'n Proto version 1.0.2 (SlateOS)");
+            println!("Cap'n Proto version 1.0.2 (Slate OS)");
         }
         "compile" => {
             let files: Vec<&str> = args.iter()
@@ -74,14 +74,14 @@ fn run_capnp(args: &[String]) -> i32 {
 fn run_capnpc(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: capnpc [OPTIONS] FILE.capnp [FILE.capnp ...]");
-        println!("Cap'n Proto compiler plugin (SlateOS)");
+        println!("Cap'n Proto compiler plugin (Slate OS)");
         println!("  -o LANG:DIR   Output language and directory");
         println!("  -I DIR        Schema import path");
         println!("  --version     Show version");
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("capnpc 1.0.2 (SlateOS)");
+        println!("capnpc 1.0.2 (Slate OS)");
         return 0;
     }
     let files: Vec<&str> = args.iter()

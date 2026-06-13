@@ -26,7 +26,7 @@ fn run_mdcat(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("mdcat 2.1.2 (SlateOS)");
+        println!("mdcat 2.1.2 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "--detect-terminal") {

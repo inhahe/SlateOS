@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wd(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: workday [OPTIONS]");
-        println!("Workday 2024R2 (SlateOS) — Cloud HCM + Financial Management");
+        println!("Workday 2024R2 (Slate OS) — Cloud HCM + Financial Management");
         println!();
         println!("Options:");
         println!("  --tenant TENANT        Workday tenant name");
@@ -24,8 +24,8 @@ fn run_wd(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Workday 2024R2 (Release 2024R2) (SlateOS)"); return 0; }
-    println!("Workday 2024R2 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Workday 2024R2 (Release 2024R2) (Slate OS)"); return 0; }
+    println!("Workday 2024R2 (Slate OS)");
     println!("  Suites: Human Capital Management (HCM), Financial Management, Planning,");
     println!("          Spend Management, Adaptive Planning (FP&A), Peakon (engagement)");
     println!("  Architecture: object-based, in-memory, multi-tenant SaaS");

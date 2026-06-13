@@ -1984,7 +1984,7 @@ impl Default for ServiceBus {
 /// connections and processes messages in a loop. For now, this sets up the bus
 /// with default configuration and reports readiness.
 fn main() {
-    eprintln!("[servicebus] SlateOS Service Bus Daemon starting...");
+    eprintln!("[servicebus] Slate OS Service Bus Daemon starting...");
 
     let mut bus = ServiceBus::new();
 

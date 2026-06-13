@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mvn(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: mvn [OPTIONS] [GOAL [GOAL ...]] [PHASE [PHASE ...]]");
-        println!("Apache Maven 3.9.6 (SlateOS)");
+        println!("Apache Maven 3.9.6 (Slate OS)");
         println!();
         println!("Options:");
         println!("  -f FILE             Alternate POM file");
@@ -38,7 +38,7 @@ fn run_mvn(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--version" || a == "-v") {
         println!("Apache Maven 3.9.6 (bc0240f3c744dd6b6ec2920b3cd08dcc295161ae)");
         println!("Maven home: /usr/local/maven");
-        println!("Java version: 21.0.2, vendor: SlateOS");
+        println!("Java version: 21.0.2, vendor: Slate OS");
         println!("Default locale: en_US, platform encoding: UTF-8");
         println!("OS name: \"slateos\", version: \"1.0\", arch: \"amd64\"");
         return 0;

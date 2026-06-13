@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_eleventy(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: eleventy [OPTIONS]");
-        println!("Eleventy v3.0.0 (SlateOS) — Simple static site generator");
+        println!("Eleventy v3.0.0 (Slate OS) — Simple static site generator");
         println!();
         println!("Options:");
         println!("  --serve          Start dev server with live reload");
@@ -28,7 +28,7 @@ fn run_eleventy(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("Eleventy v3.0.0 (SlateOS)");
+        println!("Eleventy v3.0.0 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "--serve") {

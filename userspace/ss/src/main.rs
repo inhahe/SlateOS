@@ -790,7 +790,7 @@ fn print_version(personality: Personality) {
         Personality::Ss => "ss",
         Personality::Sockstat => "sockstat",
     };
-    println!("{name} (SlateOS) 0.1.0");
+    println!("{name} (Slate OS) 0.1.0");
 }
 
 // ---------------------------------------------------------------------------

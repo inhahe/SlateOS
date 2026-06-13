@@ -618,7 +618,7 @@ fn cmd_mkswap(args: &MkswapArgs) -> i32 {
     }
 
     if args.show_version {
-        print_out(b"mkswap (SlateOS util-linux) 1.0.0\n");
+        print_out(b"mkswap (Slate OS util-linux) 1.0.0\n");
         return 0;
     }
 
@@ -714,7 +714,7 @@ fn cmd_swapon(args: &SwaponArgs) -> i32 {
     }
 
     if args.show_version {
-        print_out(b"swapon (SlateOS util-linux) 1.0.0\n");
+        print_out(b"swapon (Slate OS util-linux) 1.0.0\n");
         return 0;
     }
 
@@ -836,7 +836,7 @@ fn cmd_swapoff(args: &SwapoffArgs) -> i32 {
     }
 
     if args.show_version {
-        print_out(b"swapoff (SlateOS util-linux) 1.0.0\n");
+        print_out(b"swapoff (Slate OS util-linux) 1.0.0\n");
         return 0;
     }
 

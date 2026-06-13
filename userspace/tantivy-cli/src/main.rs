@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_tantivy(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: tantivy [COMMAND] [OPTIONS]");
-        println!("Tantivy v0.22 (SlateOS) — Full-text search engine library");
+        println!("Tantivy v0.22 (Slate OS) — Full-text search engine library");
         println!();
         println!("Commands:");
         println!("  new                Create new index");
@@ -29,8 +29,8 @@ fn run_tantivy(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Tantivy v0.22.0 (SlateOS)"); return 0; }
-    println!("Tantivy v0.22.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Tantivy v0.22.0 (Slate OS)"); return 0; }
+    println!("Tantivy v0.22.0 (Slate OS)");
     println!("  Index: /var/tantivy/index");
     println!("  Segments: 5");
     println!("  Documents: 123,456");

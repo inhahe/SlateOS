@@ -631,7 +631,7 @@ fn parse_sort_field(s: &str) -> Option<SortField> {
 }
 
 fn print_usage() {
-    println!("SlateOS Process Monitor v0.1.0");
+    println!("Slate OS Process Monitor v0.1.0");
     println!();
     println!("Real-time display of running processes, CPU, and memory usage.");
     println!();

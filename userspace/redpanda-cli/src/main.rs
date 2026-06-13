@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rpk(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: rpk COMMAND [OPTIONS]");
-        println!("rpk — Redpanda CLI 24.1.7 (SlateOS)");
+        println!("rpk — Redpanda CLI 24.1.7 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  topic        Manage topics");

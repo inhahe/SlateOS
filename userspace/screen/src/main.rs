@@ -37,14 +37,14 @@ use std::process;
 // Syscall interface
 // ============================================================================
 
-// Native SlateOS console syscalls (kernel syscall/number.rs).  These were
+// Native Slate OS console syscalls (kernel syscall/number.rs).  These were
 // previously 0/1, which are SYS_YIELD and SYS_EXIT — so a "read char" call
 // actually terminated the process.  The render loop polls for input (it must
 // keep refreshing the status bar while idle), so it uses the *non-blocking*
 // try-read variant (103); the blocking variant (101) would freeze the loop.
 const SYS_CONSOLE_WRITE: u64 = 100;
 const SYS_CONSOLE_TRY_READ_CHAR: u64 = 103;
-// Native SlateOS monotonic clock (kernel syscall/number.rs); no-arg, returns
+// Native Slate OS monotonic clock (kernel syscall/number.rs); no-arg, returns
 // boot-relative nanoseconds in rax.  (Syscall 30 is SYS_IRQ_REGISTER.)
 const SYS_CLOCK_MONOTONIC: u64 = 10;
 const SYS_PROCESS_SPAWN: u64 = 500;

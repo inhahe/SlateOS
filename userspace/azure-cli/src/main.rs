@@ -11,7 +11,7 @@ fn run_az(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "help") {
         println!("Usage: az [GROUP] [COMMAND] [OPTIONS]");
         println!();
-        println!("Azure CLI — manage Azure resources (SlateOS).");
+        println!("Azure CLI — manage Azure resources (Slate OS).");
         println!();
         println!("Groups:");
         println!("  account       Manage subscriptions");
@@ -33,7 +33,7 @@ fn run_az(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("azure-cli 2.56.0 (SlateOS)");
+        println!("azure-cli 2.56.0 (Slate OS)");
         return 0;
     }
 

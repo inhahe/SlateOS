@@ -11,7 +11,7 @@ fn run_nikto(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "-H") {
         println!("Usage: nikto [OPTIONS]");
         println!();
-        println!("Nikto — web server scanner (SlateOS).");
+        println!("Nikto — web server scanner (Slate OS).");
         println!();
         println!("Options:");
         println!("  -h, -host HOST        Target host");
@@ -29,7 +29,7 @@ fn run_nikto(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-Version" || a == "--version") {
-        println!("Nikto v2.5.0 (SlateOS)");
+        println!("Nikto v2.5.0 (Slate OS)");
         return 0;
     }
 
@@ -60,7 +60,7 @@ fn run_nikto(args: Vec<String>) -> i32 {
 
     let scheme = if ssl || port == "443" { "https" } else { "http" };
 
-    println!("- Nikto v2.5.0 (SlateOS)");
+    println!("- Nikto v2.5.0 (Slate OS)");
     println!("---------------------------------------------------------------------------");
     println!("+ Target IP:          {}", host);
     println!("+ Target Hostname:    {}", host);

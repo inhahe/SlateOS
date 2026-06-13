@@ -11,7 +11,7 @@ fn run_nats(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: nats <COMMAND> [OPTIONS]");
         println!();
-        println!("NATS messaging system CLI (SlateOS).");
+        println!("NATS messaging system CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  pub          Publish a message");
@@ -27,7 +27,7 @@ fn run_nats(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("nats 0.1.1 (SlateOS)");
+        println!("nats 0.1.1 (Slate OS)");
         return 0;
     }
 

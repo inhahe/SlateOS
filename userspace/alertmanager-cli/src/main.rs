@@ -14,7 +14,7 @@ fn run_alertmanager(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: alertmanager [OPTIONS]");
         println!();
-        println!("alertmanager — Prometheus Alertmanager (SlateOS).");
+        println!("alertmanager — Prometheus Alertmanager (Slate OS).");
         println!();
         println!("Options:");
         println!("  --config.file <f>         Config file");
@@ -26,13 +26,13 @@ fn run_alertmanager(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("alertmanager, version 0.27.0 (SlateOS)");
+        println!("alertmanager, version 0.27.0 (Slate OS)");
         println!("  build date: 2024-01-15");
         println!("  go:          go1.22.0");
         return 0;
     }
 
-    println!("level=info ts=2024-05-22T12:00:00.000Z caller=main.go:231 msg=\"Starting Alertmanager\" version=\"0.27.0 (SlateOS)\"");
+    println!("level=info ts=2024-05-22T12:00:00.000Z caller=main.go:231 msg=\"Starting Alertmanager\" version=\"0.27.0 (Slate OS)\"");
     println!("level=info ts=2024-05-22T12:00:00.001Z caller=coordinator.go:113 msg=\"Loading configuration file\" file=/etc/alertmanager/alertmanager.yml");
     println!("level=info ts=2024-05-22T12:00:00.002Z caller=coordinator.go:126 msg=\"Completed loading of configuration file\"");
     println!("level=info ts=2024-05-22T12:00:00.003Z caller=main.go:535 msg=\"Listening\" address=0.0.0.0:9093");
@@ -43,7 +43,7 @@ fn run_amtool(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: amtool [OPTIONS] COMMAND");
         println!();
-        println!("amtool — Alertmanager CLI (SlateOS).");
+        println!("amtool — Alertmanager CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  alert         Manage alerts");

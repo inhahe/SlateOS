@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_spss(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: spss [OPTIONS] [FILE]");
-        println!("IBM SPSS Statistics 30 (SlateOS) — Statistical analysis software");
+        println!("IBM SPSS Statistics 30 (Slate OS) — Statistical analysis software");
         println!();
         println!("Options:");
         println!("  --data FILE            Open .sav data file");
@@ -24,8 +24,8 @@ fn run_spss(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("IBM SPSS Statistics 30.0.0.0 (SlateOS)"); return 0; }
-    println!("IBM SPSS Statistics 30.0.0.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("IBM SPSS Statistics 30.0.0.0 (Slate OS)"); return 0; }
+    println!("IBM SPSS Statistics 30.0.0.0 (Slate OS)");
     println!("  Editions: Base, Standard, Professional, Premium, Subscription");
     println!("  Format: .sav (data), .sps (syntax), .spv (output viewer)");
     println!("  Procedures: descriptives, regression, ANOVA, factor, cluster, survival,");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_yarn(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: yarn COMMAND [OPTIONS]");
-        println!("Yarn 4.3.1 (SlateOS)");
+        println!("Yarn 4.3.1 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  add          Add dependencies");

@@ -156,7 +156,7 @@ fn main() {
     let rest: Vec<String> = args.into_iter().skip(1).collect();
 
     if rest.iter().any(|a| a == "-V" || a == "--version") {
-        println!("opus-tools 0.2 (SlateOS, libopus 1.5.1)");
+        println!("opus-tools 0.2 (Slate OS, libopus 1.5.1)");
         process::exit(0);
     }
 

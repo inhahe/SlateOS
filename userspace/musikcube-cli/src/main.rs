@@ -24,7 +24,7 @@ fn run_musikcube(args: &[String], prog: &str) -> i32 {
             return 0;
         }
         if args.iter().any(|a| a == "-V" || a == "--version") {
-            println!("musikcubed 3.0.2 (SlateOS)");
+            println!("musikcubed 3.0.2 (Slate OS)");
             return 0;
         }
         let port = args.windows(2).find(|w| w[0] == "--port")
@@ -35,14 +35,14 @@ fn run_musikcube(args: &[String], prog: &str) -> i32 {
     // musikcube
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: musikcube [OPTIONS]");
-        println!("musikcube 3.0.2 (SlateOS) — Terminal music player and library");
+        println!("musikcube 3.0.2 (Slate OS) — Terminal music player and library");
         println!();
         println!("Options:");
         println!("  -V, --version       Show version");
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("musikcube 3.0.2 (SlateOS)");
+        println!("musikcube 3.0.2 (Slate OS)");
         return 0;
     }
     println!("musikcube: Starting music player...");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_serum(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: serum [OPTIONS] [PRESET]");
-        println!("Xfer Records Serum 2 (SlateOS) — Advanced wavetable synthesizer");
+        println!("Xfer Records Serum 2 (Slate OS) — Advanced wavetable synthesizer");
         println!();
         println!("Options:");
         println!("  --load FILE            Load .fxp preset");
@@ -22,8 +22,8 @@ fn run_serum(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Xfer Serum 2.0.7 (SlateOS)"); return 0; }
-    println!("Xfer Serum 2.0.7 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Xfer Serum 2.0.7 (Slate OS)"); return 0; }
+    println!("Xfer Serum 2.0.7 (Slate OS)");
     println!("  Oscillators: 2 wavetable + sub + noise");
     println!("  Modulation: Drag-and-drop, 4 LFOs, 3 ENV, 4 macros");
     println!("  Effects: 10 high-quality (hyper/dimension, chorus, distortion, etc.)");

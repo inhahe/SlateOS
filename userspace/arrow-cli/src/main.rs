@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_arrow(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: arrow COMMAND [OPTIONS]");
-        println!("Apache Arrow CLI 15.0.0 (SlateOS)");
+        println!("Apache Arrow CLI 15.0.0 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  schema       Show schema of Arrow/Parquet file");
@@ -29,7 +29,7 @@ fn run_arrow(args: &[String]) -> i32 {
     }
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match subcmd {
-        "version" | "--version" => println!("arrow 15.0.0 (SlateOS)"),
+        "version" | "--version" => println!("arrow 15.0.0 (Slate OS)"),
         "schema" => {
             let file = args.get(1).map(|s| s.as_str()).unwrap_or("data.arrow");
             println!("arrow schema: {}", file);
@@ -103,7 +103,7 @@ fn run_arrow(args: &[String]) -> i32 {
 fn run_parquet(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: parquet COMMAND [OPTIONS]");
-        println!("Parquet Tools 15.0.0 (SlateOS)");
+        println!("Parquet Tools 15.0.0 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  schema       Show Parquet schema");
@@ -116,7 +116,7 @@ fn run_parquet(args: &[String]) -> i32 {
     }
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match subcmd {
-        "--version" => println!("parquet 15.0.0 (SlateOS)"),
+        "--version" => println!("parquet 15.0.0 (Slate OS)"),
         "schema" => {
             let file = args.get(1).map(|s| s.as_str()).unwrap_or("data.parquet");
             println!("parquet schema: {}", file);

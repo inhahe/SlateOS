@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_op(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: opera [URL] [OPTIONS]");
-        println!("Opera (SlateOS) — Chromium-based browser with built-in messengers/VPN/AI");
+        println!("Opera (Slate OS) — Chromium-based browser with built-in messengers/VPN/AI");
         println!();
         println!("Options:");
         println!("  --private              Private browsing window");
@@ -26,8 +26,8 @@ fn run_op(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Opera 115.0.5322.77 (SlateOS)"); return 0; }
-    println!("Opera 115.0.5322.77 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Opera 115.0.5322.77 (Slate OS)"); return 0; }
+    println!("Opera 115.0.5322.77 (Slate OS)");
     println!("  Vendor: Opera Software AS (Oslo, Norway), majority-owned by Kunlun (China) 2016+");
     println!("  History:");
     println!("    1995-2013: Presto engine (own engine, multi-platform, MDI tabs pioneer)");

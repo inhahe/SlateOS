@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_axel(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: axel [OPTIONS] URL [URL...]");
-        println!("axel v2.17 (SlateOS) — Lightweight download accelerator");
+        println!("axel v2.17 (Slate OS) — Lightweight download accelerator");
         println!();
         println!("Options:");
         println!("  -n NUM            Max connections (default: 4)");
@@ -26,7 +26,7 @@ fn run_axel(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("axel v2.17 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("axel v2.17 (Slate OS)"); return 0; }
     let urls: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
     if urls.is_empty() {
         println!("axel: no URL specified");

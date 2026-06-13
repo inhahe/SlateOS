@@ -32,7 +32,7 @@ fn print_help(prog: &str) {
 }
 
 fn print_version() {
-    println!("adyen-cli 0.1.0 — SlateOS personality binary");
+    println!("adyen-cli 0.1.0 — Slate OS personality binary");
     println!("Adyen N.V. (Euronext: ADYEN), Amsterdam, Netherlands");
 }
 

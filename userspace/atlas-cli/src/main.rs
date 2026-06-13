@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_atlas(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: atlas COMMAND [OPTIONS]");
-        println!("Atlas v0.21.0 (SlateOS) — Database schema management");
+        println!("Atlas v0.21.0 (Slate OS) — Database schema management");
         println!();
         println!("Commands:");
         println!("  schema          Schema management");
@@ -36,7 +36,7 @@ fn run_atlas(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("atlas version v0.21.0 (SlateOS)");
+        println!("atlas version v0.21.0 (Slate OS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("schema");

@@ -686,7 +686,7 @@ impl Default for ServerConfig {
             tls: true,
             nick: "SlateOSUser".to_string(),
             username: "slateos".to_string(),
-            realname: "SlateOS IRC Client".to_string(),
+            realname: "Slate OS IRC Client".to_string(),
             password: None,
             auto_join: vec!["#slateos".to_string()],
             nickserv_pass: None,
@@ -786,7 +786,7 @@ impl IrcClientApp {
                         tls: true,
                         nick: "SlateOSUser".to_string(),
                         username: "slateos".to_string(),
-                        realname: "SlateOS IRC Client".to_string(),
+                        realname: "Slate OS IRC Client".to_string(),
                         password: None,
                         auto_join: vec![],
                         nickserv_pass: None,
@@ -1674,7 +1674,7 @@ fn main() {
     app.join_channel("#rust");
 
     if let Some(ch) = app.find_channel_mut("#slateos") {
-        ch.topic = "SlateOS Development | https://slateos.dev".to_string();
+        ch.topic = "Slate OS Development | https://slateos.dev".to_string();
         ch.add_user(ChannelUser { nick: "SlateOSUser".to_string(), prefix: UserPrefix::Op, away: false });
         ch.add_user(ChannelUser { nick: "alice".to_string(), prefix: UserPrefix::Voice, away: false });
         ch.add_user(ChannelUser { nick: "bob".to_string(), prefix: UserPrefix::None, away: false });

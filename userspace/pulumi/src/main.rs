@@ -33,7 +33,7 @@ fn run_pulumi(args: Vec<String>) -> i32 {
 
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match cmd {
-        "version" => println!("v3.117.0 (SlateOS)"),
+        "version" => println!("v3.117.0 (Slate OS)"),
         "about" => {
             println!("CLI          ");
             println!("Version      3.117.0");

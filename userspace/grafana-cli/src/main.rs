@@ -27,7 +27,7 @@ fn run_grafana_cli(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("grafana-cli version 10.3.1 (SlateOS)");
+        println!("grafana-cli version 10.3.1 (Slate OS)");
         return 0;
     }
 

@@ -27,7 +27,7 @@ fn run_julia(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-v" || a == "--version") {
-        println!("julia version 1.11.0 (SlateOS)");
+        println!("julia version 1.11.0 (Slate OS)");
         return 0;
     }
 
@@ -50,7 +50,7 @@ fn run_julia(args: Vec<String>) -> i32 {
             println!("  (_)     | (_) (_)    |");
             println!("   _ _   _| |_  __ _   |  Type \"?\" for help, \"]?\" for Pkg help.");
             println!("  | | | | | | |/ _` |  |");
-            println!("  | | |_| | | | (_| |  |  Version 1.11.0 (SlateOS)");
+            println!("  | | |_| | | | (_| |  |  Version 1.11.0 (Slate OS)");
             println!("  _/ |\\__'_|_|_|\\__'_|  |");
             println!(" |__/                   |");
         }

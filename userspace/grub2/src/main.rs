@@ -151,7 +151,7 @@ fn read_os_name(os_release_path: &str) -> String {
             return name.clone();
         }
     }
-    "SlateOS".to_string()
+    "Slate OS".to_string()
 }
 
 // ============================================================================
@@ -476,7 +476,7 @@ fn parse_install_args(args: &[String]) -> Result<InstallOptions, GrubError> {
             print_install_usage();
             process::exit(0);
         } else if arg == "--version" || arg == "-V" {
-            println!("grub-install (SlateOS) {VERSION}");
+            println!("grub-install (Slate OS) {VERSION}");
             process::exit(0);
         } else if arg.starts_with('-') {
             return Err(GrubError::InvalidArgs(format!("unknown option: {arg}")));
@@ -657,7 +657,7 @@ fn parse_mkconfig_args(args: &[String]) -> Result<MkconfigOptions, GrubError> {
             print_mkconfig_usage();
             process::exit(0);
         } else if arg == "--version" || arg == "-V" {
-            println!("grub-mkconfig (SlateOS) {VERSION}");
+            println!("grub-mkconfig (Slate OS) {VERSION}");
             process::exit(0);
         } else if arg.starts_with('-') {
             return Err(GrubError::InvalidArgs(format!("unknown option: {arg}")));
@@ -898,7 +898,7 @@ fn run_set_default_with_path(args: &[String], env_path: &str) -> Result<(), Grub
         return Ok(());
     }
     if entry == "--version" || entry == "-V" {
-        println!("grub-set-default (SlateOS) {VERSION}");
+        println!("grub-set-default (Slate OS) {VERSION}");
         return Ok(());
     }
 
@@ -941,7 +941,7 @@ fn run_reboot_with_path(args: &[String], env_path: &str) -> Result<(), GrubError
         return Ok(());
     }
     if entry == "--version" || entry == "-V" {
-        println!("grub-reboot (SlateOS) {VERSION}");
+        println!("grub-reboot (Slate OS) {VERSION}");
         return Ok(());
     }
 
@@ -994,7 +994,7 @@ fn parse_editenv_args(args: &[String]) -> Result<EditenvArgs, GrubError> {
         process::exit(0);
     }
     if args[0] == "--version" || args[0] == "-V" {
-        println!("grub-editenv (SlateOS) {VERSION}");
+        println!("grub-editenv (Slate OS) {VERSION}");
         process::exit(0);
     }
 
@@ -1123,7 +1123,7 @@ fn parse_probe_args(args: &[String]) -> Result<ProbeOptions, GrubError> {
             print_probe_usage();
             process::exit(0);
         } else if arg == "--version" || arg == "-V" {
-            println!("grub-probe (SlateOS) {VERSION}");
+            println!("grub-probe (Slate OS) {VERSION}");
             process::exit(0);
         } else if arg.starts_with('-') {
             return Err(GrubError::InvalidArgs(format!("unknown option: {arg}")));
@@ -1656,13 +1656,13 @@ mod tests {
 
     #[test]
     fn test_parse_os_release_basic() {
-        let content = "NAME=\"SlateOS\"\nVERSION=\"1.0\"\nPRETTY_NAME=\"SlateOS 1.0\"\n";
+        let content = "NAME=\"Slate OS\"\nVERSION=\"1.0\"\nPRETTY_NAME=\"Slate OS 1.0\"\n";
         let map = parse_os_release(content);
-        assert_eq!(map.get("NAME").map(|s| s.as_str()), Some("SlateOS"));
+        assert_eq!(map.get("NAME").map(|s| s.as_str()), Some("Slate OS"));
         assert_eq!(map.get("VERSION").map(|s| s.as_str()), Some("1.0"));
         assert_eq!(
             map.get("PRETTY_NAME").map(|s| s.as_str()),
-            Some("SlateOS 1.0")
+            Some("Slate OS 1.0")
         );
     }
 
@@ -1675,9 +1675,9 @@ mod tests {
 
     #[test]
     fn test_parse_os_release_single_quotes() {
-        let content = "NAME='SlateOS'\n";
+        let content = "NAME='Slate OS'\n";
         let map = parse_os_release(content);
-        assert_eq!(map.get("NAME").map(|s| s.as_str()), Some("SlateOS"));
+        assert_eq!(map.get("NAME").map(|s| s.as_str()), Some("Slate OS"));
     }
 
     #[test]
@@ -1712,7 +1712,7 @@ mod tests {
     #[test]
     fn test_read_os_name_missing_file() {
         let name = read_os_name("/nonexistent/os-release");
-        assert_eq!(name, "SlateOS");
+        assert_eq!(name, "Slate OS");
     }
 
     #[test]
@@ -2777,13 +2777,13 @@ GRUB_DISABLE_OS_PROBER="true"
         let env = GrubEnv::new();
         write_grubenv(path_str, &env).unwrap();
 
-        let args = vec!["SlateOS, with Linux 5.10.0".to_string()];
+        let args = vec!["Slate OS, with Linux 5.10.0".to_string()];
         run_set_default_with_path(&args, path_str).expect("set default");
 
         let env2 = read_grubenv(path_str);
         assert_eq!(
             env2.get("saved_entry"),
-            Some("SlateOS, with Linux 5.10.0")
+            Some("Slate OS, with Linux 5.10.0")
         );
 
         cleanup(&dir);
@@ -3094,11 +3094,11 @@ GRUB_DISABLE_OS_PROBER="true"
 
     #[test]
     fn test_os_release_with_spaces_in_value() {
-        let content = "PRETTY_NAME=\"SlateOS 1.0 (Fancy Release)\"\n";
+        let content = "PRETTY_NAME=\"Slate OS 1.0 (Fancy Release)\"\n";
         let map = parse_os_release(content);
         assert_eq!(
             map.get("PRETTY_NAME").map(|s| s.as_str()),
-            Some("SlateOS 1.0 (Fancy Release)")
+            Some("Slate OS 1.0 (Fancy Release)")
         );
     }
 

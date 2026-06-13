@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_locust(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: locust [OPTIONS]");
-        println!("Locust 2.29.0 (SlateOS) — Load testing tool");
+        println!("Locust 2.29.0 (Slate OS) — Load testing tool");
         println!();
         println!("Options:");
         println!("  -f FILE        Locustfile to use (default: locustfile.py)");

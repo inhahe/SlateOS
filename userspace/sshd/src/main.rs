@@ -2814,7 +2814,7 @@ fn handle_channel_request(conn: &mut ConnectionState, payload: &[u8]) -> Result<
             }
 
             // Send a welcome message.
-            let welcome = format!("Welcome to SlateOS, {}!\r\n$ ", conn.username);
+            let welcome = format!("Welcome to Slate OS, {}!\r\n$ ", conn.username);
             send_channel_data(conn, remote_id, welcome.as_bytes())?;
         }
         "exec" => {

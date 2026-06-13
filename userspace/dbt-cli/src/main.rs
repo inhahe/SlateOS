@@ -11,7 +11,7 @@ fn run_dbt(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: dbt <COMMAND> [OPTIONS]");
         println!();
-        println!("dbt (data build tool) CLI (SlateOS).");
+        println!("dbt (data build tool) CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  init         Initialize dbt project");
@@ -29,7 +29,7 @@ fn run_dbt(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("dbt 1.7.0 (SlateOS)");
+        println!("dbt 1.7.0 (Slate OS)");
         return 0;
     }
 
@@ -180,7 +180,7 @@ fn run_dbt(args: Vec<String>) -> i32 {
             println!();
             println!("  dbt version: 1.7.0");
             println!("  python version: 3.12.0");
-            println!("  os info: SlateOS x86_64");
+            println!("  os info: Slate OS x86_64");
             println!("  Configuration:");
             println!("    profiles.yml found:  YES (/home/user/.dbt/profiles.yml)");
             println!("    dbt_project.yml found: YES (/home/user/project/dbt_project.yml)");

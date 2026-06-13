@@ -1738,7 +1738,7 @@ impl InstallProgress {
 /// Generate a sample YAML configuration string suitable for use as a starting
 /// template.  This can be parsed back via `InstallConfig::from_yaml`.
 pub fn generate_sample_config() -> String {
-    r#"# SlateOS Installer Configuration
+    r#"# Slate OS Installer Configuration
 # ================================
 # Edit this file to customize your installation.
 

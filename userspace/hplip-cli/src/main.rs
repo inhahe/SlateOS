@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_setup(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: hp-setup [OPTIONS]");
-        println!("hp-setup v3.22 (SlateOS) — HP printer setup wizard");
+        println!("hp-setup v3.22 (Slate OS) — HP printer setup wizard");
         println!();
         println!("Options:");
         println!("  -i                Interactive mode");
@@ -23,7 +23,7 @@ fn run_setup(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("hp-setup v3.22 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("hp-setup v3.22 (Slate OS)"); return 0; }
     println!("hp-setup: searching for HP devices...");
     println!("  Found: HP LaserJet Pro M404 (USB)");
     println!("  Driver: hp-laserjet_pro_m404-ps.ppd");
@@ -34,10 +34,10 @@ fn run_setup(args: &[String], _prog: &str) -> i32 {
 fn run_info(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: hp-info [OPTIONS]");
-        println!("hp-info v3.22 (SlateOS) — HP device information");
+        println!("hp-info v3.22 (Slate OS) — HP device information");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("hp-info v3.22 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("hp-info v3.22 (Slate OS)"); return 0; }
     println!("HP Device Information:");
     println!("  Model: HP LaserJet Pro M404");
     println!("  Serial: VNB1234567");
@@ -50,10 +50,10 @@ fn run_info(args: &[String], _prog: &str) -> i32 {
 fn run_levels(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: hp-levels [OPTIONS]");
-        println!("hp-levels v3.22 (SlateOS) — Show supply levels");
+        println!("hp-levels v3.22 (Slate OS) — Show supply levels");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("hp-levels v3.22 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("hp-levels v3.22 (Slate OS)"); return 0; }
     println!("HP LaserJet Pro M404:");
     println!("  Black toner:  75%");
     println!("  Drum:         85%");
@@ -64,10 +64,10 @@ fn run_levels(args: &[String], _prog: &str) -> i32 {
 fn run_toolbox(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: hp-toolbox [OPTIONS]");
-        println!("hp-toolbox v3.22 (SlateOS) — HP device management GUI");
+        println!("hp-toolbox v3.22 (Slate OS) — HP device management GUI");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("hp-toolbox v3.22 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("hp-toolbox v3.22 (Slate OS)"); return 0; }
     println!("hp-toolbox: device management GUI started");
     println!("  Devices: 1 connected");
     0

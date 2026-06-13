@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_amp(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: amp [OPTIONS] [FILE...]");
-        println!("amp 0.7.0 (SlateOS) — A complete text editor for the terminal");
+        println!("amp 0.7.0 (Slate OS) — A complete text editor for the terminal");
         println!();
         println!("Options:");
         println!("  -s, --syntax-path DIR   Syntax definition directory");
@@ -29,7 +29,7 @@ fn run_amp(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("amp 0.7.0 (SlateOS)");
+        println!("amp 0.7.0 (Slate OS)");
         return 0;
     }
     let file = args.iter().find(|a| !a.starts_with('-'))

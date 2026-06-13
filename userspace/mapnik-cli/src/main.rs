@@ -21,7 +21,7 @@ fn run_mapnik_render(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Mapnik 4.0.0 (SlateOS)");
+        println!("Mapnik 4.0.0 (Slate OS)");
         return 0;
     }
     let stylesheet = args.iter().find(|a| a.ends_with(".xml")).map(|s| s.as_str()).unwrap_or("style.xml");

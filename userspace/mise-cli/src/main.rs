@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mise(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: mise [OPTIONS] [COMMAND]");
-        println!("mise 2024.11.0 (SlateOS) — Polyglot dev tool version manager");
+        println!("mise 2024.11.0 (Slate OS) — Polyglot dev tool version manager");
         println!();
         println!("Commands:");
         println!("  activate SHELL     Activate mise for shell");
@@ -50,13 +50,13 @@ fn run_mise(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("mise 2024.11.0 (SlateOS)");
+        println!("mise 2024.11.0 (Slate OS)");
         return 0;
     }
     let cmd = args.iter().find(|a| !a.starts_with('-'))
         .map(|s| s.as_str()).unwrap_or("version");
     match cmd {
-        "version" => println!("mise 2024.11.0 (SlateOS)"),
+        "version" => println!("mise 2024.11.0 (Slate OS)"),
         "current" => {
             println!("node   20.11.1   ~/.config/mise/config.toml");
             println!("python 3.12.1    ~/.config/mise/config.toml");

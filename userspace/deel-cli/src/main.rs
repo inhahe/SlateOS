@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_deel(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: deel [OPTIONS]");
-        println!("Deel (SlateOS) — Global hiring + payroll + contractors + EOR");
+        println!("Deel (Slate OS) — Global hiring + payroll + contractors + EOR");
         println!();
         println!("Options:");
         println!("  --contractor           Contractor management ($49/contractor/mo)");
@@ -23,8 +23,8 @@ fn run_deel(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Deel 2024 (SlateOS)"); return 0; }
-    println!("Deel 2024 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Deel 2024 (Slate OS)"); return 0; }
+    println!("Deel 2024 (Slate OS)");
     println!("  Vendor: Deel Inc. (San Francisco — founded 2019)");
     println!("  Founders: Alex Bouaziz + Shuo Wang (MIT)");
     println!("  Funding: Andreessen Horowitz, Spark Capital, Coatue + others");

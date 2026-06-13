@@ -142,7 +142,7 @@ fn read_users() -> Vec<User> {
 
 /// Write all users back to /etc/users.yaml.
 fn write_users(users: &[User]) -> Result<(), String> {
-    let mut yaml = String::from("# SlateOS user database\n# Managed by useradm — do not edit manually\nusers:\n");
+    let mut yaml = String::from("# Slate OS user database\n# Managed by useradm — do not edit manually\nusers:\n");
 
     for user in users {
         yaml.push_str(&format!("  - uid: {}\n", user.uid));
@@ -604,7 +604,7 @@ fn cmd_groups(username: &str) {
 // ============================================================================
 
 fn print_usage() {
-    println!("SlateOS User Account Manager v0.1.0");
+    println!("Slate OS User Account Manager v0.1.0");
     println!();
     println!("Manage user accounts in the system.");
     println!();

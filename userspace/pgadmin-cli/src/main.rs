@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pgadmin(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pgadmin [OPTIONS]");
-        println!("pgadmin v8.2 (SlateOS) — PostgreSQL administration tool");
+        println!("pgadmin v8.2 (Slate OS) — PostgreSQL administration tool");
         println!();
         println!("Options:");
         println!("  --port PORT      Web server port (default: 5050)");
@@ -24,7 +24,7 @@ fn run_pgadmin(args: &[String], _prog: &str) -> i32 {
         println!("Web-based PostgreSQL management and query tool.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("pgadmin v8.2 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("pgadmin v8.2 (Slate OS)"); return 0; }
     println!("pgadmin: starting web interface");
     println!("  URL: http://localhost:5050");
     println!("  Mode: desktop");

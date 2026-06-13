@@ -14,13 +14,13 @@ fn run_bridge(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: bridge [OPTIONS] OBJECT COMMAND");
         println!();
-        println!("bridge — iproute2 bridge management (SlateOS).");
+        println!("bridge — iproute2 bridge management (Slate OS).");
         println!();
         println!("Objects: link, fdb, mdb, vlan, monitor");
         return 0;
     }
     if args.iter().any(|a| a == "-V") {
-        println!("bridge utility, iproute2-6.7.0 (SlateOS)");
+        println!("bridge utility, iproute2-6.7.0 (Slate OS)");
         return 0;
     }
 
@@ -136,7 +136,7 @@ fn run_bondctl(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: bondctl [OPTIONS] COMMAND");
         println!();
-        println!("bondctl — network bonding management (SlateOS).");
+        println!("bondctl — network bonding management (Slate OS).");
         println!();
         println!("Commands:");
         println!("  show [BOND]          Show bonding info");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gerbv(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: gerbv [OPTIONS] FILE...");
-        println!("gerbv v2.10 (SlateOS) — Gerber file viewer/converter");
+        println!("gerbv v2.10 (Slate OS) — Gerber file viewer/converter");
         println!();
         println!("Options:");
         println!("  FILE.gbr/.drl     Gerber/Excellon files to view");
@@ -26,7 +26,7 @@ fn run_gerbv(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("gerbv v2.10 (SlateOS)");
+        println!("gerbv v2.10 (Slate OS)");
         return 0;
     }
     let files: Vec<&str> = args.iter()

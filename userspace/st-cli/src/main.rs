@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_st(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: st [OPTIONS] [CMD [ARGS...]]");
-        println!("st v0.9 (SlateOS) — Simple terminal");
+        println!("st v0.9 (Slate OS) — Simple terminal");
         println!();
         println!("Options:");
         println!("  -a                Disable alt screen");
@@ -28,7 +28,7 @@ fn run_st(args: &[String], _prog: &str) -> i32 {
         println!("  -v                Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "-v") { println!("st v0.9 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "-v") { println!("st v0.9 (Slate OS)"); return 0; }
     println!("st: simple terminal");
     println!("  Font: Liberation Mono:size=12");
     println!("  TERM: st-256color");

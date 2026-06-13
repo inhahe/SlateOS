@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ap(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: adobepodcast [COMMAND] [OPTIONS]");
-        println!("Adobe Podcast (SlateOS) — AI-powered audio enhancement & recording");
+        println!("Adobe Podcast (Slate OS) — AI-powered audio enhancement & recording");
         println!();
         println!("Commands:");
         println!("  enhance FILE           Run Enhance Speech (AI) on file");
@@ -25,8 +25,8 @@ fn run_ap(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Adobe Podcast 1.0 (beta) (SlateOS)"); return 0; }
-    println!("Adobe Podcast (SlateOS) — beta as of 2024");
+    if args.iter().any(|a| a == "--version") { println!("Adobe Podcast 1.0 (beta) (Slate OS)"); return 0; }
+    println!("Adobe Podcast (Slate OS) — beta as of 2024");
     println!("  Enhance Speech: AI removes background noise + room echo");
     println!("  Mic Check: scores room/setup for podcast quality");
     println!("  Studio: browser-based multi-guest recording");

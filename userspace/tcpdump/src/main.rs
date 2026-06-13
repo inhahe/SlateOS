@@ -1191,7 +1191,7 @@ fn parse_filter(args: &[String]) -> Filter {
 // ============================================================================
 
 fn print_usage() {
-    println!("SlateOS Network Packet Analyzer v0.1.0");
+    println!("Slate OS Network Packet Analyzer v0.1.0");
     println!();
     println!("Capture and analyze network packets.");
     println!();
@@ -1248,7 +1248,7 @@ fn main() {
                 return;
             }
             "--version" => {
-                println!("tcpdump (SlateOS) 0.1.0");
+                println!("tcpdump (Slate OS) 0.1.0");
                 return;
             }
             "-i" => {

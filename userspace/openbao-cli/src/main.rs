@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_openbao(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: openbao [COMMAND] [OPTIONS]");
-        println!("OpenBao v2.0 (SlateOS) — Secrets management (Vault fork)");
+        println!("OpenBao v2.0 (Slate OS) — Secrets management (Vault fork)");
         println!();
         println!("Commands:");
         println!("  server             Start server");
@@ -32,8 +32,8 @@ fn run_openbao(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("OpenBao v2.0.1 (SlateOS)"); return 0; }
-    println!("OpenBao v2.0.1 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("OpenBao v2.0.1 (Slate OS)"); return 0; }
+    println!("OpenBao v2.0.1 (Slate OS)");
     println!("  API: https://0.0.0.0:8200");
     println!("  Cluster: https://0.0.0.0:8201");
     println!("  Storage: Raft (integrated)");

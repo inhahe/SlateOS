@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_crossplane(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: crossplane COMMAND [OPTIONS]");
-        println!("Crossplane CLI 1.16.0 (SlateOS)");
+        println!("Crossplane CLI 1.16.0 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  xpkg          Manage Crossplane packages");

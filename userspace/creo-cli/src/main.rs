@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_creo(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: creo [OPTIONS] [FILE]");
-        println!("PTC Creo Parametric 11.0 (SlateOS) — Parametric 3D CAD (Pro/ENGINEER successor)");
+        println!("PTC Creo Parametric 11.0 (Slate OS) — Parametric 3D CAD (Pro/ENGINEER successor)");
         println!();
         println!("Options:");
         println!("  -g:no_graphics         Headless mode");
@@ -23,8 +23,8 @@ fn run_creo(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("PTC Creo Parametric 11.0.0.0 (SlateOS)"); return 0; }
-    println!("PTC Creo Parametric 11.0.0.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("PTC Creo Parametric 11.0.0.0 (Slate OS)"); return 0; }
+    println!("PTC Creo Parametric 11.0.0.0 (Slate OS)");
     println!("  Modules: Simulate (FEA), Mold, Tooling, Mechanism, Render Studio, NC");
     println!("  Format: .prt/.asm/.drw native + STEP/IGES/Parasolid/JT/Creo View");
     println!("  Scripting: J-Link (Java), Pro/TOOLKIT (C), Pro/WEB.Link (JavaScript)");

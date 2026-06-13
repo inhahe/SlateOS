@@ -31,7 +31,7 @@ fn print_help(prog: &str) {
 }
 
 fn print_version() {
-    println!("chargebee-cli 0.1.0 — SlateOS personality binary");
+    println!("chargebee-cli 0.1.0 — Slate OS personality binary");
     println!("Chargebee Inc. — Chennai, India / San Francisco, USA");
 }
 

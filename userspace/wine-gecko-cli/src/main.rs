@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wine_gecko(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wine-gecko [OPTIONS]");
-        println!("wine-gecko v2.47 (SlateOS) — Mozilla Gecko-based HTML renderer for Wine");
+        println!("wine-gecko v2.47 (Slate OS) — Mozilla Gecko-based HTML renderer for Wine");
         println!();
         println!("Options:");
         println!("  --status          Show installation status");
@@ -23,7 +23,7 @@ fn run_wine_gecko(args: &[String], _prog: &str) -> i32 {
         println!("Windows applications that use embedded web browsers.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("wine-gecko v2.47 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("wine-gecko v2.47 (Slate OS)"); return 0; }
     if args.iter().any(|a| a == "--status") {
         println!("Wine Gecko status:");
         println!("  Version: 2.47.4");

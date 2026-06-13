@@ -59,7 +59,7 @@ fn run_wpa_supplicant(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-v") {
-        println!("wpa_supplicant v2.10 (SlateOS)");
+        println!("wpa_supplicant v2.10 (Slate OS)");
         return 0;
     }
     let iface = args.windows(2).find(|w| w[0] == "-i").map(|w| w[1].as_str()).unwrap_or("wlan0");

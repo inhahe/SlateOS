@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wofi(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wofi [OPTIONS]");
-        println!("wofi v1.4 (SlateOS) — Application launcher for Wayland");
+        println!("wofi v1.4 (Slate OS) — Application launcher for Wayland");
         println!();
         println!("Options:");
         println!("  -S MODE           Show mode: drun, run, dmenu");
@@ -30,7 +30,7 @@ fn run_wofi(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("wofi v1.4 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("wofi v1.4 (Slate OS)"); return 0; }
     let mode = args.iter().skip_while(|a| a.as_str() != "-S").nth(1)
         .map(|s| s.as_str()).unwrap_or("drun");
     println!("wofi: launcher (mode={})", mode);

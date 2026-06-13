@@ -11,7 +11,7 @@ fn run_rpcs3(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: rpcs3 [OPTIONS] [PATH]");
         println!();
-        println!("rpcs3 — PlayStation 3 emulator (SlateOS).");
+        println!("rpcs3 — PlayStation 3 emulator (Slate OS).");
         println!();
         println!("Options:");
         println!("  --headless          Run without GUI");
@@ -24,7 +24,7 @@ fn run_rpcs3(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("RPCS3 v0.0.31-16500-abcdef12 (SlateOS)");
+        println!("RPCS3 v0.0.31-16500-abcdef12 (Slate OS)");
         return 0;
     }
 
@@ -39,7 +39,7 @@ fn run_rpcs3(args: &[String]) -> i32 {
 
     let game_path = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str());
 
-    println!("[RPCS3] Version 0.0.31-16500-abcdef12 (SlateOS)");
+    println!("[RPCS3] Version 0.0.31-16500-abcdef12 (Slate OS)");
     println!("[RPCS3] PPU Decoder: Recompiler (LLVM)");
     println!("[RPCS3] SPU Decoder: Recompiler (LLVM)");
     println!("[RPCS3] Renderer: Vulkan (AMD Radeon RX 7900 XTX)");

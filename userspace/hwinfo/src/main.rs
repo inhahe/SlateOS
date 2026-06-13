@@ -617,7 +617,7 @@ fn hwinfo_main(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("hwinfo (SlateOS) {VERSION}");
+                println!("hwinfo (Slate OS) {VERSION}");
                 return 0;
             }
             _ => {}
@@ -690,7 +690,7 @@ fn lshw_main(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("lshw (SlateOS) {VERSION}");
+                println!("lshw (Slate OS) {VERSION}");
                 return 0;
             }
             s if !s.starts_with('-') => {

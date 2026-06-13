@@ -14,7 +14,7 @@ fn run_multipath(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: multipath [OPTIONS] [device]");
         println!();
-        println!("multipath — device-mapper multipath (SlateOS).");
+        println!("multipath — device-mapper multipath (Slate OS).");
         println!();
         println!("Options:");
         println!("  -l             Show topology");

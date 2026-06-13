@@ -166,7 +166,7 @@ fn parse_args(algo: Algorithm) -> Options {
                 process::exit(0);
             }
             "--version" => {
-                println!("{} (SlateOS) 0.1.0", algo.command());
+                println!("{} (Slate OS) 0.1.0", algo.command());
                 process::exit(0);
             }
             other => {

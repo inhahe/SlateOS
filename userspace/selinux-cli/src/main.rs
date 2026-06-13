@@ -56,7 +56,7 @@ fn run_semanage(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: semanage OBJECT [OPTIONS]");
         println!();
-        println!("semanage — SELinux policy management (SlateOS).");
+        println!("semanage — SELinux policy management (Slate OS).");
         println!();
         println!("Objects: login, user, role, port, interface, fcontext, boolean, module");
         return 0;

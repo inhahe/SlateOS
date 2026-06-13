@@ -18,7 +18,7 @@ fn run_unbound(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("Version 1.20.0 (SlateOS)");
+        println!("Version 1.20.0 (Slate OS)");
         println!("linked libs: OpenSSL 3.2.1, libevent 2.1.12-stable");
         println!("linked modules: dns64 respip validator iterator");
         return 0;

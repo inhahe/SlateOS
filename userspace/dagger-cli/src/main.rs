@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_dagger(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: dagger COMMAND [OPTIONS]");
-        println!("Dagger 0.12.0 (SlateOS)");
+        println!("Dagger 0.12.0 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  call           Call a Dagger function");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_asciidoctor(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: asciidoctor [OPTIONS] FILE.adoc [FILE.adoc ...]");
-        println!("Asciidoctor 2.0.21 (SlateOS)");
+        println!("Asciidoctor 2.0.21 (Slate OS)");
         println!("  -b BACKEND    Backend (html5, docbook5, manpage)");
         println!("  -o FILE       Output file");
         println!("  -D DIR        Output directory");
@@ -24,7 +24,7 @@ fn run_asciidoctor(args: &[String]) -> i32 {
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("Asciidoctor 2.0.21 [https://asciidoctor.org]");
-        println!("Runtime Environment (ruby 3.3.0, SlateOS)");
+        println!("Runtime Environment (ruby 3.3.0, Slate OS)");
         return 0;
     }
     let files: Vec<&str> = args.iter().filter(|a| a.ends_with(".adoc") || a.ends_with(".asciidoc")).map(|s| s.as_str()).collect();
@@ -55,7 +55,7 @@ fn run_asciidoctor_pdf(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Asciidoctor PDF 2.3.10 (SlateOS)");
+        println!("Asciidoctor PDF 2.3.10 (Slate OS)");
         return 0;
     }
     let file = args.iter().find(|a| a.ends_with(".adoc")).map(|s| s.as_str()).unwrap_or("document.adoc");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_cocos(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: cocos [OPTIONS]");
-        println!("Cocos Creator 3.8.4 (SlateOS) — Open-source 2D/3D engine (big in CN market)");
+        println!("Cocos Creator 3.8.4 (Slate OS) — Open-source 2D/3D engine (big in CN market)");
         println!();
         println!("Options:");
         println!("  --new                  New project (3D / 2D / Empty)");
@@ -24,8 +24,8 @@ fn run_cocos(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Cocos Creator 3.8.4 (SlateOS)"); return 0; }
-    println!("Cocos Creator 3.8.4 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Cocos Creator 3.8.4 (Slate OS)"); return 0; }
+    println!("Cocos Creator 3.8.4 (Slate OS)");
     println!("  Vendor: Xiamen Yaji Software Co. (Cocos Engine team, Xiamen, China)");
     println!("  License: MIT (engine) — fully open source");
     println!("  Origin: cocos2d-iphone (2008, Argentina-born, Ricardo Quesada) →");

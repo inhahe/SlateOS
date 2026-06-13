@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sb(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: servicebus [OPTIONS]");
-        println!("Azure Service Bus (SlateOS) — Microsoft's enterprise messaging broker on Azure");
+        println!("Azure Service Bus (Slate OS) — Microsoft's enterprise messaging broker on Azure");
         println!();
         println!("Options:");
         println!("  --namespace            Service Bus namespace (the broker)");
@@ -22,8 +22,8 @@ fn run_sb(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Azure Service Bus 2024 (SlateOS) — servicebus CLI (az + Service Bus Explorer)"); return 0; }
-    println!("Azure Service Bus 2024 (SlateOS) — Enterprise Messaging on Azure (AMQP 1.0-native)");
+    if args.iter().any(|a| a == "--version") { println!("Azure Service Bus 2024 (Slate OS) — servicebus CLI (az + Service Bus Explorer)"); return 0; }
+    println!("Azure Service Bus 2024 (Slate OS) — Enterprise Messaging on Azure (AMQP 1.0-native)");
     println!("  Vendor: Microsoft Corporation (Redmond, WA — NASDAQ: MSFT)");
     println!("  History:");
     println!("    - Launched as 'Service Bus' on Windows Azure 2010");

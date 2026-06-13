@@ -19,11 +19,11 @@ fn run_elasticsearch(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("Version: 8.13.0 (SlateOS), Build: abc1234/2025-05-22");
+        println!("Version: 8.13.0 (Slate OS), Build: abc1234/2025-05-22");
         return 0;
     }
     println!("[2025-05-22T10:00:00,000][INFO ][o.e.n.Node               ] [slateos-node-1] version[8.13.0], pid[12345]");
-    println!("[2025-05-22T10:00:00,500][INFO ][o.e.n.Node               ] [slateos-node-1] JVM: 21.0.2 (SlateOS)");
+    println!("[2025-05-22T10:00:00,500][INFO ][o.e.n.Node               ] [slateos-node-1] JVM: 21.0.2 (Slate OS)");
     println!("[2025-05-22T10:00:01,000][INFO ][o.e.e.NodeEnvironment    ] [slateos-node-1] using [1] data paths, mounts [[/ (/)]]");
     println!("[2025-05-22T10:00:02,000][INFO ][o.e.g.GatewayService     ] [slateos-node-1] recovered [0] indices");
     println!("[2025-05-22T10:00:02,500][INFO ][o.e.c.s.MasterService    ] [slateos-node-1] elected-as-master");

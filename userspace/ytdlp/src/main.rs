@@ -59,7 +59,7 @@ fn run_ytdlp(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("yt-dlp 2024.01.01 (SlateOS)");
+        println!("yt-dlp 2024.01.01 (Slate OS)");
         return 0;
     }
 

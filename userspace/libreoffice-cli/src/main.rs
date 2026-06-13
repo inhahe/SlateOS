@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_libreoffice(args: &[String], prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: {} [OPTIONS] [FILE...]", prog);
-        println!("libreoffice v24.2 (SlateOS) — Office suite");
+        println!("libreoffice v24.2 (Slate OS) — Office suite");
         println!();
         println!("Options:");
         println!("  --writer          Start Writer");
@@ -27,7 +27,7 @@ fn run_libreoffice(args: &[String], prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("libreoffice v24.2 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("libreoffice v24.2 (Slate OS)"); return 0; }
     let component = match prog {
         "lowriter" => "Writer",
         "localc" => "Calc",

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_iftop(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: iftop [OPTIONS]");
-        println!("iftop 1.0pre4 (SlateOS) — Network bandwidth monitor");
+        println!("iftop 1.0pre4 (Slate OS) — Network bandwidth monitor");
         println!();
         println!("Options:");
         println!("  -i IFACE       Listen on interface");

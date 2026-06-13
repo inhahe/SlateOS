@@ -10,7 +10,7 @@ use std::process;
 fn run_osmium(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: osmium COMMAND [OPTIONS]");
-        println!("Osmium 1.16.0 (SlateOS)");
+        println!("Osmium 1.16.0 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  fileinfo       Show file info");
@@ -27,7 +27,7 @@ fn run_osmium(args: &[String]) -> i32 {
     }
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match subcmd {
-        "--version" => println!("osmium 1.16.0 (SlateOS)"),
+        "--version" => println!("osmium 1.16.0 (Slate OS)"),
         "fileinfo" => {
             let file = args.get(1).map(|s| s.as_str()).unwrap_or("planet.osm.pbf");
             println!("File:");

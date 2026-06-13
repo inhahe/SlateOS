@@ -15,12 +15,12 @@ fn run_nfsd(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("nfsd (SlateOS nfs-utils 2.6.4)");
+        println!("nfsd (Slate OS nfs-utils 2.6.4)");
         return 0;
     }
     let nprocs = args.first().and_then(|s| s.parse::<u32>().ok()).unwrap_or(8);
     println!("Starting NFS daemon with {} threads", nprocs);
-    println!("NFS server running (SlateOS nfs-utils 2.6.4)");
+    println!("NFS server running (Slate OS nfs-utils 2.6.4)");
     0
 }
 

@@ -159,7 +159,7 @@ Options:
 }
 
 fn print_version() {
-    println!("du (SlateOS coreutils) 0.1.0");
+    println!("du (Slate OS coreutils) 0.1.0");
 }
 
 /// Parse a human-readable size string like "1M", "500K", "2G", "4096" into

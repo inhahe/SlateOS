@@ -63,7 +63,7 @@ fn run_node(args: Vec<String>) -> i32 {
     }
 
     // Interactive REPL
-    println!("Welcome to Node.js v22.0.0 (SlateOS).");
+    println!("Welcome to Node.js v22.0.0 (Slate OS).");
     println!("Type \".help\" for more information.");
     println!("> process.platform");
     println!("'slateos'");

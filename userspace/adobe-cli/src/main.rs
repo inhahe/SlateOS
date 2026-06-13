@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_adobe(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: adobe [OPTIONS]");
-        println!("Adobe Experience Platform (SlateOS) — enterprise CDP + Experience Cloud");
+        println!("Adobe Experience Platform (Slate OS) — enterprise CDP + Experience Cloud");
         println!();
         println!("Options:");
         println!("  --aep                  Adobe Experience Platform (CDP foundation)");
@@ -25,8 +25,8 @@ fn run_adobe(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Adobe Experience Platform 2024 (SlateOS)"); return 0; }
-    println!("Adobe Experience Platform 2024 (SlateOS) — Enterprise Experience Cloud");
+    if args.iter().any(|a| a == "--version") { println!("Adobe Experience Platform 2024 (Slate OS)"); return 0; }
+    println!("Adobe Experience Platform 2024 (Slate OS) — Enterprise Experience Cloud");
     println!("  Vendor: Adobe, Inc. (San Jose, CA — NASDAQ:ADBE)");
     println!("  Founded: 1982 by John Warnock + Charles Geschke (PARC veterans)");
     println!("          original product: PostScript (page description language) — desktop publishing revolution");

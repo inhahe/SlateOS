@@ -96,7 +96,7 @@ fn run_docker(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "version" => {
-            println!("Docker version 26.0.0, build abcdef0 (SlateOS)");
+            println!("Docker version 26.0.0, build abcdef0 (Slate OS)");
             0
         }
         "run" => {
@@ -253,7 +253,7 @@ fn run_docker(args: Vec<String>) -> i32 {
             let sub = cmd_args.first().map(|s| s.as_str()).unwrap_or("info");
             match sub {
                 "info" => {
-                    println!("Client: Docker Engine - SlateOS");
+                    println!("Client: Docker Engine - Slate OS");
                     println!(" Version:    26.0.0");
                     println!(" OS/Arch:    slateos/amd64");
                     println!("Server:");
@@ -308,7 +308,7 @@ fn run_compose(args: Vec<String>) -> i32 {
             println!("  --version Show version");
             0
         }
-        "--version" | "version" => { println!("Docker Compose version v2.26.0 (SlateOS)"); 0 }
+        "--version" | "version" => { println!("Docker Compose version v2.26.0 (Slate OS)"); 0 }
         "up" => {
             println!("[+] Running 3/3");
             println!(" ✔ Container cache       Started");
@@ -354,11 +354,11 @@ fn run_dockerd(args: Vec<String>) -> i32 {
     }
 
     if args.iter().any(|a| a == "--version") {
-        println!("Docker version 26.0.0 (SlateOS)");
+        println!("Docker version 26.0.0 (Slate OS)");
         return 0;
     }
 
-    println!("INFO[0000] Starting up (SlateOS)");
+    println!("INFO[0000] Starting up (Slate OS)");
     println!("INFO[0000] containerd not running, starting managed containerd");
     println!("INFO[0001] Loading containers: start.");
     println!("INFO[0001] Daemon has completed initialization");

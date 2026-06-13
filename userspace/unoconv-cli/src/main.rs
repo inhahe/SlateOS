@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_unoconv(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: unoconv [OPTIONS] FILE...");
-        println!("unoconv v0.9 (SlateOS) — Universal Office document converter");
+        println!("unoconv v0.9 (Slate OS) — Universal Office document converter");
         println!();
         println!("Options:");
         println!("  -f FORMAT     Output format (pdf, html, docx, odt, txt, csv, etc.)");
@@ -31,7 +31,7 @@ fn run_unoconv(args: &[String], _prog: &str) -> i32 {
         println!("  --version     Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("unoconv v0.9 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("unoconv v0.9 (Slate OS)"); return 0; }
     if args.iter().any(|a| a == "--show") {
         println!("Supported output formats:");
         println!("  Document:     pdf, html, odt, docx, doc, rtf, txt, epub");

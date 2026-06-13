@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_fastqc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: fastqc [OPTIONS] FILE.fastq...");
-        println!("FastQC v0.12 (SlateOS) — Quality control for sequencing data");
+        println!("FastQC v0.12 (Slate OS) — Quality control for sequencing data");
         println!();
         println!("Options:");
         println!("  FILE.fastq        Input FASTQ file(s)");
@@ -25,7 +25,7 @@ fn run_fastqc(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("FastQC v0.12 (SlateOS)");
+        println!("FastQC v0.12 (Slate OS)");
         return 0;
     }
     let files: Vec<&str> = args.iter()

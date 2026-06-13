@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_salt(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: salt TARGET FUNCTION [ARGS...]");
-        println!("Salt 3006.8 (SlateOS)");
+        println!("Salt 3006.8 (Slate OS)");
         println!();
         println!("Options:");
         println!("  --version             Show version");
@@ -63,9 +63,9 @@ fn run_salt(args: &[String]) -> i32 {
         }
         "grains.items" => {
             println!("    ----------");
-            println!("    os: SlateOS");
+            println!("    os: Slate OS");
             println!("    osrelease: 1.0");
-            println!("    kernel: SlateOS");
+            println!("    kernel: Slate OS");
             println!("    cpuarch: x86_64");
             println!("    mem_total: 8192");
         }

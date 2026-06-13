@@ -11,7 +11,7 @@ fn run_timeshift(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: timeshift [OPTIONS] COMMAND");
         println!();
-        println!("Timeshift — system restore tool (SlateOS).");
+        println!("Timeshift — system restore tool (Slate OS).");
         println!();
         println!("Commands:");
         println!("  --create          Create snapshot");
@@ -32,7 +32,7 @@ fn run_timeshift(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Timeshift v24.01.1 (SlateOS)");
+        println!("Timeshift v24.01.1 (Slate OS)");
         return 0;
     }
 

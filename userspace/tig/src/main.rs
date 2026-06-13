@@ -25,7 +25,7 @@ fn run_tig(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-v" || a == "--version") {
-        println!("tig version 2.5.8 (SlateOS)");
+        println!("tig version 2.5.8 (Slate OS)");
         return 0;
     }
 

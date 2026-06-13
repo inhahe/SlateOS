@@ -32,7 +32,7 @@ fn run_vifm(args: &[String], prog: &str) -> i32 {
     // vifm
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: vifm [OPTIONS] [LDIR] [RDIR]");
-        println!("vifm 0.13 (SlateOS) — Vi-like file manager");
+        println!("vifm 0.13 (Slate OS) — Vi-like file manager");
         println!();
         println!("Options:");
         println!("  --select FILE      Select file on start");
@@ -48,7 +48,7 @@ fn run_vifm(args: &[String], prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("vifm 0.13 (SlateOS)");
+        println!("vifm 0.13 (Slate OS)");
         return 0;
     }
     if let Some(pos) = args.iter().position(|a| a == "--remote") {

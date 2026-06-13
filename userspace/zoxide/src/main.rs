@@ -132,7 +132,7 @@ fn run_zoxide(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("zoxide 0.9.4 (SlateOS)");
+            println!("zoxide 0.9.4 (Slate OS)");
             0
         }
         _ => {

@@ -554,7 +554,7 @@ fn print_json(info: &SystemInfo) {
 // ============================================================================
 
 fn print_help() {
-    println!("SlateOS System Uptime Display v0.1.0");
+    println!("Slate OS System Uptime Display v0.1.0");
     println!();
     println!("Show how long the system has been running.");
     println!();
@@ -571,7 +571,7 @@ fn print_help() {
 }
 
 fn print_version() {
-    println!("uptime (SlateOS) 0.1.0");
+    println!("uptime (Slate OS) 0.1.0");
 }
 
 // ============================================================================

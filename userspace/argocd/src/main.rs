@@ -31,7 +31,7 @@ fn run_argocd(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match cmd {
         "version" => {
-            println!("argocd: v2.11.3 (SlateOS)");
+            println!("argocd: v2.11.3 (Slate OS)");
             println!("  BuildDate: 2025-05-22T10:00:00Z");
             println!("  GitCommit: (simulated)");
             println!("  GoVersion: go1.22");

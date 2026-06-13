@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_goproxy(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: goproxy [OPTIONS]");
-        println!("goproxy v0.16.0 (SlateOS) — Go module proxy server");
+        println!("goproxy v0.16.0 (Slate OS) — Go module proxy server");
         println!();
         println!("Options:");
         println!("  -listen ADDR        Listen address (default: :8081)");
@@ -25,7 +25,7 @@ fn run_goproxy(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("goproxy v0.16.0 (SlateOS)");
+        println!("goproxy v0.16.0 (Slate OS)");
         return 0;
     }
     println!("goproxy v0.16.0");

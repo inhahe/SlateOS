@@ -19,7 +19,7 @@ fn run_cupsctl(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: cupsctl [OPTIONS] [NAME=VALUE ...]");
         println!();
-        println!("cupsctl — configure CUPS server (SlateOS).");
+        println!("cupsctl — configure CUPS server (Slate OS).");
         println!();
         println!("Options:");
         println!("  -h SERVER[:PORT]   Connect to server");
@@ -60,7 +60,7 @@ fn run_cupsenable(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: cupsenable PRINTER ...");
         println!();
-        println!("cupsenable — enable CUPS printer (SlateOS).");
+        println!("cupsenable — enable CUPS printer (Slate OS).");
         return 0;
     }
     for printer in args.iter().filter(|a| !a.starts_with('-')) {
@@ -73,7 +73,7 @@ fn run_cupsdisable(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: cupsdisable [OPTIONS] PRINTER ...");
         println!();
-        println!("cupsdisable — disable CUPS printer (SlateOS).");
+        println!("cupsdisable — disable CUPS printer (Slate OS).");
         println!();
         println!("Options:");
         println!("  -r REASON   Reason for disabling");
@@ -89,7 +89,7 @@ fn run_cupsaccept(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: cupsaccept PRINTER ...");
         println!();
-        println!("cupsaccept — accept jobs on printer (SlateOS).");
+        println!("cupsaccept — accept jobs on printer (Slate OS).");
         return 0;
     }
     for printer in args.iter().filter(|a| !a.starts_with('-')) {
@@ -102,7 +102,7 @@ fn run_cupsreject(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: cupsreject [OPTIONS] PRINTER ...");
         println!();
-        println!("cupsreject — reject jobs on printer (SlateOS).");
+        println!("cupsreject — reject jobs on printer (Slate OS).");
         return 0;
     }
     for printer in args.iter().filter(|a| !a.starts_with('-')) {

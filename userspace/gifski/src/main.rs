@@ -31,7 +31,7 @@ fn run_gifski(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("gifski 1.14.4 (SlateOS)");
+        println!("gifski 1.14.4 (Slate OS)");
         return 0;
     }
 

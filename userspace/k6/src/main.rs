@@ -29,7 +29,7 @@ fn run_k6(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match cmd {
         "version" => {
-            println!("k6 v0.51.0 (SlateOS, go1.22, linux/amd64)");
+            println!("k6 v0.51.0 (Slate OS, go1.22, linux/amd64)");
         }
         "run" => {
             if args.iter().any(|a| a == "--help") {
@@ -57,7 +57,7 @@ fn run_k6(args: Vec<String>) -> i32 {
                 .unwrap_or("10s");
 
             println!();
-            println!("          /\\      |------| k6 (SlateOS)");
+            println!("          /\\      |------| k6 (Slate OS)");
             println!("     /\\  /  \\     | v0.51 |");
             println!("    /  \\/    \\    |-------|");
             println!("   /          \\   execution: local");

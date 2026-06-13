@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_vboxmanage(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: VBoxManage <command> [OPTIONS]");
-        println!("VBoxManage v7.0 (SlateOS) — VirtualBox CLI");
+        println!("VBoxManage v7.0 (Slate OS) — VirtualBox CLI");
         println!();
         println!("Commands:");
         println!("  list vms         List all VMs");
@@ -27,7 +27,7 @@ fn run_vboxmanage(args: &[String], _prog: &str) -> i32 {
         println!("  --version        Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("VBoxManage v7.0 (SlateOS, VirtualBox)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("VBoxManage v7.0 (Slate OS, VirtualBox)"); return 0; }
     if args.len() >= 2 && args[0] == "list" && args[1] == "vms" {
         println!("\"SlateOS-test\" {{a1b2c3d4-e5f6-7890-abcd-ef1234567890}}");
         println!("\"Ubuntu-22\" {{b2c3d4e5-f6a7-8901-bcde-f12345678901}}");
@@ -44,11 +44,11 @@ fn run_vboxmanage(args: &[String], _prog: &str) -> i32 {
 fn run_vboxheadless(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: VBoxHeadless --startvm NAME [OPTIONS]");
-        println!("VBoxHeadless v7.0 (SlateOS) — Run VM without GUI");
+        println!("VBoxHeadless v7.0 (Slate OS) — Run VM without GUI");
         println!("  --vrde on/off   Enable/disable VRDE");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("VBoxHeadless v7.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("VBoxHeadless v7.0 (Slate OS)"); return 0; }
     println!("VBoxHeadless: starting VM in headless mode");
     println!("  VRDE: enabled (port 3389)");
     0
@@ -57,10 +57,10 @@ fn run_vboxheadless(args: &[String], _prog: &str) -> i32 {
 fn run_vboxsdl(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: VBoxSDL --startvm NAME");
-        println!("VBoxSDL v7.0 (SlateOS) — Simple VM display");
+        println!("VBoxSDL v7.0 (Slate OS) — Simple VM display");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("VBoxSDL v7.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("VBoxSDL v7.0 (Slate OS)"); return 0; }
     println!("VBoxSDL: starting VM with SDL display");
     0
 }

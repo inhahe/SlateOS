@@ -38,7 +38,7 @@ fn run_valgrind(args: Vec<String>) -> i32 {
     }
 
     if args.iter().any(|a| a == "--version") {
-        println!("valgrind-0.1.0 (SlateOS)");
+        println!("valgrind-0.1.0 (Slate OS)");
         return 0;
     }
 

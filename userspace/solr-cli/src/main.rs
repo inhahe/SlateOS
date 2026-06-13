@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_solr(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: solr [COMMAND] [OPTIONS]");
-        println!("Apache Solr v9.5 (SlateOS) — Enterprise search platform");
+        println!("Apache Solr v9.5 (Slate OS) — Enterprise search platform");
         println!();
         println!("Commands:");
         println!("  start              Start Solr server");
@@ -32,8 +32,8 @@ fn run_solr(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Apache Solr v9.5.0 (SlateOS)"); return 0; }
-    println!("Apache Solr v9.5.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Apache Solr v9.5.0 (Slate OS)"); return 0; }
+    println!("Apache Solr v9.5.0 (Slate OS)");
     println!("  Admin UI: http://0.0.0.0:8983/solr");
     println!("  Mode: standalone");
     println!("  Collections: 4");

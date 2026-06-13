@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_snyk(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: snyk COMMAND [OPTIONS]");
-        println!("Snyk CLI 1.1292.0 (SlateOS)");
+        println!("Snyk CLI 1.1292.0 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  test         Test for vulnerabilities");

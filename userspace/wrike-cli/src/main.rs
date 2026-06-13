@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wrike(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wrike [OPTIONS]");
-        println!("Wrike (SlateOS) — enterprise collaborative work management (Citrix-owned)");
+        println!("Wrike (Slate OS) — enterprise collaborative work management (Citrix-owned)");
         println!();
         println!("Options:");
         println!("  --free                 Free — basic task management for small teams");
@@ -23,8 +23,8 @@ fn run_wrike(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Wrike 2024 (SlateOS)"); return 0; }
-    println!("Wrike 2024 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Wrike 2024 (Slate OS)"); return 0; }
+    println!("Wrike 2024 (Slate OS)");
     println!("  Vendor: Wrike, Inc. (San Jose, CA — owned by Citrix Systems, Symphony Tech)");
     println!("  Founders: Andrew Filev (CEO), 2006");
     println!("          Filev started Wrike as a side project running another company (Imobix consultancy)");

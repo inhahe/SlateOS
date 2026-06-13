@@ -427,7 +427,7 @@ fn parse_args(args: &[String]) -> Options {
                 process::exit(0);
             }
             "--version" => {
-                println!("logger (SlateOS) 0.1.0");
+                println!("logger (Slate OS) 0.1.0");
                 process::exit(0);
             }
             _ if arg.starts_with("--priority=") => {

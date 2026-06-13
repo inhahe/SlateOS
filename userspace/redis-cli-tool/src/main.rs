@@ -11,7 +11,7 @@ fn run_redis_cli(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: redis-cli [OPTIONS] [COMMAND [ARGS]]");
         println!();
-        println!("Redis command line interface (SlateOS).");
+        println!("Redis command line interface (Slate OS).");
         println!();
         println!("Options:");
         println!("  -h HOST        Server hostname (default: 127.0.0.1)");
@@ -27,7 +27,7 @@ fn run_redis_cli(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("redis-cli 7.2.4 (SlateOS)");
+        println!("redis-cli 7.2.4 (Slate OS)");
         return 0;
     }
 

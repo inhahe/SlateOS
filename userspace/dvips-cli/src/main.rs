@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_dvips(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: dvips [OPTIONS] FILE.dvi");
-        println!("dvips 2024.1 (SlateOS)");
+        println!("dvips 2024.1 (Slate OS)");
         println!();
         println!("Options:");
         println!("  -o FILE       Output file (default: FILE.ps)");
@@ -53,7 +53,7 @@ fn run_dvips(args: &[String]) -> i32 {
 fn run_dvipdfmx(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: dvipdfmx [OPTIONS] FILE.dvi");
-        println!("dvipdfmx 20240116 (SlateOS)");
+        println!("dvipdfmx 20240116 (Slate OS)");
         println!();
         println!("Options:");
         println!("  -o FILE       Output file");
@@ -65,7 +65,7 @@ fn run_dvipdfmx(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("dvipdfmx version 20240116 (SlateOS)");
+        println!("dvipdfmx version 20240116 (Slate OS)");
         return 0;
     }
     let file = args.iter()
@@ -87,7 +87,7 @@ fn run_dvipdfmx(args: &[String]) -> i32 {
 fn run_dvisvgm(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: dvisvgm [OPTIONS] FILE.dvi");
-        println!("dvisvgm 3.2.2 (SlateOS)");
+        println!("dvisvgm 3.2.2 (Slate OS)");
         println!();
         println!("Options:");
         println!("  -o FILE       Output file");
@@ -100,7 +100,7 @@ fn run_dvisvgm(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("dvisvgm 3.2.2 (SlateOS)");
+        println!("dvisvgm 3.2.2 (Slate OS)");
         return 0;
     }
     let file = args.iter()

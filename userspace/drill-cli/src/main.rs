@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_drill(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: drill [OPTIONS] --benchmark FILE");
-        println!("Drill v0.8.3 (SlateOS) — HTTP load testing application");
+        println!("Drill v0.8.3 (Slate OS) — HTTP load testing application");
         println!();
         println!("Options:");
         println!("  -b, --benchmark FILE    Benchmark plan (YAML)");
@@ -36,7 +36,7 @@ fn run_drill(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("drill 0.8.3 (SlateOS)");
+        println!("drill 0.8.3 (Slate OS)");
         return 0;
     }
     println!("Drill 0.8.3");

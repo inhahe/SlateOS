@@ -11,7 +11,7 @@ fn run_stripe(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: stripe <COMMAND> [OPTIONS]");
         println!();
-        println!("Stripe CLI for payment integration (SlateOS).");
+        println!("Stripe CLI for payment integration (Slate OS).");
         println!();
         println!("Commands:");
         println!("  login        Login to Stripe");
@@ -31,7 +31,7 @@ fn run_stripe(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("stripe version 1.19.0 (SlateOS)");
+        println!("stripe version 1.19.0 (Slate OS)");
         return 0;
     }
 

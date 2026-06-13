@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_partitionmanager(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: partitionmanager [OPTIONS] [DEVICE]");
-        println!("partitionmanager v24.08 (SlateOS) — KDE Partition Manager");
+        println!("partitionmanager v24.08 (Slate OS) — KDE Partition Manager");
         println!();
         println!("Options:");
         println!("  -d DEVICE       Open specific device");
@@ -26,7 +26,7 @@ fn run_partitionmanager(args: &[String], _prog: &str) -> i32 {
         println!("  label, mount/unmount, SMART info");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("partitionmanager v24.08 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("partitionmanager v24.08 (Slate OS)"); return 0; }
     println!("partitionmanager: KDE Partition Manager");
     println!("  Devices:");
     println!("    /dev/sda  500 GiB  GPT  (3 partitions)");

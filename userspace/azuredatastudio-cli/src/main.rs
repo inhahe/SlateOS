@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ads(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: azuredatastudio [OPTIONS] [PATH]");
-        println!("Azure Data Studio v1.48 (SlateOS) — Cross-platform database tool");
+        println!("Azure Data Studio v1.48 (Slate OS) — Cross-platform database tool");
         println!();
         println!("Options:");
         println!("  --new-window       Force a new window");
@@ -27,8 +27,8 @@ fn run_ads(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Azure Data Studio v1.48.1 (SlateOS)"); return 0; }
-    println!("Azure Data Studio v1.48.1 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Azure Data Studio v1.48.1 (Slate OS)"); return 0; }
+    println!("Azure Data Studio v1.48.1 (Slate OS)");
     println!("  Connections: 6 saved");
     println!("  Supported: SQL Server, PostgreSQL, Azure SQL, MySQL");
     println!("  Extensions: 12 installed");

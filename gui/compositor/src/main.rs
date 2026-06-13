@@ -2943,7 +2943,7 @@ fn main() {
     //
     // For now, we demonstrate the API with a simple test scenario.
     let window_id = compositor.create_window(
-        "Welcome to SlateOS".to_string(),
+        "Welcome to Slate OS".to_string(),
         640,
         480,
         1,
@@ -2952,7 +2952,7 @@ fn main() {
     // Submit some test render commands.
     let mut tree = RenderTree::new();
     tree.fill_rect(10.0, 10.0, 200.0, 40.0, Color::BLUE);
-    tree.text(20.0, 20.0, "Hello from SlateOS Compositor!", Color::WHITE, 14.0);
+    tree.text(20.0, 20.0, "Hello from Slate OS Compositor!", Color::WHITE, 14.0);
     tree.fill_rect(10.0, 60.0, 620.0, 1.0, Color::LIGHT_GRAY);
 
     if let Err(e) = compositor.submit_render(window_id, tree.commands) {

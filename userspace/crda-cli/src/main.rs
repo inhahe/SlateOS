@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_crda(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: crda [OPTIONS]");
-        println!("crda v4.15 (SlateOS) — Central Regulatory Domain Agent");
+        println!("crda v4.15 (Slate OS) — Central Regulatory Domain Agent");
         println!();
         println!("Options:");
         println!("  --version      Show version");
@@ -22,7 +22,7 @@ fn run_crda(args: &[String], _prog: &str) -> i32 {
         println!("Called by the kernel via udev when regulatory info needed.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("crda v4.15 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("crda v4.15 (Slate OS)"); return 0; }
     println!("crda: regulatory domain agent");
     println!("  Country: US");
     println!("  2.4 GHz: channels 1-11");
@@ -33,7 +33,7 @@ fn run_crda(args: &[String], _prog: &str) -> i32 {
 fn run_regdbdump(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: regdbdump <regdb-file>");
-        println!("regdbdump v4.15 (SlateOS) — Dump wireless regulatory database");
+        println!("regdbdump v4.15 (Slate OS) — Dump wireless regulatory database");
         return 0;
     }
     let _ = args;

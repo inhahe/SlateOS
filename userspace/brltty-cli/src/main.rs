@@ -19,7 +19,7 @@ fn run_brltty(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: brltty [OPTIONS]");
         println!();
-        println!("BRLTTY — braille display driver (SlateOS).");
+        println!("BRLTTY — braille display driver (Slate OS).");
         println!();
         println!("Options:");
         println!("  -b DRIVER      Braille driver");
@@ -37,7 +37,7 @@ fn run_brltty(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("BRLTTY 6.6 (SlateOS)");
+        println!("BRLTTY 6.6 (Slate OS)");
         return 0;
     }
 

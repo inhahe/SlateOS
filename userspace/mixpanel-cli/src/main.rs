@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mixpanel(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mixpanel [OPTIONS]");
-        println!("Mixpanel (SlateOS) — event-based product analytics");
+        println!("Mixpanel (Slate OS) — event-based product analytics");
         println!();
         println!("Options:");
         println!("  --free                 Free tier (1M events/mo)");
@@ -24,8 +24,8 @@ fn run_mixpanel(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Mixpanel 2024 (SlateOS)"); return 0; }
-    println!("Mixpanel 2024 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Mixpanel 2024 (Slate OS)"); return 0; }
+    println!("Mixpanel 2024 (Slate OS)");
     println!("  Vendor: Mixpanel, Inc. (San Francisco, CA — private)");
     println!("  Founders: Suhail Doshi (CEO until 2018), Tim Trefren, 2009");
     println!("          Doshi was 19 when he started Mixpanel; today runs Playground (image gen AI)");

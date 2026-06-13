@@ -15,18 +15,18 @@ fn run_kuma(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [COMMAND] [OPTIONS]", prog);
         match prog {
             "kuma-cp" => {
-                println!("kuma-cp (SlateOS) — Kuma control plane");
+                println!("kuma-cp (Slate OS) — Kuma control plane");
                 println!("  run                Start control plane");
                 println!("  migrate            Run store migrations");
             }
             "kuma-dp" => {
-                println!("kuma-dp (SlateOS) — Kuma data plane proxy");
+                println!("kuma-dp (Slate OS) — Kuma data plane proxy");
                 println!("  run                Start data plane");
                 println!("  --cp-address URL   Control plane address");
                 println!("  --name NAME        Data plane name");
             }
             _ => {
-                println!("kumactl (SlateOS) — Kuma management CLI");
+                println!("kumactl (Slate OS) — Kuma management CLI");
                 println!("  get meshes|dataplanes|policies  List resources");
                 println!("  apply -f FILE      Apply policy");
                 println!("  delete TYPE NAME   Delete resource");
@@ -38,7 +38,7 @@ fn run_kuma(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Kuma v2.7.2 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("Kuma v2.7.2 (Slate OS)"); return 0; }
     match prog {
         "kuma-cp" => {
             println!("Kuma Control Plane v2.7.2");
@@ -53,7 +53,7 @@ fn run_kuma(args: &[String], prog: &str) -> i32 {
             println!("  Envoy: v1.29");
         }
         _ => {
-            println!("Kuma v2.7.2 (SlateOS)");
+            println!("Kuma v2.7.2 (Slate OS)");
             println!("  Meshes: 2 (default, production)");
             println!("  Data planes: 15 online");
             println!("  Policies: 23 applied");

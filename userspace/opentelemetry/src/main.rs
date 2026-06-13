@@ -24,9 +24,9 @@ fn run_otelcol(args: Vec<String>, contrib: bool) -> i32 {
     }
     if args.iter().any(|a| a == "--version") {
         if contrib {
-            println!("otelcol-contrib version 0.100.0 (SlateOS)");
+            println!("otelcol-contrib version 0.100.0 (Slate OS)");
         } else {
-            println!("otelcol version 0.100.0 (SlateOS)");
+            println!("otelcol version 0.100.0 (Slate OS)");
         }
         return 0;
     }

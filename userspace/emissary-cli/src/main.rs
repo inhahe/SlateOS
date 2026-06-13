@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_emissary(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: emissary [COMMAND] [OPTIONS]");
-        println!("Emissary-ingress v3.9 (SlateOS) — Kubernetes-native API gateway");
+        println!("Emissary-ingress v3.9 (Slate OS) — Kubernetes-native API gateway");
         println!();
         println!("Commands:");
         println!("  serve              Start Emissary");
@@ -28,8 +28,8 @@ fn run_emissary(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Emissary-ingress v3.9.1 (SlateOS)"); return 0; }
-    println!("Emissary-ingress v3.9.1 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Emissary-ingress v3.9.1 (Slate OS)"); return 0; }
+    println!("Emissary-ingress v3.9.1 (Slate OS)");
     println!("  Envoy: v1.28 (sidecar)");
     println!("  Mappings: 34");
     println!("  Hosts: 8");

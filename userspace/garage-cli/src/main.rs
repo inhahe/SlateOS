@@ -15,13 +15,13 @@ fn run_garage(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [COMMAND] [OPTIONS]", prog);
         match prog {
             "garage-server" => {
-                println!("garage-server (SlateOS) — Garage storage node");
+                println!("garage-server (Slate OS) — Garage storage node");
                 println!("  --config FILE      Config file");
                 println!("  --metadata-dir DIR Metadata directory");
                 println!("  --data-dir DIR     Data directory");
             }
             _ => {
-                println!("Garage v1.0 (SlateOS) — S3-compatible distributed storage");
+                println!("Garage v1.0 (Slate OS) — S3-compatible distributed storage");
                 println!();
                 println!("Commands:");
                 println!("  status             Show cluster status");
@@ -36,8 +36,8 @@ fn run_garage(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Garage v1.0.1 (SlateOS)"); return 0; }
-    println!("Garage v1.0.1 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Garage v1.0.1 (Slate OS)"); return 0; }
+    println!("Garage v1.0.1 (Slate OS)");
     println!("  Nodes: 3 (all healthy)");
     println!("  Buckets: 8");
     println!("  Objects: 234,567");

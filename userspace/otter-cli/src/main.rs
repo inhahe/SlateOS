@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_otter(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: otter [COMMAND] [OPTIONS]");
-        println!("Otter v2024 (SlateOS) — Infrastructure automation & config management");
+        println!("Otter v2024 (Slate OS) — Infrastructure automation & config management");
         println!();
         println!("Commands:");
         println!("  server list|get    Manage servers");
@@ -29,8 +29,8 @@ fn run_otter(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Otter v2024.3 (SlateOS)"); return 0; }
-    println!("Otter v2024.3 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Otter v2024.3 (Slate OS)"); return 0; }
+    println!("Otter v2024.3 (Slate OS)");
     println!("  Servers: 45 managed");
     println!("  Roles: 12 defined");
     println!("  Drift: 3 servers out of compliance");

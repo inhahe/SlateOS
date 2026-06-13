@@ -595,7 +595,7 @@ fn pick_editor() -> String {
 }
 
 fn print_usage() {
-    eprintln!("SlateOS crontab v0.1.0 — manage per-user cron schedules");
+    eprintln!("Slate OS crontab v0.1.0 — manage per-user cron schedules");
     eprintln!();
     eprintln!("USAGE:");
     eprintln!("  crontab -l                 List current user's crontab");

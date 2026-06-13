@@ -14,7 +14,7 @@ fn run_knife(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: knife SUBCOMMAND [OPTIONS]");
         println!();
-        println!("knife — Chef server CLI (SlateOS).");
+        println!("knife — Chef server CLI (Slate OS).");
         println!();
         println!("Subcommands:");
         println!("  node list             List nodes");
@@ -28,7 +28,7 @@ fn run_knife(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Chef Infra Client: 18.3.0 (SlateOS)");
+        println!("Chef Infra Client: 18.3.0 (Slate OS)");
         return 0;
     }
 
@@ -79,7 +79,7 @@ fn run_chef_client(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Chef Infra Client: 18.3.0 (SlateOS)");
+        println!("Chef Infra Client: 18.3.0 (Slate OS)");
         return 0;
     }
 

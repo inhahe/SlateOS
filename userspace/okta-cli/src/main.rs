@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_okta(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: okta [OPTIONS]");
-        println!("Okta Workforce Identity Cloud (SlateOS) — Enterprise SSO/MFA/IAM");
+        println!("Okta Workforce Identity Cloud (Slate OS) — Enterprise SSO/MFA/IAM");
         println!();
         println!("Options:");
         println!("  --workforce            Workforce Identity Cloud (employees)");
@@ -24,8 +24,8 @@ fn run_okta(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Okta Workforce Identity Cloud 2024 (SlateOS)"); return 0; }
-    println!("Okta Workforce Identity Cloud 2024 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Okta Workforce Identity Cloud 2024 (Slate OS)"); return 0; }
+    println!("Okta Workforce Identity Cloud 2024 (Slate OS)");
     println!("  Vendor: Okta, Inc. (San Francisco — NASDAQ:OKTA)");
     println!("  Founders: Todd McKinnon (ex-Salesforce SVP Engineering) + Frederic Kerrest");
     println!("  Founded: 2009; IPO 2017");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rq(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: rq COMMAND [OPTIONS]");
-        println!("RQ (Redis Queue) 1.16.2 (SlateOS)");
+        println!("RQ (Redis Queue) 1.16.2 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  worker       Start a worker");

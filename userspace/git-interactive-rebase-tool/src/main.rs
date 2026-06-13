@@ -20,7 +20,7 @@ fn run_rebase_tool(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("interactive-rebase-tool 2.4.1 (SlateOS)");
+        println!("interactive-rebase-tool 2.4.1 (Slate OS)");
         return 0;
     }
 

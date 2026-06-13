@@ -13,10 +13,10 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_kwalletd(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: kwalletd6 [OPTIONS]");
-        println!("kwalletd6 v6.0 (SlateOS) — KDE Wallet daemon");
+        println!("kwalletd6 v6.0 (Slate OS) — KDE Wallet daemon");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("kwalletd6 v6.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("kwalletd6 v6.0 (Slate OS)"); return 0; }
     println!("kwalletd6: wallet daemon started");
     println!("  Wallets: kdewallet (default)");
     0
@@ -25,10 +25,10 @@ fn run_kwalletd(args: &[String], _prog: &str) -> i32 {
 fn run_manager(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: kwalletmanager5 [OPTIONS]");
-        println!("kwalletmanager5 v23.08 (SlateOS) — KDE Wallet Manager");
+        println!("kwalletmanager5 v23.08 (Slate OS) — KDE Wallet Manager");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("kwalletmanager5 v23.08 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("kwalletmanager5 v23.08 (Slate OS)"); return 0; }
     println!("kwalletmanager5: wallet manager started");
     println!("  Wallets: 1");
     println!("  Entries: 45");
@@ -38,7 +38,7 @@ fn run_manager(args: &[String], _prog: &str) -> i32 {
 fn run_query(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: kwallet-query [OPTIONS] WALLET");
-        println!("kwallet-query v6.0 (SlateOS) — Query KDE Wallet");
+        println!("kwallet-query v6.0 (Slate OS) — Query KDE Wallet");
         println!();
         println!("Options:");
         println!("  -l                List folders");

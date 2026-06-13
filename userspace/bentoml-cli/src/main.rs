@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_bentoml(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: bentoml COMMAND [OPTIONS]");
-        println!("BentoML 1.2.0 (SlateOS)");
+        println!("BentoML 1.2.0 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  serve          Serve a Bento service");

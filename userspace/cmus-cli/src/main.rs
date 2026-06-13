@@ -55,7 +55,7 @@ fn run_cmus(args: &[String], prog: &str) -> i32 {
     // cmus
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: cmus [OPTIONS]");
-        println!("cmus 2.10.0 (SlateOS) — Small, fast, powerful console music player");
+        println!("cmus 2.10.0 (Slate OS) — Small, fast, powerful console music player");
         println!();
         println!("Options:");
         println!("  --listen ADDR    Listen address for remote");
@@ -65,7 +65,7 @@ fn run_cmus(args: &[String], prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("cmus 2.10.0 (SlateOS)");
+        println!("cmus 2.10.0 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "--plugins") {

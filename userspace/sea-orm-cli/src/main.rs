@@ -22,7 +22,7 @@ fn run_sea_orm(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("sea-orm-cli 0.12.15 (SlateOS)");
+        println!("sea-orm-cli 0.12.15 (Slate OS)");
         return 0;
     }
 

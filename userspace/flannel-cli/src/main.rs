@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_flannel(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: flanneld [OPTIONS]");
-        println!("Flannel v0.25 (SlateOS) — Container network overlay");
+        println!("Flannel v0.25 (Slate OS) — Container network overlay");
         println!();
         println!("Options:");
         println!("  --etcd-endpoints URL   etcd endpoints");
@@ -27,8 +27,8 @@ fn run_flannel(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Flannel v0.25.5 (SlateOS)"); return 0; }
-    println!("Flannel v0.25.5 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Flannel v0.25.5 (Slate OS)"); return 0; }
+    println!("Flannel v0.25.5 (Slate OS)");
     println!("  Backend: VXLAN");
     println!("  Network: 10.244.0.0/16");
     println!("  Subnet: 10.244.1.0/24");

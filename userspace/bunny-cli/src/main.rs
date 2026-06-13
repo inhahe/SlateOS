@@ -29,7 +29,7 @@ fn print_help(prog: &str) {
 }
 
 fn print_version() {
-    println!("bunny-cli 0.1.0 — SlateOS personality binary");
+    println!("bunny-cli 0.1.0 — Slate OS personality binary");
     println!("BunnyWay d.o.o. — Maribor, Slovenia (Bunny.net)");
 }
 

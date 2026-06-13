@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gatus(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gatus [OPTIONS]");
-        println!("Gatus v5.11 (SlateOS) — Automated developer health dashboard");
+        println!("Gatus v5.11 (Slate OS) — Automated developer health dashboard");
         println!();
         println!("Options:");
         println!("  --config FILE      Config file (default: config.yaml)");
@@ -23,8 +23,8 @@ fn run_gatus(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Gatus v5.11.0 (SlateOS)"); return 0; }
-    println!("Gatus v5.11.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Gatus v5.11.0 (Slate OS)"); return 0; }
+    println!("Gatus v5.11.0 (Slate OS)");
     println!("  Endpoints: 23 monitored");
     println!("  Groups: 4 (API, Web, Database, External)");
     println!("  Healthy: 21, Unhealthy: 2");

@@ -28,7 +28,7 @@ fn run_bandwhich(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("bandwhich 0.22.2 (SlateOS)");
+        println!("bandwhich 0.22.2 (Slate OS)");
         return 0;
     }
 
@@ -85,7 +85,7 @@ fn run_bandwhich(args: Vec<String>) -> i32 {
     }
 
     // Default: show all three tables
-    println!("bandwhich 0.22.2 (SlateOS) — TUI launched");
+    println!("bandwhich 0.22.2 (Slate OS) — TUI launched");
     println!();
     println!("┌Process─────────────┬Upload──────┬Download────┐");
     println!("│ browser            │  240.0KB/s │    1.5MB/s │");

@@ -1557,7 +1557,7 @@ fn main() {
         return;
     }
 
-    println!("SlateOS Credential Manager v0.1.0");
+    println!("Slate OS Credential Manager v0.1.0");
     println!("Store initialized for uid={}", store.uid);
     println!("Storage path: {}", store.storage_path());
     println!("Auto-lock timeout: {}s", store.lock_timeout_secs);

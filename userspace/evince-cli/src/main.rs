@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_evince(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: evince [OPTIONS] [FILE...]");
-        println!("evince v45.0 (SlateOS) — GNOME Document Viewer");
+        println!("evince v45.0 (Slate OS) — GNOME Document Viewer");
         println!();
         println!("Options:");
         println!("  -p PAGE           Open at page");
@@ -24,7 +24,7 @@ fn run_evince(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("evince v45.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("evince v45.0 (Slate OS)"); return 0; }
     println!("evince: document viewer started");
     println!("  Supported: PDF, DjVu, PostScript, TIFF, XPS, CBR/CBZ");
     0
@@ -33,7 +33,7 @@ fn run_evince(args: &[String], _prog: &str) -> i32 {
 fn run_previewer(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: evince-previewer [OPTIONS] FILE");
-        println!("evince-previewer v45.0 (SlateOS) — Print preview");
+        println!("evince-previewer v45.0 (Slate OS) — Print preview");
         return 0;
     }
     let _ = args;
@@ -44,7 +44,7 @@ fn run_previewer(args: &[String], _prog: &str) -> i32 {
 fn run_thumbnailer(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: evince-thumbnailer [-s SIZE] INPUT OUTPUT");
-        println!("evince-thumbnailer v45.0 (SlateOS) — Generate thumbnails");
+        println!("evince-thumbnailer v45.0 (Slate OS) — Generate thumbnails");
         return 0;
     }
     let _ = args;

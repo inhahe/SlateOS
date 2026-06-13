@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_onboard(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: onboard [OPTIONS]");
-        println!("onboard v1.4 (SlateOS) — On-screen keyboard");
+        println!("onboard v1.4 (Slate OS) — On-screen keyboard");
         println!();
         println!("Options:");
         println!("  --size WxH        Window size");
@@ -23,7 +23,7 @@ fn run_onboard(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("onboard v1.4 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("onboard v1.4 (Slate OS)"); return 0; }
     println!("onboard: on-screen keyboard started");
     println!("  Layout: Compact (default)");
     println!("  Word prediction: enabled");

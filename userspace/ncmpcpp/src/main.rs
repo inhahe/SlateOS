@@ -22,7 +22,7 @@ fn run_ncmpcpp(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("ncmpcpp 0.9.2 (SlateOS)");
+        println!("ncmpcpp 0.9.2 (Slate OS)");
         return 0;
     }
     if args.iter().any(|a| a == "--current-song") {
@@ -30,7 +30,7 @@ fn run_ncmpcpp(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    println!("ncmpcpp 0.9.2 (SlateOS) — NCurses MPD client");
+    println!("ncmpcpp 0.9.2 (Slate OS) — NCurses MPD client");
     println!("(TUI interface — simulated)");
     0
 }
@@ -65,7 +65,7 @@ fn run_mpc(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("status");
     match cmd {
         "version" => {
-            println!("mpc version: 0.35 (SlateOS)");
+            println!("mpc version: 0.35 (Slate OS)");
             println!("mpd version: 0.23.15");
         }
         "status" => {

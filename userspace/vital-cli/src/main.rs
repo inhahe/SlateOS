@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_vital(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: vital [OPTIONS] [PRESET]");
-        println!("Vital 1.5 (SlateOS) — Free spectral warping wavetable synthesizer");
+        println!("Vital 1.5 (Slate OS) — Free spectral warping wavetable synthesizer");
         println!();
         println!("Options:");
         println!("  --load FILE            Load .vital preset");
@@ -22,8 +22,8 @@ fn run_vital(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Vital 1.5.5 (SlateOS)"); return 0; }
-    println!("Vital 1.5.5 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Vital 1.5.5 (Slate OS)"); return 0; }
+    println!("Vital 1.5.5 (Slate OS)");
     println!("  Oscillators: 3 wavetable + sub + sample, spectral warping");
     println!("  Modulation: 8 LFOs, 6 ENV, 4 random, 8 macros, drag-and-drop");
     println!("  Effects: Chorus, Compressor, Delay, Distortion, EQ, Filter, FlangerL");

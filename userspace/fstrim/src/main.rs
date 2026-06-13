@@ -642,7 +642,7 @@ fn tool_name(tool: Tool) -> &'static [u8] {
 
 fn show_version(tool: Tool) {
     print_out(tool_name(tool));
-    print_out(b" version 0.1.0 (SlateOS)\n");
+    print_out(b" version 0.1.0 (Slate OS)\n");
 }
 
 fn show_fstrim_help() {

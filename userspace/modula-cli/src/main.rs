@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gm2(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: gm2 [OPTIONS] FILE.mod [FILE.mod ...]");
-        println!("GNU Modula-2 14.0.0 (SlateOS)");
+        println!("GNU Modula-2 14.0.0 (Slate OS)");
         println!();
         println!("Options:");
         println!("  -o FILE       Output file");
@@ -52,7 +52,7 @@ fn run_gm2(args: &[String]) -> i32 {
 fn run_obc(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: obc [OPTIONS] FILE.ob [FILE.ob ...]");
-        println!("Oxford Oberon-2 Compiler 3.2 (SlateOS)");
+        println!("Oxford Oberon-2 Compiler 3.2 (Slate OS)");
         println!();
         println!("Options:");
         println!("  -o FILE       Output file");
@@ -62,7 +62,7 @@ fn run_obc(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("obc 3.2 (SlateOS)");
+        println!("obc 3.2 (Slate OS)");
         return 0;
     }
     let files: Vec<&str> = args.iter()

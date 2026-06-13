@@ -55,7 +55,7 @@ fn run_mpv(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("mpv 0.38.0 (SlateOS)");
+        println!("mpv 0.38.0 (Slate OS)");
         return 0;
     }
 

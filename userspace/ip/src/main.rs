@@ -663,7 +663,7 @@ fn cmd_dns_add(server: &str) {
 // ============================================================================
 
 fn print_usage() {
-    println!("SlateOS Network Configuration v0.1.0");
+    println!("Slate OS Network Configuration v0.1.0");
     println!();
     println!("Configure network interfaces, addresses, routes, and DNS.");
     println!();

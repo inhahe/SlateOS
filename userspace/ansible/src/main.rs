@@ -37,7 +37,7 @@ fn run_ansible(args: Vec<String>) -> i32 {
     }
 
     if args.iter().any(|a| a == "--version") {
-        println!("ansible [core 2.16.0] (SlateOS)");
+        println!("ansible [core 2.16.0] (Slate OS)");
         println!("  python version = 3.13.0");
         return 0;
     }

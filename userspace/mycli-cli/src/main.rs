@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mycli(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mycli [OPTIONS] [DATABASE]");
-        println!("mycli 1.27.2 — Enhanced MySQL client (SlateOS)");
+        println!("mycli 1.27.2 — Enhanced MySQL client (Slate OS)");
         println!();
         println!("Options:");
         println!("  -h HOST       Server hostname");

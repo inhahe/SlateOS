@@ -9,7 +9,7 @@ use std::process;
 
 fn run_bedtools(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
-        println!("bedtools: flexible tools for genome analysis (v2.31.0, SlateOS)");
+        println!("bedtools: flexible tools for genome analysis (v2.31.0, Slate OS)");
         println!();
         println!("Usage:   bedtools <subcommand> [options]");
         println!();
@@ -35,7 +35,7 @@ fn run_bedtools(args: &[String]) -> i32 {
     }
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match subcmd {
-        "--version" => println!("bedtools v2.31.0 (SlateOS)"),
+        "--version" => println!("bedtools v2.31.0 (Slate OS)"),
         "intersect" => {
             println!("bedtools intersect:");
             println!("chr1\t100\t200\tchr1\t150\t250");

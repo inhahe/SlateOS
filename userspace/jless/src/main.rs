@@ -23,7 +23,7 @@ fn run_jless(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("jless 0.9.0 (SlateOS)");
+        println!("jless 0.9.0 (Slate OS)");
         return 0;
     }
 

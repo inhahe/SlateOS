@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rundeck(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: rundeck [COMMAND] [OPTIONS]");
-        println!("Rundeck v5.3 (SlateOS) — Operations automation & job scheduler");
+        println!("Rundeck v5.3 (Slate OS) — Operations automation & job scheduler");
         println!();
         println!("Commands:");
         println!("  jobs list|run|export  Manage jobs");
@@ -32,8 +32,8 @@ fn run_rundeck(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Rundeck v5.3.0 (SlateOS)"); return 0; }
-    println!("Rundeck v5.3.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Rundeck v5.3.0 (Slate OS)"); return 0; }
+    println!("Rundeck v5.3.0 (Slate OS)");
     println!("  Projects: 5");
     println!("  Jobs: 67 defined");
     println!("  Nodes: 23");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_cloudcompare(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: CloudCompare [OPTIONS] [FILE.las | FILE.ply | FILE.e57]");
-        println!("CloudCompare 2.13.0 (SlateOS)");
+        println!("CloudCompare 2.13.0 (Slate OS)");
         println!("  -O FILE         Open file");
         println!("  -C_EXPORT_FMT F Set export format");
         println!("  -SS RATIO       Subsample");
@@ -24,7 +24,7 @@ fn run_cloudcompare(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("CloudCompare 2.13.0 (SlateOS)");
+        println!("CloudCompare 2.13.0 (Slate OS)");
         return 0;
     }
     let file = args.iter().find(|a| {
@@ -70,7 +70,7 @@ fn run_ccviewer(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("ccViewer 2.13.0 (CloudCompare, SlateOS)");
+        println!("ccViewer 2.13.0 (CloudCompare, Slate OS)");
         return 0;
     }
     let file = args.first().map(|s| s.as_str());

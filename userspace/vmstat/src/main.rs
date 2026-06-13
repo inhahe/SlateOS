@@ -1126,7 +1126,7 @@ fn run_slabs(config: &Config) -> i32 {
 // ============================================================================
 
 fn print_usage() {
-    println!("SlateOS Virtual Memory Statistics v0.1.0");
+    println!("Slate OS Virtual Memory Statistics v0.1.0");
     println!();
     println!("Report virtual memory, CPU, and I/O statistics.");
     println!();

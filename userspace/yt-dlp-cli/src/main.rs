@@ -11,7 +11,7 @@ fn run_ytdlp(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: yt-dlp [OPTIONS] URL...");
         println!();
-        println!("yt-dlp — video downloader (SlateOS).");
+        println!("yt-dlp — video downloader (Slate OS).");
         println!();
         println!("Options:");
         println!("  -f, --format FORMAT    Video format selector");
@@ -33,7 +33,7 @@ fn run_ytdlp(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("yt-dlp 2024.01.12 (SlateOS)");
+        println!("yt-dlp 2024.01.12 (Slate OS)");
         return 0;
     }
 

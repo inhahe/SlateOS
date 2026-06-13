@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_lua(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lua [OPTIONS] [FILE [ARGS]]");
-        println!("Lua 5.4.6 (SlateOS)");
+        println!("Lua 5.4.6 (Slate OS)");
         println!("  -e EXPR     Execute string");
         println!("  -l LIB      Require library");
         println!("  -i          Interactive mode after running script");

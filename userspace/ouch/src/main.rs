@@ -38,7 +38,7 @@ fn run_ouch(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("ouch 0.5.1 (SlateOS)");
+            println!("ouch 0.5.1 (Slate OS)");
             0
         }
         "compress" | "c" => {

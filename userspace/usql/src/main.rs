@@ -40,7 +40,7 @@ fn run_usql(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("usql 0.17.5 (SlateOS)");
+        println!("usql 0.17.5 (Slate OS)");
         return 0;
     }
 

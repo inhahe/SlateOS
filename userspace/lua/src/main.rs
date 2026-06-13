@@ -21,7 +21,7 @@ fn run_lua(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-v") {
-        println!("Lua 5.4.7 (SlateOS)  Copyright (C) 1994-2025 Lua.org, PUC-Rio");
+        println!("Lua 5.4.7 (Slate OS)  Copyright (C) 1994-2025 Lua.org, PUC-Rio");
         return 0;
     }
 
@@ -36,7 +36,7 @@ fn run_lua(args: Vec<String>) -> i32 {
     if let Some(file) = script {
         println!("(running {})", file);
     } else {
-        println!("Lua 5.4.7 (SlateOS)  Copyright (C) 1994-2025 Lua.org, PUC-Rio");
+        println!("Lua 5.4.7 (Slate OS)  Copyright (C) 1994-2025 Lua.org, PUC-Rio");
         println!("> (interactive mode — simulated)");
     }
     0
@@ -53,7 +53,7 @@ fn run_luac(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-v") {
-        println!("Lua 5.4.7 (SlateOS)");
+        println!("Lua 5.4.7 (Slate OS)");
         return 0;
     }
     let files: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
@@ -82,7 +82,7 @@ fn run_luarocks(args: Vec<String>) -> i32 {
 
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match cmd {
-        "--version" => println!("luarocks 3.11.1 (SlateOS)"),
+        "--version" => println!("luarocks 3.11.1 (Slate OS)"),
         "list" => {
             println!("Rocks installed for Lua 5.4");
             println!("---------------------------");

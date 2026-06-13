@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_dremio(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: dremio [OPTIONS]");
-        println!("Dremio (SlateOS) — open data lakehouse platform (Apache Arrow + Iceberg)");
+        println!("Dremio (Slate OS) — open data lakehouse platform (Apache Arrow + Iceberg)");
         println!();
         println!("Options:");
         println!("  --cloud                Dremio Cloud (managed SaaS, free standard tier)");
@@ -22,8 +22,8 @@ fn run_dremio(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Dremio 2024 (SlateOS)"); return 0; }
-    println!("Dremio 2024 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Dremio 2024 (Slate OS)"); return 0; }
+    println!("Dremio 2024 (Slate OS)");
     println!("  Vendor: Dremio Corp. (Santa Clara, CA — private)");
     println!("  Founders: Tomer Shiran (CPO), Jacques Nadeau (ex-CTO), Kelly Stirman, 2015");
     println!("          Shiran + Nadeau were former MapR engineers + creators of Apache Arrow");

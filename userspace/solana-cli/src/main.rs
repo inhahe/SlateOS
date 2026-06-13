@@ -11,7 +11,7 @@ fn run_solana(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: solana <COMMAND> [OPTIONS]");
         println!();
-        println!("Solana blockchain CLI (SlateOS).");
+        println!("Solana blockchain CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  balance      Get SOL balance");
@@ -32,7 +32,7 @@ fn run_solana(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("solana-cli 1.18.0 (SlateOS)");
+        println!("solana-cli 1.18.0 (Slate OS)");
         return 0;
     }
 

@@ -21,7 +21,7 @@ fn run_groff(prog: &str, args: &[String]) -> i32 {
             "groff" => {
                 println!("Usage: groff [OPTIONS] [FILE...]");
                 println!();
-                println!("groff — GNU roff typesetter (SlateOS).");
+                println!("groff — GNU roff typesetter (Slate OS).");
                 println!();
                 println!("Options:");
                 println!("  -T DEVICE    Output device (ascii, utf8, html, pdf, ps)");
@@ -35,29 +35,29 @@ fn run_groff(prog: &str, args: &[String]) -> i32 {
             }
             "nroff" => {
                 println!("Usage: nroff [OPTIONS] [FILE...]");
-                println!("nroff — format documents for terminal display (SlateOS).");
+                println!("nroff — format documents for terminal display (Slate OS).");
             }
             "tbl" => {
                 println!("Usage: tbl [FILE...]");
-                println!("tbl — format tables for groff (SlateOS).");
+                println!("tbl — format tables for groff (Slate OS).");
             }
             "eqn" => {
                 println!("Usage: eqn [FILE...]");
-                println!("eqn — format equations for groff (SlateOS).");
+                println!("eqn — format equations for groff (Slate OS).");
             }
             "pic" => {
                 println!("Usage: pic [FILE...]");
-                println!("pic — compile pictures for groff (SlateOS).");
+                println!("pic — compile pictures for groff (Slate OS).");
             }
             _ => {
                 println!("Usage: troff [OPTIONS] [FILE...]");
-                println!("troff — the troff processor (SlateOS).");
+                println!("troff — the troff processor (Slate OS).");
             }
         }
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("GNU groff version 1.23.0 (SlateOS)");
+        println!("GNU groff version 1.23.0 (Slate OS)");
         return 0;
     }
 

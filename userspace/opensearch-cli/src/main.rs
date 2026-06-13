@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_opensearch(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: opensearch [OPTIONS]");
-        println!("OpenSearch v2.12 (SlateOS) — Distributed search and analytics");
+        println!("OpenSearch v2.12 (Slate OS) — Distributed search and analytics");
         println!();
         println!("Options:");
         println!("  -E KEY=VALUE       Setting override");
@@ -22,8 +22,8 @@ fn run_opensearch(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version" || a == "-V") { println!("OpenSearch v2.12.0 (SlateOS)"); return 0; }
-    println!("OpenSearch v2.12.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version" || a == "-V") { println!("OpenSearch v2.12.0 (Slate OS)"); return 0; }
+    println!("OpenSearch v2.12.0 (Slate OS)");
     println!("  HTTP: https://0.0.0.0:9200");
     println!("  Transport: 0.0.0.0:9300");
     println!("  Cluster: opensearch-cluster (green)");

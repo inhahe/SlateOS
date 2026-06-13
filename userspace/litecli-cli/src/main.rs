@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_litecli(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: litecli [OPTIONS] [DATABASE]");
-        println!("litecli 1.10.0 — Enhanced SQLite client (SlateOS)");
+        println!("litecli 1.10.0 — Enhanced SQLite client (Slate OS)");
         println!();
         println!("Options:");
         println!("  -e STMT       Execute statement");

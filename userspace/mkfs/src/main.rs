@@ -563,7 +563,7 @@ fn parse_args() -> MkfsOptions {
             }
 
             "--version" | "-V" => {
-                println!("mkfs (SlateOS) 0.1.0");
+                println!("mkfs (Slate OS) 0.1.0");
                 process::exit(0);
             }
 
@@ -1072,7 +1072,7 @@ fn do_format(dev_path: &str, fs_type_id: u64) -> Result<(), String> {
 // ============================================================================
 
 fn print_usage() {
-    println!("mkfs (SlateOS) 0.1.0 -- Create filesystems on disk devices or image files");
+    println!("mkfs (Slate OS) 0.1.0 -- Create filesystems on disk devices or image files");
     println!();
     println!("USAGE:");
     println!("  mkfs -t <type> [options] <device>");

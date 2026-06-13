@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_docusaurus(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: docusaurus COMMAND [OPTIONS]");
-        println!("Docusaurus 3.4.0 (SlateOS)");
+        println!("Docusaurus 3.4.0 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  start          Start development server");

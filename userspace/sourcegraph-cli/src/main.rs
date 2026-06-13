@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sg(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sourcegraph [OPTIONS]");
-        println!("Sourcegraph 5.7 (SlateOS) — Universal code search across all your repos");
+        println!("Sourcegraph 5.7 (Slate OS) — Universal code search across all your repos");
         println!();
         println!("Options:");
         println!("  search QUERY           Code search (regex, structural, literal)");
@@ -23,8 +23,8 @@ fn run_sg(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Sourcegraph 5.7 (SlateOS)"); return 0; }
-    println!("Sourcegraph 5.7 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Sourcegraph 5.7 (Slate OS)"); return 0; }
+    println!("Sourcegraph 5.7 (Slate OS)");
     println!("  Vendor: Sourcegraph, Inc. (San Francisco, founded 2013)");
     println!("  Founders: Quinn Slack + Beyang Liu (Stanford CS)");
     println!("  Funding: a16z + Sequoia + Redpoint — $125M Series D (Mar 2021), $2.6B valuation");

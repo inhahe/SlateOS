@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sophos(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sophos [OPTIONS]");
-        println!("Sophos Intercept X Advanced / Central / Home (SlateOS)");
+        println!("Sophos Intercept X Advanced / Central / Home (Slate OS)");
         println!();
         println!("Options:");
         println!("  --scan TYPE            full/quick/custom");
@@ -24,8 +24,8 @@ fn run_sophos(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Sophos Intercept X Advanced 2024.4 / Endpoint Agent 2024.4.5.5 (SlateOS)"); return 0; }
-    println!("Sophos Intercept X Advanced 2024.4 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Sophos Intercept X Advanced 2024.4 / Endpoint Agent 2024.4.5.5 (Slate OS)"); return 0; }
+    println!("Sophos Intercept X Advanced 2024.4 (Slate OS)");
     println!("  Origin: UK, founded 1985 (Abingdon, Oxfordshire); private equity owned 2020");
     println!("  Endpoint: Intercept X (NGAV + EDR), Server (workload), Mobile (UEM)");
     println!("  Network: Sophos Firewall (XGS series), wireless, switches, SD-WAN");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wdisplays(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wdisplays [OPTIONS]");
-        println!("wdisplays v1.1 (SlateOS) — Graphical Wayland output configurator");
+        println!("wdisplays v1.1 (Slate OS) — Graphical Wayland output configurator");
         println!();
         println!("Options:");
         println!("  --version         Show version");
@@ -22,7 +22,7 @@ fn run_wdisplays(args: &[String], _prog: &str) -> i32 {
         println!("refresh rate, scaling, and rotation for Wayland.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("wdisplays v1.1 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("wdisplays v1.1 (Slate OS)"); return 0; }
     println!("wdisplays: opening display configuration GUI...");
     println!("  Detected outputs:");
     println!("    HDMI-A-1: 1920x1080@60Hz, scale 1.0, rotation normal");

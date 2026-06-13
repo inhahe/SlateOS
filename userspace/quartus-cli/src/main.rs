@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_quartus(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: quartus [OPTIONS] [PROJECT]");
-        println!("Intel Quartus Prime Pro 24.2 (SlateOS) — Altera FPGA design suite");
+        println!("Intel Quartus Prime Pro 24.2 (Slate OS) — Altera FPGA design suite");
         println!();
         println!("Options:");
         println!("  --shell                Quartus shell (Tcl interactive)");
@@ -23,8 +23,8 @@ fn run_quartus(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Intel Quartus Prime Pro 24.2.0 (SlateOS)"); return 0; }
-    println!("Intel Quartus Prime Pro 24.2.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Intel Quartus Prime Pro 24.2.0 (Slate OS)"); return 0; }
+    println!("Intel Quartus Prime Pro 24.2.0 (Slate OS)");
     println!("  Editions: Lite (free), Standard, Pro (Stratix/Agilex)");
     println!("  Devices: Cyclone V/10, Arria 10, Stratix 10, Agilex 5/7/9, MAX 10");
     println!("  Languages: VHDL, Verilog, SystemVerilog, AHDL, schematic");

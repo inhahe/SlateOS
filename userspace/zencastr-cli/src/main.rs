@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_zc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: zencastr [COMMAND] [OPTIONS]");
-        println!("Zencastr (SlateOS) — Cloud-based podcast recording & editing");
+        println!("Zencastr (Slate OS) — Cloud-based podcast recording & editing");
         println!();
         println!("Commands:");
         println!("  new                    New episode");
@@ -27,8 +27,8 @@ fn run_zc(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Zencastr v3.0 (SlateOS)"); return 0; }
-    println!("Zencastr (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Zencastr v3.0 (Slate OS)"); return 0; }
+    println!("Zencastr (Slate OS)");
     println!("  Recording: Local on each guest's device (then uploaded), separate tracks");
     println!("  Audio: 48 kHz uncompressed WAV per guest");
     println!("  Video: HD video recording (browser-based)");

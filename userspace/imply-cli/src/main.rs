@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_imply(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: imply [OPTIONS]");
-        println!("Imply (SlateOS) — Apache Druid commercial platform (real-time + sub-second analytics)");
+        println!("Imply (Slate OS) — Apache Druid commercial platform (real-time + sub-second analytics)");
         println!();
         println!("Options:");
         println!("  --polaris              Polaris (fully-managed Druid on AWS)");
@@ -20,8 +20,8 @@ fn run_imply(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Imply 2024 (SlateOS) — imply CLI 2.x + Druid 30.x"); return 0; }
-    println!("Imply 2024 (SlateOS) — Apache Druid Commercial (Real-Time Analytics)");
+    if args.iter().any(|a| a == "--version") { println!("Imply 2024 (Slate OS) — imply CLI 2.x + Druid 30.x"); return 0; }
+    println!("Imply 2024 (Slate OS) — Apache Druid Commercial (Real-Time Analytics)");
     println!("  Vendor: Imply Data, Inc. (Burlingame, CA — private)");
     println!("  Founders: Fangjin Yang + Gian Merlino + Vadim Ogievetsky, 2015");
     println!("          Fangjin Yang: co-creator of Druid at Metamarkets (2011)");

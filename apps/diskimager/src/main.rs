@@ -1092,7 +1092,7 @@ impl DiskImagerApp {
                     },
                     Partition {
                         index: 2,
-                        label: "SlateOS".to_string(),
+                        label: "Slate OS".to_string(),
                         filesystem: "ext4".to_string(),
                         offset_bytes: 269_484_032,
                         size_bytes: 999_935_401_984,

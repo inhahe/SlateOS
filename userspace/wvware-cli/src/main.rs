@@ -20,7 +20,7 @@ fn run_wv(args: &[String], prog: &str) -> i32 {
 
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: {} [OPTIONS] <input.doc> [output.{}]", prog, ext);
-        println!("{} v1.2 (SlateOS) — Convert Word documents to {}", prog, format);
+        println!("{} v1.2 (Slate OS) — Convert Word documents to {}", prog, format);
         println!();
         println!("Options:");
         println!("  --charset CHARSET  Output character set");
@@ -30,7 +30,7 @@ fn run_wv(args: &[String], prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("{} v1.2 (SlateOS, wvWare library)", prog);
+        println!("{} v1.2 (Slate OS, wvWare library)", prog);
         return 0;
     }
     let files: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();

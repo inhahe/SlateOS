@@ -11,7 +11,7 @@ fn run_cypress(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: cypress <COMMAND> [OPTIONS]");
         println!();
-        println!("Cypress end-to-end testing CLI (SlateOS).");
+        println!("Cypress end-to-end testing CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  run          Run tests headless");
@@ -23,7 +23,7 @@ fn run_cypress(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Cypress package version: 13.6.3 (SlateOS)");
+        println!("Cypress package version: 13.6.3 (Slate OS)");
         return 0;
     }
 

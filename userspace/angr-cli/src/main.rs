@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_angr(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: angr [OPTIONS] BINARY");
-        println!("angr v9.2 (SlateOS) — Binary analysis platform");
+        println!("angr v9.2 (Slate OS) — Binary analysis platform");
         println!();
         println!("Options:");
         println!("  -e ENTRY       Entry point override");
@@ -28,8 +28,8 @@ fn run_angr(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("angr v9.2.90 (SlateOS)"); return 0; }
-    println!("angr v9.2.90 (SlateOS) — Binary Analysis");
+    if args.iter().any(|a| a == "--version") { println!("angr v9.2.90 (Slate OS)"); return 0; }
+    println!("angr v9.2.90 (Slate OS) — Binary Analysis");
     println!("  Loading: crackme (ELF x86_64)");
     println!("  Shared libraries: libc.so.6, ld-linux-x86-64.so.2");
     println!("  CFG recovery:");

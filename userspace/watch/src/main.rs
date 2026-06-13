@@ -92,7 +92,7 @@ struct Config {
 
 /// Print usage information.
 fn print_usage() {
-    println!("SlateOS Watch Utility v{VERSION}");
+    println!("Slate OS Watch Utility v{VERSION}");
     println!();
     println!("Execute a command periodically, displaying its output.");
     println!();
@@ -141,7 +141,7 @@ fn parse_args(args: &[String]) -> Option<Config> {
                 return None;
             }
             "-v" | "--version" => {
-                println!("watch (SlateOS) {VERSION}");
+                println!("watch (Slate OS) {VERSION}");
                 return None;
             }
             "-n" | "--interval" => {

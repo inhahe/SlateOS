@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_laptop_mode(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: laptop_mode COMMAND");
-        println!("laptop_mode v1.74 (SlateOS) — Laptop power saving tool");
+        println!("laptop_mode v1.74 (Slate OS) — Laptop power saving tool");
         println!();
         println!("Commands:");
         println!("  status            Show current status");

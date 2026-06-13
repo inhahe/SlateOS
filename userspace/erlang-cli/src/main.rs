@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_erl(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: erl [OPTIONS]");
-        println!("Erlang/OTP 26 (SlateOS)");
+        println!("Erlang/OTP 26 (Slate OS)");
         println!("  -noshell       Don't start a shell");
         println!("  -eval EXPR     Evaluate expression");
         println!("  -s MOD FUNC    Start module:function");

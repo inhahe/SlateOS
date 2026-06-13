@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_picotts(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: picotts [OPTIONS] [TEXT]");
-        println!("picotts v1.0 (SlateOS) — Pico TTS command-line interface");
+        println!("picotts v1.0 (Slate OS) — Pico TTS command-line interface");
         println!();
         println!("Options:");
         println!("  -o FILE        Output audio file (wav)");
@@ -27,7 +27,7 @@ fn run_picotts(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("picotts v1.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("picotts v1.0 (Slate OS)"); return 0; }
     if args.iter().any(|a| a == "--list-voices") {
         println!("Available voices:");
         println!("  en-US    English (US)");

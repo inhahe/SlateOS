@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ccx(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ccx [-i INPUTFILE] [OPTIONS]");
-        println!("CalculiX CrunchiX v2.21 (SlateOS) — FEM solver");
+        println!("CalculiX CrunchiX v2.21 (Slate OS) — FEM solver");
         println!();
         println!("Options:");
         println!("  -i FILE        Input file (without .inp extension)");
@@ -22,13 +22,13 @@ fn run_ccx(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("CalculiX CrunchiX v2.21 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("CalculiX CrunchiX v2.21 (Slate OS)"); return 0; }
     let input = args.windows(2).find(|w| w[0] == "-i").map(|w| w[1].as_str());
     if input.is_none() {
         eprintln!("ccx: error: no input file (-i)");
         return 1;
     }
-    println!("CalculiX CrunchiX v2.21 (SlateOS)");
+    println!("CalculiX CrunchiX v2.21 (Slate OS)");
     println!("  Input: {}.inp", input.unwrap_or("model"));
     println!("  Reading model...");
     println!("  Nodes: 12,456");
@@ -46,7 +46,7 @@ fn run_ccx(args: &[String], _prog: &str) -> i32 {
 fn run_cgx(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: cgx [-b|-v|-e] FILE");
-        println!("CalculiX GraphiX v2.21 (SlateOS) — FEM pre/post-processor");
+        println!("CalculiX GraphiX v2.21 (Slate OS) — FEM pre/post-processor");
         println!();
         println!("Options:");
         println!("  -b FILE        Open FBD geometry file");
@@ -55,8 +55,8 @@ fn run_cgx(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("CalculiX GraphiX v2.21 (SlateOS)"); return 0; }
-    println!("CalculiX GraphiX v2.21 (SlateOS) — Pre/Post-Processor");
+    if args.iter().any(|a| a == "--version") { println!("CalculiX GraphiX v2.21 (Slate OS)"); return 0; }
+    println!("CalculiX GraphiX v2.21 (Slate OS) — Pre/Post-Processor");
     println!("  Renderer: OpenGL");
     println!("  Status: ready for model");
     0

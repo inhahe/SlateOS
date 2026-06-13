@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_screenfetch(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: screenfetch [OPTIONS]");
-        println!("screenfetch v3.9 (SlateOS) — System information screenshot");
+        println!("screenfetch v3.9 (Slate OS) — System information screenshot");
         println!();
         println!("Options:");
         println!("  -n             No ASCII art");
@@ -23,8 +23,8 @@ fn run_screenfetch(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("screenfetch v3.9 (SlateOS)"); return 0; }
-    println!("         OS: SlateOS 1.0");
+    if args.iter().any(|a| a == "--version") { println!("screenfetch v3.9 (Slate OS)"); return 0; }
+    println!("         OS: Slate OS 1.0");
     println!("     Kernel: 0.1.0-slateos");
     println!("     Uptime: 2h 15m");
     println!("      Shell: kshell");

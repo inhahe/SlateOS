@@ -1123,7 +1123,7 @@ fn print_locate_help(out: &mut dyn Write, prog: &str) {
 }
 
 fn print_version(out: &mut dyn Write, prog: &str) {
-    let _ = writeln!(out, "{prog} (SlateOS) {VERSION}");
+    let _ = writeln!(out, "{prog} (Slate OS) {VERSION}");
 }
 
 // ---------------------------------------------------------------------------

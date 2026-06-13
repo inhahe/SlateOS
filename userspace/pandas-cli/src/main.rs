@@ -16,11 +16,11 @@ fn run_pandas(args: &[String]) -> i32 {
     }
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match subcmd {
-        "version" | "--version" => println!("pandas 2.2.0 (SlateOS)"),
+        "version" | "--version" => println!("pandas 2.2.0 (Slate OS)"),
         "show-versions" | "info" => {
             println!("INSTALLED VERSIONS");
             println!("------------------");
-            println!("python    : 3.12.0 (SlateOS)");
+            println!("python    : 3.12.0 (Slate OS)");
             println!("pandas    : 2.2.0");
             println!("numpy     : 1.26.4");
             println!("pytz      : 2024.1");

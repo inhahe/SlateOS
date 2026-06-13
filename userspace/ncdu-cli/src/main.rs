@@ -11,7 +11,7 @@ fn run_ncdu(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ncdu [OPTIONS] [PATH]");
         println!();
-        println!("ncdu — NCurses Disk Usage (SlateOS).");
+        println!("ncdu — NCurses Disk Usage (Slate OS).");
         println!();
         println!("Options:");
         println!("  -q             Quiet mode during scan");
@@ -23,7 +23,7 @@ fn run_ncdu(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("ncdu 2.3 (SlateOS)");
+        println!("ncdu 2.3 (Slate OS)");
         return 0;
     }
 

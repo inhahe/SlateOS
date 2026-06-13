@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_badblocks(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: badblocks [OPTIONS] DEVICE [LAST_BLOCK [FIRST_BLOCK]]");
-        println!("badblocks 1.47.1 (SlateOS) — Search for bad blocks");
+        println!("badblocks 1.47.1 (Slate OS) — Search for bad blocks");
         println!();
         println!("Options:");
         println!("  -b SIZE        Block size (default 1024)");
@@ -33,7 +33,7 @@ fn run_badblocks(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V") {
-        println!("badblocks 1.47.1 (SlateOS)");
+        println!("badblocks 1.47.1 (Slate OS)");
         return 0;
     }
     let device = args.iter().rfind(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("/dev/sda");

@@ -40,7 +40,7 @@ fn run_i3(args: &[String], prog: &str) -> i32 {
     }
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: i3-msg [OPTIONS] MESSAGE");
-        println!("i3-msg (i3 4.23) (SlateOS)");
+        println!("i3-msg (i3 4.23) (Slate OS)");
         println!();
         println!("Options:");
         println!("  -t TYPE      Message type (command, get_workspaces, get_outputs,");
@@ -64,7 +64,7 @@ fn run_i3(args: &[String], prog: &str) -> i32 {
             println!("[{{\"name\":\"DP-1\",\"active\":true,\"primary\":true,\"rect\":{{\"x\":0,\"y\":0,\"width\":2560,\"height\":1440}}}}]");
         }
         Some("get_version") => {
-            println!("{{\"major\":4,\"minor\":23,\"patch\":0,\"human_readable\":\"4.23 (SlateOS)\"}}");
+            println!("{{\"major\":4,\"minor\":23,\"patch\":0,\"human_readable\":\"4.23 (Slate OS)\"}}");
         }
         _ => {
             if let Some(cmd) = message {

@@ -19,7 +19,7 @@ fn run_locale(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: locale [OPTIONS] [NAME ...]");
         println!();
-        println!("locale — get locale-specific information (SlateOS).");
+        println!("locale — get locale-specific information (Slate OS).");
         println!();
         println!("Options:");
         println!("  -a, --all-locales    List all available locales");
@@ -71,7 +71,7 @@ fn run_localedef(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: localedef [OPTIONS] OUTPUT_PATH");
         println!();
-        println!("localedef — compile locale definition (SlateOS).");
+        println!("localedef — compile locale definition (Slate OS).");
         println!();
         println!("Options:");
         println!("  -i, --inputfile FILE  Input file");
@@ -101,7 +101,7 @@ fn run_locale_gen(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: locale-gen [LOCALE ...]");
         println!();
-        println!("locale-gen — generate locale data (SlateOS).");
+        println!("locale-gen — generate locale data (Slate OS).");
         return 0;
     }
 

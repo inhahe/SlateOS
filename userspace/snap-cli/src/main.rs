@@ -10,7 +10,7 @@ use std::process;
 fn run_snap(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: snap COMMAND [OPTIONS]");
-        println!("snap 2.63 (SlateOS)");
+        println!("snap 2.63 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  install       Install a snap");

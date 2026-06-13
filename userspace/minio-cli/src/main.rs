@@ -11,7 +11,7 @@ fn run_mc(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mc <COMMAND> [OPTIONS]");
         println!();
-        println!("MinIO Client - S3-compatible object storage CLI (SlateOS).");
+        println!("MinIO Client - S3-compatible object storage CLI (Slate OS).");
         println!();
         println!("Commands:");
         println!("  alias        Manage server aliases");
@@ -29,7 +29,7 @@ fn run_mc(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("mc version RELEASE.2024-01-15 (SlateOS)");
+        println!("mc version RELEASE.2024-01-15 (Slate OS)");
         return 0;
     }
 

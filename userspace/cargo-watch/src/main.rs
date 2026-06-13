@@ -38,7 +38,7 @@ fn run_cargo_watch(args: Vec<String>) -> i32 {
         return 0;
     }
     if subargs.iter().any(|a| a == "-V" || a == "--version") {
-        println!("cargo-watch 8.5.2 (SlateOS)");
+        println!("cargo-watch 8.5.2 (Slate OS)");
         return 0;
     }
 

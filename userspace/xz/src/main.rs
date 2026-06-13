@@ -128,7 +128,7 @@ fn run_xz(args: Vec<String>, personality: &str) -> i32 {
                 return 0;
             }
             "--version" | "-V" => {
-                println!("xz (SlateOS) 0.1.0");
+                println!("xz (Slate OS) 0.1.0");
                 println!("liblzma 0.1.0");
                 return 0;
             }

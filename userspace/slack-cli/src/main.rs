@@ -11,7 +11,7 @@ fn run_slack(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: slack <COMMAND> [OPTIONS]");
         println!();
-        println!("Slack CLI for workspace management and messaging (SlateOS).");
+        println!("Slack CLI for workspace management and messaging (Slate OS).");
         println!();
         println!("Commands:");
         println!("  auth         Authenticate with Slack");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_minimap2(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: minimap2 [OPTIONS] REF.fa QUERY.fa");
-        println!("minimap2 v2.28 (SlateOS) — Long-read sequence alignment");
+        println!("minimap2 v2.28 (Slate OS) — Long-read sequence alignment");
         println!();
         println!("Options:");
         println!("  -a                Output SAM format");
@@ -27,7 +27,7 @@ fn run_minimap2(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("minimap2 v2.28 (SlateOS)");
+        println!("minimap2 v2.28 (Slate OS)");
         return 0;
     }
     let files: Vec<&str> = args.iter()

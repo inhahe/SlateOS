@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pdm(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: pdm COMMAND [OPTIONS]");
-        println!("PDM 2.17.1 (SlateOS)");
+        println!("PDM 2.17.1 (Slate OS)");
         println!();
         println!("Commands:");
         println!("  init         Initialize a new project");

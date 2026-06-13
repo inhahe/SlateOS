@@ -419,12 +419,12 @@ Options:
   -n                  Numeric output; do not resolve hostnames
   -v                  Verbose output
   -i <iface>          Limit to interface <iface>
-  -d <hostname>       Delete ARP entry (unsupported on SlateOS)
-  -s <hostname> <hw>  Add static entry (unsupported on SlateOS)
-  -D                  With -s: use the device MAC (unsupported on SlateOS)
+  -d <hostname>       Delete ARP entry (unsupported on Slate OS)
+  -s <hostname> <hw>  Add static entry (unsupported on Slate OS)
+  -D                  With -s: use the device MAC (unsupported on Slate OS)
   -h, --help          Show this help
 
-Note: SlateOS has no kernel syscall to add, delete, or probe ARP entries, so
+Note: Slate OS has no kernel syscall to add, delete, or probe ARP entries, so
 the -d/-s/-D operations report \"not supported\".
 
 Examples:

@@ -11,7 +11,7 @@ fn run_clickhouse(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: clickhouse-client [OPTIONS]");
         println!();
-        println!("ClickHouse client CLI (SlateOS).");
+        println!("ClickHouse client CLI (Slate OS).");
         println!();
         println!("Options:");
         println!("  --host HOST        Server hostname (default: localhost)");
@@ -25,7 +25,7 @@ fn run_clickhouse(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("ClickHouse client version 24.1.1 (SlateOS)");
+        println!("ClickHouse client version 24.1.1 (Slate OS)");
         return 0;
     }
 

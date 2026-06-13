@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_screengrab(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: screengrab [OPTIONS]");
-        println!("screengrab v2.7 (SlateOS) — Qt-based screenshot tool");
+        println!("screengrab v2.7 (Slate OS) — Qt-based screenshot tool");
         println!();
         println!("Options:");
         println!("  --fullscreen      Full screen capture");
@@ -23,7 +23,7 @@ fn run_screengrab(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("screengrab v2.7 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("screengrab v2.7 (Slate OS)"); return 0; }
     println!("screengrab: screenshot tool started");
     println!("  Modes: fullscreen, window, region");
     println!("  Format: PNG, JPEG, BMP");

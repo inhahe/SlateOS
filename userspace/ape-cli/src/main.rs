@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ape(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: ape COMMAND [OPTIONS]");
-        println!("ape v0.8.0 (SlateOS) — Smart contract development framework");
+        println!("ape v0.8.0 (Slate OS) — Smart contract development framework");
         println!();
         println!("Commands:");
         println!("  init            Initialize new project");
@@ -31,7 +31,7 @@ fn run_ape(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("ape v0.8.0 (SlateOS)");
+        println!("ape v0.8.0 (Slate OS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("compile");

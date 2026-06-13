@@ -33,7 +33,7 @@ use std::process;
 const VERSION: &str = "0.1.0";
 
 /// Default kernel name when `/proc/sys/kernel/ostype` is unavailable.
-const DEFAULT_KERNEL_NAME: &str = "SlateOS";
+const DEFAULT_KERNEL_NAME: &str = "Slate OS";
 
 /// Default kernel release when `/proc/sys/kernel/osrelease` is unavailable.
 const DEFAULT_RELEASE: &str = "0.1.0";
@@ -42,7 +42,7 @@ const DEFAULT_RELEASE: &str = "0.1.0";
 const DEFAULT_MACHINE: &str = "x86_64";
 
 /// Default operating system name.
-const DEFAULT_OS_NAME: &str = "SlateOS";
+const DEFAULT_OS_NAME: &str = "Slate OS";
 
 // Proc filesystem paths.
 const PROC_OSTYPE: &str = "/proc/sys/kernel/ostype";

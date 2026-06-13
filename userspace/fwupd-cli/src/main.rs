@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_fwupdmgr(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: fwupdmgr <command> [OPTIONS]");
-        println!("fwupdmgr v1.9 (SlateOS) — Firmware update manager");
+        println!("fwupdmgr v1.9 (Slate OS) — Firmware update manager");
         println!();
         println!("Commands:");
         println!("  get-devices      List devices with firmware");
@@ -24,7 +24,7 @@ fn run_fwupdmgr(args: &[String], _prog: &str) -> i32 {
         println!("  --version        Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("fwupdmgr v1.9 (SlateOS, fwupd)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("fwupdmgr v1.9 (Slate OS, fwupd)"); return 0; }
     match args.first().map(|s| s.as_str()) {
         Some("get-devices") => {
             println!("System Firmware");
@@ -50,12 +50,12 @@ fn run_fwupdmgr(args: &[String], _prog: &str) -> i32 {
 fn run_fwupdtool(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: fwupdtool <command> [OPTIONS]");
-        println!("fwupdtool v1.9 (SlateOS) — Firmware debugging tool");
+        println!("fwupdtool v1.9 (Slate OS) — Firmware debugging tool");
         println!("  get-plugins      List plugins");
         println!("  get-details CAB  Show firmware details");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("fwupdtool v1.9 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("fwupdtool v1.9 (Slate OS)"); return 0; }
     println!("fwupdtool: firmware debugging utility");
     0
 }

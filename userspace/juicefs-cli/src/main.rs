@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_juicefs(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: juicefs [COMMAND] [OPTIONS]");
-        println!("JuiceFS v1.2 (SlateOS) — Distributed POSIX filesystem");
+        println!("JuiceFS v1.2 (Slate OS) — Distributed POSIX filesystem");
         println!();
         println!("Commands:");
         println!("  format META URL    Format a new volume");
@@ -32,8 +32,8 @@ fn run_juicefs(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("JuiceFS v1.2.0 (SlateOS)"); return 0; }
-    println!("JuiceFS v1.2.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("JuiceFS v1.2.0 (Slate OS)"); return 0; }
+    println!("JuiceFS v1.2.0 (Slate OS)");
     println!("  Metadata: Redis (redis://localhost:6379/1)");
     println!("  Storage: S3 (s3://juicefs-data)");
     println!("  Files: 567,890");

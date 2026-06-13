@@ -30,7 +30,7 @@ fn print_help(prog: &str) {
 }
 
 fn print_version() {
-    println!("lemonsqueezy-cli 0.1.0 — SlateOS personality binary");
+    println!("lemonsqueezy-cli 0.1.0 — Slate OS personality binary");
     println!("Lemon Squeezy (acquired by Stripe, Jul 2024)");
 }
 

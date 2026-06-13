@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_hashcat(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: hashcat [OPTIONS] HASH|HASHFILE [DICT|MASK]");
-        println!("hashcat v6.2 (SlateOS) — Advanced password recovery");
+        println!("hashcat v6.2 (Slate OS) — Advanced password recovery");
         println!();
         println!("Options:");
         println!("  -m MODE       Hash type (0=MD5, 1000=NTLM, 1800=sha512crypt, etc.)");
@@ -30,9 +30,9 @@ fn run_hashcat(args: &[String], _prog: &str) -> i32 {
         println!("  --version     Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("hashcat v6.2.6 (SlateOS)"); return 0; }
-    println!("hashcat v6.2.6 (SlateOS)");
-    println!("  OpenCL Platform: SlateOS GPU Runtime");
+    if args.iter().any(|a| a == "--version") { println!("hashcat v6.2.6 (Slate OS)"); return 0; }
+    println!("hashcat v6.2.6 (Slate OS)");
+    println!("  OpenCL Platform: Slate OS GPU Runtime");
     println!("  Device 1: GPU (4096 cores, 8192 MB)");
     println!("  Hash type: SHA-256 (mode 1400)");
     println!("  Attack mode: Dictionary + Rules");

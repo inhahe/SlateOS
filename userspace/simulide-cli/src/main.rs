@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_simulide(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: simulide [OPTIONS] [FILE.sim1]");
-        println!("simulide v1.1 (SlateOS) — Real-time electronic circuit simulator");
+        println!("simulide v1.1 (Slate OS) — Real-time electronic circuit simulator");
         println!();
         println!("Options:");
         println!("  --version         Show version");
@@ -24,7 +24,7 @@ fn run_simulide(args: &[String], _prog: &str) -> i32 {
         println!("  Logic analyzer, oscilloscope, I/O components");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("simulide v1.1 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("simulide v1.1 (Slate OS)"); return 0; }
     println!("simulide: circuit simulator started");
     println!("  Components: passive, semiconductor, logic gates, MCU");
     println!("  MCU support: AVR, PIC, Arduino");

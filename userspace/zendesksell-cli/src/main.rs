@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_zsell(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: zsell [OPTIONS]");
-        println!("Zendesk Sell (SlateOS) — sales CRM, sister to Zendesk Support");
+        println!("Zendesk Sell (Slate OS) — sales CRM, sister to Zendesk Support");
         println!();
         println!("Options:");
         println!("  --team                 Sell Team $19/user/mo");
@@ -25,8 +25,8 @@ fn run_zsell(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Zendesk Sell 2024 (SlateOS)"); return 0; }
-    println!("Zendesk Sell 2024 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Zendesk Sell 2024 (Slate OS)"); return 0; }
+    println!("Zendesk Sell 2024 (Slate OS)");
     println!("  Vendor: Zendesk, Inc. (San Francisco, CA — private since 2022)");
     println!("  Origin: 'Sell' was originally Base CRM (Mountain View, CA)");
     println!("        Base founded 2009 by Uzi Shmilovici, Pawel Niznik, Tomek Buszewski");

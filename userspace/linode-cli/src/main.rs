@@ -11,7 +11,7 @@ fn run_linode(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "help") {
         println!("Usage: linode-cli <COMMAND> [ACTION] [OPTIONS]");
         println!();
-        println!("Linode CLI — manage Linode/Akamai cloud (SlateOS).");
+        println!("Linode CLI — manage Linode/Akamai cloud (Slate OS).");
         println!();
         println!("Commands:");
         println!("  linodes       Manage Linode instances");
@@ -27,7 +27,7 @@ fn run_linode(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("linode-cli 5.45.0 (SlateOS)");
+        println!("linode-cli 5.45.0 (Slate OS)");
         return 0;
     }
 

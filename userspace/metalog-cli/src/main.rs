@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_metalog(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: metalog [OPTIONS]");
-        println!("Metalog v4.0 (SlateOS) — Modern syslog daemon");
+        println!("Metalog v4.0 (Slate OS) — Modern syslog daemon");
         println!();
         println!("Options:");
         println!("  -c, --config FILE  Config file (default: /etc/metalog.conf)");
@@ -24,8 +24,8 @@ fn run_metalog(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("metalog v4.0.0 (SlateOS)"); return 0; }
-    println!("Metalog v4.0.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("metalog v4.0.0 (Slate OS)"); return 0; }
+    println!("Metalog v4.0.0 (Slate OS)");
     println!("  Config: /etc/metalog.conf");
     println!("  Sections: 5 (mail, news, kernel, auth, default)");
     println!("  Log directory: /var/log");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_semaphore(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: semaphore [COMMAND] [OPTIONS]");
-        println!("Semaphore v2.10 (SlateOS) — Modern UI for Ansible/Terraform");
+        println!("Semaphore v2.10 (Slate OS) — Modern UI for Ansible/Terraform");
         println!();
         println!("Commands:");
         println!("  server             Start Semaphore server");
@@ -29,8 +29,8 @@ fn run_semaphore(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Semaphore v2.10.22 (SlateOS)"); return 0; }
-    println!("Semaphore v2.10.22 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Semaphore v2.10.22 (Slate OS)"); return 0; }
+    println!("Semaphore v2.10.22 (Slate OS)");
     println!("  Server: http://0.0.0.0:3000");
     println!("  Projects: 4");
     println!("  Templates: 23");

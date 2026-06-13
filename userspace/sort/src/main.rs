@@ -1051,7 +1051,7 @@ fn write_output(
 // ============================================================================
 
 fn print_help() {
-    println!("SlateOS sort v{VERSION}");
+    println!("Slate OS sort v{VERSION}");
     println!();
     println!("Write sorted concatenation of all FILE(s) to standard output.");
     println!("With no FILE, or when FILE is -, read standard input.");
@@ -1116,7 +1116,7 @@ fn main() {
             process::exit(0);
         }
         ParseResult::Version => {
-            println!("sort (SlateOS) {VERSION}");
+            println!("sort (Slate OS) {VERSION}");
             process::exit(0);
         }
         ParseResult::Run(config) => {

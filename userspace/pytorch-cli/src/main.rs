@@ -15,7 +15,7 @@ fn run_pytorch(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "torchrun" => {
-                println!("torchrun (SlateOS) — PyTorch distributed training launcher");
+                println!("torchrun (Slate OS) — PyTorch distributed training launcher");
                 println!("  --nproc_per_node N  Processes per node");
                 println!("  --nnodes N         Number of nodes");
                 println!("  --node_rank N      Rank of this node");
@@ -24,7 +24,7 @@ fn run_pytorch(args: &[String], prog: &str) -> i32 {
                 println!("  SCRIPT [ARGS]      Training script");
             }
             _ => {
-                println!("PyTorch v2.3 (SlateOS) — Deep learning framework");
+                println!("PyTorch v2.3 (Slate OS) — Deep learning framework");
                 println!("  CUDA: available (GPU detected)");
                 println!("  cuDNN: 8.9.7");
             }
@@ -32,10 +32,10 @@ fn run_pytorch(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("PyTorch v2.3.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("PyTorch v2.3.0 (Slate OS)"); return 0; }
     match prog {
         "torchrun" => {
-            println!("torchrun (SlateOS)");
+            println!("torchrun (Slate OS)");
             println!("  Processes: 4 (1 node, 4 GPUs)");
             println!("  Backend: NCCL");
             println!("  Master: localhost:29500");
@@ -45,7 +45,7 @@ fn run_pytorch(args: &[String], prog: &str) -> i32 {
             println!("  Training complete");
         }
         _ => {
-            println!("PyTorch v2.3.0 (SlateOS)");
+            println!("PyTorch v2.3.0 (Slate OS)");
             println!("  CUDA: 12.1, GPU: NVIDIA RTX 4090");
             println!("  Model: ResNet-50");
             println!("  Parameters: 25,557,032");

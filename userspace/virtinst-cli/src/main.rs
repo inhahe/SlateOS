@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_virt_install(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: virt-install [OPTIONS]");
-        println!("virt-install v4.1 (SlateOS) — Provision new virtual machines");
+        println!("virt-install v4.1 (Slate OS) — Provision new virtual machines");
         println!();
         println!("Options:");
         println!("  --name NAME        VM name");
@@ -27,7 +27,7 @@ fn run_virt_install(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("virt-install v4.1 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("virt-install v4.1 (Slate OS)"); return 0; }
     println!("virt-install: provisioning new VM");
     println!("  Name: new-vm");
     println!("  Memory: 2048 MiB");
@@ -39,13 +39,13 @@ fn run_virt_install(args: &[String], _prog: &str) -> i32 {
 fn run_virt_clone(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: virt-clone [OPTIONS]");
-        println!("virt-clone v4.1 (SlateOS) — Clone existing virtual machines");
+        println!("virt-clone v4.1 (Slate OS) — Clone existing virtual machines");
         println!("  --original NAME   Source VM");
         println!("  --name NAME       New VM name");
         println!("  --auto-clone      Auto-generate all names");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("virt-clone v4.1 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("virt-clone v4.1 (Slate OS)"); return 0; }
     println!("virt-clone: cloning VM");
     println!("  Source: original-vm");
     println!("  Clone: original-vm-clone");
@@ -56,13 +56,13 @@ fn run_virt_clone(args: &[String], _prog: &str) -> i32 {
 fn run_virt_xml(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: virt-xml DOMAIN [OPTIONS]");
-        println!("virt-xml v4.1 (SlateOS) — Edit libvirt domain XML");
+        println!("virt-xml v4.1 (Slate OS) — Edit libvirt domain XML");
         println!("  --add-device     Add device to domain");
         println!("  --remove-device  Remove device");
         println!("  --edit           Edit existing device");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("virt-xml v4.1 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("virt-xml v4.1 (Slate OS)"); return 0; }
     println!("virt-xml: domain XML editor");
     0
 }

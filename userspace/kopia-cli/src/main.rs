@@ -11,7 +11,7 @@ fn run_kopia(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: kopia <COMMAND> [OPTIONS]");
         println!();
-        println!("Kopia fast and secure backup tool (SlateOS).");
+        println!("Kopia fast and secure backup tool (Slate OS).");
         println!();
         println!("Commands:");
         println!("  repository   Manage repository");
@@ -25,7 +25,7 @@ fn run_kopia(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("kopia 0.15.0 (SlateOS)");
+        println!("kopia 0.15.0 (Slate OS)");
         return 0;
     }
 

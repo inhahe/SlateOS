@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ntopng(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ntopng [OPTIONS]");
-        println!("ntopng v6.0 (SlateOS) — High-speed web-based traffic analysis");
+        println!("ntopng v6.0 (Slate OS) — High-speed web-based traffic analysis");
         println!();
         println!("Options:");
         println!("  -i, --interface IF   Network interface(s)");
@@ -27,8 +27,8 @@ fn run_ntopng(args: &[String], _prog: &str) -> i32 {
         println!("  --version            Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("ntopng v6.0.0 (SlateOS)"); return 0; }
-    println!("ntopng v6.0.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("ntopng v6.0.0 (Slate OS)"); return 0; }
+    println!("ntopng v6.0.0 (Slate OS)");
     println!("  Interface: eth0");
     println!("  Active flows: 1,234");
     println!("  Hosts: 89 (45 local, 44 remote)");

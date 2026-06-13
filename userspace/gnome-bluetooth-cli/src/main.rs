@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gnome_bluetooth(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gnome-bluetooth [OPTIONS]");
-        println!("gnome-bluetooth v46.0 (SlateOS) — GNOME Bluetooth panel");
+        println!("gnome-bluetooth v46.0 (Slate OS) — GNOME Bluetooth panel");
         println!();
         println!("Options:");
         println!("  --version      Show version");
@@ -22,7 +22,7 @@ fn run_gnome_bluetooth(args: &[String], _prog: &str) -> i32 {
         println!("Supports audio, input devices, file transfer.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("gnome-bluetooth v46.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("gnome-bluetooth v46.0 (Slate OS)"); return 0; }
     println!("gnome-bluetooth: Bluetooth settings");
     println!("  Adapter: hci0 (powered on, discoverable)");
     println!("  Paired devices:");
@@ -34,11 +34,11 @@ fn run_gnome_bluetooth(args: &[String], _prog: &str) -> i32 {
 fn run_bluetooth_sendto(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: bluetooth-sendto [OPTIONS] [FILE...]");
-        println!("bluetooth-sendto v46.0 (SlateOS) — Send files via Bluetooth");
+        println!("bluetooth-sendto v46.0 (Slate OS) — Send files via Bluetooth");
         println!("  --device ADDR  Target device address");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("bluetooth-sendto v46.0 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("bluetooth-sendto v46.0 (Slate OS)"); return 0; }
     println!("bluetooth-sendto: file transfer dialog");
     println!("  Select device and files to send via OBEX.");
     0

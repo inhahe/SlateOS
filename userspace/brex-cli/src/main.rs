@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_brex(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: brex [OPTIONS]");
-        println!("Brex (SlateOS) — Corporate card + spend + AP + business account");
+        println!("Brex (Slate OS) — Corporate card + spend + AP + business account");
         println!();
         println!("Options:");
         println!("  --card                 Issue virtual or physical Brex card");
@@ -25,8 +25,8 @@ fn run_brex(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Brex 2024 (SlateOS)"); return 0; }
-    println!("Brex 2024 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Brex 2024 (Slate OS)"); return 0; }
+    println!("Brex 2024 (Slate OS)");
     println!("  Vendor: Brex Inc. (San Francisco — founded 2017)");
     println!("  Founders: Henrique Dubugras + Pedro Franceschi (Brazil — sold Pagar.me to Stone for $150M before age 22)");
     println!("           moved to Stanford, founded Brex");

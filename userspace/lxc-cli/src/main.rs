@@ -19,7 +19,7 @@ fn run_lxc(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: lxc COMMAND [OPTIONS]");
         println!();
-        println!("LXD — system container and VM manager (SlateOS).");
+        println!("LXD — system container and VM manager (Slate OS).");
         println!();
         println!("Commands:");
         println!("  launch IMAGE [NAME]  Create and start");
@@ -39,7 +39,7 @@ fn run_lxc(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("lxc 5.21 (SlateOS)");
+        println!("lxc 5.21 (Slate OS)");
         return 0;
     }
 
@@ -129,7 +129,7 @@ fn run_lxc_legacy(args: &[String], cmd_name: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: {} [OPTIONS]", cmd_name);
         println!();
-        println!("{} — LXC legacy command (SlateOS).", cmd_name);
+        println!("{} — LXC legacy command (Slate OS).", cmd_name);
         return 0;
     }
     match cmd_name {

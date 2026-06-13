@@ -14,7 +14,7 @@ fn run_networkctl(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: networkctl [OPTIONS] COMMAND ...");
         println!();
-        println!("networkctl — network link management (SlateOS).");
+        println!("networkctl — network link management (Slate OS).");
         println!();
         println!("Commands:");
         println!("  list                 List links");

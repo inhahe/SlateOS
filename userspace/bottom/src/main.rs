@@ -51,7 +51,7 @@ fn run_btm(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("bottom 0.10.2 (SlateOS)");
+        println!("bottom 0.10.2 (Slate OS)");
         return 0;
     }
 
@@ -70,7 +70,7 @@ fn run_btm(args: Vec<String>) -> i32 {
         println!("  150  terminal          1.2    1.8  0.1M   0.0M");
         println!("   92  display-server    0.8    0.3  0.0M   0.0M");
     } else if tree {
-        println!("btm 0.10.2 (SlateOS) — TUI launched");
+        println!("btm 0.10.2 (Slate OS) — TUI launched");
         println!();
         println!("Process Tree:");
         println!("  PID  Name               CPU%   Mem%");
@@ -82,7 +82,7 @@ fn run_btm(args: Vec<String>) -> i32 {
         println!("    ├─ 150  terminal       1.2    1.8");
         println!("    └─ 180  browser        8.2    5.4");
     } else {
-        println!("btm 0.10.2 (SlateOS) — TUI launched");
+        println!("btm 0.10.2 (Slate OS) — TUI launched");
         println!("(Graphical terminal UI — simulated output)");
         println!();
         println!("CPU [████████████░░░░░░░░]  58.3%");

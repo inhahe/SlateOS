@@ -11,7 +11,7 @@ fn run_duply(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: duply PROFILE COMMAND [OPTIONS]");
         println!();
-        println!("duply — Duplicity backup wrapper (SlateOS).");
+        println!("duply — Duplicity backup wrapper (Slate OS).");
         println!();
         println!("Commands:");
         println!("  create          Create new profile");
@@ -38,7 +38,7 @@ fn run_duply(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("duply 2.5.2 (SlateOS)");
+        println!("duply 2.5.2 (Slate OS)");
         return 0;
     }
 

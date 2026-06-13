@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_samtools(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Program: samtools (Tools for alignments in SAM/BAM/CRAM format)");
-        println!("Version: 1.19 (SlateOS, using htslib 1.19)");
+        println!("Version: 1.19 (Slate OS, using htslib 1.19)");
         println!();
         println!("Usage:   samtools <command> [options]");
         println!();

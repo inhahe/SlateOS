@@ -11,7 +11,7 @@ fn run_doctl(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "help") {
         println!("Usage: doctl [GROUP] [COMMAND] [OPTIONS]");
         println!();
-        println!("doctl — DigitalOcean CLI (SlateOS).");
+        println!("doctl — DigitalOcean CLI (Slate OS).");
         println!();
         println!("Groups:");
         println!("  compute         Manage Droplets, volumes, images, etc.");
@@ -28,7 +28,7 @@ fn run_doctl(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "version") {
-        println!("doctl version 1.100.0-release (SlateOS)");
+        println!("doctl version 1.100.0-release (Slate OS)");
         return 0;
     }
 

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_hevo(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: hevo [COMMAND] [OPTIONS]");
-        println!("Hevo Data v2.0 (SlateOS) — No-code data pipeline");
+        println!("Hevo Data v2.0 (Slate OS) — No-code data pipeline");
         println!();
         println!("Commands:");
         println!("  pipeline list|create|pause   Manage pipelines");
@@ -30,8 +30,8 @@ fn run_hevo(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Hevo Data v2.0.0 (SlateOS)"); return 0; }
-    println!("Hevo Data v2.0.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Hevo Data v2.0.0 (Slate OS)"); return 0; }
+    println!("Hevo Data v2.0.0 (Slate OS)");
     println!("  Pipelines: 15 active");
     println!("  Sources: 8 (MySQL, PostgreSQL, MongoDB, S3, Kafka)");
     println!("  Destinations: 3 (BigQuery, Snowflake, Redshift)");

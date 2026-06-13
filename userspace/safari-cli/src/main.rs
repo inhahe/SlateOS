@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sf(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: safari [URL] [OPTIONS]");
-        println!("Apple Safari (SlateOS) — WebKit-powered browser, default on macOS/iOS/iPadOS");
+        println!("Apple Safari (Slate OS) — WebKit-powered browser, default on macOS/iOS/iPadOS");
         println!();
         println!("Options:");
         println!("  --private              Private browsing window");
@@ -24,8 +24,8 @@ fn run_sf(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Safari 18.1 (20619.2.8.11.5) (SlateOS)"); return 0; }
-    println!("Safari 18.1 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Safari 18.1 (20619.2.8.11.5) (Slate OS)"); return 0; }
+    println!("Safari 18.1 (Slate OS)");
     println!("  Vendor: Apple Inc. (Cupertino, California)");
     println!("  Engine: WebKit (HTML/CSS), JavaScriptCore Nitro/FTL (JS)");
     println!("  Launched: Jun 2003 (Mac OS X Panther), abandoned Windows 2012");

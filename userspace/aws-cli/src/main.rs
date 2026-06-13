@@ -11,7 +11,7 @@ fn run_aws(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "help") {
         println!("Usage: aws [OPTIONS] <SERVICE> <COMMAND> [PARAMETERS]");
         println!();
-        println!("The AWS Command Line Interface (SlateOS).");
+        println!("The AWS Command Line Interface (Slate OS).");
         println!();
         println!("Services:");
         println!("  s3           Amazon S3");

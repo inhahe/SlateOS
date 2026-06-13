@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_minitest(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: minitest [OPTIONS] [FILES]");
-        println!("Minitest 5.24.0 (SlateOS)");
+        println!("Minitest 5.24.0 (Slate OS)");
         println!();
         println!("Options:");
         println!("  -n, --name PATTERN   Run tests matching pattern");

@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sqsp(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: squarespace [OPTIONS]");
-        println!("Squarespace (SlateOS) — beautifully-designed website + commerce + scheduling + domains in one");
+        println!("Squarespace (Slate OS) — beautifully-designed website + commerce + scheduling + domains in one");
         println!();
         println!("Options:");
         println!("  --personal             Personal — $16/mo");
@@ -25,8 +25,8 @@ fn run_sqsp(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Squarespace 2024 (SlateOS)"); return 0; }
-    println!("Squarespace 2024 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Squarespace 2024 (Slate OS)"); return 0; }
+    println!("Squarespace 2024 (Slate OS)");
     println!("  Vendor: Squarespace Inc. (New York City — was NYSE:SQSP, taken private 2024)");
     println!("  Founders: Anthony Casalena, 2003");
     println!("          Casalena built first version in his University of Maryland dorm");

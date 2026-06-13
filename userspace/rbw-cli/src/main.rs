@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rbw(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: rbw COMMAND [OPTIONS]");
-        println!("rbw v1.9 (SlateOS) — Unofficial Bitwarden CLI");
+        println!("rbw v1.9 (Slate OS) — Unofficial Bitwarden CLI");
         println!();
         println!("Commands:");
         println!("  login             Log in to Bitwarden");
@@ -28,7 +28,7 @@ fn run_rbw(args: &[String], _prog: &str) -> i32 {
         println!("  remove NAME       Remove entry");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("rbw v1.9 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("rbw v1.9 (Slate OS)"); return 0; }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("list");
     match cmd {
         "list" => {
@@ -51,7 +51,7 @@ fn run_rbw(args: &[String], _prog: &str) -> i32 {
 fn run_agent(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: rbw-agent [OPTIONS]");
-        println!("rbw-agent v1.9 (SlateOS) — rbw background agent");
+        println!("rbw-agent v1.9 (Slate OS) — rbw background agent");
         return 0;
     }
     let _ = args;

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ntnx(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: nutanix [OPTIONS]");
-        println!("Nutanix Cloud Platform AOS 7.0 (SlateOS) — HCI + AHV hypervisor + DBaaS");
+        println!("Nutanix Cloud Platform AOS 7.0 (Slate OS) — HCI + AHV hypervisor + DBaaS");
         println!();
         println!("Options:");
         println!("  --prism                Prism (web UI + Prism Central multi-cluster)");
@@ -26,8 +26,8 @@ fn run_ntnx(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Nutanix AOS 7.0 / AHV 20230302.1019 / Prism Central pc.2024.3 (SlateOS)"); return 0; }
-    println!("Nutanix AOS 7.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Nutanix AOS 7.0 / AHV 20230302.1019 / Prism Central pc.2024.3 (Slate OS)"); return 0; }
+    println!("Nutanix AOS 7.0 (Slate OS)");
     println!("  Vendor: Nutanix Inc. (San Jose, CA; founded 2009; NASDAQ:NTNX)");
     println!("  Founders: Dheeraj Pandey, Mohit Aron (also Cohesity founder), Ajeet Singh");
     println!("  Category creator: hyperconverged infrastructure (HCI) — compute + storage in one node");

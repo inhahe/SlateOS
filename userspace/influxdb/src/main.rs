@@ -27,7 +27,7 @@ fn run_influxd(args: Vec<String>) -> i32 {
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("run");
     if cmd == "version" || args.iter().any(|a| a == "--version") {
-        println!("InfluxDB v2.7.6 (SlateOS) (git: abc1234)");
+        println!("InfluxDB v2.7.6 (Slate OS) (git: abc1234)");
         return 0;
     }
     if cmd == "inspect" {
@@ -78,7 +78,7 @@ fn run_influx_cli(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "version" => {
-            println!("Influx CLI v2.7.6 (SlateOS)");
+            println!("Influx CLI v2.7.6 (Slate OS)");
             0
         }
         "setup" => {

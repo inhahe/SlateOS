@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_lilypond(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: lilypond [OPTIONS] FILE.ly");
-        println!("GNU LilyPond 2.24.3 (SlateOS)");
+        println!("GNU LilyPond 2.24.3 (Slate OS)");
         println!("  -f, --format FMT   Output format (pdf, png, svg, ps)");
         println!("  -o, --output NAME  Output file base name");
         println!("  -d, --define KEY=VAL  Define Scheme variable");
@@ -24,7 +24,7 @@ fn run_lilypond(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("GNU LilyPond 2.24.3 (SlateOS)");
+        println!("GNU LilyPond 2.24.3 (Slate OS)");
         println!("Running Guile 3.0");
         return 0;
     }
@@ -56,7 +56,7 @@ fn run_lilypond_book(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("lilypond-book (GNU LilyPond) 2.24.3 (SlateOS)");
+        println!("lilypond-book (GNU LilyPond) 2.24.3 (Slate OS)");
         return 0;
     }
     let file = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("document.lytex");

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_lw(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lightwave [OPTIONS] [FILE]");
-        println!("LightWave 3D 2024 (SlateOS) — Modeler + Layout 3D suite");
+        println!("LightWave 3D 2024 (Slate OS) — Modeler + Layout 3D suite");
         println!();
         println!("Options:");
         println!("  --modeler             Launch Modeler");
@@ -24,8 +24,8 @@ fn run_lw(args: &[String], _prog: &str) -> i32 {
         println!("  --version             Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("LightWave 3D 2024.0.1 (SlateOS)"); return 0; }
-    println!("LightWave 3D 2024.0.1 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("LightWave 3D 2024.0.1 (Slate OS)"); return 0; }
+    println!("LightWave 3D 2024.0.1 (Slate OS)");
     println!("  Applications: Modeler, Layout");
     println!("  Renderer: VPR, F-Prime, Octane plug-in");
     println!("  Scripting: LScript, Python");

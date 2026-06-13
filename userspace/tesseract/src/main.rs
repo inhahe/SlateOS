@@ -32,7 +32,7 @@ fn run_tesseract(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("tesseract 5.3.4 (SlateOS)");
+        println!("tesseract 5.3.4 (Slate OS)");
         println!(" leptonica-1.84.1");
         println!("  libpng 1.6.43 : zlib 1.3.1 : libjpeg 9e : libtiff 4.6.0");
         println!(" Found AVX2");
@@ -57,7 +57,7 @@ fn run_tesseract(args: Vec<String>) -> i32 {
 
     match (input, output) {
         (Some(inp), Some(out)) => {
-            println!("Tesseract Open Source OCR Engine v5.3.4 (SlateOS) with Leptonica");
+            println!("Tesseract Open Source OCR Engine v5.3.4 (Slate OS) with Leptonica");
             println!("Language: {}", lang);
             println!("Processing: {} -> {}.txt", inp, out);
             println!("Estimating resolution as 300 ppi");

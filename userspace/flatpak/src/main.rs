@@ -1466,13 +1466,13 @@ fn cmd_config(args: &[String]) -> i32 {
 // ============================================================================
 
 fn print_version() {
-    println!("flatpak 1.0.0 (SlateOS)");
+    println!("flatpak 1.0.0 (Slate OS)");
 }
 
 fn print_help(prog: &str) {
     println!("Usage: {} COMMAND [OPTIONS]", prog);
     println!();
-    println!("Sandboxed application management for SlateOS");
+    println!("Sandboxed application management for Slate OS");
     println!();
     println!("Application commands:");
     println!("  install [REMOTE] REF      Install an application or runtime");

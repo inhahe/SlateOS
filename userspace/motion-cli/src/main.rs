@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_motion(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: motion [OPTIONS]");
-        println!("Apple Motion 5.7 (SlateOS) — Motion graphics + visual effects (FCP companion)");
+        println!("Apple Motion 5.7 (Slate OS) — Motion graphics + visual effects (FCP companion)");
         println!();
         println!("Options:");
         println!("  --new                  New project (motion graphic / Final Cut title/effect/transition/generator)");
@@ -24,8 +24,8 @@ fn run_motion(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Apple Motion 5.7.1 (SlateOS)"); return 0; }
-    println!("Apple Motion 5.7.1 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Apple Motion 5.7.1 (Slate OS)"); return 0; }
+    println!("Apple Motion 5.7.1 (Slate OS)");
     println!("  Vendor: Apple Inc. — companion app to Final Cut Pro");
     println!("  History: Motion 1.0 (2004) — built on the same Final Cut Studio engine,");
     println!("           since FCP X era sold separately at $49.99 one-time");

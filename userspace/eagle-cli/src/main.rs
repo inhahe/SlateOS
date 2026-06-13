@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_eagle(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: eagle [OPTIONS] [FILE.brd|FILE.sch]");
-        println!("eagle v9.6 (SlateOS) — PCB design and schematic editor");
+        println!("eagle v9.6 (Slate OS) — PCB design and schematic editor");
         println!();
         println!("Options:");
         println!("  --version         Show version");
@@ -25,7 +25,7 @@ fn run_eagle(args: &[String], _prog: &str) -> i32 {
         println!("  CAM               Manufacturing output");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("eagle v9.6 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("eagle v9.6 (Slate OS)"); return 0; }
     println!("eagle: PCB design editor started");
     println!("  Schematic: hierarchical sheet support");
     println!("  Board: 16 signal layers, autorouter");

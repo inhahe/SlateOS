@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_trino(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: trino [OPTIONS]");
-        println!("Trino (SlateOS) — open-source distributed SQL query engine (formerly PrestoSQL)");
+        println!("Trino (Slate OS) — open-source distributed SQL query engine (formerly PrestoSQL)");
         println!();
         println!("Options:");
         println!("  --start                Start Trino server (coordinator + workers)");
@@ -24,8 +24,8 @@ fn run_trino(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Trino 445 (SlateOS)"); return 0; }
-    println!("Trino 445 (SlateOS) — Open-source distributed SQL");
+    if args.iter().any(|a| a == "--version") { println!("Trino 445 (Slate OS)"); return 0; }
+    println!("Trino 445 (Slate OS) — Open-source distributed SQL");
     println!("  License: Apache 2.0 — fully open-source, no commercial dual-license");
     println!("  Governance: Trino Software Foundation (TSF) — 501(c)(3) nonprofit (since 2022)");
     println!("            board: Martin Traverso, Dain Sundstrom, David Phillips + community members");

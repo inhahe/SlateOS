@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wlsunset(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: wlsunset [OPTIONS]");
-        println!("wlsunset v0.4 (SlateOS) — Day/night gamma adjustments for Wayland");
+        println!("wlsunset v0.4 (Slate OS) — Day/night gamma adjustments for Wayland");
         println!();
         println!("Options:");
         println!("  -l LAT            Latitude");

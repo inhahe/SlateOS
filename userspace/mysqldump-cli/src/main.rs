@@ -11,7 +11,7 @@ fn run_mysqldump(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mysqldump [OPTIONS] DATABASE [TABLES]");
         println!();
-        println!("mysqldump — MySQL database backup tool (SlateOS).");
+        println!("mysqldump — MySQL database backup tool (Slate OS).");
         println!();
         println!("Options:");
         println!("  -h, --host HOST        Server host");
@@ -30,7 +30,7 @@ fn run_mysqldump(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("mysqldump  Ver 8.0.35 (SlateOS)");
+        println!("mysqldump  Ver 8.0.35 (Slate OS)");
         return 0;
     }
 
@@ -40,7 +40,7 @@ fn run_mysqldump(args: Vec<String>) -> i32 {
     let db = args.iter().find(|a| !a.starts_with('-'))
         .map(|s| s.as_str());
 
-    println!("-- MySQL dump 8.0.35 (SlateOS)");
+    println!("-- MySQL dump 8.0.35 (Slate OS)");
     println!("-- Host: localhost    Database: {}", db.unwrap_or("(all)"));
     println!("-- Server version  8.0.35");
     println!();

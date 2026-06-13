@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_dirvish(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: dirvish --vault NAME [OPTIONS]");
-        println!("dirvish v1.2 (SlateOS) — Rsync-based rotating backup");
+        println!("dirvish v1.2 (Slate OS) — Rsync-based rotating backup");
         println!();
         println!("Options:");
         println!("  --vault NAME   Backup vault name");
@@ -22,7 +22,7 @@ fn run_dirvish(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("dirvish v1.2 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("dirvish v1.2 (Slate OS)"); return 0; }
     println!("dirvish: creating backup image");
     println!("  Vault: default");
     println!("  Image: 2024-01-15_1200");
@@ -34,7 +34,7 @@ fn run_dirvish(args: &[String], _prog: &str) -> i32 {
 fn run_dirvish_runall(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: dirvish-runall [OPTIONS]");
-        println!("dirvish-runall v1.2 (SlateOS) — Run all configured vaults");
+        println!("dirvish-runall v1.2 (Slate OS) — Run all configured vaults");
         return 0;
     }
     let _ = args;
@@ -48,7 +48,7 @@ fn run_dirvish_runall(args: &[String], _prog: &str) -> i32 {
 fn run_dirvish_expire(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: dirvish-expire [OPTIONS]");
-        println!("dirvish-expire v1.2 (SlateOS) — Expire old backup images");
+        println!("dirvish-expire v1.2 (Slate OS) — Expire old backup images");
         return 0;
     }
     let _ = args;
@@ -61,7 +61,7 @@ fn run_dirvish_expire(args: &[String], _prog: &str) -> i32 {
 fn run_dirvish_locate(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: dirvish-locate <pattern>");
-        println!("dirvish-locate v1.2 (SlateOS) — Find files in backup history");
+        println!("dirvish-locate v1.2 (Slate OS) — Find files in backup history");
         return 0;
     }
     if let Some(pat) = args.first() {

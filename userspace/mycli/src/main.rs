@@ -11,7 +11,7 @@ fn run_mycli(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mycli [OPTIONS] [DATABASE]");
         println!();
-        println!("mycli — MySQL CLI with auto-completion and syntax highlighting (SlateOS).");
+        println!("mycli — MySQL CLI with auto-completion and syntax highlighting (Slate OS).");
         println!();
         println!("Options:");
         println!("  -h, --host HOST       Host name (default: localhost)");
@@ -25,7 +25,7 @@ fn run_mycli(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("mycli 1.27.0 (SlateOS)");
+        println!("mycli 1.27.0 (Slate OS)");
         return 0;
     }
 

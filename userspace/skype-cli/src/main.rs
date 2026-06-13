@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sk(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: skype [OPTIONS]");
-        println!("Skype (SlateOS) — Microsoft Skype consumer VoIP / video calls");
+        println!("Skype (Slate OS) — Microsoft Skype consumer VoIP / video calls");
         println!();
         println!("Options:");
         println!("  --call CONTACT         Place audio/video call");
@@ -23,8 +23,8 @@ fn run_sk(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Skype 8.130.0.207 (SlateOS)"); return 0; }
-    println!("Skype 8.130.0.207 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Skype 8.130.0.207 (Slate OS)"); return 0; }
+    println!("Skype 8.130.0.207 (Slate OS)");
     println!("  Owner: Microsoft (acquired May 2011 from eBay+silver lake/canada pension for $8.5B)");
     println!("  Founders: Niklas Zennstrom, Janus Friis (Estonian devs Ahti Heinla et al)");
     println!("  Founded: 2003 in Tallinn/Luxembourg — pioneered consumer P2P VoIP");

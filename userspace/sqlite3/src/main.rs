@@ -78,7 +78,7 @@ fn run_sqlite3(args: Vec<String>) -> i32 {
                 return 0;
             }
             "-version" | "--version" => {
-                println!("3.45.0 2025-05-22 (SlateOS)");
+                println!("3.45.0 2025-05-22 (Slate OS)");
                 return 0;
             }
             "-cmd" => {
@@ -100,7 +100,7 @@ fn run_sqlite3(args: Vec<String>) -> i32 {
 
     if commands.is_empty() {
         // Interactive mode
-        println!("SQLite version 3.45.0 (SlateOS)");
+        println!("SQLite version 3.45.0 (Slate OS)");
         println!("Enter \".help\" for usage hints.");
         if db == ":memory:" {
             println!("Connected to a transient in-memory database.");

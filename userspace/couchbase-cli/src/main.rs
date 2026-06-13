@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_cb(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: couchbase [OPTIONS] [SUBCMD]");
-        println!("Couchbase Server 7.6 Enterprise (SlateOS) — Distributed JSON document DB");
+        println!("Couchbase Server 7.6 Enterprise (Slate OS) — Distributed JSON document DB");
         println!();
         println!("Options:");
         println!("  -c HOST:PORT           Cluster endpoint");
@@ -24,8 +24,8 @@ fn run_cb(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Couchbase Server 7.6.2 Enterprise Edition (SlateOS)"); return 0; }
-    println!("Couchbase Server 7.6.2 Enterprise Edition (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Couchbase Server 7.6.2 Enterprise Edition (Slate OS)"); return 0; }
+    println!("Couchbase Server 7.6.2 Enterprise Edition (Slate OS)");
     println!("  Data model: JSON documents with N1QL (SQL for JSON) query language");
     println!("  Services: Data, Query, Index, Search (FTS), Analytics, Eventing, Backup");
     println!("  Memory-first: integrated managed cache (Memcached-derived)");

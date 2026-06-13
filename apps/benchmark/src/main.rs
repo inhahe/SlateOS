@@ -140,19 +140,19 @@ pub struct HardwareInfo {
 impl Default for HardwareInfo {
     fn default() -> Self {
         Self {
-            cpu_model: "SlateOS Virtual CPU @ 3.6 GHz".into(),
+            cpu_model: "Slate OS Virtual CPU @ 3.6 GHz".into(),
             cpu_cores: 4,
             cpu_threads: 8,
             cpu_freq_mhz: 3600,
             ram_total_mb: 8192,
             ram_type: "DDR4".into(),
             ram_speed_mhz: 3200,
-            disk_model: "SlateOS VirtIO Block Device".into(),
+            disk_model: "Slate OS VirtIO Block Device".into(),
             disk_capacity_gb: 256,
             disk_interface: "NVMe".into(),
-            gpu_model: "SlateOS VirtIO GPU".into(),
+            gpu_model: "Slate OS VirtIO GPU".into(),
             gpu_vram_mb: 256,
-            os_version: "SlateOS 0.1.0".into(),
+            os_version: "Slate OS 0.1.0".into(),
         }
     }
 }
@@ -317,7 +317,7 @@ impl BenchmarkResult {
     pub fn to_text_report(&self) -> String {
         let mut out = String::with_capacity(2048);
         out.push_str("========================================\n");
-        out.push_str("     SlateOS System Benchmark Report\n");
+        out.push_str("     Slate OS System Benchmark Report\n");
         out.push_str("========================================\n\n");
         out.push_str(&self.hardware.to_text());
         out.push('\n');
@@ -479,7 +479,7 @@ impl BenchmarkHistory {
     /// Export all runs as a text report.
     pub fn export_as_text(&self) -> String {
         let mut out = String::with_capacity(4096);
-        out.push_str("SlateOS Benchmark History\n");
+        out.push_str("Slate OS Benchmark History\n");
         out.push_str("=======================\n\n");
         if self.runs.is_empty() {
             out.push_str("No benchmark runs recorded.\n");
@@ -1429,7 +1429,7 @@ impl BenchmarkApp {
         tree.push(RenderCommand::Text {
             x: 16.0,
             y: 12.0,
-            text: "SlateOS System Benchmark".into(),
+            text: "Slate OS System Benchmark".into(),
             font_size: 16.0,
             color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
@@ -2559,7 +2559,7 @@ mod tests {
     fn benchmark_result_to_text_report_contains_sections() {
         let result = make_test_result(5000.0, 4000.0, 3000.0, 2000.0);
         let report = result.to_text_report();
-        assert!(report.contains("SlateOS System Benchmark Report"));
+        assert!(report.contains("Slate OS System Benchmark Report"));
         assert!(report.contains("Overall Score"));
         assert!(report.contains("CPU"));
         assert!(report.contains("Memory"));
@@ -3083,7 +3083,7 @@ mod tests {
         let mut app = BenchmarkApp::new();
         app.run_benchmark();
         let report = app.export_report();
-        assert!(report.contains("SlateOS System Benchmark Report"));
+        assert!(report.contains("Slate OS System Benchmark Report"));
         assert!(report.contains("CPU"));
     }
 

@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_massive(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: massive [OPTIONS] [PRESET]");
-        println!("NI Massive X 1.5 (SlateOS) — Next-generation wavetable synthesizer");
+        println!("NI Massive X 1.5 (Slate OS) — Next-generation wavetable synthesizer");
         println!();
         println!("Options:");
         println!("  --load FILE            Load .nmsv preset");
@@ -22,8 +22,8 @@ fn run_massive(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("NI Massive X 1.5.0 (SlateOS)"); return 0; }
-    println!("NI Massive X 1.5.0 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("NI Massive X 1.5.0 (Slate OS)"); return 0; }
+    println!("NI Massive X 1.5.0 (Slate OS)");
     println!("  Oscillators: 2 wavetable, 9 phase modes, 10 wavetable modes");
     println!("  Filters: Stereo routing matrix, dual filters");
     println!("  Modulation: Performer, Tracker, LFO, ENV (5 each), 4 macros");

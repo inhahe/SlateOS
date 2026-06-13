@@ -134,7 +134,7 @@ fn main() {
     let rest: Vec<String> = args.into_iter().skip(1).collect();
 
     if rest.iter().any(|a| a == "-V" || a == "--version") {
-        println!("woff2 1.0.2 (SlateOS)");
+        println!("woff2 1.0.2 (Slate OS)");
         process::exit(0);
     }
 

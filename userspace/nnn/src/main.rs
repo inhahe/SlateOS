@@ -50,7 +50,7 @@ fn run_nnn(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V") {
-        println!("nnn 4.9 (SlateOS)");
+        println!("nnn 4.9 (Slate OS)");
         return 0;
     }
 

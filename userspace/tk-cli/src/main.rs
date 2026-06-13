@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wish(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wish [OPTIONS] [FILE [ARG ...]]");
-        println!("Tk 8.6.14 (SlateOS)");
+        println!("Tk 8.6.14 (Slate OS)");
         println!("  -display DISP  X display to use");
         println!("  -geometry GEO  Window geometry");
         println!("  -name NAME     Application name");

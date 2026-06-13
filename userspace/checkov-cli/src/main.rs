@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_checkov(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: checkov [OPTIONS]");
-        println!("Checkov 3.2.0 (SlateOS) — Infrastructure as Code scanner");
+        println!("Checkov 3.2.0 (Slate OS) — Infrastructure as Code scanner");
         println!();
         println!("Options:");
         println!("  -d, --directory DIR    Directory to scan");

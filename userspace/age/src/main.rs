@@ -95,7 +95,7 @@ fn run_age(args: Vec<String>) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("age v0.1.0 (SlateOS)");
+                println!("age v0.1.0 (Slate OS)");
                 return 0;
             }
             "-e" | "--encrypt" => opts.action = Action::Encrypt,
@@ -201,7 +201,7 @@ fn run_age_keygen(args: Vec<String>) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("age-keygen v0.1.0 (SlateOS)");
+                println!("age-keygen v0.1.0 (Slate OS)");
                 return 0;
             }
             "-o" | "--output" => {

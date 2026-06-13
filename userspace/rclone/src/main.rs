@@ -56,7 +56,7 @@ fn run_rclone(args: Vec<String>) -> i32 {
             println!("  --version   Show version");
             0
         }
-        "--version" | "version" => { println!("rclone v0.1.0 (SlateOS)"); 0 }
+        "--version" | "version" => { println!("rclone v0.1.0 (Slate OS)"); 0 }
         "copy" | "sync" | "move" => {
             let dry_run = cmd_args.iter().any(|a| a == "--dry-run" || a == "-n");
             let verbose = cmd_args.iter().any(|a| a == "-v" || a == "--verbose");

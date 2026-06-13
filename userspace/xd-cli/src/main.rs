@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_xd(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: xd [OPTIONS]");
-        println!("Adobe XD CC 57.1 (SlateOS) — UX/UI design + prototype (maintenance mode)");
+        println!("Adobe XD CC 57.1 (Slate OS) — UX/UI design + prototype (maintenance mode)");
         println!();
         println!("Options:");
         println!("  --new                  New artboard set");
@@ -24,8 +24,8 @@ fn run_xd(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Adobe XD 57.1.12.2 (SlateOS)"); return 0; }
-    println!("Adobe XD 57.1.12.2 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Adobe XD 57.1.12.2 (Slate OS)"); return 0; }
+    println!("Adobe XD 57.1.12.2 (Slate OS)");
     println!("  Vendor: Adobe Inc. (San Jose, CA)");
     println!("  Status: MAINTENANCE MODE since 2023 — no new features, security/critical fixes only");
     println!("  Reason: Adobe announced $20B Figma acquisition Sep 2022 → blocked Dec 2023 EU/UK antitrust");

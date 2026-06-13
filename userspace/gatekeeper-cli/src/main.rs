@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gatekeeper(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: gatekeeper COMMAND [OPTIONS]");
-        println!("Gatekeeper v3.16.0 (SlateOS) — OPA Gatekeeper policy tool");
+        println!("Gatekeeper v3.16.0 (Slate OS) — OPA Gatekeeper policy tool");
         println!();
         println!("Commands:");
         println!("  test            Test constraints against resources");
@@ -31,7 +31,7 @@ fn run_gatekeeper(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("Gatekeeper v3.16.0 (SlateOS)");
+        println!("Gatekeeper v3.16.0 (Slate OS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("test");

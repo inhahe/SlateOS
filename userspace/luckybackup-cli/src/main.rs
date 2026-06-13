@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_luckybackup(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: luckybackup [OPTIONS] [PROFILE]");
-        println!("luckybackup v0.5 (SlateOS) — Rsync-based backup & sync tool");
+        println!("luckybackup v0.5 (Slate OS) — Rsync-based backup & sync tool");
         println!();
         println!("Options:");
         println!("  --skip-critical  Skip critical question");
@@ -24,7 +24,7 @@ fn run_luckybackup(args: &[String], _prog: &str) -> i32 {
         println!("Features: sync, backup with snapshots, scheduling");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("luckybackup v0.5 (SlateOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("luckybackup v0.5 (Slate OS)"); return 0; }
     if args.iter().any(|a| a == "--dry-run") {
         println!("luckybackup: dry run (simulation)");
         println!("  Profile: default");

@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ecwid(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ecwid [OPTIONS]");
-        println!("Ecwid by Lightspeed (SlateOS) — embeddable e-commerce store you can drop into any existing site");
+        println!("Ecwid by Lightspeed (Slate OS) — embeddable e-commerce store you can drop into any existing site");
         println!();
         println!("Options:");
         println!("  --free                 Free — up to 5 products, basic features");
@@ -24,8 +24,8 @@ fn run_ecwid(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Ecwid by Lightspeed 2024 (SlateOS)"); return 0; }
-    println!("Ecwid by Lightspeed 2024 (SlateOS)");
+    if args.iter().any(|a| a == "--version") { println!("Ecwid by Lightspeed 2024 (Slate OS)"); return 0; }
+    println!("Ecwid by Lightspeed 2024 (Slate OS)");
     println!("  Vendor: Lightspeed Commerce Inc. (Montreal, Canada — NYSE/TSX:LSPD)");
     println!("  Original: Ecwid Inc. (Ulyanovsk, Russia / Encinitas CA — founded 2009 by Ruslan Fazlyev)");
     println!("  Acquired: by Lightspeed for $500M (mix cash+stock), closed Aug 2021");

@@ -6498,13 +6498,19 @@ fn alsa_pcm_ioctl(entry: &FdEntry, request: u32, argp: u64) -> SyscallResult {
         }
         alsa::SNDRV_PCM_IOCTL_SW_PARAMS => {
             // Accept software parameters unchanged: our fixed pipeline imposes
-            // no extra constraints, so we echo the client's request back.
+            // no extra constraints, so we echo the client's request back — but
+            // record the boundary + avail_min, which drive SYNC_PTR reporting.
             let swp = match read_user_struct::<alsa::SndPcmSwParams>(argp) {
                 Ok(v) => v,
                 Err(e) => return linux_err(e),
             };
-            if !crate::ipc::alsa_pcm::exists(h) {
-                return linux_err(errno::EBADF);
+            if let Err(e) =
+                crate::ipc::alsa_pcm::set_sw_params(h, swp.boundary, swp.avail_min)
+            {
+                return match e {
+                    KernelError::InvalidHandle => linux_err(errno::EBADF),
+                    _ => linux_err(errno::EINVAL),
+                };
             }
             match write_user_struct(argp, &swp) {
                 Ok(()) => SyscallResult::ok(0),
@@ -6523,6 +6529,8 @@ fn alsa_pcm_ioctl(entry: &FdEntry, request: u32, argp: u64) -> SyscallResult {
             map(crate::ipc::alsa_pcm::pause(h, argp != 0))
         }
         alsa::SNDRV_PCM_IOCTL_WRITEI_FRAMES => alsa_pcm_ioctl_writei(entry, argp),
+        alsa::SNDRV_PCM_IOCTL_READI_FRAMES => alsa_pcm_ioctl_readi(entry, argp),
+        alsa::SNDRV_PCM_IOCTL_SYNC_PTR => alsa_pcm_ioctl_sync_ptr(entry, argp),
         // HWSYNC / RESUME / XRUN / LINK / UNLINK / TTSTAMP: position-sync and
         // link operations that are no-ops on our software pipeline.  Accept
         // them so clients that issue them during teardown do not error.
@@ -6537,10 +6545,13 @@ fn alsa_pcm_ioctl(entry: &FdEntry, request: u32, argp: u64) -> SyscallResult {
                 linux_err(errno::EBADF)
             }
         }
-        // STATUS / SYNC_PTR / READI_FRAMES position reporting is not yet wired
-        // (the appl/hw-pointer accounting and its boundary handling land in the
-        // next commit); report ENOTTY so a client falls back rather than
-        // trusting bogus position data.
+        // STATUS / STATUS_EXT remain unwired: their `snd_pcm_status` payload
+        // embeds bare `struct timespec`s, so its size (and thus the ioctl
+        // request number) depends on the time64-vs-legacy-timespec ABI.  A
+        // client that wants the hardware pointer uses SYNC_PTR (handled above,
+        // and timestamp-ABI-independent thanks to its 64-byte union pages);
+        // STATUS is a convenience overlay we add once the timespec layout is
+        // pinned down.  Report ENOTTY so the client falls back to SYNC_PTR.
         _ => linux_err(errno::ENOTTY),
     }
 }
@@ -6626,6 +6637,104 @@ fn alsa_pcm_ioctl_writei(entry: &FdEntry, argp: u64) -> SyscallResult {
         Err(crate::error::KernelError::WouldBlock) => linux_err(errno::EAGAIN),
         Err(crate::error::KernelError::InvalidHandle) => linux_err(errno::EBADF),
         Err(_) => linux_err(errno::EINVAL),
+    }
+}
+
+/// `SNDRV_PCM_IOCTL_READI_FRAMES` — read interleaved capture frames whose user
+/// buffer pointer and frame count are carried in a `snd_xferi`.
+///
+/// The mixer is output-only, so a capture substream delivers synthesised
+/// silence: the user buffer is zero-filled and the full requested frame count
+/// is reported.
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+fn alsa_pcm_ioctl_readi(entry: &FdEntry, argp: u64) -> SyscallResult {
+    use crate::audio_alsa as alsa;
+    let h = crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(entry.raw_handle);
+    let mut xfer = match read_user_struct::<alsa::SndXferi>(argp) {
+        Ok(v) => v,
+        Err(e) => return linux_err(e),
+    };
+
+    // bytes = frames * 4 (native S16_LE stereo frame), bounded so the kernel
+    // buffer is bounded; whole-frame aligned by construction.
+    const RING_CAP: usize = 16384;
+    const FRAME_BYTES: u64 = 4;
+    let req_bytes = xfer.frames.saturating_mul(FRAME_BYTES);
+    let want = req_bytes.min(RING_CAP as u64) as usize;
+
+    if want > 0 {
+        if crate::mm::user::validate_user_write(xfer.buf, want).is_err() {
+            return linux_err(errno::EFAULT);
+        }
+        let mut kbuf = alloc::vec![0u8; want];
+        // Fill `kbuf` with silence (and validate this is a live capture fd).
+        match crate::ipc::alsa_pcm::read_frames(h, &mut kbuf) {
+            Ok(_) => {}
+            Err(crate::error::KernelError::InvalidHandle) => return linux_err(errno::EBADF),
+            Err(_) => return linux_err(errno::EINVAL),
+        }
+        // SAFETY: `kbuf` is a kernel buffer of exactly `want` bytes; the user
+        // range was validated writable just above and `copy_to_user` re-checks
+        // it and handles SMAP.
+        if unsafe { crate::mm::user::copy_to_user(kbuf.as_ptr(), xfer.buf, want) }.is_err() {
+            return linux_err(errno::EFAULT);
+        }
+    } else if !crate::ipc::alsa_pcm::readable(h) {
+        // A zero-frame read still validates direction so a playback/stale fd
+        // is rejected rather than silently "succeeding".
+        return linux_err(errno::EINVAL);
+    }
+
+    xfer.result = want
+        .checked_div(crate::audio_mixer::FRAME_SIZE_BYTES)
+        .unwrap_or(0) as i64;
+    match write_user_struct(argp, &xfer) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(e),
+    }
+}
+
+/// `SNDRV_PCM_IOCTL_SYNC_PTR` — exchange the application and hardware pointers.
+///
+/// Pulls the current hardware pointer (frames the mixer has consumed) and,
+/// depending on the request flags, either adopts the application pointer /
+/// `avail_min` the client pushes or returns the kernel's own values.  The
+/// status/control pages sit in 64-byte unions, so the payload size is
+/// independent of the timestamp ABI and matches real ALSA-lib byte-for-byte.
+fn alsa_pcm_ioctl_sync_ptr(entry: &FdEntry, argp: u64) -> SyscallResult {
+    use crate::audio_alsa as alsa;
+    let h = crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(entry.raw_handle);
+    let mut sp = match read_user_struct::<alsa::SndPcmSyncPtr>(argp) {
+        Ok(v) => v,
+        Err(e) => return linux_err(e),
+    };
+
+    // When the corresponding flag is *clear*, the client is pushing its value
+    // to the kernel; when set, it wants the kernel's value back.
+    if sp.flags & alsa::SNDRV_PCM_SYNC_PTR_APPL == 0 {
+        crate::ipc::alsa_pcm::set_appl_ptr(h, sp.control.appl_ptr);
+    }
+    if sp.flags & alsa::SNDRV_PCM_SYNC_PTR_AVAIL_MIN == 0 {
+        crate::ipc::alsa_pcm::set_avail_min(h, sp.control.avail_min);
+    }
+
+    let pos = match crate::ipc::alsa_pcm::sync_position(h) {
+        Some(p) => p,
+        None => return linux_err(errno::EBADF),
+    };
+
+    #[allow(clippy::cast_possible_wrap)]
+    {
+        sp.status.state = pos.state as i32;
+    }
+    sp.status.hw_ptr = pos.hw_ptr;
+    sp.status.suspended_state = sp.status.state;
+    sp.control.appl_ptr = pos.appl_ptr;
+    sp.control.avail_min = pos.avail_min;
+
+    match write_user_struct(argp, &sp) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(e),
     }
 }
 

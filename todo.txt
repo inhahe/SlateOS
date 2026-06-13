@@ -51,11 +51,25 @@
 ##       alignment assumption) + write_cstr_field. Built clean, clippy 17462, BOOT_OK; the alsa_pcm
 ##       boot self-test now drives the full state machine (hw_params/prepare/write/pause/drain/start/drop/
 ##       hw_free + capture) and PASSES.
-##       [DEFERRED to commit 4b] STATUS / SYNC_PTR / READI_FRAMES position reporting returns ENOTTY for
-##       now. Proper hw_ptr/appl_ptr accounting needs the boundary stored from SW_PARAMS and a byte-exact
-##       snd_pcm_sync_ptr / snd_pcm_mmap_{status,control} layout (the time64 vs legacy-timespec variants
-##       flagged in commit 2's note). Without SYNC_PTR a real ALSA-lib client cannot run end-to-end, but
-##       there is no ALSA-lib in QEMU yet to test against — the state machine itself is fully self-tested.
+##   [DONE commit 4b] SYNC_PTR + READI_FRAMES position reporting. PcmStream gained boundary + avail_min
+##       (stored by set_sw_params, called from the SW_PARAMS ioctl); sync_position(handle) returns a
+##       PcmPosition { state, hw_ptr, appl_ptr, avail_min } with appl_ptr = frames submitted and
+##       hw_ptr = appl_ptr - mixer-buffered frames, both reduced modulo boundary (leaf-lock-safe: the
+##       mixer buffered() call is made after the table lock is dropped). set_appl_ptr/set_avail_min adopt
+##       the values a client pushes via SYNC_PTR's !APPL/!AVAIL_MIN flags. read_frames() zero-fills a
+##       capture buffer. audio_alsa.rs gained byte-exact snd_pcm_mmap_status (56) / snd_pcm_mmap_control
+##       (16) / snd_pcm_sync_ptr (136, status+control each in a 64-byte union so the size is timestamp-ABI
+##       independent) + the SYNC_PTR ioctl number (0xC0884123) + SYNC_PTR_HWSYNC/APPL/AVAIL_MIN flags, all
+##       size-asserted in the ABI self-test. syscall/linux.rs: alsa_pcm_ioctl routes SYNC_PTR ->
+##       alsa_pcm_ioctl_sync_ptr (push/pull appl_ptr+avail_min per flags, fill state+hw_ptr) and
+##       READI_FRAMES -> alsa_pcm_ioctl_readi (validate capture, copy out silence); SW_PARAMS now stores the
+##       boundary/avail_min instead of only echoing. Built clean, clippy 17462, BOOT_OK; the alsa_pcm
+##       self-test now also checks the SYNC_PTR snapshot (appl=2/hw=0), appl_ptr/avail_min push-adopt, and
+##       capture silence read.
+##       [DEFERRED to commit 4c] STATUS / STATUS_EXT still return ENOTTY. Unlike SYNC_PTR, snd_pcm_status
+##       embeds bare struct timespecs directly (not in a padded union), so its sizeof — and the ioctl number
+##       — depends on the time64 vs legacy-timespec ABI. It is a convenience overlay (ALSA-lib gets the
+##       pointers from SYNC_PTR), so deferring it does not block the playback hot path. See known-issues TD10.
 ##       Also note: only RW_INTERLEAVED access is advertised (mmap-based clients unsupported); non-native
 ##       formats/rates are rejected rather than converted (resampling/format conversion is future work).
 ##   [TODO commit 5] control device (controlC0): SNDRV_CTL_IOCTL_PVERSION/CARD_INFO/ELEM_* enough for

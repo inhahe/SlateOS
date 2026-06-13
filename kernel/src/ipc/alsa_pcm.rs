@@ -146,9 +146,16 @@ struct PcmStream {
     /// `None` in the `OPEN` / freed state.
     mixer_stream: Option<StreamId>,
     /// Total frames the application has submitted since the last `PREPARE`
-    /// (the ALSA `appl_ptr` hardware pointer, modulo the boundary).  Used by
-    /// `STATUS` / `SYNC_PTR` reporting in a later commit.
+    /// (the ALSA `appl_ptr` application pointer, before the boundary reduction
+    /// `SYNC_PTR` reporting applies).
     frames_written: u64,
+    /// Pointer wrap-around boundary from `SW_PARAMS` (a large multiple of the
+    /// buffer size).  `0` means "not set yet"; the position reporting then
+    /// returns the raw counters without a modular reduction.
+    boundary: u64,
+    /// Minimum available frames for a poll wakeup, from `SW_PARAMS`.  Stored so
+    /// `SYNC_PTR` can echo it back to the client; we wake on any space today.
+    avail_min: u64,
     /// Reference count: `create` = 1, each `dup` +1, each `close` −1.
     refcount: u32,
 }
@@ -163,9 +170,28 @@ impl PcmStream {
             channels: None,
             mixer_stream: None,
             frames_written: 0,
+            boundary: 0,
+            avail_min: 0,
             refcount: 1,
         }
     }
+}
+
+/// A position snapshot for `SYNC_PTR` / `STATUS` reporting.
+///
+/// All pointers are already reduced modulo the substream's boundary (or left
+/// raw if no boundary has been set via `SW_PARAMS`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PcmPosition {
+    /// Current `STATE_*` state-machine state.
+    pub state: u32,
+    /// Hardware pointer: frames the mixer has already consumed (`appl_ptr`
+    /// minus the frames still queued in the mixer ring).
+    pub hw_ptr: u64,
+    /// Application pointer: total frames the app has submitted.
+    pub appl_ptr: u64,
+    /// Minimum available frames for a wakeup (echoed from `SW_PARAMS`).
+    pub avail_min: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -524,6 +550,105 @@ pub fn reset(handle: AlsaPcmHandle) -> KernelResult<()> {
     Ok(())
 }
 
+/// Record the software parameters that affect position reporting (`SW_PARAMS`):
+/// the pointer wrap-around `boundary` and the `avail_min` wakeup threshold.
+///
+/// Our fixed pipeline imposes no other software-parameter constraints, so the
+/// remaining fields (thresholds, silence) are accepted and echoed unchanged by
+/// the syscall layer; only these two influence the `SYNC_PTR` reply.
+///
+/// # Errors
+///
+/// [`KernelError::InvalidHandle`] if the instance is stale.
+pub fn set_sw_params(handle: AlsaPcmHandle, boundary: u64, avail_min: u64) -> KernelResult<()> {
+    let mut table = ALSA_PCM_TABLE.lock();
+    let pcm = table.get_mut(&handle.id()).ok_or(KernelError::InvalidHandle)?;
+    pcm.boundary = boundary;
+    pcm.avail_min = avail_min;
+    Ok(())
+}
+
+/// Adopt an application pointer pushed by `SYNC_PTR` (the `!APPL` case, where
+/// the client tells the kernel its current `appl_ptr`).
+///
+/// A stale handle is ignored — the caller has already validated existence via
+/// [`sync_position`] (which returns `None` for a dead instance).
+pub fn set_appl_ptr(handle: AlsaPcmHandle, appl_ptr: u64) {
+    if let Some(pcm) = ALSA_PCM_TABLE.lock().get_mut(&handle.id()) {
+        pcm.frames_written = appl_ptr;
+    }
+}
+
+/// Adopt an `avail_min` pushed by `SYNC_PTR` (the `!AVAIL_MIN` case).
+pub fn set_avail_min(handle: AlsaPcmHandle, avail_min: u64) {
+    if let Some(pcm) = ALSA_PCM_TABLE.lock().get_mut(&handle.id()) {
+        pcm.avail_min = avail_min;
+    }
+}
+
+/// Snapshot the substream position for `SYNC_PTR` / `STATUS` reporting.
+///
+/// Computes the hardware pointer (frames the mixer has consumed) as the
+/// application pointer minus the frames still queued in the mixer ring, and
+/// reduces both pointers modulo the substream's boundary.  Returns `None` for a
+/// stale handle.
+///
+/// Lock discipline: the per-open fields are read under the table lock, the lock
+/// is dropped, and *then* the mixer's buffered-frame count is queried — so no
+/// mixer call is made while `ALSA_PCM_TABLE` is held.
+#[must_use]
+pub fn sync_position(handle: AlsaPcmHandle) -> Option<PcmPosition> {
+    let (state, frames_written, boundary, avail_min, mixer_stream) = {
+        let table = ALSA_PCM_TABLE.lock();
+        let pcm = table.get(&handle.id())?;
+        (
+            pcm.state,
+            pcm.frames_written,
+            pcm.boundary,
+            pcm.avail_min,
+            pcm.mixer_stream,
+        )
+    };
+
+    // Frames still queued in the mixer ring (not yet played) — fetched with the
+    // table lock released to preserve the leaf-lock invariant.
+    let buffered_frames = match mixer_stream {
+        Some(sid) => (audio_mixer::buffered(sid))
+            .checked_div(audio_mixer::FRAME_SIZE_BYTES)
+            .unwrap_or(0) as u64,
+        None => 0,
+    };
+    let hw_abs = frames_written.saturating_sub(buffered_frames);
+
+    // Reduce modulo the boundary; a zero boundary (not yet set) means "report
+    // the raw counter".  `checked_rem` returns `None` on a zero divisor.
+    let reduce = |v: u64| v.checked_rem(boundary).unwrap_or(v);
+    Some(PcmPosition {
+        state,
+        hw_ptr: reduce(hw_abs),
+        appl_ptr: reduce(frames_written),
+        avail_min,
+    })
+}
+
+/// Produce capture (record) frames into `dst` (`READI_FRAMES` / `read(2)`).
+///
+/// The mixer is output-only, so a capture substream reads synthesised silence:
+/// `dst` is zero-filled.  Returns the number of **bytes** produced (always all
+/// of `dst` for a live capture instance).
+///
+/// # Errors
+///
+/// [`KernelError::InvalidArgument`] if this is not a live capture substream
+/// (a playback substream or a stale handle).
+pub fn read_frames(handle: AlsaPcmHandle, dst: &mut [u8]) -> KernelResult<usize> {
+    if !readable(handle) {
+        return Err(KernelError::InvalidArgument);
+    }
+    dst.fill(0);
+    Ok(dst.len())
+}
+
 /// Submit interleaved playback frames (`WRITEI_FRAMES` / `write(2)`).
 ///
 /// `data` is native-format PCM (S16_LE stereo at 48 kHz, 4 bytes/frame) already
@@ -664,6 +789,29 @@ pub fn self_test() -> KernelResult<()> {
     check!(frames_written(p) == Some(2), "appl ptr advanced by 2 frames");
     check!(writable(p), "running playback is writable");
     check!(!readable(p), "playback is not readable");
+    // SW_PARAMS records the boundary + avail_min for SYNC_PTR reporting.
+    set_sw_params(p, 1 << 20, 64)?;
+    // SYNC_PTR snapshot: 2 frames submitted; the mixer pull thread does not run
+    // during the boot self-test, so all 2 are still ring-buffered and the
+    // hardware pointer has not advanced (hw_ptr = appl_ptr - buffered = 0).
+    check!(
+        sync_position(p)
+            == Some(PcmPosition {
+                state: STATE_RUNNING,
+                hw_ptr: 0,
+                appl_ptr: 2,
+                avail_min: 64,
+            }),
+        "sync position snapshot (appl=2, hw=0)"
+    );
+    // A pushed application pointer is adopted (the !APPL SYNC_PTR case).
+    set_appl_ptr(p, 7);
+    check!(frames_written(p) == Some(7), "set_appl_ptr adopted");
+    set_avail_min(p, 128);
+    check!(
+        sync_position(p).map(|pp| pp.avail_min) == Some(128),
+        "set_avail_min adopted"
+    );
     // PAUSE / resume round-trip.
     pause(p, true)?;
     check!(state(p) == Some(STATE_PAUSED), "pause -> PAUSED");
@@ -702,6 +850,15 @@ pub fn self_test() -> KernelResult<()> {
     check!(
         write_frames(cap, &frame) == Err(KernelError::InvalidArgument),
         "write to capture errors"
+    );
+    // READI_FRAMES on a capture substream yields silence (mixer is output-only).
+    let mut rbuf = [0xAAu8; 8];
+    check!(read_frames(cap, &mut rbuf) == Ok(8), "capture read produces full buffer");
+    check!(rbuf == [0u8; 8], "capture read is silence");
+    // A read on the (now-stale) playback handle is rejected.
+    check!(
+        read_frames(p, &mut rbuf) == Err(KernelError::InvalidArgument),
+        "read on a non-capture/stale handle errors"
     );
     close(cap);
 

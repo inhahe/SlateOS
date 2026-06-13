@@ -374,6 +374,80 @@ pub struct SndPcmInfo {
     pub reserved: [u8; 64],
 }
 
+/// `struct snd_pcm_mmap_status` — the read-only status page ALSA exposes for a
+/// substream: the current state, the hardware pointer, and reference
+/// timestamps (56 bytes on a 64-bit target).
+///
+/// Only `state` and `hw_ptr` are meaningful to us; the timestamps are zeroed
+/// (we do not yet drive a monotonic audio clock).  The struct is always
+/// embedded in a 64-byte union inside [`SndPcmSyncPtr`], so its exact tail
+/// layout never affects an ioctl request number — but we mirror it faithfully
+/// so a future status-timestamp implementation drops in without an ABI change.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SndPcmMmapStatus {
+    /// `SNDRV_PCM_STATE_*` (RO).
+    pub state: i32,
+    /// Padding for 64-bit alignment of `hw_ptr`.
+    pub pad1: i32,
+    /// Hardware pointer, `0..boundary` (RO) — frames the device has consumed.
+    pub hw_ptr: SndPcmUframes,
+    /// Reference timestamp (`struct timespec`: 2 × 64-bit on this target).
+    pub tstamp: [u64; 2],
+    /// Suspended-stream state (RO).
+    pub suspended_state: i32,
+    /// Padding for 64-bit alignment of `audio_tstamp`.
+    pub pad2: i32,
+    /// Audio timestamp (`struct timespec`).
+    pub audio_tstamp: [u64; 2],
+}
+
+/// `struct snd_pcm_mmap_control` — the read/write control page: the
+/// application pointer and the wakeup threshold (16 bytes).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SndPcmMmapControl {
+    /// Application pointer, `0..boundary` (RW) — frames the app has submitted.
+    pub appl_ptr: SndPcmUframes,
+    /// Minimum available frames for a poll wakeup (RW).
+    pub avail_min: SndPcmUframes,
+}
+
+/// `struct snd_pcm_sync_ptr` — the `SYNC_PTR` payload: a flags word plus the
+/// status and control pages, each padded out to a 64-byte union (136 bytes).
+///
+/// ALSA-lib's kernel-backed PCM plugin issues this ioctl on every period to
+/// pull the hardware pointer and push/pull the application pointer when it
+/// cannot mmap the status/control pages directly (our case — we do not export
+/// those pages).  Because both pages sit in a `union { …; unsigned char
+/// reserved[64]; }`, the overall size is independent of the timestamp ABI, so
+/// this layout is byte-exact on every 64-bit target.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SndPcmSyncPtr {
+    /// `SNDRV_PCM_SYNC_PTR_*` request flags.
+    pub flags: u32,
+    /// Padding to 8-byte-align the status union.
+    pub pad: u32,
+    /// `union s`: the status page (RO fields filled by the kernel).
+    pub status: SndPcmMmapStatus,
+    /// Tail padding of `union s` to a full 64 bytes.
+    pub status_pad: [u8; 8],
+    /// `union c`: the control page (RW appl_ptr / avail_min).
+    pub control: SndPcmMmapControl,
+    /// Tail padding of `union c` to a full 64 bytes.
+    pub control_pad: [u8; 48],
+}
+
+/// `SYNC_PTR` flag: execute a hardware-pointer sync before reading.
+pub const SNDRV_PCM_SYNC_PTR_HWSYNC: u32 = 1 << 0;
+/// `SYNC_PTR` flag: return the kernel's `appl_ptr` instead of adopting the
+/// caller's (a read of the application pointer rather than a push).
+pub const SNDRV_PCM_SYNC_PTR_APPL: u32 = 1 << 1;
+/// `SYNC_PTR` flag: return the kernel's `avail_min` instead of adopting the
+/// caller's.
+pub const SNDRV_PCM_SYNC_PTR_AVAIL_MIN: u32 = 1 << 2;
+
 /// Size of an ALSA payload struct as a `u32` for ioctl-number encoding.
 ///
 /// Every struct here is well under the 14-bit `_IOC` size field (max
@@ -416,6 +490,9 @@ pub const SNDRV_PCM_IOCTL_READI_FRAMES: u32 =
 /// `INFO` — query device identification (`_IOR`).
 pub const SNDRV_PCM_IOCTL_INFO: u32 =
     ioc(IOC_READ, SNDRV_PCM_IOCTL_MAGIC, 0x01, struct_size::<SndPcmInfo>());
+/// `SYNC_PTR` — exchange the application/hardware pointers (`_IOWR`).
+pub const SNDRV_PCM_IOCTL_SYNC_PTR: u32 =
+    ioc(IOC_READ | IOC_WRITE, SNDRV_PCM_IOCTL_MAGIC, 0x23, struct_size::<SndPcmSyncPtr>());
 
 // ---------------------------------------------------------------------------
 // Format / configuration translation onto the mixer pipeline
@@ -633,6 +710,21 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         "snd_pcm_info size {}",
         size_of::<SndPcmInfo>()
     );
+    check!(
+        size_of::<SndPcmMmapStatus>() == 56,
+        "snd_pcm_mmap_status size {}",
+        size_of::<SndPcmMmapStatus>()
+    );
+    check!(
+        size_of::<SndPcmMmapControl>() == 16,
+        "snd_pcm_mmap_control size {}",
+        size_of::<SndPcmMmapControl>()
+    );
+    check!(
+        size_of::<SndPcmSyncPtr>() == 136,
+        "snd_pcm_sync_ptr size {}",
+        size_of::<SndPcmSyncPtr>()
+    );
 
     // --- struct-carrying ioctls vs known Linux hex (size-derived) -------
     check!(
@@ -664,6 +756,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         SNDRV_PCM_IOCTL_INFO == 0x8120_4101,
         "INFO enc {:#x}",
         SNDRV_PCM_IOCTL_INFO
+    );
+    check!(
+        SNDRV_PCM_IOCTL_SYNC_PTR == 0xC088_4123,
+        "SYNC_PTR enc {:#x}",
+        SNDRV_PCM_IOCTL_SYNC_PTR
     );
 
     // --- the _IOC helper's field decomposition --------------------------

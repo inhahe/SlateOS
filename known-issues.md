@@ -462,40 +462,40 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
-### TD10. ALSA PCM shim has no position reporting (STATUS/SYNC_PTR) yet — DEBT 2026-06-13
+### TD10. ALSA PCM shim does not implement the STATUS ioctl — DEBT 2026-06-13 (narrowed 2026-06-13)
 
-**What:** The ALSA PCM ioctl handler (`alsa_pcm_ioctl` in
-`kernel/src/syscall/linux.rs`) implements the configuration + transport
-ioctls (PVERSION, INFO, HW_REFINE, HW_PARAMS, SW_PARAMS, HW_FREE,
-PREPARE/START/DROP/DRAIN/RESET/PAUSE, WRITEI_FRAMES) and the `write(2)` /
-`read(2)` / `poll` paths, but returns **ENOTTY** for the position-query
-ioctls: `SNDRV_PCM_IOCTL_STATUS`, `SNDRV_PCM_IOCTL_SYNC_PTR`, and
-`SNDRV_PCM_IOCTL_READI_FRAMES`.
+**Update (commit 4b):** SYNC_PTR and READI_FRAMES are now implemented.
+`alsa_pcm_ioctl` (`kernel/src/syscall/linux.rs`) stores `boundary` /
+`avail_min` from SW_PARAMS, computes `appl_ptr` (= frames submitted) and
+`hw_ptr` (= `appl_ptr − mixer-buffered frames`) reduced modulo the
+boundary, and answers `SNDRV_PCM_IOCTL_SYNC_PTR` with a byte-exact
+`snd_pcm_sync_ptr` (the status/control pages sit in 64-byte unions, so the
+payload size is independent of the timestamp ABI). `READI_FRAMES` returns
+zeroed capture frames. Both are covered by the
+`ipc::alsa_pcm::self_test()` boot self-test (SYNC_PTR snapshot appl=2/hw=0,
+appl_ptr/avail_min push-adopt, capture silence read).
 
-**Why it's deferred, not done now:** Correct position reporting requires
-(a) tracking `appl_ptr` and `hw_ptr` modulo a **boundary** value that the
-client sets via `SW_PARAMS` (currently echoed but not stored), and (b)
-byte-exact `#[repr(C)]` mirrors of `snd_pcm_sync_ptr` /
-`snd_pcm_mmap_status` / `snd_pcm_mmap_control`, which embed `struct
-timespec` and therefore have the time64-vs-legacy layout ambiguity already
-flagged in the commit-2 note at the top of `todo.txt`. That is a coherent
-chunk of work (commit 4b) and there is no real ALSA-lib client in QEMU to
-test it against yet, so shipping the fully self-tested state machine first
-and adding position reporting next is the cleaner split.
+**What still remains:** `alsa_pcm_ioctl` returns **ENOTTY** for
+`SNDRV_PCM_IOCTL_STATUS` / `STATUS_EXT`.
 
-**Impact:** A real ALSA-lib playback client cannot run end-to-end yet —
-after START it calls SYNC_PTR to learn `hw_ptr` and will fail on ENOTTY.
-The in-kernel state machine itself is fully exercised by the
-`ipc::alsa_pcm::self_test()` boot self-test (hw_params → prepare → write →
-pause → drain → start → drop → hw_free, plus capture).
+**Why STATUS is still deferred:** unlike SYNC_PTR, the `snd_pcm_status`
+payload embeds bare `struct timespec`s directly (not inside a padded
+union), so its `sizeof` — and therefore the ioctl request number — depends
+on the time64-vs-legacy-timespec ABI (the ambiguity flagged in the
+commit-2 note at the top of `todo.txt`). Pinning that layout down is a
+self-contained follow-up. STATUS is also only a convenience overlay: a
+conforming ALSA-lib client learns `hw_ptr`/`appl_ptr` from SYNC_PTR (now
+handled), so STATUS-on-ENOTTY does not block the playback hot path.
 
-**Proper fix (commit 4b):** Store `boundary` (and `avail_min`) from
-SW_PARAMS in the `PcmStream`; add `hw_ptr(handle)` =
-`frames_written − buffered_frames` and `appl_ptr(handle)` =
-`frames_written`, both reduced modulo `boundary`; add the
-`snd_pcm_sync_ptr` family structs to `audio_alsa.rs` with size asserts;
-implement SYNC_PTR (honour the APPL/HWSYNC/AVAIL_MIN flags) and STATUS,
-and READI_FRAMES for capture (zeroed frames).
+**Impact:** low. SYNC_PTR (the per-period pointer exchange ALSA-lib's
+kernel plugin actually relies on) works; only the `snd_pcm_status()`
+convenience query falls back to ENOTTY.
+
+**Proper fix:** add byte-exact `snd_pcm_status` (resolving the timespec
+layout against our 64-bit `struct timespec`), define
+`SNDRV_PCM_IOCTL_STATUS` / `STATUS_EXT` from its `size_of`, fill it from
+the same `sync_position` snapshot plus the trigger/reference timestamps
+once a monotonic audio clock exists, and replace the ENOTTY arm.
 
 **Related limitations (not debt, intentional first-cut scope):** the shim
 advertises only `RW_INTERLEAVED` access (mmap-based clients unsupported)

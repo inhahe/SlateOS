@@ -102,3 +102,53 @@ standalone per-tool crates are canonical; see `design-decisions.md` §8.)
   (add `"vm"` dir + `"vm/overcommit_memory"`), `gen_sys` (the value), and the
   procfs self-test.
 - **Status** — OPEN
+
+---
+
+### Q3. Which major initiative comes next? (the autonomous loop has run out of *bounded* roadmap work)
+
+- **Question** — An autonomous-loop survey (2026-06-13) confirmed that every
+  readily-actionable surface is already mature, so the only remaining roadmap
+  work is large multi-day ports. Which should be prioritized? This is a strategic
+  direction call with a costly, hard-to-reverse commitment (days of work each)
+  and no obviously-correct ordering, so it's being put to the operator rather
+  than picked autonomously.
+- **What's already done (why there's no bounded increment left to grab):**
+  - `/proc` + `/proc/sys` (procfs.rs) — exhaustive; further sysctl entries are
+    blocked on **Q2** or lack honest backing.
+  - sysfs (`sysfs.rs`), sysctlfs (`sysctlfs.rs`) — present.
+  - Linux syscall table (`syscall/linux.rs`) — every named syscall has a handler
+    (down to historical no-ops like `nfsservctl`/`tuxcall`/`vserver`); the
+    "syscall-by-syscall audit" (task 5089) yields no edits — coverage is complete.
+  - POSIX layer (`posix/src/`, ~2294 files) — no `todo!`/`unimplemented!` stubs;
+    extraordinarily complete.
+  - Container runtime (task 5223) — complete except "Port Docker".
+  - ALSA shim (task 5095) — complete except STATUS ioctl (**TD10**, blocked on the
+    time64 timespec-ABI decision) and a real hardware audio backend (a driver task).
+  - DRM/KMS Linux-ABI shim — recent; swept clean; open debt is **TD11/TD12**.
+  - Most recent bug-hunt find: **F12** (alsa_pcm mixer-slot leak), now fixed.
+- **Options** (each is a large initiative; dependency notes in parens)
+  - **(A) Port bash** (task 1491) — gateway to a real interactive userspace.
+    Depends on the POSIX libc layer (1184/1430), which is already very mature, so
+    this is plausibly the *least-blocked* big task. Best if the goal is a usable
+    shell / dev environment.
+  - **(B) Port the GCC/CMake/Make toolchain** (5031) + **CPython** (5033) — a
+    self-hosting dev environment; also rides the mature POSIX layer.
+  - **(C) GPU drivers → Mesa → Vulkan/OpenGL** (4554/4582) — unblocks the GUI
+    stack and is a prerequisite for (D)/(E). Largest and most hardware-dependent.
+  - **(D) WINE** (5096) — Windows-app support; needs Mesa + audio (audio shim is
+    in place; Mesa is not), so effectively gated behind (C).
+  - **(E) Chromium** (5025) — needs POSIX + GPU + audio + networking; the heaviest
+    single port; gated behind (C).
+- **Claude's recommendation** — **(A) bash** as the immediate next step: it's the
+  least-blocked (rides the mature POSIX layer, no GPU dependency), it's
+  decomposable into small tested increments (the ALSA shim showed this pattern
+  works well for the autonomous loop), and a working shell is high leverage for
+  everything downstream. (C) is the long pole for the GUI/app vision and should
+  start in parallel when the operator is available to steer hardware/driver
+  choices. **The autonomous loop is stopping here** rather than guessing a
+  multi-day direction or spinning on no-edit sweeps; resume it (or point it at a
+  specific target, e.g. "get bash building") when you're back.
+- **Where it bites** — new top-level work; entry points depend on the choice
+  (`userspace/` for a bash port, `drivers/`/`gui/gpu/` for GPU/Mesa).
+- **Status** — OPEN

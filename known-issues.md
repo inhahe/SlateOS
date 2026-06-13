@@ -491,6 +491,35 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
+### TD21. Minor Linux-ABI fidelity gaps — procfs fd visibility for native processes; sendfile pos write-back — APPROXIMATION 2026-06-13
+
+**Where:** `kernel/src/fs/procfs` (`/proc/<pid>/fd[info]`, `linux_fd_list`) and
+`kernel/src/syscall/linux.rs` (`sys_sendfile`). Both are documented in-code.
+
+**What it is:** two small, deliberate Linux-ABI approximations:
+- **`/proc/<pid>/fd/` and `/fdinfo/` are EMPTY for *native* processes.** Native
+  processes keep their fd table in userspace (`posix/src/fdtable.rs`), which is
+  not kernel-visible, so `linux_fd_list` returns `None` and the readdir yields
+  zero entries rather than inventing fds. Only Linux-ABI processes (which use the
+  kernel-side `KernelFdTable`) get a populated `fd/`. Same honesty stance as the
+  fdinfo `mnt_id:`/`ino:` omission — printing fabricated fds would mislead
+  introspection tools.
+- **sendfile `put_user(pos, offset)` write-back EFAULT is not modelled.** In Linux
+  this write-back runs unconditionally after the transfer and can override a
+  success/EBADF result; we don't model it because the sendfile transfer itself is
+  unimplemented (the call terminates EINVAL). The leading `validate_user_read`
+  already rejects a wholly-unmapped offset pointer, matching the dominant failure
+  mode.
+
+**Impact:** low — native-process fd introspection via `/proc` is unavailable
+(tools must use the native fd API); the sendfile gap only matters once sendfile
+transfer is implemented.
+
+**Proper fix:** procfs fd — expose a kernel-visible view of native fd tables (or a
+read bridge into the userspace fd table) so `/proc/<pid>/fd` works uniformly.
+sendfile — model the trailing `put_user(pos)` write-back when the sendfile data
+path is actually implemented.
+
 ### TD20. Userspace crate verification & lint-cleanup gaps — DEBT 2026-06-13
 
 **Where:** `userspace/coreutils/` (and any userspace crate whose *test* code uses

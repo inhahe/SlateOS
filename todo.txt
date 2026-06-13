@@ -15,13 +15,17 @@
 ##                                                       roadmap.md checkbox
 ##                                                       (do NOT restate here)
 ##
-## LEGACY MIGRATION (in progress): everything BELOW this header predates the
-## policy and is a historical journal (~109 BUG/DIVERGENCE/LIMITATION blocks,
-## ~55 DONE/VERIFIED changelog blocks, etc.). The issue blocks are being moved
-## to known-issues.md and removed from here, carefully, a chunk at a time. A
-## full snapshot was taken first: todo.backup-2026-06-13.txt (git-ignored).
-## Until the migration completes, treat known-issues.md as authoritative for
-## any issue that has already been moved.
+## LEGACY MIGRATION: everything BELOW this header predates the policy and is a
+## historical journal. ISSUE MIGRATION COMPLETE (2026-06-13): every genuinely-
+## OPEN bug/divergence/limitation/tech-debt block has been moved to
+## known-issues.md (TD18-TD21) or design-decisions.md (§15-16 judgment calls),
+## with a one-line breadcrumb left here. The ~88 FIXED-BUG blocks and ~55
+## DONE/VERIFIED changelog blocks that remain are REDUNDANT historical record
+## (the same content is in the git commit + the roadmap.md checkbox per §14) —
+## they are safe to prune incrementally but were left in place for now; they do
+## NOT track any open issue. A full snapshot was taken first:
+## todo.backup-2026-06-13.txt (git-ignored). known-issues.md is authoritative
+## for all issues; design-decisions.md for all resolved judgment calls.
 ## ############################################################################
 
 ## ============================================================================
@@ -749,7 +753,7 @@
 ##   4. validate_linux_fd(out_fd)->EBADF
 ##   5. caller_pid Some: !fd_access_is_writable(out.status_flags)->EBADF
 ##   terminal EINVAL (transfer unimplemented).
-## LIMITATION (documented in-code): Linux's terminal put_user(pos,offset) write-back EFAULT, which
+## LIMITATION (documented in-code; tracked: known-issues TD21): Linux's terminal put_user(pos,offset) write-back EFAULT, which
 ## runs unconditionally after the transfer and can override a success/EBADF, is NOT modelled because
 ## we don't implement the transfer. The leading validate_user_read already rejects a wholly-unmapped
 ## offset pointer, matching the dominant failure mode.
@@ -1221,7 +1225,7 @@
 ##   - "fd" added to the PidDir readdir listing alongside "task"; the per-PID
 ##     directory entry-count self-test bumped (PID_FILES + PID_LINKS + 2 for the
 ##     two subdirs) with an fd-presence assertion.
-## HONEST LIMITATION (same spirit as the io block above): the directory is
+## HONEST LIMITATION (same spirit as the io block above; tracked: known-issues TD21): the directory is
 ## EMPTY for NATIVE processes.  Native processes keep their fd table in
 ## userspace (posix/src/fdtable.rs) — it is not kernel-visible — so
 ## linux_fd_list returns None and /proc/<pid>/fd/ readdir yields zero entries

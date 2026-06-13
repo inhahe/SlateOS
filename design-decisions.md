@@ -685,3 +685,198 @@ point bash (or a smaller POSIX sh) becomes the natural follow-on.
   reordered unless fastpy gains a native binary-extension loader that removes the
   CPython dependency. If GUI work becomes more urgent than dev tooling, start
   option (C) instead — but per this decision, terminal/dev leads.
+
+---
+
+## 10. set_mempolicy_home_node / NUMA mempolicy on UMA — keep the UMA no-op returning 0 (option A)
+
+**Date:** 2026-06-13
+
+**Decided by:** Operator (this was `open-questions.md` Q1; Claude recommended
+option A and laid out the UMA/NUMA/VMA tradeoff; the operator chose A).
+
+**Context:**
+OuRoS is a single-node **UMA** system (all CPUs reach all RAM at equal latency —
+the desktop hardware we target). Linux's NUMA mempolicy family
+(`mbind`/`set_mempolicy`/`set_mempolicy_home_node`) lets a program request that
+specific regions of its address space be backed by specific NUMA *nodes*. On UMA
+there is exactly one node, so any such policy is functionally a no-op. The
+question was what `set_mempolicy_home_node` should return on a valid non-empty
+range when we keep `mbind`/`set_mempolicy` as no-ops:
+- **(A)** return 0 (success) *(current)*,
+- **(B)** return `-ENOENT` (Linux's literal answer for a default-policy range),
+- **(C)** implement real per-VMA mempolicy storage so the errno can be
+  discriminated faithfully (per-VMA policy objects, `mbind_range`, `mpol_dup` on
+  fork — substantial machinery for zero functional effect on UMA).
+
+**Decision — option A: keep the UMA no-op and return 0.**
+`set_mempolicy_home_node` on a valid non-empty range returns 0;
+`mbind`/`set_mempolicy` continue to accept-and-drop the policy. No per-VMA
+policy storage is built.
+
+**Rationale:**
+- **Negligible stakes on UMA.** Only programs that call `set_mempolicy_home_node`
+  (a NUMA-tuning syscall, Linux 5.17+) are affected — server software tuned for
+  multi-socket boxes plus `numactl`/`libnuma`. That's **<0.1% of programs and
+  ~0% of desktop programs**; native OuRoS programs are unaffected entirely (NUMA
+  mempolicy is a Linux-ABI construct).
+- **A maximizes Linux-app compatibility.** The common real sequence is
+  `mbind(MPOL_BIND)` then `set_mempolicy_home_node`; returning 0 keeps that path
+  succeeding, which is what glibc/libnuma expect. Option B would report failure
+  for a sequence Linux accepts (triggering "kernel lacks home-node" warnings or
+  degraded fallback paths). Neither A nor B can crash a program or stop it
+  starting — the difference is at most a warning log on B.
+- **C is real, fragile code for no benefit.** Per-VMA policy means every VMA
+  split/merge (`mmap`/`munmap`/`mprotect`/`madvise`/`mremap`) and `fork` must
+  carry/dup the policy — meaningful complexity whose entire payoff is faithful
+  errnos on syscalls almost nothing calls, with zero effect on what any program
+  computes or how fast it runs (one node).
+
+**Alternatives considered:**
+- **(B) return `-ENOENT`** — rejected: "more literal" only for a case that has no
+  practical consequence on UMA, and it breaks the common post-`mbind` success
+  path.
+- **(C) per-VMA mempolicy storage** — rejected for now: substantial, bug-prone
+  machinery for zero UMA benefit. **The correct trigger to revisit is OuRoS ever
+  targeting real multi-node (multi-socket) hardware** — at which point C should
+  be implemented *properly* (real page placement, not just errno cosmetics), and
+  the faithful errnos come for free.
+
+**Where it lives:**
+- `kernel/src/syscall/linux.rs`: `sys_set_mempolicy_home_node`, `sys_mbind`,
+  `sys_set_mempolicy`, `sys_get_mempolicy` (the empty-mask/default-policy
+  answers).
+- `known-issues.md` TD7 (the UMA no-op tech-debt note).
+
+**How to reverse:**
+- If a multi-node target appears: implement per-VMA mempolicy + node-aware
+  allocation, then make `set_mempolicy_home_node` walk real per-VMA policies and
+  return `-ENOENT`/`-EOPNOTSUPP`/0 per Linux. Until then, A stands.
+
+---
+
+## 11. /proc/sys/vm/overcommit_memory & the OuRoS memory-commit policy — option C now, Option 5 (both strategies, configurable) as the end-state
+
+**Date:** 2026-06-13
+
+**Decided by:** Operator (this was `open-questions.md` Q2; the operator chose
+"keep `vm/` omitted now, build the full configurable both-strategies model
+later," with the priority "maximize the number of programs that run without
+crashing; log noise is acceptable." Options 4 and 5 were the operator's own
+proposals).
+
+**Context:**
+`design.txt`/CLAUDE.md mandate "Committed memory by default, **lazy allocation
+opt-in**. No silent overcommit." Linux exposes `/proc/sys/vm/overcommit_memory`
+(0 = heuristic overcommit [Linux default], 1 = always overcommit, 2 = strict
+commit accounting). OuRoS currently hardcodes strict "committed by default, no
+overcommit" (`mm/oom.rs`) and our `/proc/sys` is read-only with the `vm/`
+subtree omitted. The question was whether to expose the file and at what value.
+Options considered: (A) expose `= 2` (honest strict value, but its biggest risk
+is that overcommit-expecting apps — Go/JVM/Electron/some WINE paths — may scale
+back arenas, warn, or in a few cases refuse to start), (B) expose `= 0` (a lie —
+we don't actually overcommit; an app trusting it could over-allocate and hit
+commit failures), (C) keep `vm/` omitted (a *missing* sysctl almost never stops
+a program — well-behaved code falls back to its built-in default; effect is at
+most a line of log noise), (4) per-program user-configurable value with
+OS-surfaced diagnosis, (5) implement **both** commit strategies and make the
+choice configurable system-wide *and* per-program for both Linux and native
+programs.
+
+**Decision — two phases:**
+- **Now: option C (keep `vm/` omitted).** It cannot cause the refuse-to-start
+  risk that A carries, and it doesn't lie like B. Under the operator's "max
+  programs run, log noise OK" priority, an absent sysctl is the lowest-risk
+  immediate state.
+- **End-state: Option 5 (build both strategies, make them configurable).** This
+  is the full realization of the existing design ("lazy allocation opt-in").
+  Scope:
+  - Implement both **strict-commit** and **lazy/overcommit** allocation in the
+    kernel (today only strict exists; the `OvercommitMode` enum in
+    `kernel/src/fs/mmtune.rs` is advisory-only and **not wired into the commit
+    path**).
+  - Expose the choice **system-wide and per-program**, for both Linux and native
+    programs, under **Settings → Advanced** with warnings.
+  - **Default for Linux programs: `overcommit_memory = 0` (overcommit)** for
+    maximum drop-in compatibility (operator's call); **native programs default
+    to strict-commit** per "committed by default."
+  - Option 4 (per-program override + OS diagnosis UX) is folded in as the **UX
+    half of Option 5**, not a competing option.
+  - Once 5 lands, `/proc/sys/vm/overcommit_memory` simply **reports the active
+    mode honestly** (no longer a fabrication), retiring the original A/B/C
+    dilemma.
+- **Writes to `/proc/sys/vm/*` are gated on the privilege Linux calls
+  CAP_SYS_ADMIN.** A Linux program may *write* the sysctl to request a policy
+  change if it holds that privilege — but see the capability decision below for
+  how that maps onto OuRoS's native model (we do **not** import CAP_SYS_ADMIN as
+  a native capability).
+
+**CAP_SYS_ADMIN / capability mapping (operator asked: add it to the native
+capability list, or does it map to an existing capability?):**
+- **Do NOT add `CAP_SYS_ADMIN` to the native capability list in
+  `roadmap-detailed.md`.** CAP_SYS_ADMIN is Linux's notorious "junk drawer" —
+  one coarse token gating ~1000+ unrelated operations. Importing it as a native
+  capability would reintroduce exactly the **ambient authority** OuRoS exists to
+  abolish ("capability-based security from day one, no ambient authority"), and
+  it contradicts the project's deliberately **fine-grained** capability model
+  (`fs.*`, `admin.*`, `resource.*`, `hook.*`, each a distinct risk level).
+- **CAP_SYS_ADMIN is a Linux-ABI construct that lives only in the Linux compat
+  layer.** When a Linux program performs an operation Linux gates on
+  CAP_SYS_ADMIN, the compat layer maps **that specific operation** to the
+  fine-grained *native* capability that actually governs it — it never grants a
+  blanket "admin" power.
+- **For the overcommit-write operation specifically, no existing native
+  capability is an exact fit.** `resource.ram` is a *per-process RAM limit*, not
+  a *system-wide VM-policy* control; `admin.*` today covers *user* administration
+  (`admin.user`/`admin.user_caps`/`admin.cross_user`). Changing the **system-wide
+  memory-commit policy** is a distinct, elevated risk that warrants its **own
+  fine-grained native capability** — to be added when Option 5 is built (working
+  name `admin.memory_policy`, i.e. "change system-wide memory/VM commit policy").
+  A tracking entry is added to `roadmap-detailed.md` now.
+  - Note the privilege split this enables (better than Linux's all-or-nothing):
+    changing the **system-wide** policy needs `admin.memory_policy`; a user
+    changing **their own program's** per-program override via Settings is a
+    normal user/Settings action, **not** an elevated syscall — so per-program
+    tuning doesn't require an admin capability at all.
+
+**Rationale:**
+- C now is the safest immediate answer for the stated priority and requires no
+  new code (the `vm/` subtree is already omitted).
+- Option 5 is *design-faithful*: the spec already sanctions both strategies with
+  lazy as an explicit opt-in. It maximizes compatibility (overcommit-expecting
+  Linux apps get what they want) without lying (the user opted in; nothing is
+  silent), and keeps native code strict per "committed by default."
+- The capability stance preserves least-privilege: a fine-grained
+  `admin.memory_policy` is far safer than honoring a Linux blanket CAP_SYS_ADMIN,
+  and the Linux-cap→native-cap mapping is the general pattern for the whole
+  compat layer.
+
+**Alternatives considered:**
+- **(A) expose `= 2`** — rejected for now: real refuse-to-start / arena-shrink
+  risk for overcommit-expecting apps, against the "max programs run" priority.
+- **(B) expose `= 0`** — rejected: a fabrication (we don't overcommit), against
+  the "never fabricate in procfs" rule and the design.
+- **Add CAP_SYS_ADMIN as a native capability** — rejected: ambient-authority
+  junk drawer; contradicts the fine-grained capability model.
+
+**Where it lives:**
+- `kernel/src/fs/procfs.rs`: `SYS_FILES`/`SYS_DIRS` (currently no `vm/`; Option 5
+  adds `vm/overcommit_memory` reporting the active mode), `gen_sys`.
+- `kernel/src/fs/mmtune.rs`: `OvercommitMode` (exists, advisory-only — Option 5
+  wires it into the commit path).
+- `kernel/src/mm/` commit/allocation path + `mm/oom.rs` (must learn to honor the
+  mode), per-program policy storage (PCB / Linux-ABI PCB state).
+- `kernel/src/syscall/linux.rs`: the Linux-ABI write path + CAP_SYS_ADMIN→native
+  capability mapping (when sysctl writes are implemented).
+- `roadmap-detailed.md`: new `admin.memory_policy` capability (tracking entry),
+  and the Option-5 "both commit strategies, configurable" feature.
+- Settings app: Advanced section (system-wide + per-program overcommit, warnings).
+
+**How to reverse:**
+- Immediate: exposing `vm/overcommit_memory` early (still read-only) is a small
+  `procfs.rs` change if a specific app needs to *read* the value before Option 5
+  lands; pick the honest current value (strict) per decision #1's "never
+  fabricate" rule.
+- End-state: if Option 5 proves not worth the complexity, fall back to a single
+  honest read-only value reflecting the hardcoded strict policy. The capability
+  decision (no native CAP_SYS_ADMIN) is independent and should not be reversed.

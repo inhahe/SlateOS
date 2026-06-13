@@ -479,6 +479,7 @@ _Scoping mechanics: the grant carries a list of extension strings (or `*` if the
 - [ ] `admin.user` — create/delete/modify users
 - [ ] `admin.user_caps` — change other users' capabilities
 - [ ] `admin.cross_user` — install/modify across user accounts
+- [ ] `admin.memory_policy` — change the **system-wide** memory-commit policy (strict-commit vs lazy/overcommit). Fine-grained replacement for the slice of Linux's `CAP_SYS_ADMIN` that gates writing `/proc/sys/vm/overcommit_memory`; the Linux compat layer maps that CAP_SYS_ADMIN check to this capability. Needed when the "both commit strategies, configurable" feature lands (see design-decisions.md §11). Note: a user changing their *own program's* per-program overcommit override via Settings is a normal user action and does **not** require this elevated capability — only changing the global default does. We deliberately do **not** add `CAP_SYS_ADMIN` itself as a native capability (it is Linux's ambient-authority junk drawer; OuRoS maps each CAP_SYS_ADMIN-gated operation to its own fine-grained native capability).
 
 #### Capability Types — Libraries
 - [ ] `lib.load` — load dynamic libraries

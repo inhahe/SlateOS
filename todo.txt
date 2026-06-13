@@ -1,4 +1,28 @@
 
+## DONE (2026-06-12): ABI batch 550 — get_mempolicy: faithful do_get_mempolicy / copy_nodes_to_user rewrite
+## Linux v6.6 mm/mempolicy.c kernel_get_mempolicy + do_get_mempolicy + copy_nodes_to_user
+## (verified verbatim against raw.githubusercontent.com torvalds/linux v6.6). Divergences fixed:
+##   D1. kernel_get_mempolicy FIRST check: `if (nmask != NULL && maxnode < nr_node_ids) return -EINVAL;`
+##       nr_node_ids == 1 on UMA, so a non-NULL nmask with maxnode == 0 -> EINVAL (we returned 0).
+##       Runs BEFORE do_get_mempolicy's flags validation.
+##   D2. do_get_mempolicy `else if (addr) return -EINVAL;` — an address passed WITHOUT MPOL_F_ADDR
+##       is rejected (we ignored addr in that case).
+##   D3. MPOL_F_NODE WITHOUT MPOL_F_ADDR -> -EINVAL for a default-policy task (the `else { err =
+##       -EINVAL; }` arm; only INTERLEAVE current->mempolicy or the MPOL_F_ADDR/lookup_node path
+##       succeed). We previously returned node 0 / ret 0 — wrong. With MPOL_F_ADDR it stays node 0.
+##   D4. MPOL_F_MEMS_ALLOWED also writes *policy = 0 (kernel_get_mempolicy still runs
+##       put_user(pval=0, policy) after do_get_mempolicy returns). We had skipped the mode write.
+##   D5. nodemask copy: copy_nodes_to_user uses `copy = ALIGN(maxnode-1,64)/8`, caps at
+##       `copy > PAGE_SIZE` (== maxnode-1 > 32768, NOT the old 1<<23 cap), zero-fills bytes above
+##       the 8-byte kernel mask, and is called AFTER *policy is written (so an over-cap maxnode
+##       still updates *policy before returning EINVAL). Our single zeroed buffer of `copy` bytes
+##       (byte0 = node-0 presence, rest 0) reproduces clear_user(upper)+copy_to_user(low8) exactly.
+## VERIFIED: build clean; clippy 17462 (<= baseline 17463 — the rewrite dropped two old closure
+## warnings); boot self-test stamp "get_mempolicy faithful do_get_mempolicy/copy_nodes_to_user
+## (batch 550): OK" with 11 cases (incl. new F_NODE-alone EINVAL, F_NODE|F_ADDR node 0, addr-without-
+## F_ADDR EINVAL, nmask+maxnode==0 EINVAL, over-cap EINVAL). NOTE: new asserts use
+## i64::from(errno::X).wrapping_neg() — `-i64::from(..)` trips DENY-adjacent arithmetic_side_effects.
+
 ## DONE (2026-06-12): hrtimer self-test Test 2 — close interrupt-window race vs APIC ISR (known-issues F11)
 ## Test 2 scheduled a 0-delay timer then called process_expired() manually with interrupts ENABLED.
 ## The periodic APIC timer ISR also calls process_expired(); if it fired in the window between

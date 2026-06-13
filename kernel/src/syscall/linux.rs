@@ -23576,138 +23576,143 @@ fn sys_get_mempolicy(args: &SyscallArgs) -> SyscallResult {
     const MPOL_F_ADDR: u32 = 2;
     const MPOL_F_MEMS_ALLOWED: u32 = 4;
     const MPOL_DEFAULT: i32 = 0;
+    // PAGE_SIZE*BITS_PER_BYTE = 4096*8.  Mirrors get_nodes_uma: copy_nodes_to_user
+    // rejects `copy > PAGE_SIZE`, and `copy > PAGE_SIZE` is equivalent to
+    // `(maxnode-1) > NODE_BITS_CAP` (see the cap derivation below).
+    const NODE_BITS_CAP: u64 = 4096 * 8;
 
-    #[allow(clippy::cast_possible_truncation)]
-    let flags = args.arg4 as u32;
-    if flags & !(MPOL_F_NODE | MPOL_F_ADDR | MPOL_F_MEMS_ALLOWED) != 0 {
-        return linux_err(errno::EINVAL);
-    }
-    // MPOL_F_MEMS_ALLOWED is mutually exclusive with NODE / ADDR.
-    if flags & MPOL_F_MEMS_ALLOWED != 0
-        && flags & (MPOL_F_NODE | MPOL_F_ADDR) != 0
-    {
-        return linux_err(errno::EINVAL);
-    }
-
-    let mode_ptr = args.arg0;
+    let policy_ptr = args.arg0;
     let nodemask_ptr = args.arg1;
     let maxnode = args.arg2;
     let addr = args.arg3;
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg4 as u32;
 
-    // MPOL_F_ADDR requires a valid user pointer — Linux dereferences
-    // it to find the VMA before looking up the policy.
-    if flags & MPOL_F_ADDR != 0 {
-        if addr == 0 {
-            return linux_err(errno::EFAULT);
-        }
-        if let Err(e) = crate::mm::user::validate_user_read(addr, 1) {
-            return linux_err(linux_errno_for(e));
-        }
+    // kernel_get_mempolicy: reject a non-NULL nodemask whose maxnode cannot
+    // even hold nr_node_ids nodes (`if (nmask != NULL && maxnode < nr_node_ids)
+    // return -EINVAL`).  On our UMA system nr_node_ids == 1, so this is exactly
+    // "non-NULL nmask with maxnode == 0 -> EINVAL".  It is the FIRST check,
+    // before do_get_mempolicy's flags validation.
+    if nodemask_ptr != 0 && maxnode == 0 {
+        return linux_err(errno::EINVAL);
     }
 
-    // Pre-validate the mode output pointer (an int* in Linux's ABI).
-    if mode_ptr != 0 {
-        if let Err(e) = crate::mm::user::validate_user_write(mode_ptr, 4) {
-            return linux_err(linux_errno_for(e));
-        }
+    // do_get_mempolicy: unknown flag bits -> EINVAL.
+    if flags & !(MPOL_F_NODE | MPOL_F_ADDR | MPOL_F_MEMS_ALLOWED) != 0 {
+        return linux_err(errno::EINVAL);
     }
-    // Pre-validate the nodemask output range.  Linux caps at
-    // MAX_NUMNODES rounded up; we keep the existing 1 << 23-bit cap.
-    let mask_bytes: usize = if maxnode > 0 && nodemask_ptr != 0 {
-        if maxnode > (1 << 23) {
-            return linux_err(errno::EINVAL);
-        }
-        let bytes = maxnode.div_ceil(8) as usize;
-        if let Err(e) = crate::mm::user::validate_user_write(nodemask_ptr, bytes) {
-            return linux_err(linux_errno_for(e));
-        }
-        bytes
-    } else {
-        0
-    };
 
-    // Helper: write a 32-bit value to *mode if the user gave us a
-    // mode pointer.  copy_to_user does the SMAP-safe transfer.
-    let write_mode = |v: i32| -> Option<SyscallResult> {
-        if mode_ptr == 0 {
-            return None;
-        }
-        // SAFETY: validate_user_write above confirmed the 4-byte
-        // writable range at mode_ptr.
-        let r = unsafe {
-            crate::mm::user::copy_to_user(
-                (&raw const v).cast::<u8>(),
-                mode_ptr,
-                4,
-            )
-        };
-        if let Err(e) = r {
-            return Some(linux_err(linux_errno_for(e)));
-        }
-        None
-    };
-
-    // Helper: write `mask_bytes` to *nodemask, optionally setting
-    // bit 0 (our only node).  Bit 0 lives in byte 0 bit 0 on x86_64
-    // little-endian, which matches Linux's unsigned long bit layout
-    // for bit indices 0..7.
-    let write_nodemask = |set_bit_zero: bool| -> Option<SyscallResult> {
-        if mask_bytes == 0 {
-            return None;
-        }
-        // Stack-resident scratch is bounded by the (1 << 23) cap above,
-        // which is well in excess of any sane kernel stack; spill onto
-        // a heap Vec to be safe.  alloc::vec is available in our
-        // no_std + alloc kernel build.
-        let mut mask = alloc::vec![0u8; mask_bytes];
-        if set_bit_zero {
-            // Byte 0 bit 0 = node 0 set.
-            mask[0] = 1;
-        }
-        // SAFETY: validate_user_write above confirmed the byte range.
-        let r = unsafe {
-            crate::mm::user::copy_to_user(
-                mask.as_ptr(),
-                nodemask_ptr,
-                mask_bytes,
-            )
-        };
-        if let Err(e) = r {
-            return Some(linux_err(linux_errno_for(e)));
-        }
-        None
-    };
+    // `pval` is the int written back to *policy; `set_bit0` records whether the
+    // returned nodemask names node 0.  On our UMA, default-policy-only kernel
+    // every resolved answer is 0 (MPOL_DEFAULT == 0, node id 0 on UMA, mems
+    // index 0), and the only query that yields a non-empty mask is
+    // MPOL_F_MEMS_ALLOWED (cpuset_current_mems_allowed == {0}); every other
+    // path resolves to default_policy (MPOL_LOCAL) whose nodemask is empty.
+    let pval: i32;
+    let set_bit0: bool;
 
     if flags & MPOL_F_MEMS_ALLOWED != 0 {
-        // Allowed-nodes query: write the cpuset-allowed mask
-        // (bit 0 = our single node).  Mode is NOT written for this
-        // flag combination per Linux's get_mempolicy(2).
-        if let Some(err) = write_nodemask(true) {
-            return err;
+        // MPOL_F_MEMS_ALLOWED is mutually exclusive with NODE / ADDR.
+        if flags & (MPOL_F_NODE | MPOL_F_ADDR) != 0 {
+            return linux_err(errno::EINVAL);
         }
-        return SyscallResult::ok(0);
+        // do_get_mempolicy sets *policy = 0 and *nmask = mems_allowed = {0}.
+        pval = 0;
+        set_bit0 = true;
+    } else {
+        if flags & MPOL_F_ADDR != 0 {
+            // vma_lookup(mm, addr): no VMA covering addr -> EFAULT.  We
+            // approximate VMA presence with a 1-byte readability probe (a NULL
+            // or unmapped addr has no VMA and faults).
+            if addr == 0 {
+                return linux_err(errno::EFAULT);
+            }
+            if let Err(e) = crate::mm::user::validate_user_read(addr, 1) {
+                return linux_err(linux_errno_for(e));
+            }
+        } else if addr != 0 {
+            // `else if (addr) return -EINVAL`: an address without MPOL_F_ADDR
+            // is rejected.
+            return linux_err(errno::EINVAL);
+        }
+
+        if flags & MPOL_F_NODE != 0 {
+            if flags & MPOL_F_ADDR != 0 {
+                // lookup_node(addr): node id of the page at addr.  On UMA the
+                // page (probed present above) lives on node 0.
+                pval = 0;
+            } else {
+                // MPOL_F_NODE without MPOL_F_ADDR falls into the `else` arm of
+                // do_get_mempolicy (pol != current->mempolicy/INTERLEAVE for
+                // our default_policy) -> -EINVAL.
+                return linux_err(errno::EINVAL);
+            }
+        } else {
+            // No introspection flag: report the task policy mode.  We have no
+            // per-task / per-VMA policy, so the answer is always MPOL_DEFAULT.
+            pval = MPOL_DEFAULT;
+        }
+        // get_policy_nodemask(default_policy) is empty (MPOL_LOCAL).
+        set_bit0 = false;
     }
 
-    if flags & MPOL_F_NODE != 0 {
-        // Return node id in *mode.  With or without MPOL_F_ADDR the
-        // answer is 0 (UMA — every page is on node 0).
-        if let Some(err) = write_mode(0) {
-            return err;
+    // kernel_get_mempolicy writes *policy via put_user, THEN copies the
+    // nodemask via copy_nodes_to_user.  The order is observable: an over-cap
+    // maxnode still updates *policy before copy_nodes_to_user returns EINVAL.
+    if policy_ptr != 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(policy_ptr, 4) {
+            return linux_err(linux_errno_for(e));
         }
-        // Linux does not also fill nodemask for MPOL_F_NODE; we don't
-        // either.
-        return SyscallResult::ok(0);
+        // SAFETY: validate_user_write confirmed the 4-byte writable range.
+        let r = unsafe {
+            crate::mm::user::copy_to_user((&raw const pval).cast::<u8>(), policy_ptr, 4)
+        };
+        if let Err(e) = r {
+            return linux_err(linux_errno_for(e));
+        }
     }
 
-    // No mempolicy-introspection flag set: return the calling task's
-    // own policy.  We have no per-thread / per-VMA policy storage,
-    // so the answer is always MPOL_DEFAULT with an empty nodemask.
-    if let Some(err) = write_mode(MPOL_DEFAULT) {
-        return err;
+    if nodemask_ptr != 0 {
+        // copy_nodes_to_user(nmask, maxnode, &nodes) with nbytes == 8 (one
+        // unsigned long, BITS_TO_LONGS(nr_node_ids=1) * sizeof(long)):
+        //   copy = ALIGN(maxnode-1, 64) / 8        (bytes to touch in user)
+        //   if copy > PAGE_SIZE  -> EINVAL
+        //   bytes above the 8-byte kernel mask are zero-filled (clear_user),
+        //   then the low 8 carry the mask.  Our mask is byte0 bit0 = node 0,
+        //   everything else zero, so the entire [0, copy) range is
+        //   byte0 = content, rest 0 — identical net effect to Linux's
+        //   clear_user(upper) + copy_to_user(low 8), so one transfer suffices.
+        // maxnode >= 1 is guaranteed here (maxnode == 0 with a non-NULL nmask
+        // returned EINVAL above), so the decrement cannot underflow.
+        let m = maxnode.wrapping_sub(1);
+        // copy > PAGE_SIZE (4096) <=> ALIGN(m,64) > 32768 <=> m > 32768, since
+        // 32768 is a multiple of 64.  NODE_BITS_CAP == 32768.
+        if m > NODE_BITS_CAP {
+            return linux_err(errno::EINVAL);
+        }
+        // ALIGN(m, 64); m <= 32768 so the add cannot overflow.
+        let aligned = m.wrapping_add(63) & !63u64;
+        let copy = aligned.div_ceil(8) as usize;
+        if copy > 0 {
+            let mut buf = alloc::vec![0u8; copy];
+            if set_bit0 {
+                if let Some(first) = buf.first_mut() {
+                    *first = 1;
+                }
+            }
+            if let Err(e) = crate::mm::user::validate_user_write(nodemask_ptr, copy) {
+                return linux_err(linux_errno_for(e));
+            }
+            // SAFETY: validate_user_write confirmed the `copy`-byte writable range.
+            let r = unsafe {
+                crate::mm::user::copy_to_user(buf.as_ptr(), nodemask_ptr, copy)
+            };
+            if let Err(e) = r {
+                return linux_err(linux_errno_for(e));
+            }
+        }
     }
-    if let Some(err) = write_nodemask(false) {
-        return err;
-    }
+
     SyscallResult::ok(0)
 }
 
@@ -37083,8 +37088,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // Case 3: MPOL_F_NODE without MPOL_F_ADDR.  Writes node id
-        // (= 0 on UMA) to *mode.
+        // Case 3 (batch 550): MPOL_F_NODE without MPOL_F_ADDR -> -EINVAL.
+        // do_get_mempolicy's MPOL_F_NODE arm only succeeds for an INTERLEAVE
+        // task policy (or with MPOL_F_ADDR via lookup_node); for our
+        // default_policy it falls into the `else { err = -EINVAL; }` branch.
+        // Pre-batch this returned node 0 / ret 0, which was wrong.
         let mut mode: i32 = -1;
         let a = SyscallArgs {
             arg0: (&raw mut mode).addr() as u64,
@@ -37092,10 +37100,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             arg4: MPOL_F_NODE, arg5: 0,
         };
         let r = dispatch_linux(nr::GET_MEMPOLICY, &a);
-        if r.value != 0 || mode != 0 {
+        if r.value != i64::from(errno::EINVAL).wrapping_neg() {
             serial_println!(
-                "[syscall/linux]   FAIL: get_mempolicy(F_NODE) -> ret {} mode {} (expected 0/0)",
-                r.value, mode,
+                "[syscall/linux]   FAIL: get_mempolicy(F_NODE alone) -> {} (expected -EINVAL)",
+                r.value,
             );
             return Err(KernelError::InternalError);
         }
@@ -37163,6 +37171,79 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+
+        // Case 8 (batch 550): MPOL_F_NODE | MPOL_F_ADDR over a valid mapped
+        // address resolves lookup_node -> node 0 on UMA, ret 0 / mode 0.
+        // Use the address of a stack local as a guaranteed-mapped page.
+        let probe: u64 = 0;
+        let mut node: i32 = -1;
+        let a = SyscallArgs {
+            arg0: (&raw mut node).addr() as u64,
+            arg1: 0, arg2: 0,
+            arg3: (&raw const probe).addr() as u64,
+            arg4: MPOL_F_NODE | MPOL_F_ADDR, arg5: 0,
+        };
+        let r = dispatch_linux(nr::GET_MEMPOLICY, &a);
+        if r.value != 0 || node != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: get_mempolicy(F_NODE|F_ADDR) -> ret {} node {} (expected 0/0)",
+                r.value, node,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Case 9 (batch 550): a non-zero addr WITHOUT MPOL_F_ADDR -> -EINVAL
+        // (`else if (addr) return -EINVAL`).
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0, arg2: 0,
+            arg3: (&raw const probe).addr() as u64,
+            arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::GET_MEMPOLICY, &a);
+        if r.value != i64::from(errno::EINVAL).wrapping_neg() {
+            serial_println!(
+                "[syscall/linux]   FAIL: get_mempolicy(addr w/o F_ADDR) -> {} (expected -EINVAL)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Case 10 (batch 550): non-NULL nmask with maxnode == 0 -> -EINVAL
+        // (kernel_get_mempolicy: `maxnode < nr_node_ids`, nr_node_ids == 1).
+        let mut sink: u64 = 0;
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: (&raw mut sink).addr() as u64,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::GET_MEMPOLICY, &a);
+        if r.value != i64::from(errno::EINVAL).wrapping_neg() {
+            serial_println!(
+                "[syscall/linux]   FAIL: get_mempolicy(nmask,maxnode=0) -> {} (expected -EINVAL)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Case 11 (batch 550): maxnode over the PAGE_SIZE*BITS_PER_BYTE cap
+        // (32769+ => copy > PAGE_SIZE) -> -EINVAL from copy_nodes_to_user.
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: (&raw mut sink).addr() as u64,
+            arg2: 32770, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::GET_MEMPOLICY, &a);
+        if r.value != i64::from(errno::EINVAL).wrapping_neg() {
+            serial_println!(
+                "[syscall/linux]   FAIL: get_mempolicy(maxnode over cap) -> {} (expected -EINVAL)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   get_mempolicy faithful do_get_mempolicy/copy_nodes_to_user (batch 550): OK"
+        );
     }
 
     // (9f) Batch 102: set_mempolicy upgraded from -ENOSYS stub to a

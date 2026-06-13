@@ -8527,6 +8527,29 @@ fn linux_file_mmap_rollback(pml4: u64, base: u64, count: usize, frame_size: u64)
     }
 }
 
+/// Sum the bytes of every existing VMA of `pid` that overlap `[start, end)`.
+///
+/// `MAP_FIXED` replaces whatever currently occupies the target range, so the
+/// address space those bytes already accounted for must be subtracted from the
+/// fresh `RLIMIT_AS` charge — otherwise reserving a span and then overlaying
+/// segments onto it (exactly what `ld.so` does) double-counts the overlap.
+/// Overlaps are clamped per-VMA, so a partial intersection contributes only
+/// its intersecting bytes.
+fn linux_vma_overlap_bytes(pid: u64, start: u64, end: u64) -> u64 {
+    let Some(vmas) = pcb::list_vmas(pid) else {
+        return 0;
+    };
+    let mut total: u64 = 0;
+    for vma in &vmas {
+        let lo = vma.start.max(start);
+        let hi = vma.end.min(end);
+        if hi > lo {
+            total = total.saturating_add(hi.saturating_sub(lo));
+        }
+    }
+    total
+}
+
 /// Map a regular file (or `memfd`) into the calling process — the
 /// file-backed `mmap(2)` path that backs `ld.so`'s shared-object loading
 /// (glibc `_dl_map_segments`) and `MAP_PRIVATE` data maps.
@@ -8654,8 +8677,23 @@ fn linux_file_mmap(
     };
 
     // Charge RLIMIT_AS for the virtual span (refunded on any failure below).
-    if pcb::linux_as_charge(pid, length_aligned).is_err() {
-        return linux_err(errno::ENOMEM);
+    // For MAP_FIXED, the overlapping range is already accounted for by the
+    // VMAs we are about to replace, so only the *net* change is charged (or
+    // released) — otherwise reserving a span then overlaying segments onto it
+    // double-counts the overlap.  After this block the range's accounting
+    // reflects exactly `length_aligned` bytes, so the per-frame rollback paths
+    // below correctly release `length_aligned`.
+    let prior_charge = if fixed {
+        linux_vma_overlap_bytes(pid, base, end)
+    } else {
+        0
+    };
+    if length_aligned > prior_charge {
+        if pcb::linux_as_charge(pid, length_aligned.wrapping_sub(prior_charge)).is_err() {
+            return linux_err(errno::ENOMEM);
+        }
+    } else {
+        pcb::linux_as_release(pid, prior_charge.wrapping_sub(length_aligned));
     }
 
     // MAP_FIXED silently replaces whatever currently occupies the range:
@@ -39151,6 +39189,19 @@ pub fn self_test_file_mmap() -> crate::error::KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
+    // RLIMIT_AS must account for exactly the virtual span just mapped.  The
+    // throwaway process started empty, so the running total equals
+    // `length_aligned`.
+    let as_after_initial = pcb::linux_as_used(pid).unwrap_or(0);
+    if as_after_initial != length_aligned {
+        teardown!();
+        serial_println!(
+            "[syscall/linux]   FAIL: RLIMIT_AS after map = {}, expected {}",
+            as_after_initial, length_aligned
+        );
+        return Err(KernelError::InternalError);
+    }
+
     // Verify every mapped byte: file content where it exists, zero past EOF.
     // Read through the throwaway process's page table via the HHDM.
     let hhdm = page_table::hhdm().ok_or(KernelError::InternalError)?;
@@ -39208,6 +39259,20 @@ pub fn self_test_file_mmap() -> crate::error::KernelResult<()> {
         );
         return Err(KernelError::InternalError);
     }
+    // The MAP_FIXED overlay replaced one frame that was already accounted for,
+    // so the net RLIMIT_AS charge is zero — the running total must be
+    // unchanged from after the initial map.  (A naive charge-the-whole-span
+    // implementation would double-count the overlapping frame here.)
+    let as_after_overlay = pcb::linux_as_used(pid).unwrap_or(0);
+    if as_after_overlay != as_after_initial {
+        teardown!();
+        serial_println!(
+            "[syscall/linux]   FAIL: RLIMIT_AS after MAP_FIXED overlay = {}, expected {}",
+            as_after_overlay, as_after_initial
+        );
+        return Err(KernelError::InternalError);
+    }
+
     // Content of the re-mapped first frame must still match the file.
     let Some(phys0) = page_table::translate(pml4, VirtAddr::new(base)) else {
         teardown!();

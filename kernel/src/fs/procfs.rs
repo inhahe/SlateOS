@@ -712,65 +712,124 @@ fn gen_meminfo() -> Vec<u8> {
     s.into_bytes()
 }
 
-/// `/proc/cpuinfo` — CPU topology and features.
-fn gen_cpuinfo() -> Vec<u8> {
-    let count = crate::acpi::processor_count();
-    let processors = crate::acpi::processors();
-
-    let mut s = String::with_capacity(512);
-    s.push_str(&format!("processors: {count}\n"));
-
-    // CPU feature flags (from centralized CPUID detection).
-    if let Some(f) = crate::cpu::features() {
-        s.push_str("flags      :");
-        if f.sse       { s.push_str(" sse"); }
-        if f.sse2      { s.push_str(" sse2"); }
-        if f.sse3      { s.push_str(" sse3"); }
-        if f.ssse3     { s.push_str(" ssse3"); }
-        if f.sse4_1    { s.push_str(" sse4_1"); }
-        if f.sse4_2    { s.push_str(" sse4_2"); }
-        if f.popcnt    { s.push_str(" popcnt"); }
-        if f.avx       { s.push_str(" avx"); }
-        if f.avx2      { s.push_str(" avx2"); }
-        if f.avx512f   { s.push_str(" avx512f"); }
-        if f.xsave     { s.push_str(" xsave"); }
-        if f.aes_ni    { s.push_str(" aes"); }
-        if f.sha       { s.push_str(" sha_ni"); }
-        if f.rdrand    { s.push_str(" rdrand"); }
-        if f.rdseed    { s.push_str(" rdseed"); }
-        if f.rdtscp    { s.push_str(" rdtscp"); }
-        if f.rdpid     { s.push_str(" rdpid"); }
-        if f.fxsr      { s.push_str(" fxsr"); }
-        if f.tsc       { s.push_str(" tsc"); }
-        if f.f16c      { s.push_str(" f16c"); }
-        if f.bmi1      { s.push_str(" bmi1"); }
-        if f.bmi2      { s.push_str(" bmi2"); }
-        if f.vaes      { s.push_str(" vaes"); }
-        if f.page_1g   { s.push_str(" pdpe1gb"); }
-        s.push('\n');
-
-        if f.pmu_version > 0 {
-            s.push_str(&format!(
-                "pmu        : v{}, {} counters, {}-bit\n",
-                f.pmu_version, f.pmu_counters, f.pmu_counter_width
-            ));
-        }
-    }
-
-    // TSC frequency.
-    let tsc_freq = crate::bench::tsc_freq();
-    if tsc_freq > 0 {
-        s.push_str(&format!("tsc_freq   : {} Hz\n", tsc_freq));
-    }
-
+/// Append the Linux-style `flags` line for the given CPU feature set.
+///
+/// The key uses a trailing tab + colon to match Linux's `%s\t: %s`
+/// formatting so that tools splitting on `:` recover the value cleanly.
+fn push_cpu_flags(s: &mut String, f: &crate::cpu::CpuFeatures) {
+    s.push_str("flags\t\t:");
+    // Baseline x86_64 features that are architecturally guaranteed.
+    s.push_str(" fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov");
+    s.push_str(" pat pse36 clflush mmx fxsr");
+    if f.sse       { s.push_str(" sse"); }
+    if f.sse2      { s.push_str(" sse2"); }
+    s.push_str(" ht syscall nx lm");
+    if f.sse3      { s.push_str(" pni"); }
+    if f.ssse3     { s.push_str(" ssse3"); }
+    if f.sse4_1    { s.push_str(" sse4_1"); }
+    if f.sse4_2    { s.push_str(" sse4_2"); }
+    if f.popcnt    { s.push_str(" popcnt"); }
+    if f.aes_ni    { s.push_str(" aes"); }
+    if f.xsave     { s.push_str(" xsave"); }
+    if f.avx       { s.push_str(" avx"); }
+    if f.f16c      { s.push_str(" f16c"); }
+    if f.rdrand    { s.push_str(" rdrand"); }
+    if f.fxsr      { s.push_str(" fxsr_opt"); }
+    if f.page_1g   { s.push_str(" pdpe1gb"); }
+    if f.rdtscp    { s.push_str(" rdtscp"); }
+    if f.bmi1      { s.push_str(" bmi1"); }
+    if f.avx2      { s.push_str(" avx2"); }
+    if f.bmi2      { s.push_str(" bmi2"); }
+    if f.rdseed    { s.push_str(" rdseed"); }
+    if f.sha       { s.push_str(" sha_ni"); }
+    if f.avx512f   { s.push_str(" avx512f"); }
+    if f.vaes      { s.push_str(" vaes"); }
+    if f.rdpid     { s.push_str(" rdpid"); }
     s.push('\n');
+}
 
-    for (i, p) in processors.iter().enumerate() {
-        s.push_str(&format!("processor  : {i}\n"));
-        s.push_str(&format!("acpi_id    : {}\n", p.acpi_processor_id));
-        s.push_str(&format!("apic_id    : {}\n", p.apic_id));
-        s.push_str(&format!("enabled    : {}\n", p.enabled));
-        s.push_str(&format!("online_cap : {}\n", p.online_capable));
+/// `/proc/cpuinfo` — per-processor topology and features (Linux format).
+///
+/// Emits one Linux-style block per online logical CPU, each beginning with a
+/// `processor\t: N` line.  This matches what build tools (`grep -c ^processor`),
+/// glibc, and native utilities (lscpu, hwinfo) expect; the previous custom
+/// format (a header block plus `acpi_id`/`apic_id` keys) was miscounted as an
+/// extra CPU by block-counting parsers and omitted keys consumers look for.
+fn gen_cpuinfo() -> Vec<u8> {
+    let processors = crate::acpi::processors();
+    // List only enabled (online) processors; fall back to a single synthetic
+    // BSP entry when no MADT was parsed.
+    let mut apics: Vec<u8> = processors
+        .iter()
+        .filter(|p| p.enabled)
+        .map(|p| p.apic_id)
+        .collect();
+    if apics.is_empty() {
+        apics.push(0);
+    }
+    let count = apics.len();
+
+    // Identity, shared across all logical CPUs (we model a single package).
+    let vendor = crate::cpu::vendor_string();
+    let vendor_str = core::str::from_utf8(&vendor).unwrap_or("unknown");
+    let (family, model, stepping) = crate::cpu::cpu_family_model_stepping();
+    let brand = crate::cpu::brand_string();
+    let brand_str = core::str::from_utf8(&brand)
+        .unwrap_or("")
+        .trim_matches(|c: char| c == '\0' || c == ' ');
+    let model_name = if brand_str.is_empty() {
+        "Unknown CPU"
+    } else {
+        brand_str
+    };
+
+    // Clock from the calibrated TSC frequency (Hz → MHz with 3 decimals).
+    let tsc_freq = crate::bench::tsc_freq();
+    let (mhz_int, mhz_frac) = if tsc_freq > 0 {
+        (tsc_freq / 1_000_000, (tsc_freq % 1_000_000) / 1000)
+    } else {
+        (0, 0)
+    };
+    // BogoMIPS: classic 2× clock approximation.
+    let (bogo_int, bogo_frac) = (mhz_int.saturating_mul(2), mhz_frac);
+
+    // Last-level cache size (largest detected cache), reported in KB.
+    let cache_kb = crate::cpu::cache_topology()
+        .iter()
+        .map(|c| c.size)
+        .max()
+        .unwrap_or(0)
+        / 1024;
+    let clflush = crate::cpu::cache_line_size();
+
+    let mut s = String::with_capacity(1024);
+    for (i, &apic_id) in apics.iter().enumerate() {
+        s.push_str(&format!("processor\t: {i}\n"));
+        s.push_str(&format!("vendor_id\t: {vendor_str}\n"));
+        s.push_str(&format!("cpu family\t: {family}\n"));
+        s.push_str(&format!("model\t\t: {model}\n"));
+        s.push_str(&format!("model name\t: {model_name}\n"));
+        s.push_str(&format!("stepping\t: {stepping}\n"));
+        s.push_str(&format!("cpu MHz\t\t: {mhz_int}.{mhz_frac:03}\n"));
+        if cache_kb > 0 {
+            s.push_str(&format!("cache size\t: {cache_kb} KB\n"));
+        }
+        s.push_str("physical id\t: 0\n");
+        s.push_str(&format!("siblings\t: {count}\n"));
+        s.push_str(&format!("core id\t\t: {i}\n"));
+        s.push_str(&format!("cpu cores\t: {count}\n"));
+        s.push_str(&format!("apicid\t\t: {apic_id}\n"));
+        s.push_str(&format!("initial apicid\t: {apic_id}\n"));
+        s.push_str("fpu\t\t: yes\n");
+        s.push_str("fpu_exception\t: yes\n");
+        s.push_str("wp\t\t: yes\n");
+        if let Some(f) = crate::cpu::features() {
+            push_cpu_flags(&mut s, f);
+        }
+        s.push_str(&format!("bogomips\t: {bogo_int}.{bogo_frac:03}\n"));
+        s.push_str(&format!("clflush size\t: {clflush}\n"));
+        s.push_str(&format!("cache_alignment\t: {clflush}\n"));
+        s.push_str("power management:\n");
         s.push('\n');
     }
 
@@ -12667,6 +12726,60 @@ pub fn self_test() -> KernelResult<()> {
         }
 
         serial_println!("[procfs]   {name}: {} bytes OK", data.len());
+    }
+
+    // --- /proc/cpuinfo Linux per-processor format ---
+    // Tools (`grep -c ^processor`), glibc, and lscpu/hwinfo expect one block
+    // per online CPU, each beginning with a `processor\t: N` line and carrying
+    // the well-known keys.  The previous custom format (a header block plus
+    // `acpi_id`/`apic_id` keys) was miscounted as an extra CPU by
+    // block-counting parsers; pin the new shape so it can't regress.
+    {
+        let cpu_data = fs.read_file("/cpuinfo")?;
+        let cpu_text = core::str::from_utf8(&cpu_data)
+            .map_err(|_| KernelError::InternalError)?;
+        // `grep -c ^processor` — count lines that start a processor block.
+        let block_count = cpu_text
+            .lines()
+            .filter(|l| l.starts_with("processor\t:"))
+            .count();
+        let want = crate::acpi::processor_count();
+        if block_count != want {
+            serial_println!(
+                "[procfs]   FAIL: cpuinfo has {} processor blocks, want {} (online CPUs)",
+                block_count, want
+            );
+            return Err(KernelError::InternalError);
+        }
+        if block_count == 0 {
+            serial_println!("[procfs]   FAIL: cpuinfo has no processor blocks");
+            return Err(KernelError::InternalError);
+        }
+        // First block must be index 0 (Linux numbers from 0).
+        if !cpu_text.starts_with("processor\t: 0\n") {
+            serial_println!("[procfs]   FAIL: cpuinfo first line not 'processor\\t: 0'");
+            return Err(KernelError::InternalError);
+        }
+        // Per-block keys consumers scrape must each appear once per CPU.
+        for key in ["vendor_id\t:", "cpu family\t:", "model name\t:",
+                    "flags\t\t:", "cpu cores\t:"] {
+            let n = cpu_text.lines().filter(|l| l.starts_with(key)).count();
+            if n != want {
+                serial_println!(
+                    "[procfs]   FAIL: cpuinfo key {:?} appears {} times, want {}",
+                    key, n, want
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // The legacy header line must be gone (it broke block-counting).
+        if cpu_text.contains("processors:") || cpu_text.contains("acpi_id") {
+            serial_println!("[procfs]   FAIL: cpuinfo still contains legacy header keys");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[procfs]   cpuinfo: {} Linux-format processor block(s) OK", block_count
+        );
     }
 
     // Test stat on nonexistent file.

@@ -20128,50 +20128,55 @@ fn sys_semget(args: &SyscallArgs) -> SyscallResult {
 
 /// `semop(semid, sops, nsops)`.
 ///
-/// Linux's `ipc/sem.c::SYSCALL_DEFINE3(semop)` -> `do_semtimedop` ->
-/// `__do_semtimedop` gate order:
+/// Linux's `ipc/sem.c::SYSCALL_DEFINE3(semop)` is exactly
+/// `do_semtimedop(semid, tsops, nsops, NULL)`, so it shares the
+/// verbatim v6.6 gate order (see [`sys_semtimedop`]):
 ///
-///   1. `copy_from_user(sops, tsops, nsops * sizeof(struct sembuf))`
-///      runs BEFORE the structural gates.  With nsops>0 and an
-///      unreadable tsops, this returns -EFAULT.  (With nsops==0 the
-///      copy is a no-op and falls through to step 2.)
-///   2. `__do_semtimedop`: `nsops < 1 || semid < 0` -> EINVAL.
-///   3. `nsops > sc_semopm` -> E2BIG (sc_semopm default 500).
+///   1. `do_semtimedop`: `nsops > sc_semopm` -> E2BIG (FIRST).
+///   2. `do_semtimedop`: `nsops < 1` -> EINVAL.
+///   3. `do_semtimedop`: `copy_from_user(sops, tsops, nsops * 6)`
+///      -> EFAULT — only reached after the E2BIG/EINVAL gates.
+///   4. `__do_semtimedop`: `sem_obtain_object_check(semid)` -> EINVAL
+///      for any absent id (we model none).  `semid` is validated
+///      HERE, not up front.
 ///
-/// Pre-batch we ran the nsops/semid gates BEFORE the sops copy.  A
-/// probe passing (sops=BADPTR, nsops=1, semid=-1) saw -EINVAL where
-/// Linux returns -EFAULT.  Batch 204 reorders the gates so the sops
-/// EFAULT wins.
+/// `nsops` is C `unsigned int` -> the syscall ABI delivers only the
+/// low 32 bits.
+///
+/// Batch 544 corrects the earlier (batch 204) model, which claimed
+/// `copy_from_user` ran BEFORE the E2BIG / `nsops < 1` gates — the
+/// verbatim source shows the opposite.  So `(sops=BADPTR, nsops=501)`
+/// returned EFAULT where Linux returns E2BIG, and a 64-bit-wide
+/// `nsops=0x1_0000_0000` returned E2BIG where Linux's truncated
+/// `nsops=0` returns EINVAL.  The up-front `semid < 0` check is also
+/// dropped (Linux defers it to step 4, after the sops copy).
 fn sys_semop(args: &SyscallArgs) -> SyscallResult {
-    const SEMOPM: usize = 500;
-    let nsops = args.arg2 as usize;
-    // 1. copy_from_user runs first in Linux.  Only meaningful when
-    //    nsops > 0 — Linux's copy_from_user(..., 0) is a no-op even
-    //    against NULL.
-    if nsops > 0 {
-        if args.arg1 == 0 {
-            return linux_err(errno::EFAULT);
-        }
-        // struct sembuf = 6 bytes; round up validate.
-        if let Err(e) =
-            crate::mm::user::validate_user_read(args.arg1, nsops.saturating_mul(6))
-        {
-            return linux_err(linux_errno_for(e));
-        }
-    }
-    // 2. nsops < 1 || semid < 0 -> EINVAL.
-    if nsops == 0 {
-        return linux_err(errno::EINVAL);
-    }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let semid = args.arg0 as i32;
-    if semid < 0 {
-        return linux_err(errno::EINVAL);
-    }
-    // 3. nsops > SEMOPM -> E2BIG.
+    // ns->sc_semopm default (ipc/sem.c) — SEMOPM = 500.
+    const SEMOPM: u32 = 500;
+    // nsops is `unsigned int` -> low 32 bits only.
+    #[allow(clippy::cast_possible_truncation)]
+    let nsops = args.arg2 as u32;
+    // 1. nsops > sc_semopm -> E2BIG (before the nsops < 1 EINVAL).
     if nsops > SEMOPM {
         return linux_err(errno::E2BIG);
     }
+    // 2. nsops < 1 -> EINVAL.
+    if nsops == 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // 3. copy_from_user(sops, tsops, nsops * 6) -> EFAULT.  struct
+    //    sembuf = 6 bytes.  Reached only after the E2BIG/EINVAL gates.
+    if args.arg1 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(
+        args.arg1,
+        (nsops as usize).saturating_mul(6),
+    ) {
+        return linux_err(linux_errno_for(e));
+    }
+    // 4. sem_obtain_object_check(semid) -> EINVAL for any id (no SysV
+    //    semaphore set modelled; also covers semid < 0).
     linux_err(errno::EINVAL)
 }
 
@@ -20253,71 +20258,81 @@ fn sys_semctl(args: &SyscallArgs) -> SyscallResult {
 
 /// `semtimedop(semid, sops, nsops, timeout)`.
 ///
-/// Linux's `ipc/sem.c::SYSCALL_DEFINE4(semtimedop)` order:
+/// Verbatim Linux v6.6 `ipc/sem.c` gate order (verified against
+/// `ksys_semtimedop`, `do_semtimedop`, `__do_semtimedop`):
 ///
-///   1. If `timeout != NULL`: `get_timespec64(&ts, timeout)`
-///      (copy_from_user 16 bytes) -> EFAULT on unreadable.  Note:
-///      `get_timespec64` does NOT range-check tv_nsec — that happens
-///      later in `__do_semtimedop`.
-///   2. `do_semtimedop`:
+///   1. `ksys_semtimedop`: if `timeout != NULL`,
+///      `get_timespec64(&ts, timeout)` -> EFAULT on unreadable.
+///      `get_timespec64` only copies (16 bytes); it does NOT
+///      range-check tv_sec/tv_nsec (that is gate 5).
+///   2. `do_semtimedop`: `if (nsops > ns->sc_semopm) return -E2BIG;`
+///      — the E2BIG check runs FIRST, before the `nsops < 1` EINVAL.
+///   3. `do_semtimedop`: `if (nsops < 1) return -EINVAL;`
+///   4. `do_semtimedop`:
 ///      `copy_from_user(sops, tsops, nsops * sizeof(*tsops))`
-///      -> EFAULT (no-op when nsops==0).
-///   3. `__do_semtimedop`:
-///      a. `nsops < 1 || semid < 0` -> EINVAL.
-///      b. `nsops > sc_semopm` -> E2BIG.
-///      c. If timeout: `tv_sec < 0 || tv_nsec < 0 || tv_nsec >= 1e9`
-///      -> EINVAL.
+///      -> EFAULT — only reached after the E2BIG/EINVAL gates.
+///   5. `__do_semtimedop`: if timeout,
+///      `tv_sec < 0 || tv_nsec < 0 || tv_nsec >= 1e9` -> EINVAL —
+///      validated AFTER the sops copy.
+///   6. `__do_semtimedop`: `sem_obtain_object_check(ns, semid)` ->
+///      -EINVAL for a bad/absent id.  This is where `semid` is
+///      validated — NOT up front.  We model no SysV semaphore set,
+///      so every id is absent and this is the terminal EINVAL.
 ///
-/// Pre-batch we did nsops/semid first and never validated the
-/// timespec content.  A probe passing
-/// (timeout=BADPTR, nsops=0, semid=-1) saw -EINVAL where Linux
-/// returns -EFAULT, and (timeout={tv_nsec=2e9}, nsops=1, semid=0,
-/// sops=valid) saw the terminal -EINVAL via the wrong code path.
-/// Batch 204 reorders to match Linux exactly.
+/// `nsops` is C `unsigned int`; the x86_64 syscall ABI delivers only
+/// the low 32 bits, so it is truncated before the bound checks.
+///
+/// Batch 544 corrects the earlier (batch 204) model, which had two
+/// divergences: (a) it validated the `sops` pointer EFAULT *before*
+/// the E2BIG / `nsops < 1` gates, so e.g. `(nsops=600, sops=BADPTR)`
+/// returned EFAULT where Linux returns E2BIG; and (b) it compared
+/// `nsops` at full 64-bit width, so `(nsops=0x1_0000_0000)` returned
+/// E2BIG where Linux's truncated `nsops=0` returns EINVAL.  It also
+/// checked `semid < 0` up front; Linux defers semid validation to
+/// step 6 (after the sops copy and timeout validation).
 fn sys_semtimedop(args: &SyscallArgs) -> SyscallResult {
-    const SEMOPM: usize = 500;
+    // ns->sc_semopm default (ipc/sem.c) — SEMOPM = 500.
+    const SEMOPM: u32 = 500;
 
-    // 1. Timeout EFAULT first (timeout pointer readability only;
-    //    content validity is gate 3c below).
+    // 1. ksys_semtimedop: timeout readability EFAULT (no range check
+    //    here; get_timespec64 only copies 16 bytes).
     if args.arg3 != 0 {
-        // timespec = 16 bytes.
         if let Err(e) = crate::mm::user::validate_user_read(args.arg3, 16) {
             return linux_err(linux_errno_for(e));
         }
     }
-    // 2. sops EFAULT — only checked when nsops > 0 (see sys_semop).
-    let nsops = args.arg2 as usize;
-    if nsops > 0 {
-        if args.arg1 == 0 {
-            return linux_err(errno::EFAULT);
-        }
-        if let Err(e) =
-            crate::mm::user::validate_user_read(args.arg1, nsops.saturating_mul(6))
-        {
-            return linux_err(linux_errno_for(e));
-        }
-    }
-    // 3a. nsops < 1 || semid < 0 -> EINVAL.
-    if nsops == 0 {
-        return linux_err(errno::EINVAL);
-    }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let semid = args.arg0 as i32;
-    if semid < 0 {
-        return linux_err(errno::EINVAL);
-    }
-    // 3b. nsops > SEMOPM -> E2BIG.
+    // nsops is `unsigned int` -> low 32 bits only.
+    #[allow(clippy::cast_possible_truncation)]
+    let nsops = args.arg2 as u32;
+    // 2. do_semtimedop: nsops > sc_semopm -> E2BIG (before nsops < 1).
     if nsops > SEMOPM {
         return linux_err(errno::E2BIG);
     }
-    // 3c. Timeout content validity: tv_sec >= 0 AND tv_nsec in
-    //     [0, NSEC_PER_SEC).  validate_user_timespec64 is the same
-    //     helper used by mq_timed{send,receive} (batch 198).
+    // 3. do_semtimedop: nsops < 1 -> EINVAL.
+    if nsops == 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // 4. do_semtimedop: copy_from_user(sops, tsops, nsops * 6) -> EFAULT.
+    //    sembuf = 6 bytes.  Reached only after the E2BIG/EINVAL gates.
+    if args.arg1 == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(
+        args.arg1,
+        (nsops as usize).saturating_mul(6),
+    ) {
+        return linux_err(linux_errno_for(e));
+    }
+    // 5. __do_semtimedop: timeout content validity (tv_sec >= 0 AND
+    //    tv_nsec in [0, NSEC_PER_SEC)) -> EINVAL, AFTER the sops copy.
     if args.arg3 != 0 {
         if let Err(r) = validate_user_timespec64(args.arg3) {
             return r;
         }
     }
+    // 6. __do_semtimedop: sem_obtain_object_check(semid) -> EINVAL for
+    //    any id (no SysV semaphore set modelled; also covers semid < 0,
+    //    which Linux validates here, not up front).
     linux_err(errno::EINVAL)
 }
 
@@ -59934,13 +59949,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "[syscall/linux]   semget ipcget gate routing \
              (IPC_PRIVATE/newary / ENOENT / key_t-trunc): OK"
         );
-        // Batch 204: sops EFAULT now ordered AHEAD of semid<0 / SEMOPM
-        // gates, matching Linux's do_semtimedop -> __do_semtimedop
-        // sequence.  Tests that exercise the semid<0 / E2BIG gates
-        // must therefore supply a readable sops buffer.
+        // Batch 544: verbatim v6.6 do_semtimedop runs the structural
+        // gates (E2BIG, then nsops<1 EINVAL) BEFORE copy_from_user(sops),
+        // and validates semid only later in __do_semtimedop (after the
+        // sops copy).  Tests that exercise the terminal semid EINVAL
+        // therefore supply a readable sops buffer; the E2BIG gate is
+        // reachable even with a NULL sops (it precedes the copy).
         let sops_buf = [0u8; 4096]; // enough for nsops<=682 sembufs
         let sops_ptr = sops_buf.as_ptr() as u64;
-        // semop(semid=-1, nsops=1, valid sops) -> EINVAL (semid<0).
+        // semop(semid=-1, nsops=1, valid sops) -> EINVAL (terminal
+        // sem_obtain_object_check; semid validated after the sops copy).
         let a = SyscallArgs { arg0: u64::MAX, arg1: sops_ptr, arg2: 1, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SEMOP, &a).value
@@ -59949,7 +59967,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         // semop(_, valid sops, nsops=501) -> E2BIG (SEMOPM cap; distinct
-        // errno from EINVAL — see Linux ipc/sem.c::__do_semtimedop).
+        // errno from EINVAL — see Linux ipc/sem.c::do_semtimedop).
         let a = SyscallArgs { arg0: 0, arg1: sops_ptr, arg2: 501, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SEMOP, &a).value
@@ -59975,10 +59993,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!("[syscall/linux]   semget/semop SEMMSL/SEMOPM validation: OK");
 
-        // Batch 204: sops EFAULT ordered ahead of structural gates.
-        //   * (sops=BADPTR, nsops=1, semid=-1) -> EFAULT (was EINVAL).
-        //     Linux's do_semtimedop runs copy_from_user before the
-        //     __do_semtimedop semid<0 check.
+        // Batch 544: the E2BIG / nsops<1 EINVAL gates precede the sops
+        // copy in v6.6 do_semtimedop.
+        //   * (sops=NULL, nsops=1, semid=-1) -> EFAULT.  nsops=1 passes
+        //     E2BIG/EINVAL, then copy_from_user(NULL, 6) -> EFAULT
+        //     (semid is validated only AFTER the copy, so it never
+        //     surfaces here).
         let a = SyscallArgs { arg0: u64::MAX, arg1: 0, arg2: 1, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SEMOP, &a).value != -i64::from(errno::EFAULT) {
@@ -59988,15 +60008,56 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        //   * (sops=BADPTR, nsops=501, semid=0) -> EFAULT (was E2BIG).
+        //   * (sops=NULL, nsops=501, semid=0) -> E2BIG (NOT EFAULT).
+        //     The E2BIG gate runs before copy_from_user, so a NULL sops
+        //     never gets inspected.  This is the headline batch-544
+        //     fix: pre-batch this returned EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 501, arg3: 0,
             arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::SEMOP, &a).value != -i64::from(errno::EFAULT) {
+        if dispatch_linux(nr::SEMOP, &a).value != -i64::from(errno::E2BIG) {
             serial_println!(
-                "[syscall/linux]   FAIL: semop(sops=NULL,nsops=501) not EFAULT"
+                "[syscall/linux]   FAIL: semop(sops=NULL,nsops=501) not E2BIG"
             );
             return Err(KernelError::InternalError);
         }
+        //   * nsops truncation: nsops is C `unsigned int`.  With low 32
+        //     bits == 0 the value is 0 -> nsops<1 EINVAL (NOT E2BIG, as
+        //     a 64-bit-wide comparison would give).  Probe both semop
+        //     and semtimedop; sops=NULL is irrelevant (EINVAL precedes
+        //     the copy).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0x1_0000_0000,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SEMOP, &a).value
+            != i64::from(errno::EINVAL).wrapping_neg() {
+            serial_println!(
+                "[syscall/linux]   FAIL: semop(nsops=0x1_0000_0000) not EINVAL (trunc)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0x1_0000_0000,
+            arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SEMTIMEDOP, &a).value
+            != i64::from(errno::EINVAL).wrapping_neg() {
+            serial_println!(
+                "[syscall/linux]   FAIL: semtimedop(nsops=0x1_0000_0000) not EINVAL (trunc)"
+            );
+            return Err(KernelError::InternalError);
+        }
+        //   * E2BIG-before-sops for semtimedop too: (sops=NULL,
+        //     nsops=600, timeout=NULL) -> E2BIG, not EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 600, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::SEMTIMEDOP, &a).value
+            != i64::from(errno::E2BIG).wrapping_neg() {
+            serial_println!(
+                "[syscall/linux]   FAIL: semtimedop(sops=NULL,nsops=600) not E2BIG"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   sem(timed)op E2BIG-before-sops-copy + nsops \
+             unsigned-int truncation (batch 544): OK"
+        );
         // Note: a (timeout=BADPTR, nsops=0) "EFAULT-from-pointer"
         // discriminator can't be exercised here — validate_user_read
         // is a no-op in kernel context, so any pointer is considered

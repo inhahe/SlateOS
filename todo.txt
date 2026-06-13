@@ -1,4 +1,41 @@
 
+## DONE (2026-06-12): ABI batch 544 — semop/semtimedop: E2BIG/EINVAL structural gates precede copy_from_user(sops); nsops unsigned-int truncation
+## Linux v6.6 ipc/sem.c (verified verbatim against raw.githubusercontent.com torvalds/linux v6.6):
+##   SYSCALL_DEFINE3(semop)  = do_semtimedop(semid, tsops, nsops, NULL)
+##   SYSCALL_DEFINE4(semtimedop) -> ksys_semtimedop:
+##       if(timeout){ if(get_timespec64(&ts,timeout)) return -EFAULT; return do_semtimedop(...,&ts);} ...
+##       (get_timespec64 only COPIES 16 bytes; it does NOT range-check tv_sec/tv_nsec.)
+##   do_semtimedop():
+##       if (nsops > ns->sc_semopm) return -E2BIG;     // E2BIG FIRST
+##       if (nsops < 1)            return -EINVAL;      // then nsops<1
+##       if (nsops > SEMOPM_FAST) sops = kvmalloc_array(...);
+##       if (copy_from_user(sops, tsops, nsops*sizeof(*tsops))) { ret=-EFAULT; goto out_free; }  // AFTER the gates
+##       ret = __do_semtimedop(semid, sops, nsops, timeout, ns);
+##   __do_semtimedop(): if(timeout){ tv_sec<0||tv_nsec<0||tv_nsec>=1e9 -> -EINVAL }  // after sops copy
+##                      sma = sem_obtain_object_check(ns, semid); IS_ERR -> -EINVAL  // semid validated HERE
+##   nsops is C `unsigned int` -> x86_64 ABI delivers only the low 32 bits.
+## DIVERGENCE: batch 204's model was BACKWARDS. It (a) ran the sops-pointer EFAULT check BEFORE the
+##   E2BIG / nsops<1 EINVAL gates, so (sops=NULL, nsops=501/600) returned EFAULT where Linux returns
+##   E2BIG; (b) compared nsops at full 64-bit width, so (nsops=0x1_0000_0000) returned E2BIG where
+##   Linux's truncated nsops=0 returns EINVAL; (c) checked semid<0 up front, though Linux defers semid
+##   validation to __do_semtimedop AFTER the sops copy.  (The batch-204 doc comment literally claimed
+##   "copy_from_user runs BEFORE the structural gates" — the verbatim source shows the opposite.)
+## FIX (translator-only, kernel/src/syscall/linux.rs):
+##   - sys_semop (~20145): reordered to nsops>SEMOPM E2BIG -> nsops==0 EINVAL -> sops(arg1==0)EFAULT +
+##     validate_user_read -> terminal EINVAL; nsops now `args.arg2 as u32`; dropped up-front semid<0.
+##   - sys_semtimedop (~20277): timeout-readability EFAULT -> E2BIG -> nsops==0 EINVAL -> sops EFAULT ->
+##     timeout content EINVAL (validate_user_timespec64) -> terminal EINVAL; nsops u32; dropped semid<0.
+##   - Rewrote both doc comments to the verbatim 4-step / 6-step v6.6 orders.
+##   Self-tests (kernel ~59947+): flipped semop(sops=NULL,nsops=501) EFAULT->E2BIG; added nsops
+##   truncation probes (0x1_0000_0000 -> EINVAL for both semop and semtimedop) and a semtimedop
+##   (sops=NULL,nsops=600)->E2BIG E2BIG-before-copy probe; stamp "sem(timed)op E2BIG-before-sops-copy
+##   + nsops unsigned-int truncation (batch 544): OK".  Existing semid=-1 / timespec64-content tests
+##   still pass under the corrected order.
+## SEMOPM kept at 500 (ns->sc_semopm default; unchanged).
+## VERIFIED: cargo build clean; clippy 17475 (unchanged baseline; new asserts use
+##   i64::from(errno::X).wrapping_neg()); boot-test BOOT_OK EXIT=0, batch-544 stamp present in
+##   build/serial-test.txt, no SELF-TEST FAILURE.
+
 ## DONE (2026-06-12): ABI batch 543 — mq_timedsend/mq_timedreceive: msg buffer untouched before fdget (EBADF preempts EFAULT)
 ## Linux v6.6 ipc/mqueue.c (verified verbatim against raw.githubusercontent.com torvalds/linux v6.6):
 ##   SYSCALL_DEFINE5(mq_timedsend): if(u_abs_timeout){prepare_timeout(...)}  // EFAULT then EINVAL

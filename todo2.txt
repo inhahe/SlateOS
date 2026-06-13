@@ -1,25 +1,22 @@
-All four items below handled — 2026-06-12. Status notes inline.
+[ANSWERED 2026-06-13 → see operator-answers-2026-06-13.md] Your comments below
+are addressed there (NUMA/UMA explanation + option-C overhead for Q1; overcommit
+explanation, your options 4 & 5 confirmed-already-built, and the "default default"
+for Q2; toolchain ordering + the fastpy/CPython correction for Q3). Two small
+confirmations are awaiting your word (Q1 keep option A; Q2 keep shipped defaults);
+neither blocks the toolchain work, which is proceeding. Original comments preserved:
 
-[DONE] add to roadmap-detailed.md that the OS should have the capability of making a dump file when a program crashes (which can be set by the program itself or by the user) and a ported dump file debugger
-  -> Added "#### Crash Dumps & Postmortem Debugging" under §1.5 Capability Types
-     (registers/stacks/loaded-libs capture, minimal vs full scope, program self-opt-in
-     AND user/admin policy as two independent triggers, capability gating, storage/rotation).
-     Ported dump-file debugger added under §4.8 Development Tools (gdb/lldb, postmortem
-     dump loading, re-symbolicate against store paths, minidump/ELF-core-compatible format).
+---
 
-[DONE] add if it's not already in roadmap-detailed.md that we should port an IDE ... vscode ... marketplace note
-  -> "Port VS Code" already existed in §4.7; expanded it: build from open-source `Code - OSS`
-     (MIT) NOT the MS-branded binary; MS license forbids only connecting to the Microsoft
-     Visual Studio Marketplace, so ship pointed at Open VSX / self-hosted registry (VSCodium
-     constraint). Added integration with our C/C++ (gcc/clang), Rust, and fastpy toolchains
-     + debugger integration.
+regarding Q1 it open-questions.md, what are the advantages of being a UMA system versus being a NUMA system? and regarding option C, I guess that creates a CPU and memory overhead? how much overhead? i really have no understanding of what NUMA or VMA or UMA means, so I can't think about whether there might be a better fourth option.  also i don't have any clear answers for options A and B on what the end results might be on trying to run native programs and linux programs and what percentage of programs they might affect. 
 
-[ALREADY PRESENT] if it doesn't already exist, add to the capabilities the ability to display "always on top"
-  -> Already in roadmap-detailed.md line ~451: `ui.always_on_top` — show always-on-top window.
-     No change needed.
+regarding option Q2, i think the biggest con for option A is one you didn't mention under cons but mentioned before then: that some apps might refuse to start. regarding option C, you said that some readers treat it as an error, does that mean the program might not run? just log noise is okay as a tradeoff for optimal behavior (as in the biggest number of programs (especially important programs) run and don't crash)
 
-[ALREADY DONE] coreutils crate vs standalone per-tool crates question
-  -> Resolved earlier today: answer written to `coreutils-canonical-answer.md` (effort/space
-     explicitly set aside; decision driven by per-tool least-privilege capability security).
-     Recorded in design-decisions.md §8 (Decided by: Operator) and closed in open-questions.md.
-     Recommendation: standalone per-tool crates are canonical + a shared `coreutils-common` lib.
+i think there's a fourth option for Q2: let the user modify this value per program according to whatever issues they have (but that still leaves in question what the default should be. that could be modifiable by the user, too, then we'd just need to decide a default default). but we'd need to offer an explanation of the issue and how to solve it that makes itself obvious when the OS detects that a program is having or may be having issues due to proc/sys/vm/overcommit_memory.
+
+a fifth option for Q2 is to actually create both memory strategies and allow the user to configure which one to use system-wide, and use overcommit_memory = 0 for linux programs by default but let the user change that too, as a default for all linux programs, and per linux program. and allow the user to change the value per non-linux program too. all Q2 options would be flagged as 'advanced options' under settings, possibly with warnings (and/or there may be a general warning for all advanced options that changing them could cause problems).
+
+Q3: let's do the terminal stuff before the GUI stuff, that seems intuitive to me. i'd think we should port the GCC/CMake/Make toolchain first before porting bash, because doing the latter will make doing the former easier or possible, no? it may not even be necessary to port CPython because we've done everything we could (in other sessions for another project) to make fastpy as fully compatible with CPython 3.14 and bug-free as we can, and it's many many times faster than CPython, so maybe we should work on porting that before CPython if we haven't already ported it.
+
+write all your answers to these comments to an .md file (maybe even open-questions.md if you think that's the most appropriate place).
+
+

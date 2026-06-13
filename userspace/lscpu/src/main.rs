@@ -21,6 +21,18 @@ const VERSION: &str = "0.1.0";
 // CPU information structures
 // ============================================================================
 
+/// One cache level as reported by `/sys/devices/system/cpu/cpu0/cache/indexN/`.
+/// Every field is sourced from sysfs (ultimately CPUID-derived in the kernel);
+/// fields the kernel does not expose are left `None` and simply not displayed.
+/// lscpu never fabricates cache geometry.
+#[derive(Clone, Debug)]
+struct CacheRecord {
+    level: u8,
+    cache_type: String,
+    size: String,
+    ways: Option<u32>,
+}
+
 #[derive(Clone, Debug, Default)]
 struct CpuInfo {
     architecture: String,
@@ -43,6 +55,7 @@ struct CpuInfo {
     l1i_cache: String,
     l2_cache: String,
     l3_cache: String,
+    caches: Vec<CacheRecord>,
     threads_per_core: u32,
     cores_per_socket: u32,
     sockets: u32,
@@ -220,36 +233,33 @@ fn collect_cpu_info() -> CpuInfo {
         info.numa_nodes = 1;
     }
 
-    // Cache info from sysfs.
-    for i in 0..4 {
+    // Cache info from sysfs.  Every value here is sourced from
+    // /sys/.../cache/indexN (CPUID-derived in the kernel).  If sysfs does not
+    // expose a cache index we leave the corresponding field empty and simply
+    // do not display it — we never substitute a fabricated default, which
+    // would show the user invented numbers as if they were real.
+    for i in 0..8 {
         let base = format!("/sys/devices/system/cpu/cpu0/cache/index{i}");
-        if let (Some(level), Some(cache_type), Some(size)) = (
+        let (Some(level_s), Some(cache_type), Some(size)) = (
             read_sys_file(&format!("{base}/level")),
             read_sys_file(&format!("{base}/type")),
             read_sys_file(&format!("{base}/size")),
-        ) {
-            match (level.as_str(), cache_type.as_str()) {
-                ("1", "Data") => info.l1d_cache = size,
-                ("1", "Instruction") => info.l1i_cache = size,
-                ("2", _) => info.l2_cache = size,
-                ("3", _) => info.l3_cache = size,
-                _ => {}
-            }
-        }
-    }
+        ) else {
+            // No more cache indices.
+            break;
+        };
+        let Ok(level) = level_s.parse::<u8>() else { continue };
+        let ways = read_sys_file(&format!("{base}/ways_of_associativity"))
+            .and_then(|s| s.parse::<u32>().ok());
 
-    // Defaults for cache if not found.
-    if info.l1d_cache.is_empty() {
-        info.l1d_cache = "32K".to_string();
-    }
-    if info.l1i_cache.is_empty() {
-        info.l1i_cache = "32K".to_string();
-    }
-    if info.l2_cache.is_empty() {
-        info.l2_cache = "256K".to_string();
-    }
-    if info.l3_cache.is_empty() {
-        info.l3_cache = "8192K".to_string();
+        match (level, cache_type.as_str()) {
+            (1, "Data") => info.l1d_cache = size.clone(),
+            (1, "Instruction") => info.l1i_cache = size.clone(),
+            (2, _) => info.l2_cache = size.clone(),
+            (3, _) => info.l3_cache = size.clone(),
+            _ => {}
+        }
+        info.caches.push(CacheRecord { level, cache_type, size, ways });
     }
 
     // Hypervisor detection.
@@ -328,10 +338,19 @@ fn print_standard(out: &mut io::StdoutLock<'_>, info: &CpuInfo) {
     let _ = writeln!(out, "Socket(s):             {}", info.sockets);
     let _ = writeln!(out, "NUMA node(s):          {}", info.numa_nodes);
 
-    let _ = writeln!(out, "L1d cache:             {}", info.l1d_cache);
-    let _ = writeln!(out, "L1i cache:             {}", info.l1i_cache);
-    let _ = writeln!(out, "L2 cache:              {}", info.l2_cache);
-    let _ = writeln!(out, "L3 cache:              {}", info.l3_cache);
+    // Only print cache lines we could actually source from sysfs.
+    if !info.l1d_cache.is_empty() {
+        let _ = writeln!(out, "L1d cache:             {}", info.l1d_cache);
+    }
+    if !info.l1i_cache.is_empty() {
+        let _ = writeln!(out, "L1i cache:             {}", info.l1i_cache);
+    }
+    if !info.l2_cache.is_empty() {
+        let _ = writeln!(out, "L2 cache:              {}", info.l2_cache);
+    }
+    if !info.l3_cache.is_empty() {
+        let _ = writeln!(out, "L3 cache:              {}", info.l3_cache);
+    }
 
     let _ = writeln!(out, "NUMA node0 CPU(s):     {}", info.online_cpus);
 
@@ -348,48 +367,41 @@ fn print_standard(out: &mut io::StdoutLock<'_>, info: &CpuInfo) {
 fn print_json(out: &mut io::StdoutLock<'_>, info: &CpuInfo) {
     let _ = writeln!(out, "{{");
     let _ = writeln!(out, "  \"lscpu\": [");
-    let fields = [
-        ("Architecture", &info.architecture),
-        ("Byte Order", &info.byte_order),
-        ("Vendor ID", &info.vendor_id),
-        ("Model name", &info.model_name),
+    // Assemble fields dynamically so empty/unsourced values (e.g. cache sizes
+    // sysfs did not provide) are omitted rather than emitted as blanks.
+    let mut entries: Vec<(&str, String)> = vec![
+        ("Architecture", info.architecture.clone()),
+        ("Byte Order", info.byte_order.clone()),
+        ("CPU(s)", info.cpus.to_string()),
+        ("CPU family", info.cpu_family.to_string()),
+        ("Model", info.model.to_string()),
+        ("Stepping", info.stepping.to_string()),
+        ("Thread(s) per core", info.threads_per_core.to_string()),
+        ("Core(s) per socket", info.cores_per_socket.to_string()),
+        ("Socket(s)", info.sockets.to_string()),
+        ("NUMA node(s)", info.numa_nodes.to_string()),
+    ];
+    if !info.vendor_id.is_empty() {
+        entries.push(("Vendor ID", info.vendor_id.clone()));
+    }
+    if !info.model_name.is_empty() {
+        entries.push(("Model name", info.model_name.clone()));
+    }
+    for (label, val) in [
         ("L1d cache", &info.l1d_cache),
         ("L1i cache", &info.l1i_cache),
         ("L2 cache", &info.l2_cache),
         ("L3 cache", &info.l3_cache),
-    ];
-
-    let cpu_str = info.cpus.to_string();
-    let family_str = info.cpu_family.to_string();
-    let model_str = info.model.to_string();
-    let stepping_str = info.stepping.to_string();
-    let tpc_str = info.threads_per_core.to_string();
-    let cps_str = info.cores_per_socket.to_string();
-    let sockets_str = info.sockets.to_string();
-    let numa_str = info.numa_nodes.to_string();
-
-    let num_fields = [
-        ("CPU(s)", &cpu_str),
-        ("CPU family", &family_str),
-        ("Model", &model_str),
-        ("Stepping", &stepping_str),
-        ("Thread(s) per core", &tpc_str),
-        ("Core(s) per socket", &cps_str),
-        ("Socket(s)", &sockets_str),
-        ("NUMA node(s)", &numa_str),
-    ];
-
-    let total = fields.len() + num_fields.len();
-    let mut idx = 0;
-    for (key, val) in &fields {
-        let comma = if idx + 1 < total { "," } else { "" };
-        let _ = writeln!(out, "    {{\"field\": \"{key}\", \"data\": \"{val}\"}}{comma}");
-        idx += 1;
+    ] {
+        if !val.is_empty() {
+            entries.push((label, val.clone()));
+        }
     }
-    for (key, val) in &num_fields {
+
+    let total = entries.len();
+    for (idx, (key, val)) in entries.iter().enumerate() {
         let comma = if idx + 1 < total { "," } else { "" };
         let _ = writeln!(out, "    {{\"field\": \"{key}\", \"data\": \"{val}\"}}{comma}");
-        idx += 1;
     }
 
     let _ = writeln!(out, "  ]");
@@ -397,11 +409,24 @@ fn print_json(out: &mut io::StdoutLock<'_>, info: &CpuInfo) {
 }
 
 fn print_caches(out: &mut io::StdoutLock<'_>, info: &CpuInfo) {
-    let _ = writeln!(out, "NAME ONE-SIZE ALL-SIZE WAYS TYPE");
-    let _ = writeln!(out, "L1d  {}     {}     8    Data", info.l1d_cache, info.l1d_cache);
-    let _ = writeln!(out, "L1i  {}     {}     8    Instruction", info.l1i_cache, info.l1i_cache);
-    let _ = writeln!(out, "L2   {}    {}    16   Unified", info.l2_cache, info.l2_cache);
-    let _ = writeln!(out, "L3   {}  {}  16   Unified", info.l3_cache, info.l3_cache);
+    if info.caches.is_empty() {
+        // No honest source for cache geometry — say so rather than print
+        // fabricated rows.
+        let _ = writeln!(out, "lscpu: no cache information available");
+        return;
+    }
+    let _ = writeln!(out, "NAME ONE-SIZE WAYS TYPE");
+    for c in &info.caches {
+        // Linux names: L1d/L1i for level-1 data/instruction, L2/L3 otherwise.
+        let name = match (c.level, c.cache_type.as_str()) {
+            (1, "Data") => "L1d".to_string(),
+            (1, "Instruction") => "L1i".to_string(),
+            (lvl, _) => format!("L{lvl}"),
+        };
+        // Only print the ways column when sysfs actually reported it.
+        let ways = c.ways.map_or_else(|| "-".to_string(), |w| w.to_string());
+        let _ = writeln!(out, "{name:<4} {:<8} {ways:<4} {}", c.size, c.cache_type);
+    }
 }
 
 // ============================================================================
@@ -540,12 +565,35 @@ mod tests {
     }
 
     #[test]
-    fn test_cache_defaults() {
+    fn test_cache_no_fabrication() {
+        // Cache sizes must never be invented: a non-empty summary cache size
+        // may only exist when a matching sysfs-sourced record is present.
         let info = collect_cpu_info();
-        assert!(!info.l1d_cache.is_empty());
-        assert!(!info.l1i_cache.is_empty());
-        assert!(!info.l2_cache.is_empty());
-        assert!(!info.l3_cache.is_empty());
+        let has = |level: u8, ty: &str| {
+            info.caches.iter().any(|c| c.level == level && c.cache_type == ty)
+        };
+        if !info.l1d_cache.is_empty() {
+            assert!(has(1, "Data"), "L1d size with no sourced record");
+        }
+        if !info.l1i_cache.is_empty() {
+            assert!(has(1, "Instruction"), "L1i size with no sourced record");
+        }
+        if !info.l2_cache.is_empty() {
+            assert!(
+                info.caches.iter().any(|c| c.level == 2),
+                "L2 size with no sourced record"
+            );
+        }
+        if !info.l3_cache.is_empty() {
+            assert!(
+                info.caches.iter().any(|c| c.level == 3),
+                "L3 size with no sourced record"
+            );
+        }
+        // Every record's size string is non-empty (sysfs gave us a value).
+        for c in &info.caches {
+            assert!(!c.size.is_empty());
+        }
     }
 
     #[test]

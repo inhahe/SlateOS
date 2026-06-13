@@ -491,6 +491,38 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
+### TD23. No `/sys/devices/system/cpu/cpuN/cache/` tree — lscpu/hwloc cannot read real cache geometry — DEBT 2026-06-13
+
+**Where:** kernel `kernel/src/fs/sysfs.rs` (would add a `cache/indexN/` subtree
+under each `cpuN`), data source `kernel/src/cpu.rs::cache_topology()` (returns
+real CPUID-derived `CacheInfo { level, cache_type, size, line_size, ways, sets,
+shared, max_sharing }`). Consumer `userspace/lscpu/src/main.rs` reads
+`/sys/devices/system/cpu/cpu0/cache/indexN/{level,type,size,ways_of_associativity}`.
+
+**What:** The sysfs per-CPU `cache/` subtree does not exist yet, so lscpu has no
+honest source for L1/L2/L3 cache sizes. As of this entry lscpu correctly
+*omits* cache lines it cannot source (the previous behaviour — printing
+fabricated `32K`/`256K`/`8192K` defaults and hardcoded `8`/`16` associativity —
+was removed because it showed invented numbers as if real). The result is
+correct but less informative: `lscpu` and `lscpu -C` show no cache rows.
+
+**Proper fix:** Build the kernel `cache/indexN/` tree from
+`cpu::cache_topology()`, exposing the Linux files: `level`, `type`
+(`Data`/`Instruction`/`Unified`), `size` (e.g. `32K`/`8192K`),
+`coherency_line_size`, `ways_of_associativity`, `number_of_sets`, and
+`shared_cpu_map`/`shared_cpu_list`. The geometry fields are all directly
+honest (CPUID-derived). `shared_cpu_list` can be derived from `max_sharing`
+under our contiguous CPU-numbering model (cache instance for cpuN groups the
+`max_sharing` contiguous CPUs containing N) — verify this matches the topology
+before relying on it; if `max_sharing` cannot be mapped to a specific CPU set
+honestly, omit the share-map files rather than guess. Once the tree exists,
+lscpu's existing reader lights up automatically with real data.
+
+**Severity:** low — cosmetic/informational; no correctness impact on CPU
+*enumeration* (count/topology come from the already-correct `online`/`present`
+range files and `topology/` subtree). Tracked as the follow-up to the
+CPU-enumeration sysfs work.
+
 ### TD22. File-backed `mmap` is an eager private copy — no demand paging, no shared write-back — DEBT 2026-06-13
 
 **Where:** `kernel/src/syscall/linux.rs` — `linux_file_mmap` (the file-backed

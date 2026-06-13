@@ -530,8 +530,11 @@ pub fn spawn_process(
     // images.
     if is_linux_abi {
         // interp_base is Some(base) for a dynamically-linked binary (so
-        // ld.so receives AT_BASE) and None for a static one.
-        match build_linux_initial_stack(pml4_phys, &elf_file, options.argv, options.envp, interp_base) {
+        // ld.so receives AT_BASE) and None for a static one.  exec_load_bias
+        // is 0 until PIE executable basing lands (Commit B); for the current
+        // ET_EXEC images the bias is genuinely 0, so AT_ENTRY/AT_PHDR are
+        // unchanged.
+        match build_linux_initial_stack(pml4_phys, &elf_file, options.argv, options.envp, interp_base, 0) {
             Ok(installed) => {
                 serial_println!(
                     "[spawn] Built Linux SysV stack: rsp={:#x} (was {:#x})",
@@ -990,8 +993,9 @@ pub fn exec_process(
     // Native images keep the bare stack from `setup_user_stack`.
     if new_abi_mode == pcb::AbiMode::Linux {
         // interp_base is Some(base) for a dynamically-linked binary and
-        // None for a static one.
-        match build_linux_initial_stack(pml4_phys, &elf_file, argv, envp, interp_base) {
+        // None for a static one.  exec_load_bias is 0 until PIE basing
+        // lands (Commit B); ET_EXEC images have a genuine bias of 0.
+        match build_linux_initial_stack(pml4_phys, &elf_file, argv, envp, interp_base, 0) {
             Ok(installed) => {
                 serial_println!(
                     "[exec] Built Linux SysV stack: rsp={:#x} (was {:#x})",
@@ -1314,6 +1318,7 @@ fn build_linux_initial_stack(
     argv: &[&[u8]],
     envp: &[&[u8]],
     interp_base: Option<u64>,
+    exec_load_bias: u64,
 ) -> KernelResult<crate::proc::linux_stack::InstalledLinuxStack> {
     let stack_bottom = USER_STACK_TOP
         .checked_sub(USER_STACK_SIZE)
@@ -1329,6 +1334,7 @@ fn build_linux_initial_stack(
         envp,
         &random16,
         interp_base,
+        exec_load_bias,
     )
 }
 

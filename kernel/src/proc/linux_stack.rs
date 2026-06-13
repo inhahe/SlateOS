@@ -355,17 +355,30 @@ fn phdr_vaddr(elf: &ElfFile<'_>) -> Option<u64> {
 /// was loaded at, or `None` for a statically-linked executable (no
 /// interpreter).  When `Some`, an `AT_BASE` entry is emitted so the
 /// loader can relocate itself; `AT_ENTRY` always remains the
-/// **executable's** `e_entry` (the real program entry the loader jumps
-/// to once relocation is done), never the interpreter's.
-fn base_auxv(elf: &ElfFile<'_>, interp_base: Option<u64>) -> Vec<AuxEntry> {
+/// **executable's** entry (the real program entry the loader jumps to
+/// once relocation is done), never the interpreter's.
+///
+/// `exec_load_bias` is the address the executable image itself was
+/// loaded at relative to its link-time vaddrs.  It is `0` for an
+/// `ET_EXEC` (fixed-address) binary and the chosen load base for an
+/// `ET_DYN`/PIE executable.  Both `AT_ENTRY` (= `e_entry + bias`) and
+/// `AT_PHDR` (= program-header vaddr + bias) must report the *runtime*
+/// address so glibc/musl and the dynamic loader find the headers and
+/// entry where they were actually mapped.
+fn base_auxv(elf: &ElfFile<'_>, interp_base: Option<u64>, exec_load_bias: u64) -> Vec<AuxEntry> {
     // Auxv entry order is irrelevant to libc (it scans by `a_type`), so the
     // unconditional entries are built as one literal and the optional
     // `AT_PHDR` is appended afterwards.
+    //
+    // saturating_add for the bias: the loaded image was already validated
+    // to satisfy `bias + p_vaddr + p_memsz <= USER_SPACE_END` when its
+    // segments were mapped, so neither sum can actually overflow; saturate
+    // rather than panic to stay clippy `arithmetic_side_effects`-clean.
     let mut aux = vec![
         AuxEntry::new(AT_PAGESZ, LINUX_ABI_PAGE_SIZE),
         AuxEntry::new(AT_PHENT, u64::from(elf.header.e_phentsize)),
         AuxEntry::new(AT_PHNUM, u64::from(elf.header.e_phnum)),
-        AuxEntry::new(AT_ENTRY, elf.header.e_entry),
+        AuxEntry::new(AT_ENTRY, elf.header.e_entry.saturating_add(exec_load_bias)),
         AuxEntry::new(AT_FLAGS, 0),
         AuxEntry::new(AT_HWCAP, 0),
         AuxEntry::new(AT_CLKTCK, LINUX_ABI_CLK_TCK),
@@ -376,7 +389,7 @@ fn base_auxv(elf: &ElfFile<'_>, interp_base: Option<u64>) -> Vec<AuxEntry> {
         AuxEntry::new(AT_EGID, 0),
     ];
     if let Some(phdr) = phdr_vaddr(elf) {
-        aux.push(AuxEntry::new(AT_PHDR, phdr));
+        aux.push(AuxEntry::new(AT_PHDR, phdr.saturating_add(exec_load_bias)));
     }
     // AT_BASE: where the program interpreter (ld.so) was mapped.  Omitted
     // entirely for static binaries — glibc/musl treat a missing AT_BASE
@@ -457,6 +470,9 @@ pub struct InstalledLinuxStack {
 /// * `interp_base` — base address the program interpreter (`ld.so`) was
 ///   loaded at, or `None` for a static executable.  Forwarded to the
 ///   auxv as `AT_BASE`.
+/// * `exec_load_bias` — load base of the executable image itself (`0`
+///   for `ET_EXEC`, the chosen base for an `ET_DYN`/PIE executable).
+///   Biases `AT_ENTRY` and `AT_PHDR` to their runtime addresses.
 ///
 /// # Errors
 ///
@@ -472,8 +488,9 @@ pub fn install_linux_stack(
     envp: &[&[u8]],
     random16: &[u8; 16],
     interp_base: Option<u64>,
+    exec_load_bias: u64,
 ) -> KernelResult<InstalledLinuxStack> {
-    let aux = base_auxv(elf, interp_base);
+    let aux = base_auxv(elf, interp_base, exec_load_bias);
     let built = build_sysv_stack(stack_top, stack_limit, argv, envp, &aux, random16)?;
     // SAFETY: the stack frames [stack_limit, stack_top) were just mapped
     // present + writable by `setup_user_stack`, and `built.image` spans
@@ -768,6 +785,54 @@ pub fn self_test() -> KernelResult<()> {
                 break;
             }
             require!(at2 < TOP, "[linux_stack] FAIL: auxv missing AT_NULL (static test)");
+        }
+    }
+
+    // --- Test 9: exec_load_bias shifts AT_ENTRY and AT_PHDR by exactly
+    // the bias.  This is the auxv path a PIE (ET_DYN) executable's load
+    // base travels: when the kernel loads the image at a non-zero base,
+    // glibc/musl and ld.so must see the program headers and entry at
+    // their *runtime* addresses, or TLS setup and relocation jump to the
+    // wrong place.  We compare base_auxv at bias 0 vs a fake non-zero
+    // bias and require the AT_ENTRY/AT_PHDR deltas to equal the bias. ---
+    {
+        let elf_data = crate::proc::elf::build_test_elf_public();
+        let elf = crate::proc::elf::ElfFile::parse(&elf_data)?;
+        const FAKE_BIAS: u64 = 0x0000_5555_5555_4000;
+
+        let aux0 = base_auxv(&elf, None, 0);
+        let auxb = base_auxv(&elf, None, FAKE_BIAS);
+
+        let find = |aux: &[AuxEntry], ty: u64| -> Option<u64> {
+            aux.iter().find(|e| e.a_type == ty).map(|e| e.a_val)
+        };
+
+        // AT_ENTRY is always present (every executable has an entry).
+        let (Some(entry0), Some(entryb)) =
+            (find(&aux0, AT_ENTRY), find(&auxb, AT_ENTRY))
+        else {
+            fail!("[linux_stack] FAIL: AT_ENTRY missing from base_auxv");
+        };
+        require!(
+            entryb.wrapping_sub(entry0) == FAKE_BIAS,
+            "[linux_stack] FAIL: AT_ENTRY not shifted by exec_load_bias"
+        );
+        // The unbiased AT_ENTRY must equal the raw e_entry.
+        require!(
+            entry0 == elf.header.e_entry,
+            "[linux_stack] FAIL: AT_ENTRY at bias 0 != e_entry"
+        );
+
+        // AT_PHDR is optional (only when a PT_LOAD covers the header
+        // table), but the test ELF does carry it; if present in both, the
+        // delta must also equal the bias.
+        if let (Some(phdr0), Some(phdrb)) =
+            (find(&aux0, AT_PHDR), find(&auxb, AT_PHDR))
+        {
+            require!(
+                phdrb.wrapping_sub(phdr0) == FAKE_BIAS,
+                "[linux_stack] FAIL: AT_PHDR not shifted by exec_load_bias"
+            );
         }
     }
 

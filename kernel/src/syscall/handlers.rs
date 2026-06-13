@@ -664,12 +664,19 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
     let mut flags = args.arg2;
     let phys_addr = args.arg3;
 
-    // If the system-wide default is lazy allocation and the caller
-    // didn't explicitly specify MAP_LAZY or MAP_MMIO, apply lazy as
-    // the default.  MMIO mappings are always committed (they must map
-    // specific physical addresses).
+    // If the caller didn't explicitly specify a commit bit (MAP_LAZY /
+    // MAP_MMIO), pick the default commit mode.  A per-process policy
+    // override (set via Settings; design-decisions.md §11) wins; otherwise
+    // the system-wide default (PARAM_MM_LAZY_DEFAULT) applies.  MMIO
+    // mappings are always committed (they must map specific physical
+    // addresses), so they bypass this entirely.
     if flags & (MAP_LAZY | MAP_MMIO) == 0 {
-        if crate::sysctl::get(crate::sysctl::PARAM_MM_LAZY_DEFAULT) == Some(1) {
+        let sysctl_lazy =
+            crate::sysctl::get(crate::sysctl::PARAM_MM_LAZY_DEFAULT) == Some(1);
+        let policy = thread::owner_process(sched::current_task_id())
+            .and_then(pcb::get_mmap_commit_policy)
+            .unwrap_or_default();
+        if policy.native_lazy(sysctl_lazy) {
             flags |= MAP_LAZY;
         }
     }

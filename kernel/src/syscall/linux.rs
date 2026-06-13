@@ -4822,21 +4822,31 @@ fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
     //     malloc arena — would fault.  (The previous code passed a bare `0x01`,
     //     which is `MAP_READ`, not `MAP_WRITE`, so the region was non-writable.)
     //
-    //  2. **Commit policy: default to lazy (demand-paged).** Linux programs
-    //     assume overcommit semantics — they reserve large sparse mappings and
-    //     expect backing only on touch — so the Linux ABI defaults to lazy
-    //     allocation, i.e. `vm/overcommit_memory = 0`.  See the memory-commit
-    //     policy decision (design-decisions.md §11).  Native OuRoS programs keep
-    //     the committed (eager) default; this lazy default is Linux-ABI-only.
-    //     A future per-program override may force committed allocation, but that
-    //     is not wired yet.
+    //  2. **Commit policy: default to lazy (demand-paged), per-program
+    //     override permitting.** Linux programs assume overcommit semantics —
+    //     they reserve large sparse mappings and expect backing only on touch —
+    //     so the Linux ABI defaults to lazy allocation, i.e.
+    //     `vm/overcommit_memory = 0`.  Native OuRoS programs keep the committed
+    //     (eager) default; this lazy default is Linux-ABI-only.  The user may
+    //     override the default for a single misbehaving program via the
+    //     per-process commit policy (Settings → Advanced): `ForceCommitted`
+    //     flips this Linux process to strict-commit, `ForceLazy`/`Inherit` keep
+    //     it lazy.  See the memory-commit policy decision (design-decisions.md
+    //     §11) and `pcb::MmapCommitPolicy::linux_lazy`.
     //
     // `MAP_FIXED` is conveyed implicitly: the resolved `addr_hint` is passed in
     // arg0, which the native handler honors when non-zero — so no flag bit is
     // needed for it (the old `0x01` did nothing here).
     const PROT_WRITE: u64 = 2;
     const PROT_EXEC: u64 = 4;
-    let mut native_flags: u64 = super::number::MAP_LAZY;
+    let commit_policy = as_pid
+        .and_then(pcb::get_mmap_commit_policy)
+        .unwrap_or_default();
+    let mut native_flags: u64 = if commit_policy.linux_lazy() {
+        super::number::MAP_LAZY
+    } else {
+        0
+    };
     if prot & PROT_WRITE != 0 {
         native_flags |= super::number::MAP_WRITE;
     }

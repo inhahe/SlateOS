@@ -193,6 +193,69 @@ pub enum AbiMode {
     Linux,
 }
 
+/// Per-process memory-commit policy — the per-program half of the
+/// configurable commit strategy (design-decisions.md §11, "Option 5").
+///
+/// `mmap` requests that do **not** explicitly carry a commit bit
+/// (`MAP_LAZY` / `MAP_MMIO`) fall back to a *default* commit mode.  That
+/// default is normally the system-wide setting (native ABI:
+/// [`crate::sysctl::PARAM_MM_LAZY_DEFAULT`]; Linux ABI: always lazy, since
+/// Linux programs assume overcommit).  This per-process field lets the
+/// user/Settings *override* that default for one misbehaving program
+/// without touching the system-wide knob — e.g. force a leaky Linux app to
+/// strict-commit, or let one native tool overcommit.
+///
+/// Changing a program's own override is a normal user/Settings action (no
+/// elevated capability); the system-wide knob is what needs
+/// `admin.memory_policy`.  Inherited verbatim across `fork` (the child runs
+/// the same image, so it should honour the same policy until it execs).
+///
+/// The resolution helpers ([`Self::native_lazy`] / [`Self::linux_lazy`]) are
+/// pure so the policy logic can be unit-tested in isolation; the two `mmap`
+/// paths call them to decide the default commit mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MmapCommitPolicy {
+    /// Use the ABI's default commit mode (system-wide sysctl for native,
+    /// lazy/overcommit for Linux).  This is what every process starts with.
+    #[default]
+    Inherit,
+    /// Force strict-commit (eager-populate) for this process's mmaps,
+    /// regardless of the system-wide / ABI default.
+    ForceCommitted,
+    /// Force lazy/demand-paged allocation for this process's mmaps,
+    /// regardless of the system-wide / ABI default.
+    ForceLazy,
+}
+
+impl MmapCommitPolicy {
+    /// Resolve the default commit mode for a **native**-ABI `mmap` that
+    /// didn't request an explicit commit bit.  Returns `true` for lazy
+    /// (demand-paged), `false` for committed (eager-populate).
+    ///
+    /// `sysctl_lazy` is the system-wide default
+    /// ([`crate::sysctl::PARAM_MM_LAZY_DEFAULT`] == 1).  Only `Inherit`
+    /// consults it; an explicit per-process override wins.
+    #[must_use]
+    pub fn native_lazy(self, sysctl_lazy: bool) -> bool {
+        match self {
+            MmapCommitPolicy::ForceLazy => true,
+            MmapCommitPolicy::ForceCommitted => false,
+            MmapCommitPolicy::Inherit => sysctl_lazy,
+        }
+    }
+
+    /// Resolve the default commit mode for a **Linux**-ABI `mmap` that
+    /// didn't request an explicit commit bit.  Returns `true` for lazy.
+    ///
+    /// The Linux ABI default is lazy/overcommit (programs assume sparse
+    /// mappings backed on touch), so both `Inherit` and `ForceLazy` resolve
+    /// to lazy; only `ForceCommitted` flips it to strict-commit.
+    #[must_use]
+    pub fn linux_lazy(self) -> bool {
+        !matches!(self, MmapCommitPolicy::ForceCommitted)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Crash information — details about how a process died
 // ---------------------------------------------------------------------------
@@ -960,6 +1023,13 @@ pub struct Process {
     /// nothing new to report. Set on stop/continue, cleared once a
     /// `wait4`/`waitid` reports it (unless `WNOWAIT`).
     pub jc_report: Option<JobControlEvent>,
+    /// Per-process memory-commit policy override (design-decisions.md §11,
+    /// "Option 5").  Consulted by both `mmap` paths to pick the default
+    /// commit mode for requests that don't carry an explicit `MAP_LAZY` /
+    /// `MAP_MMIO` bit.  Starts at [`MmapCommitPolicy::Inherit`] (use the
+    /// ABI/system default); the user/Settings may flip it to force
+    /// committed or lazy for one program.  Inherited verbatim across `fork`.
+    pub mmap_commit_policy: MmapCommitPolicy,
 }
 
 /// Highest valid Linux capability number — fixed at
@@ -1175,6 +1245,9 @@ impl Process {
             // report for its parent to observe.
             stopped: false,
             jc_report: None,
+            // Fresh process uses the ABI/system default commit mode until
+            // the user/Settings overrides it.
+            mmap_commit_policy: MmapCommitPolicy::Inherit,
         }
     }
 }
@@ -1338,6 +1411,7 @@ pub fn fork_create(
         proc_argv,
         proc_envp,
         exe_path,
+        mmap_commit_policy,
     ) = {
         let parent = table.get(&parent_pid).ok_or(KernelError::NoSuchProcess)?;
         let cloned_fd_table = parent.linux_fd_table.as_ref().map(|t| {
@@ -1402,6 +1476,9 @@ pub fn fork_create(
             // A forked child runs the same executable image until it
             // execve's, so it inherits the parent's exe path.
             parent.exe_path.clone(),
+            // The child runs the same image, so it honours the same
+            // per-program commit policy until it execs.
+            parent.mmap_commit_policy,
         )
     };
 
@@ -1618,6 +1695,10 @@ pub fn fork_create(
         // job-control report of its own.
         stopped: false,
         jc_report: None,
+        // Inherited from the parent (see the snapshot tuple above): the
+        // child runs the same image, so it honours the same commit policy
+        // until it execs.
+        mmap_commit_policy,
     };
 
     table.insert(pid, child);
@@ -2154,6 +2235,36 @@ pub fn set_personality(pid: ProcessId, new: u32) -> Option<u32> {
     let proc = table.get_mut(&pid)?;
     let old = proc.linux_personality;
     proc.linux_personality = new;
+    Some(old)
+}
+
+/// Read the per-process memory-commit policy override for `pid`.
+///
+/// Returns `None` if `pid` is unknown.  Callers in kernel context (no
+/// live PCB) should treat the absence as [`MmapCommitPolicy::Inherit`]
+/// (use the ABI/system default) — that is exactly what both `mmap` paths
+/// do via `unwrap_or_default()`.
+#[must_use]
+pub fn get_mmap_commit_policy(pid: ProcessId) -> Option<MmapCommitPolicy> {
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.mmap_commit_policy)
+}
+
+/// Install a new per-process memory-commit policy override for `pid`,
+/// returning the old one.
+///
+/// This is the kernel side of the per-program commit-strategy override
+/// (design-decisions.md §11). The user-facing setter (Settings →
+/// Advanced, and a future native syscall the launcher/Settings call) is
+/// dependency-gated on the GUI; this API is the mechanism both will use.
+/// Returns `None` if `pid` is unknown.
+pub fn set_mmap_commit_policy(
+    pid: ProcessId,
+    policy: MmapCommitPolicy,
+) -> Option<MmapCommitPolicy> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid)?;
+    let old = proc.mmap_commit_policy;
+    proc.mmap_commit_policy = policy;
     Some(old)
 }
 
@@ -4636,6 +4747,7 @@ pub fn self_test() -> KernelResult<()> {
     test_reap_any()?;
     test_io_accounting()?;
     test_job_control_state()?;
+    test_mmap_commit_policy()?;
 
     Ok(())
 }
@@ -4785,6 +4897,79 @@ fn test_job_control_state() -> KernelResult<()> {
     destroy(parent);
 
     serial_println!("[proc]   job-control state model: OK");
+    Ok(())
+}
+
+/// Test: per-process memory-commit policy (design-decisions.md §11).
+///
+/// Verifies both halves of the per-program commit override:
+///   - the **pure resolution helpers** ([`MmapCommitPolicy::native_lazy`] /
+///     [`MmapCommitPolicy::linux_lazy`]) map every variant to the right
+///     lazy/committed decision under both system-wide sysctl settings,
+///   - the **PCB get/set API** defaults to `Inherit`, round-trips an
+///     override, returns the prior value, and treats an unknown pid as a
+///     silent `None` (kernel-context / reaped case).
+fn test_mmap_commit_policy() -> KernelResult<()> {
+    use MmapCommitPolicy::{ForceCommitted, ForceLazy, Inherit};
+
+    // --- Pure native resolution: Inherit follows the sysctl, the two
+    //     forced modes ignore it. ---
+    if Inherit.native_lazy(false) || !Inherit.native_lazy(true) {
+        serial_println!("[proc]   FAIL: native Inherit should follow sysctl");
+        return Err(KernelError::InternalError);
+    }
+    if !ForceLazy.native_lazy(false) || !ForceLazy.native_lazy(true) {
+        serial_println!("[proc]   FAIL: native ForceLazy should always be lazy");
+        return Err(KernelError::InternalError);
+    }
+    if ForceCommitted.native_lazy(false) || ForceCommitted.native_lazy(true) {
+        serial_println!("[proc]   FAIL: native ForceCommitted should never be lazy");
+        return Err(KernelError::InternalError);
+    }
+
+    // --- Pure Linux resolution: lazy by default, only ForceCommitted flips
+    //     it (the Linux ABI default is overcommit). ---
+    if !Inherit.linux_lazy() || !ForceLazy.linux_lazy() {
+        serial_println!("[proc]   FAIL: linux Inherit/ForceLazy should be lazy");
+        return Err(KernelError::InternalError);
+    }
+    if ForceCommitted.linux_lazy() {
+        serial_println!("[proc]   FAIL: linux ForceCommitted should be committed");
+        return Err(KernelError::InternalError);
+    }
+
+    // --- PCB get/set API round-trip. ---
+    let pid = create("commit-policy-test", 0);
+    set_running(pid)?;
+
+    if get_mmap_commit_policy(pid) != Some(Inherit) {
+        serial_println!("[proc]   FAIL: fresh process should default to Inherit");
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    }
+    // set returns the prior value...
+    if set_mmap_commit_policy(pid, ForceCommitted) != Some(Inherit) {
+        serial_println!("[proc]   FAIL: set should return prior Inherit");
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    }
+    // ...and the override is observable.
+    if get_mmap_commit_policy(pid) != Some(ForceCommitted) {
+        serial_println!("[proc]   FAIL: override not observed after set");
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    }
+    destroy(pid);
+
+    // Unknown pid is a silent None for both accessors.
+    if get_mmap_commit_policy(pid).is_some()
+        || set_mmap_commit_policy(pid, ForceLazy).is_some()
+    {
+        serial_println!("[proc]   FAIL: unknown pid should yield None");
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[proc]   mmap commit policy: OK");
     Ok(())
 }
 

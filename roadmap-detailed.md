@@ -293,6 +293,15 @@ _Bootloader: Limine for development (Phases 0-5). For release: GRUB for dual-boo
 - [x] Committed memory by default (guaranteed backed by RAM + swap)
 - [x] Lazy/overcommit memory as opt-in (programs request explicitly)
 - [x] OOM handling: graceful, no silent kills — fail the allocation
+- [x] System-wide commit-policy toggle (`sysctl mm.lazy_default` /
+  `PARAM_MM_LAZY_DEFAULT`; surfaced via `/proc/sys/vm/overcommit_memory`)
+- [x] Linux-ABI mmap defaults to lazy/overcommit (Linux's expected idiom);
+  native programs keep the strict-commit default
+- [x] Per-program commit-policy override (`pcb::MmapCommitPolicy`
+  {Inherit, ForceCommitted, ForceLazy}, consulted by both `mmap` paths,
+  inherited across fork) — the kernel core of design-decisions.md §11
+  "Option 5"; user-facing front-ends are Phase 5 (§5.6 system-wide, §5.8
+  per-program)
 
 #### Kernel Heap
 - [x] Slab allocator for common kernel object sizes
@@ -2044,6 +2053,36 @@ _The automation framework uses the same channel IPC + RPC serialization (Cap'n P
 
 _This is the comprehensive settings UI. Most items depend on the subsystem they configure._
 
+### 5.0 Advanced Options Convention (cross-cutting)
+
+_A Settings-wide UX convention for risky/expert knobs. Applies to every
+section below — any setting that can degrade stability, performance,
+compatibility, or security if misused is tagged **Advanced** and surfaced
+through this shared pattern so users learn one mental model. (User-directed:
+see design-decisions.md §11, the Option 5 "all Q2 options flagged as advanced
+options with warnings" decision.)_
+
+- [ ] **`advanced` flag on settings.** Each setting carries an `advanced:
+  bool` attribute in its schema. Advanced settings are collapsed by default
+  behind a per-section "Show advanced options" disclosure (off by default);
+  non-advanced settings are always visible. The flag is data, not per-widget
+  code, so the same rendering/warning logic covers every section.
+- [ ] **General advanced-options warning.** The first time a user expands any
+  "Show advanced options" disclosure (per session, or until dismissed with
+  "don't warn again"), show a single general warning: *changing advanced
+  options can cause instability, data loss, performance regressions, or
+  programs to stop working.* This is the blanket warning that covers all
+  advanced options so individual knobs don't each need their own modal.
+- [ ] **Per-setting inline warnings.** Individual high-risk settings may add
+  their own short inline caution (and, for the most dangerous, a confirm
+  dialog) on top of the general warning — e.g. partition manager (data loss),
+  system-wide memory-commit policy (§5.6), firewall disable.
+- [ ] **Search surfaces advanced options** but marks them with an "Advanced"
+  badge in results, so they're findable without hunting through disclosures.
+- [ ] **Reset-to-default** is always offered for advanced sections (per-setting
+  and per-section), since advanced knobs are the ones users most often need to
+  back out of.
+
 ### 5.1 Display and Appearance
 
 - [ ] Screen resolution (auto-revert if user doesn't confirm in N seconds)
@@ -2093,6 +2132,18 @@ _Keyboard layouts: Dvorak (+ left-hand, right-hand, programmer variants), Colema
 
 ### 5.6 Kernel and System Tuning
 
+- [ ] **System-wide memory-commit policy selector (Advanced).** Choose the
+  default allocation strategy for the whole system: **strict-commit** (every
+  mapping guaranteed backed by RAM+swap — "committed by default", the native
+  default) vs **lazy/overcommit** (mappings backed on first touch — the Linux
+  default). This is the user-facing front-end for the Option 5 kernel core
+  that already exists: it sets `sysctl mm.lazy_default` (`PARAM_MM_LAZY_DEFAULT`)
+  and is reflected in `/proc/sys/vm/overcommit_memory`. **Advanced + warning**
+  (§5.0) — flipping the global default affects every program. Gated by the
+  `admin.memory_policy` capability (§1.5) since it changes a system-wide
+  policy. Show the per-strategy tradeoffs (strict = no surprise OOM but apps
+  that reserve huge sparse arenas may fail to start; lazy = max compatibility
+  but allocations can fail late on touch). See design-decisions.md §11.
 - [ ] Memory management tuning parameters (may require reboot)
 - [ ] Scheduling tuning parameters (may require reboot)
 - [ ] Paging tuning parameters (page size requires recompile)
@@ -2112,6 +2163,19 @@ _Keyboard layouts: Dvorak (+ left-hand, right-hand, programmer variants), Colema
 ### 5.8 Programs
 
 - [ ] Per-program: set priority, set capabilities
+- [ ] **Per-program memory-commit policy override (Advanced).** Override the
+  default commit strategy for a single program — force **strict-commit** or
+  **lazy/overcommit** regardless of the system-wide default — to work around a
+  misbehaving app (e.g. force a leaky program to strict-commit, or let one app
+  overcommit). Front-end for the existing kernel mechanism
+  (`pcb::MmapCommitPolicy` {Inherit, ForceCommitted, ForceLazy}, consulted by
+  both `mmap` paths). Applies to both native and Linux-ABI programs. **Advanced
+  + warning** (§5.0). Changing a program's *own* override is a normal user
+  action and does **not** require an elevated capability (only the system-wide
+  default needs `admin.memory_policy`). When the OS detects a program may be
+  failing due to commit policy (allocation failures, refuse-to-start), surface
+  a contextual hint pointing the user here with an explanation. See
+  design-decisions.md §11.
 - [ ] Uninstall (option to keep program files, keep program settings)
 - [ ] Recompile with specified parameters (if source available)
 - [ ] Notification settings per app: sound (dropdown, previewable), show in pane, per-notification-type control

@@ -23,77 +23,84 @@ Format for each entry:
 
 ---
 
-## Q4 — Toolchain port (task 5031): bootstrap-compiler strategy + a missing prerequisite
+## Q4 — Toolchain on OuRoS (task 5031): *run prebuilt Linux* vs *native port*, + a missing prerequisite
 
-- **Status:** OPEN
+- **Status:** OPEN  *(reframed 2026-06-13 after operator feedback — see "Reframing" below)*
 
-- **Question:** You chose the GCC/CMake/Make toolchain port as the next major
-  initiative (design-decisions.md §9). Starting it surfaced a hard prerequisite
-  and an architectural fork that I'd rather not resolve unilaterally, because
-  it's a costly, multi-day, hard-to-reverse commitment and it requires changing
-  the dev environment (installing a compiler).
+- **Question:** You chose the GCC/CMake/Make toolchain as the next major
+  initiative (design-decisions.md §9). The first real fork is **how
+  gcc/make/cmake/cpython/bash actually run on OuRoS** — as *prebuilt Linux
+  binaries on the kernel's Linux-ABI layer*, or as *native OuRoS binaries we
+  port/recompile*. This shapes the whole effort and is costly/hard-to-reverse.
 
-- **The prerequisite (a real blocker):** *there is currently no C compiler on
-  this machine that can cross-compile to OuRoS.* I checked: no `clang.exe`
-  (only `clang-format`/`clang-tidy` ship with VS), no `gcc`, no `zig`. The only
-  C/C++ compiler present is MSVC `cl.exe`, which targets Windows PE/COFF and
-  cannot emit `x86_64-ouros` ELF binaries. So *nothing C-related for the
-  toolchain can be built or tested until a cross-capable C compiler is
-  installed.* Installing system software / changing the dev toolchain is an
-  operator-level environment change, so I'm not doing it on my own.
+- **Reframing (operator's instinct: favor what gives the Linux compatibility we
+  need anyway).** My first cut framed this as "clang-bootstrap vs build-a-gcc-
+  cross-compiler" — but both of those produce a *native* toolchain and **neither
+  advances Linux compatibility.** The option that *is* Linux compat is running
+  prebuilt Linux binaries on the compat layer. The three real paths:
 
-- **What already exists (so we're not starting from zero):** a custom Rust
-  target `toolchain/x86_64-ouros.json`; a comprehensive Rust-implemented libc
-  (`posix/`, ~2300 files) that exports C-ABI symbols backed by native syscalls,
-  built into `toolchain/sysroot/lib/libc.a`; C-runtime startup glue in
-  `posix/src/crt.rs` (`__libc_start_main`, `atexit`, C++ ABI stubs). Rust `std`
-  already runs against this shim (design-decisions.md §5036 deliberately chose
-  the "libc-compatible shim" approach over forking std/libc). **What's missing
-  for compiling *C* against it is a C header tree** (`<stdio.h>`, `<stdlib.h>`,
-  …) declaring those symbols — plus a compiler to use them.
+  - **Path X — Run prebuilt Linux toolchain binaries on the Linux-ABI layer.**
+    The kernel's Linux ELF loader + `ld.so` loading + full Linux syscall table
+    (just verified) exist to run *unmodified* Linux binaries. Drop a distro's
+    prebuilt gcc/make/cmake + its glibc/`ld.so` onto the disk image; harden the
+    compat layer until they run. The roadmap's "gcc … *(via POSIX layer)*"
+    wording matches this.
+    - *Pros:* **this is the Linux compatibility we need anyway**; least work to a
+      *usable* toolchain (gcc/CPython are millions of lines — no recompile);
+      needs **no host C cross-compiler**; directly hardens the Linux-ABI layer
+      (reused by every future Linux app).
+    - *Cons:* runs as Linux-ABI processes (not native syscalls / capability-
+      native); depends on the compat layer being complete enough for demanding
+      programs (gcc forks subprocesses, heavy file/mmap/`/proc` use) — iterative
+      hardening; must obtain + place a real glibc/musl runtime on the image.
+  - **Path Y — Native OuRoS toolchain (recompile/port against `posix`).** Build
+    a gcc cross-compiler targeting `x86_64-ouros` + a native C library (extend
+    `posix`, or port musl to native syscalls), producing native-syscall
+    binaries. The "purity" path (microkernel/capability-native).
+    - *Pros:* native syscalls + capability security; smaller, OuRoS-idiomatic
+      binaries; eventual self-hosting.
+    - *Cons:* **does not advance Linux compatibility**; enormous per-program
+      effort for gcc/CPython (canadian cross + full native libc); slowest to a
+      working toolchain; CLAUDE.md already prefers **fastpy** for native OS
+      userspace, shrinking how much big C software we'd ever want native.
+  - **Path Z — Hybrid (recommended): Path X now, Path Y selectively later.**
+    Run prebuilt Linux tools to get a working dev environment + harden Linux
+    compat now; native-port only the specific components where capability-native
+    behavior matters, later.
 
-- **Options:**
-  - **(A) Install LLVM/clang standalone; bootstrap with clang.** clang is a
-    turnkey cross-compiler (one binary targets any triple via `--target`). We'd
-    extend the existing `posix` shim into a full *C* libc by writing a header
-    tree under `toolchain/sysroot/include/`, then cross-compile C against
-    `clang --target=x86_64-... -isystem sysroot/include` + `libc.a` + a crt0.
-    First milestone: a hand-written hello-world C program that runs on OuRoS
-    (proves the C → libc → native-syscall path, the way I just proved the
-    dynamic-linker path). clang can later build GCC itself.
-    - *Pros:* leverages everything already built (custom target, posix shim,
-      sysroot); least work to first running C binary; matches the project's
-      established shim philosophy (§5036); clang installs cleanly on Windows.
-    - *Cons:* clang ≠ gcc, so "port gcc" (the literal task) becomes a *later*
-      phase (build gcc with clang once the C runtime is solid); some autoconf
-      projects assume `gcc`/`cc` exists (mitigated by symlinking `cc`→clang).
-  - **(B) Build a real GCC cross-compiler from source.** The literal "port gcc"
-    path: set up MSYS2 (or WSL), build `binutils` + `gcc` targeting
-    `x86_64-ouros`, and port a real C library for the target
-    (musl/newlib) rather than using the Rust `posix` shim for C.
-    - *Pros:* end-state is exactly a native gcc toolchain; a ported musl brings
-      its own complete, battle-tested headers + implementation.
-    - *Cons:* much heavier (multi-stage "canadian cross"); needs a Unix-y build
-      env on Windows (MSYS2/WSL); porting musl/newlib to native syscalls
-      duplicates a lot of what `posix` already does; slowest path to a first
-      running C binary; partially abandons the existing shim investment.
-  - **(C) Hybrid:** clang-bootstrap now (Option A) to get a working C runtime +
-    self-tests quickly, then build gcc-on-OuRoS with clang as a later phase
-    (Option B's end-state, reached via A). This is really "A first, B later."
+- **The clang question (orthogonal — it's a *tool*, not a path):** clang is one
+  binary that targets *both* `x86_64-linux-*` *and* `x86_64-ouros`. Installing it
+  is **low-regret regardless of path**: under Path X it lets us compile real
+  Linux C programs to *systematically stress and harden the Linux-ABI layer*
+  (the gating work); under Path Y it can cross-compile native C. The earlier
+  "fast hello-world" pitch undersold it — its real value is driving Linux-compat
+  hardening.
 
-- **Claude's recommendation:** **Option A / C** — install LLVM/clang, extend
-  `posix` into a full C libc with a header tree, prove a hello-world C binary
-  end-to-end, then layer gcc on top later. It reuses the substantial existing
-  investment (custom target + posix shim + sysroot), matches §5036's chosen
-  philosophy, and reaches a *testable* first milestone fastest. The only thing I
-  need from you to start: **agreement on Option A and an LLVM/clang install**
-  (or your go-ahead for me to attempt the install). If you prefer B, I'll set up
-  MSYS2 + the cross-build instead.
+- **The prerequisite (a real blocker either way):** *no C compiler on this
+  machine can target OuRoS or build/test C for it.* Only `clang-format`/
+  `clang-tidy` ship with VS; `cl.exe` targets Windows PE/COFF. We need a real
+  compiler installed — **clang (recommended; one install serves both ABIs)**, or
+  MSYS2 + a gcc cross-build for Path Y. Installing system software is an
+  operator-level environment change, so I'm not doing it unprompted.
 
-- **Where it bites:** new `toolchain/sysroot/include/` (C headers), `posix/`
-  (any C-only shims the headers expose), a crt0 object, build wiring under
-  `toolchain/`; roadmap.md task 5031; design-decisions.md (new entry once
-  decided).
+- **What already exists:** custom Rust target `toolchain/x86_64-ouros.json`; a
+  comprehensive Rust-implemented native libc (`posix/`, ~2300 files →
+  `toolchain/sysroot/lib/libc.a`) with C-runtime glue in `posix/src/crt.rs`;
+  Rust `std` runs on it (§5036 chose the libc-shim approach). The full kernel
+  Linux-ABI layer (Linux ELF loader, `ld.so` loading, Linux syscall table,
+  procfs/sysfs) — the foundation Path X builds on.
+
+- **Claude's recommendation:** **Path Z (X first), install clang.** It is the
+  Linux compatibility we need anyway, the fastest route to a usable toolchain,
+  and reuses the Linux-ABI investment. Native porting (Y) is a later, optional
+  purity step. **To start I need:** your pick of X/Y/Z, and an LLVM/clang install
+  (or your go-ahead to attempt it).
+
+- **Where it bites:** *Path X* — Linux-ABI hardening across `kernel/src/syscall/
+  linux.rs`, ELF loader, procfs/sysfs; disk-image work to place a glibc/`ld.so`
+  runtime. *Path Y* — `toolchain/sysroot/include/` (C headers), `posix/`, a
+  crt0, gcc cross-build wiring. roadmap.md task 5031; design-decisions.md (new
+  entry once decided).
 
 ---
 

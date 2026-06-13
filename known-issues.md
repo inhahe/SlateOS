@@ -471,6 +471,33 @@ are hard-rejected by Linux's `get_nodes` itself), and apply the per-mode
 emptiness check to the *intersected* mask in `mpol_new_check`'s spirit.
 This is only worth doing if/when we support more than one NUMA node.
 
+### TD6. `move_pages` per-page node error stores `-EINVAL` where Linux stores `-ENODEV`/`-EACCES` — APPROXIMATION 2026-06-12
+
+**What:** `sys_move_pages` (`kernel/src/syscall/linux.rs`), in move mode
+(`nodes != NULL`), writes `status[i] = -EINVAL` for any requested target
+node other than 0 (we only have node 0). Linux's `do_pages_move`
+(`mm/migrate.c`) instead validates each target node and stores a per-page
+error via `store_status`: `-ENODEV` when the node is out of range or has no
+memory (`!node_state(node, N_MEMORY)`), or `-EACCES` when the node is valid
+but not in `task_nodes` (`!node_isset(node, task_nodes)`). On a single-node
+box, target node 1 would be `-ENODEV` (node 1 has no `N_MEMORY`), not
+`-EINVAL`.
+
+**Divergence:** observable only in `status[i]` for a deliberately-bogus
+target node; the syscall return code (0) is unaffected. Batch-105 self-test
+Case 4 currently asserts `status == [0, -EINVAL, 0]`.
+
+**Why deferred (not fixed in batch 548):** batch 548 fixed two
+independently-verified divergences (missing pid→ESRCH lookup; invented
+E2BIG cap) and intentionally did **not** guess at the per-page errno. The
+exact `do_pages_move` node-validity path (range check → `N_MEMORY` →
+`node_isset(task_nodes)` → `store_status`) needs its own verbatim v6.6
+verification before changing the stored errno.
+
+**Proper fix:** verify `do_pages_move`/`add_page_for_migration`/`store_status`
+against v6.6, then store `-ENODEV` for out-of-range / no-memory nodes and
+`-EACCES` for valid-but-disallowed nodes, and update Case 4's expectation.
+
 ### TD4. Monolithic `syscall::linux::self_test()` has an unbounded boot-stack frame — OPEN 2026-06-12
 
 **What:** `kernel/src/syscall/linux.rs::self_test()` is a single ~1.4 MB

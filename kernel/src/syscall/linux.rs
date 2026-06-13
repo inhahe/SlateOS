@@ -23834,8 +23834,9 @@ fn sys_migrate_pages(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Heap usage: the `pages` array is never dereferenced (each pointer
 /// would need a VMA lookup we don't have), but `nodes` and `status` are
-/// streamed in 256-entry chunks (1 KiB at a time) to avoid allocating
-/// a 4 MiB buffer for the 1 << 20-entry maximum.
+/// streamed in 256-entry chunks (1 KiB at a time) to avoid allocating a
+/// buffer proportional to `count` — Linux imposes no `nr_pages` limit on
+/// move_pages, so `count` is unbounded.
 fn sys_move_pages(args: &SyscallArgs) -> SyscallResult {
     const MPOL_MF_MOVE: u32 = 0x2;
     const MPOL_MF_MOVE_ALL: u32 = 0x4;
@@ -23846,24 +23847,47 @@ fn sys_move_pages(args: &SyscallArgs) -> SyscallResult {
     if flags & !(MPOL_MF_MOVE | MPOL_MF_MOVE_ALL) != 0 {
         return linux_err(errno::EINVAL);
     }
-    // Linux kernel_move_pages (mm/migrate.c): after the flag-bits mask
-    // check, `(flags & MPOL_MF_MOVE_ALL) && !capable(CAP_SYS_NICE)
-    // -> -EPERM` fires before the pid lookup and before the count==0
-    // no-op shortcut.  Pre-batch we accepted MOVE_ALL silently, so a
-    // probe passing (count=0, flags=MOVE_ALL) saw 0 where Linux
-    // returns -EPERM, and (count>0, flags=MOVE_ALL, pages=BADPTR) saw
-    // -EFAULT where Linux returns -EPERM.  We have no per-task
-    // credentials struct in the dispatch-time test context, so
-    // MOVE_ALL is unconditionally EPERM here (matches the
-    // unprivileged-task case on Linux).  When real task creds land,
-    // swap for a CAP_SYS_NICE check.
+    // Linux v6.6 kernel_move_pages (mm/migrate.c) gate order:
+    //   1. flags & ~(MOVE|MOVE_ALL) -> EINVAL                  (above)
+    //   2. (flags & MOVE_ALL) && !capable(CAP_SYS_NICE) -> EPERM
+    //   3. mm = find_mm_struct(pid, &task_nodes):
+    //        pid == 0 -> current->mm (self, no permission check);
+    //        else find_task_by_vpid(pid); !task -> ERR_PTR(-ESRCH);
+    //        ptrace_may_access fail -> -EPERM; security_task_movememory;
+    //        get_task_mm; !mm -> -EINVAL.
+    //   4. nodes ? do_pages_move : do_pages_stat — per-page work; BOTH
+    //      run an empty loop and return 0 for nr_pages==0 without ever
+    //      dereferencing pages/status.
+    // There is NO nr_pages limit anywhere in kernel_move_pages /
+    // do_pages_move / do_pages_stat (verified verbatim against v6.6).
+    //
+    // The MOVE_ALL EPERM gate (step 2) fires BEFORE the pid lookup and
+    // the count==0 shortcut.  We have no per-task credentials in the
+    // dispatch-time context, so MOVE_ALL is unconditionally EPERM here
+    // (the unprivileged-task answer).  When real task creds land, swap
+    // for a CAP_SYS_NICE check.
     if flags & MPOL_MF_MOVE_ALL != 0 {
         return linux_err(errno::EPERM);
     }
-    let count = args.arg1;
-    if count > (1 << 20) {
-        return linux_err(errno::E2BIG);
+    // find_mm_struct (step 3): pid==0 is "self"; any other pid that is
+    // not the current task id resolves to NULL via find_task_by_vpid
+    // (negative pids included, since they are out of range for the idr
+    // lookup) -> -ESRCH.  No per-task tracking exists here beyond
+    // `current`.  This runs BEFORE the count==0 shortcut and the
+    // pages/status validation, so an unknown pid yields -ESRCH even for
+    // count==0.  (ptrace -EPERM and !mm -EINVAL would slot in here once
+    // real task tracking lands.)
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let pid = args.arg0 as i32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let current_tid_i32 = crate::sched::current_task_id() as i32;
+    if pid != 0 && pid != current_tid_i32 {
+        return linux_err(errno::ESRCH);
     }
+    let count = args.arg1;
+    // nr_pages == 0: do_pages_move/do_pages_stat run an empty loop and
+    // return 0 without dereferencing pages/status, so NULL pointers are
+    // accepted for a zero count.
     if count == 0 {
         return SyscallResult::ok(0);
     }
@@ -38010,14 +38034,17 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // Case 5: count > limit -> -E2BIG.
+        // Case 5: large count (self pid) has NO E2BIG cap — Linux
+        // imposes no nr_pages limit.  With NULL pages it flows to the
+        // pages/status validation and returns -EFAULT.  Batch 548
+        // removed the invented `count > (1<<20) -> E2BIG` gate.
         let a = SyscallArgs {
             arg0: 0, arg1: (1 << 21), arg2: 0, arg3: 0, arg4: 0, arg5: 0,
         };
         let r = dispatch_linux(nr::MOVE_PAGES, &a);
-        if r.value != -i64::from(errno::E2BIG) {
+        if r.value != i64::from(errno::EFAULT).wrapping_neg() {
             serial_println!(
-                "[syscall/linux]   FAIL: move_pages(huge count) -> {} (expected -E2BIG)",
+                "[syscall/linux]   FAIL: move_pages(huge count,NULL pages) -> {} (expected -EFAULT)",
                 r.value,
             );
             return Err(KernelError::InternalError);
@@ -38061,17 +38088,18 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // Case 8: MOVE_ALL EPERM fires ahead of count > limit -> -E2BIG.
-        // Probe passing (count=huge, flags=MOVE_ALL) must see EPERM,
-        // not E2BIG (Linux gate order).
+        // Case 8: MOVE_ALL EPERM fires ahead of the pid lookup and the
+        // pages handling.  Probe passing (large count, foreign pid,
+        // flags=MOVE_ALL) must see EPERM (the step-2 gate), not ESRCH
+        // (step 3) or EFAULT (step 4) — Linux gate order.
         let a = SyscallArgs {
-            arg0: 0, arg1: (1 << 21), arg2: 0, arg3: 0, arg4: 0,
+            arg0: 99_999, arg1: (1 << 21), arg2: 0, arg3: 0, arg4: 0,
             arg5: MPOL_MF_MOVE_ALL_FLAG,
         };
         let r = dispatch_linux(nr::MOVE_PAGES, &a);
-        if r.value != -i64::from(errno::EPERM) {
+        if r.value != i64::from(errno::EPERM).wrapping_neg() {
             serial_println!(
-                "[syscall/linux]   FAIL: move_pages(huge,MOVE_ALL) -> {} (expected -EPERM)",
+                "[syscall/linux]   FAIL: move_pages(huge,foreign pid,MOVE_ALL) -> {} (expected -EPERM)",
                 r.value,
             );
             return Err(KernelError::InternalError);
@@ -38092,8 +38120,41 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+
+        // Case 10: unknown pid (not self) -> -ESRCH (find_mm_struct ->
+        // find_task_by_vpid -> NULL).  The pid lookup runs AFTER the
+        // MOVE_ALL gate but BEFORE the count==0 shortcut and the
+        // pages/status validation, so count==0 with a foreign pid still
+        // returns ESRCH (pre-batch the missing pid lookup let this
+        // return 0).
+        let a = SyscallArgs {
+            arg0: 99_999, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::MOVE_PAGES, &a);
+        if r.value != i64::from(errno::ESRCH).wrapping_neg() {
+            serial_println!(
+                "[syscall/linux]   FAIL: move_pages(foreign pid,count=0) -> {} (expected -ESRCH)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Case 11: negative pid resolves to NULL too -> -ESRCH, and the
+        // lookup beats the pages/status EFAULT (Linux step 3 before
+        // step 4).
+        let a = SyscallArgs {
+            arg0: u64::MAX, arg1: 3, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::MOVE_PAGES, &a);
+        if r.value != i64::from(errno::ESRCH).wrapping_neg() {
+            serial_println!(
+                "[syscall/linux]   FAIL: move_pages(neg pid) -> {} (expected -ESRCH)",
+                r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
         serial_println!(
-            "[syscall/linux]   move_pages MOVE_ALL EPERM ahead of pid/count: OK"
+            "[syscall/linux]   move_pages MOVE_ALL EPERM / pid-ESRCH (no E2BIG cap) (batch 548): OK"
         );
     }
 
@@ -62967,17 +63028,20 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: move_pages bad flags not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // move_pages count > limit -> E2BIG.
+        // move_pages(foreign pid, large count) -> ESRCH.  Batch 548
+        // removed the invented E2BIG cap; the pid lookup (find_mm_struct
+        // -> find_task_by_vpid -> NULL) now drives the result for a
+        // non-self pid, ahead of any count/pages handling.
         let a = SyscallArgs { arg0: 1, arg1: (1 << 21), arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::MOVE_PAGES, &a).value != -i64::from(errno::E2BIG) {
-            serial_println!("[syscall/linux]   FAIL: move_pages huge count not E2BIG");
+        if dispatch_linux(nr::MOVE_PAGES, &a).value != i64::from(errno::ESRCH).wrapping_neg() {
+            serial_println!("[syscall/linux]   FAIL: move_pages foreign-pid huge count not ESRCH");
             return Err(KernelError::InternalError);
         }
-        // move_pages count=0 -> 0 (batch 105 upgrade: was ENOSYS,
-        // now a no-op success).
-        let a = SyscallArgs { arg0: 1, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        // move_pages(self, count=0) -> 0 (no-op success; pid==0 is self,
+        // so the ESRCH lookup is skipped and the count==0 shortcut hits).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::MOVE_PAGES, &a).value != 0 {
-            serial_println!("[syscall/linux]   FAIL: move_pages count=0 not 0");
+            serial_println!("[syscall/linux]   FAIL: move_pages self count=0 not 0");
             return Err(KernelError::InternalError);
         }
 

@@ -1,4 +1,47 @@
 
+## DONE (2026-06-12): ABI batch 548 — move_pages: add missing pid->ESRCH lookup (find_mm_struct); remove invented E2BIG count cap
+## Linux v6.6 mm/migrate.c (verified verbatim against raw.githubusercontent.com torvalds/linux v6.6):
+##   kernel_move_pages(pid, nr_pages, pages, nodes, status, flags):
+##       if (flags & ~(MPOL_MF_MOVE|MPOL_MF_MOVE_ALL)) return -EINVAL;
+##       if ((flags & MPOL_MF_MOVE_ALL) && !capable(CAP_SYS_NICE)) return -EPERM;
+##       mm = find_mm_struct(pid, &task_nodes); if (IS_ERR(mm)) return PTR_ERR(mm);
+##       if (nodes) err = do_pages_move(...); else err = do_pages_stat(...); mmput(mm); return err;
+##   find_mm_struct(pid, *mem_nodes):
+##       if (!pid) { mmget(current->mm); *mem_nodes = cpuset_mems_allowed(current); return current->mm; }
+##       task = find_task_by_vpid(pid); if (!task) return ERR_PTR(-ESRCH);
+##       if (!ptrace_may_access(task, PTRACE_MODE_READ_REALCREDS)) mm = ERR_PTR(-EPERM); goto out;
+##       mm = ERR_PTR(security_task_movememory(task)); if (IS_ERR(mm)) goto out;
+##       *mem_nodes = cpuset_mems_allowed(task); mm = get_task_mm(task);
+##       out: put_task_struct(task); if (!mm) mm = ERR_PTR(-EINVAL); return mm;
+##   There is NO nr_pages limit ANYWHERE in kernel_move_pages / do_pages_move / do_pages_stat (both do_pages_*
+##   chunk through `while (nr_pages)` 16 at a time and return 0 for nr_pages==0 without touching pages/status).
+## DIVERGENCES (pre-batch sys_move_pages), both now fixed:
+##   (a) NO pid lookup at all.  find_mm_struct's ESRCH (unknown/negative pid -> find_task_by_vpid NULL) was missing;
+##       a foreign pid fell through to the pages/status validation and returned 0 / EFAULT instead of ESRCH.  The
+##       lookup belongs AFTER the MOVE_ALL EPERM gate and BEFORE the count==0 shortcut + pages handling, so even
+##       count==0 with an unknown pid is ESRCH (same class of bug fixed for migrate_pages in batch 547).
+##   (b) INVENTED `count > (1<<20) -> E2BIG` cap.  No such limit exists in Linux; removed.  A large count now flows
+##       to the pages/status validation (NULL -> EFAULT; unmapped -> EFAULT) exactly as Linux's chunked do_pages_*.
+## FIX (translator-only): inserted the pid!=0 && pid!=current -> ESRCH gate (pid==0 = self, no permission check),
+##   removed the E2BIG check, kept the count==0 -> 0 shortcut (now AFTER the pid lookup), kept the MOVE_ALL EPERM gate
+##   ahead of everything.  ptrace -EPERM / !mm -EINVAL are documented as the slots for a future real task model.
+## SELF-TEST (boot, dispatch_linux) stamp:
+##   "move_pages MOVE_ALL EPERM / pid-ESRCH (no E2BIG cap) (batch 548): OK"
+##   Updated batch-105 cases: Case 5 (large count, NULL pages) E2BIG->EFAULT; Case 8 now (large count, FOREIGN pid,
+##   MOVE_ALL) -> EPERM (proves step-2 gate beats step-3 ESRCH and step-4 EFAULT); added Case 10 (foreign pid,
+##   count=0) -> ESRCH and Case 11 (negative pid) -> ESRCH.  NUMA-block duplicates: huge-count test E2BIG->ESRCH
+##   (foreign pid drives it); count==0 test switched to self pid (pid==0) so it still returns 0.  Cases 1-4/6/7/9
+##   (all self pid) unchanged.
+## FOLLOW-UP (tracked, NOT done — needs its own verification):
+##   * do_pages_move per-page node-error errno: for a target node not in mems_allowed={0} (e.g. node 1 on UMA),
+##     Linux stores a per-page error in status[i] via store_status — likely -ENODEV (node has no N_MEMORY) or
+##     -EACCES (!node_isset in task_nodes), NOT the -EINVAL we currently store (sys_move_pages Case 4, status
+##     [0,-EINVAL,0]).  Verify the exact do_pages_move path (node validity checks + store_status) against v6.6
+##     and correct the per-page errno in a dedicated batch.  Left as-is this batch to avoid guessing (the pid/ESRCH
+##     and E2BIG fixes are independently verified and self-contained).
+## VERIFIED: build clean; clippy 17463 (DOWN 3 from batch-547's 17466 — removed the E2BIG branch and the changed
+##   asserts use i64::from(errno).wrapping_neg()); boot-test BOOT_OK + stamp in serial-test.txt + EXIT=0, no SELF-TEST FAILURE.
+
 ## DONE (2026-06-12): ABI batch 547 — migrate_pages: convert to get_nodes_uma; faithful EPERM/EINVAL/ESRCH split (kernel_migrate_pages order)
 ## Linux v6.6 mm/mempolicy.c kernel_migrate_pages (verified verbatim against raw.githubusercontent.com torvalds/linux v6.6):
 ##   err = get_nodes(old, old_nodes, maxnode); if (err) goto out;     // OLD mask first

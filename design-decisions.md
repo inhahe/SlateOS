@@ -592,15 +592,17 @@ code — is fully recovered by a shared **library** crate rather than a shared
 
 ---
 
-## 9. Next major initiative ordering — terminal/dev toolchain before GUI; fastpy before/instead of CPython
+## 9. Next major initiative ordering — terminal/dev toolchain before GUI; CPython then fastpy (fastpy depends on CPython)
 
-**Date:** 2026-06-13
+**Date:** 2026-06-13 (corrected same day — see CPython-dependency note)
 
 **Decided by:** Operator (Claude surveyed the roadmap, found bounded work
 exhausted, and put the strategic ordering to the operator as `open-questions.md`
 Q3 with options A–E and a recommendation of "bash first"; the operator chose a
-different ordering — toolchain before bash, terminal/dev before GUI, fastpy
-before CPython — which overrules Claude's recommendation).
+different ordering — toolchain before bash, terminal/dev before GUI, and Python
+via fastpy. The operator subsequently corrected a factual error in Claude's
+write-up: fastpy is **not** an alternative to CPython but **depends on** it, so
+the ordering is CPython *then* fastpy, not "fastpy instead of CPython").
 
 **Context:**
 An autonomous-loop survey (2026-06-13) confirmed every readily-actionable
@@ -618,13 +620,18 @@ CPython, (C) GPU drivers → Mesa → Vulkan/OpenGL, (D) WINE, (E) Chromium.
   vision (options C/D/E) until that's in place.
 - **Port the GCC/CMake/Make toolchain (roadmap task 5031) before bash (task
   1491).** The toolchain is the prioritized next initiative.
-- **Integrate fastpy (roadmap tasks 24 "integrate fastpy compiler into build
-  system" and 5034 "fastpy compiler") before — and likely *instead of* —
-  CPython (task 5033).** fastpy is being maintained (in another project) to be
-  CPython 3.14-compatible and is many times faster than CPython, so it is the
-  preferred Python implementation for OuRoS userspace. CPython is only revisited
-  if a real compatibility gap forces it. **Status check:** fastpy is *not yet
-  ported* — tasks 24 and 5034 are both `[ ]` (unstarted) in `roadmap.md`.
+- **Port CPython (task 5033) *first*, then integrate fastpy (tasks 24 + 5034) on
+  top of it.** fastpy is the preferred *fast* execution path for OuRoS userspace
+  Python (it AOT-compiles Python to native code and is many times faster than
+  CPython, and is maintained to be CPython-3.14-compatible). **But fastpy is not
+  a standalone replacement for CPython — it depends on the CPython runtime/DLL as
+  a bridge** for a set of operations it does not implement natively, most notably
+  **importing binary/compiled Python extension modules** (the C-API extension
+  ecosystem). So CPython must be ported *before* fastpy can run, and CPython
+  stays resident as fastpy's bridge — it is a **prerequisite and a runtime
+  dependency**, not an alternative we skip. **Status check:** neither is ported
+  yet — task 5033 (CPython) is `[ ]`, and tasks 24 & 5034 (fastpy) are `[ ]`
+  (unstarted) in `roadmap.md`.
 
 **Rationale:**
 - A working dev toolchain is the foundation for self-hosting and for building
@@ -633,8 +640,10 @@ CPython, (C) GPU drivers → Mesa → Vulkan/OpenGL, (D) WINE, (E) Chromium.
   the GUI is the intuitive ordering (you build the tools before the storefront).
 - fastpy gives CPython-3.14 compatibility at much higher performance, and the
   project's own guidance already prefers "Python via fastpy" for userspace
-  components (CLAUDE.md). Porting it instead of CPython avoids carrying a slower
-  second Python runtime unless compatibility forces it.
+  components (CLAUDE.md). But because fastpy bridges to the CPython runtime/DLL
+  for binary-extension imports and other unimplemented operations, CPython is a
+  hard prerequisite — porting CPython is not optional work we can defer in favor
+  of fastpy; it is step one, with fastpy layered on top as the fast path.
 
 **Honest nuance recorded at decision time (toolchain ↔ shell bootstrap
 co-dependency):** the operator's reasoning was "porting bash will be easier once
@@ -657,18 +666,22 @@ point bash (or a smaller POSIX sh) becomes the natural follow-on.
 - **(C/D/E) GPU/Mesa, WINE, Chromium** — deferred: these are the GUI/app long
   pole, the most hardware-dependent, and (D)/(E) are gated behind the GPU/Mesa
   work. The operator explicitly wants terminal/dev before GUI.
-- **CPython before/instead of fastpy** — rejected: fastpy is faster and
-  CPython-3.14-compatible; carry CPython only if a real gap appears.
+- **"fastpy instead of CPython" (skip the CPython port)** — Claude's original
+  write-up framed it this way; **corrected and rejected** by the operator:
+  fastpy depends on the CPython runtime/DLL (binary-extension imports etc.), so
+  CPython can't be skipped. The relationship is CPython-then-fastpy, with CPython
+  remaining resident as the bridge.
 
 **Where it lives:**
-- `roadmap.md`: task 5031 (gcc/cmake/make/pkg-config — next), tasks 24 & 5034
-  (fastpy integration & compiler — before CPython), task 5033 (CPython —
-  deprioritized), task 1491 (bash — follow-on after toolchain).
+- `roadmap.md`: task 5031 (gcc/cmake/make/pkg-config — next), task 5033 (CPython
+  — prerequisite for fastpy, port first), tasks 24 & 5034 (fastpy integration &
+  compiler — layered on CPython), task 1491 (bash — follow-on after toolchain).
 - New top-level work; entry points emerge as the toolchain port begins
   (build wiring under the workspace + `pkg/`/`userspace/` as needed).
 
 **How to reverse:**
-- Re-prioritize by reordering the roadmap tasks. If fastpy proves to have a
-  blocking CPython-compat gap for a required package, promote task 5033 (CPython)
-  ahead of relying on fastpy. If GUI work becomes more urgent than dev tooling,
-  start option (C) instead — but per this decision, terminal/dev leads.
+- Re-prioritize by reordering the roadmap tasks. The CPython→fastpy dependency is
+  not a preference but a technical fact (fastpy's bridge), so it can't be
+  reordered unless fastpy gains a native binary-extension loader that removes the
+  CPython dependency. If GUI work becomes more urgent than dev tooling, start
+  option (C) instead — but per this decision, terminal/dev leads.

@@ -414,8 +414,14 @@ pub const DRM_MODE_SUBPIXEL_NONE: u32 = 6;
 pub const DRM_MODE_CONNECTOR_UNKNOWN: u32 = 0;
 /// VGA (DE-15) analog connector.
 pub const DRM_MODE_CONNECTOR_VGA: u32 = 1;
+/// DVI-D (digital) connector.
+pub const DRM_MODE_CONNECTOR_DVID: u32 = 3;
+/// LVDS (laptop panel) connector.
+pub const DRM_MODE_CONNECTOR_LVDS: u32 = 7;
 /// HDMI type A connector.
 pub const DRM_MODE_CONNECTOR_HDMIA: u32 = 11;
+/// Embedded DisplayPort (laptop panel) connector.
+pub const DRM_MODE_CONNECTOR_EDP: u32 = 14;
 /// Virtual connector (e.g. virtio-gpu / vkms).
 pub const DRM_MODE_CONNECTOR_VIRTUAL: u32 = 15;
 /// DisplayPort connector.
@@ -425,10 +431,16 @@ pub const DRM_MODE_CONNECTOR_DISPLAYPORT: u32 = 10;
 
 /// No / unknown encoder.
 pub const DRM_MODE_ENCODER_NONE: u32 = 0;
+/// DAC encoder (VGA analog).
+pub const DRM_MODE_ENCODER_DAC: u32 = 1;
 /// TMDS encoder (DVI/HDMI).
 pub const DRM_MODE_ENCODER_TMDS: u32 = 2;
+/// LVDS encoder (laptop panels).
+pub const DRM_MODE_ENCODER_LVDS: u32 = 3;
 /// Virtual encoder (virtio-gpu / vkms).
 pub const DRM_MODE_ENCODER_VIRTUAL: u32 = 5;
+/// DisplayPort MST encoder.
+pub const DRM_MODE_ENCODER_DPMST: u32 = 6;
 
 // --- Mode type/flags (drm_mode_modeinfo.type / .flags) --------------------
 

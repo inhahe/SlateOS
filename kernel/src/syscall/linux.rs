@@ -7172,7 +7172,44 @@ fn drm_card_ioctl(entry: &FdEntry, request: u32, argp: u64) -> SyscallResult {
             }
             linux_err(errno::EINVAL)
         }
-        // KMS / GEM ioctls land in follow-up commits.
+        // --- KMS resource enumeration (primary-node only) ---
+        uapi::DRM_IOCTL_MODE_GETRESOURCES => {
+            if render_node {
+                return linux_err(errno::EACCES);
+            }
+            drm_card_ioctl_mode_getresources(handle, argp)
+        }
+        uapi::DRM_IOCTL_MODE_GETCONNECTOR => {
+            if render_node {
+                return linux_err(errno::EACCES);
+            }
+            drm_card_ioctl_mode_getconnector(handle, argp)
+        }
+        uapi::DRM_IOCTL_MODE_GETENCODER => {
+            if render_node {
+                return linux_err(errno::EACCES);
+            }
+            drm_card_ioctl_mode_getencoder(handle, argp)
+        }
+        uapi::DRM_IOCTL_MODE_GETCRTC => {
+            if render_node {
+                return linux_err(errno::EACCES);
+            }
+            drm_card_ioctl_mode_getcrtc(handle, argp)
+        }
+        uapi::DRM_IOCTL_MODE_GETPLANERESOURCES => {
+            if render_node {
+                return linux_err(errno::EACCES);
+            }
+            drm_card_ioctl_mode_getplaneresources(handle, argp)
+        }
+        uapi::DRM_IOCTL_MODE_GETPLANE => {
+            if render_node {
+                return linux_err(errno::EACCES);
+            }
+            drm_card_ioctl_mode_getplane(handle, argp)
+        }
+        // Dumb-buffer / framebuffer / page-flip ioctls land in commit 6.
         _ => linux_err(errno::ENOTTY),
     }
 }
@@ -7341,6 +7378,442 @@ fn drm_card_ioctl_set_version(argp: u64) -> SyscallResult {
         drm_dd_minor: uapi::DRIVER_VERSION_MINOR,
     };
     match write_user_struct(argp, &sv) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(e),
+    }
+}
+
+/// The DRM device index a card fd refers to, or an errno for a stale fd.
+fn drm_card_device(handle: crate::drm::card_fd::DrmCardHandle) -> Result<usize, i32> {
+    crate::drm::card_fd::device(handle).ok_or(errno::EBADF)
+}
+
+/// Map a [`crate::drm`] lookup error onto a DRM ioctl errno.
+///
+/// A missing object id (`NotFound`) is Linux's `ENOENT` for the KMS getters;
+/// anything else is `EINVAL`.
+fn drm_kernel_err(e: crate::error::KernelError) -> i32 {
+    match e {
+        crate::error::KernelError::NotFound => errno::ENOENT,
+        _ => errno::EINVAL,
+    }
+}
+
+/// Copy a slice of `#[repr(C)]` items into a user array for a KMS getter,
+/// honouring the two-pass enumeration contract.
+///
+/// `capacity` is the number of elements the caller's array can hold (its
+/// `count_*` field on input).  We copy `min(capacity, items.len())` elements
+/// when the pointer and capacity are both non-zero, and always return the
+/// *full* `items.len()` so the caller learns the real count — a `capacity = 0`
+/// probe just reads the count back and then re-issues with a big-enough array.
+fn drm_copy_array<T: Copy>(user_ptr: u64, capacity: u32, items: &[T]) -> Result<u32, i32> {
+    let actual = u32::try_from(items.len()).unwrap_or(u32::MAX);
+    if user_ptr != 0 && capacity > 0 {
+        let cap = usize::try_from(capacity).unwrap_or(usize::MAX);
+        let n = cap.min(items.len());
+        if let Some(slice) = items.get(..n) {
+            let elem = core::mem::size_of::<T>();
+            let bytes = n.checked_mul(elem).ok_or(errno::EINVAL)?;
+            if bytes > 0 {
+                // SAFETY: `slice` is `n` contiguous `T` = `bytes` bytes of valid
+                // kernel memory; `copy_to_user` validates the user destination
+                // range and handles SMAP.  A byte copy imposes no alignment
+                // requirement on the user pointer.
+                if unsafe { crate::mm::user::copy_to_user(slice.as_ptr().cast::<u8>(), user_ptr, bytes) }
+                    .is_err()
+                {
+                    return Err(errno::EFAULT);
+                }
+            }
+        }
+    }
+    Ok(actual)
+}
+
+/// Map a native [`crate::drm::connector::ConnectorType`] to its
+/// `DRM_MODE_CONNECTOR_*` ABI value.
+fn drm_connector_type_to_uapi(t: crate::drm::connector::ConnectorType) -> u32 {
+    use crate::drm::connector::ConnectorType;
+    use crate::drm::uapi;
+    match t {
+        ConnectorType::Virtual => uapi::DRM_MODE_CONNECTOR_VIRTUAL,
+        ConnectorType::Hdmi => uapi::DRM_MODE_CONNECTOR_HDMIA,
+        ConnectorType::DisplayPort => uapi::DRM_MODE_CONNECTOR_DISPLAYPORT,
+        ConnectorType::Vga => uapi::DRM_MODE_CONNECTOR_VGA,
+        ConnectorType::Lvds => uapi::DRM_MODE_CONNECTOR_LVDS,
+        ConnectorType::Dvi => uapi::DRM_MODE_CONNECTOR_DVID,
+        ConnectorType::Edp => uapi::DRM_MODE_CONNECTOR_EDP,
+    }
+}
+
+/// Map a native [`crate::drm::connector::ConnectorStatus`] to its
+/// `DRM_MODE_*` connection ABI value.
+fn drm_connector_status_to_uapi(s: crate::drm::connector::ConnectorStatus) -> u32 {
+    use crate::drm::connector::ConnectorStatus;
+    use crate::drm::uapi;
+    match s {
+        ConnectorStatus::Connected => uapi::DRM_MODE_CONNECTED,
+        ConnectorStatus::Disconnected => uapi::DRM_MODE_DISCONNECTED,
+        ConnectorStatus::Unknown => uapi::DRM_MODE_UNKNOWNCONNECTION,
+    }
+}
+
+/// Map a native [`crate::drm::encoder::EncoderType`] to its
+/// `DRM_MODE_ENCODER_*` ABI value.
+fn drm_encoder_type_to_uapi(t: crate::drm::encoder::EncoderType) -> u32 {
+    use crate::drm::encoder::EncoderType;
+    use crate::drm::uapi;
+    match t {
+        EncoderType::Virtual => uapi::DRM_MODE_ENCODER_VIRTUAL,
+        EncoderType::Tmds => uapi::DRM_MODE_ENCODER_TMDS,
+        EncoderType::Lvds => uapi::DRM_MODE_ENCODER_LVDS,
+        EncoderType::DpMst => uapi::DRM_MODE_ENCODER_DPMST,
+        EncoderType::Dac => uapi::DRM_MODE_ENCODER_DAC,
+    }
+}
+
+/// Convert a native [`crate::drm::mode::DrmMode`] to the ABI
+/// `drm_mode_modeinfo`.
+///
+/// Display dimensions and timing values fit in `u16` (every real mode is well
+/// under 65535 pixels/lines), so the `u32`→`u16` narrowing cannot lose data;
+/// the synthetic virtual modes carry zero blanking/sync timing.
+#[allow(clippy::cast_possible_truncation)]
+fn drm_mode_to_uapi(m: &crate::drm::mode::DrmMode) -> crate::drm::uapi::DrmModeModeinfo {
+    use crate::drm::mode::DrmModeFlags;
+    use crate::drm::uapi;
+    let mut info = uapi::DrmModeModeinfo {
+        clock: m.clock,
+        hdisplay: m.hdisplay as u16,
+        hsync_start: 0,
+        hsync_end: 0,
+        htotal: m.htotal as u16,
+        hskew: 0,
+        vdisplay: m.vdisplay as u16,
+        vsync_start: 0,
+        vsync_end: 0,
+        vtotal: m.vtotal as u16,
+        vscan: 0,
+        vrefresh: m.vrefresh,
+        // Synthetic virtual modes carry no real sync-polarity timing.
+        flags: 0,
+        type_: uapi::DRM_MODE_TYPE_DRIVER,
+        name: [0u8; uapi::DRM_DISPLAY_MODE_LEN],
+    };
+    if m.flags == DrmModeFlags::PREFERRED {
+        info.type_ |= uapi::DRM_MODE_TYPE_PREFERRED;
+    }
+    write_cstr_field(&mut info.name, m.name_str());
+    info
+}
+
+/// `DRM_IOCTL_MODE_GETRESOURCES` — enumerate the device's CRTC / connector /
+/// encoder ids (and the framebuffer-size bounds).
+///
+/// Framebuffer ids are reported as an empty set: dumb/scanout buffers are a
+/// per-client resource that land in commit 6, and clients track the fb ids
+/// they create themselves rather than relying on this list.
+fn drm_card_ioctl_mode_getresources(
+    handle: crate::drm::card_fd::DrmCardHandle,
+    argp: u64,
+) -> SyscallResult {
+    use crate::drm::uapi;
+    let mut res = match read_user_struct::<uapi::DrmModeCardRes>(argp) {
+        Ok(v) => v,
+        Err(e) => return linux_err(e),
+    };
+    let device = match drm_card_device(handle) {
+        Ok(d) => d,
+        Err(e) => return linux_err(e),
+    };
+    let ids = crate::drm::with_device(device, |dev| {
+        let crtcs: alloc::vec::Vec<u32> = dev.crtcs().iter().map(|c| c.id.raw()).collect();
+        let conns: alloc::vec::Vec<u32> = dev.connectors().iter().map(|c| c.id.raw()).collect();
+        let encs: alloc::vec::Vec<u32> = dev.encoders().iter().map(|e| e.id.raw()).collect();
+        Ok((crtcs, conns, encs))
+    });
+    let (crtc_ids, conn_ids, enc_ids) = match ids {
+        Ok(v) => v,
+        Err(e) => return linux_err(drm_kernel_err(e)),
+    };
+
+    // Copy each id array out (capacity-limited), recording the true counts.
+    let count_crtcs = match drm_copy_array(res.crtc_id_ptr, res.count_crtcs, &crtc_ids) {
+        Ok(n) => n,
+        Err(e) => return linux_err(e),
+    };
+    let count_connectors =
+        match drm_copy_array(res.connector_id_ptr, res.count_connectors, &conn_ids) {
+            Ok(n) => n,
+            Err(e) => return linux_err(e),
+        };
+    let count_encoders = match drm_copy_array(res.encoder_id_ptr, res.count_encoders, &enc_ids) {
+        Ok(n) => n,
+        Err(e) => return linux_err(e),
+    };
+
+    res.count_fbs = 0;
+    res.count_crtcs = count_crtcs;
+    res.count_connectors = count_connectors;
+    res.count_encoders = count_encoders;
+    res.min_width = 0;
+    res.min_height = 0;
+    // Conventional virtual-driver framebuffer-size cap (matches vkms/virtio).
+    res.max_width = 16384;
+    res.max_height = 16384;
+    match write_user_struct(argp, &res) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(e),
+    }
+}
+
+/// `DRM_IOCTL_MODE_GETCONNECTOR` — report a connector's type / status, its
+/// supported modes, and the encoders that can drive it.
+///
+/// Properties are reported as an empty set for now (atomic-modeset property
+/// objects land with the atomic-commit path); legacy modesetting via SETCRTC
+/// needs only the mode + encoder lists.
+fn drm_card_ioctl_mode_getconnector(
+    handle: crate::drm::card_fd::DrmCardHandle,
+    argp: u64,
+) -> SyscallResult {
+    use crate::drm::uapi;
+    let mut conn = match read_user_struct::<uapi::DrmModeGetConnector>(argp) {
+        Ok(v) => v,
+        Err(e) => return linux_err(e),
+    };
+    let device = match drm_card_device(handle) {
+        Ok(d) => d,
+        Err(e) => return linux_err(e),
+    };
+    let want = conn.connector_id;
+    let gathered = crate::drm::with_device(device, |dev| {
+        let c = dev
+            .connectors()
+            .iter()
+            .find(|c| c.id.raw() == want)
+            .ok_or(crate::error::KernelError::NotFound)?;
+        let modes: alloc::vec::Vec<uapi::DrmModeModeinfo> =
+            c.modes.iter().map(drm_mode_to_uapi).collect();
+        let encoders: alloc::vec::Vec<u32> =
+            c.possible_encoders.iter().map(|e| e.raw()).collect();
+        let connector_type = drm_connector_type_to_uapi(c.connector_type);
+        let connection = drm_connector_status_to_uapi(c.status);
+        let encoder_id = c.current_encoder.map_or(0, |e| e.raw());
+        Ok((modes, encoders, connector_type, connection, encoder_id))
+    });
+    let (modes, encoders, connector_type, connection, encoder_id) = match gathered {
+        Ok(v) => v,
+        Err(e) => return linux_err(drm_kernel_err(e)),
+    };
+
+    let count_modes = match drm_copy_array(conn.modes_ptr, conn.count_modes, &modes) {
+        Ok(n) => n,
+        Err(e) => return linux_err(e),
+    };
+    let count_encoders = match drm_copy_array(conn.encoders_ptr, conn.count_encoders, &encoders)
+    {
+        Ok(n) => n,
+        Err(e) => return linux_err(e),
+    };
+
+    conn.count_modes = count_modes;
+    conn.count_encoders = count_encoders;
+    conn.count_props = 0;
+    conn.encoder_id = encoder_id;
+    conn.connector_type = connector_type;
+    conn.connector_type_id = 1;
+    conn.connection = connection;
+    conn.mm_width = 0;
+    conn.mm_height = 0;
+    conn.subpixel = uapi::DRM_MODE_SUBPIXEL_UNKNOWN;
+    conn.pad = 0;
+    match write_user_struct(argp, &conn) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(e),
+    }
+}
+
+/// `DRM_IOCTL_MODE_GETENCODER` — report an encoder's type, bound CRTC, and the
+/// CRTCs/encoders it is compatible with.
+fn drm_card_ioctl_mode_getencoder(
+    handle: crate::drm::card_fd::DrmCardHandle,
+    argp: u64,
+) -> SyscallResult {
+    use crate::drm::uapi;
+    let mut enc = match read_user_struct::<uapi::DrmModeGetEncoder>(argp) {
+        Ok(v) => v,
+        Err(e) => return linux_err(e),
+    };
+    let device = match drm_card_device(handle) {
+        Ok(d) => d,
+        Err(e) => return linux_err(e),
+    };
+    let want = enc.encoder_id;
+    let gathered = crate::drm::with_device(device, |dev| {
+        let e = dev
+            .encoders()
+            .iter()
+            .find(|e| e.id.raw() == want)
+            .ok_or(crate::error::KernelError::NotFound)?;
+        Ok((
+            drm_encoder_type_to_uapi(e.encoder_type),
+            e.crtc.map_or(0, |c| c.raw()),
+            e.possible_crtcs,
+        ))
+    });
+    let (encoder_type, crtc_id, possible_crtcs) = match gathered {
+        Ok(v) => v,
+        Err(e) => return linux_err(drm_kernel_err(e)),
+    };
+    enc.encoder_type = encoder_type;
+    enc.crtc_id = crtc_id;
+    enc.possible_crtcs = possible_crtcs;
+    enc.possible_clones = 0;
+    match write_user_struct(argp, &enc) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(e),
+    }
+}
+
+/// `DRM_IOCTL_MODE_GETCRTC` — report a CRTC's current mode + bound framebuffer.
+fn drm_card_ioctl_mode_getcrtc(
+    handle: crate::drm::card_fd::DrmCardHandle,
+    argp: u64,
+) -> SyscallResult {
+    use crate::drm::uapi;
+    let mut crtc = match read_user_struct::<uapi::DrmModeCrtc>(argp) {
+        Ok(v) => v,
+        Err(e) => return linux_err(e),
+    };
+    let device = match drm_card_device(handle) {
+        Ok(d) => d,
+        Err(e) => return linux_err(e),
+    };
+    let want = crtc.crtc_id;
+    let gathered = crate::drm::with_device(device, |dev| {
+        let c = dev
+            .crtcs()
+            .iter()
+            .find(|c| c.id.raw() == want)
+            .ok_or(crate::error::KernelError::NotFound)?;
+        // The CRTC scans out its primary plane's framebuffer (0 = unbound).
+        let fb_id = dev
+            .planes()
+            .iter()
+            .find(|p| p.id == c.primary_plane)
+            .and_then(|p| p.fb)
+            .map_or(0, |f| f.raw());
+        let mode = c.mode.as_ref().map(drm_mode_to_uapi);
+        Ok((fb_id, c.gamma_size, mode))
+    });
+    let (fb_id, gamma_size, mode) = match gathered {
+        Ok(v) => v,
+        Err(e) => return linux_err(drm_kernel_err(e)),
+    };
+    // GETCRTC ignores the SETCRTC input fields; clear them on output.
+    crtc.set_connectors_ptr = 0;
+    crtc.count_connectors = 0;
+    crtc.fb_id = fb_id;
+    crtc.x = 0;
+    crtc.y = 0;
+    crtc.gamma_size = gamma_size;
+    match mode {
+        Some(m) => {
+            crtc.mode_valid = 1;
+            crtc.mode = m;
+        }
+        None => {
+            crtc.mode_valid = 0;
+            // SAFETY: DrmModeModeinfo is a plain `#[repr(C)]` integer/byte
+            // aggregate, so an all-zero value is a valid "no mode" descriptor.
+            crtc.mode = unsafe { core::mem::zeroed() };
+        }
+    }
+    match write_user_struct(argp, &crtc) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(e),
+    }
+}
+
+/// `DRM_IOCTL_MODE_GETPLANERESOURCES` — enumerate the device's plane ids.
+fn drm_card_ioctl_mode_getplaneresources(
+    handle: crate::drm::card_fd::DrmCardHandle,
+    argp: u64,
+) -> SyscallResult {
+    use crate::drm::uapi;
+    let mut pr = match read_user_struct::<uapi::DrmModeGetPlaneRes>(argp) {
+        Ok(v) => v,
+        Err(e) => return linux_err(e),
+    };
+    let device = match drm_card_device(handle) {
+        Ok(d) => d,
+        Err(e) => return linux_err(e),
+    };
+    let ids = crate::drm::with_device(device, |dev| {
+        Ok(dev.planes().iter().map(|p| p.id.raw()).collect::<alloc::vec::Vec<u32>>())
+    });
+    let plane_ids = match ids {
+        Ok(v) => v,
+        Err(e) => return linux_err(drm_kernel_err(e)),
+    };
+    let count_planes = match drm_copy_array(pr.plane_id_ptr, pr.count_planes, &plane_ids) {
+        Ok(n) => n,
+        Err(e) => return linux_err(e),
+    };
+    pr.count_planes = count_planes;
+    match write_user_struct(argp, &pr) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(e),
+    }
+}
+
+/// `DRM_IOCTL_MODE_GETPLANE` — report a plane's bound CRTC/framebuffer and the
+/// FourCC pixel formats it supports.
+fn drm_card_ioctl_mode_getplane(
+    handle: crate::drm::card_fd::DrmCardHandle,
+    argp: u64,
+) -> SyscallResult {
+    use crate::drm::uapi;
+    let mut pl = match read_user_struct::<uapi::DrmModeGetPlane>(argp) {
+        Ok(v) => v,
+        Err(e) => return linux_err(e),
+    };
+    let device = match drm_card_device(handle) {
+        Ok(d) => d,
+        Err(e) => return linux_err(e),
+    };
+    let want = pl.plane_id;
+    let gathered = crate::drm::with_device(device, |dev| {
+        let p = dev
+            .planes()
+            .iter()
+            .find(|p| p.id.raw() == want)
+            .ok_or(crate::error::KernelError::NotFound)?;
+        let formats: alloc::vec::Vec<u32> = p.formats.iter().map(|f| f.raw()).collect();
+        Ok((
+            p.crtc.map_or(0, |c| c.raw()),
+            p.fb.map_or(0, |f| f.raw()),
+            p.possible_crtcs,
+            formats,
+        ))
+    });
+    let (crtc_id, fb_id, possible_crtcs, formats) = match gathered {
+        Ok(v) => v,
+        Err(e) => return linux_err(drm_kernel_err(e)),
+    };
+    let count_format_types =
+        match drm_copy_array(pl.format_type_ptr, pl.count_format_types, &formats) {
+            Ok(n) => n,
+            Err(e) => return linux_err(e),
+        };
+    pl.crtc_id = crtc_id;
+    pl.fb_id = fb_id;
+    pl.possible_crtcs = possible_crtcs;
+    pl.gamma_size = 0;
+    pl.count_format_types = count_format_types;
+    match write_user_struct(argp, &pl) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => linux_err(e),
     }
@@ -77663,6 +78136,80 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   futimesat tv_usec value gating: OK"
         );
+    }
+
+    // (DRM) KMS enumeration conversion helpers map every native enum variant
+    // onto its DRM ABI value, and drm_mode_to_uapi narrows + names a mode.
+    {
+        use crate::drm::connector::{ConnectorStatus, ConnectorType};
+        use crate::drm::encoder::EncoderType;
+        use crate::drm::mode::{DrmMode, DrmModeFlags};
+        use crate::drm::uapi;
+
+        if drm_connector_type_to_uapi(ConnectorType::Virtual) != uapi::DRM_MODE_CONNECTOR_VIRTUAL
+            || drm_connector_type_to_uapi(ConnectorType::Hdmi) != uapi::DRM_MODE_CONNECTOR_HDMIA
+            || drm_connector_type_to_uapi(ConnectorType::DisplayPort)
+                != uapi::DRM_MODE_CONNECTOR_DISPLAYPORT
+            || drm_connector_type_to_uapi(ConnectorType::Vga) != uapi::DRM_MODE_CONNECTOR_VGA
+            || drm_connector_type_to_uapi(ConnectorType::Lvds) != uapi::DRM_MODE_CONNECTOR_LVDS
+            || drm_connector_type_to_uapi(ConnectorType::Dvi) != uapi::DRM_MODE_CONNECTOR_DVID
+            || drm_connector_type_to_uapi(ConnectorType::Edp) != uapi::DRM_MODE_CONNECTOR_EDP
+        {
+            serial_println!("[syscall/linux]   FAIL: DRM connector-type mapping");
+            return Err(KernelError::InternalError);
+        }
+        if drm_connector_status_to_uapi(ConnectorStatus::Connected) != uapi::DRM_MODE_CONNECTED
+            || drm_connector_status_to_uapi(ConnectorStatus::Disconnected)
+                != uapi::DRM_MODE_DISCONNECTED
+            || drm_connector_status_to_uapi(ConnectorStatus::Unknown)
+                != uapi::DRM_MODE_UNKNOWNCONNECTION
+        {
+            serial_println!("[syscall/linux]   FAIL: DRM connector-status mapping");
+            return Err(KernelError::InternalError);
+        }
+        if drm_encoder_type_to_uapi(EncoderType::Virtual) != uapi::DRM_MODE_ENCODER_VIRTUAL
+            || drm_encoder_type_to_uapi(EncoderType::Tmds) != uapi::DRM_MODE_ENCODER_TMDS
+            || drm_encoder_type_to_uapi(EncoderType::Lvds) != uapi::DRM_MODE_ENCODER_LVDS
+            || drm_encoder_type_to_uapi(EncoderType::DpMst) != uapi::DRM_MODE_ENCODER_DPMST
+            || drm_encoder_type_to_uapi(EncoderType::Dac) != uapi::DRM_MODE_ENCODER_DAC
+        {
+            serial_println!("[syscall/linux]   FAIL: DRM encoder-type mapping");
+            return Err(KernelError::InternalError);
+        }
+
+        // A preferred 1920x1080@60 mode converts with the dimensions narrowed,
+        // the PREFERRED native flag promoted to the DRM type bit, and the name
+        // copied (NUL-terminated within the 32-byte field).
+        let m = DrmMode::from_resolution(1920, 1080, 60);
+        let mut m = m;
+        m.flags = DrmModeFlags::PREFERRED;
+        let info = drm_mode_to_uapi(&m);
+        if info.hdisplay != 1920 || info.vdisplay != 1080 || info.vrefresh != 60 {
+            serial_println!("[syscall/linux]   FAIL: DRM mode dimension conversion");
+            return Err(KernelError::InternalError);
+        }
+        if info.type_ & uapi::DRM_MODE_TYPE_PREFERRED == 0
+            || info.type_ & uapi::DRM_MODE_TYPE_DRIVER == 0
+        {
+            serial_println!("[syscall/linux]   FAIL: DRM mode type bits");
+            return Err(KernelError::InternalError);
+        }
+        // Name field starts with "1920x1080@60" and is NUL-terminated.
+        let name_ok = info.name.starts_with(b"1920x1080@60")
+            && info.name.get(12) == Some(&0u8);
+        if !name_ok {
+            serial_println!("[syscall/linux]   FAIL: DRM mode name field");
+            return Err(KernelError::InternalError);
+        }
+
+        // A non-preferred mode keeps only the DRIVER type bit.
+        let m2 = DrmMode::from_resolution(800, 600, 60);
+        let info2 = drm_mode_to_uapi(&m2);
+        if info2.type_ & uapi::DRM_MODE_TYPE_PREFERRED != 0 {
+            serial_println!("[syscall/linux]   FAIL: DRM non-preferred mode type");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[syscall/linux]   DRM KMS enumeration conversions: OK");
     }
 
     serial_println!("[syscall/linux] Translation self-test PASSED");

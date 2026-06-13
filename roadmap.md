@@ -8,7 +8,7 @@ Status key: `[ ]` not started, `[-]` in progress, `[x]` done, `[~]` deferred
 
 _No dependencies. Do this first._
 
-- [ ] Choose a project name
+- [x] Choose a project name (Slate OS — identifier form "SlateOS"; renamed from OuRoS across the codebase 2026-06-13)
 - [x] Set up git repo, CI, build system (cargo workspace for kernel)
 - [x] Set up QEMU/VirtualBox dev loop (edit on Windows, cross-compile, boot in VM)
 - [x] Set up Rust cross-compilation (`x86_64-unknown-none` target)

@@ -2163,13 +2163,12 @@ fn build_pid_status(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
         "Mems_allowed_list:\t{}",
         format_bitmap_list(node_mask, nnodes)
     );
-    // Context switches: the native scheduler tracks a single schedule count,
-    // not Linux's voluntary/nonvoluntary split.  A preemptive round-robin
-    // scheduler drives almost all switches as involuntary preemptions, so the
-    // total is reported under nonvoluntary; voluntary is left 0.  Tools that
-    // sum both columns still get the right total.  Per-thread → task.
-    let _ = writeln!(s, "voluntary_ctxt_switches:\t0");
-    let _ = writeln!(s, "nonvoluntary_ctxt_switches:\t{}", task.schedule_count);
+    // Context switches: the scheduler now tracks the voluntary/involuntary
+    // split per task (charged at the switch point — voluntary when the task
+    // yields/blocks/self-suspends, involuntary when it is preempted by the
+    // timer).  Per-thread → from `task`.
+    let _ = writeln!(s, "voluntary_ctxt_switches:\t{}", task.nvcsw);
+    let _ = writeln!(s, "nonvoluntary_ctxt_switches:\t{}", task.nivcsw);
 
     s.into_bytes()
 }
@@ -13220,6 +13219,10 @@ pub fn self_test() -> KernelResult<()> {
             sys_ticks: 2,
             min_flt: 0,
             maj_flt: 0,
+
+            nvcsw: 0,
+
+            nivcsw: 0,
             total_cycles: 0,
             schedule_count: 0,
             start_tick: 99_999,
@@ -13308,6 +13311,10 @@ pub fn self_test() -> KernelResult<()> {
                 sys_ticks: 0,
                 min_flt: 0,
                 maj_flt: 0,
+
+                nvcsw: 0,
+
+                nivcsw: 0,
                 total_cycles: 0,
                 schedule_count: 0,
                 start_tick: 0,
@@ -13376,6 +13383,10 @@ pub fn self_test() -> KernelResult<()> {
             sys_ticks: 0,
             min_flt: 0,
             maj_flt: 0,
+
+            nvcsw: 0,
+
+            nivcsw: 0,
             total_cycles: 0,
             schedule_count: 0,
             start_tick: 0,

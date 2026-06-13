@@ -449,6 +449,17 @@ pub struct Task {
     /// (majflt).
     pub maj_flt: u64,
 
+    /// Voluntary context switches — the task gave up the CPU itself
+    /// (blocked on I/O/IPC/futex, called `yield_now`, or self-suspended)
+    /// while it could still have run.  Charged at the scheduler switch
+    /// point.  Sourced by `getrusage` `ru_nvcsw`.
+    pub nvcsw: u64,
+
+    /// Involuntary context switches — the task was preempted by the
+    /// timer while still runnable.  Charged at the scheduler switch
+    /// point.  Sourced by `getrusage` `ru_nivcsw`.
+    pub nivcsw: u64,
+
     /// Total number of times this task has been scheduled (context
     /// switched into).
     ///
@@ -767,6 +778,8 @@ impl Task {
             sys_ticks: 0,
             min_flt: 0,
             maj_flt: 0,
+            nvcsw: 0,
+            nivcsw: 0,
             schedule_count: 0,
             // Idle tasks are created at boot, before the timer ticks; a
             // start_tick of 0 reads as "started at boot" in /proc stat.
@@ -845,6 +858,8 @@ impl Task {
             sys_ticks: 0,
             min_flt: 0,
             maj_flt: 0,
+            nvcsw: 0,
+            nivcsw: 0,
             schedule_count: 0,
             // Idle tasks are created at boot, before the timer ticks; a
             // start_tick of 0 reads as "started at boot" in /proc stat.
@@ -978,6 +993,8 @@ impl Task {
             sys_ticks: 0,
             min_flt: 0,
             maj_flt: 0,
+            nvcsw: 0,
+            nivcsw: 0,
             schedule_count: 0,
             // Capture the boot-relative creation time for /proc/<pid>/stat
             // starttime (field 22).  USER_HZ == tick rate, so no rescale.

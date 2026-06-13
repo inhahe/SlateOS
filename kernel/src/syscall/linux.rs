@@ -10607,13 +10607,14 @@ fn write_uid32_triple(a: u64, b: u64, c: u64) -> SyscallResult {
 /// `getrusage(who, usage)` — query resource usage for the calling
 /// process or one of its children.
 ///
-/// `ru_utime`/`ru_stime` (CPU time), `ru_maxrss` (peak RSS), and
-/// `ru_minflt`/`ru_majflt` (page-fault counts) are populated; the
-/// context-switch counters (`ru_nvcsw`/`ru_nivcsw`) are not tracked yet
-/// and stay 0.  CPU time comes from the scheduler's per-task
-/// tick-sampling accounting (Linux `account_user_time`/
-/// `account_system_time` model); fault counts come from the page-fault
-/// handler's per-task accounting.
+/// `ru_utime`/`ru_stime` (CPU time), `ru_maxrss` (peak RSS),
+/// `ru_minflt`/`ru_majflt` (page-fault counts), and
+/// `ru_nvcsw`/`ru_nivcsw` (context-switch counts) are populated; the
+/// remaining fields (`ru_ixrss`, `ru_nswap`, signal/IPC message counts,
+/// etc.) stay 0 — Linux leaves most of those 0 too.  CPU time comes from
+/// the scheduler's per-task tick-sampling accounting (Linux
+/// `account_user_time`/`account_system_time` model); fault counts from
+/// the page-fault handler; ctxsw counts from the scheduler switch point.
 ///
 /// `who`:
 ///   - `RUSAGE_SELF == 0`: stats for the calling process
@@ -10630,10 +10631,10 @@ fn write_uid32_triple(a: u64, b: u64, c: u64) -> SyscallResult {
 /// reaped-children accumulator for `RUSAGE_CHILDREN`) and `ru_maxrss`
 /// (peak resident set size in KiB, from the per-address-space RSS
 /// accounting; `RUSAGE_CHILDREN` keeps `ru_maxrss` at 0, matching Linux's
-/// `signal->cmaxrss` which we don't track) and `ru_minflt`/`ru_majflt`
-/// (minor/major page faults — process-wide, calling-thread, or
-/// reaped-children per `who`).  The context-switch counters
-/// (`ru_nvcsw`/`ru_nivcsw`) stay 0 (known-issues TD14 follow-up).
+/// `signal->cmaxrss` which we don't track), `ru_minflt`/`ru_majflt`
+/// (minor/major page faults) and `ru_nvcsw`/`ru_nivcsw` (voluntary/
+/// involuntary context switches) — each process-wide, calling-thread, or
+/// reaped-children per `who`.
 ///
 /// Returns 0 on success, `-EINVAL` for an unknown `who`, `-EFAULT` if
 /// `usage` is a bad pointer.
@@ -10753,6 +10754,33 @@ fn sys_getrusage(args: &SyscallArgs) -> SyscallResult {
     {
         buf[64..72].copy_from_slice(&(min_flt as i64).to_ne_bytes());
         buf[72..80].copy_from_slice(&(maj_flt as i64).to_ne_bytes());
+    }
+
+    // ru_nvcsw (offset 128) and ru_nivcsw (offset 136), both
+    // `__kernel_long_t` (i64).  Voluntary switches = the task gave up the
+    // CPU (blocked/yielded); involuntary = it was preempted.  Counted per
+    // task at the scheduler switch point (`SwitchKind` in schedule_inner),
+    // folded into the process on thread exit, and carried up to the parent
+    // at reap — same accounting shape as CPU time and page faults above.
+    let (nvcsw, nivcsw): (u64, u64) = match who_i32 {
+        RUSAGE_SELF => {
+            let pid = caller_pid().unwrap_or(0);
+            crate::proc::thread::process_ctxsw_counts(pid)
+        }
+        RUSAGE_THREAD => {
+            let tid = crate::sched::current_task_id();
+            crate::sched::ctxsw_counts(tid).unwrap_or((0, 0))
+        }
+        _ => {
+            // RUSAGE_CHILDREN: reaped-children ctxsw counts.
+            let pid = caller_pid().unwrap_or(0);
+            crate::proc::pcb::process_child_ctxsw(pid)
+        }
+    };
+    #[allow(clippy::cast_possible_wrap)]
+    {
+        buf[128..136].copy_from_slice(&(nvcsw as i64).to_ne_bytes());
+        buf[136..144].copy_from_slice(&(nivcsw as i64).to_ne_bytes());
     }
 
     // Batch 554: ru_maxrss (offset 32, __kernel_long_t) — peak resident set

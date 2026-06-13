@@ -1076,6 +1076,22 @@ pub struct Process {
     pub child_min_flt: u64,
     /// Accumulated major faults of reaped descendant processes.
     pub child_maj_flt: u64,
+
+    // --- Per-process context-switch accounting (nvcsw/nivcsw) ---
+    //
+    // Same fold/carry-up pattern as the CPU-time and page-fault
+    // accumulators: live threads carry their own `Task::nvcsw`/`nivcsw`,
+    // folded here on thread exit; reaped children's totals are credited
+    // into `child_nvcsw`/`child_nivcsw`.  Backs `getrusage`
+    // `ru_nvcsw`/`ru_nivcsw`.  Reset to 0 on fork.
+    /// Accumulated voluntary ctxsw from this process's already-exited threads.
+    pub acct_nvcsw: u64,
+    /// Accumulated involuntary ctxsw from this process's already-exited threads.
+    pub acct_nivcsw: u64,
+    /// Accumulated voluntary ctxsw of reaped descendant processes.
+    pub child_nvcsw: u64,
+    /// Accumulated involuntary ctxsw of reaped descendant processes.
+    pub child_nivcsw: u64,
     /// Job-control: `true` while the process is stopped (all its threads
     /// suspended by a stop signal). Set when a stop signal takes effect,
     /// cleared by `SIGCONT`. A stopped process is still alive (not a
@@ -1315,6 +1331,10 @@ impl Process {
             acct_maj_flt: 0,
             child_min_flt: 0,
             child_maj_flt: 0,
+            acct_nvcsw: 0,
+            acct_nivcsw: 0,
+            child_nvcsw: 0,
+            child_nivcsw: 0,
             // Fresh process starts runnable, with no pending job-control
             // report for its parent to observe.
             stopped: false,
@@ -1777,6 +1797,11 @@ pub fn fork_create(
         acct_maj_flt: 0,
         child_min_flt: 0,
         child_maj_flt: 0,
+        // Context-switch accounting also resets on fork.
+        acct_nvcsw: 0,
+        acct_nivcsw: 0,
+        child_nvcsw: 0,
+        child_nivcsw: 0,
         // POSIX: a forked child starts runnable even if the parent is
         // stopped (it is a brand-new process), and has no pending
         // job-control report of its own.
@@ -1836,6 +1861,10 @@ pub struct ThreadExitAccounting {
     pub min_flt: u64,
     /// Major page faults charged to the exiting thread.
     pub maj_flt: u64,
+    /// Voluntary context switches charged to the exiting thread.
+    pub nvcsw: u64,
+    /// Involuntary context switches charged to the exiting thread.
+    pub nivcsw: u64,
 }
 
 /// Remove a thread from a process.
@@ -1873,6 +1902,8 @@ pub fn remove_thread(
     proc.acct_sys_ticks = proc.acct_sys_ticks.saturating_add(acct.sys_ticks);
     proc.acct_min_flt = proc.acct_min_flt.saturating_add(acct.min_flt);
     proc.acct_maj_flt = proc.acct_maj_flt.saturating_add(acct.maj_flt);
+    proc.acct_nvcsw = proc.acct_nvcsw.saturating_add(acct.nvcsw);
+    proc.acct_nivcsw = proc.acct_nivcsw.saturating_add(acct.nivcsw);
 
     if proc.threads.is_empty() && proc.state == ProcessState::Running {
         proc.state = ProcessState::Zombie;
@@ -3445,6 +3476,13 @@ pub fn try_reap(
         let child_maj = proc
             .acct_maj_flt
             .saturating_add(proc.child_maj_flt);
+        // Same carry-up for context switches (ru_nvcsw/ru_nivcsw children).
+        let child_nv = proc
+            .acct_nvcsw
+            .saturating_add(proc.child_nvcsw);
+        let child_niv = proc
+            .acct_nivcsw
+            .saturating_add(proc.child_nivcsw);
 
         // Extract the IPC handle list and initial fds before removing.
         let mut removed = table.remove(&child_pid);
@@ -3469,6 +3507,10 @@ pub fn try_reap(
                 parent.child_min_flt.saturating_add(child_min);
             parent.child_maj_flt =
                 parent.child_maj_flt.saturating_add(child_maj);
+            parent.child_nvcsw =
+                parent.child_nvcsw.saturating_add(child_nv);
+            parent.child_nivcsw =
+                parent.child_nivcsw.saturating_add(child_niv);
         }
 
         let info = ExitInfo { exit_code, crash };
@@ -3540,7 +3582,8 @@ pub fn try_reap_any(
         };
 
         // Extract the zombie's info and remove it from the table.
-        let (exit_code, crash, pml4_phys, child_user, child_sys, child_min, child_maj) = {
+        let (exit_code, crash, pml4_phys, child_user, child_sys, child_min, child_maj,
+             child_nv, child_niv) = {
             let proc = table
                 .get(&child_pid)
                 .ok_or(KernelError::NoSuchProcess)?;
@@ -3555,6 +3598,9 @@ pub fn try_reap_any(
                 // Same carry-up for page faults.
                 proc.acct_min_flt.saturating_add(proc.child_min_flt),
                 proc.acct_maj_flt.saturating_add(proc.child_maj_flt),
+                // Same carry-up for context switches.
+                proc.acct_nvcsw.saturating_add(proc.child_nvcsw),
+                proc.acct_nivcsw.saturating_add(proc.child_nivcsw),
             )
         };
 
@@ -3579,6 +3625,10 @@ pub fn try_reap_any(
                 parent.child_min_flt.saturating_add(child_min);
             parent.child_maj_flt =
                 parent.child_maj_flt.saturating_add(child_maj);
+            parent.child_nvcsw =
+                parent.child_nvcsw.saturating_add(child_nv);
+            parent.child_nivcsw =
+                parent.child_nivcsw.saturating_add(child_niv);
         }
 
         let info = ExitInfo { exit_code, crash };
@@ -5005,6 +5055,32 @@ pub fn process_child_faults(pid: ProcessId) -> (u64, u64) {
         .unwrap_or((0, 0))
 }
 
+/// Get a process's accumulated context switches from its already-exited
+/// threads, as `(nvcsw, nivcsw)`.  Returns `None` if the process is unknown.
+///
+/// This is the exited-thread half of a process's total ctxsw counts; live
+/// threads are summed separately (see `proc::thread::process_ctxsw_counts`).
+#[must_use]
+pub fn process_acct_ctxsw(pid: ProcessId) -> Option<(u64, u64)> {
+    let table = PROCESS_TABLE.lock();
+    table
+        .get(&pid)
+        .map(|p| (p.acct_nvcsw, p.acct_nivcsw))
+}
+
+/// Get a process's accumulated children context switches (from reaped
+/// descendants) as `(child_nvcsw, child_nivcsw)`.  Returns `(0, 0)` if the
+/// process is unknown.  Backs `getrusage(RUSAGE_CHILDREN)`
+/// `ru_nvcsw`/`ru_nivcsw`.
+#[must_use]
+pub fn process_child_ctxsw(pid: ProcessId) -> (u64, u64) {
+    let table = PROCESS_TABLE.lock();
+    table
+        .get(&pid)
+        .map(|p| (p.child_nvcsw, p.child_nivcsw))
+        .unwrap_or((0, 0))
+}
+
 /// Get the state of a process.
 #[allow(dead_code)]
 pub fn state(pid: ProcessId) -> Option<ProcessState> {
@@ -5476,7 +5552,9 @@ fn test_cpu_time_accounting() -> KernelResult<()> {
     let (gc_zombie, _, _) = remove_thread(
         grandchild,
         970,
-        ThreadExitAccounting { user_ticks: 2, sys_ticks: 1, min_flt: 3, maj_flt: 1 },
+        ThreadExitAccounting {
+            user_ticks: 2, sys_ticks: 1, min_flt: 3, maj_flt: 1, nvcsw: 6, nivcsw: 4,
+        },
     )?;
     if !gc_zombie {
         serial_println!("[proc]   FAIL: grandchild should be zombie after last thread exits");
@@ -5520,6 +5598,22 @@ fn test_cpu_time_accounting() -> KernelResult<()> {
         destroy(parent);
         return Err(KernelError::InternalError);
     }
+    // Same property for the context-switch accumulator.
+    if process_acct_ctxsw(grandchild) != Some((6, 4)) {
+        serial_println!("[proc]   FAIL: grandchild acct ctxsw != (6,4): {:?}",
+            process_acct_ctxsw(grandchild));
+        destroy(grandchild);
+        destroy(child);
+        destroy(parent);
+        return Err(KernelError::InternalError);
+    }
+    if crate::proc::thread::process_ctxsw_counts(grandchild) != (6, 4) {
+        serial_println!("[proc]   FAIL: grandchild process_ctxsw_counts != (6,4)");
+        destroy(grandchild);
+        destroy(child);
+        destroy(parent);
+        return Err(KernelError::InternalError);
+    }
 
     // The child reaps the grandchild → child.child_* == (2, 1).
     set_running(child)?;
@@ -5547,15 +5641,25 @@ fn test_cpu_time_accounting() -> KernelResult<()> {
         destroy(parent);
         return Err(KernelError::InternalError);
     }
+    if process_child_ctxsw(child) != (6, 4) {
+        serial_println!("[proc]   FAIL: child children-ctxsw != (6,4): {:?}",
+            process_child_ctxsw(child));
+        destroy(child);
+        destroy(parent);
+        return Err(KernelError::InternalError);
+    }
 
-    // Now the child itself exits, charging 5 user / 3 sys ticks and
-    // 4 minor / 2 major faults, and the parent reaps it.  Property 3:
-    // the parent's children accumulators take the child's own totals
-    // (5,3)/(4,2) PLUS the child's children-totals (2,1)/(3,1).
+    // Now the child itself exits, charging 5 user / 3 sys ticks,
+    // 4 minor / 2 major faults, and 7 voluntary / 5 involuntary ctxsw,
+    // and the parent reaps it.  Property 3: the parent's children
+    // accumulators take the child's own totals PLUS the child's
+    // children-totals.
     let (c_zombie, _, _) = remove_thread(
         child,
         971,
-        ThreadExitAccounting { user_ticks: 5, sys_ticks: 3, min_flt: 4, maj_flt: 2 },
+        ThreadExitAccounting {
+            user_ticks: 5, sys_ticks: 3, min_flt: 4, maj_flt: 2, nvcsw: 7, nivcsw: 5,
+        },
     )?;
     if !c_zombie {
         serial_println!("[proc]   FAIL: child should be zombie after last thread exits");
@@ -5584,9 +5688,16 @@ fn test_cpu_time_accounting() -> KernelResult<()> {
         destroy(parent);
         return Err(KernelError::InternalError);
     }
+    // Parent children-ctxsw: child's own (7,5) + child's children (6,4) = (13,9).
+    if process_child_ctxsw(parent) != (13, 9) {
+        serial_println!("[proc]   FAIL: parent children-ctxsw != (13,9): {:?}",
+            process_child_ctxsw(parent));
+        destroy(parent);
+        return Err(KernelError::InternalError);
+    }
 
     destroy(parent);
-    serial_println!("[proc]   CPU-time + fault accounting (exited-thread fold + children carry-up): OK");
+    serial_println!("[proc]   CPU-time + fault + ctxsw accounting (exited-thread fold + children carry-up): OK");
     Ok(())
 }
 

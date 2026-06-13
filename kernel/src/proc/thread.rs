@@ -396,11 +396,14 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
     // remove_thread, to avoid nesting the two locks.)
     let (exit_user, exit_sys) = sched::cpu_ticks(task_id).unwrap_or((0, 0));
     let (exit_min, exit_maj) = sched::fault_counts(task_id).unwrap_or((0, 0));
+    let (exit_nv, exit_niv) = sched::ctxsw_counts(task_id).unwrap_or((0, 0));
     let acct = pcb::ThreadExitAccounting {
         user_ticks: exit_user,
         sys_ticks: exit_sys,
         min_flt: exit_min,
         maj_flt: exit_maj,
+        nvcsw: exit_nv,
+        nivcsw: exit_niv,
     };
 
     // Remove from the process's thread list.
@@ -512,6 +515,31 @@ pub fn process_fault_counts(pid: ProcessId) -> (u64, u64) {
         }
     }
     (min_flt, maj_flt)
+}
+
+/// Sum the `(nvcsw, nivcsw)` context-switch counts of a process across both
+/// its **live** and **already-exited** threads.
+///
+/// Mirrors [`process_cpu_ticks`]/[`process_fault_counts`]: live threads
+/// carry their own `Task::nvcsw`/`nivcsw`, and exited threads have folded
+/// theirs into `Process::acct_nvcsw`/`acct_nivcsw`.  Returns `(0, 0)` if the
+/// process is unknown.  Sourced by `getrusage(RUSAGE_SELF)`
+/// `ru_nvcsw`/`ru_nivcsw`.  Children ctxsw (`RUSAGE_CHILDREN`) is tracked
+/// separately — see [`crate::proc::pcb::process_child_ctxsw`].
+#[must_use]
+pub fn process_ctxsw_counts(pid: ProcessId) -> (u64, u64) {
+    let Some((mut nvcsw, mut nivcsw)) = pcb::process_acct_ctxsw(pid) else {
+        return (0, 0);
+    };
+    if let Some(task_ids) = pcb::get_threads(pid) {
+        for tid in task_ids {
+            if let Some((nv, niv)) = sched::ctxsw_counts(tid) {
+                nvcsw = nvcsw.saturating_add(nv);
+                nivcsw = nivcsw.saturating_add(niv);
+            }
+        }
+    }
+    (nvcsw, nivcsw)
 }
 
 /// Force-kill all threads in a process.

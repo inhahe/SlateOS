@@ -797,7 +797,7 @@ this kernel rarely steps the realtime clock at runtime.
 stamp it into the timerfd at settime when `CANCEL_ON_SET` is set; on read/poll, if
 the counter advanced, return `ECANCELED`/`EPOLLERR` and disarm.
 
-### TD14. Per-process CPU-time accounting — MOSTLY RESOLVED 2026-06-13 (CPU-time + page-fault counters done; only ctxsw counters pending)
+### TD14. Per-process CPU-time / fault / ctxsw accounting — RESOLVED 2026-06-13 (time + page-fault + context-switch counters all done)
 
 **Where:** `kernel/src/syscall/linux.rs` `sys_getrusage` and `sys_times`;
 `kernel/src/sched/task.rs` (`Task::user_ticks`/`sys_ticks`, `tick_burst(from_user)`);
@@ -807,9 +807,10 @@ the counter advanced, return `ECANCELED`/`EPOLLERR` and disarm.
 and `{acct_,child_}{min,maj}_flt`, `ThreadExitAccounting`, `remove_thread`,
 `try_reap`/`try_reap_any`, `process_acct_ticks`/`process_child_ticks`,
 `process_acct_faults`/`process_child_faults`); `kernel/src/sched/mod.rs`
-(`account_fault`/`fault_counts`); `kernel/src/idt.rs` (`account_fault` calls in
+(`account_fault`/`fault_counts`, `ctxsw_counts`, `SwitchKind` threaded through
+`schedule_inner`); `kernel/src/idt.rs` (`account_fault` calls in
 `handle_page_fault`); `kernel/src/apic.rs` (CPL sampling in `handle_timer_irq`);
-`kernel/src/fs/procfs.rs` (`build_pid_stat`).
+`kernel/src/fs/procfs.rs` (`build_pid_stat`, `build_pid_status` ctxsw lines).
 
 **Resolved — base (2026-06-13):** Linux-style tick-sampling CPU-time
 accounting. On every timer IRQ, `handle_timer_irq` reads the interrupted frame's
@@ -858,17 +859,30 @@ SELF/THREAD/CHILDREN, and `/proc/<pid>/stat` fields 10/11/12/13
 the fault fold (grandchild `(3,1)`), child children-faults `(3,1)`, and parent
 children-faults `(4+3, 2+1) = (7,3)`. Boot-test PASSED.
 
-**Still pending (TD14-followup):**
-- **Ctxsw counters** — `getrusage` `ru_nvcsw`/`ru_nivcsw` (and `/proc/<pid>/stat`
-  has no ctxsw field) remain 0. Proper fix: distinguish voluntary
-  (blocked/yielded) vs involuntary (preempted) context switches at the scheduler
-  switch point, increment per-task counters, roll up per process (fold on thread
-  exit + children carry-up, same pattern as faults), and source the two rusage
-  fields. Note `Task::schedule_count` already counts total dispatches but doesn't
-  split voluntary/involuntary.
+**Resolved — context-switch counters (2026-06-13):** added per-task
+`nvcsw`/`nivcsw` to `Task`, charged at the scheduler switch point. A
+`SwitchKind` enum (`Voluntary`/`Involuntary`/`Uncounted`) is threaded into
+`schedule_inner` from its five call sites (`yield_now`/`block_current`/
+self-`suspend` ⇒ voluntary; `preempt` ⇒ involuntary; `task_exit` ⇒ uncounted)
+and the outgoing task's counter is bumped under the SCHED lock at the actual
+switch (where `next_id != current_id`). The PCB gained
+`acct_nvcsw`/`acct_nivcsw` (exited-thread fold) and `child_nvcsw`/`child_nivcsw`
+(reaped-children carry-up); `ThreadExitAccounting` carries the two fields too.
+`proc::thread::process_ctxsw_counts(pid)` sums live + exited;
+`pcb::process_child_ctxsw(pid)` reports the children accumulator. Wired into
+`getrusage` `ru_nvcsw`(off 128)/`ru_nivcsw`(off 136) for SELF/THREAD/CHILDREN,
+and `/proc/<pid>/status` `voluntary_ctxt_switches`/`nonvoluntary_ctxt_switches`
+(previously stubbed as `0`/`schedule_count`). `test_cpu_time_accounting`
+extended to assert the ctxsw fold (grandchild `(6,4)`), child children-ctxsw
+`(6,4)`, and parent children-ctxsw `(7+6, 5+4) = (13,9)`. Boot-test PASSED.
 
-Trigger for the followup: when rusage-based profilers that read the ctxsw
-counters become a priority.
+**TD14 is now fully resolved** — all `getrusage` time/fault/ctxsw fields, `times`,
+and the `/proc/<pid>/stat` + `/proc/<pid>/status` accounting surfaces are sourced
+from real per-task counters rolled up per process with children carry-up. The
+only rusage fields left at 0 are ones Linux also commonly leaves 0 (`ru_ixrss`,
+`ru_idrss`, `ru_isrss`, `ru_nswap`, `ru_msgsnd`/`msgrcv`, `ru_nsignals`,
+`ru_inblock`/`oublock`), which would require swap-RSS integral / signal-IPC
+accounting not yet modelled.
 
 ### TD13. A few Linux-compat-flavored fields live in the native PCB — WATCH 2026-06-13
 

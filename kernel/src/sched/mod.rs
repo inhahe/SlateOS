@@ -1064,7 +1064,7 @@ pub fn yield_now() {
     // Report RCU quiescent state — this CPU is voluntarily yielding,
     // so it's not in an RCU read-side critical section.
     crate::rcu::quiescent_state();
-    schedule_inner(true);
+    schedule_inner(true, SwitchKind::Voluntary);
 }
 
 /// Mark the current task as dead and yield to the next task.
@@ -1097,8 +1097,9 @@ pub fn task_exit() {
         }
     }
 
-    // Yield without re-enqueuing.
-    schedule_inner(false);
+    // Yield without re-enqueuing.  Exit is not a counted context switch
+    // (the outgoing task is dead).
+    schedule_inner(false, SwitchKind::Uncounted);
 
     // Should never reach here — the task is dead and won't be
     // scheduled again.  If somehow we do, halt.
@@ -1205,8 +1206,9 @@ pub fn block_current() {
             task.state = TaskState::Blocked;
         }
     }
-    // Yield without re-enqueuing (requeue = false).
-    schedule_inner(false);
+    // Yield without re-enqueuing (requeue = false).  Blocking is a
+    // voluntary context switch.
+    schedule_inner(false, SwitchKind::Voluntary);
 }
 
 /// Wake a blocked task, making it runnable again.
@@ -1691,6 +1693,20 @@ pub fn fault_counts(tid: TaskId) -> Option<(u64, u64)> {
     Some((task.min_flt, task.maj_flt))
 }
 
+/// Return the accumulated `(nvcsw, nivcsw)` context-switch counts for a
+/// task by its scheduler id, or `None` if no such task is registered.
+///
+/// `nvcsw` = voluntary switches (the task gave up the CPU); `nivcsw` =
+/// involuntary switches (the task was preempted).  Used by the Linux-ABI
+/// `getrusage` `ru_nvcsw`/`ru_nivcsw` (via the per-process roll-up in
+/// `proc::thread::process_ctxsw_counts`).  Takes the global `SCHED` lock.
+#[must_use]
+pub fn ctxsw_counts(tid: TaskId) -> Option<(u64, u64)> {
+    let state = SCHED.lock();
+    let task = state.tasks.get(&tid)?;
+    Some((task.nvcsw, task.nivcsw))
+}
+
 /// Preempt the current task (called from timer ISR after time slice
 /// expiry).
 ///
@@ -1708,7 +1724,7 @@ pub fn preempt() {
         current_id,
         current_cpu_id() as u64,
     );
-    schedule_inner(true);
+    schedule_inner(true, SwitchKind::Involuntary);
 }
 
 /// Reset bandwidth period counters and re-enqueue all throttled tasks.
@@ -2191,8 +2207,9 @@ pub fn suspend(task_id: TaskId) -> bool {
     }
 
     // If we just suspended the current task, yield to another task.
+    // Self-suspension is a voluntary context switch.
     if task_id == current {
-        schedule_inner(false);
+        schedule_inner(false, SwitchKind::Voluntary);
     }
 
     serial_println!("[sched] Suspended task {}", task_id);
@@ -2829,6 +2846,12 @@ pub struct TaskInfo {
     /// Major page faults (required I/O — swap-in, file-backed read).
     /// Exposed as `/proc/<pid>/stat` field 12 (majflt).
     pub maj_flt: u64,
+    /// Voluntary context switches (task yielded/blocked).  Sourced by
+    /// `getrusage` `ru_nvcsw`.
+    pub nvcsw: u64,
+    /// Involuntary context switches (task preempted).  Sourced by
+    /// `getrusage` `ru_nivcsw`.
+    pub nivcsw: u64,
     /// Total CPU cycles consumed (TSC-based, nanosecond precision).
     pub total_cycles: u64,
     /// Number of times this task was scheduled.
@@ -2871,6 +2894,8 @@ pub fn task_list() -> alloc::vec::Vec<TaskInfo> {
             sys_ticks: task.sys_ticks,
             min_flt: task.min_flt,
             maj_flt: task.maj_flt,
+            nvcsw: task.nvcsw,
+            nivcsw: task.nivcsw,
             total_cycles: task.total_cycles,
             schedule_count: task.schedule_count,
             start_tick: task.start_tick,
@@ -3394,7 +3419,22 @@ fn account_cycles(state: &mut SchedState, outgoing_id: TaskId, cpu: usize) {
 /// Previous implementation took the lock twice (once for scheduling,
 /// once for context pointer extraction), wasting ~100 cycles per switch
 /// on redundant lock + BTreeMap lookups.
-fn schedule_inner(requeue: bool) {
+/// How the outgoing task relinquished the CPU, for `nvcsw`/`nivcsw`
+/// (voluntary/involuntary context-switch) accounting.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SwitchKind {
+    /// The task gave up the CPU itself (yield, block, self-suspend).
+    /// Increments the outgoing task's `nvcsw`.
+    Voluntary,
+    /// The task was preempted by the timer while still runnable.
+    /// Increments the outgoing task's `nivcsw`.
+    Involuntary,
+    /// Internal transition that must not be counted (e.g. the task is
+    /// exiting — a dead task has no meaningful ctxsw stat).
+    Uncounted,
+}
+
+fn schedule_inner(requeue: bool, kind: SwitchKind) {
     let current_id = load_current_task();
     let cpu = current_cpu_id();
 
@@ -3575,6 +3615,17 @@ fn schedule_inner(requeue: bool) {
                     let old_data = s.tasks.get_mut(&current_id)
                         .map(|t| {
                             t.check_stack_canary();
+                            // Real switch (current != ready): charge the
+                            // outgoing task's voluntary/involuntary ctxsw.
+                            match kind {
+                                SwitchKind::Voluntary => {
+                                    t.nvcsw = t.nvcsw.saturating_add(1);
+                                }
+                                SwitchKind::Involuntary => {
+                                    t.nivcsw = t.nivcsw.saturating_add(1);
+                                }
+                                SwitchKind::Uncounted => {}
+                            }
                             (&raw mut t.context, &raw mut t.fpu_state, t.pml4_phys)
                         });
                     let new_data = s.tasks.get(&ready_id)
@@ -3705,6 +3756,18 @@ fn schedule_inner(requeue: bool) {
             .map(|t| {
                 // Check stack canary before switching away from this task.
                 t.check_stack_canary();
+                // Reaching here means a real switch (picked_id != current_id
+                // returns early above), so charge the outgoing task's
+                // voluntary/involuntary context-switch counter.
+                match kind {
+                    SwitchKind::Voluntary => {
+                        t.nvcsw = t.nvcsw.saturating_add(1);
+                    }
+                    SwitchKind::Involuntary => {
+                        t.nivcsw = t.nivcsw.saturating_add(1);
+                    }
+                    SwitchKind::Uncounted => {}
+                }
                 (&raw mut t.context, &raw mut t.fpu_state, t.pml4_phys)
             });
         let new_data = state.tasks.get(&next_id)

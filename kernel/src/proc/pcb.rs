@@ -198,9 +198,12 @@ pub enum AbiMode {
 ///
 /// `mmap` requests that do **not** explicitly carry a commit bit
 /// (`MAP_LAZY` / `MAP_MMIO`) fall back to a *default* commit mode.  That
-/// default is normally the system-wide setting (native ABI:
-/// [`crate::sysctl::PARAM_MM_LAZY_DEFAULT`]; Linux ABI: always lazy, since
-/// Linux programs assume overcommit).  This per-process field lets the
+/// default is normally the system-wide setting — each ABI has its own
+/// knob: native ABI uses [`crate::sysctl::PARAM_MM_LAZY_DEFAULT`]
+/// (committed by default), Linux ABI uses
+/// [`crate::sysctl::PARAM_MM_LINUX_LAZY_DEFAULT`] (lazy/overcommit by
+/// default, since Linux programs assume overcommit).  This per-process
+/// field lets the
 /// user/Settings *override* that default for one misbehaving program
 /// without touching the system-wide knob — e.g. force a leaky Linux app to
 /// strict-commit, or let one native tool overcommit.
@@ -215,8 +218,9 @@ pub enum AbiMode {
 /// paths call them to decide the default commit mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MmapCommitPolicy {
-    /// Use the ABI's default commit mode (system-wide sysctl for native,
-    /// lazy/overcommit for Linux).  This is what every process starts with.
+    /// Use the ABI's system-wide default commit mode (`mm.lazy_default`
+    /// for native, `mm.linux_lazy_default` for Linux).  This is what every
+    /// process starts with.
     #[default]
     Inherit,
     /// Force strict-commit (eager-populate) for this process's mmaps,
@@ -245,14 +249,21 @@ impl MmapCommitPolicy {
     }
 
     /// Resolve the default commit mode for a **Linux**-ABI `mmap` that
-    /// didn't request an explicit commit bit.  Returns `true` for lazy.
+    /// didn't request an explicit commit bit.  Returns `true` for lazy
+    /// (demand-paged), `false` for committed (eager-populate).
     ///
-    /// The Linux ABI default is lazy/overcommit (programs assume sparse
-    /// mappings backed on touch), so both `Inherit` and `ForceLazy` resolve
-    /// to lazy; only `ForceCommitted` flips it to strict-commit.
+    /// `sysctl_linux_lazy` is the system-wide Linux-ABI default
+    /// ([`crate::sysctl::PARAM_MM_LINUX_LAZY_DEFAULT`] == 1, which defaults
+    /// to lazy/overcommit because Linux programs assume sparse mappings
+    /// backed on first touch).  Only `Inherit` consults it; an explicit
+    /// per-process override (`ForceLazy` / `ForceCommitted`) wins.
     #[must_use]
-    pub fn linux_lazy(self) -> bool {
-        !matches!(self, MmapCommitPolicy::ForceCommitted)
+    pub fn linux_lazy(self, sysctl_linux_lazy: bool) -> bool {
+        match self {
+            MmapCommitPolicy::ForceLazy => true,
+            MmapCommitPolicy::ForceCommitted => false,
+            MmapCommitPolicy::Inherit => sysctl_linux_lazy,
+        }
     }
 }
 
@@ -4927,14 +4938,18 @@ fn test_mmap_commit_policy() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
-    // --- Pure Linux resolution: lazy by default, only ForceCommitted flips
-    //     it (the Linux ABI default is overcommit). ---
-    if !Inherit.linux_lazy() || !ForceLazy.linux_lazy() {
-        serial_println!("[proc]   FAIL: linux Inherit/ForceLazy should be lazy");
+    // --- Pure Linux resolution: Inherit follows the Linux-ABI sysctl
+    //     (mm.linux_lazy_default), the two forced modes ignore it. ---
+    if Inherit.linux_lazy(false) || !Inherit.linux_lazy(true) {
+        serial_println!("[proc]   FAIL: linux Inherit should follow sysctl");
         return Err(KernelError::InternalError);
     }
-    if ForceCommitted.linux_lazy() {
-        serial_println!("[proc]   FAIL: linux ForceCommitted should be committed");
+    if !ForceLazy.linux_lazy(false) || !ForceLazy.linux_lazy(true) {
+        serial_println!("[proc]   FAIL: linux ForceLazy should always be lazy");
+        return Err(KernelError::InternalError);
+    }
+    if ForceCommitted.linux_lazy(false) || ForceCommitted.linux_lazy(true) {
+        serial_println!("[proc]   FAIL: linux ForceCommitted should never be lazy");
         return Err(KernelError::InternalError);
     }
 

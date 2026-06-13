@@ -293,10 +293,15 @@ _Bootloader: Limine for development (Phases 0-5). For release: GRUB for dual-boo
 - [x] Committed memory by default (guaranteed backed by RAM + swap)
 - [x] Lazy/overcommit memory as opt-in (programs request explicitly)
 - [x] OOM handling: graceful, no silent kills — fail the allocation
-- [x] System-wide commit-policy toggle (`sysctl mm.lazy_default` /
-  `PARAM_MM_LAZY_DEFAULT`; surfaced via `/proc/sys/vm/overcommit_memory`)
-- [x] Linux-ABI mmap defaults to lazy/overcommit (Linux's expected idiom);
-  native programs keep the strict-commit default
+- [x] System-wide commit-policy toggles — **one per ABI** (native and Linux
+  have different idioms, so they get independent knobs):
+  - [x] Native: `sysctl mm.lazy_default` / `PARAM_MM_LAZY_DEFAULT` (default
+    committed on Desktop)
+  - [x] Linux: `sysctl mm.linux_lazy_default` / `PARAM_MM_LINUX_LAZY_DEFAULT`
+    (default lazy/overcommit), surfaced via `/proc/sys/vm/overcommit_memory`
+    (mirrors the live sysctl: lazy→`0`, committed→`2`)
+- [x] Linux-ABI mmap defaults to lazy/overcommit (Linux's expected idiom, now
+  via `mm.linux_lazy_default`); native programs keep the strict-commit default
 - [x] Per-program commit-policy override (`pcb::MmapCommitPolicy`
   {Inherit, ForceCommitted, ForceLazy}, consulted by both `mmap` paths,
   inherited across fork) — the kernel core of design-decisions.md §11
@@ -2132,18 +2137,23 @@ _Keyboard layouts: Dvorak (+ left-hand, right-hand, programmer variants), Colema
 
 ### 5.6 Kernel and System Tuning
 
-- [ ] **System-wide memory-commit policy selector (Advanced).** Choose the
-  default allocation strategy for the whole system: **strict-commit** (every
-  mapping guaranteed backed by RAM+swap — "committed by default", the native
-  default) vs **lazy/overcommit** (mappings backed on first touch — the Linux
-  default). This is the user-facing front-end for the Option 5 kernel core
-  that already exists: it sets `sysctl mm.lazy_default` (`PARAM_MM_LAZY_DEFAULT`)
-  and is reflected in `/proc/sys/vm/overcommit_memory`. **Advanced + warning**
-  (§5.0) — flipping the global default affects every program. Gated by the
-  `admin.memory_policy` capability (§1.5) since it changes a system-wide
-  policy. Show the per-strategy tradeoffs (strict = no surprise OOM but apps
-  that reserve huge sparse arenas may fail to start; lazy = max compatibility
-  but allocations can fail late on touch). See design-decisions.md §11.
+- [ ] **System-wide memory-commit policy selectors (Advanced) — two, one per
+  ABI.** Choose the default allocation strategy for the whole system:
+  **strict-commit** (every mapping guaranteed backed by RAM+swap — "committed by
+  default") vs **lazy/overcommit** (mappings backed on first touch). The native
+  and Linux ABIs get **independent** selectors because their idioms differ:
+  - [ ] **Native** default — front-end for `sysctl mm.lazy_default`
+    (`PARAM_MM_LAZY_DEFAULT`); defaults to strict-commit per the design spec.
+  - [ ] **Linux** default — front-end for `sysctl mm.linux_lazy_default`
+    (`PARAM_MM_LINUX_LAZY_DEFAULT`); defaults to lazy/overcommit (Linux programs
+    expect it). Reflected in `/proc/sys/vm/overcommit_memory`.
+  These are the user-facing front-end for the Option 5 kernel core that already
+  exists. **Advanced + warning** (§5.0) — flipping a global default affects every
+  program of that ABI. Gated by the `admin.memory_policy` capability (§1.5) since
+  it changes a system-wide policy. Show the per-strategy tradeoffs (strict = no
+  surprise OOM but apps that reserve huge sparse arenas may fail to start; lazy =
+  max compatibility but allocations can fail late on touch). See
+  design-decisions.md §11.
 - [ ] Memory management tuning parameters (may require reboot)
 - [ ] Scheduling tuning parameters (may require reboot)
 - [ ] Paging tuning parameters (page size requires recompile)

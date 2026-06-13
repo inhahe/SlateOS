@@ -768,6 +768,29 @@ asked to **do Option 5 now if there's no good reason to defer** — and a code
 survey found most of the mechanism already exists, so the kernel core is being
 built now. See "Revision").
 
+**Update (2026-06-13, later) — split the system-wide knob per ABI.**
+**Decided by:** Operator (operator asked "shouldn't we have two system-wide
+policy selectors, one for native and one for linux, because linux tends to
+expect overcommit?"; Claude agreed and implemented).
+The original design had *one* system-wide knob (`mm.lazy_default`) that only
+governed the **native** ABI, while the Linux ABI was hardcoded lazy — so an
+admin could tune native's default but not Linux's, which is backwards (Linux is
+exactly where overcommit-vs-strict is most likely to matter). Fixed by giving
+each ABI its own system-wide selector:
+- **Native** → `mm.lazy_default` (sysctl id 1), default committed (Desktop).
+- **Linux** → new `mm.linux_lazy_default` (sysctl id 8), default 1 =
+  lazy/overcommit on all workload profiles. Surfaced to userspace under the
+  canonical Linux name `/proc/sys/vm/overcommit_memory`, which now *mirrors the
+  live sysctl* (lazy → `0` heuristic-overcommit, committed → `2` never-overcommit)
+  instead of being a hardcoded `0`.
+`MmapCommitPolicy::linux_lazy` now takes the system-wide value (like
+`native_lazy`): `Inherit` follows `mm.linux_lazy_default`, `ForceLazy`/
+`ForceCommitted` override per-program. The workload presets carry
+`linux_lazy_default = 1` uniformly (Linux apps expect overcommit regardless of
+profile; flipping it manually drops profile detection, which is correct). Commit
+*"mm: split system-wide commit policy per ABI (native vs Linux)"*. The Settings
+front-end (§5.6) therefore exposes **two** system-wide selectors.
+
 **Status (2026-06-13) — all three now-doable kernel items have landed.**
 The unblocked kernel work below (items 1–3) is implemented and boot-tested:
 - **(2) Linux mmap defaults to lazy/overcommit** + **(3) `/proc/sys/vm/overcommit_memory`

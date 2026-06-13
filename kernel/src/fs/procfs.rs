@@ -11944,11 +11944,14 @@ fn gen_sys(rel: &str) -> KernelResult<Vec<u8>> {
         // Memory-commit policy as seen through the Linux ABI.  `/proc/sys/vm/`
         // is a Linux-ABI-only surface — native OuRoS programs use native APIs,
         // so the only readers of this file are Linux binaries.  Per the
-        // memory-commit policy decision (design-decisions.md §11), the Linux ABI
-        // defaults anonymous mappings to lazy/demand-paged allocation
-        // (`sys_mmap` in `syscall/linux.rs` passes `MAP_LAZY`), which is exactly
-        // Linux's heuristic-overcommit behavior — so the honest value here is
-        // `0` (heuristic overcommit).  This is real, not fabricated: a Linux
+        // memory-commit policy decision (design-decisions.md §11), this file is
+        // the canonical userspace name for the Linux-ABI system-wide commit
+        // default (`mm.linux_lazy_default`, the Linux counterpart of the native
+        // `mm.lazy_default`).  We mirror the live sysctl honestly:
+        //   linux_lazy_default == 1 (lazy/overcommit) → "0" (heuristic overcommit)
+        //   linux_lazy_default == 0 (committed/strict) → "2" (never overcommit)
+        // The default is `1` → "0", matching Linux's typical heuristic-overcommit
+        // behavior.  This is real, not fabricated: when set to lazy a Linux
         // program's `mmap` genuinely is backed on touch, not up front.
         //
         // We deliberately do NOT expose `overcommit_ratio` / `overcommit_kbytes`:
@@ -11956,7 +11959,15 @@ fn gen_sys(rel: &str) -> KernelResult<Vec<u8>> {
         // (overcommit_memory = 2), which we do not perform, so advertising them
         // would imply a knob with no backing (violates the "never advertise an
         // unhonored feature" rule, design-decisions.md §1).
-        "vm/overcommit_memory" => String::from("0\n"),
+        "vm/overcommit_memory" => {
+            let lazy = crate::sysctl::get(crate::sysctl::PARAM_MM_LINUX_LAZY_DEFAULT)
+                != Some(0);
+            if lazy {
+                String::from("0\n")
+            } else {
+                String::from("2\n")
+            }
+        }
         _ => return Err(KernelError::NotFound),
     };
     Ok(text.into_bytes())

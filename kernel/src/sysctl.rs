@@ -190,6 +190,25 @@ pub const PARAM_FS_DIRTY_EXPIRE_SECS: u16 = 22;
 /// allocator level.  Use `alloctrace` kshell command to inspect.
 pub const PARAM_MM_ALLOC_TRACE: u16 = 7;
 
+/// Whether new anonymous mmap regions from **Linux-ABI** programs default
+/// to lazy allocation (`mm.linux_lazy_default`).
+///
+/// 0 = committed (eager-populate — strict, no overcommit).
+/// 1 = lazy/overcommit (default — Linux programs assume sparse mappings
+///     backed on first touch).
+///
+/// This is the Linux-ABI counterpart of [`PARAM_MM_LAZY_DEFAULT`] (which
+/// governs the *native* ABI).  The two ABIs get independent system-wide
+/// knobs because their idioms differ: native code is committed-by-default
+/// per the design spec, whereas Linux code expects overcommit.  This knob
+/// is surfaced to userspace under the canonical Linux name
+/// `/proc/sys/vm/overcommit_memory`.
+///
+/// As with the native knob, individual mappings can override with the
+/// `MAP_LAZY` flag, and a process can override the default for itself via
+/// [`crate::proc::pcb::MmapCommitPolicy`].
+pub const PARAM_MM_LINUX_LAZY_DEFAULT: u16 = 8;
+
 // ---------------------------------------------------------------------------
 // Parameter IDs — cgroup subsystem (30-39)
 // ---------------------------------------------------------------------------
@@ -442,6 +461,14 @@ pub fn init() {
         0,  // Disabled (zero-cost single atomic load per alloc/free)
         0,
         1,  // 1 = enabled
+    );
+
+    reg.register(
+        PARAM_MM_LINUX_LAZY_DEFAULT,
+        "mm.linux_lazy_default",
+        1,  // 1 = lazy/overcommit (Linux programs assume overcommit)
+        0,
+        1,
     );
 
     // Scheduler parameters (informational — actual values are in the
@@ -714,6 +741,7 @@ pub fn set_by_name(name: &str, value: u64) -> Option<u64> {
 /// |---------------------|---------|--------|-------------|--------|
 /// | mm.max_stack_frames | 256     | 512    | 512         | 512    |
 /// | mm.lazy_default     | 0       | 1      | 0           | 0      |
+/// | mm.linux_lazy_default | 1     | 1      | 1           | 1      |
 /// | mm.oom_policy       | 0       | 2      | 0           | 0      |
 /// | mm.zero_on_alloc    | 0       | 1      | 0           | 1      |
 /// | mm.swap_batch_size  | 4       | 16     | 4           | 2      |
@@ -736,6 +764,7 @@ pub fn set_by_name(name: &str, value: u64) -> Option<u64> {
 struct MemoryProfilePreset {
     max_stack_frames: u64,
     lazy_default: u64,
+    linux_lazy_default: u64,
     oom_policy: u64,
     zero_on_alloc: u64,
     swappiness: u64,
@@ -749,6 +778,7 @@ impl MemoryProfilePreset {
             WorkloadProfile::Desktop => Self {
                 max_stack_frames: 256, // 4 MiB — moderate, enough for typical apps
                 lazy_default: 0,       // committed (per design spec default)
+                linux_lazy_default: 1, // Linux apps (browsers, etc.) expect overcommit
                 oom_policy: 0,         // kill largest — protect desktop responsiveness
                 zero_on_alloc: 0,      // secure default
                 swappiness: 15,        // conservative — only swap under real pressure
@@ -757,6 +787,7 @@ impl MemoryProfilePreset {
             WorkloadProfile::Server => Self {
                 max_stack_frames: 512, // 8 MiB — servers may have deep stacks (Java, etc.)
                 lazy_default: 1,       // lazy — many-process servers benefit from CoW/overcommit
+                linux_lazy_default: 1, // Linux server workloads expect overcommit
                 oom_policy: 2,         // return error — servers should handle OOM gracefully
                 zero_on_alloc: 1,      // zero on free — amortise for high-throughput alloc
                 swappiness: 30,        // moderate — servers benefit from more aggressive reclaim
@@ -765,6 +796,7 @@ impl MemoryProfilePreset {
             WorkloadProfile::Development => Self {
                 max_stack_frames: 512, // 8 MiB — compilers/debuggers use deep stacks
                 lazy_default: 0,       // committed — predictable for debugging
+                linux_lazy_default: 1, // Linux toolchains (gcc, etc.) expect overcommit
                 oom_policy: 0,         // kill largest — just kill the runaway build
                 zero_on_alloc: 0,      // secure default, clean state for debugging
                 swappiness: 10,        // low — keep build artifacts in memory
@@ -773,6 +805,7 @@ impl MemoryProfilePreset {
             WorkloadProfile::Gaming => Self {
                 max_stack_frames: 512, // 8 MiB — game engines use deep stacks
                 lazy_default: 0,       // committed — avoid page fault latency during gameplay
+                linux_lazy_default: 1, // Linux games (Proton-style) expect overcommit
                 oom_policy: 0,         // kill largest — protect the game process
                 zero_on_alloc: 1,      // zero on free — reduce alloc latency spikes
                 swappiness: 5,         // very low — minimize swap latency during gameplay
@@ -818,6 +851,7 @@ pub fn apply_memory_profile(profile_id: u8) -> bool {
 
     let ok = set(PARAM_MM_MAX_STACK_FRAMES, preset.max_stack_frames).is_some()
         && set(PARAM_MM_LAZY_DEFAULT, preset.lazy_default).is_some()
+        && set(PARAM_MM_LINUX_LAZY_DEFAULT, preset.linux_lazy_default).is_some()
         && set(PARAM_MM_OOM_POLICY, preset.oom_policy).is_some()
         && set(PARAM_MM_ZERO_ON_ALLOC, preset.zero_on_alloc).is_some()
         && set(PARAM_MM_SWAPPINESS, preset.swappiness).is_some()
@@ -826,10 +860,11 @@ pub fn apply_memory_profile(profile_id: u8) -> bool {
 
     if ok {
         serial_println!(
-            "[sysctl] Applied memory profile: {} (stack={}, lazy={}, oom={}, zero={}, swap={}, batch={})",
+            "[sysctl] Applied memory profile: {} (stack={}, lazy={}, linux_lazy={}, oom={}, zero={}, swap={}, batch={})",
             profile.name(),
             preset.max_stack_frames,
             preset.lazy_default,
+            preset.linux_lazy_default,
             preset.oom_policy,
             preset.zero_on_alloc,
             preset.swappiness,
@@ -852,6 +887,7 @@ pub fn current_memory_profile() -> Option<WorkloadProfile> {
     // Read current values under a single lock acquisition for consistency.
     let stack = reg.get(PARAM_MM_MAX_STACK_FRAMES)?;
     let lazy = reg.get(PARAM_MM_LAZY_DEFAULT)?;
+    let linux_lazy = reg.get(PARAM_MM_LINUX_LAZY_DEFAULT)?;
     let oom = reg.get(PARAM_MM_OOM_POLICY)?;
     let zero = reg.get(PARAM_MM_ZERO_ON_ALLOC)?;
     let swap = reg.get(PARAM_MM_SWAPPINESS)?;
@@ -864,6 +900,7 @@ pub fn current_memory_profile() -> Option<WorkloadProfile> {
             let preset = MemoryProfilePreset::for_profile(profile);
             if stack == preset.max_stack_frames
                 && lazy == preset.lazy_default
+                && linux_lazy == preset.linux_lazy_default
                 && oom == preset.oom_policy
                 && zero == preset.zero_on_alloc
                 && swap == preset.swappiness
@@ -906,6 +943,7 @@ pub fn self_test() {
     // Read default values.
     assert_eq!(get(PARAM_MM_MAX_STACK_FRAMES), Some(256));
     assert_eq!(get(PARAM_MM_LAZY_DEFAULT), Some(0));
+    assert_eq!(get(PARAM_MM_LINUX_LAZY_DEFAULT), Some(1));
     assert_eq!(get(PARAM_MM_OOM_POLICY), Some(0));
 
     // Set within range.
@@ -936,6 +974,7 @@ pub fn self_test() {
     assert!(apply_memory_profile(1)); // Server
     assert_eq!(get(PARAM_MM_MAX_STACK_FRAMES), Some(512));
     assert_eq!(get(PARAM_MM_LAZY_DEFAULT), Some(1));
+    assert_eq!(get(PARAM_MM_LINUX_LAZY_DEFAULT), Some(1));
     assert_eq!(get(PARAM_MM_OOM_POLICY), Some(2));
     assert_eq!(get(PARAM_MM_ZERO_ON_ALLOC), Some(1));
     assert_eq!(get(PARAM_MM_SWAPPINESS), Some(30));
@@ -971,6 +1010,14 @@ pub fn self_test() {
 
     // Restore Desktop defaults.
     assert!(apply_memory_profile(0));
+    assert_eq!(current_memory_profile(), Some(WorkloadProfile::Desktop));
+
+    // Tuning the Linux lazy default also breaks detection (all profiles
+    // ship linux_lazy_default=1, so flipping it to 0 matches no preset).
+    let _ = set(PARAM_MM_LINUX_LAZY_DEFAULT, 0);
+    assert_eq!(current_memory_profile(), None);
+    assert!(apply_memory_profile(0)); // restore
+    assert_eq!(get(PARAM_MM_LINUX_LAZY_DEFAULT), Some(1));
     assert_eq!(current_memory_profile(), Some(WorkloadProfile::Desktop));
 
     // -----------------------------------------------------------------------

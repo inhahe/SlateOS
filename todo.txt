@@ -52971,3 +52971,68 @@ pure O_RDONLY and O_RDONLY|O_APPEND not.  Serial stamp "ftruncate
 FMODE_WRITE gate (batch 535): OK".  cargo build clean; clippy at 17477
 baseline; boot-test PASSED (BOOT_OK 25s, stamp present, no ftruncate
 FAILs).  Reversible (pure translator change; no PCB/state).
+
+## DRM Linux-ABI shim — commit 7 design (MAP_DUMB + mmap-on-/dev/dri-fd)
+##
+## Status: commits 1-6 done (uAPI ABI, KMS structs, /dev/dri nodes +
+## HandleKind::DrmCard fd family, core ioctl dispatch, KMS resource
+## enumeration, dumb-buffer+framebuffer ALLOCATION lifecycle).  Commit 7
+## makes dumb buffers CPU-mappable and flips DRM_CAP_DUMB_BUFFER 0->1.
+##
+## The hard part is mapping the GEM object's *allocator-owned* physical
+## frames into a userspace process WITHOUT the address-space teardown
+## double-freeing them.  Verified mechanism:
+##   - kernel/src/mm/page_table.rs `clear_user_address_space` walks every
+##     present user PTE on exit and calls frame::free_frame on each frame.
+##     free_frame is REFCOUNTED (mm/frame.rs ~2124): rc>1 just decrements
+##     (and skips zero-on-free), only rc==1->0 truly frees.
+##   - frame::ref_inc (mm/frame.rs:2486) / ref_dec (:2519) exist.
+##   => Proper design: when mapping GEM frames into a process for MAP_DUMB,
+##      call ref_inc on each frame first.  Teardown's free_frame then just
+##      decrements the extra ref; the GEM object keeps its own ref until
+##      gem_destroy (DrmDevice::gem_destroy -> GemObject::free_backing ->
+##      free_frame).  Whichever drops last truly frees.  This mirrors how
+##      CoW shared frames are handled.  (Note: ipc/shm.rs has NOT built a
+##      shared-frame user-mapping path yet — shm.rs:241 "future mmap"; so
+##      this is the first such path and should become the template.)
+##
+## Pieces:
+## 1. Fake-offset allocator (new small module, e.g. kernel/src/drm/dumb_mmap.rs
+##    or a table in card_fd.rs): bidirectional map offset <-> (device idx,
+##    gem_handle).  MAP_DUMB allocates a 16 KiB-aligned fake offset for a
+##    (device, gem_handle) pair and returns it; idempotent per buffer
+##    (same buffer -> same offset, like Linux drm_vma_offset_manager).
+##    Offsets come from a monotonic counter in frame units, in a private
+##    "fake mmap offset" space (only meaningful to the drm fd's mmap).
+##    DESTROY_DUMB should also drop the offset mapping (extend
+##    drm_card_ioctl_mode_destroy_dumb).
+## 2. drm accessor: DrmDevice::gem_phys_frames(handle) -> Vec<PhysFrame> (or
+##    Vec<u64> phys addrs) + a size/frame-count getter.  gem_frame_addrs
+##    already returns HHDM *virtual* addrs; add a phys variant for mapping.
+## 3. MAP_DUMB handler (drm_card_ioctl_mode_map_dumb): render-node gated
+##    (EACCES), look up the gem handle on the device, allocate/return the
+##    fake offset in DrmModeMapDumb.offset.
+## 4. mmap interception: in syscall/linux.rs sys_mmap, BEFORE the
+##    `(flags & MAP_ANONYMOUS)==0 || fd>=0 -> ENOSYS` rejection, resolve fd
+##    in the Linux fd table; if it is HandleKind::DrmCard, route to a drm
+##    mmap path that: validates offset->(_,gem_handle); fetches phys frames;
+##    checks length <= buffer size; picks a user vaddr (mmap_alloc_vaddr or
+##    honor MAP_FIXED); for each frame: ref_inc then page_table::map_frame
+##    with USER|WRITABLE|PRESENT (cacheable is fine for system-RAM dumb
+##    buffers); full rollback (unmap + ref_dec) on partial failure; charge
+##    RLIMIT_AS.  No anonymous VMA (these are device-shared frames, not
+##    demand-paged) — but consider a VmaKind so /proc/maps + munmap behave;
+##    teardown frees by walking PTEs regardless.
+## 5. Flip uapi::cap_value(DRM_CAP_DUMB_BUFFER) 0 -> 1.
+##
+## Fork caveat to document: a process that forks AFTER mmap'ing a dumb
+## buffer will hit CoW dup (refcount bump + CoW mark) -> first write yields
+## a private copy, breaking MAP_SHARED semantics for the buffer.  Graphics
+## clients almost never fork post-map, so acceptable for now; the correct
+## fix is a shared/foreign VmaKind that fork copies the mapping (not the
+## frames) for.  Log under Judgment Calls if shipped this way.
+##
+## Commit 8 (after 7): PAGE_FLIP + vblank-event delivery — queue a
+## drm_event (struct drm_event_vblank) readable/pollable on the card fd so
+## DRM_MODE_PAGE_FLIP_EVENT clients don't hang; PAGE_FLIP itself maps to
+## DrmDevice::page_flip(crtc_id, fb_id).

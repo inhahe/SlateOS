@@ -6838,7 +6838,11 @@ fn alsa_control_ioctl(_entry: &FdEntry, request: u32, argp: u64) -> SyscallResul
             SyscallResult::ok(0)
         }
         ctl::SNDRV_CTL_IOCTL_CARD_INFO => alsa_control_ioctl_card_info(argp),
-        // ELEM_* and everything else is unsupported for now → ENOTTY.
+        ctl::SNDRV_CTL_IOCTL_ELEM_LIST => alsa_control_ioctl_elem_list(argp),
+        ctl::SNDRV_CTL_IOCTL_ELEM_INFO => alsa_control_ioctl_elem_info(argp),
+        ctl::SNDRV_CTL_IOCTL_ELEM_READ => alsa_control_ioctl_elem_read(argp),
+        ctl::SNDRV_CTL_IOCTL_ELEM_WRITE => alsa_control_ioctl_elem_write(argp),
+        // Anything else is an unsupported control ioctl → ENOTTY.
         _ => linux_err(errno::ENOTTY),
     }
 }
@@ -6862,6 +6866,144 @@ fn alsa_control_ioctl_card_info(argp: u64) -> SyscallResult {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => linux_err(e),
     }
+}
+
+/// `SNDRV_CTL_IOCTL_ELEM_LIST` — enumerate the card's control-element IDs.
+///
+/// Fills the caller's `snd_ctl_elem_id[space]` array (at the `pids` user
+/// pointer) with up to `space` element IDs starting at `offset`, then reports
+/// `used` (how many were written) and `count` (the card's total).  A `space` of
+/// 0 is the standard two-step probe: the client first asks for the count, then
+/// allocates and re-issues.
+#[allow(clippy::cast_possible_truncation)]
+fn alsa_control_ioctl_elem_list(argp: u64) -> SyscallResult {
+    use crate::audio_alsa_ctl as ctl;
+    let mut list = match read_user_struct::<ctl::SndCtlElemList>(argp) {
+        Ok(v) => v,
+        Err(e) => return linux_err(e),
+    };
+    list.count = ctl::ELEM_COUNT;
+
+    // All element IDs, indexed 0-based (numids are 1-based and contiguous).
+    let all = [
+        ctl::elem_id_for(ctl::NUMID_MASTER_VOLUME),
+        ctl::elem_id_for(ctl::NUMID_MASTER_SWITCH),
+    ];
+    let elem_size = core::mem::size_of::<ctl::SndCtlElemId>() as u64;
+
+    let mut written: u32 = 0;
+    if list.pids != 0 {
+        // Emit IDs for indices [offset, offset+space) ∩ [0, count).
+        for slot in 0..list.space {
+            let idx = match list.offset.checked_add(slot) {
+                Some(v) => v,
+                None => break,
+            };
+            if idx >= ctl::ELEM_COUNT {
+                break;
+            }
+            let elem = match all.get(idx as usize) {
+                Some(e) => e,
+                None => break,
+            };
+            // dest = pids + written * sizeof(snd_ctl_elem_id)
+            let dest = match (u64::from(written))
+                .checked_mul(elem_size)
+                .and_then(|off| list.pids.checked_add(off))
+            {
+                Some(d) => d,
+                None => return linux_err(errno::EFAULT),
+            };
+            if let Err(e) = write_user_struct(dest, elem) {
+                return linux_err(e);
+            }
+            written = written.saturating_add(1);
+        }
+    }
+    list.used = written;
+
+    match write_user_struct(argp, &list) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(e),
+    }
+}
+
+/// `SNDRV_CTL_IOCTL_ELEM_INFO` — describe one control element (type, access,
+/// value range).  The caller supplies the element id; we resolve it (by numid
+/// or by name) and fill the rest.
+fn alsa_control_ioctl_elem_info(argp: u64) -> SyscallResult {
+    use crate::audio_alsa_ctl as ctl;
+    let mut info = match read_user_struct::<ctl::SndCtlElemInfo>(argp) {
+        Ok(v) => v,
+        Err(e) => return linux_err(e),
+    };
+    let numid = ctl::resolve_numid(&info.id);
+    if !ctl::fill_elem_info(numid, &mut info) {
+        // No such element on the card — Linux returns ENOENT.
+        return linux_err(errno::ENOENT);
+    }
+    match write_user_struct(argp, &info) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(e),
+    }
+}
+
+/// `SNDRV_CTL_IOCTL_ELEM_READ` — read a control element's current value from
+/// the mixer.  Master volume reports the 0..=100 percentage; the switch reports
+/// 1 when *un*muted (ALSA "Switch" controls are active-high), 0 when muted.
+fn alsa_control_ioctl_elem_read(argp: u64) -> SyscallResult {
+    use crate::audio_alsa_ctl as ctl;
+    let mut val = match read_user_struct::<ctl::SndCtlElemValue>(argp) {
+        Ok(v) => v,
+        Err(e) => return linux_err(e),
+    };
+    let numid = ctl::resolve_numid(&val.id);
+    let current: i64 = match numid {
+        ctl::NUMID_MASTER_VOLUME => i64::from(crate::audio_mixer::master_volume()),
+        ctl::NUMID_MASTER_SWITCH => {
+            // "Switch" is unmute: 1 = on (unmuted), 0 = off (muted).
+            i64::from(!crate::audio_mixer::is_master_muted())
+        }
+        _ => return linux_err(errno::ENOENT),
+    };
+    // Canonicalise the id and report the value in the first union slot.
+    val.id = ctl::elem_id_for(numid);
+    if let Some(first) = val.value_integer.get_mut(0) {
+        *first = current;
+    }
+    match write_user_struct(argp, &val) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(e),
+    }
+}
+
+/// `SNDRV_CTL_IOCTL_ELEM_WRITE` — write a control element's value to the mixer.
+/// Master volume is clamped to 0..=100; the switch sets unmute (1 = unmuted).
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn alsa_control_ioctl_elem_write(argp: u64) -> SyscallResult {
+    use crate::audio_alsa_ctl as ctl;
+    let val = match read_user_struct::<ctl::SndCtlElemValue>(argp) {
+        Ok(v) => v,
+        Err(e) => return linux_err(e),
+    };
+    let numid = ctl::resolve_numid(&val.id);
+    let requested = match val.value_integer.first() {
+        Some(v) => *v,
+        None => return linux_err(errno::EINVAL),
+    };
+    match numid {
+        ctl::NUMID_MASTER_VOLUME => {
+            // Clamp into 0..=100 before the u8 cast (clamped value fits).
+            let clamped = requested.clamp(0, ctl::MASTER_VOLUME_MAX) as u8;
+            crate::audio_mixer::set_master_volume(clamped);
+        }
+        ctl::NUMID_MASTER_SWITCH => {
+            // Non-zero = unmuted (switch on) → mute = !value.
+            crate::audio_mixer::set_master_mute(requested == 0);
+        }
+        _ => return linux_err(errno::ENOENT),
+    }
+    SyscallResult::ok(0)
 }
 
 /// Copy a fixed `#[repr(C)]` payload struct out of userspace by value.

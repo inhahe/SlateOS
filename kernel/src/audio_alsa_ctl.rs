@@ -299,6 +299,101 @@ pub const ELEM_COUNT: u32 = 2;
 /// `audio_mixer` 0..=100 percentage scale).
 pub const MASTER_VOLUME_MAX: i64 = 100;
 
+/// ASCII name of the master playback volume control, as ALSA-lib expects it.
+pub const MASTER_VOLUME_NAME: &[u8] = b"Master Playback Volume";
+/// ASCII name of the master playback switch (unmute) control.
+pub const MASTER_SWITCH_NAME: &[u8] = b"Master Playback Switch";
+
+/// Compare a NUL-padded fixed-size control-element name field against a
+/// desired ASCII name, matching up to the field's first NUL.
+fn name_field_matches(field: &[u8; 44], want: &[u8]) -> bool {
+    let used = field.iter().position(|&b| b == 0).unwrap_or(field.len());
+    field.get(..used) == Some(want)
+}
+
+/// Resolve a caller-supplied [`SndCtlElemId`] to one of our element numids
+/// ([`NUMID_MASTER_VOLUME`] or [`NUMID_MASTER_SWITCH`]), or `0` if it matches
+/// no element on the card.
+///
+/// ALSA identifies an element either by its `numid` (when non-zero) or, when
+/// `numid == 0`, by the `iface + name + index` tuple (plus device/subdevice,
+/// which are always 0 for our card-global mixer controls).  We honour both
+/// forms so that clients that cache a numid and clients that look up by name
+/// both resolve correctly.
+#[must_use]
+pub fn resolve_numid(id: &SndCtlElemId) -> u32 {
+    // numid form: accept only the two we expose.
+    if id.numid == NUMID_MASTER_VOLUME || id.numid == NUMID_MASTER_SWITCH {
+        return id.numid;
+    }
+    if id.numid != 0 {
+        return 0; // a non-zero numid we don't recognise
+    }
+    // name form: must be a card-global mixer control at index 0.
+    if id.iface != SNDRV_CTL_ELEM_IFACE_MIXER
+        || id.index != 0
+        || id.device != 0
+        || id.subdevice != 0
+    {
+        return 0;
+    }
+    if name_field_matches(&id.name, MASTER_VOLUME_NAME) {
+        NUMID_MASTER_VOLUME
+    } else if name_field_matches(&id.name, MASTER_SWITCH_NAME) {
+        NUMID_MASTER_SWITCH
+    } else {
+        0
+    }
+}
+
+/// Build the canonical [`SndCtlElemId`] for one of our numids.  For an unknown
+/// numid the returned id carries only that numid (name empty), which a caller
+/// can treat as "no such element".
+#[must_use]
+pub fn elem_id_for(numid: u32) -> SndCtlElemId {
+    let mut id = SndCtlElemId {
+        numid,
+        iface: SNDRV_CTL_ELEM_IFACE_MIXER,
+        device: 0,
+        subdevice: 0,
+        name: [0u8; 44],
+        index: 0,
+    };
+    let name: &[u8] = match numid {
+        NUMID_MASTER_VOLUME => MASTER_VOLUME_NAME,
+        NUMID_MASTER_SWITCH => MASTER_SWITCH_NAME,
+        _ => &[],
+    };
+    let n = name.len().min(id.name.len().saturating_sub(1));
+    if let (Some(d), Some(s)) = (id.name.get_mut(..n), name.get(..n)) {
+        d.copy_from_slice(s);
+    }
+    id
+}
+
+/// Populate a [`SndCtlElemInfo`] describing the control with `numid`, mirroring
+/// Linux's `snd_ctl_*_info` helpers: the master volume is a mono INTEGER on
+/// `0..=MASTER_VOLUME_MAX`, the master switch a mono BOOLEAN on `0..=1`; both
+/// are read-write with a single value.  Returns `false` (leaving `info`
+/// untouched) for an unknown numid.
+#[must_use]
+pub fn fill_elem_info(numid: u32, info: &mut SndCtlElemInfo) -> bool {
+    let (ty, max) = match numid {
+        NUMID_MASTER_VOLUME => (SNDRV_CTL_ELEM_TYPE_INTEGER, MASTER_VOLUME_MAX),
+        NUMID_MASTER_SWITCH => (SNDRV_CTL_ELEM_TYPE_BOOLEAN, 1),
+        _ => return false,
+    };
+    info.id = elem_id_for(numid);
+    info.r#type = ty;
+    info.access = SNDRV_CTL_ELEM_ACCESS_READWRITE;
+    info.count = 1;
+    info.owner = 0;
+    info.value_integer_min = 0;
+    info.value_integer_max = max;
+    info.value_integer_step = 0;
+    true
+}
+
 // ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
@@ -408,6 +503,55 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     check!(ELEM_COUNT == 2, "two control elements");
     check!(NUMID_MASTER_VOLUME == 1 && NUMID_MASTER_SWITCH == 2, "numids");
     check!(MASTER_VOLUME_MAX == 100, "volume scale matches mixer");
+
+    // --- element id resolution ------------------------------------------
+    // numid form resolves directly.
+    let mut probe = elem_id_for(NUMID_MASTER_VOLUME);
+    check!(resolve_numid(&probe) == NUMID_MASTER_VOLUME, "resolve vol by numid");
+    check!(probe.iface == SNDRV_CTL_ELEM_IFACE_MIXER, "vol iface is MIXER");
+    check!(
+        name_field_matches(&probe.name, MASTER_VOLUME_NAME),
+        "vol name populated"
+    );
+    check!(
+        resolve_numid(&elem_id_for(NUMID_MASTER_SWITCH)) == NUMID_MASTER_SWITCH,
+        "resolve switch by numid"
+    );
+    // An unknown numid resolves to 0.
+    probe.numid = 99;
+    probe.name = [0u8; 44];
+    check!(resolve_numid(&probe) == 0, "unknown numid -> 0");
+    // name form: numid 0 + iface MIXER + matching name resolves.
+    probe.numid = 0;
+    probe.iface = SNDRV_CTL_ELEM_IFACE_MIXER;
+    let n = MASTER_SWITCH_NAME.len().min(probe.name.len().saturating_sub(1));
+    if let (Some(d), Some(s)) = (probe.name.get_mut(..n), MASTER_SWITCH_NAME.get(..n)) {
+        d.copy_from_slice(s);
+    }
+    check!(resolve_numid(&probe) == NUMID_MASTER_SWITCH, "resolve switch by name");
+    // wrong iface with the right name does not resolve.
+    probe.iface = SNDRV_CTL_ELEM_IFACE_PCM;
+    check!(resolve_numid(&probe) == 0, "name form requires MIXER iface");
+
+    // --- element info population ----------------------------------------
+    // SAFETY: SndCtlElemInfo is a plain `#[repr(C)]` integer/byte aggregate, so
+    // an all-zero value is a valid initialised value.
+    let mut info: SndCtlElemInfo = unsafe { core::mem::zeroed() };
+    check!(fill_elem_info(NUMID_MASTER_VOLUME, &mut info), "fill vol info");
+    check!(info.r#type == SNDRV_CTL_ELEM_TYPE_INTEGER, "vol is INTEGER");
+    check!(info.count == 1, "vol count 1");
+    check!(info.access == SNDRV_CTL_ELEM_ACCESS_READWRITE, "vol rw");
+    check!(
+        info.value_integer_min == 0 && info.value_integer_max == MASTER_VOLUME_MAX,
+        "vol range 0..max"
+    );
+    check!(fill_elem_info(NUMID_MASTER_SWITCH, &mut info), "fill switch info");
+    check!(info.r#type == SNDRV_CTL_ELEM_TYPE_BOOLEAN, "switch is BOOLEAN");
+    check!(
+        info.value_integer_min == 0 && info.value_integer_max == 1,
+        "switch range 0..1"
+    );
+    check!(!fill_elem_info(99, &mut info), "unknown numid info -> false");
 
     serial_println!("[alsactl] ALSA control ABI self-test PASSED");
     Ok(())

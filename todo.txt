@@ -92,9 +92,16 @@
 ##       fcntl-lock→EBADF, cachestat→EOPNOTSUPP, /proc/self/fd→/dev/snd/controlC0. ioctl routed to a new
 ##       alsa_control_ioctl() implementing PVERSION + CARD_INFO (OuRoS card identity); ELEM_* return ENOTTY
 ##       for now. Built clean, clippy 17462, BOOT_OK (alsactl self-test PASSED).
-##   [TODO commit 5c] control ioctl dispatch: ELEM_LIST/INFO/READ/WRITE for the two master elements
-##       (NUMID 1 volume INTEGER 0..100, NUMID 2 switch BOOLEAN), mapping READ/WRITE to audio_mixer
-##       master_volume / mute.
+##   [DONE commit 5c] control ioctl dispatch: ELEM_LIST/INFO/READ/WRITE for the two master elements.
+##       Added pure card-model helpers to audio_alsa_ctl.rs (resolve_numid by numid OR iface+name,
+##       elem_id_for, fill_elem_info) with self-test coverage; dispatch in linux.rs:
+##         ELEM_LIST  -> writes up to `space` ids from `offset` into the user pids[] array, sets used/count;
+##         ELEM_INFO  -> resolves id, fills type/access/count/range (vol INTEGER 0..100, switch BOOLEAN 0..1);
+##         ELEM_READ  -> master_volume() / !is_master_muted() into value_integer[0];
+##         ELEM_WRITE -> set_master_volume(clamp 0..100) / set_master_mute(value==0).
+##       "Switch" is active-high unmute (1=on). Unknown elements -> ENOENT. Built clean, clippy 17462,
+##       BOOT_OK (alsactl self-test PASSED). The ALSA control device is now fully functional for
+##       card enumeration + master volume/mute, which is what alsamixer/amixer/PulseAudio drive.
 ##   DESIGN NOTE (clearly-correct default, not blocking): ALSA-direct kernel interface chosen over a
 ##   userspace PulseAudio-protocol daemon because PA/PipeWire/JACK/SDL/WINE all layer on ALSA — providing
 ##   ALSA gives the broadest compat with one interface. If the operator prefers a userspace PA-protocol

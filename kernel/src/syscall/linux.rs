@@ -2902,8 +2902,10 @@ fn dispatch_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
             linux_from_native(handlers::sys_pipe_read(&a))
         }
         HandleKind::EventFd => dispatch_eventfd_read(entry, buf, cap),
-        // The ALSA control device and DRM card are ioctl-only: read(2) → EINVAL.
-        HandleKind::PidFd | HandleKind::Epoll | HandleKind::AlsaControl | HandleKind::DrmCard => linux_err(errno::EINVAL),
+        // The ALSA control device is ioctl-only: read(2) → EINVAL.
+        HandleKind::PidFd | HandleKind::Epoll | HandleKind::AlsaControl => linux_err(errno::EINVAL),
+        // A DRM card fd delivers queued KMS events (flip-complete) via read(2).
+        HandleKind::DrmCard => dispatch_drm_card_read(&entry, buf, cap),
         HandleKind::MemFd => dispatch_memfd_read(entry, buf, cap),
         HandleKind::SignalFd => dispatch_signalfd_read(entry, buf, cap),
         HandleKind::Timerfd => dispatch_timerfd_read(entry, buf, cap),
@@ -7260,7 +7262,15 @@ fn drm_card_ioctl(entry: &FdEntry, request: u32, argp: u64) -> SyscallResult {
             }
             drm_card_ioctl_mode_rmfb(handle, argp)
         }
-        // PAGE_FLIP (+ vblank-event delivery) lands in the follow-up commit.
+        // PAGE_FLIP swaps the scanout framebuffer on a CRTC; the optional
+        // flip-complete event is queued on this fd.  Modeset authority is
+        // required, so a render node gets EACCES.
+        uapi::DRM_IOCTL_MODE_PAGE_FLIP => {
+            if render_node {
+                return linux_err(errno::EACCES);
+            }
+            drm_card_ioctl_mode_page_flip(handle, argp)
+        }
         _ => linux_err(errno::ENOTTY),
     }
 }
@@ -8083,6 +8093,116 @@ fn drm_card_ioctl_mode_rmfb(
         Ok(()) => SyscallResult::ok(0),
         Err(e) => linux_err(drm_kernel_err(e)),
     }
+}
+
+/// Monotonic vblank sequence counter handed out to flip-complete events.
+///
+/// Linux reports a per-CRTC vblank count; for the shim a single
+/// monotonically-increasing sequence is sufficient — clients treat it as an
+/// opaque, increasing token to order completions, and our flips retire
+/// synchronously so there is no real per-CRTC vblank hardware to mirror.
+static DRM_VBLANK_SEQUENCE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// `DRM_IOCTL_MODE_PAGE_FLIP` — swap the scanout framebuffer on a CRTC.
+///
+/// Validates the flags (only `DRM_MODE_PAGE_FLIP_EVENT` / `_ASYNC` are
+/// accepted; `reserved` must be 0), performs the flip via the native
+/// [`crate::drm::DrmDevice::page_flip`] (which itself validates the CRTC, the
+/// framebuffer, and its backing GEM object), and — if the client requested it
+/// — queues a `drm_event_vblank` flip-complete record on this fd for delivery
+/// via `read(2)`.
+///
+/// Because our backends retire the flip synchronously inside `page_flip`, the
+/// event is queued before the ioctl returns, so a client that subsequently
+/// `poll`s the fd finds it immediately readable.
+fn drm_card_ioctl_mode_page_flip(
+    handle: crate::drm::card_fd::DrmCardHandle,
+    argp: u64,
+) -> SyscallResult {
+    use core::sync::atomic::Ordering;
+
+    use crate::drm::uapi;
+    let pf = match read_user_struct::<uapi::DrmModeCrtcPageFlip>(argp) {
+        Ok(v) => v,
+        Err(e) => return linux_err(e),
+    };
+    // Reject unknown flags and a non-zero reserved field, matching Linux's
+    // `drm_mode_page_flip_ioctl` argument validation.
+    if pf.flags & !uapi::DRM_MODE_PAGE_FLIP_FLAGS != 0 || pf.reserved != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    let device = match drm_card_device(handle) {
+        Ok(d) => d,
+        Err(e) => return linux_err(e),
+    };
+    let crtc = crate::drm::DrmObjectId::new(pf.crtc_id);
+    let fb = crate::drm::DrmObjectId::new(pf.fb_id);
+    if let Err(e) = crate::drm::with_device_mut(device, |dev| dev.page_flip(crtc, fb)) {
+        return linux_err(drm_kernel_err(e));
+    }
+    // Queue the flip-complete event if the client asked for one.  The flip has
+    // already retired (synchronous backend), so stamp it now and make the fd
+    // immediately readable.
+    if pf.flags & uapi::DRM_MODE_PAGE_FLIP_EVENT != 0 {
+        let seq = DRM_VBLANK_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let ev = uapi::DrmEventVblank::flip_complete(
+            pf.crtc_id,
+            pf.user_data,
+            seq,
+            crate::hrtimer::now_ns(),
+        );
+        crate::drm::card_fd::queue_event(handle, &ev.to_bytes());
+    }
+    SyscallResult::ok(0)
+}
+
+/// `read(2)` on a `/dev/dri/cardN` fd — drain queued KMS events.
+///
+/// Delivers whole `drm_event_vblank` records (flip-complete events queued by
+/// [`drm_card_ioctl_mode_page_flip`]) in FIFO order, copying as many as fit in
+/// the caller's buffer.  Mirrors Linux's `drm_read`: the whole user buffer is
+/// validated up front, then complete events are drained into it.
+///
+/// With nothing queued we return `EAGAIN` rather than blocking: our backends
+/// retire page flips synchronously, so a flip-complete event is queued before
+/// `PAGE_FLIP` returns and is therefore already present by the time a client
+/// `poll`s the fd readable and reads it.  A true blocking event wait queue is
+/// unnecessary under synchronous retirement (see known-issues TD12).
+fn dispatch_drm_card_read(entry: &FdEntry, buf: u64, cap: u64) -> SyscallResult {
+    use crate::drm::card_fd;
+    let handle = card_fd::DrmCardHandle::from_raw(entry.raw_handle);
+    // Existence check (None ⇒ stale instance).
+    if card_fd::device(handle).is_none() {
+        return linux_err(errno::EBADF);
+    }
+    let first_len = match card_fd::next_event_len(handle) {
+        Some(l) => l,
+        None => return linux_err(errno::EAGAIN),
+    };
+    let cap_usize = usize::try_from(cap).unwrap_or(usize::MAX);
+    // DRM never delivers a partial event: a buffer too small for even the first
+    // whole record is EINVAL.
+    if cap_usize < first_len {
+        return linux_err(errno::EINVAL);
+    }
+    // Validate the whole user buffer before draining (Linux drm_read does the
+    // same access_ok(buffer, count)) so a bad pointer can't lose a queued event.
+    if let Err(e) = crate::mm::user::validate_user_write(buf, cap_usize) {
+        return linux_err(linux_errno_for(e));
+    }
+    let bytes = card_fd::drain_into_kernel(handle, cap_usize);
+    if bytes.is_empty() {
+        // A concurrent reader on a dup'd fd drained the event between our peek
+        // and the drain — report EAGAIN as if nothing was queued.
+        return linux_err(errno::EAGAIN);
+    }
+    // SAFETY: `bytes` is a kernel-owned slice; the destination range
+    // [buf, buf+bytes.len()) lies within the [buf, buf+cap) region validated
+    // just above, and `copy_to_user` re-checks the range and handles SMAP.
+    if unsafe { crate::mm::user::copy_to_user(bytes.as_ptr(), buf, bytes.len()) }.is_err() {
+        return linux_err(errno::EFAULT);
+    }
+    SyscallResult::ok(i64::try_from(bytes.len()).unwrap_or(i64::MAX))
 }
 
 /// Roll back a partially-completed dumb-buffer mmap.
@@ -23352,12 +23472,16 @@ fn poll_revents_from_entry(
             0
         }
         HandleKind::DrmCard => {
-            // A DRM fd becomes readable (POLLIN) when a KMS event is queued
-            // (e.g. a completed page-flip's vblank event delivered via
-            // read(2)).  Event delivery is wired in a later commit, so a DRM
-            // fd is never reported ready for now — never POLLIN (no events)
-            // and never POLLOUT (ioctl-only, write(2) is EINVAL).
-            0
+            // A DRM fd is readable (POLLIN) whenever a KMS event is queued —
+            // a completed page-flip's flip-complete event delivered via
+            // read(2).  It is never POLLOUT (ioctl-only; write(2) is EINVAL).
+            if crate::drm::card_fd::has_events(
+                crate::drm::card_fd::DrmCardHandle::from_raw(entry.raw_handle),
+            ) {
+                poll_bits::POLLIN | poll_bits::POLLRDNORM
+            } else {
+                0
+            }
         }
     };
 

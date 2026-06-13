@@ -739,6 +739,100 @@ pub struct DrmModeCrtcPageFlip {
     pub user_data: u64,
 }
 
+// --- Page-flip flags (`drm_mode_crtc_page_flip.flags`) ---------------------
+
+/// Request a flip-complete event be queued on the fd when the flip retires.
+pub const DRM_MODE_PAGE_FLIP_EVENT: u32 = 0x01;
+/// Asynchronous (tear-allowed) flip — retire as soon as possible.
+pub const DRM_MODE_PAGE_FLIP_ASYNC: u32 = 0x02;
+/// Mask of all page-flip flags this driver accepts.  A flip request with any
+/// bit outside this mask is rejected with `EINVAL`, matching Linux's
+/// `DRM_MODE_PAGE_FLIP_FLAGS` validation in `drm_mode_page_flip_ioctl`.
+pub const DRM_MODE_PAGE_FLIP_FLAGS: u32 = DRM_MODE_PAGE_FLIP_EVENT | DRM_MODE_PAGE_FLIP_ASYNC;
+
+// --- KMS event delivery (`read(2)` on a /dev/dri fd) -----------------------
+
+/// `DRM_EVENT_VBLANK` — a vblank crossing the client subscribed to.
+pub const DRM_EVENT_VBLANK: u32 = 0x01;
+/// `DRM_EVENT_FLIP_COMPLETE` — a `PAGE_FLIP` with `DRM_MODE_PAGE_FLIP_EVENT`
+/// has retired; the payload is a `drm_event_vblank`.
+pub const DRM_EVENT_FLIP_COMPLETE: u32 = 0x02;
+
+/// Wire size of a serialized [`DrmEventVblank`] (the `drm_event` header plus
+/// its payload), in bytes.  Matches Linux's `sizeof(struct drm_event_vblank)`.
+pub const DRM_EVENT_VBLANK_SIZE: usize = 32;
+
+/// `struct drm_event_vblank` — the record a client `read(2)`s off a
+/// `/dev/dri/cardN` fd after a `PAGE_FLIP` with `DRM_MODE_PAGE_FLIP_EVENT`
+/// (or a vblank subscription) retires.  Begins with the 8-byte `drm_event`
+/// header (`type`, `length`) so a client can demultiplex event kinds.
+///
+/// Layout (little-endian, `#[repr(C)]`, no padding — total 32 bytes):
+/// ```text
+///   off 0 : u32 type        (DRM_EVENT_*)
+///   off 4 : u32 length      (= 32, the whole record)
+///   off 8 : u64 user_data   (cookie from the flip request)
+///   off 16: u32 tv_sec      (CLOCK_MONOTONIC seconds)
+///   off 20: u32 tv_usec     (CLOCK_MONOTONIC microseconds)
+///   off 24: u32 sequence    (vblank sequence number)
+///   off 28: u32 crtc_id     (CRTC that retired; 0 on legacy kernels)
+/// ```
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct DrmEventVblank {
+    /// `DRM_EVENT_*` discriminator.
+    pub ev_type: u32,
+    /// Total record length in bytes (always [`DRM_EVENT_VBLANK_SIZE`]).
+    pub length: u32,
+    /// Opaque cookie copied from the originating flip request.
+    pub user_data: u64,
+    /// Event timestamp — `CLOCK_MONOTONIC` seconds.
+    pub tv_sec: u32,
+    /// Event timestamp — microseconds within the second.
+    pub tv_usec: u32,
+    /// Vblank sequence number at the time of the event.
+    pub sequence: u32,
+    /// CRTC that produced the event.
+    pub crtc_id: u32,
+}
+
+impl DrmEventVblank {
+    /// Build a flip-complete event for `crtc_id` carrying `user_data`,
+    /// timestamped from a `CLOCK_MONOTONIC` nanosecond reading `now_ns` and
+    /// stamped with `sequence`.
+    #[must_use]
+    pub fn flip_complete(crtc_id: u32, user_data: u64, sequence: u32, now_ns: u64) -> Self {
+        let tv_sec = u32::try_from(now_ns / 1_000_000_000).unwrap_or(u32::MAX);
+        let tv_usec = u32::try_from((now_ns % 1_000_000_000) / 1_000).unwrap_or(0);
+        Self {
+            ev_type: DRM_EVENT_FLIP_COMPLETE,
+            length: u32::try_from(DRM_EVENT_VBLANK_SIZE).unwrap_or(32),
+            user_data,
+            tv_sec,
+            tv_usec,
+            sequence,
+            crtc_id,
+        }
+    }
+
+    /// Serialize to the 32-byte little-endian wire form a client reads.
+    #[must_use]
+    pub fn to_bytes(self) -> [u8; DRM_EVENT_VBLANK_SIZE] {
+        let mut b = [0u8; DRM_EVENT_VBLANK_SIZE];
+        // Each field is copied into its fixed offset; the slices are all
+        // in-bounds of the 32-byte array, so the `copy_from_slice`s cannot
+        // panic.
+        b[0..4].copy_from_slice(&self.ev_type.to_le_bytes());
+        b[4..8].copy_from_slice(&self.length.to_le_bytes());
+        b[8..16].copy_from_slice(&self.user_data.to_le_bytes());
+        b[16..20].copy_from_slice(&self.tv_sec.to_le_bytes());
+        b[20..24].copy_from_slice(&self.tv_usec.to_le_bytes());
+        b[24..28].copy_from_slice(&self.sequence.to_le_bytes());
+        b[28..32].copy_from_slice(&self.crtc_id.to_le_bytes());
+        b
+    }
+}
+
 /// `struct drm_mode_cursor` (CURSOR). 28 bytes.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -1109,6 +1203,46 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         "drm_mode_crtc_page_flip size {}",
         size_of::<DrmModeCrtcPageFlip>()
     );
+    check!(
+        size_of::<DrmEventVblank>() == DRM_EVENT_VBLANK_SIZE && DRM_EVENT_VBLANK_SIZE == 32,
+        "drm_event_vblank size {}",
+        size_of::<DrmEventVblank>()
+    );
+    // A round-trip of the serialized form pins the field offsets (the values
+    // a client demultiplexes by): type@0, length@4, user_data@8, crtc_id@28.
+    {
+        let ev = DrmEventVblank::flip_complete(42, 0xDEAD_BEEF_F00D_BABE, 7, 3_500_000_000);
+        let b = ev.to_bytes();
+        check!(
+            u32::from_le_bytes([b[0], b[1], b[2], b[3]]) == DRM_EVENT_FLIP_COMPLETE,
+            "event type at offset 0"
+        );
+        check!(
+            u32::from_le_bytes([b[4], b[5], b[6], b[7]]) == 32,
+            "event length at offset 4"
+        );
+        check!(
+            u64::from_le_bytes([b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]])
+                == 0xDEAD_BEEF_F00D_BABE,
+            "event user_data at offset 8"
+        );
+        check!(
+            u32::from_le_bytes([b[16], b[17], b[18], b[19]]) == 3,
+            "event tv_sec at offset 16"
+        );
+        check!(
+            u32::from_le_bytes([b[20], b[21], b[22], b[23]]) == 500_000,
+            "event tv_usec at offset 20"
+        );
+        check!(
+            u32::from_le_bytes([b[24], b[25], b[26], b[27]]) == 7,
+            "event sequence at offset 24"
+        );
+        check!(
+            u32::from_le_bytes([b[28], b[29], b[30], b[31]]) == 42,
+            "event crtc_id at offset 28"
+        );
+    }
     check!(
         size_of::<DrmModeCursor>() == 28,
         "drm_mode_cursor size {}",

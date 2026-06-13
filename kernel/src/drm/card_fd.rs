@@ -34,7 +34,8 @@
 //! a later commit, so the whole `drm` subsystem allows `dead_code` until that
 //! wiring is in place.
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, VecDeque};
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
@@ -103,6 +104,12 @@ struct DrmClient {
     client_caps: u32,
     /// Reference count: `create` = 1, each `dup` +1, each `close` −1.
     refcount: u32,
+    /// FIFO of pending KMS events (serialized `drm_event_vblank` records),
+    /// drained in order by `read(2)`.  A completed page-flip with
+    /// `DRM_MODE_PAGE_FLIP_EVENT` pushes one record here; `poll(2)` reports
+    /// the fd readable while it is non-empty.  Shared across `dup`'d fds,
+    /// matching how Linux queues events on the `struct drm_file`.
+    events: VecDeque<Vec<u8>>,
 }
 
 impl DrmClient {
@@ -112,9 +119,19 @@ impl DrmClient {
             render_node,
             client_caps: 0,
             refcount: 1,
+            events: VecDeque::new(),
         }
     }
 }
+
+/// Upper bound on queued-but-undrained events per client.
+///
+/// A client that requests flip events but never `read(2)`s them would
+/// otherwise grow this queue without bound.  Linux caps the per-file event
+/// space similarly (`drm_event` accounting against a fixed budget); we cap the
+/// record count.  Past the cap the oldest event is dropped to make room — a
+/// slow reader loses the stalest completion rather than pinning kernel memory.
+const MAX_PENDING_EVENTS: usize = 128;
 
 // ---------------------------------------------------------------------------
 // Global table
@@ -254,6 +271,95 @@ pub fn client_cap(handle: DrmCardHandle, cap: u64) -> Option<bool> {
 }
 
 // ---------------------------------------------------------------------------
+// KMS event queue (read(2) / poll(2) on a /dev/dri fd)
+// ---------------------------------------------------------------------------
+
+/// Queue a serialized KMS event (`bytes`, a `drm_event_vblank` wire record)
+/// for delivery via `read(2)`.
+///
+/// Used by the `PAGE_FLIP` handler when the client set
+/// `DRM_MODE_PAGE_FLIP_EVENT`.  If the per-client queue is at
+/// [`MAX_PENDING_EVENTS`] the oldest record is dropped first (a slow reader
+/// loses the stalest completion rather than pinning unbounded kernel memory).
+///
+/// A stale handle is silently ignored — the event simply has no live fd to be
+/// delivered on, exactly as if it had been read and discarded.
+pub fn queue_event(handle: DrmCardHandle, bytes: &[u8]) {
+    let mut table = DRM_CARD_TABLE.lock();
+    if let Some(client) = table.get_mut(&handle.id()) {
+        while client.events.len() >= MAX_PENDING_EVENTS {
+            client.events.pop_front();
+        }
+        client.events.push_back(bytes.to_vec());
+    }
+}
+
+/// Whether at least one event is queued for delivery.
+///
+/// Returns `false` for a stale handle (nothing to read).  Used by the poll
+/// path to set `POLLIN`.
+#[must_use]
+pub fn has_events(handle: DrmCardHandle) -> bool {
+    DRM_CARD_TABLE
+        .lock()
+        .get(&handle.id())
+        .is_some_and(|c| !c.events.is_empty())
+}
+
+/// Byte length of the next queued event without removing it, or `None` if the
+/// queue is empty (or the handle is stale).
+///
+/// The `read(2)` path uses this to decide whether the next whole event fits in
+/// the caller's remaining buffer before committing to dequeue it (DRM reads
+/// deliver only whole event records).
+#[must_use]
+pub fn next_event_len(handle: DrmCardHandle) -> Option<usize> {
+    DRM_CARD_TABLE
+        .lock()
+        .get(&handle.id())
+        .and_then(|c| c.events.front().map(Vec::len))
+}
+
+/// Remove and return the next queued event, or `None` if the queue is empty
+/// (or the handle is stale).
+#[must_use]
+pub fn pop_event(handle: DrmCardHandle) -> Option<Vec<u8>> {
+    DRM_CARD_TABLE
+        .lock()
+        .get_mut(&handle.id())
+        .and_then(|c| c.events.pop_front())
+}
+
+/// Atomically drain whole queued events into one contiguous buffer, stopping
+/// before any event that would push the total over `max_bytes`.
+///
+/// The whole drain happens under a single lock acquisition, so it is race-free
+/// against a concurrent reader on a `dup`'d fd: each event is delivered to
+/// exactly one reader.  Only complete event records are dequeued (DRM never
+/// delivers a partial event), and the returned buffer is always `≤ max_bytes`.
+/// A stale handle yields an empty buffer.
+#[must_use]
+pub fn drain_into_kernel(handle: DrmCardHandle, max_bytes: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut table = DRM_CARD_TABLE.lock();
+    if let Some(client) = table.get_mut(&handle.id()) {
+        while let Some(front) = client.events.front() {
+            // Stop if this whole event would not fit in the remaining budget.
+            match out.len().checked_add(front.len()) {
+                Some(total) if total <= max_bytes => {}
+                _ => break,
+            }
+            if let Some(ev) = client.events.pop_front() {
+                out.extend_from_slice(&ev);
+            } else {
+                break;
+            }
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 
@@ -337,6 +443,29 @@ pub fn self_test() -> KernelResult<()> {
     check!(is_render_node(r) == Some(true), "render node flag");
     close(r);
     check!(!exists(r), "render-node instance freed");
+
+    // Event queue: empty → no events; push two → FIFO order + length probe;
+    // pop drains; shared across dup; drops on final close.
+    let e = create(0, false);
+    check!(!has_events(e), "fresh fd has no events");
+    check!(next_event_len(e).is_none(), "empty queue has no next length");
+    check!(pop_event(e).is_none(), "popping an empty queue is None");
+    queue_event(e, &[1, 2, 3]);
+    queue_event(e, &[4, 5, 6, 7]);
+    check!(has_events(e), "events pending after queue");
+    check!(next_event_len(e) == Some(3), "FIFO: first event length");
+    let e2 = dup(e)?;
+    check!(pop_event(e2) == Some(alloc::vec![1, 2, 3]), "shared queue across dup");
+    check!(next_event_len(e) == Some(4), "second event now at front");
+    check!(pop_event(e) == Some(alloc::vec![4, 5, 6, 7]), "FIFO: second event");
+    check!(!has_events(e), "queue drained");
+    close(e);
+    close(e2);
+    check!(!exists(e), "event-queue fd freed after final close");
+    // Stale handle: event ops are inert, never a panic.
+    queue_event(e, &[9]);
+    check!(!has_events(e), "stale fd reports no events");
+    check!(pop_event(e).is_none(), "stale fd pop is None");
 
     // Stale-handle accessors are all None/err, never a panic.
     check!(device(h).is_none(), "stale device is None");

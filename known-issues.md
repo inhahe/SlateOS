@@ -462,6 +462,32 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
+### TD12. DRM event `read(2)` returns EAGAIN instead of blocking when empty — DEBT 2026-06-13
+
+**Where:** `dispatch_drm_card_read` in `kernel/src/syscall/linux.rs`.
+
+**What it is:** `read(2)` on a `/dev/dri/cardN` fd drains queued KMS events
+(flip-complete records from `PAGE_FLIP` with `DRM_MODE_PAGE_FLIP_EVENT`).
+When the event queue is empty it returns `EAGAIN` unconditionally — it does
+not honour a *blocking* fd by parking the caller until an event arrives
+(unlike, e.g., the signalfd read path, which has a real wait queue).
+
+**Why it's not a live bug today:** our DRM backends retire page flips
+**synchronously** inside `DrmDevice::page_flip`, so a flip-complete event is
+queued *before* the `PAGE_FLIP` ioctl returns. A client following the normal
+pattern (submit flip with the EVENT flag, `poll(2)` the fd, then `read(2)`)
+always finds the event already queued; `poll` reports `POLLIN` immediately
+and the read succeeds. The empty-read path is only reachable by a client
+that reads without having submitted a flip — a client bug — and returning
+EAGAIN there prevents a kernel hang rather than causing one.
+
+**Proper fix (deferred until a backend retires flips asynchronously):** add a
+per-client DRM event wait queue (mirroring the signalfd waiter pattern:
+`register` + re-check + `block_current`, woken by `queue_event`), and have a
+blocking read park on it instead of returning EAGAIN. Only worth doing once
+a real vblank/async-flip source exists; under synchronous retirement it is
+dead code.
+
 ### TD11. DRM dumb-buffer mmap not ref-tracked across `fork()` — DEBT 2026-06-13
 
 **Where:** `drm_mmap_dumb` in `kernel/src/syscall/linux.rs` (the

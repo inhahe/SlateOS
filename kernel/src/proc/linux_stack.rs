@@ -67,7 +67,6 @@ pub const AT_PHNUM: u64 = 5;
 /// System page size as seen across the Linux ABI.
 pub const AT_PAGESZ: u64 = 6;
 /// Base address the program interpreter (ld.so) was loaded at.
-#[allow(dead_code)] // Populated only once the dynamic loader path lands.
 pub const AT_BASE: u64 = 7;
 /// Flags (always 0 for our targets).
 pub const AT_FLAGS: u64 = 8;
@@ -351,7 +350,14 @@ fn phdr_vaddr(elf: &ElfFile<'_>) -> Option<u64> {
 /// appends those.  Identity is reported as uid/gid 0 for now (we have no
 /// per-process credential model exposed to the Linux ABI yet); revisit
 /// when real credentials land.
-fn base_auxv(elf: &ElfFile<'_>) -> Vec<AuxEntry> {
+///
+/// `interp_base` is the base address the program interpreter (`ld.so`)
+/// was loaded at, or `None` for a statically-linked executable (no
+/// interpreter).  When `Some`, an `AT_BASE` entry is emitted so the
+/// loader can relocate itself; `AT_ENTRY` always remains the
+/// **executable's** `e_entry` (the real program entry the loader jumps
+/// to once relocation is done), never the interpreter's.
+fn base_auxv(elf: &ElfFile<'_>, interp_base: Option<u64>) -> Vec<AuxEntry> {
     // Auxv entry order is irrelevant to libc (it scans by `a_type`), so the
     // unconditional entries are built as one literal and the optional
     // `AT_PHDR` is appended afterwards.
@@ -371,6 +377,12 @@ fn base_auxv(elf: &ElfFile<'_>) -> Vec<AuxEntry> {
     ];
     if let Some(phdr) = phdr_vaddr(elf) {
         aux.push(AuxEntry::new(AT_PHDR, phdr));
+    }
+    // AT_BASE: where the program interpreter (ld.so) was mapped.  Omitted
+    // entirely for static binaries — glibc/musl treat a missing AT_BASE
+    // as "no interpreter", which is correct for a fully-static image.
+    if let Some(base) = interp_base {
+        aux.push(AuxEntry::new(AT_BASE, base));
     }
     aux
 }
@@ -442,11 +454,15 @@ pub struct InstalledLinuxStack {
 /// * `elf` — the parsed executable (for the program-header auxv values).
 /// * `argv` / `envp` — byte-string arguments and environment.
 /// * `random16` — 16 bytes of randomness for `AT_RANDOM`.
+/// * `interp_base` — base address the program interpreter (`ld.so`) was
+///   loaded at, or `None` for a static executable.  Forwarded to the
+///   auxv as `AT_BASE`.
 ///
 /// # Errors
 ///
 /// Propagates [`build_sysv_stack`] errors and any failure resolving or
 /// writing the stack pages.
+#[allow(clippy::too_many_arguments)] // SysV stack inputs are irreducibly many.
 pub fn install_linux_stack(
     pml4_phys: u64,
     stack_top: u64,
@@ -455,8 +471,9 @@ pub fn install_linux_stack(
     argv: &[&[u8]],
     envp: &[&[u8]],
     random16: &[u8; 16],
+    interp_base: Option<u64>,
 ) -> KernelResult<InstalledLinuxStack> {
-    let aux = base_auxv(elf);
+    let aux = base_auxv(elf, interp_base);
     let built = build_sysv_stack(stack_top, stack_limit, argv, envp, &aux, random16)?;
     // SAFETY: the stack frames [stack_limit, stack_top) were just mapped
     // present + writable by `setup_user_stack`, and `built.image` spans
@@ -702,6 +719,55 @@ pub fn self_test() -> KernelResult<()> {
                 p >= img.rsp && p < TOP,
                 "[linux_stack] FAIL: argv pointer outside stack"
             );
+        }
+    }
+
+    // --- Test 8: AT_BASE (dynamic loader base) round-trips into the
+    // stack image when present, and is absent when the executable is
+    // static.  This is the auxv path the ld.so base travels: a Linux
+    // loader reads AT_BASE to relocate itself, so the value the kernel
+    // computes must land verbatim in the userspace auxv. ---
+    // Arithmetic here walks fixed compile-time stack offsets that cannot
+    // overflow; raw `+` matches the other tests in this harness.
+    #[allow(clippy::arithmetic_side_effects)]
+    {
+        let rnd = [0u8; 16];
+        let argv: &[&[u8]] = &[b"prog"];
+        const FAKE_BASE: u64 = 0x0000_5555_5555_0000;
+        let with_base = &[AuxEntry::new(AT_BASE, FAKE_BASE)];
+        let img = build_sysv_stack(TOP, LIMIT, argv, &[], with_base, &rnd)?;
+        // auxv starts at rsp + argc(8) + (1 argv + NULL)(16) + (0 envp + NULL)(8).
+        let mut at = img.rsp + 8 + 16 + 8;
+        let mut found_base = false;
+        loop {
+            let ty = read_u64!(&img, at);
+            let val = read_u64!(&img, at + 8);
+            at += 16;
+            if ty == AT_BASE {
+                require!(
+                    val == FAKE_BASE,
+                    "[linux_stack] FAIL: AT_BASE value mismatch"
+                );
+                found_base = true;
+            }
+            if ty == AT_NULL {
+                break;
+            }
+            require!(at < TOP, "[linux_stack] FAIL: auxv missing AT_NULL (AT_BASE test)");
+        }
+        require!(found_base, "[linux_stack] FAIL: AT_BASE not present when supplied");
+
+        // Without an AT_BASE input entry, none must appear.
+        let img2 = build_sysv_stack(TOP, LIMIT, argv, &[], &[], &rnd)?;
+        let mut at2 = img2.rsp + 8 + 16 + 8;
+        loop {
+            let ty = read_u64!(&img2, at2);
+            at2 += 16;
+            require!(ty != AT_BASE, "[linux_stack] FAIL: AT_BASE present for static image");
+            if ty == AT_NULL {
+                break;
+            }
+            require!(at2 < TOP, "[linux_stack] FAIL: auxv missing AT_NULL (static test)");
         }
     }
 

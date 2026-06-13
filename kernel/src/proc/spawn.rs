@@ -497,7 +497,9 @@ pub fn spawn_process(
     // left untouched (design-decision #4); this only runs for Linux-ABI
     // images.
     if is_linux_abi {
-        match build_linux_initial_stack(pml4_phys, &elf_file, options.argv, options.envp) {
+        // interp_base is None until the dynamic-linker wiring lands; a
+        // static Linux executable has no interpreter and thus no AT_BASE.
+        match build_linux_initial_stack(pml4_phys, &elf_file, options.argv, options.envp, None) {
             Ok(installed) => {
                 serial_println!(
                     "[spawn] Built Linux SysV stack: rsp={:#x} (was {:#x})",
@@ -927,7 +929,8 @@ pub fn exec_process(
     // walks the table explicitly via HHDM so it is independent of CR3).
     // Native images keep the bare stack from `setup_user_stack`.
     if new_abi_mode == pcb::AbiMode::Linux {
-        match build_linux_initial_stack(pml4_phys, &elf_file, argv, envp) {
+        // interp_base is None until the dynamic-linker wiring lands.
+        match build_linux_initial_stack(pml4_phys, &elf_file, argv, envp, None) {
             Ok(installed) => {
                 serial_println!(
                     "[exec] Built Linux SysV stack: rsp={:#x} (was {:#x})",
@@ -1119,6 +1122,7 @@ fn build_linux_initial_stack(
     elf_file: &elf::ElfFile<'_>,
     argv: &[&[u8]],
     envp: &[&[u8]],
+    interp_base: Option<u64>,
 ) -> KernelResult<crate::proc::linux_stack::InstalledLinuxStack> {
     let stack_bottom = USER_STACK_TOP
         .checked_sub(USER_STACK_SIZE)
@@ -1133,6 +1137,7 @@ fn build_linux_initial_stack(
         argv,
         envp,
         &random16,
+        interp_base,
     )
 }
 

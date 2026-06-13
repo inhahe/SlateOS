@@ -213,6 +213,206 @@ pub const SNDRV_PCM_IOCTL_UNLINK: u32 = io(0x61);
 pub const SNDRV_PCM_VERSION: u32 = 0x0002_000f;
 
 // ---------------------------------------------------------------------------
+// Byte-exact `#[repr(C)]` mirrors of the `asound.h` PCM payload structs
+// ---------------------------------------------------------------------------
+//
+// The struct-carrying ioctls below encode `sizeof(struct)` in their request
+// number, so these layouts must be byte-identical to Linux's on a 64-bit
+// target or real ALSA-lib's ioctl number never matches ours.  Each struct's
+// size is asserted against its authoritative Linux value in `self_test`, and
+// the ioctl numbers are derived from `size_of` (not hand-typed) so they stay
+// consistent with the layout.  `snd_pcm_uframes_t` / `snd_pcm_sframes_t` are
+// `unsigned long` / `signed long` = 8 bytes here.
+
+/// `snd_pcm_uframes_t` — an unsigned frame count/position (`unsigned long`).
+pub type SndPcmUframes = u64;
+/// `snd_pcm_sframes_t` — a signed frame count/delay (`signed long`).
+pub type SndPcmSframes = i64;
+
+/// `struct snd_mask` — a configuration-space bitmask (256 bits → `u32[8]`,
+/// 32 bytes).  Used for the ACCESS/FORMAT/SUBFORMAT parameter masks.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SndMask {
+    /// 256 candidate bits, one per possible enum value of the parameter.
+    pub bits: [u32; 8],
+}
+
+/// `struct snd_interval` — a `[min, max]` range with open/closed/integer/
+/// empty flags packed into one word (12 bytes).  Used for the numeric
+/// hardware parameters (rate, channels, period size, …).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SndInterval {
+    /// Inclusive (unless `openmin`) lower bound.
+    pub min: u32,
+    /// Inclusive (unless `openmax`) upper bound.
+    pub max: u32,
+    /// Bitfield word: bit0 `openmin`, bit1 `openmax`, bit2 `integer`,
+    /// bit3 `empty`.  Modelled as a plain word for ABI exactness.
+    pub flags: u32,
+}
+
+/// Index of the first/last mask parameter (`ACCESS`..=`SUBFORMAT`) → 3
+/// masks; and the first/last interval parameter (`SAMPLE_BITS`..=
+/// `TICK_TIME`) → 12 intervals.  Encoded as array lengths below.
+///
+/// `struct snd_pcm_hw_params` — the hardware-parameter negotiation
+/// payload for `HW_REFINE` / `HW_PARAMS` (608 bytes).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SndPcmHwParams {
+    /// `SNDRV_PCM_HW_PARAMS_*` flags.
+    pub flags: u32,
+    /// Parameter masks (`ACCESS`, `FORMAT`, `SUBFORMAT`).
+    pub masks: [SndMask; 3],
+    /// Reserved masks.
+    pub mres: [SndMask; 5],
+    /// Numeric parameter intervals (`SAMPLE_BITS`..=`TICK_TIME`).
+    pub intervals: [SndInterval; 12],
+    /// Reserved intervals.
+    pub ires: [SndInterval; 9],
+    /// Mask of parameters to refine (request).
+    pub rmask: u32,
+    /// Mask of parameters that changed (reply).
+    pub cmask: u32,
+    /// `SNDRV_PCM_INFO_*` capability flags (reply).
+    pub info: u32,
+    /// Significant bits in each sample (reply).
+    pub msbits: u32,
+    /// Exact rate numerator (reply).
+    pub rate_num: u32,
+    /// Exact rate denominator (reply).
+    pub rate_den: u32,
+    /// Hardware FIFO size in frames (reply).
+    pub fifo_size: SndPcmUframes,
+    /// Reserved, must be zero.
+    pub reserved: [u8; 64],
+}
+
+/// `struct snd_pcm_sw_params` — software-parameter payload for
+/// `SW_PARAMS` (136 bytes).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SndPcmSwParams {
+    /// Timestamp mode.
+    pub tstamp_mode: i32,
+    /// Period step.
+    pub period_step: u32,
+    /// Obsolete minimum sleep ticks.
+    pub sleep_min: u32,
+    /// Minimum available frames for a wakeup.
+    pub avail_min: SndPcmUframes,
+    /// Obsolete transfer alignment.
+    pub xfer_align: SndPcmUframes,
+    /// Minimum `hw_avail` frames for automatic start.
+    pub start_threshold: SndPcmUframes,
+    /// Minimum available frames for automatic stop.
+    pub stop_threshold: SndPcmUframes,
+    /// Distance from noise for silence filling.
+    pub silence_threshold: SndPcmUframes,
+    /// Silence block size.
+    pub silence_size: SndPcmUframes,
+    /// Pointer wrap-around boundary.
+    pub boundary: SndPcmUframes,
+    /// Protocol version.
+    pub proto: u32,
+    /// Timestamp type.
+    pub tstamp_type: u32,
+    /// Reserved, must be zero.
+    pub reserved: [u8; 56],
+}
+
+/// `struct snd_xferi` — the interleaved read/write payload for
+/// `WRITEI_FRAMES` / `READI_FRAMES` (24 bytes).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SndXferi {
+    /// Frames transferred (reply) — `snd_pcm_sframes_t`.
+    pub result: SndPcmSframes,
+    /// User pointer to the frame buffer (stored as an integer address).
+    pub buf: u64,
+    /// Frames requested (request).
+    pub frames: SndPcmUframes,
+}
+
+/// `struct snd_pcm_info` — device-identification payload for `INFO`
+/// (288 bytes).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SndPcmInfo {
+    /// Device number.
+    pub device: u32,
+    /// Subdevice number.
+    pub subdevice: u32,
+    /// Stream direction (`SNDRV_PCM_STREAM_*`).
+    pub stream: i32,
+    /// Card number.
+    pub card: i32,
+    /// User-selectable ID string.
+    pub id: [u8; 64],
+    /// Device name.
+    pub name: [u8; 80],
+    /// Subdevice name.
+    pub subname: [u8; 32],
+    /// `SNDRV_PCM_CLASS_*`.
+    pub dev_class: i32,
+    /// `SNDRV_PCM_SUBCLASS_*`.
+    pub dev_subclass: i32,
+    /// Total subdevices.
+    pub subdevices_count: u32,
+    /// Available subdevices.
+    pub subdevices_avail: u32,
+    /// Hardware sync ID (`union snd_pcm_sync_id`, 16 bytes).
+    pub sync: [u8; 16],
+    /// Reserved, must be zero.
+    pub reserved: [u8; 64],
+}
+
+/// Size of an ALSA payload struct as a `u32` for ioctl-number encoding.
+///
+/// Every struct here is well under the 14-bit `_IOC` size field (max
+/// 16383 bytes), so the cast cannot truncate; the bound is checked in
+/// `self_test`.
+#[allow(clippy::cast_possible_truncation)]
+const fn struct_size<T>() -> u32 {
+    core::mem::size_of::<T>() as u32
+}
+
+// --- Struct-carrying PCM ioctls (request number includes sizeof) ----------
+
+/// `HW_REFINE` — probe/refine the hardware-parameter space (`_IOWR`).
+pub const SNDRV_PCM_IOCTL_HW_REFINE: u32 = ioc(
+    IOC_READ | IOC_WRITE,
+    SNDRV_PCM_IOCTL_MAGIC,
+    0x10,
+    struct_size::<SndPcmHwParams>(),
+);
+/// `HW_PARAMS` — commit a hardware configuration (`_IOWR`).
+pub const SNDRV_PCM_IOCTL_HW_PARAMS: u32 = ioc(
+    IOC_READ | IOC_WRITE,
+    SNDRV_PCM_IOCTL_MAGIC,
+    0x11,
+    struct_size::<SndPcmHwParams>(),
+);
+/// `SW_PARAMS` — set software parameters (`_IOWR`).
+pub const SNDRV_PCM_IOCTL_SW_PARAMS: u32 = ioc(
+    IOC_READ | IOC_WRITE,
+    SNDRV_PCM_IOCTL_MAGIC,
+    0x13,
+    struct_size::<SndPcmSwParams>(),
+);
+/// `WRITEI_FRAMES` — write interleaved frames (`_IOW`).
+pub const SNDRV_PCM_IOCTL_WRITEI_FRAMES: u32 =
+    ioc(IOC_WRITE, SNDRV_PCM_IOCTL_MAGIC, 0x50, struct_size::<SndXferi>());
+/// `READI_FRAMES` — read interleaved frames (`_IOR`).
+pub const SNDRV_PCM_IOCTL_READI_FRAMES: u32 =
+    ioc(IOC_READ, SNDRV_PCM_IOCTL_MAGIC, 0x51, struct_size::<SndXferi>());
+/// `INFO` — query device identification (`_IOR`).
+pub const SNDRV_PCM_IOCTL_INFO: u32 =
+    ioc(IOC_READ, SNDRV_PCM_IOCTL_MAGIC, 0x01, struct_size::<SndPcmInfo>());
+
+// ---------------------------------------------------------------------------
 // Format / configuration translation onto the mixer pipeline
 // ---------------------------------------------------------------------------
 
@@ -312,6 +512,63 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         SNDRV_PCM_IOCTL_LINK
     );
     check!(SNDRV_PCM_IOCTL_UNLINK == 0x4161, "UNLINK enc {:#x}", SNDRV_PCM_IOCTL_UNLINK);
+
+    // --- byte-exact struct layouts vs Linux asound.h --------------------
+    use core::mem::size_of;
+    check!(size_of::<SndMask>() == 32, "snd_mask size {}", size_of::<SndMask>());
+    check!(
+        size_of::<SndInterval>() == 12,
+        "snd_interval size {}",
+        size_of::<SndInterval>()
+    );
+    check!(
+        size_of::<SndPcmHwParams>() == 608,
+        "snd_pcm_hw_params size {}",
+        size_of::<SndPcmHwParams>()
+    );
+    check!(
+        size_of::<SndPcmSwParams>() == 136,
+        "snd_pcm_sw_params size {}",
+        size_of::<SndPcmSwParams>()
+    );
+    check!(size_of::<SndXferi>() == 24, "snd_xferi size {}", size_of::<SndXferi>());
+    check!(
+        size_of::<SndPcmInfo>() == 288,
+        "snd_pcm_info size {}",
+        size_of::<SndPcmInfo>()
+    );
+
+    // --- struct-carrying ioctls vs known Linux hex (size-derived) -------
+    check!(
+        SNDRV_PCM_IOCTL_HW_REFINE == 0xC260_4110,
+        "HW_REFINE enc {:#x}",
+        SNDRV_PCM_IOCTL_HW_REFINE
+    );
+    check!(
+        SNDRV_PCM_IOCTL_HW_PARAMS == 0xC260_4111,
+        "HW_PARAMS enc {:#x}",
+        SNDRV_PCM_IOCTL_HW_PARAMS
+    );
+    check!(
+        SNDRV_PCM_IOCTL_SW_PARAMS == 0xC088_4113,
+        "SW_PARAMS enc {:#x}",
+        SNDRV_PCM_IOCTL_SW_PARAMS
+    );
+    check!(
+        SNDRV_PCM_IOCTL_WRITEI_FRAMES == 0x4018_4150,
+        "WRITEI_FRAMES enc {:#x}",
+        SNDRV_PCM_IOCTL_WRITEI_FRAMES
+    );
+    check!(
+        SNDRV_PCM_IOCTL_READI_FRAMES == 0x8018_4151,
+        "READI_FRAMES enc {:#x}",
+        SNDRV_PCM_IOCTL_READI_FRAMES
+    );
+    check!(
+        SNDRV_PCM_IOCTL_INFO == 0x8120_4101,
+        "INFO enc {:#x}",
+        SNDRV_PCM_IOCTL_INFO
+    );
 
     // --- the _IOC helper's field decomposition --------------------------
     // Round-trip: extract dir/size/type/nr back out of PVERSION.

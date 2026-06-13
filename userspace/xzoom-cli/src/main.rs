@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xzoom-cli — OurOS screen magnifier
+//! xzoom-cli — SlateOS screen magnifier
 //!
 //! Single personality: `xzoom`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_xzoom(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: xzoom [OPTIONS]");
-        println!("xzoom v0.3 (OurOS) — Screen magnifier");
+        println!("xzoom v0.3 (SlateOS) — Screen magnifier");
         println!();
         println!("Options:");
         println!("  -mag N         Magnification factor (1-16, default: 2)");
@@ -27,9 +27,9 @@ fn run_xzoom(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("xzoom v0.3 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("xzoom v0.3 (SlateOS)"); return 0; }
     let mag = args.windows(2).find(|w| w[0] == "-mag").and_then(|w| w[1].parse::<u32>().ok()).unwrap_or(2);
-    println!("xzoom v0.3 (OurOS) — Screen Magnifier");
+    println!("xzoom v0.3 (SlateOS) — Screen Magnifier");
     println!("  Magnification: {}x", mag);
     println!("  Source: 128x128 pixels");
     println!("  Window: 256x256 pixels");

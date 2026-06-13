@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gatsby-cli — OurOS Gatsby React static site generator
+//! gatsby-cli — SlateOS Gatsby React static site generator
 //!
 //! Single personality: `gatsby`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gatsby(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: gatsby COMMAND [OPTIONS]");
-        println!("Gatsby CLI v5.13.0 (OurOS) — React-based site generator");
+        println!("Gatsby CLI v5.13.0 (SlateOS) — React-based site generator");
         println!();
         println!("Commands:");
         println!("  new [DIR]       Create new site");
@@ -70,7 +70,7 @@ fn run_gatsby(args: &[String], _prog: &str) -> i32 {
         "clean" => println!("  Deleted .cache and public directories."),
         "info" => {
             println!("  System:");
-            println!("    OS: OurOS x86_64");
+            println!("    OS: SlateOS x86_64");
             println!("  Binaries:");
             println!("    Node: v20.11.1");
             println!("  Gatsby packages:");

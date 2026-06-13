@@ -2,5 +2,5 @@
 name = "inotify"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS filesystem event monitor"
+description = "SlateOS filesystem event monitor"
 [dependencies]

@@ -1,4 +1,4 @@
-//! OurOS stream editor (`sed`)
+//! SlateOS stream editor (`sed`)
 //!
 //! A POSIX-compatible stream editor that reads input line by line, applies
 //! editing commands (substitution, deletion, insertion, etc.), and writes the

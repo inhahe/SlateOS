@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bugsnag-cli — OurOS BugSnag / SmartBear Insight Hub (app stability monitoring, mobile focus)
+//! bugsnag-cli — SlateOS BugSnag / SmartBear Insight Hub (app stability monitoring, mobile focus)
 //!
 //! Single personality: `bugsnag`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_bs(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: bugsnag [OPTIONS]");
-        println!("BugSnag / SmartBear Insight Hub (OurOS) — App stability monitoring");
+        println!("BugSnag / SmartBear Insight Hub (SlateOS) — App stability monitoring");
         println!();
         println!("Options:");
         println!("  --stability-score      App stability score per release");
@@ -22,8 +22,8 @@ fn run_bs(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("BugSnag / SmartBear Insight Hub (OurOS)"); return 0; }
-    println!("BugSnag / SmartBear Insight Hub (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("BugSnag / SmartBear Insight Hub (SlateOS)"); return 0; }
+    println!("BugSnag / SmartBear Insight Hub (SlateOS)");
     println!("  Vendor: BugSnag Inc. (San Francisco, founded 2013)");
     println!("          acquired by SmartBear May 2021 (~$100M est.)");
     println!("          rebranded 'SmartBear Insight Hub' 2023 (BugSnag still used informally)");

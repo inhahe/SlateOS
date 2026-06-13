@@ -2,6 +2,6 @@
 name = "lockscreen"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS Lock Screen — secure graphical lock screen with clock, password entry, and multi-user support"
+description = "SlateOS Lock Screen — secure graphical lock screen with clock, password entry, and multi-user support"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }

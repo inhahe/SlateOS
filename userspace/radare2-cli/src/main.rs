@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! radare2-cli — OurOS radare2 reverse engineering framework
+//! radare2-cli — SlateOS radare2 reverse engineering framework
 //!
 //! Multi-personality: `r2`, `rabin2`, `rasm2`, `rahash2`, `radiff2`, `rafind2`
 
@@ -15,7 +15,7 @@ fn run_radare2(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "rabin2" => {
-                println!("rabin2 (OurOS) — Binary information extractor");
+                println!("rabin2 (SlateOS) — Binary information extractor");
                 println!("  -I           Binary info");
                 println!("  -i           Imports");
                 println!("  -E           Exports");
@@ -25,33 +25,33 @@ fn run_radare2(args: &[String], prog: &str) -> i32 {
                 println!("  -z           Strings");
             }
             "rasm2" => {
-                println!("rasm2 (OurOS) — Assembler/disassembler");
+                println!("rasm2 (SlateOS) — Assembler/disassembler");
                 println!("  -a ARCH      Architecture (x86, arm, mips)");
                 println!("  -b BITS      Bits (16, 32, 64)");
                 println!("  -d HEX       Disassemble hex bytes");
                 println!("  -f FILE      Assemble file");
             }
             "rahash2" => {
-                println!("rahash2 (OurOS) — Hash/checksum tool");
+                println!("rahash2 (SlateOS) — Hash/checksum tool");
                 println!("  -a ALGO      Algorithm (md5, sha256, crc32, etc.)");
                 println!("  -s STRING    Hash string");
                 println!("  -f FROM      Start offset");
                 println!("  -t TO        End offset");
             }
             "radiff2" => {
-                println!("radiff2 (OurOS) — Binary diffing");
+                println!("radiff2 (SlateOS) — Binary diffing");
                 println!("  -g           Graph diff");
                 println!("  -ss          Structural diff");
                 println!("  -c           Count differences");
             }
             "rafind2" => {
-                println!("rafind2 (OurOS) — Pattern finder in binaries");
+                println!("rafind2 (SlateOS) — Pattern finder in binaries");
                 println!("  -s STRING    Search for string");
                 println!("  -x HEX      Search for hex pattern");
                 println!("  -m MASK      Search with mask");
             }
             _ => {
-                println!("radare2 v5.9 (OurOS) — Reverse engineering framework");
+                println!("radare2 v5.9 (SlateOS) — Reverse engineering framework");
                 println!("  -A           Auto-analyze");
                 println!("  -d           Debug mode");
                 println!("  -w           Write mode");
@@ -63,7 +63,7 @@ fn run_radare2(args: &[String], prog: &str) -> i32 {
         println!("  --version    Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("radare2 v5.9.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("radare2 v5.9.0 (SlateOS)"); return 0; }
     match prog {
         "rabin2" => {
             println!("rabin2: binary info");
@@ -83,7 +83,7 @@ fn run_radare2(args: &[String], prog: &str) -> i32 {
             println!("  0x04: sub rsp, 0x20");
         }
         _ => {
-            println!("radare2 v5.9.0 (OurOS)");
+            println!("radare2 v5.9.0 (SlateOS)");
             println!("  [x] Analysis complete");
             println!("  Functions: 456");
             println!("  Strings: 1,234");

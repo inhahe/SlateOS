@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! btmgmt-cli — OurOS btmgmt Bluetooth management interface
+//! btmgmt-cli — SlateOS btmgmt Bluetooth management interface
 //!
 //! Single personality: `btmgmt`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_btmgmt(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: btmgmt COMMAND [OPTIONS]");
-        println!("btmgmt v5.72 (OurOS) — Bluetooth management interface");
+        println!("btmgmt v5.72 (SlateOS) — Bluetooth management interface");
         println!();
         println!("Commands:");
         println!("  info              Show adapter info");
@@ -29,7 +29,7 @@ fn run_btmgmt(args: &[String], _prog: &str) -> i32 {
     match cmd {
         "info" => {
             println!("hci0: addr AA:BB:CC:DD:EE:FF");
-            println!("  Name: OurOS");
+            println!("  Name: SlateOS");
             println!("  Powered: yes, Discoverable: no");
             println!("  Supported settings: powered, connectable, discoverable, pairable");
         }
@@ -38,7 +38,7 @@ fn run_btmgmt(args: &[String], _prog: &str) -> i32 {
             println!("Power: {}", state);
         }
         "find" => println!("Discovery started..."),
-        "version" => println!("btmgmt v5.72 (OurOS)"),
+        "version" => println!("btmgmt v5.72 (SlateOS)"),
         _ => println!("btmgmt {}: done", cmd),
     }
     0

@@ -2,5 +2,5 @@
 name = "numactl"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS numactl utility"
+description = "SlateOS numactl utility"
 [dependencies]

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! javadoc-cli — OurOS Javadoc documentation generator
+//! javadoc-cli — SlateOS Javadoc documentation generator
 //!
 //! Multi-personality: `javadoc`, `scaladoc`, `kotlindoc`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_javadoc(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "-help") || args.is_empty() {
         println!("Usage: javadoc [OPTIONS] [PACKAGE_NAMES] [SOURCE_FILES] [@FILE]");
-        println!("javadoc 21.0.2 (OurOS)");
+        println!("javadoc 21.0.2 (SlateOS)");
         println!();
         println!("Options:");
         println!("  -d DIR             Output directory");
@@ -38,7 +38,7 @@ fn run_javadoc(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-version" || a == "--version") {
-        println!("javadoc 21.0.2 (OurOS)");
+        println!("javadoc 21.0.2 (SlateOS)");
         return 0;
     }
     let sources: Vec<&str> = args.iter()
@@ -73,14 +73,14 @@ fn run_javadoc(args: &[String]) -> i32 {
 fn run_scaladoc(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "-help") || args.is_empty() {
         println!("Usage: scaladoc [OPTIONS] [SOURCE_FILES]");
-        println!("Scaladoc 3.4.0 (OurOS)");
+        println!("Scaladoc 3.4.0 (SlateOS)");
         println!("  -d DIR         Output directory");
         println!("  -classpath     Classpath");
         println!("  -doc-title     Document title");
         return 0;
     }
     if args.iter().any(|a| a == "-version" || a == "--version") {
-        println!("Scaladoc 3.4.0 (OurOS)");
+        println!("Scaladoc 3.4.0 (SlateOS)");
         return 0;
     }
     let sources: Vec<&str> = args.iter()
@@ -101,14 +101,14 @@ fn run_scaladoc(args: &[String]) -> i32 {
 fn run_kotlindoc(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: kotlindoc [OPTIONS] [SOURCE_FILES]");
-        println!("Dokka 1.9.20 (OurOS)");
+        println!("Dokka 1.9.20 (SlateOS)");
         println!("  -output DIR       Output directory");
         println!("  -format FORMAT    Output format (html, markdown, javadoc)");
         println!("  -module NAME      Module name");
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Dokka 1.9.20 (OurOS)");
+        println!("Dokka 1.9.20 (SlateOS)");
         return 0;
     }
     let sources: Vec<&str> = args.iter()

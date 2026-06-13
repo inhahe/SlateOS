@@ -2,5 +2,5 @@
 name = "dbus"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS dbus - D-Bus message bus daemon (dbus-daemon/dbus-send/dbus-monitor)"
+description = "SlateOS dbus - D-Bus message bus daemon (dbus-daemon/dbus-send/dbus-monitor)"
 [dependencies]

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cheat-sh — OurOS community-driven cheat sheets client
+//! cheat-sh — SlateOS community-driven cheat sheets client
 //!
 //! Single personality: `cht`
 
@@ -24,7 +24,7 @@ fn run_cht(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("cht 1.0.0 (OurOS)");
+        println!("cht 1.0.0 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "-l" || a == "--list") {

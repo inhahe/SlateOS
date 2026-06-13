@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! grpc-tools — OurOS gRPC development and debugging tools
+//! grpc-tools — SlateOS gRPC development and debugging tools
 //!
 //! Multi-personality: `grpcurl`, `grpc_health_probe`, `grpc_cli`
 
@@ -30,7 +30,7 @@ fn run_grpcurl(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("grpcurl v1.9.1 (OurOS)");
+        println!("grpcurl v1.9.1 (SlateOS)");
         return 0;
     }
 

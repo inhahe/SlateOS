@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! heroku-cli — OurOS Heroku CLI
+//! heroku-cli — SlateOS Heroku CLI
 //!
 //! Single personality: `heroku`
 
@@ -11,7 +11,7 @@ fn run_heroku(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: heroku <COMMAND> [OPTIONS]");
         println!();
-        println!("Heroku command-line interface (OurOS).");
+        println!("Heroku command-line interface (SlateOS).");
         println!();
         println!("Commands:");
         println!("  apps         Manage apps");
@@ -38,7 +38,7 @@ fn run_heroku(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("heroku/8.11.0 ouros-x64 node-v20.11.0");
+        println!("heroku/8.11.0 slateos-x64 node-v20.11.0");
         return 0;
     }
 

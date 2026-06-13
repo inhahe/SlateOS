@@ -2,5 +2,5 @@
 name = "newgrp"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS newgrp utility"
+description = "SlateOS newgrp utility"
 [dependencies]

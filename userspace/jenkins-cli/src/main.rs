@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! jenkins-cli — OurOS Jenkins CI/CD tools
+//! jenkins-cli — SlateOS Jenkins CI/CD tools
 //!
 //! Multi-personality: `jenkins-cli`
 
@@ -11,7 +11,7 @@ fn run_jenkins_cli(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: jenkins-cli [OPTIONS] COMMAND [ARGS]");
         println!();
-        println!("jenkins-cli — Jenkins CI/CD management (OurOS).");
+        println!("jenkins-cli — Jenkins CI/CD management (SlateOS).");
         println!();
         println!("Commands:");
         println!("  build <job>          Trigger a build");
@@ -27,7 +27,7 @@ fn run_jenkins_cli(args: &[String]) -> i32 {
 
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match subcmd {
-        "version" => println!("Jenkins 2.440.1 (OurOS)"),
+        "version" => println!("Jenkins 2.440.1 (SlateOS)"),
         "who-am-i" => {
             println!("Authenticated as: admin");
             println!("Authorities:");
@@ -36,23 +36,23 @@ fn run_jenkins_cli(args: &[String]) -> i32 {
         }
         "list-jobs" => {
             println!("NAME                    STATUS    LAST BUILD");
-            println!("ouros-kernel-build      SUCCESS   #142 (2h ago)");
-            println!("ouros-userspace-test    SUCCESS   #89 (4h ago)");
-            println!("ouros-integration       FAILURE   #23 (1h ago)");
-            println!("ouros-deploy-staging    SUCCESS   #67 (6h ago)");
+            println!("slateos-kernel-build      SUCCESS   #142 (2h ago)");
+            println!("slateos-userspace-test    SUCCESS   #89 (4h ago)");
+            println!("slateos-integration       FAILURE   #23 (1h ago)");
+            println!("slateos-deploy-staging    SUCCESS   #67 (6h ago)");
         }
         "build" => {
-            let job = args.get(1).map(|s| s.as_str()).unwrap_or("ouros-kernel-build");
+            let job = args.get(1).map(|s| s.as_str()).unwrap_or("slateos-kernel-build");
             println!("Build triggered for '{}'.", job);
             println!("Queue item: #143");
         }
         "console" => {
-            let job = args.get(1).map(|s| s.as_str()).unwrap_or("ouros-kernel-build");
+            let job = args.get(1).map(|s| s.as_str()).unwrap_or("slateos-kernel-build");
             println!("Console output for {} #142:", job);
             println!("[Pipeline] Start of Pipeline");
             println!("[Pipeline] stage (Build)");
             println!("+ cargo build --release");
-            println!("   Compiling ouros-kernel v0.1.0");
+            println!("   Compiling slateos-kernel v0.1.0");
             println!("    Finished release [optimized] target(s)");
             println!("[Pipeline] stage (Test)");
             println!("+ cargo test --workspace");

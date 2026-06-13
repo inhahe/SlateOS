@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! monero-cli — OurOS Monero wallet CLI
+//! monero-cli — SlateOS Monero wallet CLI
 //!
 //! Single personality: `monero-wallet-cli`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_monero(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: monero-wallet-cli [OPTIONS]");
-        println!("Monero Wallet CLI v0.18.3 (OurOS)");
+        println!("Monero Wallet CLI v0.18.3 (SlateOS)");
         println!();
         println!("Options:");
         println!("  --generate-new-wallet FILE  Create new wallet");
@@ -25,7 +25,7 @@ fn run_monero(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Monero 'Fluorine Fermi' (v0.18.3.3-release) (OurOS)");
+        println!("Monero 'Fluorine Fermi' (v0.18.3.3-release) (SlateOS)");
         return 0;
     }
     println!("Monero Wallet CLI v0.18.3");

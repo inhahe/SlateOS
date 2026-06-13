@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lsblk-cli — OurOS block device lister
+//! lsblk-cli — SlateOS block device lister
 //!
 //! Multi-personality: `lsblk`, `blkid`
 
@@ -19,7 +19,7 @@ fn run_lsblk(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lsblk [OPTIONS] [DEVICE...]");
         println!();
-        println!("lsblk — list block devices (OurOS).");
+        println!("lsblk — list block devices (SlateOS).");
         println!();
         println!("Options:");
         println!("  -a, --all         Show all devices");
@@ -35,7 +35,7 @@ fn run_lsblk(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("lsblk from util-linux 2.39 (OurOS)");
+        println!("lsblk from util-linux 2.39 (SlateOS)");
         return 0;
     }
 
@@ -79,7 +79,7 @@ fn run_blkid(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: blkid [OPTIONS] [DEVICE...]");
         println!();
-        println!("blkid — locate/print block device attributes (OurOS).");
+        println!("blkid — locate/print block device attributes (SlateOS).");
         println!();
         println!("Options:");
         println!("  -c FILE      Read from cache FILE");

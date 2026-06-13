@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! portage-cli — OurOS Gentoo Portage package manager
+//! portage-cli — SlateOS Gentoo Portage package manager
 //!
 //! Multi-personality: `emerge`, `equery`, `eclean`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_emerge(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: emerge [OPTIONS] [ATOM ...]");
-        println!("Portage 2.3.99 (OurOS)");
+        println!("Portage 2.3.99 (SlateOS)");
         println!();
         println!("Actions:");
         println!("  --install            Install packages (default)");
@@ -32,7 +32,7 @@ fn run_emerge(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Portage 2.3.99 (python 3.12.2, OurOS, x86_64)");
+        println!("Portage 2.3.99 (python 3.12.2, SlateOS, x86_64)");
         return 0;
     }
     if args.iter().any(|a| a == "--sync") {
@@ -55,7 +55,7 @@ fn run_emerge(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--info") {
-        println!("Portage 2.3.99 (python 3.12.2, OurOS x86_64)");
+        println!("Portage 2.3.99 (python 3.12.2, SlateOS x86_64)");
         println!("ACCEPT_KEYWORDS=\"amd64\"");
         println!("CFLAGS=\"-O2 -pipe -march=native\"");
         println!("USE=\"X alsa dbus\"");

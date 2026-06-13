@@ -2,5 +2,5 @@
 name = "iw"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS iw - wireless tools (iw/iwconfig/iwlist/rfkill)"
+description = "SlateOS iw - wireless tools (iw/iwconfig/iwlist/rfkill)"
 [dependencies]

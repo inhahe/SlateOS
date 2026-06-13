@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cassandra — OurOS distributed NoSQL database
+//! cassandra — SlateOS distributed NoSQL database
 //!
 //! Multi-personality: `cassandra` (server), `cqlsh` (CQL shell), `nodetool` (admin)
 
@@ -20,10 +20,10 @@ fn run_cassandra(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("5.0.0 (OurOS)");
+        println!("5.0.0 (SlateOS)");
         return 0;
     }
-    println!("INFO  [main] 2025-05-22 10:00:00,000 CassandraDaemon.java:661 - Cassandra version: 5.0.0 (OurOS)");
+    println!("INFO  [main] 2025-05-22 10:00:00,000 CassandraDaemon.java:661 - Cassandra version: 5.0.0 (SlateOS)");
     println!("INFO  [main] 2025-05-22 10:00:00,100 Config.java:505 - Data files directories: [/var/lib/cassandra/data]");
     println!("INFO  [main] 2025-05-22 10:00:00,200 Config.java:506 - Commit log directory: /var/lib/cassandra/commitlog");
     println!("INFO  [main] 2025-05-22 10:00:00,500 DatabaseDescriptor.java:415 - Disk access mode: mmap");
@@ -47,7 +47,7 @@ fn run_cqlsh(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("cqlsh 6.2.0 (OurOS)");
+        println!("cqlsh 6.2.0 (SlateOS)");
         return 0;
     }
 
@@ -114,7 +114,7 @@ fn run_nodetool(args: Vec<String>) -> i32 {
             0
         }
         "version" | "--version" => {
-            println!("ReleaseVersion: 5.0.0 (OurOS)");
+            println!("ReleaseVersion: 5.0.0 (SlateOS)");
             0
         }
         "status" => {

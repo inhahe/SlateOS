@@ -1,4 +1,4 @@
-//! `OurOS` Notes & Wiki
+//! `SlateOS` Notes & Wiki
 //!
 //! A rich notes/wiki application with:
 //! - Note types: Plain text, Markdown (heading/bold/italic/list/code), Checklist, Table

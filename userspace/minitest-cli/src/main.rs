@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! minitest-cli — OurOS Ruby Minitest runner
+//! minitest-cli — SlateOS Ruby Minitest runner
 //!
 //! Multi-personality: `minitest`, `ruby-test`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_minitest(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: minitest [OPTIONS] [FILES]");
-        println!("Minitest 5.24.0 (OurOS)");
+        println!("Minitest 5.24.0 (SlateOS)");
         println!();
         println!("Options:");
         println!("  -n, --name PATTERN   Run tests matching pattern");

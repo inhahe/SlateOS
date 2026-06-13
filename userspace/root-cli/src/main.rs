@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! root-cli — OurOS ROOT data analysis framework (CERN)
+//! root-cli — SlateOS ROOT data analysis framework (CERN)
 //!
 //! Multi-personality: `root`, `rootcling`, `hadd`, `rootls`, `rootcp`, `rootmv`, `rootrm`, `rootprint`
 
@@ -22,7 +22,7 @@ fn run_root(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("ROOT 6.30.04 (OurOS)");
+        println!("ROOT 6.30.04 (SlateOS)");
         println!("Built for linuxx8664gcc on Jan 15 2024");
         println!("LLVM/Clang 16.0.6");
         println!("Python 3.12.0");
@@ -48,7 +48,7 @@ fn run_root(args: &[String]) -> i32 {
         println!("   -------------------------------------------------------");
         println!("  | Welcome to ROOT 6.30.04               https://root.cern |");
         println!("  | (c) 1995-2024, The ROOT Team; conception R. Brun, F. Rademakers |");
-        println!("  | Built for OurOS on Jan 15 2024                          |");
+        println!("  | Built for SlateOS on Jan 15 2024                          |");
         println!("  | From tag v6-30-04, 15 January 2024                      |");
         println!("   -------------------------------------------------------");
         println!();
@@ -66,7 +66,7 @@ fn run_rootcling(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("rootcling 6.30.04 (OurOS)");
+        println!("rootcling 6.30.04 (SlateOS)");
         return 0;
     }
     let dict = args.iter().find(|a| a.ends_with(".cxx")).map(|s| s.as_str()).unwrap_or("Dict.cxx");

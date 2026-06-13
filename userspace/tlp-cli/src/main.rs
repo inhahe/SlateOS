@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tlp-cli — OurOS TLP power management
+//! tlp-cli — SlateOS TLP power management
 //!
 //! Multi-personality: `tlp`, `tlp-stat`
 
@@ -19,7 +19,7 @@ fn run_tlp(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: tlp COMMAND");
         println!();
-        println!("tlp — advanced power management (OurOS).");
+        println!("tlp — advanced power management (SlateOS).");
         println!();
         println!("Commands:");
         println!("  start          Initialize and apply settings");
@@ -33,7 +33,7 @@ fn run_tlp(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("TLP 1.6.1 (OurOS)");
+        println!("TLP 1.6.1 (SlateOS)");
         return 0;
     }
 
@@ -85,7 +85,7 @@ fn run_tlp_stat(args: &[String]) -> i32 {
         println!("+++ System Info");
         println!("System         = System manufacturer System Product Name");
         println!("BIOS           = American Megatrends Inc. F20 03/15/2024");
-        println!("OS Release     = OurOS 1.0");
+        println!("OS Release     = SlateOS 1.0");
         println!("Kernel         = 1.0.0 x86_64");
         println!("TLP power source = AC");
         println!();

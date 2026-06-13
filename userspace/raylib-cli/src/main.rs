@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! raylib-cli — OurOS Raylib game development helper
+//! raylib-cli — SlateOS Raylib game development helper
 //!
 //! Multi-personality: `raylib-config`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_raylib(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: raylib-config [OPTIONS]");
-        println!("Raylib config 5.0 (OurOS)");
+        println!("Raylib config 5.0 (SlateOS)");
         println!();
         println!("Options:");
         println!("  --version        Print raylib version");
@@ -33,7 +33,7 @@ fn run_raylib(args: &[String]) -> i32 {
             "--prefix" => println!("/usr"),
             "--info" => {
                 println!("raylib 5.0 — A simple and easy-to-use library");
-                println!("  Platform: OurOS (Desktop)");
+                println!("  Platform: SlateOS (Desktop)");
                 println!("  Graphics: OpenGL 3.3");
                 println!("  Audio: miniaudio");
                 println!("  Build type: Release");

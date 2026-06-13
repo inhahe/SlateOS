@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! glxinfo-cli — OurOS glxinfo/glxgears OpenGL tools CLI
+//! glxinfo-cli — SlateOS glxinfo/glxgears OpenGL tools CLI
 //!
 //! Multi-personality: `glxinfo`, `glxgears`
 
@@ -19,7 +19,7 @@ fn run_glxinfo(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: glxinfo [OPTIONS]");
         println!();
-        println!("glxinfo — display OpenGL information (OurOS).");
+        println!("glxinfo — display OpenGL information (SlateOS).");
         println!();
         println!("Options:");
         println!("  -B           Brief output");
@@ -63,7 +63,7 @@ fn run_glxgears(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: glxgears [OPTIONS]");
         println!();
-        println!("glxgears — OpenGL gears demo (OurOS).");
+        println!("glxgears — OpenGL gears demo (SlateOS).");
         println!();
         println!("Options:");
         println!("  -display D   X display");

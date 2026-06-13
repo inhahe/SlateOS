@@ -2,5 +2,5 @@
 name = "service"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS service management CLI — start, stop, status, and control system services"
+description = "SlateOS service management CLI — start, stop, status, and control system services"
 [dependencies]

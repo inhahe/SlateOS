@@ -2,6 +2,6 @@
 name = "spreadsheet"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS Spreadsheet — full-featured spreadsheet application"
+description = "SlateOS Spreadsheet — full-featured spreadsheet application"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }

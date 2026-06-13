@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mkdocs-cli — OurOS MkDocs documentation site generator
+//! mkdocs-cli — SlateOS MkDocs documentation site generator
 //!
 //! Multi-personality: `mkdocs`
 
@@ -10,7 +10,7 @@ use std::process;
 fn run_mkdocs(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: mkdocs COMMAND [OPTIONS]");
-        println!("MkDocs 1.5.3 (OurOS)");
+        println!("MkDocs 1.5.3 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  new DIR       Create new project");
@@ -22,7 +22,7 @@ fn run_mkdocs(args: &[String]) -> i32 {
     }
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match subcmd {
-        "version" | "--version" => println!("mkdocs, version 1.5.3 (OurOS)"),
+        "version" | "--version" => println!("mkdocs, version 1.5.3 (SlateOS)"),
         "new" => {
             let dir = args.get(1).map(|s| s.as_str()).unwrap_or("my-project");
             println!("Creating project: {}", dir);

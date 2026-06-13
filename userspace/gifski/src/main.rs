@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gifski — OurOS high-quality GIF encoder
+//! gifski — SlateOS high-quality GIF encoder
 //!
 //! Single personality: `gifski`
 
@@ -31,7 +31,7 @@ fn run_gifski(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("gifski 1.14.4 (OurOS)");
+        println!("gifski 1.14.4 (SlateOS)");
         return 0;
     }
 

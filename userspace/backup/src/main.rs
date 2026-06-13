@@ -1,4 +1,4 @@
-//! OurOS Backup Utility
+//! SlateOS Backup Utility
 //!
 //! Snapshot-based backup tool supporting full and incremental backups with
 //! SHA-256 integrity verification and manifest tracking.
@@ -1276,7 +1276,7 @@ fn cmd_delete(backup_path: &Path) {
 
 fn print_usage() {
     println!(
-        "backup — OurOS backup utility
+        "backup — SlateOS backup utility
 
 Usage: backup <command> [options]
 

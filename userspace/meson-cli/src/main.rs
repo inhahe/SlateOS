@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! meson-cli — OurOS Meson build system CLI
+//! meson-cli — SlateOS Meson build system CLI
 //!
 //! Single personality: `meson`
 
@@ -11,7 +11,7 @@ fn run_meson(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: meson <COMMAND> [OPTIONS]");
         println!();
-        println!("Meson Build System (OurOS).");
+        println!("Meson Build System (SlateOS).");
         println!();
         println!("Commands:");
         println!("  setup        Configure build directory");
@@ -25,7 +25,7 @@ fn run_meson(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("1.3.1 (OurOS)");
+        println!("1.3.1 (SlateOS)");
         return 0;
     }
 

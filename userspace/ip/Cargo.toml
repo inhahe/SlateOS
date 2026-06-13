@@ -2,5 +2,5 @@
 name = "ip"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS network interface and routing configuration utility"
+description = "SlateOS network interface and routing configuration utility"
 [dependencies]

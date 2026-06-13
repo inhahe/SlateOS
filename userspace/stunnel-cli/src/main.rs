@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! stunnel-cli — OurOS SSL/TLS tunneling tools
+//! stunnel-cli — SlateOS SSL/TLS tunneling tools
 //!
 //! Multi-personality: `stunnel`, `socat`, `ncat`
 
@@ -14,7 +14,7 @@ fn run_stunnel(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: stunnel [CONFIG_FILE]");
         println!();
-        println!("stunnel — SSL/TLS tunnel (OurOS).");
+        println!("stunnel — SSL/TLS tunnel (SlateOS).");
         println!();
         println!("Options:");
         println!("  -version    Show version");
@@ -23,7 +23,7 @@ fn run_stunnel(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-version") {
-        println!("stunnel 5.71 on x86_64-ouros-gnu");
+        println!("stunnel 5.71 on x86_64-slateos-gnu");
         println!("Compiled/running with OpenSSL 3.2.1 30 Jan 2024");
         println!("Threading: PTHREAD");
         println!("Sockets: POLL+SELECT");
@@ -44,7 +44,7 @@ fn run_socat(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: socat [OPTIONS] <address1> <address2>");
         println!();
-        println!("socat — multipurpose relay (OurOS).");
+        println!("socat — multipurpose relay (SlateOS).");
         println!();
         println!("Address types:");
         println!("  TCP:host:port            TCP client");
@@ -61,8 +61,8 @@ fn run_socat(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V") {
-        println!("socat version 1.8.0.0 (OurOS)");
-        println!("   running on x86_64-ouros-gnu");
+        println!("socat version 1.8.0.0 (SlateOS)");
+        println!("   running on x86_64-slateos-gnu");
         println!("features:");
         println!("  #define WITH_STDIO 1");
         println!("  #define WITH_FDNUM 1");
@@ -85,7 +85,7 @@ fn run_ncat(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: ncat [OPTIONS] [host] [port]");
         println!();
-        println!("ncat — networking utility (OurOS, from Nmap).");
+        println!("ncat — networking utility (SlateOS, from Nmap).");
         println!();
         println!("Options:");
         println!("  -l, --listen          Listen for connections");
@@ -99,7 +99,7 @@ fn run_ncat(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Ncat: Version 7.94 (OurOS)");
+        println!("Ncat: Version 7.94 (SlateOS)");
         return 0;
     }
 

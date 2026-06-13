@@ -2,5 +2,5 @@
 name = "cpio"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS cpio archive utility"
+description = "SlateOS cpio archive utility"
 [dependencies]

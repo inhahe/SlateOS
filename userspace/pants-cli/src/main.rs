@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pants-cli — OurOS Pants build system
+//! pants-cli — SlateOS Pants build system
 //!
 //! Multi-personality: `pants`
 
@@ -10,7 +10,7 @@ use std::process;
 fn run_pants(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: pants [OPTIONS] GOAL [TARGET...]");
-        println!("Pants 2.20.0 (OurOS)");
+        println!("Pants 2.20.0 (SlateOS)");
         println!();
         println!("Goals:");
         println!("  check        Type-check source code");

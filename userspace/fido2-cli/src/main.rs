@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fido2-cli — OurOS FIDO2/WebAuthn tools
+//! fido2-cli — SlateOS FIDO2/WebAuthn tools
 //!
 //! Multi-personality: `fido2-token`, `fido2-cred`, `fido2-assert`, `fido2-info`
 
@@ -19,7 +19,7 @@ fn run_fido2_token(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: fido2-token [OPTIONS] [DEVICE]");
         println!();
-        println!("fido2-token — manage FIDO2 tokens (OurOS).");
+        println!("fido2-token — manage FIDO2 tokens (SlateOS).");
         println!();
         println!("Options:");
         println!("  -L             List available tokens");
@@ -66,7 +66,7 @@ fn run_fido2_cred(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: fido2-cred -M|-V [OPTIONS] DEVICE");
         println!();
-        println!("fido2-cred — create/verify FIDO2 credentials (OurOS).");
+        println!("fido2-cred — create/verify FIDO2 credentials (SlateOS).");
         println!();
         println!("  -M              Make credential");
         println!("  -V              Verify credential");
@@ -91,7 +91,7 @@ fn run_fido2_assert(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: fido2-assert -G|-V [OPTIONS] DEVICE");
         println!();
-        println!("fido2-assert — get/verify FIDO2 assertions (OurOS).");
+        println!("fido2-assert — get/verify FIDO2 assertions (SlateOS).");
         println!();
         println!("  -G              Get assertion");
         println!("  -V              Verify assertion");
@@ -111,7 +111,7 @@ fn run_fido2_assert(args: &[String]) -> i32 {
 }
 
 fn run_fido2_info(_args: &[String]) -> i32 {
-    println!("FIDO2 library version: 1.14.0 (OurOS)");
+    println!("FIDO2 library version: 1.14.0 (SlateOS)");
     println!("FIDO2 API version: 0x01030000");
     println!();
     println!("Available transports: usb, nfc, ble, internal");

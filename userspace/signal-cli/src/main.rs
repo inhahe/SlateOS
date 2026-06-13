@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! signal-cli — OurOS Signal end-to-end encrypted messenger
+//! signal-cli — SlateOS Signal end-to-end encrypted messenger
 //!
 //! Single personality: `signal`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sig(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: signal [OPTIONS]");
-        println!("Signal (OurOS) — End-to-end encrypted messenger");
+        println!("Signal (SlateOS) — End-to-end encrypted messenger");
         println!();
         println!("Options:");
         println!("  --chat CONTACT         Open chat");
@@ -24,8 +24,8 @@ fn run_sig(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Signal Desktop 7.36.0 (OurOS)"); return 0; }
-    println!("Signal Desktop 7.36.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Signal Desktop 7.36.0 (SlateOS)"); return 0; }
+    println!("Signal Desktop 7.36.0 (SlateOS)");
     println!("  Vendor: Signal Foundation + Signal Messenger LLC (501(c)(3) nonprofit)");
     println!("  Funded: Brian Acton (WhatsApp co-founder) $50M loan Feb 2018");
     println!("  Founders: Moxie Marlinspike (Matthew Rosenfeld), Brian Acton");

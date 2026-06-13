@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! skaffold-cli — OurOS Skaffold Kubernetes development tool
+//! skaffold-cli — SlateOS Skaffold Kubernetes development tool
 //!
 //! Single personality: `skaffold`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_skaffold(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: skaffold COMMAND [OPTIONS]");
-        println!("Skaffold v2.11.1 (OurOS) — Kubernetes dev workflow tool");
+        println!("Skaffold v2.11.1 (SlateOS) — Kubernetes dev workflow tool");
         println!();
         println!("Commands:");
         println!("  init          Initialize skaffold.yaml");
@@ -33,7 +33,7 @@ fn run_skaffold(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "version") {
-        println!("Skaffold v2.11.1 (OurOS)");
+        println!("Skaffold v2.11.1 (SlateOS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("dev");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! loginctl — OurOS session and user management
+//! loginctl — SlateOS session and user management
 //!
 //! Multi-personality binary providing systemd-logind-compatible session,
 //! user, and seat management commands. Detected via argv[0]:

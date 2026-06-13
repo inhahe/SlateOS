@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! silicon — OurOS create beautiful code screenshots from terminal
+//! silicon — SlateOS create beautiful code screenshots from terminal
 //!
 //! Single personality: `silicon`
 
@@ -42,7 +42,7 @@ fn run_silicon(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("silicon 0.5.2 (OurOS)");
+        println!("silicon 0.5.2 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "--list-themes") {

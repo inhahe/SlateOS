@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bridge-cli — OurOS network bridge/bonding tools
+//! bridge-cli — SlateOS network bridge/bonding tools
 //!
 //! Multi-personality: `bridge`, `brctl`, `bondctl`
 
@@ -14,13 +14,13 @@ fn run_bridge(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: bridge [OPTIONS] OBJECT COMMAND");
         println!();
-        println!("bridge — iproute2 bridge management (OurOS).");
+        println!("bridge — iproute2 bridge management (SlateOS).");
         println!();
         println!("Objects: link, fdb, mdb, vlan, monitor");
         return 0;
     }
     if args.iter().any(|a| a == "-V") {
-        println!("bridge utility, iproute2-6.7.0 (OurOS)");
+        println!("bridge utility, iproute2-6.7.0 (SlateOS)");
         return 0;
     }
 
@@ -136,7 +136,7 @@ fn run_bondctl(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: bondctl [OPTIONS] COMMAND");
         println!();
-        println!("bondctl — network bonding management (OurOS).");
+        println!("bondctl — network bonding management (SlateOS).");
         println!();
         println!("Commands:");
         println!("  show [BOND]          Show bonding info");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rsyslog-cli — OurOS rsyslog system logging daemon
+//! rsyslog-cli — SlateOS rsyslog system logging daemon
 //!
 //! Multi-personality: `rsyslogd`, `logger`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rsyslogd(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: rsyslogd [OPTIONS]");
-        println!("rsyslogd v8.2312 (OurOS) — System logging daemon");
+        println!("rsyslogd v8.2312 (SlateOS) — System logging daemon");
         println!();
         println!("Options:");
         println!("  -f FILE           Config file (default: /etc/rsyslog.conf)");
@@ -22,7 +22,7 @@ fn run_rsyslogd(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("rsyslogd v8.2312 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("rsyslogd v8.2312 (SlateOS)"); return 0; }
     println!("rsyslogd: system logging daemon started");
     println!("  Config: /etc/rsyslog.conf");
     println!("  Modules: imuxsock, imklog, imtcp");
@@ -33,7 +33,7 @@ fn run_rsyslogd(args: &[String], _prog: &str) -> i32 {
 fn run_logger(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: logger [OPTIONS] MESSAGE");
-        println!("logger v2.39 (OurOS) — Send log message to syslog");
+        println!("logger v2.39 (SlateOS) — Send log message to syslog");
         println!();
         println!("Options:");
         println!("  -p PRIORITY       Facility.level (e.g., user.info)");

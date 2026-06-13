@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xdg-utils-cli — OurOS xdg-utils desktop integration
+//! xdg-utils-cli — SlateOS xdg-utils desktop integration
 //!
 //! Multi-personality: `xdg-open`, `xdg-mime`, `xdg-settings`, `xdg-email`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_xdg_open(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: xdg-open FILE|URL");
-        println!("xdg-open v1.2 (OurOS) — Open file or URL in preferred application");
+        println!("xdg-open v1.2 (SlateOS) — Open file or URL in preferred application");
         return 0;
     }
     let target = args.first().map(|s| s.as_str()).unwrap_or("(none)");
@@ -24,7 +24,7 @@ fn run_xdg_open(args: &[String], _prog: &str) -> i32 {
 fn run_xdg_mime(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: xdg-mime COMMAND [OPTIONS]");
-        println!("xdg-mime v1.2 (OurOS) — MIME type operations");
+        println!("xdg-mime v1.2 (SlateOS) — MIME type operations");
         println!();
         println!("Commands:");
         println!("  query filetype FILE   Query MIME type");
@@ -58,7 +58,7 @@ fn run_xdg_mime(args: &[String], _prog: &str) -> i32 {
 fn run_xdg_settings(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: xdg-settings COMMAND PROPERTY [VALUE]");
-        println!("xdg-settings v1.2 (OurOS) — Desktop settings");
+        println!("xdg-settings v1.2 (SlateOS) — Desktop settings");
         println!();
         println!("Commands:");
         println!("  get PROPERTY      Get setting value");
@@ -85,7 +85,7 @@ fn run_xdg_settings(args: &[String], _prog: &str) -> i32 {
 fn run_xdg_email(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: xdg-email [OPTIONS] ADDRESS");
-        println!("xdg-email v1.2 (OurOS) — Compose email");
+        println!("xdg-email v1.2 (SlateOS) — Compose email");
         println!();
         println!("Options:");
         println!("  --subject TEXT    Subject line");

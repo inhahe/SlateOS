@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! git — OurOS distributed version control system
+//! git — SlateOS distributed version control system
 //!
 //! Single personality: `git`
 
@@ -46,11 +46,11 @@ struct LogEntry {
 
 fn sample_log() -> Vec<LogEntry> {
     vec![
-        LogEntry { hash: "abc1234".to_string(), _author: "Dev <dev@ouros.local>".to_string(),
+        LogEntry { hash: "abc1234".to_string(), _author: "Dev <dev@slateos.local>".to_string(),
             date: "2025-05-22".to_string(), message: "Add feature X".to_string() },
-        LogEntry { hash: "def5678".to_string(), _author: "Dev <dev@ouros.local>".to_string(),
+        LogEntry { hash: "def5678".to_string(), _author: "Dev <dev@slateos.local>".to_string(),
             date: "2025-05-21".to_string(), message: "Fix bug in parser".to_string() },
-        LogEntry { hash: "ghi9012".to_string(), _author: "Dev <dev@ouros.local>".to_string(),
+        LogEntry { hash: "ghi9012".to_string(), _author: "Dev <dev@slateos.local>".to_string(),
             date: "2025-05-20".to_string(), message: "Initial commit".to_string() },
     ]
 }
@@ -97,7 +97,7 @@ fn run_git(args: Vec<String>) -> i32 {
             println!("   remote   Manage set of tracked repositories");
             0
         }
-        "--version" => { println!("git version 0.1.0 (OurOS)"); 0 }
+        "--version" => { println!("git version 0.1.0 (SlateOS)"); 0 }
         "init" => { println!("Initialized empty Git repository in .git/ (simulated)"); 0 }
         "clone" => {
             let url = cmd_args.first().map(|s| s.as_str()).unwrap_or("https://example.com/repo.git");

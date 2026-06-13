@@ -6,7 +6,7 @@
 #![allow(clippy::cast_lossless)]
 #![allow(clippy::too_many_arguments)]
 
-//! OurOS World Clock — multi-timezone clock display with analog/digital views.
+//! SlateOS World Clock — multi-timezone clock display with analog/digital views.
 //!
 //! Shows clocks for cities around the world with timezone offset, day/night
 //! indicators, time difference from local, and both analog and digital display

@@ -1,6 +1,6 @@
-//! OurOS Font Library — bitmap and outline font rendering.
+//! SlateOS Font Library — bitmap and outline font rendering.
 //!
-//! This crate provides the system font rendering infrastructure for OurOS.
+//! This crate provides the system font rendering infrastructure for SlateOS.
 //! It supports bitmap fonts with procedurally generated system glyphs,
 //! text layout with word wrapping, and glyph rendering to ARGB buffers.
 //!
@@ -890,7 +890,7 @@ fn build_system_font(style: FontStyle) -> Font {
     };
 
     Font {
-        name: String::from("OurOS Mono"),
+        name: String::from("SlateOS Mono"),
         style,
         metrics: FontMetrics {
             ascent: 14.0,
@@ -1678,7 +1678,7 @@ mod tests {
     #[test]
     fn test_system_font_creation() {
         let font = Font::system_mono();
-        assert_eq!(font.name(), "OurOS Mono");
+        assert_eq!(font.name(), "SlateOS Mono");
         assert_eq!(font.style(), FontStyle::Regular);
         assert_eq!(font.scale_factor(), 1);
     }

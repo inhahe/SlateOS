@@ -1,4 +1,4 @@
-//! OurOS Text Editor
+//! SlateOS Text Editor
 //!
 //! Graphical text editor with:
 //! - Multi-file editing with tabs

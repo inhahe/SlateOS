@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! urbackup-cli — OurOS UrBackup client/server backup
+//! urbackup-cli — SlateOS UrBackup client/server backup
 //!
 //! Multi-personality: `urbackupclientbackend`, `urbackupclientctl`, `urbackupsrv`
 
@@ -13,12 +13,12 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_urbackup_client(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: urbackupclientbackend [OPTIONS]");
-        println!("urbackupclientbackend v2.5 (OurOS) — UrBackup client daemon");
+        println!("urbackupclientbackend v2.5 (SlateOS) — UrBackup client daemon");
         println!("  --no-server    Run without server connection");
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("urbackupclientbackend v2.5 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("urbackupclientbackend v2.5 (SlateOS)"); return 0; }
     println!("urbackupclientbackend: client daemon started");
     println!("  Server: autodiscover");
     println!("  File backup: enabled");
@@ -29,7 +29,7 @@ fn run_urbackup_client(args: &[String], _prog: &str) -> i32 {
 fn run_urbackup_ctl(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: urbackupclientctl <command> [OPTIONS]");
-        println!("urbackupclientctl v2.5 (OurOS) — UrBackup client control");
+        println!("urbackupclientctl v2.5 (SlateOS) — UrBackup client control");
         println!();
         println!("Commands:");
         println!("  status              Show backup status");
@@ -39,7 +39,7 @@ fn run_urbackup_ctl(args: &[String], _prog: &str) -> i32 {
         println!("  browse-backups      List available backups");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("urbackupclientctl v2.5 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("urbackupclientctl v2.5 (SlateOS)"); return 0; }
     match args.first().map(|s| s.as_str()) {
         Some("status") => {
             println!("Status: idle");
@@ -63,12 +63,12 @@ fn run_urbackup_ctl(args: &[String], _prog: &str) -> i32 {
 fn run_urbackup_srv(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: urbackupsrv [OPTIONS]");
-        println!("urbackupsrv v2.5 (OurOS) — UrBackup server daemon");
+        println!("urbackupsrv v2.5 (SlateOS) — UrBackup server daemon");
         println!("  --daemon       Run as daemon");
         println!("  --no-consoletime  No console timestamps");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("urbackupsrv v2.5 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("urbackupsrv v2.5 (SlateOS)"); return 0; }
     println!("urbackupsrv: server started");
     println!("  Web interface: http://localhost:55414");
     println!("  Clients: 4 connected");

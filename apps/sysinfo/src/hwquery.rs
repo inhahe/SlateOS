@@ -732,7 +732,7 @@ impl StubProvider {
 impl HardwareProvider for StubProvider {
     fn query_cpu(&self) -> Result<CpuInfo, HwQueryError> {
         Ok(CpuInfo {
-            brand: "OurOS Virtual CPU @ 3.60GHz".to_string(),
+            brand: "SlateOS Virtual CPU @ 3.60GHz".to_string(),
             vendor: "GenuineIntel".to_string(),
             family: 6,
             model: 158,
@@ -806,7 +806,7 @@ impl HardwareProvider for StubProvider {
                     mount_point: "/boot/efi".to_string(),
                 },
                 PartitionInfo {
-                    label: "OurOS Root".to_string(),
+                    label: "SlateOS Root".to_string(),
                     filesystem: "ext4".to_string(),
                     capacity_gb: 500.0,
                     used_gb: 127.3,
@@ -1511,7 +1511,7 @@ mod tests {
     fn test_stub_cpu() {
         let stub = StubProvider::new();
         let cpu = stub.query_cpu().expect("stub cpu");
-        assert!(cpu.brand.contains("OurOS"));
+        assert!(cpu.brand.contains("SlateOS"));
         assert_eq!(cpu.physical_cores, 8);
         assert_eq!(cpu.logical_processors, 16);
         assert!(!cpu.features.is_empty());
@@ -1725,7 +1725,7 @@ mod tests {
     fn test_refresh_manager_with_stub() {
         let mut mgr = RefreshManager::new(Box::new(StubProvider::new()));
         let cpu = mgr.cpu();
-        assert!(cpu.brand.contains("OurOS"));
+        assert!(cpu.brand.contains("SlateOS"));
         assert_eq!(mgr.refresh_count(), 1);
 
         // Second access should be cached
@@ -1801,7 +1801,7 @@ mod tests {
         // (no sysfs on dev machine) and fall back to StubProvider
         let provider = FallbackProvider::new();
         let cpu = provider.query_cpu().expect("fallback cpu");
-        assert!(cpu.brand.contains("OurOS"));
+        assert!(cpu.brand.contains("SlateOS"));
     }
 
     #[test]

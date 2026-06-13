@@ -1,4 +1,4 @@
-//! OurOS namespace listing utility.
+//! SlateOS namespace listing utility.
 //!
 //! Displays information about Linux namespaces from `/proc/<pid>/ns/`.
 //!

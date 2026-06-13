@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! poppler — OurOS PDF rendering library utilities
+//! poppler — SlateOS PDF rendering library utilities
 //!
 //! Multi-personality: `pdftotext`, `pdfinfo`, `pdftohtml`, `pdftoppm`, `pdfimages`, `pdfseparate`, `pdfunite`
 
@@ -17,7 +17,7 @@ fn run_pdfinfo(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("pdfinfo version 24.05.0 (OurOS)");
+        println!("pdfinfo version 24.05.0 (SlateOS)");
         return 0;
     }
     let file = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("document.pdf");
@@ -25,8 +25,8 @@ fn run_pdfinfo(args: Vec<String>) -> i32 {
     println!("Title:          Example Document");
     println!("Subject:        ");
     println!("Keywords:       ");
-    println!("Author:         OurOS User");
-    println!("Creator:        OurOS Writer");
+    println!("Author:         SlateOS User");
+    println!("Creator:        SlateOS Writer");
     println!("Producer:       LibreOffice 7.6");
     println!("CreationDate:   Wed May 22 10:00:00 2025 UTC");
     println!("ModDate:        Wed May 22 10:00:00 2025 UTC");

@@ -1,4 +1,4 @@
-//! OurOS GRUB bootloader management utility.
+//! SlateOS GRUB bootloader management utility.
 //!
 //! Multi-personality binary providing:
 //! - **grub-install** (default) — install GRUB bootloader to a device
@@ -151,7 +151,7 @@ fn read_os_name(os_release_path: &str) -> String {
             return name.clone();
         }
     }
-    "OurOS".to_string()
+    "SlateOS".to_string()
 }
 
 // ============================================================================
@@ -410,7 +410,7 @@ impl Default for InstallOptions {
             target: None,
             efi_directory: None,
             boot_directory: "/boot".to_string(),
-            bootloader_id: "ouros".to_string(),
+            bootloader_id: "slateos".to_string(),
             recheck: false,
             removable: false,
             device: None,
@@ -476,7 +476,7 @@ fn parse_install_args(args: &[String]) -> Result<InstallOptions, GrubError> {
             print_install_usage();
             process::exit(0);
         } else if arg == "--version" || arg == "-V" {
-            println!("grub-install (OurOS) {VERSION}");
+            println!("grub-install (SlateOS) {VERSION}");
             process::exit(0);
         } else if arg.starts_with('-') {
             return Err(GrubError::InvalidArgs(format!("unknown option: {arg}")));
@@ -497,7 +497,7 @@ fn print_install_usage() {
     println!("  --target=TARGET        Installation target platform");
     println!("  --efi-directory=DIR    EFI system partition mount point");
     println!("  --boot-directory=DIR   Boot directory (default: /boot)");
-    println!("  --bootloader-id=ID     Bootloader identifier (default: ouros)");
+    println!("  --bootloader-id=ID     Bootloader identifier (default: slateos)");
     println!("  --recheck              Re-check device map");
     println!("  --removable            Install for removable media");
     println!("  -h, --help             Show this help");
@@ -657,7 +657,7 @@ fn parse_mkconfig_args(args: &[String]) -> Result<MkconfigOptions, GrubError> {
             print_mkconfig_usage();
             process::exit(0);
         } else if arg == "--version" || arg == "-V" {
-            println!("grub-mkconfig (OurOS) {VERSION}");
+            println!("grub-mkconfig (SlateOS) {VERSION}");
             process::exit(0);
         } else if arg.starts_with('-') {
             return Err(GrubError::InvalidArgs(format!("unknown option: {arg}")));
@@ -755,7 +755,7 @@ fn generate_linux_entries(
             format!("{os_name}, with Linux {}", kernel.version)
         };
 
-        let _ = writeln!(cfg, "menuentry '{title}' --class ouros --class os {{");
+        let _ = writeln!(cfg, "menuentry '{title}' --class slateos --class os {{");
         let _ = writeln!(cfg, "\tload_video");
         let _ = writeln!(cfg, "\tinsmod gzio");
         let _ = writeln!(cfg, "\tinsmod part_gpt");
@@ -784,7 +784,7 @@ fn generate_linux_entries(
         );
         let _ = writeln!(
             cfg,
-            "menuentry '{recovery_title}' --class ouros --class os {{"
+            "menuentry '{recovery_title}' --class slateos --class os {{"
         );
         let _ = writeln!(cfg, "\tload_video");
         let _ = writeln!(cfg, "\tinsmod gzio");
@@ -898,7 +898,7 @@ fn run_set_default_with_path(args: &[String], env_path: &str) -> Result<(), Grub
         return Ok(());
     }
     if entry == "--version" || entry == "-V" {
-        println!("grub-set-default (OurOS) {VERSION}");
+        println!("grub-set-default (SlateOS) {VERSION}");
         return Ok(());
     }
 
@@ -941,7 +941,7 @@ fn run_reboot_with_path(args: &[String], env_path: &str) -> Result<(), GrubError
         return Ok(());
     }
     if entry == "--version" || entry == "-V" {
-        println!("grub-reboot (OurOS) {VERSION}");
+        println!("grub-reboot (SlateOS) {VERSION}");
         return Ok(());
     }
 
@@ -994,7 +994,7 @@ fn parse_editenv_args(args: &[String]) -> Result<EditenvArgs, GrubError> {
         process::exit(0);
     }
     if args[0] == "--version" || args[0] == "-V" {
-        println!("grub-editenv (OurOS) {VERSION}");
+        println!("grub-editenv (SlateOS) {VERSION}");
         process::exit(0);
     }
 
@@ -1123,7 +1123,7 @@ fn parse_probe_args(args: &[String]) -> Result<ProbeOptions, GrubError> {
             print_probe_usage();
             process::exit(0);
         } else if arg == "--version" || arg == "-V" {
-            println!("grub-probe (OurOS) {VERSION}");
+            println!("grub-probe (SlateOS) {VERSION}");
             process::exit(0);
         } else if arg.starts_with('-') {
             return Err(GrubError::InvalidArgs(format!("unknown option: {arg}")));
@@ -1656,28 +1656,28 @@ mod tests {
 
     #[test]
     fn test_parse_os_release_basic() {
-        let content = "NAME=\"OurOS\"\nVERSION=\"1.0\"\nPRETTY_NAME=\"OurOS 1.0\"\n";
+        let content = "NAME=\"SlateOS\"\nVERSION=\"1.0\"\nPRETTY_NAME=\"SlateOS 1.0\"\n";
         let map = parse_os_release(content);
-        assert_eq!(map.get("NAME").map(|s| s.as_str()), Some("OurOS"));
+        assert_eq!(map.get("NAME").map(|s| s.as_str()), Some("SlateOS"));
         assert_eq!(map.get("VERSION").map(|s| s.as_str()), Some("1.0"));
         assert_eq!(
             map.get("PRETTY_NAME").map(|s| s.as_str()),
-            Some("OurOS 1.0")
+            Some("SlateOS 1.0")
         );
     }
 
     #[test]
     fn test_parse_os_release_unquoted() {
-        let content = "ID=ouros\nVERSION_ID=1.0\n";
+        let content = "ID=slateos\nVERSION_ID=1.0\n";
         let map = parse_os_release(content);
-        assert_eq!(map.get("ID").map(|s| s.as_str()), Some("ouros"));
+        assert_eq!(map.get("ID").map(|s| s.as_str()), Some("slateos"));
     }
 
     #[test]
     fn test_parse_os_release_single_quotes() {
-        let content = "NAME='OurOS'\n";
+        let content = "NAME='SlateOS'\n";
         let map = parse_os_release(content);
-        assert_eq!(map.get("NAME").map(|s| s.as_str()), Some("OurOS"));
+        assert_eq!(map.get("NAME").map(|s| s.as_str()), Some("SlateOS"));
     }
 
     #[test]
@@ -1712,7 +1712,7 @@ mod tests {
     #[test]
     fn test_read_os_name_missing_file() {
         let name = read_os_name("/nonexistent/os-release");
-        assert_eq!(name, "OurOS");
+        assert_eq!(name, "SlateOS");
     }
 
     #[test]
@@ -2276,7 +2276,7 @@ GRUB_DISABLE_OS_PROBER="true"
         assert!(opts.target.is_none());
         assert!(opts.device.is_none());
         assert_eq!(opts.boot_directory, "/boot");
-        assert_eq!(opts.bootloader_id, "ouros");
+        assert_eq!(opts.bootloader_id, "slateos");
         assert!(!opts.recheck);
         assert!(!opts.removable);
     }
@@ -2777,13 +2777,13 @@ GRUB_DISABLE_OS_PROBER="true"
         let env = GrubEnv::new();
         write_grubenv(path_str, &env).unwrap();
 
-        let args = vec!["OurOS, with Linux 5.10.0".to_string()];
+        let args = vec!["SlateOS, with Linux 5.10.0".to_string()];
         run_set_default_with_path(&args, path_str).expect("set default");
 
         let env2 = read_grubenv(path_str);
         assert_eq!(
             env2.get("saved_entry"),
-            Some("OurOS, with Linux 5.10.0")
+            Some("SlateOS, with Linux 5.10.0")
         );
 
         cleanup(&dir);
@@ -3094,11 +3094,11 @@ GRUB_DISABLE_OS_PROBER="true"
 
     #[test]
     fn test_os_release_with_spaces_in_value() {
-        let content = "PRETTY_NAME=\"OurOS 1.0 (Fancy Release)\"\n";
+        let content = "PRETTY_NAME=\"SlateOS 1.0 (Fancy Release)\"\n";
         let map = parse_os_release(content);
         assert_eq!(
             map.get("PRETTY_NAME").map(|s| s.as_str()),
-            Some("OurOS 1.0 (Fancy Release)")
+            Some("SlateOS 1.0 (Fancy Release)")
         );
     }
 

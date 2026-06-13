@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! prisma-cli — OurOS Prisma CLI
+//! prisma-cli — SlateOS Prisma CLI
 //!
 //! Single personality: `prisma`
 
@@ -11,7 +11,7 @@ fn run_prisma(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: prisma <COMMAND> [OPTIONS]");
         println!();
-        println!("Prisma ORM CLI (OurOS).");
+        println!("Prisma ORM CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  init         Set up Prisma");
@@ -24,9 +24,9 @@ fn run_prisma(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("prisma                  : 5.8.1 (OurOS)");
+        println!("prisma                  : 5.8.1 (SlateOS)");
         println!("@prisma/client          : 5.8.1");
-        println!("Current platform        : ouros-x86_64");
+        println!("Current platform        : slateos-x86_64");
         println!("Query Engine (Node-API) : libquery-engine abc123");
         return 0;
     }

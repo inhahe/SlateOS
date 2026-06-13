@@ -1,4 +1,4 @@
-//! `OurOS` Clipboard Service
+//! `SlateOS` Clipboard Service
 //!
 //! System-wide clipboard manager providing multi-format copy/paste with history.
 //! All applications communicate with this service via IPC messages to share
@@ -821,11 +821,11 @@ fn run_self_test(service: &mut ClipboardService) {
         formats: vec![
             (
                 ClipboardFormat::PlainText,
-                b"Hello, OurOS!".to_vec(),
+                b"Hello, SlateOS!".to_vec(),
             ),
             (
                 ClipboardFormat::Html,
-                b"<b>Hello</b>, OurOS!".to_vec(),
+                b"<b>Hello</b>, SlateOS!".to_vec(),
             ),
         ],
         source: SourceApp {
@@ -843,7 +843,7 @@ fn run_self_test(service: &mut ClipboardService) {
     };
     let response = service.handle_request(paste_request);
     if let ClipboardResponse::PasteOk { data, .. } = response {
-        assert_eq!(data, b"Hello, OurOS!");
+        assert_eq!(data, b"Hello, SlateOS!");
     }
 }
 

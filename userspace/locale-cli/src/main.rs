@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! locale-cli — OurOS locale/localedef/locale-gen CLI
+//! locale-cli — SlateOS locale/localedef/locale-gen CLI
 //!
 //! Multi-personality: `locale`, `localedef`, `locale-gen`
 
@@ -19,7 +19,7 @@ fn run_locale(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: locale [OPTIONS] [NAME ...]");
         println!();
-        println!("locale — get locale-specific information (OurOS).");
+        println!("locale — get locale-specific information (SlateOS).");
         println!();
         println!("Options:");
         println!("  -a, --all-locales    List all available locales");
@@ -71,7 +71,7 @@ fn run_localedef(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: localedef [OPTIONS] OUTPUT_PATH");
         println!();
-        println!("localedef — compile locale definition (OurOS).");
+        println!("localedef — compile locale definition (SlateOS).");
         println!();
         println!("Options:");
         println!("  -i, --inputfile FILE  Input file");
@@ -101,7 +101,7 @@ fn run_locale_gen(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: locale-gen [LOCALE ...]");
         println!();
-        println!("locale-gen — generate locale data (OurOS).");
+        println!("locale-gen — generate locale data (SlateOS).");
         return 0;
     }
 

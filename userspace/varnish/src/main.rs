@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! varnish — OurOS HTTP accelerator (reverse proxy cache)
+//! varnish — SlateOS HTTP accelerator (reverse proxy cache)
 //!
 //! Multi-personality: `varnishd` (daemon), `varnishlog`, `varnishstat`, `varnishadm`
 
@@ -20,7 +20,7 @@ fn run_varnishd(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("varnishd (varnish-7.5.0 revision abc1234) (OurOS)");
+        println!("varnishd (varnish-7.5.0 revision abc1234) (SlateOS)");
         return 0;
     }
     let addr = args.iter().position(|a| a == "-a")
@@ -31,8 +31,8 @@ fn run_varnishd(args: Vec<String>) -> i32 {
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("127.0.0.1:8080");
-    println!("Debug: Version: varnish-7.5.0 (OurOS)");
-    println!("Debug: Platform: OurOS,x86_64");
+    println!("Debug: Version: varnish-7.5.0 (SlateOS)");
+    println!("Debug: Platform: SlateOS,x86_64");
     println!("Debug: Child (12346) started");
     println!("Info: Child (12346) said Ready");
     println!("Notice: Listening on {}", addr);

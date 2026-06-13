@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gocd-cli — OurOS GoCD continuous delivery
+//! gocd-cli — SlateOS GoCD continuous delivery
 //!
 //! Multi-personality: `gocd-server`, `gocd-agent`
 
@@ -15,13 +15,13 @@ fn run_gocd(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "gocd-agent" => {
-                println!("gocd-agent (OurOS) — GoCD build agent");
+                println!("gocd-agent (SlateOS) — GoCD build agent");
                 println!("  --server-url URL   GoCD server URL");
                 println!("  --auto-register    Auto-register with server");
                 println!("  --environments ENV Environments to belong to");
             }
             _ => {
-                println!("gocd-server (OurOS) — GoCD continuous delivery server");
+                println!("gocd-server (SlateOS) — GoCD continuous delivery server");
                 println!("  --http-port PORT   HTTP port (default: 8153)");
                 println!("  --https-port PORT  HTTPS port (default: 8154)");
                 println!("  --config-dir DIR   Config directory");
@@ -30,17 +30,17 @@ fn run_gocd(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("GoCD v24.1.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("GoCD v24.1.0 (SlateOS)"); return 0; }
     match prog {
         "gocd-agent" => {
-            println!("GoCD Agent v24.1.0 (OurOS)");
+            println!("GoCD Agent v24.1.0 (SlateOS)");
             println!("  Status: idle");
             println!("  Server: https://gocd.example.com:8154");
             println!("  Resources: linux, docker");
             println!("  Environments: production");
         }
         _ => {
-            println!("GoCD Server v24.1.0 (OurOS)");
+            println!("GoCD Server v24.1.0 (SlateOS)");
             println!("  Dashboard: http://0.0.0.0:8153");
             println!("  Pipelines: 23 (5 building)");
             println!("  Agents: 8 (6 idle, 2 building)");

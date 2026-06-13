@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! celigo-cli — OurOS Celigo (NetSuite-centric iPaaS, San Mateo CA, private)
+//! celigo-cli — SlateOS Celigo (NetSuite-centric iPaaS, San Mateo CA, private)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_celigo(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: celigo [OPTIONS]");
-        println!("Celigo (OurOS) — integrator.io iPaaS (NetSuite + e-commerce focus, private)");
+        println!("Celigo (SlateOS) — integrator.io iPaaS (NetSuite + e-commerce focus, private)");
         println!();
         println!("Options:");
         println!("  --integrator           integrator.io (the iPaaS platform)");
@@ -22,8 +22,8 @@ fn run_celigo(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Celigo integrator.io 2024 (OurOS)"); return 0; }
-    println!("Celigo 2024 (OurOS) — integrator.io Integration Platform");
+    if args.iter().any(|a| a == "--version") { println!("Celigo integrator.io 2024 (SlateOS)"); return 0; }
+    println!("Celigo 2024 (SlateOS) — integrator.io Integration Platform");
     println!("  Vendor: Celigo, Inc. (San Mateo, CA — private)");
     println!("  Founders: Jan Arendtsz + Rico Andrade + Scott Henderson, 2006");
     println!("          founded with a focus on NetSuite-centric integrations");

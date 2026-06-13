@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! chuck-cli — OurOS ChucK audio programming language
+//! chuck-cli — SlateOS ChucK audio programming language
 //!
 //! Single personality: `chuck`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_chuck(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: chuck [OPTIONS] FILE...");
-        println!("ChucK v1.5.2 (OurOS) — Strongly-timed audio programming");
+        println!("ChucK v1.5.2 (SlateOS) — Strongly-timed audio programming");
         println!();
         println!("Options:");
         println!("  FILE.ck           Run ChucK program");
@@ -30,7 +30,7 @@ fn run_chuck(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("ChucK v1.5.2 (OurOS)");
+        println!("ChucK v1.5.2 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "--probe") {

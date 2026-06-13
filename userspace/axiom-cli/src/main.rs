@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! axiom-cli — OurOS Axiom/FriCAS computer algebra system
+//! axiom-cli — SlateOS Axiom/FriCAS computer algebra system
 //!
 //! Multi-personality: `fricas`, `axiom`
 
@@ -21,7 +21,7 @@ fn run_fricas(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("FriCAS 1.3.10 (OurOS)");
+        println!("FriCAS 1.3.10 (SlateOS)");
         println!("Based on Axiom");
         println!("SBCL 2.4.1");
         return 0;

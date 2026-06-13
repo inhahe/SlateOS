@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hotjar-cli — OurOS Hotjar (the affordable heatmaps + session replay tool — now part of Contentsquare)
+//! hotjar-cli — SlateOS Hotjar (the affordable heatmaps + session replay tool — now part of Contentsquare)
 //!
 //! Single personality: `hotjar`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_hotjar(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: hotjar [OPTIONS]");
-        println!("Hotjar (OurOS) — heatmaps + session recordings + surveys for websites");
+        println!("Hotjar (SlateOS) — heatmaps + session recordings + surveys for websites");
         println!();
         println!("Options:");
         println!("  --observe-basic        Observe Basic FREE (35 sessions/day)");
@@ -25,8 +25,8 @@ fn run_hotjar(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Hotjar 2024 (OurOS)"); return 0; }
-    println!("Hotjar 2024 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Hotjar 2024 (SlateOS)"); return 0; }
+    println!("Hotjar 2024 (SlateOS)");
     println!("  Vendor: Hotjar Ltd. (Malta — now part of Contentsquare, acquired Sep 2021)");
     println!("        Hotjar incorporated in Malta for EU/AU favorable tax regime");
     println!("        Contentsquare paid ~$700M for Hotjar (cash + stock)");

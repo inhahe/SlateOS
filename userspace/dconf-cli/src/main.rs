@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dconf-cli — OurOS dconf configuration system CLI
+//! dconf-cli — SlateOS dconf configuration system CLI
 //!
 //! Single personality: `dconf`
 
@@ -11,7 +11,7 @@ fn run_dconf(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: dconf COMMAND [ARGS]");
         println!();
-        println!("dconf — low-level configuration system (OurOS).");
+        println!("dconf — low-level configuration system (SlateOS).");
         println!();
         println!("Commands:");
         println!("  read KEY           Read key value");

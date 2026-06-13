@@ -1,4 +1,4 @@
-//! OurOS USB Device Lister
+//! SlateOS USB Device Lister
 //!
 //! Lists USB devices by reading from `/sys/bus/usb/devices/` or
 //! `/proc/usb/devices`. Includes a built-in vendor/device ID database
@@ -919,7 +919,7 @@ struct Config {
 }
 
 fn print_usage() {
-    println!("OurOS USB Device Lister v0.1.0");
+    println!("SlateOS USB Device Lister v0.1.0");
     println!();
     println!("List USB devices and their properties.");
     println!();

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! deta-cli — OurOS Deta Space CLI
+//! deta-cli — SlateOS Deta Space CLI
 //!
 //! Multi-personality: `space`, `deta`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_space(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: space COMMAND [OPTIONS]");
-        println!("Deta Space CLI 0.5.1 (OurOS)");
+        println!("Deta Space CLI 0.5.1 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  new          Create a new project");

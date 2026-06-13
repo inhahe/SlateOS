@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nmap-cli — OurOS network scanner
+//! nmap-cli — SlateOS network scanner
 //!
 //! Single personality: `nmap`
 
@@ -36,7 +36,7 @@ fn run_nmap(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V") {
-        println!("Nmap 7.94 (OurOS)");
+        println!("Nmap 7.94 (SlateOS)");
         return 0;
     }
 
@@ -48,7 +48,7 @@ fn run_nmap(args: Vec<String>) -> i32 {
     let version_detect = args.iter().any(|a| a == "-sV" || a == "-A");
     let os_detect = args.iter().any(|a| a == "-O" || a == "-A");
 
-    println!("Starting Nmap 7.94 (OurOS) at 2024-01-15 14:30 UTC");
+    println!("Starting Nmap 7.94 (SlateOS) at 2024-01-15 14:30 UTC");
     println!("Nmap scan report for {}", target);
     println!("Host is up (0.023s latency).");
     println!();

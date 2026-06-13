@@ -1,4 +1,4 @@
-// OurOS upower -- power information and management
+// SlateOS upower -- power information and management
 //
 // Multi-personality binary:
 //   upower  -- query power device information

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! geogebra-cli — OurOS GeoGebra dynamic mathematics
+//! geogebra-cli — SlateOS GeoGebra dynamic mathematics
 //!
 //! Single personality: `geogebra`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_geogebra(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: geogebra [OPTIONS] [FILE.ggb]");
-        println!("geogebra v6.0 (OurOS) — Dynamic mathematics software");
+        println!("geogebra v6.0 (SlateOS) — Dynamic mathematics software");
         println!();
         println!("Options:");
         println!("  --version         Show version");
@@ -23,7 +23,7 @@ fn run_geogebra(args: &[String], _prog: &str) -> i32 {
         println!("  3D Graphics, Probability");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("geogebra v6.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("geogebra v6.0 (SlateOS)"); return 0; }
     println!("geogebra: dynamic mathematics started");
     println!("  Algebra: symbolic CAS engine");
     println!("  Geometry: interactive constructions");

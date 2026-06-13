@@ -2,4 +2,4 @@
 name = "indexer-app"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS Background File Indexer — builds and maintains a searchable filesystem index"
+description = "SlateOS Background File Indexer — builds and maintains a searchable filesystem index"

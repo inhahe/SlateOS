@@ -41,7 +41,7 @@ option (ii) "baseline + honored extras" — on 2026-06-10, per `todo.txt`).
 
 **Context:**
 The Linux compatibility layer (`kernel/src/syscall/linux.rs`) translates the
-Linux syscall ABI for Linux binaries running on OuRoS. Linux's ABI is a
+Linux syscall ABI for Linux binaries running on SlateOS. Linux's ABI is a
 moving target across kernel versions; we need a single, defensible answer to
 "which Linux are we?" so that feature detection, version gates, and
 sibling-syscall consistency are coherent rather than ad hoc.
@@ -49,7 +49,7 @@ sibling-syscall consistency are coherent rather than ad hoc.
 **Decision:**
 - **Baseline floor: Linux 6.6.** We implement the 6.6 syscall ABI as the
   guaranteed floor. `uname(2)` reports `sysname = "Linux"` and
-  `release = "6.6.0-ouros"`.
+  `release = "6.6.0-slateos"`.
 - **Policy: "baseline + honored extras."**
   1. Everything in the 6.6 ABI is the floor.
   2. **Never accept-without-honoring:** if we accept a flag/syscall, we must
@@ -75,7 +75,7 @@ sibling-syscall consistency are coherent rather than ad hoc.
 - The release string MUST satisfy glibc's startup version gate
   (`__libc_start_main` → "FATAL: kernel too old" if leading MAJOR.MINOR is
   below glibc's build-time minimum). glibc parses only the leading integer
-  triple, so `"6.6.0-ouros"` reads as the 6.6.0 baseline.
+  triple, so `"6.6.0-slateos"` reads as the 6.6.0 baseline.
 
 **Retained post-6.6 features (fully implemented):**
 - `F_DUPFD_QUERY` (6.10).
@@ -88,7 +88,7 @@ sibling-syscall consistency are coherent rather than ad hoc.
 **Alternatives considered:**
 - *Pin to a single exact version with no extras* — rejected: needlessly drops
   cheap, fully-implemented post-6.6 conveniences that real binaries probe for.
-- *Report "OuRoS"/"0.1.0-ouros" from uname* — rejected: breaks glibc's version
+- *Report "SlateOS"/"0.1.0-slateos" from uname* — rejected: breaks glibc's version
   gate and misleads Linux feature-detection that keys off the kernel version.
 
 **Where it lives:**
@@ -257,7 +257,7 @@ It does. That shortcut is rejected.
 
 **Decision — the auxv is a Linux-ABI-only construct; the native launch
 path is never modified to produce one.**
-- **Native processes have no auxv, by design.** OuRoS native processes do
+- **Native processes have no auxv, by design.** SlateOS native processes do
   **not** receive a System V initial stack. They get argv/envp from the
   kernel via `SYS_PROCESS_GET_ARGS`, and `posix/src/crt.rs` synthesizes
   `argc/argv/envp` for `main()`. There is no `AT_*` vector anywhere in the
@@ -276,7 +276,7 @@ path is never modified to produce one.**
   AT_ENTRY, or any other AT_* value.
 
 **Rationale:**
-- This is the core Linuxulator-style isolation rule for OuRoS: Linux/SysV
+- This is the core Linuxulator-style isolation rule for SlateOS: Linux/SysV
   ABI constructs stay confined to Linux-ABI processes and the compat
   translation layer; they never bleed into native launch, native syscalls,
   or native startup. The auxv is exactly such a construct.
@@ -550,7 +550,7 @@ implementation effort and disk/network footprint explicitly excluded.
 
 **Rationale:**
 The deciding factor is **capability-based least privilege**, a core
-non-negotiable principle of OuRoS ("capability-based security from day one, no
+non-negotiable principle of SlateOS ("capability-based security from day one, no
 ambient authority"). A multi-call binary has **one on-disk identity** for every
 tool, so the kernel must grant it the **union** of every bundled tool's
 capabilities — `cat` would carry the same authority as `ifconfig`. That is
@@ -621,7 +621,7 @@ CPython, (C) GPU drivers → Mesa → Vulkan/OpenGL, (D) WINE, (E) Chromium.
 - **Port the GCC/CMake/Make toolchain (roadmap task 5031) before bash (task
   1491).** The toolchain is the prioritized next initiative.
 - **Port CPython (task 5033) *first*, then integrate fastpy (tasks 24 + 5034) on
-  top of it.** fastpy is the preferred *fast* execution path for OuRoS userspace
+  top of it.** fastpy is the preferred *fast* execution path for SlateOS userspace
   Python (it AOT-compiles Python to native code and is many times faster than
   CPython, and is maintained to be CPython-3.14-compatible). **But fastpy is not
   a standalone replacement for CPython — it depends on the CPython runtime/DLL as
@@ -650,12 +650,12 @@ co-dependency):** the operator's reasoning was "porting bash will be easier once
 the toolchain exists." The dependency is *mostly* the other way around —
 GCC/Make are built and driven *by* a shell (`configure` scripts, recipe command
 lines invoke `/bin/sh`). In practice neither strictly blocks the other here
-because OuRoS already has a kernel shell (`kshell`) and a coreutils set, and the
-toolchain itself is **cross-built on the dev host**, not self-hosted on OuRoS
-initially — so we don't need bash-on-OuRoS to *produce* the toolchain binaries.
+because SlateOS already has a kernel shell (`kshell`) and a coreutils set, and the
+toolchain itself is **cross-built on the dev host**, not self-hosted on SlateOS
+initially — so we don't need bash-on-SlateOS to *produce* the toolchain binaries.
 The conclusion (toolchain first) stands; the ordering is fine because the
 host-side cross-build sidesteps the circular dependency. A full `make` driving
-`configure` scripts *on OuRoS* will eventually want a real `/bin/sh`, at which
+`configure` scripts *on SlateOS* will eventually want a real `/bin/sh`, at which
 point bash (or a smaller POSIX sh) becomes the natural follow-on.
 
 **Alternatives considered:**
@@ -696,7 +696,7 @@ point bash (or a smaller POSIX sh) becomes the natural follow-on.
 option A and laid out the UMA/NUMA/VMA tradeoff; the operator chose A).
 
 **Context:**
-OuRoS is a single-node **UMA** system (all CPUs reach all RAM at equal latency —
+SlateOS is a single-node **UMA** system (all CPUs reach all RAM at equal latency —
 the desktop hardware we target). Linux's NUMA mempolicy family
 (`mbind`/`set_mempolicy`/`set_mempolicy_home_node`) lets a program request that
 specific regions of its address space be backed by specific NUMA *nodes*. On UMA
@@ -718,7 +718,7 @@ policy storage is built.
 - **Negligible stakes on UMA.** Only programs that call `set_mempolicy_home_node`
   (a NUMA-tuning syscall, Linux 5.17+) are affected — server software tuned for
   multi-socket boxes plus `numactl`/`libnuma`. That's **<0.1% of programs and
-  ~0% of desktop programs**; native OuRoS programs are unaffected entirely (NUMA
+  ~0% of desktop programs**; native SlateOS programs are unaffected entirely (NUMA
   mempolicy is a Linux-ABI construct).
 - **A maximizes Linux-app compatibility.** The common real sequence is
   `mbind(MPOL_BIND)` then `set_mempolicy_home_node`; returning 0 keeps that path
@@ -737,7 +737,7 @@ policy storage is built.
   practical consequence on UMA, and it breaks the common post-`mbind` success
   path.
 - **(C) per-VMA mempolicy storage** — rejected for now: substantial, bug-prone
-  machinery for zero UMA benefit. **The correct trigger to revisit is OuRoS ever
+  machinery for zero UMA benefit. **The correct trigger to revisit is SlateOS ever
   targeting real multi-node (multi-socket) hardware** — at which point C should
   be implemented *properly* (real page placement, not just errno cosmetics), and
   the faithful errnos come for free.
@@ -755,7 +755,7 @@ policy storage is built.
 
 ---
 
-## 11. /proc/sys/vm/overcommit_memory & the OuRoS memory-commit policy — build Option 5 (both strategies, configurable) now
+## 11. /proc/sys/vm/overcommit_memory & the SlateOS memory-commit policy — build Option 5 (both strategies, configurable) now
 
 **Date:** 2026-06-13 (revised same day — see "Revision" below)
 
@@ -849,7 +849,7 @@ is no good reason to defer the kernel core:
     enforcement) — depends on the capability framework (largely unbuilt). Until
     then `/proc/sys` stays read-only and the policy is set via the kernel sysctl
     mechanism.
-- **Design nuance noted (not blocking):** OuRoS "committed" currently means
+- **Design nuance noted (not blocking):** SlateOS "committed" currently means
   *eager-populate* (allocate+map all frames at `mmap`), which satisfies "no
   silent overcommit" trivially but costs up-front faulting/RAM for pages never
   touched. Linux's `overcommit_memory=2` instead does *commit accounting* (reserve
@@ -862,7 +862,7 @@ is no good reason to defer the kernel core:
 `design.txt`/CLAUDE.md mandate "Committed memory by default, **lazy allocation
 opt-in**. No silent overcommit." Linux exposes `/proc/sys/vm/overcommit_memory`
 (0 = heuristic overcommit [Linux default], 1 = always overcommit, 2 = strict
-commit accounting). OuRoS currently hardcodes strict "committed by default, no
+commit accounting). SlateOS currently hardcodes strict "committed by default, no
 overcommit" (`mm/oom.rs`) and our `/proc/sys` is read-only with the `vm/`
 subtree omitted. The question was whether to expose the file and at what value.
 Options considered: (A) expose `= 2` (honest strict value, but its biggest risk
@@ -898,7 +898,7 @@ Option 5 scope:
 - **Writes to `/proc/sys/vm/*` are gated on the privilege Linux calls
   CAP_SYS_ADMIN.** A Linux program may *write* the sysctl to request a policy
   change if it holds that privilege — but see the capability decision below for
-  how that maps onto OuRoS's native model (we do **not** import CAP_SYS_ADMIN as
+  how that maps onto SlateOS's native model (we do **not** import CAP_SYS_ADMIN as
   a native capability).
 
 **CAP_SYS_ADMIN / capability mapping (operator asked: add it to the native
@@ -906,7 +906,7 @@ capability list, or does it map to an existing capability?):**
 - **Do NOT add `CAP_SYS_ADMIN` to the native capability list in
   `roadmap-detailed.md`.** CAP_SYS_ADMIN is Linux's notorious "junk drawer" —
   one coarse token gating ~1000+ unrelated operations. Importing it as a native
-  capability would reintroduce exactly the **ambient authority** OuRoS exists to
+  capability would reintroduce exactly the **ambient authority** SlateOS exists to
   abolish ("capability-based security from day one, no ambient authority"), and
   it contradicts the project's deliberately **fine-grained** capability model
   (`fs.*`, `admin.*`, `resource.*`, `hook.*`, each a distinct risk level).
@@ -994,8 +994,8 @@ initiative. The first real fork is *how those programs run on the OS*:
   POSIX layer)*" wording. No host C cross-compiler needed; least work to a usable
   toolchain; directly hardens the Linux-ABI layer (reused by every future Linux
   app); **this is the Linux compatibility we need anyway.**
-- **Path Y** — native OuRoS/Slate port: gcc cross-compiler targeting
-  `x86_64-ouros` + a native C library. Purity path (native syscalls, capability
+- **Path Y** — native SlateOS/Slate port: gcc cross-compiler targeting
+  `x86_64-slateos` + a native C library. Purity path (native syscalls, capability
   security) but enormous per-program effort for gcc/CPython, and it does **not**
   advance Linux compat.
 - **Path Z** — hybrid: X now, Y selectively later for components where
@@ -1006,7 +1006,7 @@ the Linux-ABI layer to get a working dev environment and harden Linux
 compatibility; native-port only where it specifically pays off, later. Install
 clang (and any other needed tooling) — clang targets both `x86_64-linux-*` (to
 compile real Linux C programs that stress/harden the compat layer) and
-`x86_64-ouros` (native C, if/when Y components are pursued).
+`x86_64-slateos` (native C, if/when Y components are pursued).
 
 **Bounding principle (operator-reaffirmed) — native-first is inviolate; the
 compat layer must not leak into the native architecture.** Slate OS is a

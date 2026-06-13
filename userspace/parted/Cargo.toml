@@ -2,5 +2,5 @@
 name = "parted"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS parted utility"
+description = "SlateOS parted utility"
 [dependencies]

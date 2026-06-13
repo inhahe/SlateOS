@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! love-cli — OurOS LOVE2D game framework
+//! love-cli — SlateOS LOVE2D game framework
 //!
 //! Single personality: `love`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_love(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: love [DIR|ARCHIVE] [OPTIONS]");
-        println!("LOVE 11.5 (OurOS) — Framework for making 2D games in Lua");
+        println!("LOVE 11.5 (SlateOS) — Framework for making 2D games in Lua");
         println!();
         println!("Options:");
         println!("  DIR|ARCHIVE        Game directory or .love file");

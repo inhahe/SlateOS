@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! borg-cli — OurOS BorgBackup CLI
+//! borg-cli — SlateOS BorgBackup CLI
 //!
 //! Single personality: `borg`
 
@@ -11,7 +11,7 @@ fn run_borg(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: borg [OPTIONS] COMMAND [ARGS ...]");
         println!();
-        println!("BorgBackup — deduplicating archiver (OurOS).");
+        println!("BorgBackup — deduplicating archiver (SlateOS).");
         println!();
         println!("Commands:");
         println!("  init           Initialize repository");
@@ -38,7 +38,7 @@ fn run_borg(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("borg 1.4.0 (OurOS)");
+        println!("borg 1.4.0 (SlateOS)");
         return 0;
     }
 

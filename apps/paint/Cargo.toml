@@ -2,6 +2,6 @@
 name = "paint"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS Paint — drawing and image editing application"
+description = "SlateOS Paint — drawing and image editing application"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }

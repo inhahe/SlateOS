@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sentinelone-cli — OurOS SentinelOne Singularity XDR
+//! sentinelone-cli — SlateOS SentinelOne Singularity XDR
 //!
 //! Single personality: `sentinelone`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_s1(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sentinelone [OPTIONS] [SUBCMD]");
-        println!("SentinelOne Singularity Platform (OurOS) — AI-powered XDR");
+        println!("SentinelOne Singularity Platform (SlateOS) — AI-powered XDR");
         println!();
         println!("Options:");
         println!("  --console URL          Management console URL");
@@ -24,8 +24,8 @@ fn run_s1(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("SentinelOne Sentinel Agent 24.1.5 (OurOS)"); return 0; }
-    println!("SentinelOne Singularity Platform (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("SentinelOne Sentinel Agent 24.1.5 (SlateOS)"); return 0; }
+    println!("SentinelOne Singularity Platform (SlateOS)");
     println!("  Modules: Endpoint (EPP/EDR), Cloud, Identity, Data (Singularity DataLake)");
     println!("  Architecture: autonomous AI agent on every endpoint (works offline)");
     println!("  Storyline: ATT&CK-mapped behavioral storylines, 1-click remediation");

@@ -1,4 +1,4 @@
-//! OurOS User and Group Management Utilities
+//! SlateOS User and Group Management Utilities
 //!
 //! Multi-personality binary providing POSIX-compatible user/group management:
 //! useradd, userdel, usermod, groupadd, groupdel, groupmod, newgrp.
@@ -465,7 +465,7 @@ fn remove_home_dir(home: &str) -> Result<(), String> {
 /// Set ownership on a path. On our OS this would be a syscall; here we attempt
 /// a chown-like call. Non-fatal on failure so tools don't break in test envs.
 fn set_ownership(_path: &str, _uid: u32, _gid: u32) {
-    // On OurOS, this would invoke SYS_CHOWN. In the current build
+    // On SlateOS, this would invoke SYS_CHOWN. In the current build
     // environment we skip actual chown since it requires kernel support.
     // The directory was already created with the process's credentials.
 }
@@ -1534,7 +1534,7 @@ fn cmd_newgrp(argv: &[String]) -> i32 {
         group.name, group.gid
     ));
 
-    // On OurOS, we would invoke:
+    // On SlateOS, we would invoke:
     //   syscall(SYS_SETGID, group.gid)
     //   syscall(SYS_EXEC, shell_path, ...)
     // For now, just exit success indicating the group was validated.
@@ -1552,7 +1552,7 @@ fn detect_personality(argv0: &str) -> &str {
 }
 
 fn usage_all() {
-    write_stderr("OurOS User/Group Management Tools");
+    write_stderr("SlateOS User/Group Management Tools");
     write_stderr("");
     write_stderr("This binary responds to its invocation name:");
     write_stderr("  useradd  - add a user account");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! setBfree-cli — OurOS setBfree tonewheel organ emulator
+//! setBfree-cli — SlateOS setBfree tonewheel organ emulator
 //!
 //! Single personality: `setBfree`
 
@@ -14,7 +14,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_setBfree(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: setBfree [OPTIONS]");
-        println!("setBfree v0.8 (OurOS) — DSP tonewheel organ emulator");
+        println!("setBfree v0.8 (SlateOS) — DSP tonewheel organ emulator");
         println!();
         println!("Options:");
         println!("  -p PROGRAM    Load program file");
@@ -28,8 +28,8 @@ fn run_setBfree(args: &[String], _prog: &str) -> i32 {
         println!("  --version     Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("setBfree v0.8.12 (OurOS)"); return 0; }
-    println!("setBfree v0.8.12 (OurOS) — Tonewheel Organ");
+    if args.iter().any(|a| a == "--version") { println!("setBfree v0.8.12 (SlateOS)"); return 0; }
+    println!("setBfree v0.8.12 (SlateOS) — Tonewheel Organ");
     println!("  JACK audio: connected");
     println!("  MIDI: JACK (listening)");
     println!("  Tonewheels: 91 (A0-C8)");

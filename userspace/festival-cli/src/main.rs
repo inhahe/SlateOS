@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! festival-cli — OurOS Festival/Flite TTS CLI
+//! festival-cli — SlateOS Festival/Flite TTS CLI
 //!
 //! Multi-personality: `festival`, `flite`, `text2wave`
 
@@ -19,7 +19,7 @@ fn run_festival(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: festival [OPTIONS] [FILE ...]");
         println!();
-        println!("Festival — speech synthesis system (OurOS).");
+        println!("Festival — speech synthesis system (SlateOS).");
         println!();
         println!("Options:");
         println!("  --tts              Text-to-speech mode");
@@ -32,7 +32,7 @@ fn run_festival(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Festival Speech Synthesis System 2.5.0 (OurOS)");
+        println!("Festival Speech Synthesis System 2.5.0 (SlateOS)");
         return 0;
     }
 
@@ -43,7 +43,7 @@ fn run_festival(args: &[String]) -> i32 {
         println!("Festival server mode on port 1314");
         println!("Waiting for connections...");
     } else {
-        println!("Festival Speech Synthesis System 2.5.0 (OurOS)");
+        println!("Festival Speech Synthesis System 2.5.0 (SlateOS)");
         println!("festival> ");
     }
     0
@@ -53,7 +53,7 @@ fn run_flite(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: flite [OPTIONS] [TEXT | -f FILE]");
         println!();
-        println!("Flite — lightweight speech synthesis (OurOS).");
+        println!("Flite — lightweight speech synthesis (SlateOS).");
         println!();
         println!("Options:");
         println!("  -v VOICE      Voice (slt/kal/awb/rms)");
@@ -66,7 +66,7 @@ fn run_flite(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("flite 2.2 (OurOS)");
+        println!("flite 2.2 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "--voices") {
@@ -92,7 +92,7 @@ fn run_text2wave(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: text2wave [OPTIONS] [FILE]");
         println!();
-        println!("text2wave — Festival text to WAV (OurOS).");
+        println!("text2wave — Festival text to WAV (SlateOS).");
         println!();
         println!("Options:");
         println!("  -o FILE       Output file");

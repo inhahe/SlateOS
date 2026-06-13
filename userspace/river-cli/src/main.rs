@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! river-cli — OurOS River Wayland compositor
+//! river-cli — SlateOS River Wayland compositor
 //!
 //! Multi-personality: `river`, `riverctl`, `rivertile`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_river(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: river [OPTIONS]");
-        println!("river v0.3 (OurOS) — Dynamic tiling Wayland compositor");
+        println!("river v0.3 (SlateOS) — Dynamic tiling Wayland compositor");
         println!();
         println!("Options:");
         println!("  -c FILE           Startup config script");
@@ -21,7 +21,7 @@ fn run_river(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("river v0.3 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("river v0.3 (SlateOS)"); return 0; }
     println!("River compositor starting...");
     println!("  Backend: DRM/KMS");
     println!("  Output: HDMI-A-1 (3840x2160@60Hz)");
@@ -32,7 +32,7 @@ fn run_river(args: &[String], _prog: &str) -> i32 {
 fn run_riverctl(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: riverctl COMMAND [ARGS...]");
-        println!("riverctl v0.3 (OurOS) — River compositor control");
+        println!("riverctl v0.3 (SlateOS) — River compositor control");
         println!();
         println!("Commands:");
         println!("  map MODE MOD KEY CMD   Map key binding");
@@ -51,7 +51,7 @@ fn run_riverctl(args: &[String], _prog: &str) -> i32 {
 fn run_rivertile(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: rivertile [OPTIONS]");
-        println!("rivertile v0.3 (OurOS) — Tiling layout generator for River");
+        println!("rivertile v0.3 (SlateOS) — Tiling layout generator for River");
         println!();
         println!("Options:");
         println!("  -view-padding N   Padding around views");

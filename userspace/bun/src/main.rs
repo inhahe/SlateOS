@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bun — OurOS Bun JavaScript runtime and toolkit
+//! bun — SlateOS Bun JavaScript runtime and toolkit
 //!
 //! Multi-personality: `bun`, `bunx`
 
@@ -31,14 +31,14 @@ fn run_bun(args: Vec<String>) -> i32 {
 
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match cmd {
-        "--version" | "-v" => println!("1.1.12 (OurOS)"),
+        "--version" | "-v" => println!("1.1.12 (SlateOS)"),
         "run" => {
             let script = args.get(1).map(|s| s.as_str()).unwrap_or("index.ts");
             println!("$ bun run {}", script);
             println!("(running — simulated)");
         }
         "test" => {
-            println!("bun test v1.1.12 (OurOS)");
+            println!("bun test v1.1.12 (SlateOS)");
             println!();
             println!("test.ts:");
             println!("  basic test ... [0.50ms]");
@@ -55,7 +55,7 @@ fn run_bun(args: Vec<String>) -> i32 {
             println!("[0.05ms] bundle 1 module");
         }
         "install" | "i" => {
-            println!("bun install v1.1.12 (OurOS)");
+            println!("bun install v1.1.12 (SlateOS)");
             println!();
             println!(" + express@4.19.2");
             println!(" + typescript@5.4.5");
@@ -81,7 +81,7 @@ fn run_bun(args: Vec<String>) -> i32 {
             }
         }
         "repl" => {
-            println!("Welcome to Bun v1.1.12 (OurOS)");
+            println!("Welcome to Bun v1.1.12 (SlateOS)");
             println!("> (REPL — simulated)");
         }
         "init" | "create" | "link" | "update" | "upgrade" => println!("({} — simulated)", cmd),

@@ -1,6 +1,6 @@
-//! OurOS Window Library — compositor client for creating windows and receiving events.
+//! SlateOS Window Library — compositor client for creating windows and receiving events.
 //!
-//! This crate provides the primary API for applications to interact with the OurOS
+//! This crate provides the primary API for applications to interact with the SlateOS
 //! compositor. It handles window creation, event dispatch, rendering submission,
 //! and window lifecycle management.
 //!
@@ -1196,7 +1196,7 @@ mod tests {
 
         let mut tree = RenderTree::new();
         tree.fill_rect(0.0, 0.0, 640.0, 480.0, guitk::color::Color::rgb(30, 30, 30));
-        tree.text(10.0, 20.0, "Hello, OurOS!", guitk::color::Color::WHITE, 14.0);
+        tree.text(10.0, 20.0, "Hello, SlateOS!", guitk::color::Color::WHITE, 14.0);
 
         // Should not panic; verifies the submit path works.
         window.submit(&tree);

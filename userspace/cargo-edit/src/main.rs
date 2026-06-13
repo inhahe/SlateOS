@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cargo-edit — OurOS cargo subcommands for dependency management
+//! cargo-edit — SlateOS cargo subcommands for dependency management
 //!
 //! Multi-personality: `cargo-add`, `cargo-rm`, `cargo-upgrade`, `cargo-set-version`
 
@@ -123,7 +123,7 @@ fn run_cargo_edit(args: Vec<String>, mode: &str) -> i32 {
     }
 
     if subargs.iter().any(|a| a == "-V" || a == "--version") {
-        println!("cargo-edit 0.12.3 (OurOS)");
+        println!("cargo-edit 0.12.3 (SlateOS)");
     }
     0
 }

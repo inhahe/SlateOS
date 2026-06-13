@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! marketo-cli — OurOS Marketo Engage (Adobe-owned enterprise B2B marketing automation)
+//! marketo-cli — SlateOS Marketo Engage (Adobe-owned enterprise B2B marketing automation)
 //!
 //! Single personality: `marketo`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_marketo(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: marketo [OPTIONS]");
-        println!("Marketo Engage (OurOS) — Adobe Experience Cloud B2B marketing automation");
+        println!("Marketo Engage (SlateOS) — Adobe Experience Cloud B2B marketing automation");
         println!();
         println!("Options:");
         println!("  --growth               Growth tier (custom, mid-market)");
@@ -24,8 +24,8 @@ fn run_marketo(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Marketo 2024 (OurOS)"); return 0; }
-    println!("Marketo Engage 2024 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Marketo 2024 (SlateOS)"); return 0; }
+    println!("Marketo Engage 2024 (SlateOS)");
     println!("  Vendor: Adobe (Marketo Engage division — part of Adobe Experience Cloud)");
     println!("        San Jose, CA + San Mateo (legacy Marketo HQ)");
     println!("  Originally Marketo, Inc. — founded 2006 in San Mateo, CA");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rhino-cli — OurOS Robert McNeel Rhinoceros 3D NURBS modeler
+//! rhino-cli — SlateOS Robert McNeel Rhinoceros 3D NURBS modeler
 //!
 //! Single personality: `rhino`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rhino(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: rhino [OPTIONS] [FILE]");
-        println!("McNeel Rhinoceros 8 (OurOS) — NURBS 3D modeler with Grasshopper");
+        println!("McNeel Rhinoceros 8 (SlateOS) — NURBS 3D modeler with Grasshopper");
         println!();
         println!("Options:");
         println!("  /runscript CMD         Execute Rhino command-line script");
@@ -23,8 +23,8 @@ fn run_rhino(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("McNeel Rhinoceros 8.10 (OurOS)"); return 0; }
-    println!("McNeel Rhinoceros 8.10 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("McNeel Rhinoceros 8.10 (SlateOS)"); return 0; }
+    println!("McNeel Rhinoceros 8.10 (SlateOS)");
     println!("  Modeling: NURBS surfaces/curves, SubD, mesh, point clouds");
     println!("  Format: .3dm native + STEP/IGES/STL/OBJ/DWG/DXF/FBX (40+ formats)");
     println!("  Grasshopper: visual programming for parametric/generative design");

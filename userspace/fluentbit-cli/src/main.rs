@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fluentbit-cli — OurOS Fluent Bit log processor
+//! fluentbit-cli — SlateOS Fluent Bit log processor
 //!
 //! Single personality: `fluent-bit`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_fluentbit(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: fluent-bit [OPTIONS]");
-        println!("fluent-bit v3.0 (OurOS) — Fast log processor and forwarder");
+        println!("fluent-bit v3.0 (SlateOS) — Fast log processor and forwarder");
         println!();
         println!("Options:");
         println!("  -c FILE           Configuration file");
@@ -26,7 +26,7 @@ fn run_fluentbit(args: &[String], _prog: &str) -> i32 {
         println!("  -V                Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "-V" || a == "--version") { println!("fluent-bit v3.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "-V" || a == "--version") { println!("fluent-bit v3.0 (SlateOS)"); return 0; }
     if args.iter().any(|a| a == "--dry-run") {
         println!("Configuration validation:");
         println!("  [INPUT] tail - OK");
@@ -35,7 +35,7 @@ fn run_fluentbit(args: &[String], _prog: &str) -> i32 {
         println!("  Status: VALID");
         return 0;
     }
-    println!("Fluent Bit v3.0 (OurOS)");
+    println!("Fluent Bit v3.0 (SlateOS)");
     println!("  [INPUT]  tail.0: /var/log/syslog");
     println!("  [FILTER] grep.0: match=*error*");
     println!("  [OUTPUT] es.0: localhost:9200");

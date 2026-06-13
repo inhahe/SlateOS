@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kubectl — OurOS Kubernetes command-line tool
+//! kubectl — SlateOS Kubernetes command-line tool
 //!
 //! Single personality: `kubectl`
 
@@ -53,9 +53,9 @@ fn run_kubectl(args: Vec<String>) -> i32 {
         "version" | "--version" => {
             let short = cmd_args.iter().any(|a| a == "--short");
             if short {
-                println!("Client Version: v1.29.0 (OurOS)");
+                println!("Client Version: v1.29.0 (SlateOS)");
             } else {
-                println!("Client Version: v1.29.0 (OurOS)");
+                println!("Client Version: v1.29.0 (SlateOS)");
                 println!("Server Version: v1.29.0 (simulated)");
             }
             0
@@ -211,17 +211,17 @@ fn run_kubectl(args: Vec<String>) -> i32 {
                     println!("clusters:");
                     println!("- cluster:");
                     println!("    server: https://10.0.0.1:6443");
-                    println!("  name: ouros-cluster");
+                    println!("  name: slateos-cluster");
                     println!("contexts:");
                     println!("- context:");
-                    println!("    cluster: ouros-cluster");
+                    println!("    cluster: slateos-cluster");
                     println!("    user: admin");
-                    println!("  name: ouros-context");
-                    println!("current-context: ouros-context");
+                    println!("  name: slateos-context");
+                    println!("current-context: slateos-context");
                 }
                 "get-contexts" => {
                     println!("CURRENT   NAME             CLUSTER          USER");
-                    println!("*         ouros-context    ouros-cluster    admin");
+                    println!("*         slateos-context    slateos-cluster    admin");
                 }
                 "use-context" => {
                     let ctx = cmd_args.get(1).map(|s| s.as_str()).unwrap_or("context");

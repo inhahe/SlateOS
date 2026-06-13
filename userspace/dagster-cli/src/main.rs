@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dagster-cli — OurOS Dagster data orchestration CLI
+//! dagster-cli — SlateOS Dagster data orchestration CLI
 //!
 //! Multi-personality: `dagster`, `dagit`
 
@@ -19,7 +19,7 @@ fn run_dagster(args: &[String], is_dagit: bool) -> i32 {
     }
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: dagster COMMAND [OPTIONS]");
-        println!("Dagster 1.7.0 (OurOS)");
+        println!("Dagster 1.7.0 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  dev            Start development webserver");

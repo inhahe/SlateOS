@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pcb-rnd-cli — OurOS pcb-rnd PCB layout editor
+//! pcb-rnd-cli — SlateOS pcb-rnd PCB layout editor
 //!
 //! Single personality: `pcb-rnd`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pcb_rnd(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pcb-rnd [OPTIONS] [FILE.lht|FILE.pcb]");
-        println!("pcb-rnd v4.1 (OurOS) — Modular PCB layout editor");
+        println!("pcb-rnd v4.1 (SlateOS) — Modular PCB layout editor");
         println!();
         println!("Options:");
         println!("  --version         Show version");
@@ -24,7 +24,7 @@ fn run_pcb_rnd(args: &[String], _prog: &str) -> i32 {
         println!("  Gerber/Excellon export, netlist import");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("pcb-rnd v4.1 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("pcb-rnd v4.1 (SlateOS)"); return 0; }
     println!("pcb-rnd: PCB layout editor started");
     println!("  Layers: copper, silk, mask, paste, outline");
     println!("  Router: interactive + autorouter");

@@ -1,4 +1,4 @@
-//! OurOS `split` Utility -- Split a File into Pieces
+//! SlateOS `split` Utility -- Split a File into Pieces
 //!
 //! Splits a file into fixed-size pieces by line count, byte count, or number
 //! of output chunks.  Modeled after POSIX/GNU `split`.
@@ -608,7 +608,7 @@ fn elide_empty_files(config: &Config, count: u64) {
 // ============================================================================
 
 fn print_help() {
-    println!("OurOS split v{VERSION}");
+    println!("SlateOS split v{VERSION}");
     println!();
     println!("Split FILE into pieces. Output pieces are named PREFIXaa, PREFIXab, ...");
     println!("With no FILE, or when FILE is -, read standard input.");
@@ -654,7 +654,7 @@ fn main() {
             process::exit(0);
         }
         ParseResult::Version => {
-            println!("split (OurOS) {VERSION}");
+            println!("split (SlateOS) {VERSION}");
             process::exit(0);
         }
         ParseResult::Run(config) => {

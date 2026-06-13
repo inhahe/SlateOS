@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kstars-cli — OurOS KStars astronomy software
+//! kstars-cli — SlateOS KStars astronomy software
 //!
 //! Single personality: `kstars`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_kstars(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: kstars [OPTIONS]");
-        println!("kstars v3.7 (OurOS) — Desktop astronomy application");
+        println!("kstars v3.7 (SlateOS) — Desktop astronomy application");
         println!();
         println!("Options:");
         println!("  --date DATE       Set simulation date");
@@ -26,7 +26,7 @@ fn run_kstars(args: &[String], _prog: &str) -> i32 {
         println!("  sky catalog with 100M+ objects");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("kstars v3.7 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("kstars v3.7 (SlateOS)"); return 0; }
     println!("kstars: astronomy application started");
     println!("  Catalog: 100M+ stars, deep sky objects");
     println!("  INDI: telescope/CCD control framework");

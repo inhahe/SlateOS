@@ -2,5 +2,5 @@
 name = "expand"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS tab/space conversion utility (expand + unexpand)"
+description = "SlateOS tab/space conversion utility (expand + unexpand)"
 [dependencies]

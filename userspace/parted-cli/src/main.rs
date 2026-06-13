@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! parted-cli — OurOS GNU Parted CLI
+//! parted-cli — SlateOS GNU Parted CLI
 //!
 //! Single personality: `parted`
 
@@ -11,7 +11,7 @@ fn run_parted(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: parted [OPTIONS] [DEVICE [COMMAND [ARGS...]]]");
         println!();
-        println!("GNU Parted — partition editor (OurOS).");
+        println!("GNU Parted — partition editor (SlateOS).");
         println!();
         println!("Options:");
         println!("  -l, --list             List all block devices");
@@ -31,7 +31,7 @@ fn run_parted(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("parted (GNU parted) 3.6 (OurOS)");
+        println!("parted (GNU parted) 3.6 (SlateOS)");
         return 0;
     }
 

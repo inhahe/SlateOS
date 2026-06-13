@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! obs-studio-cli — OurOS OBS Studio streaming/recording
+//! obs-studio-cli — SlateOS OBS Studio streaming/recording
 //!
 //! Single personality: `obs`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_obs(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: obs [OPTIONS]");
-        println!("obs v30.0 (OurOS) — Open Broadcaster Software");
+        println!("obs v30.0 (SlateOS) — Open Broadcaster Software");
         println!();
         println!("Options:");
         println!("  --scene NAME      Start with scene");
@@ -27,7 +27,7 @@ fn run_obs(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("obs v30.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("obs v30.0 (SlateOS)"); return 0; }
     println!("obs: Open Broadcaster Software started");
     println!("  Video: 1920x1080 @ 60fps");
     println!("  Encoder: x264 (software)");

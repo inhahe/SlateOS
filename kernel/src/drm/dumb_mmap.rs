@@ -9,7 +9,7 @@
 //! its pages into the process.  The offset is purely a lookup key — it bears no
 //! relation to any real file position.
 //!
-//! This module is the OuRoS analogue of `drm_vma_offset_manager`: a global
+//! This module is the SlateOS analogue of `drm_vma_offset_manager`: a global
 //! table mapping a 16 KiB-aligned fake offset to the `(device index, GEM
 //! handle)` pair it stands for.  [`crate::syscall::linux`]'s `sys_mmap`
 //! intercepts an `mmap` on a `HandleKind::DrmCard` fd, looks the offset up

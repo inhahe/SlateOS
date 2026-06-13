@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! osquery-cli — OurOS osquery endpoint visibility
+//! osquery-cli — SlateOS osquery endpoint visibility
 //!
 //! Multi-personality: `osqueryi`, `osqueryd`
 
@@ -15,7 +15,7 @@ fn run_osquery(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "osqueryd" => {
-                println!("osqueryd v5.12 (OurOS) — osquery daemon");
+                println!("osqueryd v5.12 (SlateOS) — osquery daemon");
                 println!("  --config_path FILE     Config file");
                 println!("  --flagfile FILE        Flags file");
                 println!("  --database_path DIR    RocksDB path");
@@ -23,7 +23,7 @@ fn run_osquery(args: &[String], prog: &str) -> i32 {
                 println!("  --disable_events=false Enable events");
             }
             _ => {
-                println!("osqueryi v5.12 (OurOS) — Interactive osquery shell");
+                println!("osqueryi v5.12 (SlateOS) — Interactive osquery shell");
                 println!("  --json             JSON output");
                 println!("  --csv              CSV output");
                 println!("  --line             Line output");
@@ -38,10 +38,10 @@ fn run_osquery(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("osquery v5.12.1 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("osquery v5.12.1 (SlateOS)"); return 0; }
     match prog {
         "osqueryd" => {
-            println!("osqueryd v5.12.1 (OurOS)");
+            println!("osqueryd v5.12.1 (SlateOS)");
             println!("  Config: /etc/osquery/osquery.conf");
             println!("  Database: /var/osquery/osquery.db");
             println!("  Logger: filesystem");
@@ -50,7 +50,7 @@ fn run_osquery(args: &[String], prog: &str) -> i32 {
             println!("  Running...");
         }
         _ => {
-            println!("osqueryi v5.12.1 (OurOS)");
+            println!("osqueryi v5.12.1 (SlateOS)");
             println!("  Tables: 234 available");
             println!("  Example: SELECT pid, name, cmdline FROM processes WHERE uid = 0;");
             println!("    pid  | name      | cmdline");

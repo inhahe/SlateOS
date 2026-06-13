@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dbmate — OurOS lightweight database migration tool
+//! dbmate — SlateOS lightweight database migration tool
 //!
 //! Single personality: `dbmate`
 
@@ -38,7 +38,7 @@ fn run_dbmate(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("dbmate 2.12.0 (OurOS)");
+        println!("dbmate 2.12.0 (SlateOS)");
         return 0;
     }
 

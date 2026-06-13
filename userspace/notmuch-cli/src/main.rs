@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! notmuch-cli — OurOS notmuch email indexer/search CLI
+//! notmuch-cli — SlateOS notmuch email indexer/search CLI
 //!
 //! Single personality: `notmuch`
 
@@ -11,7 +11,7 @@ fn run_notmuch(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: notmuch [OPTIONS] COMMAND [ARGS ...]");
         println!();
-        println!("notmuch — fast mail indexer and searcher (OurOS).");
+        println!("notmuch — fast mail indexer and searcher (SlateOS).");
         println!();
         println!("Commands:");
         println!("  setup        First-time setup");
@@ -30,7 +30,7 @@ fn run_notmuch(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("notmuch 0.38.2 (OurOS)");
+        println!("notmuch 0.38.2 (SlateOS)");
         return 0;
     }
 

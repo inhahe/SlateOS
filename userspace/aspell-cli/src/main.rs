@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! aspell-cli — OurOS GNU Aspell spell checker CLI
+//! aspell-cli — SlateOS GNU Aspell spell checker CLI
 //!
 //! Single personality: `aspell`
 
@@ -11,7 +11,7 @@ fn run_aspell(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "help") {
         println!("Usage: aspell [OPTIONS] COMMAND");
         println!();
-        println!("GNU Aspell — spell checker (OurOS).");
+        println!("GNU Aspell — spell checker (SlateOS).");
         println!();
         println!("Commands:");
         println!("  check FILE     Interactive spell check");
@@ -32,7 +32,7 @@ fn run_aspell(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v" || a == "version") {
-        println!("@(#) International Ispell Version 3.1.20 (but really Aspell 0.60.8.1) (OurOS)");
+        println!("@(#) International Ispell Version 3.1.20 (but really Aspell 0.60.8.1) (SlateOS)");
         return 0;
     }
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! claws-mail-cli — OurOS Claws Mail lightweight email client
+//! claws-mail-cli — SlateOS Claws Mail lightweight email client
 //!
 //! Single personality: `claws-mail`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_claws_mail(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: claws-mail [OPTIONS] [MAILTO_URI]");
-        println!("claws-mail v4.2 (OurOS) — Lightweight GTK email client");
+        println!("claws-mail v4.2 (SlateOS) — Lightweight GTK email client");
         println!();
         println!("Options:");
         println!("  --compose         Compose new message");
@@ -26,7 +26,7 @@ fn run_claws_mail(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("claws-mail v4.2 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("claws-mail v4.2 (SlateOS)"); return 0; }
     if args.iter().any(|a| a == "--compose") {
         println!("claws-mail: compose window opened");
         return 0;

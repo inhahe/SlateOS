@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mdbook-cli — OurOS mdBook CLI
+//! mdbook-cli — SlateOS mdBook CLI
 //!
 //! Multi-personality: `mdbook`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mdbook(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: mdbook COMMAND [OPTIONS]");
-        println!("mdbook 0.4.37 (OurOS)");
+        println!("mdbook 0.4.37 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  init           Create a new book");

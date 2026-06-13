@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! duo-cli — OurOS Duo Security (the green-screen push-notification MFA, now Cisco-owned)
+//! duo-cli — SlateOS Duo Security (the green-screen push-notification MFA, now Cisco-owned)
 //!
 //! Single personality: `duo`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_duo(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: duo [OPTIONS]");
-        println!("Cisco Duo (OurOS) — Multi-factor authentication & zero-trust access");
+        println!("Cisco Duo (SlateOS) — Multi-factor authentication & zero-trust access");
         println!();
         println!("Options:");
         println!("  --mfa                  Multi-factor authentication");
@@ -25,8 +25,8 @@ fn run_duo(args: &[String], _prog: &str) -> i32 {
         println!("  --version               Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Cisco Duo 2024 (OurOS)"); return 0; }
-    println!("Cisco Duo 2024 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Cisco Duo 2024 (SlateOS)"); return 0; }
+    println!("Cisco Duo 2024 (SlateOS)");
     println!("  Vendor: Duo Security, Inc. → acquired by Cisco Oct 2018 for $2.35B");
     println!("          now Cisco's Duo product line under Cisco Secure Access portfolio");
     println!("  Founders: Dug Song + Jon Oberheide (Ann Arbor, MI — founded 2009)");

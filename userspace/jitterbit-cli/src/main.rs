@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! jitterbit-cli — OurOS Jitterbit (Harmony iPaaS + API mgmt, Alameda CA, PE-owned)
+//! jitterbit-cli — SlateOS Jitterbit (Harmony iPaaS + API mgmt, Alameda CA, PE-owned)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_jitterbit(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: jitterbit [OPTIONS]");
-        println!("Jitterbit (OurOS) — Harmony iPaaS + Vinyl + EDI (PE-owned, Alameda CA)");
+        println!("Jitterbit (SlateOS) — Harmony iPaaS + Vinyl + EDI (PE-owned, Alameda CA)");
         println!();
         println!("Options:");
         println!("  --harmony              Harmony (the core iPaaS)");
@@ -22,8 +22,8 @@ fn run_jitterbit(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Jitterbit Harmony 2024 (OurOS)"); return 0; }
-    println!("Jitterbit 2024 (OurOS) — Harmony Integration Platform");
+    if args.iter().any(|a| a == "--version") { println!("Jitterbit Harmony 2024 (SlateOS)"); return 0; }
+    println!("Jitterbit 2024 (SlateOS) — Harmony Integration Platform");
     println!("  Vendor: Jitterbit, Inc. (Alameda, CA — PE-owned by KKR + Vista since 2019)");
     println!("  Founders: Sharam Sasson + Ilan Sehayek, 2003");
     println!("          early data integration vendor — initially on-prem ETL");

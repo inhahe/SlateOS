@@ -1,4 +1,4 @@
-//! OurOS Disk Partition Editor
+//! SlateOS Disk Partition Editor
 //!
 //! Multi-personality binary that acts as `parted`, `partprobe`, or `partx`
 //! depending on the name used to invoke it (detected via `argv[0]`).
@@ -2422,7 +2422,7 @@ fn run_parted(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("parted (OurOS) 1.0.0");
+                println!("parted (SlateOS) 1.0.0");
                 return 0;
             }
             _ => {
@@ -2446,7 +2446,7 @@ fn run_parted(args: &[String]) -> i32 {
 
     if commands.is_empty() && !script_mode {
         // Interactive mode would read from stdin; for now just print usage
-        println!("GNU Parted (OurOS) 1.0.0");
+        println!("GNU Parted (SlateOS) 1.0.0");
         println!("Usage: parted [OPTION]... [DEVICE [COMMAND [PARAMETERS]...]...]");
         println!("Try 'parted --help' for more information.");
         return 0;
@@ -2702,7 +2702,7 @@ fn execute_parted_command(editor: &mut DiskEditor, cmd: &PartedCommand) -> i32 {
             0
         }
         PartedCommand::Version => {
-            println!("parted (OurOS) 1.0.0");
+            println!("parted (SlateOS) 1.0.0");
             0
         }
         PartedCommand::Quit => 0,
@@ -2730,7 +2730,7 @@ fn run_partprobe(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("partprobe (OurOS) 1.0.0");
+                println!("partprobe (SlateOS) 1.0.0");
                 return 0;
             }
             _ => {
@@ -2753,7 +2753,7 @@ fn run_partprobe(args: &[String]) -> i32 {
             // For now, show the format.
             println!("{}: unknown partition table", device);
         } else {
-            // Silently inform kernel - on OurOS this would be an IPC message
+            // Silently inform kernel - on SlateOS this would be an IPC message
             // to the block device service
             println!("Informing kernel about changes to {}", device);
         }
@@ -2820,7 +2820,7 @@ fn run_partx(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("partx (OurOS) 1.0.0");
+                println!("partx (SlateOS) 1.0.0");
                 return 0;
             }
             _ => {

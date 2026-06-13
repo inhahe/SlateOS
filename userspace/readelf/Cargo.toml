@@ -2,7 +2,7 @@
 name = "readelf"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS ELF binary inspector"
+description = "SlateOS ELF binary inspector"
 [dependencies]
 
 [lints]

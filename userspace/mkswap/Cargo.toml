@@ -2,5 +2,5 @@
 name = "mkswap"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS mkswap - swap management (mkswap/swapon/swapoff)"
+description = "SlateOS mkswap - swap management (mkswap/swapon/swapoff)"
 [dependencies]

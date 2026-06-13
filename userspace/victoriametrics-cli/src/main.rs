@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! victoriametrics-cli — OurOS VictoriaMetrics CLI tools
+//! victoriametrics-cli — SlateOS VictoriaMetrics CLI tools
 //!
 //! Two personalities: `vmctl`, `vmbackup`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_vmctl(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: vmctl COMMAND [OPTIONS]");
-        println!("vmctl v1.97.0 (OurOS) — VictoriaMetrics migration tool");
+        println!("vmctl v1.97.0 (SlateOS) — VictoriaMetrics migration tool");
         println!();
         println!("Commands:");
         println!("  prometheus      Migrate from Prometheus");
@@ -26,7 +26,7 @@ fn run_vmctl(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("vmctl v1.97.0 (OurOS)");
+        println!("vmctl v1.97.0 (SlateOS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("version");
@@ -51,7 +51,7 @@ fn run_vmctl(args: &[String], _prog: &str) -> i32 {
 fn run_vmbackup(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: vmbackup [OPTIONS]");
-        println!("vmbackup v1.97.0 (OurOS) — VictoriaMetrics backup tool");
+        println!("vmbackup v1.97.0 (SlateOS) — VictoriaMetrics backup tool");
         println!();
         println!("Options:");
         println!("  -storageDataPath PATH   Data directory");

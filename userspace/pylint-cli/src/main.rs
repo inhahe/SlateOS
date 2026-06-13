@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pylint-cli — OurOS Pylint CLI
+//! pylint-cli — SlateOS Pylint CLI
 //!
 //! Single personality: `pylint`
 
@@ -11,7 +11,7 @@ fn run_pylint(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pylint [OPTIONS] [FILES/MODULES...]");
         println!();
-        println!("Pylint — Python code static analyzer (OurOS).");
+        println!("Pylint — Python code static analyzer (SlateOS).");
         println!();
         println!("Options:");
         println!("  --rcfile FILE        Config file");
@@ -24,7 +24,7 @@ fn run_pylint(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("pylint 3.0.3 (OurOS)");
+        println!("pylint 3.0.3 (SlateOS)");
         return 0;
     }
 

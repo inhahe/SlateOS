@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xymon-cli — OurOS Xymon system monitor
+//! xymon-cli — SlateOS Xymon system monitor
 //!
 //! Multi-personality: `xymond`, `xymon`, `xymoncmd`
 
@@ -15,18 +15,18 @@ fn run_xymon(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "xymond" => {
-                println!("xymond (OurOS) — Xymon monitoring daemon");
+                println!("xymond (SlateOS) — Xymon monitoring daemon");
                 println!("  --listen ADDR:PORT Listen address");
                 println!("  --config DIR       Config directory");
                 println!("  --log FILE         Log file");
                 println!("  --pidfile FILE     PID file");
             }
             "xymoncmd" => {
-                println!("xymoncmd (OurOS) — Run command with Xymon env");
+                println!("xymoncmd (SlateOS) — Run command with Xymon env");
                 println!("  COMMAND ARGS       Command to run");
             }
             _ => {
-                println!("xymon (OurOS) — Xymon client status reporter");
+                println!("xymon (SlateOS) — Xymon client status reporter");
                 println!("  HOST STATUS MSG    Send status to xymond");
                 println!("  --server HOST      Xymon server address");
             }
@@ -34,10 +34,10 @@ fn run_xymon(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Xymon v4.3.30 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("Xymon v4.3.30 (SlateOS)"); return 0; }
     match prog {
         "xymond" => {
-            println!("Xymon Daemon v4.3.30 (OurOS)");
+            println!("Xymon Daemon v4.3.30 (SlateOS)");
             println!("  Listening: 0.0.0.0:1984");
             println!("  Hosts: 78 monitored");
             println!("  Tests: 456 active");
@@ -45,7 +45,7 @@ fn run_xymon(args: &[String], prog: &str) -> i32 {
             println!("  Status msgs: 2,345/h");
         }
         _ => {
-            println!("Xymon v4.3.30 (OurOS)");
+            println!("Xymon v4.3.30 (SlateOS)");
             println!("  Server: xymon.example.com:1984");
             println!("  Status: connected");
         }

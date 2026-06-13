@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! numactl — OurOS NUMA memory policy control
+//! numactl — SlateOS NUMA memory policy control
 //!
 //! Multi-personality binary for NUMA topology and memory policy management.
 //! Detected via argv[0]:

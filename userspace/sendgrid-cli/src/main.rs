@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sendgrid-cli — OurOS SendGrid email CLI
+//! sendgrid-cli — SlateOS SendGrid email CLI
 //!
 //! Single personality: `sendgrid`
 
@@ -11,7 +11,7 @@ fn run_sendgrid(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sendgrid <COMMAND> [OPTIONS]");
         println!();
-        println!("SendGrid email API CLI (OurOS).");
+        println!("SendGrid email API CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  send         Send an email");

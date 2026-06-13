@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! meshio-cli — OurOS meshio mesh I/O converter
+//! meshio-cli — SlateOS meshio mesh I/O converter
 //!
 //! Multi-personality: `meshio`, `meshio-convert`, `meshio-info`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_meshio(args: &[String], prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: {} [OPTIONS] [FILE]", prog);
-        println!("meshio v5.3 (OurOS) — Mesh I/O library and converter");
+        println!("meshio v5.3 (SlateOS) — Mesh I/O library and converter");
         println!();
         println!("Commands:");
         println!("  meshio info FILE           Show mesh information");
@@ -32,7 +32,7 @@ fn run_meshio(args: &[String], prog: &str) -> i32 {
         println!("  --version    Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("meshio v5.3.5 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("meshio v5.3.5 (SlateOS)"); return 0; }
     match prog {
         "meshio-info" => {
             let files: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
@@ -73,7 +73,7 @@ fn run_meshio(args: &[String], prog: &str) -> i32 {
                     }
                 }
             } else {
-                println!("meshio v5.3.5 (OurOS) — use --help for commands");
+                println!("meshio v5.3.5 (SlateOS) — use --help for commands");
             }
         }
     }

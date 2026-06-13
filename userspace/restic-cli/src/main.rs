@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! restic-cli — OurOS Restic backup CLI
+//! restic-cli — SlateOS Restic backup CLI
 //!
 //! Single personality: `restic`
 
@@ -11,7 +11,7 @@ fn run_restic(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: restic <COMMAND> [OPTIONS]");
         println!();
-        println!("Restic backup program (OurOS).");
+        println!("Restic backup program (SlateOS).");
         println!();
         println!("Commands:");
         println!("  init         Initialize repository");
@@ -29,7 +29,7 @@ fn run_restic(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("restic 0.16.4 (OurOS)");
+        println!("restic 0.16.4 (SlateOS)");
         return 0;
     }
 

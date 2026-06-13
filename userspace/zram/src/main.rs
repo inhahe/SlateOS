@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zram — OurOS compressed RAM block device management
+//! zram — SlateOS compressed RAM block device management
 //!
 //! Multi-personality binary for managing zram (compressed swap in RAM).
 //! Detected via argv[0]:
@@ -169,7 +169,7 @@ fn run_zramctl(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("zramctl 0.1.0 (OurOS)");
+            println!("zramctl 0.1.0 (SlateOS)");
             0
         }
         "--algorithms" | "algorithms" => {
@@ -338,7 +338,7 @@ fn run_generator(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("zram-generator 0.1.0 (OurOS)");
+            println!("zram-generator 0.1.0 (SlateOS)");
             0
         }
         "run" => generator_run(),

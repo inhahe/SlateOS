@@ -1,4 +1,4 @@
-//! OurOS IRQ balancing daemon.
+//! SlateOS IRQ balancing daemon.
 //!
 //! Multi-personality binary providing:
 //! - **irqbalance** — distribute hardware interrupts across CPUs

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! git-absorb — OurOS automatically absorb staged changes into commits
+//! git-absorb — SlateOS automatically absorb staged changes into commits
 //!
 //! Single personality: `git-absorb`
 
@@ -25,7 +25,7 @@ fn run_git_absorb(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("git-absorb 0.6.12 (OurOS)");
+        println!("git-absorb 0.6.12 (SlateOS)");
         return 0;
     }
 

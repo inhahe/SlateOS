@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! redis-cli — OurOS Redis command-line interface
+//! redis-cli — SlateOS Redis command-line interface
 //!
 //! Single personality: `redis-cli`
 
@@ -47,7 +47,7 @@ fn run_redis_cli(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("redis-cli 7.2.4 (OurOS)");
+        println!("redis-cli 7.2.4 (SlateOS)");
         return 0;
     }
 
@@ -109,7 +109,7 @@ fn run_redis_cli(args: Vec<String>) -> i32 {
                 println!("# Server");
                 println!("redis_version:7.2.4");
                 println!("redis_mode:standalone");
-                println!("os:OurOS x86_64");
+                println!("os:SlateOS x86_64");
                 println!("arch_bits:64");
                 println!("tcp_port:6379");
                 println!("uptime_in_seconds:86400");

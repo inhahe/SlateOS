@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! aquasec-cli — OurOS Aqua Security (container/Kubernetes security, Israel + Burlington MA)
+//! aquasec-cli — SlateOS Aqua Security (container/Kubernetes security, Israel + Burlington MA)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_aqua(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: aquasec [OPTIONS]");
-        println!("Aqua Security (OurOS) — container + cloud-native security platform");
+        println!("Aqua Security (SlateOS) — container + cloud-native security platform");
         println!();
         println!("Options:");
         println!("  trivy SCAN_TARGET      Trivy (Aqua's open-source scanner)");
@@ -22,8 +22,8 @@ fn run_aqua(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Aqua Security 2024 + Trivy 0.55 (OurOS)"); return 0; }
-    println!("Aqua Security 2024 (OurOS) — Cloud-Native Security");
+    if args.iter().any(|a| a == "--version") { println!("Aqua Security 2024 + Trivy 0.55 (SlateOS)"); return 0; }
+    println!("Aqua Security 2024 (SlateOS) — Cloud-Native Security");
     println!("  Vendor: Aqua Security Software Ltd. (Ramat Gan, Israel + Burlington, MA)");
     println!("  Founders: Dror Davidoff (CEO) + Amir Jerbi (CTO) + Rami Sass + Idan Plotnik, 2015");
     println!("          Dror: ex-CA Technologies + Mercury Interactive");

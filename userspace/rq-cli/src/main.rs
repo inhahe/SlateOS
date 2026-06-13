@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rq-cli — OurOS Python RQ (Redis Queue) tools
+//! rq-cli — SlateOS Python RQ (Redis Queue) tools
 //!
 //! Multi-personality: `rq`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rq(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: rq COMMAND [OPTIONS]");
-        println!("RQ (Redis Queue) 1.16.2 (OurOS)");
+        println!("RQ (Redis Queue) 1.16.2 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  worker       Start a worker");

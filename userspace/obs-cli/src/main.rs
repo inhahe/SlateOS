@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! obs-cli — OurOS OBS Studio command-line controller
+//! obs-cli — SlateOS OBS Studio command-line controller
 //!
 //! Single personality: `obs-cli`
 
@@ -46,7 +46,7 @@ fn run_obs_cli(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("obs-cli 0.5.0 (OurOS)");
+        println!("obs-cli 0.5.0 (SlateOS)");
         return 0;
     }
 
@@ -180,7 +180,7 @@ fn run_obs_cli(args: Vec<String>) -> i32 {
             0
         }
         ("version", _) => {
-            println!("OBS Studio 30.1.0 (OurOS)");
+            println!("OBS Studio 30.1.0 (SlateOS)");
             println!("  Qt: 6.6.1");
             println!("  WebSocket: 5.4.0");
             0

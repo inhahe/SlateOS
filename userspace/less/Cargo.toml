@@ -2,5 +2,5 @@
 name = "less"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS terminal pager"
+description = "SlateOS terminal pager"
 [dependencies]

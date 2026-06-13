@@ -2,6 +2,6 @@
 name = "filediff"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS File Diff/Compare Tool — side-by-side, unified, and inline diff views with merge support"
+description = "SlateOS File Diff/Compare Tool — side-by-side, unified, and inline diff views with merge support"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }

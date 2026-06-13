@@ -2,5 +2,5 @@
 name = "free"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS memory information display"
+description = "SlateOS memory information display"
 [dependencies]

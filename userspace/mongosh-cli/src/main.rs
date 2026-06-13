@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mongosh-cli — OurOS MongoDB Shell CLI
+//! mongosh-cli — SlateOS MongoDB Shell CLI
 //!
 //! Single personality: `mongosh`
 
@@ -11,7 +11,7 @@ fn run_mongosh(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mongosh [OPTIONS] [CONNECTION_STRING] [SCRIPT]");
         println!();
-        println!("MongoDB Shell (OurOS).");
+        println!("MongoDB Shell (SlateOS).");
         println!();
         println!("Options:");
         println!("  --host HOST       Server hostname (default: localhost)");
@@ -25,7 +25,7 @@ fn run_mongosh(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("mongosh 2.1.1 (OurOS)");
+        println!("mongosh 2.1.1 (SlateOS)");
         return 0;
     }
 

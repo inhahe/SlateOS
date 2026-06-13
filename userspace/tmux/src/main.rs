@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tmux — OurOS terminal multiplexer
+//! tmux — SlateOS terminal multiplexer
 //!
 //! Single personality: `tmux`
 
@@ -56,7 +56,7 @@ fn run_tmux(args: Vec<String>) -> i32 {
             println!("  -V                        Show version");
             0
         }
-        "-V" | "--version" => { println!("tmux 3.4 (OurOS)"); 0 }
+        "-V" | "--version" => { println!("tmux 3.4 (SlateOS)"); 0 }
         "new-session" | "new" => {
             let name = cmd_args.iter().position(|a| a == "-s")
                 .and_then(|i| cmd_args.get(i + 1))

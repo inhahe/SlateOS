@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! riverside-cli — OurOS Riverside.fm remote podcast/video recording
+//! riverside-cli — SlateOS Riverside.fm remote podcast/video recording
 //!
 //! Single personality: `riverside`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rv(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: riverside [COMMAND] [OPTIONS]");
-        println!("Riverside.fm (OurOS) — Studio-quality remote recording");
+        println!("Riverside.fm (SlateOS) — Studio-quality remote recording");
         println!();
         println!("Commands:");
         println!("  new                    Start new recording session");
@@ -27,8 +27,8 @@ fn run_rv(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Riverside.fm v2.0 (OurOS)"); return 0; }
-    println!("Riverside.fm (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Riverside.fm v2.0 (SlateOS)"); return 0; }
+    println!("Riverside.fm (SlateOS)");
     println!("  Recording: Local on each guest's device (then uploaded), uncompressed");
     println!("  Quality: Up to 4K video, 48 kHz uncompressed audio per track");
     println!("  Magic Clips: AI auto-detects highlight-worthy moments");

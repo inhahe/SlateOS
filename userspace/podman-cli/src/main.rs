@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! podman-cli — OurOS Podman rootless container CLI
+//! podman-cli — SlateOS Podman rootless container CLI
 //!
 //! Single personality: `podman`
 
@@ -33,11 +33,11 @@ fn run_podman(args: Vec<String>) -> i32 {
     match cmd {
         "version" => {
             println!("Client:       Podman Engine");
-            println!("Version:      5.0.0 (OurOS)");
+            println!("Version:      5.0.0 (SlateOS)");
             println!("API Version:  5.0.0");
             println!("Go Version:   go1.21.6");
             println!("Built:        Thu Jan 15 2024");
-            println!("OS/Arch:      ouros/amd64");
+            println!("OS/Arch:      slateos/amd64");
             0
         }
         "ps" => {
@@ -88,7 +88,7 @@ fn run_podman(args: Vec<String>) -> i32 {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("info");
             if sub == "info" {
                 println!("host:");
-                println!("  os: OurOS");
+                println!("  os: SlateOS");
                 println!("  arch: amd64");
                 println!("  cpus: 4");
                 println!("  memTotal: 8589934592");

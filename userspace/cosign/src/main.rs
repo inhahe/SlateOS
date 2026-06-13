@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cosign — OurOS container signing and verification
+//! cosign — SlateOS container signing and verification
 //!
 //! Single personality: `cosign`
 
@@ -38,7 +38,7 @@ fn run_cosign(args: Vec<String>) -> i32 {
             println!("| \\___/\\ | \\__/ |      |_____  |");
             println!(" \\_____/ \\______/       _____| |");
             println!("                       |_______|");
-            println!("cosign v2.2.4 (OurOS)");
+            println!("cosign v2.2.4 (SlateOS)");
         }
         "generate-key-pair" => {
             println!("Enter password for private key:");

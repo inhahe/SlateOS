@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! salesforce-cli — OurOS Salesforce CRM platform (sf / sfdx CLI)
+//! salesforce-cli — SlateOS Salesforce CRM platform (sf / sfdx CLI)
 //!
 //! Single personality: `salesforce`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sf(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: salesforce [OPTIONS] [SUBCMD]");
-        println!("Salesforce Platform (OurOS) — CRM + Lightning Platform");
+        println!("Salesforce Platform (SlateOS) — CRM + Lightning Platform");
         println!();
         println!("Options:");
         println!("  sf org login web       Authenticate to org");
@@ -24,8 +24,8 @@ fn run_sf(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Salesforce CLI sf v2.69.6 / Spring '25 release (OurOS)"); return 0; }
-    println!("Salesforce Platform (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Salesforce CLI sf v2.69.6 / Spring '25 release (SlateOS)"); return 0; }
+    println!("Salesforce Platform (SlateOS)");
     println!("  Clouds: Sales, Service, Marketing (Pardot), Commerce, Experience,");
     println!("          Industries, Data Cloud, Slack, Mulesoft, Tableau, Heroku");
     println!("  Platform: Lightning (Aura + LWC), Visualforce (legacy), Apex (Java-like)");

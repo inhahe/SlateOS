@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ccze-cli — OurOS ccze log colorizer
+//! ccze-cli — SlateOS ccze log colorizer
 //!
 //! Single personality: `ccze`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ccze(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ccze [OPTIONS]");
-        println!("ccze v0.2 (OurOS) — Log colorizer");
+        println!("ccze v0.2 (SlateOS) — Log colorizer");
         println!();
         println!("Options:");
         println!("  -A, --raw-ansi    Raw ANSI output");
@@ -26,7 +26,7 @@ fn run_ccze(args: &[String], _prog: &str) -> i32 {
         println!("  tail -f /var/log/syslog | ccze -A");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("ccze v0.2 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("ccze v0.2 (SlateOS)"); return 0; }
     if args.iter().any(|a| a == "-l" || a == "--list") {
         println!("Available plugins:");
         println!("  syslog, httpd, postfix, squid, vsftpd, procmail,");

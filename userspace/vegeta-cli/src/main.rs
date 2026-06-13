@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vegeta-cli — OurOS Vegeta HTTP load testing tool
+//! vegeta-cli — SlateOS Vegeta HTTP load testing tool
 //!
 //! Multi-personality: `vegeta`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_vegeta(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: vegeta COMMAND [OPTIONS]");
-        println!("Vegeta 12.11.1 (OurOS) — HTTP load testing tool");
+        println!("Vegeta 12.11.1 (SlateOS) — HTTP load testing tool");
         println!();
         println!("Commands:");
         println!("  attack       Send HTTP requests at a steady rate");

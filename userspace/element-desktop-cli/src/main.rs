@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! element-desktop-cli — OurOS Element Matrix client
+//! element-desktop-cli — SlateOS Element Matrix client
 //!
 //! Single personality: `element-desktop`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_element(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: element-desktop [OPTIONS]");
-        println!("element-desktop v1.11 (OurOS) — Matrix client");
+        println!("element-desktop v1.11 (SlateOS) — Matrix client");
         println!();
         println!("Options:");
         println!("  --hidden          Start hidden");
@@ -22,7 +22,7 @@ fn run_element(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("element-desktop v1.11 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("element-desktop v1.11 (SlateOS)"); return 0; }
     println!("element-desktop: Matrix client started");
     println!("  Homeserver: matrix.org");
     println!("  Rooms: 15 joined");

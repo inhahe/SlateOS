@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! passwd-cli — OurOS passwd/chage CLI
+//! passwd-cli — SlateOS passwd/chage CLI
 //!
 //! Multi-personality: `passwd`, `chage`, `chsh`, `chfn`
 
@@ -19,7 +19,7 @@ fn run_passwd(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: passwd [OPTIONS] [USER]");
         println!();
-        println!("passwd — change user password (OurOS).");
+        println!("passwd — change user password (SlateOS).");
         println!();
         println!("Options:");
         println!("  -l, --lock         Lock account");

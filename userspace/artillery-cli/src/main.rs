@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! artillery-cli — OurOS Artillery load testing CLI
+//! artillery-cli — SlateOS Artillery load testing CLI
 //!
 //! Single personality: `artillery`
 
@@ -11,7 +11,7 @@ fn run_artillery(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: artillery <COMMAND> [OPTIONS]");
         println!();
-        println!("Artillery load testing CLI (OurOS).");
+        println!("Artillery load testing CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  run          Run a test");
@@ -21,7 +21,7 @@ fn run_artillery(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("artillery 2.0.6 (OurOS)");
+        println!("artillery 2.0.6 (SlateOS)");
         return 0;
     }
 

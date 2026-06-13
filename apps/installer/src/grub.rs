@@ -1,7 +1,7 @@
 //! GRUB integration for dual-boot scenarios.
 //!
 //! Detects existing GRUB installations and adds/removes/updates a menu entry
-//! for OurOS alongside any existing Linux (or other) entries. The module never
+//! for SlateOS alongside any existing Linux (or other) entries. The module never
 //! modifies `grub.cfg` directly — it writes a numbered script in `/etc/grub.d/`
 //! and then invokes `update-grub` (or `grub2-mkconfig`) to regenerate the
 //! master configuration.
@@ -30,9 +30,9 @@ pub enum GrubError {
     GrubNotFound,
     /// The GRUB configuration directory or file is not writable.
     ConfigNotWritable(String),
-    /// An OurOS entry already exists when trying to install a new one.
+    /// An SlateOS entry already exists when trying to install a new one.
     EntryAlreadyExists,
-    /// No OurOS entry exists when trying to update or remove one.
+    /// No SlateOS entry exists when trying to update or remove one.
     EntryNotFound,
     /// Running `update-grub` / `grub2-mkconfig` failed.
     UpdateFailed(String),
@@ -47,8 +47,8 @@ impl fmt::Display for GrubError {
         match self {
             Self::GrubNotFound => write!(f, "no GRUB installation found"),
             Self::ConfigNotWritable(p) => write!(f, "GRUB config not writable: {p}"),
-            Self::EntryAlreadyExists => write!(f, "OurOS GRUB entry already exists"),
-            Self::EntryNotFound => write!(f, "OurOS GRUB entry not found"),
+            Self::EntryAlreadyExists => write!(f, "SlateOS GRUB entry already exists"),
+            Self::EntryNotFound => write!(f, "SlateOS GRUB entry not found"),
             Self::UpdateFailed(msg) => write!(f, "GRUB update failed: {msg}"),
             Self::InvalidPath(p) => write!(f, "invalid path: {p}"),
             Self::Io(e) => write!(f, "I/O error: {e}"),
@@ -116,7 +116,7 @@ pub struct GrubConfig {
 // Menu entry types
 // ============================================================================
 
-/// Strategy for booting OurOS from GRUB.
+/// Strategy for booting SlateOS from GRUB.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GrubEntryType {
     /// Chainload the Limine EFI bootloader (recommended for UEFI systems).
@@ -125,13 +125,13 @@ pub enum GrubEntryType {
     Direct,
 }
 
-/// A GRUB menu entry for OurOS.
+/// A GRUB menu entry for SlateOS.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrubEntry {
-    /// Menu entry title shown in GRUB (e.g. "OurOS 1.0").
+    /// Menu entry title shown in GRUB (e.g. "SlateOS 1.0").
     pub title: String,
     /// Path to the kernel binary or Limine EFI binary, relative to the root
-    /// partition (e.g. `/EFI/ouros/limine.efi` or `/boot/kernel.elf`).
+    /// partition (e.g. `/EFI/slateos/limine.efi` or `/boot/kernel.elf`).
     pub kernel_path: String,
     /// GRUB device for the root partition (e.g. `(hd0,gpt3)`).
     pub root_partition: String,
@@ -150,10 +150,10 @@ pub struct GrubEntry {
 // ============================================================================
 
 /// Name of the script file we place in `/etc/grub.d/`.
-pub const CUSTOM_SCRIPT_NAME: &str = "40_ouros";
+pub const CUSTOM_SCRIPT_NAME: &str = "40_slateos";
 
 /// Marker embedded inside our generated script so we can reliably identify it.
-const OUROS_MARKER: &str = "### OurOS GRUB entry — managed by OurOS installer ###";
+const SLATEOS_MARKER: &str = "### SlateOS GRUB entry — managed by SlateOS installer ###";
 
 /// Generate the GRUB `menuentry` text for the given [`GrubEntry`].
 ///
@@ -221,7 +221,7 @@ fn generate_direct_entry(entry: &GrubEntry) -> String {
     out
 }
 
-/// Generate the full `/etc/grub.d/40_ouros` script content for the given entry.
+/// Generate the full `/etc/grub.d/40_slateos` script content for the given entry.
 ///
 /// The script is a standard GRUB custom-entry executable: it prints the menu
 /// entry to stdout so that `update-grub` / `grub2-mkconfig` can incorporate it.
@@ -229,7 +229,7 @@ pub fn generate_custom_script(entry: &GrubEntry) -> String {
     let menu_entry = generate_entry(entry);
     let mut script = String::with_capacity(512);
     script.push_str("#!/bin/sh\n");
-    script.push_str(&format!("{OUROS_MARKER}\n"));
+    script.push_str(&format!("{SLATEOS_MARKER}\n"));
     script.push_str("exec tail -n +3 \"$0\"\n");
     script.push_str(&menu_entry);
     script
@@ -457,10 +457,10 @@ pub fn extract_uuid(text: &str) -> Option<&str> {
 // GrubInstaller — entry lifecycle management
 // ============================================================================
 
-/// Manages the lifecycle of the OurOS GRUB menu entry.
+/// Manages the lifecycle of the SlateOS GRUB menu entry.
 ///
 /// All mutations go through a numbered script in `/etc/grub.d/` (default:
-/// `40_ouros`).  The installer never modifies `grub.cfg` directly.
+/// `40_slateos`).  The installer never modifies `grub.cfg` directly.
 pub struct GrubInstaller {
     /// Path to the custom-script directory (`/etc/grub.d/`).
     custom_dir: PathBuf,
@@ -479,7 +479,7 @@ impl GrubInstaller {
         self.custom_dir.join(CUSTOM_SCRIPT_NAME)
     }
 
-    /// Install a new GRUB entry for OurOS.
+    /// Install a new GRUB entry for SlateOS.
     ///
     /// Fails with [`GrubError::EntryAlreadyExists`] if the custom script file
     /// is already present.
@@ -509,7 +509,7 @@ impl GrubInstaller {
         Ok(())
     }
 
-    /// Remove the OurOS GRUB entry.
+    /// Remove the SlateOS GRUB entry.
     ///
     /// Fails with [`GrubError::EntryNotFound`] if the script does not exist.
     pub fn uninstall(&self) -> Result<(), GrubError> {
@@ -521,7 +521,7 @@ impl GrubInstaller {
         Ok(())
     }
 
-    /// Update an existing OurOS entry with new parameters.
+    /// Update an existing SlateOS entry with new parameters.
     ///
     /// Fails with [`GrubError::EntryNotFound`] if the script does not exist.
     pub fn update(&self, entry: &GrubEntry) -> Result<(), GrubError> {
@@ -535,7 +535,7 @@ impl GrubInstaller {
         Ok(())
     }
 
-    /// Check whether our custom-script file exists and contains the OurOS
+    /// Check whether our custom-script file exists and contains the SlateOS
     /// marker.
     pub fn verify(&self) -> Result<bool, GrubError> {
         let path = self.script_path();
@@ -543,7 +543,7 @@ impl GrubInstaller {
             return Ok(false);
         }
         let contents = fs::read_to_string(&path)?;
-        Ok(contents.contains(OUROS_MARKER))
+        Ok(contents.contains(SLATEOS_MARKER))
     }
 }
 
@@ -670,8 +670,8 @@ mod tests {
 
     fn sample_entry_chainload() -> GrubEntry {
         GrubEntry {
-            title: "OurOS 1.0".into(),
-            kernel_path: "/EFI/ouros/limine.efi".into(),
+            title: "SlateOS 1.0".into(),
+            kernel_path: "/EFI/slateos/limine.efi".into(),
             root_partition: "(hd0,gpt1)".into(),
             uuid: "ABCD-1234".into(),
             initrd_path: None,
@@ -682,7 +682,7 @@ mod tests {
 
     fn sample_entry_direct() -> GrubEntry {
         GrubEntry {
-            title: "OurOS 1.0".into(),
+            title: "SlateOS 1.0".into(),
             kernel_path: "/boot/kernel.elf".into(),
             root_partition: "(hd0,gpt3)".into(),
             uuid: "a1b2c3d4-e5f6-7890-abcd-ef1234567890".into(),
@@ -699,12 +699,12 @@ mod tests {
         let entry = sample_entry_chainload();
         let text = generate_entry(&entry);
 
-        assert!(text.contains("menuentry \"OurOS 1.0\""));
+        assert!(text.contains("menuentry \"SlateOS 1.0\""));
         assert!(text.contains("insmod chain"));
         assert!(text.contains("insmod part_gpt"));
         assert!(text.contains("insmod fat"));
         assert!(text.contains("search --no-floppy --fs-uuid --set=root ABCD-1234"));
-        assert!(text.contains("chainloader /EFI/ouros/limine.efi"));
+        assert!(text.contains("chainloader /EFI/slateos/limine.efi"));
         assert!(text.starts_with("menuentry"));
         assert!(text.ends_with("}\n"));
     }
@@ -726,7 +726,7 @@ mod tests {
         let entry = sample_entry_direct();
         let text = generate_entry(&entry);
 
-        assert!(text.contains("menuentry \"OurOS 1.0\""));
+        assert!(text.contains("menuentry \"SlateOS 1.0\""));
         assert!(text.contains("insmod multiboot2"));
         assert!(text.contains(
             "search --no-floppy --fs-uuid --set=root a1b2c3d4-e5f6-7890-abcd-ef1234567890"
@@ -770,7 +770,7 @@ mod tests {
         let script = generate_custom_script(&entry);
 
         assert!(script.starts_with("#!/bin/sh\n"));
-        assert!(script.contains(OUROS_MARKER));
+        assert!(script.contains(SLATEOS_MARKER));
         assert!(script.contains("exec tail"));
         assert!(script.contains("menuentry"));
     }
@@ -936,7 +936,7 @@ mod tests {
         make_grub_tree(
             &tmp,
             "boot/grub/grub.cfg",
-            "set timeout=7\nset default=\"OurOS\"\n",
+            "set timeout=7\nset default=\"SlateOS\"\n",
         );
         fs::create_dir_all(tmp.join("etc/grub.d")).unwrap();
         fs::create_dir_all(tmp.join("etc/default")).unwrap();
@@ -948,7 +948,7 @@ mod tests {
 
         let cfg = parse_grub_config(&tmp).expect("should parse");
         assert_eq!(cfg.timeout, 7);
-        assert_eq!(cfg.default_entry, "OurOS");
+        assert_eq!(cfg.default_entry, "SlateOS");
         assert!(cfg.os_prober_enabled);
     }
 
@@ -982,8 +982,8 @@ mod tests {
         assert!(installer.verify().expect("verify should not error"));
 
         let contents = fs::read_to_string(installer.script_path()).unwrap();
-        assert!(contents.contains(OUROS_MARKER));
-        assert!(contents.contains("chainloader /EFI/ouros/limine.efi"));
+        assert!(contents.contains(SLATEOS_MARKER));
+        assert!(contents.contains("chainloader /EFI/slateos/limine.efi"));
     }
 
     #[test]
@@ -1032,12 +1032,12 @@ mod tests {
         installer.install(&entry1).unwrap();
 
         let mut entry2 = sample_entry_chainload();
-        entry2.title = "OurOS 2.0".into();
+        entry2.title = "SlateOS 2.0".into();
         installer.update(&entry2).expect("update should succeed");
 
         let contents = fs::read_to_string(installer.script_path()).unwrap();
-        assert!(contents.contains("OurOS 2.0"));
-        assert!(!contents.contains("OurOS 1.0"));
+        assert!(contents.contains("SlateOS 2.0"));
+        assert!(!contents.contains("SlateOS 1.0"));
     }
 
     #[test]
@@ -1091,7 +1091,7 @@ mod tests {
     /// guard) because this is test code and cleanup is optional.
     fn tempdir() -> PathBuf {
         let mut base = std::env::temp_dir();
-        base.push(format!("ouros_grub_test_{}", std::process::id()));
+        base.push(format!("slateos_grub_test_{}", std::process::id()));
         // Append a counter to avoid collisions between tests running in the
         // same process.
         use std::sync::atomic::{AtomicU64, Ordering};

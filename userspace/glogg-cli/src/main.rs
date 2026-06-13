@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! glogg-cli — OurOS glogg fast log explorer
+//! glogg-cli — SlateOS glogg fast log explorer
 //!
 //! Single personality: `glogg`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_glogg(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: glogg [OPTIONS] [FILE...]");
-        println!("glogg v1.1 (OurOS) — Fast smart log explorer");
+        println!("glogg v1.1 (SlateOS) — Fast smart log explorer");
         println!();
         println!("Options:");
         println!("  --multi           Open multiple files in tabs");
@@ -23,7 +23,7 @@ fn run_glogg(args: &[String], _prog: &str) -> i32 {
         println!("  filtering view, handles multi-GB files efficiently");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("glogg v1.1 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("glogg v1.1 (SlateOS)"); return 0; }
     println!("glogg: log explorer started");
     println!("  Search: regular expressions");
     println!("  Follow: auto-refresh on file changes");

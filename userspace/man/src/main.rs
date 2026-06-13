@@ -1,6 +1,6 @@
-//! OurOS `man` -- Manual Page Viewer
+//! SlateOS `man` -- Manual Page Viewer
 //!
-//! Displays manual pages for OurOS commands, syscalls, configuration files, and
+//! Displays manual pages for SlateOS commands, syscalls, configuration files, and
 //! other system documentation.  Supports the standard troff-subset formatting
 //! directives (.TH, .SH, .SS, .B, .I, .TP, .PP, .br, .nf/.fi) and renders
 //! them with ANSI colour on the terminal.
@@ -633,7 +633,7 @@ fn read_proc_value(path: &str) -> Option<usize> {
 
 /// Check whether stdout is connected to a terminal.
 fn stdout_is_tty() -> bool {
-    // On OurOS we check /proc/self/fd/1 type, but a simple heuristic: if we
+    // On SlateOS we check /proc/self/fd/1 type, but a simple heuristic: if we
     // can read terminal size we are probably on a tty.
     read_proc_value("/sys/tty/rows").is_some()
         || read_proc_value("/proc/self/tty_rows").is_some()
@@ -1034,7 +1034,7 @@ enum Mode {
 fn print_help() {
     println!("Usage: man [OPTIONS] [SECTION] NAME");
     println!();
-    println!("Display manual pages for OurOS commands and system interfaces.");
+    println!("Display manual pages for SlateOS commands and system interfaces.");
     println!();
     println!("Options:");
     println!("  -k KEYWORD    Search page names and descriptions (apropos)");
@@ -1174,7 +1174,7 @@ fn main() {
             print_help();
         }
         Mode::Version => {
-            println!("man (OurOS) {VERSION}");
+            println!("man (SlateOS) {VERSION}");
         }
         Mode::Display => {
             cmd_display(&args.name, args.section, args.show_all);

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! just-cli — OurOS just command runner
+//! just-cli — SlateOS just command runner
 //!
 //! Single personality: `just`
 
@@ -11,7 +11,7 @@ fn run_just(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: just [OPTIONS] [RECIPE [ARGS...]]");
         println!();
-        println!("just — a command runner (OurOS).");
+        println!("just — a command runner (SlateOS).");
         println!();
         println!("Options:");
         println!("  -l, --list           List recipes");
@@ -24,7 +24,7 @@ fn run_just(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("just 1.23.0 (OurOS)");
+        println!("just 1.23.0 (SlateOS)");
         return 0;
     }
 

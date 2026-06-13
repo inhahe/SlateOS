@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! snowflake-cli — OurOS Snowflake cloud data platform
+//! snowflake-cli — SlateOS Snowflake cloud data platform
 //!
 //! Single personality: `snowflake`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sf(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: snowflake [OPTIONS] [SUBCMD]");
-        println!("Snowflake Data Cloud (OurOS) — Cloud data warehouse + lakehouse + AI");
+        println!("Snowflake Data Cloud (SlateOS) — Cloud data warehouse + lakehouse + AI");
         println!();
         println!("Options:");
         println!("  --account ACCT         Account locator");
@@ -25,8 +25,8 @@ fn run_sf(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Snowflake CLI 2.7.0 / Account 8.27 (OurOS)"); return 0; }
-    println!("Snowflake Data Cloud (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Snowflake CLI 2.7.0 / Account 8.27 (SlateOS)"); return 0; }
+    println!("Snowflake Data Cloud (SlateOS)");
     println!("  Architecture: separated compute/storage; multi-cluster shared data");
     println!("  Languages: SQL (ANSI), Snowpark (Python/Java/Scala), JavaScript UDFs");
     println!("  Clouds: AWS, Azure, GCP — cross-cloud replication");

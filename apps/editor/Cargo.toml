@@ -2,6 +2,6 @@
 name = "editor"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS Text Editor — graphical text editor with syntax highlighting"
+description = "SlateOS Text Editor — graphical text editor with syntax highlighting"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }

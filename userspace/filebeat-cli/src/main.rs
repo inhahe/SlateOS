@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! filebeat-cli — OurOS Filebeat log shipper
+//! filebeat-cli — SlateOS Filebeat log shipper
 //!
 //! Single personality: `filebeat`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_filebeat(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: filebeat COMMAND [OPTIONS]");
-        println!("filebeat v8.12 (OurOS) — Lightweight log shipper");
+        println!("filebeat v8.12 (SlateOS) — Lightweight log shipper");
         println!();
         println!("Commands:");
         println!("  run               Run filebeat");
@@ -70,7 +70,7 @@ fn run_filebeat(args: &[String], _prog: &str) -> i32 {
             println!("  Index template loaded.");
             println!("  Dashboards loaded: 12");
         }
-        "version" | "--version" => println!("filebeat v8.12 (OurOS)"),
+        "version" | "--version" => println!("filebeat v8.12 (SlateOS)"),
         _ => println!("filebeat {}: completed", cmd),
     }
     0

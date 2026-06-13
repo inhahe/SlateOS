@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! abstruse-cli — OurOS Abstruse CI/CD
+//! abstruse-cli — SlateOS Abstruse CI/CD
 //!
 //! Single personality: `abstruse`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_abstruse(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: abstruse [COMMAND] [OPTIONS]");
-        println!("Abstruse CI v2.8 (OurOS) — Distributed CI/CD platform");
+        println!("Abstruse CI v2.8 (SlateOS) — Distributed CI/CD platform");
         println!();
         println!("Commands:");
         println!("  server             Start Abstruse server");
@@ -29,8 +29,8 @@ fn run_abstruse(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Abstruse CI v2.8.0 (OurOS)"); return 0; }
-    println!("Abstruse CI v2.8.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Abstruse CI v2.8.0 (SlateOS)"); return 0; }
+    println!("Abstruse CI v2.8.0 (SlateOS)");
     println!("  Server: http://0.0.0.0:6500");
     println!("  Workers: 3 connected");
     println!("  Repos: 12");

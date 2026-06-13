@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! mailersend-cli — OurOS MailerSend transactional email personality CLI.
+//! mailersend-cli — SlateOS MailerSend transactional email personality CLI.
 
 use std::env;
 use std::process;
@@ -254,7 +254,7 @@ fn run_mailersend(args: &[String], prog: &str) -> i32 {
     match args[0].as_str() {
         "help" | "--help" | "-h" => { print_help(prog); 0 }
         "version" | "--version" | "-V" => {
-            println!("{prog} 0.1.0 (OurOS personality CLI)"); 0
+            println!("{prog} 0.1.0 (SlateOS personality CLI)"); 0
         }
         "about" => { print_about(); 0 }
         "products" => { print_products(); 0 }

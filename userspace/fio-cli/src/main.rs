@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fio-cli — OurOS fio flexible I/O tester
+//! fio-cli — SlateOS fio flexible I/O tester
 //!
 //! Single personality: `fio`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_fio(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: fio [OPTIONS] [JOBFILE...]");
-        println!("fio 3.37 (OurOS) — Flexible I/O tester");
+        println!("fio 3.37 (SlateOS) — Flexible I/O tester");
         println!();
         println!("Options:");
         println!("  --name=JOB           Job name");
@@ -35,7 +35,7 @@ fn run_fio(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("fio-3.37 (OurOS)");
+        println!("fio-3.37 (SlateOS)");
         return 0;
     }
     println!("fio: Starting I/O benchmark...");

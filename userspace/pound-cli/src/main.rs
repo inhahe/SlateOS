@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pound-cli — OurOS Pound reverse proxy
+//! pound-cli — SlateOS Pound reverse proxy
 //!
 //! Multi-personality: `pound`, `poundctl`
 
@@ -15,14 +15,14 @@ fn run_pound(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "poundctl" => {
-                println!("poundctl (OurOS) — Pound control interface");
+                println!("poundctl (SlateOS) — Pound control interface");
                 println!("  -c SOCKET          Control socket");
                 println!("  -L N               List listeners/services");
                 println!("  -B N M             Enable/disable backend");
                 println!("  -S N               Session dump");
             }
             _ => {
-                println!("Pound v4.11 (OurOS) — Reverse proxy and load balancer");
+                println!("Pound v4.11 (SlateOS) — Reverse proxy and load balancer");
                 println!("  -f FILE            Config file");
                 println!("  -c                 Check configuration");
                 println!("  -v                 Verbose");
@@ -32,7 +32,7 @@ fn run_pound(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version" || a == "-V") { println!("Pound v4.11.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version" || a == "-V") { println!("Pound v4.11.0 (SlateOS)"); return 0; }
     match prog {
         "poundctl" => {
             println!("Pound Status:");
@@ -41,7 +41,7 @@ fn run_pound(args: &[String], prog: &str) -> i32 {
             println!("  Active sessions: 45");
         }
         _ => {
-            println!("Pound v4.11.0 (OurOS)");
+            println!("Pound v4.11.0 (SlateOS)");
             println!("  Listeners: 2 (HTTP + HTTPS)");
             println!("  Services: 3");
             println!("  Backends: 6 (all alive)");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! iscsi-cli — OurOS iSCSI initiator/target tools
+//! iscsi-cli — SlateOS iSCSI initiator/target tools
 //!
 //! Multi-personality: `iscsiadm`, `tgtadm`, `targetcli`
 
@@ -14,7 +14,7 @@ fn run_iscsiadm(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: iscsiadm [OPTIONS]");
         println!();
-        println!("iscsiadm — iSCSI initiator admin (OurOS).");
+        println!("iscsiadm — iSCSI initiator admin (SlateOS).");
         println!();
         println!("Options:");
         println!("  -m, --mode <mode>       discovery|node|session|iface");
@@ -26,7 +26,7 @@ fn run_iscsiadm(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("iscsiadm version 2.1.9 (OurOS)");
+        println!("iscsiadm version 2.1.9 (SlateOS)");
         return 0;
     }
 
@@ -35,20 +35,20 @@ fn run_iscsiadm(args: &[String]) -> i32 {
 
     match mode {
         "discovery" => {
-            println!("192.168.1.200:3260,1 iqn.2024-01.com.ouros:storage.lun0");
-            println!("192.168.1.200:3260,1 iqn.2024-01.com.ouros:storage.lun1");
+            println!("192.168.1.200:3260,1 iqn.2024-01.com.slateos:storage.lun0");
+            println!("192.168.1.200:3260,1 iqn.2024-01.com.slateos:storage.lun1");
         }
         "session" => {
-            println!("tcp: [1] 192.168.1.200:3260,1 iqn.2024-01.com.ouros:storage.lun0 (non-flash)");
+            println!("tcp: [1] 192.168.1.200:3260,1 iqn.2024-01.com.slateos:storage.lun0 (non-flash)");
         }
         "node" => {
-            println!("192.168.1.200:3260,1 iqn.2024-01.com.ouros:storage.lun0");
+            println!("192.168.1.200:3260,1 iqn.2024-01.com.slateos:storage.lun0");
             if args.iter().any(|a| a == "-l" || a == "--login") {
-                println!("Logging in to [iface: default, target: iqn.2024-01.com.ouros:storage.lun0, portal: 192.168.1.200,3260]");
+                println!("Logging in to [iface: default, target: iqn.2024-01.com.slateos:storage.lun0, portal: 192.168.1.200,3260]");
                 println!("Login to [iface: default, ... portal: 192.168.1.200,3260] successful.");
             }
             if args.iter().any(|a| a == "-u" || a == "--logout") {
-                println!("Logging out of session [sid: 1, target: iqn.2024-01.com.ouros:storage.lun0, portal: 192.168.1.200,3260]");
+                println!("Logging out of session [sid: 1, target: iqn.2024-01.com.slateos:storage.lun0, portal: 192.168.1.200,3260]");
                 println!("Logout of [sid: 1, ... portal: 192.168.1.200,3260] successful.");
             }
         }
@@ -61,12 +61,12 @@ fn run_targetcli(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: targetcli [PATH] [COMMAND]");
         println!();
-        println!("targetcli — Linux-IO target configuration (OurOS).");
+        println!("targetcli — Linux-IO target configuration (SlateOS).");
         println!("Interactive or scripted mode.");
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("targetcli 2.1.57 (OurOS)");
+        println!("targetcli 2.1.57 (SlateOS)");
         return 0;
     }
 
@@ -80,7 +80,7 @@ fn run_targetcli(args: &[String]) -> i32 {
         println!("  | o- pscsi .................................................. [Storage Objects: 0]");
         println!("  | o- ramdisk ................................................ [Storage Objects: 0]");
         println!("  o- iscsi ............................................................ [Targets: 1]");
-        println!("  | o- iqn.2024-01.com.ouros:storage ..................................... [TPGs: 1]");
+        println!("  | o- iqn.2024-01.com.slateos:storage ..................................... [TPGs: 1]");
         println!("  |   o- tpg1 .............................................. [no-gen-acls, no-auth]");
         println!("  |     o- acls .......................................................... [ACLs: 1]");
         println!("  |     o- luns .......................................................... [LUNs: 1]");

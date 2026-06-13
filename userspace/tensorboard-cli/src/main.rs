@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tensorboard-cli — OurOS TensorBoard CLI
+//! tensorboard-cli — SlateOS TensorBoard CLI
 //!
 //! Single personality: `tensorboard`
 
@@ -11,7 +11,7 @@ fn run_tensorboard(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: tensorboard <COMMAND> [OPTIONS]");
         println!();
-        println!("TensorBoard visualization toolkit CLI (OurOS).");
+        println!("TensorBoard visualization toolkit CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  serve        Start TensorBoard server");
@@ -21,7 +21,7 @@ fn run_tensorboard(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("TensorBoard 2.16.0 (OurOS)");
+        println!("TensorBoard 2.16.0 (SlateOS)");
         return 0;
     }
 

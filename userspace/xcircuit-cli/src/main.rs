@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xcircuit-cli — OurOS XCircuit schematic editor
+//! xcircuit-cli — SlateOS XCircuit schematic editor
 //!
 //! Single personality: `xcircuit`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_xcircuit(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: xcircuit [OPTIONS] [FILE...]");
-        println!("XCircuit v3.10 (OurOS) — Publication-quality schematic editor");
+        println!("XCircuit v3.10 (SlateOS) — Publication-quality schematic editor");
         println!();
         println!("Options:");
         println!("  -2             Two-page mode");
@@ -26,8 +26,8 @@ fn run_xcircuit(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("XCircuit v3.10.30 (OurOS)"); return 0; }
-    println!("XCircuit v3.10.30 (OurOS) — Schematic Editor");
+    if args.iter().any(|a| a == "--version") { println!("XCircuit v3.10.30 (SlateOS)"); return 0; }
+    println!("XCircuit v3.10.30 (SlateOS) — Schematic Editor");
     println!("  Loading library: analog.lps");
     println!("  Loading library: digital.lps");
     println!("  Schematic: amplifier.ps");

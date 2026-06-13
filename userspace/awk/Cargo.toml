@@ -2,5 +2,5 @@
 name = "awk"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS awk pattern-action text processor"
+description = "SlateOS awk pattern-action text processor"
 [dependencies]

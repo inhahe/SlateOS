@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ltspice-cli — OurOS LTspice circuit simulator
+//! ltspice-cli — SlateOS LTspice circuit simulator
 //!
 //! Multi-personality: `ltspice`
 
@@ -17,7 +17,7 @@ fn run_ltspice(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("LTspice XVII (24.0.12) (OurOS)");
+        println!("LTspice XVII (24.0.12) (SlateOS)");
         return 0;
     }
     let batch = args.iter().any(|a| a == "-b");

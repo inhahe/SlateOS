@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! polkit-gnome-cli — OurOS GNOME PolicyKit authentication agent
+//! polkit-gnome-cli — SlateOS GNOME PolicyKit authentication agent
 //!
 //! Single personality: `polkit-gnome-authentication-agent-1`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_agent(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: polkit-gnome-authentication-agent-1");
-        println!("GNOME PolicyKit authentication agent (OurOS)");
+        println!("GNOME PolicyKit authentication agent (SlateOS)");
         println!();
         println!("Runs as session daemon. Shows GTK dialog when");
         println!("applications request elevated privileges.");

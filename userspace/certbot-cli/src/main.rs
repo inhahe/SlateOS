@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! certbot-cli — OurOS Let's Encrypt certificate manager
+//! certbot-cli — SlateOS Let's Encrypt certificate manager
 //!
 //! Single personality: `certbot`
 
@@ -39,7 +39,7 @@ fn run_certbot(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("certbot 2.9.0 (OurOS)");
+        println!("certbot 2.9.0 (SlateOS)");
         return 0;
     }
 

@@ -1,4 +1,4 @@
-// OurOS mkswap - swap management (mkswap/swapon/swapoff)
+// SlateOS mkswap - swap management (mkswap/swapon/swapoff)
 //
 // Multi-personality binary:
 //   mkswap  - create swap area on device/file
@@ -20,7 +20,7 @@ use std::fmt;
 const SWAP_MAGIC: &[u8; 10] = b"SWAPSPACE2";
 const SWAP_MAGIC_OFFSET: usize = 4086; // page_size - 10 for 4K page
 const SWAP_MAGIC_OFFSET_16K: usize = 16374; // 16KiB page - 10
-const PAGE_SIZE: u32 = 16384; // 16 KiB pages for OurOS
+const PAGE_SIZE: u32 = 16384; // 16 KiB pages for SlateOS
 const MIN_SWAP_SIZE: u64 = 10 * PAGE_SIZE as u64;
 const MAX_LABEL_LEN: usize = 16;
 const UUID_LEN: usize = 16;
@@ -604,7 +604,7 @@ fn format_size_kb(kb: u64, use_bytes: bool) -> Vec<u8> {
 fn cmd_mkswap(args: &MkswapArgs) -> i32 {
     if args.show_help {
         print_out(b"Usage: mkswap [options] device [size]\n\n");
-        print_out(b"Set up a Linux/OurOS swap area.\n\n");
+        print_out(b"Set up a Linux/SlateOS swap area.\n\n");
         print_out(b"Options:\n");
         print_out(b"  -L, --label LABEL    specify swap label\n");
         print_out(b"  -U, --uuid UUID      specify UUID\n");
@@ -618,7 +618,7 @@ fn cmd_mkswap(args: &MkswapArgs) -> i32 {
     }
 
     if args.show_version {
-        print_out(b"mkswap (OurOS util-linux) 1.0.0\n");
+        print_out(b"mkswap (SlateOS util-linux) 1.0.0\n");
         return 0;
     }
 
@@ -714,7 +714,7 @@ fn cmd_swapon(args: &SwaponArgs) -> i32 {
     }
 
     if args.show_version {
-        print_out(b"swapon (OurOS util-linux) 1.0.0\n");
+        print_out(b"swapon (SlateOS util-linux) 1.0.0\n");
         return 0;
     }
 
@@ -836,7 +836,7 @@ fn cmd_swapoff(args: &SwapoffArgs) -> i32 {
     }
 
     if args.show_version {
-        print_out(b"swapoff (OurOS util-linux) 1.0.0\n");
+        print_out(b"swapoff (SlateOS util-linux) 1.0.0\n");
         return 0;
     }
 

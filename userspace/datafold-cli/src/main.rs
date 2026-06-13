@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! datafold-cli — OurOS Datafold (data diff + data-aware CI for dbt, NYC)
+//! datafold-cli — SlateOS Datafold (data diff + data-aware CI for dbt, NYC)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_datafold(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: datafold [OPTIONS]");
-        println!("Datafold (OurOS) — data diff + data-aware CI for dbt + SQL changes");
+        println!("Datafold (SlateOS) — data diff + data-aware CI for dbt + SQL changes");
         println!();
         println!("Options:");
         println!("  diff                   Cross-database data diff (open source)");
@@ -21,8 +21,8 @@ fn run_datafold(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Datafold 2024 (OurOS)"); return 0; }
-    println!("Datafold 2024 (OurOS) — Data Diff + Data-Aware CI");
+    if args.iter().any(|a| a == "--version") { println!("Datafold 2024 (SlateOS)"); return 0; }
+    println!("Datafold 2024 (SlateOS) — Data Diff + Data-Aware CI");
     println!("  Vendor: Datafold (Brooklyn, NYC + remote)");
     println!("  Founders: Gleb Mezhanskiy (CEO) + Olha Hrytsay + Itai Kafalkov, 2020");
     println!("          Gleb: ex-Lyft (Sr Data Eng, ran ETL for Marketplace) + Phantom Auto");

@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! sanity-cli — OurOS personality CLI for Sanity.io, the structured-content platform.
+//! sanity-cli — SlateOS personality CLI for Sanity.io, the structured-content platform.
 
 use std::env;
 use std::process;

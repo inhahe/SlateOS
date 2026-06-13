@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kakoune — OurOS modal code editor
+//! kakoune — SlateOS modal code editor
 //!
 //! Single personality: `kak`
 
@@ -27,7 +27,7 @@ fn run_kak(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-version") {
-        println!("Kakoune v2024.05.22 (OurOS)");
+        println!("Kakoune v2024.05.22 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "-l") {
@@ -42,7 +42,7 @@ fn run_kak(args: Vec<String>) -> i32 {
 
     let files: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
     if files.is_empty() {
-        println!("Kakoune v2024.05.22 (OurOS) — modal code editor");
+        println!("Kakoune v2024.05.22 (SlateOS) — modal code editor");
         println!("(TUI launched — simulated)");
     } else {
         for f in &files {

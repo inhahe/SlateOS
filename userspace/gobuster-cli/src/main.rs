@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gobuster-cli — OurOS Gobuster directory/DNS brute-forcer
+//! gobuster-cli — SlateOS Gobuster directory/DNS brute-forcer
 //!
 //! Single personality: `gobuster`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gobuster(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gobuster [MODE] [OPTIONS]");
-        println!("Gobuster v3.6 (OurOS) — Directory/file & DNS brute-forcer");
+        println!("Gobuster v3.6 (SlateOS) — Directory/file & DNS brute-forcer");
         println!();
         println!("Modes:");
         println!("  dir            Directory/file enumeration");
@@ -32,8 +32,8 @@ fn run_gobuster(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Gobuster v3.6.0 (OurOS)"); return 0; }
-    println!("Gobuster v3.6.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Gobuster v3.6.0 (SlateOS)"); return 0; }
+    println!("Gobuster v3.6.0 (SlateOS)");
     println!("  Mode: dir");
     println!("  URL: http://target.local");
     println!("  Wordlist: /usr/share/wordlists/dirb/common.txt");

@@ -1,4 +1,4 @@
-//! `OurOS` Slides
+//! `SlateOS` Slides
 //!
 //! A presentation/slideshow application with:
 //! - Slide model with background color, title, subtitle, body text, bullet points

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! omnisphere-cli — OurOS Spectrasonics Omnisphere flagship synth
+//! omnisphere-cli — SlateOS Spectrasonics Omnisphere flagship synth
 //!
 //! Single personality: `omnisphere`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_omni(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: omnisphere [OPTIONS] [PATCH]");
-        println!("Spectrasonics Omnisphere 2.8 (OurOS) — Flagship hybrid synthesizer");
+        println!("Spectrasonics Omnisphere 2.8 (SlateOS) — Flagship hybrid synthesizer");
         println!();
         println!("Options:");
         println!("  --load FILE            Load .prt_omn patch");
@@ -22,8 +22,8 @@ fn run_omni(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Spectrasonics Omnisphere 2.8.5d (OurOS)"); return 0; }
-    println!("Spectrasonics Omnisphere 2.8.5d (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Spectrasonics Omnisphere 2.8.5d (SlateOS)"); return 0; }
+    println!("Spectrasonics Omnisphere 2.8.5d (SlateOS)");
     println!("  Core library: 14,000+ patches, 60+ GB sound sources");
     println!("  Synthesis: Multi-mode (sample-playback + Synth oscillators)");
     println!("  Hardware sync: 75+ hardware synths via Hardware Library");

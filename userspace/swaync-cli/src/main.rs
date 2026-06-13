@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! swaync-cli — OurOS SwayNotificationCenter
+//! swaync-cli — SlateOS SwayNotificationCenter
 //!
 //! Multi-personality: `swaync`, `swaync-client`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_swaync(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: swaync [OPTIONS]");
-        println!("swaync v0.10 (OurOS) — Sway Notification Center daemon");
+        println!("swaync v0.10 (SlateOS) — Sway Notification Center daemon");
         println!();
         println!("Options:");
         println!("  -s FILE           Style CSS file");
@@ -21,7 +21,7 @@ fn run_swaync(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("swaync v0.10 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("swaync v0.10 (SlateOS)"); return 0; }
     println!("SwayNotificationCenter daemon starting...");
     println!("  Config: ~/.config/swaync/config.json");
     println!("  Style: ~/.config/swaync/style.css");
@@ -34,7 +34,7 @@ fn run_swaync(args: &[String], _prog: &str) -> i32 {
 fn run_swaync_client(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: swaync-client [OPTIONS]");
-        println!("swaync-client v0.10 (OurOS) — SwayNC control client");
+        println!("swaync-client v0.10 (SlateOS) — SwayNC control client");
         println!();
         println!("Options:");
         println!("  -t                Toggle notification center");

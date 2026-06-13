@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! traefik — OurOS cloud-native edge router
+//! traefik — SlateOS cloud-native edge router
 //!
 //! Single personality: `traefik`
 
@@ -38,7 +38,7 @@ fn run_traefik(args: Vec<String>) -> i32 {
         println!("Codename:     beaufort");
         println!("Go version:   go1.22.2");
         println!("Built:        2025-05-22T00:00:00Z");
-        println!("OS/Arch:      ouros/amd64");
+        println!("OS/Arch:      slateos/amd64");
         return 0;
     }
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lark-cli — OurOS Lark (ByteDance super-app: chat + docs + sheets + video + email)
+//! lark-cli — SlateOS Lark (ByteDance super-app: chat + docs + sheets + video + email)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_lark(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lark [OPTIONS]");
-        println!("Lark (OurOS) — ByteDance's all-in-one work super-app (chat + docs + meetings + email + base)");
+        println!("Lark (SlateOS) — ByteDance's all-in-one work super-app (chat + docs + meetings + email + base)");
         println!();
         println!("Options:");
         println!("  --starter              Starter — free for up to 50 users");
@@ -23,8 +23,8 @@ fn run_lark(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Lark 2024 (OurOS)"); return 0; }
-    println!("Lark 2024 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Lark 2024 (SlateOS)"); return 0; }
+    println!("Lark 2024 (SlateOS)");
     println!("  Vendor: ByteDance Ltd. (Beijing, China — private)");
     println!("  Original: Feishu, launched 2017 inside ByteDance to manage its own ~150K employees globally");
     println!("           ByteDance + Toutiao + Douyin + TikTok grew so fast Zhang Yiming wanted custom tooling");

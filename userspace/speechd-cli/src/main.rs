@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! speechd-cli — OurOS Speech Dispatcher text-to-speech
+//! speechd-cli — SlateOS Speech Dispatcher text-to-speech
 //!
 //! Multi-personality: `speech-dispatcher`, `spd-say`, `spd-conf`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_dispatcher(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: speech-dispatcher [OPTIONS]");
-        println!("speech-dispatcher v0.11 (OurOS) — Speech synthesis daemon");
+        println!("speech-dispatcher v0.11 (SlateOS) — Speech synthesis daemon");
         println!();
         println!("Options:");
         println!("  -d, --daemon      Run as daemon");
@@ -22,7 +22,7 @@ fn run_dispatcher(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("speech-dispatcher v0.11 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("speech-dispatcher v0.11 (SlateOS)"); return 0; }
     println!("speech-dispatcher: TTS daemon started");
     println!("  Modules: espeak-ng, pico, festival, flite");
     println!("  Default voice: espeak-ng en-us");
@@ -33,7 +33,7 @@ fn run_dispatcher(args: &[String], _prog: &str) -> i32 {
 fn run_say(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: spd-say [OPTIONS] TEXT");
-        println!("spd-say v0.11 (OurOS) — Say text through Speech Dispatcher");
+        println!("spd-say v0.11 (SlateOS) — Say text through Speech Dispatcher");
         println!();
         println!("Options:");
         println!("  -r RATE           Speaking rate (-100 to 100)");
@@ -45,7 +45,7 @@ fn run_say(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("spd-say v0.11 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("spd-say v0.11 (SlateOS)"); return 0; }
     let text: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
     println!("spd-say: speaking '{}'", text.join(" "));
     0
@@ -54,10 +54,10 @@ fn run_say(args: &[String], _prog: &str) -> i32 {
 fn run_conf(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: spd-conf [OPTIONS]");
-        println!("spd-conf v0.11 (OurOS) — Speech Dispatcher configuration");
+        println!("spd-conf v0.11 (SlateOS) — Speech Dispatcher configuration");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("spd-conf v0.11 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("spd-conf v0.11 (SlateOS)"); return 0; }
     println!("spd-conf: configuration wizard started");
     0
 }

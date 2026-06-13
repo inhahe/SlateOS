@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! librenms-cli — OurOS LibreNMS network monitoring
+//! librenms-cli — SlateOS LibreNMS network monitoring
 //!
 //! Multi-personality: `lnms`, `librenms-service`
 
@@ -15,12 +15,12 @@ fn run_librenms(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "librenms-service" => {
-                println!("librenms-service (OurOS) — LibreNMS dispatcher service");
+                println!("librenms-service (SlateOS) — LibreNMS dispatcher service");
                 println!("  -g GROUP    Poller group");
                 println!("  -t THREADS  Thread count");
             }
             _ => {
-                println!("lnms v24.5 (OurOS) — LibreNMS CLI");
+                println!("lnms v24.5 (SlateOS) — LibreNMS CLI");
                 println!("  device:add HOST       Add device");
                 println!("  device:remove HOST    Remove device");
                 println!("  device:poll HOST      Poll device");
@@ -33,8 +33,8 @@ fn run_librenms(args: &[String], prog: &str) -> i32 {
         println!("  --version             Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("LibreNMS v24.5.0 (OurOS)"); return 0; }
-    println!("LibreNMS v24.5.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("LibreNMS v24.5.0 (SlateOS)"); return 0; }
+    println!("LibreNMS v24.5.0 (SlateOS)");
     println!("  Devices: 100 (95 up, 5 down)");
     println!("  Ports: 2,345 interfaces");
     println!("  Sensors: 890");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! birdfont-cli — OurOS BirdFont font editor
+//! birdfont-cli — SlateOS BirdFont font editor
 //!
 //! Single personality: `birdfont`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_birdfont(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: birdfont [OPTIONS] [FILE.bf|.otf|.ttf]");
-        println!("birdfont v4.33 (OurOS) — Font editor");
+        println!("birdfont v4.33 (SlateOS) — Font editor");
         println!();
         println!("Options:");
         println!("  --version         Show version");
@@ -24,7 +24,7 @@ fn run_birdfont(args: &[String], _prog: &str) -> i32 {
         println!("  export to TTF/OTF/SVG/EOT");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("birdfont v4.33 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("birdfont v4.33 (SlateOS)"); return 0; }
     println!("birdfont: font editor started");
     println!("  Tools: pen, bezier, point, freehand");
     println!("  Grid: adjustable, snap to grid");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! openocd-cli — OurOS on-chip debugger
+//! openocd-cli — SlateOS on-chip debugger
 //!
 //! Multi-personality: `openocd`, `st-flash`, `st-info`
 
@@ -19,7 +19,7 @@ fn run_openocd(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: openocd [OPTIONS]");
         println!();
-        println!("openocd — Open On-Chip Debugger (OurOS).");
+        println!("openocd — Open On-Chip Debugger (SlateOS).");
         println!();
         println!("Options:");
         println!("  -f FILE         Use configuration file");
@@ -30,7 +30,7 @@ fn run_openocd(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Open On-Chip Debugger 0.12.0 (OurOS)");
+        println!("Open On-Chip Debugger 0.12.0 (SlateOS)");
         return 0;
     }
 
@@ -54,7 +54,7 @@ fn run_st_flash(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: st-flash [OPTIONS] COMMAND [FILE] [ADDR] [SIZE]");
         println!();
-        println!("st-flash — STMicroelectronics flash tool (OurOS).");
+        println!("st-flash — STMicroelectronics flash tool (SlateOS).");
         println!();
         println!("Commands: read, write, erase, reset");
         println!();
@@ -69,7 +69,7 @@ fn run_st_flash(args: &[String]) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("write");
     let file = args.get(1).map(|s| s.as_str()).unwrap_or("firmware.bin");
 
-    println!("st-flash 1.8.0 (OurOS)");
+    println!("st-flash 1.8.0 (SlateOS)");
     match cmd {
         "write" => {
             println!("Flash page at addr: 0x08000000 erased");

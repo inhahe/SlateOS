@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! inxi-cli — OurOS inxi system information
+//! inxi-cli — SlateOS inxi system information
 //!
 //! Single personality: `inxi`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_inxi(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: inxi [OPTIONS]");
-        println!("inxi v3.3 (OurOS) — Full-featured system information");
+        println!("inxi v3.3 (SlateOS) — Full-featured system information");
         println!();
         println!("Options:");
         println!("  -F             Full output");
@@ -28,9 +28,9 @@ fn run_inxi(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("inxi v3.3 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("inxi v3.3 (SlateOS)"); return 0; }
     if args.iter().any(|a| a == "-F") {
-        println!("System:  Host: ouros-host Kernel: 0.1.0-ouros x86_64");
+        println!("System:  Host: slateos-host Kernel: 0.1.0-slateos x86_64");
         println!("Machine: Type: Desktop System: Custom");
         println!("CPU:     AMD Ryzen 7 (8) @ 3.6GHz");
         println!("Graphics: Device: AMD Radeon Driver: amdgpu");
@@ -39,7 +39,7 @@ fn run_inxi(args: &[String], _prog: &str) -> i32 {
         println!("Info:    Processes: 142 Uptime: 2h 15m Memory: 4.0/16.0 GiB");
         return 0;
     }
-    println!("CPU: AMD Ryzen 7 (8) @ 3.6GHz  Kernel: 0.1.0-ouros  Mem: 4.0/16.0GiB");
+    println!("CPU: AMD Ryzen 7 (8) @ 3.6GHz  Kernel: 0.1.0-slateos  Mem: 4.0/16.0GiB");
     0
 }
 

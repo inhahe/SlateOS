@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! julia-cli — OurOS Julia language
+//! julia-cli — SlateOS Julia language
 //!
 //! Multi-personality: `julia`
 
@@ -20,7 +20,7 @@ fn run_julia(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("julia version 1.10.2 (OurOS)");
+        println!("julia version 1.10.2 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "-e") {
@@ -39,7 +39,7 @@ fn run_julia(args: &[String]) -> i32 {
         println!("  (_)     | (_) (_)    |");
         println!("   _ _   _| |_  __ _   |  Type \"?\" for help, \"]?\" for Pkg help.");
         println!("  | | | | | | |/ _` |  |");
-        println!("  | | |_| | | | (_| |  |  Version 1.10.2 (OurOS)");
+        println!("  | | |_| | | | (_| |  |  Version 1.10.2 (SlateOS)");
         println!(" _/ |\\__'_|_|_|\\__'_|  |");
         println!("|__/                   |");
         println!();

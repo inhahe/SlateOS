@@ -11,7 +11,7 @@
 #![allow(clippy::needless_range_loop)]
 #![allow(unused_imports)]
 
-//! OurOS Nonogram (Picross / picture-logic puzzle) game.
+//! SlateOS Nonogram (Picross / picture-logic puzzle) game.
 //!
 //! The player deduces which cells to fill based on numeric clues given for
 //! each row and column. Clues describe the lengths of consecutive filled

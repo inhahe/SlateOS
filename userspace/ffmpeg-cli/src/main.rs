@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ffmpeg-cli — OurOS FFmpeg-compatible media transcoding CLI
+//! ffmpeg-cli — SlateOS FFmpeg-compatible media transcoding CLI
 //!
 //! Multi-personality: `ffmpeg`, `ffprobe`, `ffplay`
 
@@ -84,7 +84,7 @@ fn run_ffmpeg(args: &[String]) -> i32 {
         .map(|w| w[1].as_str())
         .unwrap_or("aac");
 
-    println!("ffmpeg version 7.0 (OurOS)");
+    println!("ffmpeg version 7.0 (SlateOS)");
     println!("  Input #0: {}", input);
     println!("    Duration: 00:05:23.45, bitrate: 8543 kb/s");
     println!("    Stream #0:0: Video: h264, yuv420p, 1920x1080, 30 fps");
@@ -185,9 +185,9 @@ fn main() {
 
     if rest.iter().any(|a| a == "-V" || a == "--version") {
         match p {
-            "ffprobe" => println!("ffprobe version 7.0 (OurOS)"),
-            "ffplay" => println!("ffplay version 7.0 (OurOS)"),
-            _ => println!("ffmpeg version 7.0 (OurOS)"),
+            "ffprobe" => println!("ffprobe version 7.0 (SlateOS)"),
+            "ffplay" => println!("ffplay version 7.0 (SlateOS)"),
+            _ => println!("ffmpeg version 7.0 (SlateOS)"),
         }
         process::exit(0);
     }

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! semaphore-cli — OurOS Semaphore CI/CD (Rendered Text, performance-focused)
+//! semaphore-cli — SlateOS Semaphore CI/CD (Rendered Text, performance-focused)
 //!
 //! Single personality: `semaphore`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sem(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: semaphore [OPTIONS]");
-        println!("Semaphore CI 2.0 (OurOS) — Fast continuous integration");
+        println!("Semaphore CI 2.0 (SlateOS) — Fast continuous integration");
         println!();
         println!("Options:");
         println!("  jobs                   List jobs");
@@ -21,8 +21,8 @@ fn run_sem(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Semaphore CI 2.0 (OurOS)"); return 0; }
-    println!("Semaphore CI 2.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Semaphore CI 2.0 (SlateOS)"); return 0; }
+    println!("Semaphore CI 2.0 (SlateOS)");
     println!("  Vendor: Rendered Text d.o.o. (Novi Sad, Serbia + Brooklyn, NY)");
     println!("  Founders: Marko Anastasov + Aleksandar Diklic (Serbian dev shop turned product co.)");
     println!("  History: started as Rendered Text — Rails consultancy 2009");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! etcd — OurOS distributed key-value store
+//! etcd — SlateOS distributed key-value store
 //!
 //! Multi-personality: `etcd` (server), `etcdctl` (CLI), `etcdutl` (utilities)
 
@@ -23,10 +23,10 @@ fn run_etcd(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("etcd Version: 3.5.13 (OurOS)");
+        println!("etcd Version: 3.5.13 (SlateOS)");
         println!("Git SHA: abc1234");
         println!("Go Version: go1.22.2");
-        println!("Go OS/Arch: ouros/amd64");
+        println!("Go OS/Arch: slateos/amd64");
         return 0;
     }
     let name = args.iter().position(|a| a == "--name")
@@ -72,7 +72,7 @@ fn run_etcdctl(args: Vec<String>) -> i32 {
             0
         }
         "version" | "--version" => {
-            println!("etcdctl version: 3.5.13 (OurOS)");
+            println!("etcdctl version: 3.5.13 (SlateOS)");
             println!("API version: 3.5");
             0
         }
@@ -212,7 +212,7 @@ fn run_etcdutl(args: Vec<String>) -> i32 {
             0
         }
         "version" | "--version" => {
-            println!("etcdutl version: 3.5.13 (OurOS)");
+            println!("etcdutl version: 3.5.13 (SlateOS)");
             0
         }
         "defrag" => {

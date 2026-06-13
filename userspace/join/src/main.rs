@@ -1,4 +1,4 @@
-//! OurOS `join` Utility -- Join Lines of Two Sorted Files on a Common Field
+//! SlateOS `join` Utility -- Join Lines of Two Sorted Files on a Common Field
 //!
 //! Reads two sorted files and joins lines that share a common join field,
 //! similar to an SQL inner join. Both input files must be sorted on the
@@ -1135,7 +1135,7 @@ fn run_join_json(
 // ============================================================================
 
 fn print_help() {
-    println!("OurOS join v{VERSION}");
+    println!("SlateOS join v{VERSION}");
     println!();
     println!("Join lines of two sorted files on a common field.");
     println!();
@@ -1201,7 +1201,7 @@ fn main() {
             process::exit(0);
         }
         ParseResult::Version => {
-            println!("join (OurOS) {VERSION}");
+            println!("join (SlateOS) {VERSION}");
             process::exit(0);
         }
         ParseResult::Run(config) => {

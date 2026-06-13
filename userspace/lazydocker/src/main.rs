@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lazydocker — OurOS terminal UI for Docker
+//! lazydocker — SlateOS terminal UI for Docker
 //!
 //! Single personality: `lazydocker`
 
@@ -19,12 +19,12 @@ fn run_lazydocker(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-v" || a == "--version") {
-        println!("Version: 0.23.1 (OurOS)");
+        println!("Version: 0.23.1 (SlateOS)");
         println!("Date: 2025-05-22");
         return 0;
     }
 
-    println!("lazydocker 0.23.1 (OurOS)");
+    println!("lazydocker 0.23.1 (SlateOS)");
     println!("(TUI launched — simulated)");
     let _ = args;
     0

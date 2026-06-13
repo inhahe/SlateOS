@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! firebase-cli — OurOS Firebase CLI
+//! firebase-cli — SlateOS Firebase CLI
 //!
 //! Multi-personality: `firebase`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_firebase(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: firebase COMMAND [OPTIONS]");
-        println!("Firebase CLI 13.12.0 (OurOS)");
+        println!("Firebase CLI 13.12.0 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  init         Initialize Firebase in a directory");

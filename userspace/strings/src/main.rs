@@ -1,4 +1,4 @@
-//! OurOS Printable String Finder
+//! SlateOS Printable String Finder
 //!
 //! Finds and prints sequences of printable characters in binary files.
 //! Useful for inspecting executables, libraries, core dumps, and other

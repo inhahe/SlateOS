@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lvm2-cli — OurOS LVM2 logical volume manager
+//! lvm2-cli — SlateOS LVM2 logical volume manager
 //!
 //! Multi-personality: `pvcreate`, `vgcreate`, `lvcreate`, `pvs`, `vgs`, `lvs`, `pvdisplay`, `vgdisplay`, `lvdisplay`
 
@@ -14,22 +14,22 @@ fn run_lvm(args: &[String], prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
-            "pvcreate" => println!("pvcreate (OurOS) — Initialize physical volume"),
-            "vgcreate" => println!("vgcreate (OurOS) — Create volume group"),
+            "pvcreate" => println!("pvcreate (SlateOS) — Initialize physical volume"),
+            "vgcreate" => println!("vgcreate (SlateOS) — Create volume group"),
             "lvcreate" => {
-                println!("lvcreate (OurOS) — Create logical volume");
+                println!("lvcreate (SlateOS) — Create logical volume");
                 println!("  -L SIZE   Volume size");
                 println!("  -n NAME   Volume name");
                 println!("  -T        Thin pool");
                 println!("  --mirrors N  Mirror copies");
             }
-            "pvs" | "vgs" | "lvs" => println!("{} (OurOS) — Display {} information", prog, prog),
-            _ => println!("{} (OurOS) — LVM2 tool", prog),
+            "pvs" | "vgs" | "lvs" => println!("{} (SlateOS) — Display {} information", prog, prog),
+            _ => println!("{} (SlateOS) — LVM2 tool", prog),
         }
         println!("  --version  Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("LVM2 v2.03.23 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("LVM2 v2.03.23 (SlateOS)"); return 0; }
     match prog {
         "pvs" => {
             println!("  PV         VG       Fmt  Attr PSize   PFree");
@@ -50,7 +50,7 @@ fn run_lvm(args: &[String], prog: &str) -> i32 {
             println!("  backup vg_data  -wi-ao---- 100.00g");
         }
         _ => {
-            println!("LVM2 v2.03.23 (OurOS)");
+            println!("LVM2 v2.03.23 (SlateOS)");
             println!("  Operation: {}", prog);
             println!("  Completed successfully");
         }

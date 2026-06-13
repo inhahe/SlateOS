@@ -1,4 +1,4 @@
-//! OurOS Network Traceroute Utility
+//! SlateOS Network Traceroute Utility
 //!
 //! Traces the route packets take to a network host by sending ICMP
 //! echo requests with increasing TTL values. Intermediate routers

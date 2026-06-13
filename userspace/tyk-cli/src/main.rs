@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tyk-cli — OurOS Tyk API gateway
+//! tyk-cli — SlateOS Tyk API gateway
 //!
 //! Multi-personality: `tyk`, `tyk-gateway`
 
@@ -15,7 +15,7 @@ fn run_tyk(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "tyk-gateway" | "tyk" => {
-                println!("Tyk Gateway v5.3 (OurOS) — API gateway");
+                println!("Tyk Gateway v5.3 (SlateOS) — API gateway");
                 println!("  --conf FILE        Config file (tyk.conf)");
                 println!("  --port PORT        Gateway port");
                 println!("  --import-blueprint Import API blueprint");
@@ -23,7 +23,7 @@ fn run_tyk(args: &[String], prog: &str) -> i32 {
                 println!("  --lint             Lint API definitions");
             }
             _ => {
-                println!("Tyk CLI (OurOS)");
+                println!("Tyk CLI (SlateOS)");
                 println!("  bundle             Manage plugin bundles");
                 println!("  lint               Lint configuration");
                 println!("  import             Import APIs");
@@ -32,8 +32,8 @@ fn run_tyk(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Tyk v5.3.5 (OurOS)"); return 0; }
-    println!("Tyk Gateway v5.3.5 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Tyk v5.3.5 (SlateOS)"); return 0; }
+    println!("Tyk Gateway v5.3.5 (SlateOS)");
     println!("  Proxy: http://0.0.0.0:8080");
     println!("  APIs: 18 loaded");
     println!("  Policies: 5");

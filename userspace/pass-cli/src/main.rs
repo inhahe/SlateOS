@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pass-cli — OurOS pass (password-store) CLI
+//! pass-cli — SlateOS pass (password-store) CLI
 //!
 //! Single personality: `pass`
 
@@ -11,7 +11,7 @@ fn run_pass(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pass <COMMAND> [OPTIONS]");
         println!();
-        println!("pass — the standard Unix password manager (OurOS).");
+        println!("pass — the standard Unix password manager (SlateOS).");
         println!();
         println!("Commands:");
         println!("  init         Initialize password store");
@@ -29,7 +29,7 @@ fn run_pass(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("pass 1.7.4 (OurOS)");
+        println!("pass 1.7.4 (SlateOS)");
         return 0;
     }
 

@@ -1,4 +1,4 @@
-//! OurOS Login Manager — Display Manager and Session Launcher
+//! SlateOS Login Manager — Display Manager and Session Launcher
 //!
 //! Presents the login screen, authenticates users against the local user
 //! database, and starts user sessions. Also provides a lock screen that
@@ -389,7 +389,7 @@ fn generate_default_salt(uid: u32, username: &str) -> [u8; SALT_LENGTH] {
     let mut seed = Vec::new();
     seed.extend_from_slice(&uid.to_le_bytes());
     seed.extend_from_slice(username.as_bytes());
-    seed.extend_from_slice(b"ouros-default-salt");
+    seed.extend_from_slice(b"slateos-default-salt");
     let hash = sha256(&seed);
     let mut salt = [0u8; SALT_LENGTH];
     if let Some(src) = hash.get(..SALT_LENGTH) {
@@ -512,7 +512,7 @@ impl UserAccount {
 /// Simple YAML serialization for user database.
 /// Format: /etc/users.yaml
 fn serialize_users_yaml(users: &[UserAccount]) -> String {
-    let mut yaml = String::from("# OurOS User Database\n# DO NOT EDIT MANUALLY\n\nusers:\n");
+    let mut yaml = String::from("# SlateOS User Database\n# DO NOT EDIT MANUALLY\n\nusers:\n");
     for user in users {
         yaml.push_str(&format!("  - uid: {}\n", user.uid));
         yaml.push_str(&format!("    username: \"{}\"\n", user.username));
@@ -2524,7 +2524,7 @@ fn main() {
         return;
     }
 
-    // In a real OurOS environment, this enters the compositor event loop.
+    // In a real SlateOS environment, this enters the compositor event loop.
     // For now, render one frame to verify the UI builds correctly.
     let tree = manager.render();
     assert!(!tree.is_empty(), "Login UI must produce render commands");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lxqt-policykit-cli — OurOS LXQt PolicyKit agent
+//! lxqt-policykit-cli — SlateOS LXQt PolicyKit agent
 //!
 //! Single personality: `lxqt-policykit-agent`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_agent(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lxqt-policykit-agent");
-        println!("lxqt-policykit-agent v2.0 (OurOS) — LXQt PolicyKit agent");
+        println!("lxqt-policykit-agent v2.0 (SlateOS) — LXQt PolicyKit agent");
         println!();
         println!("Qt-based PolicyKit authentication agent for LXQt desktop.");
         return 0;

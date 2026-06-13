@@ -2,5 +2,5 @@
 name = "comm"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS sorted file comparison utility"
+description = "SlateOS sorted file comparison utility"
 [dependencies]

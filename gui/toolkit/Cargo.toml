@@ -2,4 +2,4 @@
 name = "guitk"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS GUI toolkit — widget library with Flexbox/Grid layout engine"
+description = "SlateOS GUI toolkit — widget library with Flexbox/Grid layout engine"

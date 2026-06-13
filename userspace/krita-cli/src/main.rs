@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! krita-cli — OurOS Krita digital painting (open source)
+//! krita-cli — SlateOS Krita digital painting (open source)
 //!
 //! Single personality: `krita`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_krita(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: krita [OPTIONS] [FILE]");
-        println!("Krita 5.2 (OurOS) — Open-source digital painting (KDE Frameworks)");
+        println!("Krita 5.2 (SlateOS) — Open-source digital painting (KDE Frameworks)");
         println!();
         println!("Options:");
         println!("  --canvasonly           Start in canvas-only mode");
@@ -24,8 +24,8 @@ fn run_krita(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Krita 5.2.5 (OurOS)"); return 0; }
-    println!("Krita 5.2.5 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Krita 5.2.5 (SlateOS)"); return 0; }
+    println!("Krita 5.2.5 (SlateOS)");
     println!("  Brush engines: 9 (Pixel, Color Smudge, Hatching, Bristle, ...)");
     println!("  Color: 8/16/32-bit, OpenColorIO, ICC profiles");
     println!("  Features: Animation, Vector layers, Storyboard, Comics");

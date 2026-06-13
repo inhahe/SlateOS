@@ -2,5 +2,5 @@
 name = "blockdev"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS blockdev utility"
+description = "SlateOS blockdev utility"
 [dependencies]

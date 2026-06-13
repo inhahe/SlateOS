@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! espeak-ng-cli — OurOS eSpeak NG text-to-speech
+//! espeak-ng-cli — SlateOS eSpeak NG text-to-speech
 //!
 //! Single personality: `espeak-ng`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_espeak_ng(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: espeak-ng [OPTIONS] [TEXT]");
-        println!("espeak-ng v1.51 (OurOS) — Text-to-speech synthesizer");
+        println!("espeak-ng v1.51 (SlateOS) — Text-to-speech synthesizer");
         println!();
         println!("Options:");
         println!("  TEXT              Text to speak (stdin if omitted)");
@@ -29,7 +29,7 @@ fn run_espeak_ng(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("espeak-ng v1.51 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("espeak-ng v1.51 (SlateOS)"); return 0; }
     if args.iter().any(|a| a == "--voices") {
         println!("Languages: 100+");
         println!("  en    English");

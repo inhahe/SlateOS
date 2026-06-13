@@ -1,4 +1,4 @@
-//! OurOS file deduplication utility.
+//! SlateOS file deduplication utility.
 //!
 //! Multi-personality binary providing:
 //! - **hardlink** — find and link identical files to save disk space

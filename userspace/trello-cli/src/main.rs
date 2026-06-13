@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! trello-cli — OurOS Trello CLI
+//! trello-cli — SlateOS Trello CLI
 //!
 //! Single personality: `trello`
 
@@ -11,7 +11,7 @@ fn run_trello(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: trello <COMMAND> [OPTIONS]");
         println!();
-        println!("Trello board management CLI (OurOS).");
+        println!("Trello board management CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  boards       Manage boards");

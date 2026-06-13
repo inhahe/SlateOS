@@ -1,4 +1,4 @@
-//! OurOS `nmcli` — NetworkManager multi-personality binary.
+//! SlateOS `nmcli` — NetworkManager multi-personality binary.
 //!
 //! Multi-personality binary providing:
 //! - **NetworkManager** — network management daemon: manages connection profiles,
@@ -29,7 +29,7 @@ use std::io::Write;
 // Constants
 // ============================================================================
 
-const VERSION: &str = "1.48.0-ouros";
+const VERSION: &str = "1.48.0-slateos";
 const NM_CONFIG_DIR: &str = "/etc/NetworkManager";
 
 // ============================================================================
@@ -426,7 +426,7 @@ impl NmState {
             wifi_enabled: true,
             wwan_enabled: true,
             networking_enabled: true,
-            hostname: String::from("ouros"),
+            hostname: String::from("slateos"),
         };
         state.populate_defaults();
         state
@@ -2114,7 +2114,7 @@ fn run(args: &[String], out: &mut dyn Write) -> i32 {
 }
 
 // ============================================================================
-// Entry point (OurOS)
+// Entry point (SlateOS)
 // ============================================================================
 
 #[cfg(not(test))]
@@ -2403,7 +2403,7 @@ mod tests {
         let rc = run(&args, &mut buf);
         assert_eq!(rc, 0);
         let s = out_str(&buf);
-        assert!(s.contains("ouros"));
+        assert!(s.contains("slateos"));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hashcat — OurOS password recovery tool
+//! hashcat — SlateOS password recovery tool
 //!
 //! Single personality: `hashcat`
 
@@ -31,7 +31,7 @@ fn run_hashcat(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("hashcat (v6.2.6) starting in version mode");
         println!();
-        println!("hashcat (v6.2.6) (OurOS)");
+        println!("hashcat (v6.2.6) (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "--benchmark") {
@@ -55,7 +55,7 @@ fn run_hashcat(args: Vec<String>) -> i32 {
         println!("Backend Device #1");
         println!("  Type...........: CPU");
         println!("  Vendor.ID......: 1");
-        println!("  Vendor.........: OurOS");
+        println!("  Vendor.........: SlateOS");
         println!("  Name...........: CPU (simulated)");
         println!("  Processor(s)...: 8");
         return 0;
@@ -66,7 +66,7 @@ fn run_hashcat(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    println!("hashcat (v6.2.6) starting (OurOS)");
+    println!("hashcat (v6.2.6) starting (SlateOS)");
     println!();
     println!("Session..........: hashcat");
     println!("Status...........: Running");

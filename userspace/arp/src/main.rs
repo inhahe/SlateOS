@@ -1,4 +1,4 @@
-//! OurOS ARP Table Management Utility
+//! SlateOS ARP Table Management Utility
 //!
 //! Displays the ARP (Address Resolution Protocol) cache.  The cache is read
 //! through the dedicated `SYS_ARP_TABLE` syscall, which returns the resolved
@@ -12,14 +12,14 @@
 //! arp -n                      Display entries, numeric output only
 //! arp -i eth0                 Limit display to interface eth0
 //! arp -v                      Verbose output
-//! arp -d hostname             Delete an ARP entry (unsupported on OurOS)
-//! arp -s hostname hw_addr     Add a static ARP entry (unsupported on OurOS)
+//! arp -d hostname             Delete an ARP entry (unsupported on SlateOS)
+//! arp -s hostname hw_addr     Add a static ARP entry (unsupported on SlateOS)
 //! arp -D -s hostname iface    Use device MAC for a static entry (unsupported)
 //! ```
 //!
 //! # ABI note
 //!
-//! OurOS exposes `SYS_ARP_TABLE` (read) and `SYS_NET_IF_INFO` (interface
+//! SlateOS exposes `SYS_ARP_TABLE` (read) and `SYS_NET_IF_INFO` (interface
 //! configuration, including the local MAC) but has **no** syscall to add,
 //! delete, or probe ARP entries.  Those operations therefore report a clear
 //! "not supported" error rather than silently invoking the wrong syscall.
@@ -54,7 +54,7 @@ const MAX_ARP_RECORDS: usize = 1024;
 /// # Safety
 ///
 /// The caller must ensure:
-/// - `nr` is a valid OurOS syscall number.
+/// - `nr` is a valid SlateOS syscall number.
 /// - All arguments are valid for that specific syscall (valid pointers,
 ///   correct sizes, etc.).
 #[cfg(target_arch = "x86_64")]
@@ -184,7 +184,7 @@ fn mac_is_zero(mac: &[u8; 6]) -> bool {
 // ARP cache entry
 // ============================================================================
 
-/// ARP cache flags.  OurOS reports only resolved/unresolved state, so the
+/// ARP cache flags.  SlateOS reports only resolved/unresolved state, so the
 /// vocabulary mirrors Linux's `arp` output for familiarity even though only
 /// `COMPLETE` is currently synthesised from kernel data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -289,7 +289,7 @@ pub enum ArpError {
     IoError(String),
     /// A syscall returned a negative error code.
     SyscallError(i64),
-    /// The requested operation is not supported on OurOS.
+    /// The requested operation is not supported on SlateOS.
     Unsupported(&'static str),
 }
 
@@ -419,12 +419,12 @@ Options:
   -n                  Numeric output; do not resolve hostnames
   -v                  Verbose output
   -i <iface>          Limit to interface <iface>
-  -d <hostname>       Delete ARP entry (unsupported on OurOS)
-  -s <hostname> <hw>  Add static entry (unsupported on OurOS)
-  -D                  With -s: use the device MAC (unsupported on OurOS)
+  -d <hostname>       Delete ARP entry (unsupported on SlateOS)
+  -s <hostname> <hw>  Add static entry (unsupported on SlateOS)
+  -D                  With -s: use the device MAC (unsupported on SlateOS)
   -h, --help          Show this help
 
-Note: OurOS has no kernel syscall to add, delete, or probe ARP entries, so
+Note: SlateOS has no kernel syscall to add, delete, or probe ARP entries, so
 the -d/-s/-D operations report \"not supported\".
 
 Examples:
@@ -621,7 +621,7 @@ fn cmd_display(opts: &Options, stdout: &mut dyn Write) -> Result<(), ArpError> {
 /// syscall.  Report a clear error instead of invoking the wrong syscall.
 fn cmd_delete(_opts: &Options) -> Result<(), ArpError> {
     Err(ArpError::Unsupported(
-        "deleting ARP entries is not supported on OurOS: the kernel exposes no ARP-delete syscall",
+        "deleting ARP entries is not supported on SlateOS: the kernel exposes no ARP-delete syscall",
     ))
 }
 
@@ -629,7 +629,7 @@ fn cmd_delete(_opts: &Options) -> Result<(), ArpError> {
 /// syscall.  Report a clear error instead of invoking the wrong syscall.
 fn cmd_add(_opts: &Options) -> Result<(), ArpError> {
     Err(ArpError::Unsupported(
-        "adding static ARP entries is not supported on OurOS: the kernel exposes no ARP-add syscall",
+        "adding static ARP entries is not supported on SlateOS: the kernel exposes no ARP-add syscall",
     ))
 }
 

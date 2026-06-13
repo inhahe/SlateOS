@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! systemctl-cli — OurOS systemctl CLI
+//! systemctl-cli — SlateOS systemctl CLI
 //!
 //! Single personality: `systemctl`
 
@@ -11,7 +11,7 @@ fn run_systemctl(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "help") {
         println!("Usage: systemctl [OPTIONS] COMMAND [UNIT...]");
         println!();
-        println!("systemctl — service manager control (OurOS).");
+        println!("systemctl — service manager control (SlateOS).");
         println!();
         println!("Unit commands:");
         println!("  start UNIT            Start unit");
@@ -35,7 +35,7 @@ fn run_systemctl(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("systemd 255 (OurOS)");
+        println!("systemd 255 (SlateOS)");
         return 0;
     }
 
@@ -60,7 +60,7 @@ fn run_systemctl(args: Vec<String>) -> i32 {
                 println!("        CPU: 1.234s");
                 println!("     CGroup: /system.slice/{}", svc);
                 println!();
-                println!("Jan 15 08:00:00 ouros systemd[1]: Started {}.", svc);
+                println!("Jan 15 08:00:00 slateos systemd[1]: Started {}.", svc);
             }
         }
         "start" => { println!("Started {}", unit); }

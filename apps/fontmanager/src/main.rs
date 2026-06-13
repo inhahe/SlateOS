@@ -1,4 +1,4 @@
-//! OurOS Font Manager — Graphical Font Management and Preview
+//! SlateOS Font Manager — Graphical Font Management and Preview
 //!
 //! A graphical application for managing system and user fonts. Provides
 //! font browsing by category, family, and style; live previews at multiple
@@ -1235,7 +1235,7 @@ fn render_setting_options<T: PartialEq + Copy>(
 fn main() {
     let state = FontManagerState::new();
 
-    // In a real OurOS environment, this would enter the compositor event loop.
+    // In a real SlateOS environment, this would enter the compositor event loop.
     // For now, render one frame to verify the UI builds correctly.
     let tree = state.render();
 

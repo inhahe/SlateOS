@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! shotman-cli — OurOS shotman screenshot manager
+//! shotman-cli — SlateOS shotman screenshot manager
 //!
 //! Single personality: `shotman`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_shotman(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: shotman COMMAND [OPTIONS]");
-        println!("shotman v0.4 (OurOS) — Screenshot manager for Wayland");
+        println!("shotman v0.4 (SlateOS) — Screenshot manager for Wayland");
         println!();
         println!("Commands:");
         println!("  capture           Take screenshot");
@@ -36,7 +36,7 @@ fn run_shotman(args: &[String], _prog: &str) -> i32 {
             println!("Click window...");
             println!("Screenshot saved: ~/Pictures/screenshot.png");
         }
-        "version" | "--version" => println!("shotman v0.4 (OurOS)"),
+        "version" | "--version" => println!("shotman v0.4 (SlateOS)"),
         _ => println!("shotman {}: completed", cmd),
     }
     0

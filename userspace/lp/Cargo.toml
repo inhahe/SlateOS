@@ -2,5 +2,5 @@
 name = "lp"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS lp - printing utilities (lp/lpstat/lprm/cancel)"
+description = "SlateOS lp - printing utilities (lp/lpstat/lprm/cancel)"
 [dependencies]

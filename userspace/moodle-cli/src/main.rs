@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! moodle-cli — OurOS Moodle desktop client
+//! moodle-cli — SlateOS Moodle desktop client
 //!
 //! Single personality: `moodle`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_moodle(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: moodle [OPTIONS]");
-        println!("moodle v4.3 (OurOS) — Moodle LMS desktop client");
+        println!("moodle v4.3 (SlateOS) — Moodle LMS desktop client");
         println!();
         println!("Options:");
         println!("  --url URL         Moodle server URL");
@@ -21,7 +21,7 @@ fn run_moodle(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("moodle v4.3 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("moodle v4.3 (SlateOS)"); return 0; }
     println!("moodle: desktop client started");
     println!("  Status: not connected (configure server URL)");
     println!("  Features: course browsing, assignment submission,");

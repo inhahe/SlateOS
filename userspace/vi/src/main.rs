@@ -1,4 +1,4 @@
-//! vi -- modal terminal text editor for OurOS.
+//! vi -- modal terminal text editor for SlateOS.
 //!
 //! A functional vi/vim-like editor with Normal, Insert, Visual, and Command
 //! modes. Uses VT100 escape sequences for full-screen rendering and POSIX
@@ -2173,7 +2173,7 @@ fn run(mut editor: Editor) {
 
 fn print_help() {
     eprintln!("Usage: vi [FILE]");
-    eprintln!("Modal text editor for OurOS.");
+    eprintln!("Modal text editor for SlateOS.");
     eprintln!();
     eprintln!("NORMAL:  h/j/k/l  w/b/e  0/$/^  gg/G  C-f/b  i/I/a/A/o/O");
     eprintln!("         x  dd/dw  yy  p/P  r  u/C-r  J  ~  >>/<<  /  n/N  .");

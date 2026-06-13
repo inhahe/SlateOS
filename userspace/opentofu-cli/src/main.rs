@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! opentofu-cli — OurOS OpenTofu infrastructure as code
+//! opentofu-cli — SlateOS OpenTofu infrastructure as code
 //!
 //! Single personality: `tofu`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_tofu(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: tofu COMMAND [OPTIONS]");
-        println!("OpenTofu v1.7 (OurOS) — Infrastructure as Code");
+        println!("OpenTofu v1.7 (SlateOS) — Infrastructure as Code");
         println!();
         println!("Commands:");
         println!("  init        Initialize working directory");
@@ -29,8 +29,8 @@ fn run_tofu(args: &[String], _prog: &str) -> i32 {
         println!("  --version   Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("OpenTofu v1.7.2 (OurOS)"); return 0; }
-    println!("OpenTofu v1.7.2 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("OpenTofu v1.7.2 (SlateOS)"); return 0; }
+    println!("OpenTofu v1.7.2 (SlateOS)");
     println!("  Plan: 3 to add, 1 to change, 0 to destroy");
     println!("  + aws_instance.web");
     println!("  + aws_security_group.web_sg");

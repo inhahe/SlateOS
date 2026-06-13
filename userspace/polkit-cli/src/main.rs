@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! polkit-cli — OurOS PolicyKit authorization framework
+//! polkit-cli — SlateOS PolicyKit authorization framework
 //!
 //! Multi-personality: `polkitd`, `pkaction`, `pkcheck`, `pkexec`, `pkttyagent`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_polkitd(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: polkitd [OPTIONS]");
-        println!("polkitd v124 (OurOS) — PolicyKit daemon");
+        println!("polkitd v124 (SlateOS) — PolicyKit daemon");
         println!();
         println!("Options:");
         println!("  --replace         Replace running daemon");
@@ -28,7 +28,7 @@ fn run_polkitd(args: &[String], _prog: &str) -> i32 {
 fn run_pkaction(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pkaction [OPTIONS]");
-        println!("pkaction v124 (OurOS) — List PolicyKit actions");
+        println!("pkaction v124 (SlateOS) — List PolicyKit actions");
         println!();
         println!("Options:");
         println!("  -a ACTION         Show specific action");
@@ -52,7 +52,7 @@ fn run_pkaction(args: &[String], _prog: &str) -> i32 {
 fn run_pkcheck(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pkcheck [OPTIONS]");
-        println!("pkcheck v124 (OurOS) — Check PolicyKit authorization");
+        println!("pkcheck v124 (SlateOS) — Check PolicyKit authorization");
         println!();
         println!("Options:");
         println!("  -a ACTION         Action to check");
@@ -68,7 +68,7 @@ fn run_pkcheck(args: &[String], _prog: &str) -> i32 {
 fn run_pkexec(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: pkexec [OPTIONS] COMMAND [ARGS]");
-        println!("pkexec v124 (OurOS) — Execute command as privileged user");
+        println!("pkexec v124 (SlateOS) — Execute command as privileged user");
         println!();
         println!("Options:");
         println!("  --user USER       Target user (default: root)");
@@ -83,7 +83,7 @@ fn run_pkexec(args: &[String], _prog: &str) -> i32 {
 fn run_pkttyagent(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pkttyagent [OPTIONS]");
-        println!("pkttyagent v124 (OurOS) — Text-mode authentication agent");
+        println!("pkttyagent v124 (SlateOS) — Text-mode authentication agent");
         println!();
         println!("Options:");
         println!("  --process PID     Process to authenticate");

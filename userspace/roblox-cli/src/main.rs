@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! roblox-cli — OurOS Roblox + Roblox Studio (UGC mega-platform)
+//! roblox-cli — SlateOS Roblox + Roblox Studio (UGC mega-platform)
 //!
 //! Single personality: `roblox`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rx(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: roblox [OPTIONS]");
-        println!("Roblox Player + Studio 0.650 (OurOS) — UGC game platform (kids/teens dominant)");
+        println!("Roblox Player + Studio 0.650 (SlateOS) — UGC game platform (kids/teens dominant)");
         println!();
         println!("Options:");
         println!("  --play                 Roblox Player (consume experiences)");
@@ -24,8 +24,8 @@ fn run_rx(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Roblox 0.650.0.6500664 (OurOS)"); return 0; }
-    println!("Roblox 0.650.0.6500664 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Roblox 0.650.0.6500664 (SlateOS)"); return 0; }
+    println!("Roblox 0.650.0.6500664 (SlateOS)");
     println!("  Vendor: Roblox Corporation (San Mateo, CA — NYSE: RBLX, $35B market cap 2024)");
     println!("  Founders: David Baszucki (CEO), Erik Cassel (RIP 2013)");
     println!("  Launch: 2006 (originally 'DynaBlocks' beta 2004)");

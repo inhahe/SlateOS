@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kmail-cli — OurOS KDE KMail email client
+//! kmail-cli — SlateOS KDE KMail email client
 //!
 //! Multi-personality: `kmail`, `korganizer`, `kaddressbook`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_kmail(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: kmail [OPTIONS] [MAILTO_URI]");
-        println!("kmail v23.08 (OurOS) — KDE email client");
+        println!("kmail v23.08 (SlateOS) — KDE email client");
         println!();
         println!("Options:");
         println!("  --composer        Open compose window");
@@ -21,7 +21,7 @@ fn run_kmail(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("kmail v23.08 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("kmail v23.08 (SlateOS)"); return 0; }
     println!("kmail: KDE email client started");
     println!("  Accounts: 2 (IMAP + POP3)");
     println!("  Inbox: 22 unread");
@@ -32,10 +32,10 @@ fn run_kmail(args: &[String], _prog: &str) -> i32 {
 fn run_korganizer(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: korganizer [OPTIONS]");
-        println!("korganizer v23.08 (OurOS) — KDE calendar/organizer");
+        println!("korganizer v23.08 (SlateOS) — KDE calendar/organizer");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("korganizer v23.08 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("korganizer v23.08 (SlateOS)"); return 0; }
     println!("korganizer: calendar application started");
     println!("  Calendars: 3 loaded");
     println!("  Upcoming events: 5");
@@ -46,10 +46,10 @@ fn run_korganizer(args: &[String], _prog: &str) -> i32 {
 fn run_kaddressbook(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: kaddressbook [OPTIONS]");
-        println!("kaddressbook v23.08 (OurOS) — KDE address book");
+        println!("kaddressbook v23.08 (SlateOS) — KDE address book");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("kaddressbook v23.08 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("kaddressbook v23.08 (SlateOS)"); return 0; }
     println!("kaddressbook: address book started");
     println!("  Address books: 2");
     println!("  Contacts: 150");

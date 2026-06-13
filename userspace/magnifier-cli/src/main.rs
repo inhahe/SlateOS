@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! magnifier-cli — OurOS screen magnifier
+//! magnifier-cli — SlateOS screen magnifier
 //!
 //! Single personality: `magnifier`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_magnifier(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: magnifier [OPTIONS]");
-        println!("magnifier v1.0 (OurOS) — Screen magnification tool");
+        println!("magnifier v1.0 (SlateOS) — Screen magnification tool");
         println!();
         println!("Options:");
         println!("  --zoom LEVEL      Initial zoom level (2-32, default: 4)");
@@ -23,7 +23,7 @@ fn run_magnifier(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("magnifier v1.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("magnifier v1.0 (SlateOS)"); return 0; }
     println!("magnifier: screen magnification active");
     println!("  Zoom: 4x");
     println!("  Mode: full-screen");

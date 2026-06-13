@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ttfdump-cli — OurOS TrueType font dumper
+//! ttfdump-cli — SlateOS TrueType font dumper
 //!
 //! Single personality: `ttfdump`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ttfdump(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: ttfdump [OPTIONS] FONT");
-        println!("ttfdump v0.6 (OurOS) — Dump TrueType font tables");
+        println!("ttfdump v0.6 (SlateOS) — Dump TrueType font tables");
         println!();
         println!("Options:");
         println!("  FONT              Font file (.ttf, .otf, .ttc)");
@@ -24,7 +24,7 @@ fn run_ttfdump(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("ttfdump v0.6 (OurOS)");
+        println!("ttfdump v0.6 (SlateOS)");
         return 0;
     }
     let file = args.iter()

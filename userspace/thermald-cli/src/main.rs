@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! thermald-cli — OurOS thermal management daemon
+//! thermald-cli — SlateOS thermal management daemon
 //!
 //! Multi-personality: `thermald`, `thermal-monitor`
 
@@ -19,7 +19,7 @@ fn run_thermald(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: thermald [OPTIONS]");
         println!();
-        println!("thermald — thermal management daemon (OurOS).");
+        println!("thermald — thermal management daemon (SlateOS).");
         println!();
         println!("Options:");
         println!("  --no-daemon      Run in foreground");
@@ -30,11 +30,11 @@ fn run_thermald(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("thermald version 2.5.6 (OurOS)");
+        println!("thermald version 2.5.6 (SlateOS)");
         return 0;
     }
 
-    println!("thermald: starting thermal daemon (OurOS)");
+    println!("thermald: starting thermal daemon (SlateOS)");
     println!("thermald: detected CPU: Intel Core i9-13900K");
     println!("thermald: thermal zones: 2");
     println!("thermald:   zone 0: x86_pkg_temp (trip: 100°C)");
@@ -48,7 +48,7 @@ fn run_thermald(args: &[String]) -> i32 {
 }
 
 fn run_thermal_monitor(_args: &[String]) -> i32 {
-    println!("Thermal Monitor (OurOS)");
+    println!("Thermal Monitor (SlateOS)");
     println!();
     println!("Zone                   Temperature  Trip Point  Status");
     println!("────────────────────   ───────────  ──────────  ──────");

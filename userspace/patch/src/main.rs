@@ -1,6 +1,6 @@
 //! patch -- apply a diff file to originals.
 //!
-//! A complete POSIX-compatible patch utility for OurOS that supports
+//! A complete POSIX-compatible patch utility for SlateOS that supports
 //! unified, context, and normal diff formats.
 //!
 //! Exit codes:

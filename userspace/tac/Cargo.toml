@@ -2,5 +2,5 @@
 name = "tac"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS reverse line/character printer (tac/rev)"
+description = "SlateOS reverse line/character printer (tac/rev)"
 [dependencies]

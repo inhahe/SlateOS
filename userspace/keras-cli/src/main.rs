@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! keras-cli — OurOS Keras deep learning API
+//! keras-cli — SlateOS Keras deep learning API
 //!
 //! Multi-personality: `keras`
 
@@ -17,11 +17,11 @@ fn run_keras(args: &[String]) -> i32 {
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match subcmd {
         "version" | "--version" => {
-            println!("Keras 3.0.4 (OurOS)");
+            println!("Keras 3.0.4 (SlateOS)");
             println!("Backend: TensorFlow 2.15.0");
         }
         "info" => {
-            println!("Keras 3.0.4 (OurOS)");
+            println!("Keras 3.0.4 (SlateOS)");
             println!("  Backend: tensorflow");
             println!("  Float dtype: float32");
             println!("  Epsilon: 1e-7");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nim-cli — OurOS Nim programming language
+//! nim-cli — SlateOS Nim programming language
 //!
 //! Multi-personality: `nim`, `nimble`, `nimsuggest`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_nim(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: nim COMMAND [OPTIONS] FILE.nim");
-        println!("Nim Compiler Version 2.0.2 (OurOS)");
+        println!("Nim Compiler Version 2.0.2 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  c, compile     Compile to C and build");
@@ -30,7 +30,7 @@ fn run_nim(args: &[String]) -> i32 {
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match subcmd {
         "--version" | "-v" => {
-            println!("Nim Compiler Version 2.0.2 [OurOS: amd64]");
+            println!("Nim Compiler Version 2.0.2 [SlateOS: amd64]");
             println!("Compiled at 2024-02-15");
             println!("git hash: abc123def");
         }
@@ -75,7 +75,7 @@ fn run_nim(args: &[String]) -> i32 {
 fn run_nimble(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: nimble COMMAND [OPTIONS]");
-        println!("Nimble 0.16.0 (OurOS)");
+        println!("Nimble 0.16.0 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  install      Install packages");
@@ -91,7 +91,7 @@ fn run_nimble(args: &[String]) -> i32 {
     }
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match subcmd {
-        "--version" => println!("nimble v0.16.0 (OurOS)"),
+        "--version" => println!("nimble v0.16.0 (SlateOS)"),
         "install" => {
             let pkg = args.get(1).map(|s| s.as_str()).unwrap_or("jester");
             println!("Downloading {}@#head...", pkg);

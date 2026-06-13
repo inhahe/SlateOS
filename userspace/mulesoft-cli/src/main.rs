@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mulesoft-cli — OurOS MuleSoft (Anypoint Platform + API mgmt, San Francisco, Salesforce subsidiary)
+//! mulesoft-cli — SlateOS MuleSoft (Anypoint Platform + API mgmt, San Francisco, Salesforce subsidiary)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mulesoft(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mulesoft [OPTIONS]");
-        println!("MuleSoft (OurOS) — Anypoint Platform (API + integration — Salesforce subsidiary)");
+        println!("MuleSoft (SlateOS) — Anypoint Platform (API + integration — Salesforce subsidiary)");
         println!();
         println!("Options:");
         println!("  --anypoint             Anypoint Platform (unified API + integration)");
@@ -23,8 +23,8 @@ fn run_mulesoft(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("MuleSoft Anypoint 2024 (OurOS) — Mule 4.6"); return 0; }
-    println!("MuleSoft 2024 (OurOS) — Anypoint Platform");
+    if args.iter().any(|a| a == "--version") { println!("MuleSoft Anypoint 2024 (SlateOS) — Mule 4.6"); return 0; }
+    println!("MuleSoft 2024 (SlateOS) — Anypoint Platform");
     println!("  Vendor: MuleSoft, LLC (San Francisco — Salesforce subsidiary since 2018)");
     println!("  Founder: Ross Mason, 2006 (originally as MuleSource)");
     println!("          'Mule' name = 'pack mule' carrying heavy integration loads — also play on 'donkey work'");

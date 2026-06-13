@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! qualys-cli — OurOS Qualys (original SaaS vuln scanner, Foster City CA, NASDAQ:QLYS)
+//! qualys-cli — SlateOS Qualys (original SaaS vuln scanner, Foster City CA, NASDAQ:QLYS)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_qualys(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: qualys [OPTIONS]");
-        println!("Qualys (OurOS) — original SaaS vulnerability scanner (NASDAQ:QLYS)");
+        println!("Qualys (SlateOS) — original SaaS vulnerability scanner (NASDAQ:QLYS)");
         println!();
         println!("Options:");
         println!("  --vmdr                 VMDR (Vulnerability Mgmt, Detection + Response)");
@@ -24,8 +24,8 @@ fn run_qualys(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Qualys 2024 (OurOS) — Cloud Platform 10.x"); return 0; }
-    println!("Qualys 2024 (OurOS) — Enterprise TruRisk Platform");
+    if args.iter().any(|a| a == "--version") { println!("Qualys 2024 (SlateOS) — Cloud Platform 10.x"); return 0; }
+    println!("Qualys 2024 (SlateOS) — Enterprise TruRisk Platform");
     println!("  Vendor: Qualys, Inc. (Foster City, CA — NASDAQ:QLYS since 2012)");
     println!("  Founder: Philippe Courtot (1999) — French-American security entrepreneur");
     println!("          previously CEO of Verity (search) + Signio (payments — acquired by VeriSign)");

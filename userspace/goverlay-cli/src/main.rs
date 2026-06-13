@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! goverlay-cli — OurOS GOverlay graphics overlay manager
+//! goverlay-cli — SlateOS GOverlay graphics overlay manager
 //!
 //! Single personality: `goverlay`
 
@@ -13,13 +13,13 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_goverlay(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: goverlay [OPTIONS]");
-        println!("goverlay v1.1 (OurOS) — Graphics overlay configuration");
+        println!("goverlay v1.1 (SlateOS) — Graphics overlay configuration");
         println!();
         println!("Options:");
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("goverlay v1.1 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("goverlay v1.1 (SlateOS)"); return 0; }
     println!("goverlay: overlay configuration GUI started");
     println!("  MangoHud: configured");
     println!("  vkBasalt: available");

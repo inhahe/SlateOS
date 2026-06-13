@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hive-cli — OurOS Hive (NYC democratic-input PM platform)
+//! hive-cli — SlateOS Hive (NYC democratic-input PM platform)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_hive(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: hive [OPTIONS]");
-        println!("Hive (OurOS) — project management built by user votes (democratic product development)");
+        println!("Hive (SlateOS) — project management built by user votes (democratic product development)");
         println!();
         println!("Options:");
         println!("  --free                 Hive Solo — free for individuals");
@@ -24,8 +24,8 @@ fn run_hive(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Hive 2024 (OurOS)"); return 0; }
-    println!("Hive 2024 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Hive 2024 (SlateOS)"); return 0; }
+    println!("Hive 2024 (SlateOS)");
     println!("  Vendor: Hive Technology, Inc. (New York City — private)");
     println!("  Founders: John Furneaux (CEO), Eric Typaldos, 2015");
     println!("          Furneaux ex-Saba Software, ex-Eloqua exec");

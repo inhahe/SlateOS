@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! k9s-cli — OurOS K9s Kubernetes TUI
+//! k9s-cli — SlateOS K9s Kubernetes TUI
 //!
 //! Single personality: `k9s`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_k9s(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: k9s [OPTIONS]");
-        println!("K9s v0.32.4 (OurOS) — Kubernetes TUI");
+        println!("K9s v0.32.4 (SlateOS) — Kubernetes TUI");
         println!();
         println!("Options:");
         println!("  -n, --namespace NS    Start in namespace");
@@ -32,9 +32,9 @@ fn run_k9s(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version" || a == "version") {
-        println!("K9s v0.32.4 (OurOS)");
+        println!("K9s v0.32.4 (SlateOS)");
         println!("  Rev:    abc1234");
-        println!("  OS/Arch: ouros/amd64");
+        println!("  OS/Arch: slateos/amd64");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");

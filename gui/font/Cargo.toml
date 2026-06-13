@@ -2,7 +2,7 @@
 name = "osfont"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS Font Library — bitmap and outline font rendering"
+description = "SlateOS Font Library — bitmap and outline font rendering"
 [lib]
 name = "osfont"
 path = "src/lib.rs"

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! convertkit-cli — OurOS ConvertKit / Kit (creator-focused email marketing)
+//! convertkit-cli — SlateOS ConvertKit / Kit (creator-focused email marketing)
 //!
 //! Single personality: `convertkit` (also responds to `kit`)
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ck(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: convertkit [OPTIONS]");
-        println!("ConvertKit / Kit (OurOS) — email marketing for creators (newsletters, courses, podcasts)");
+        println!("ConvertKit / Kit (SlateOS) — email marketing for creators (newsletters, courses, podcasts)");
         println!();
         println!("Options:");
         println!("  --newsletter           Newsletter Free tier (up to 10K subscribers)");
@@ -24,8 +24,8 @@ fn run_ck(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("ConvertKit / Kit 2024 (OurOS)"); return 0; }
-    println!("ConvertKit / Kit 2024 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("ConvertKit / Kit 2024 (SlateOS)"); return 0; }
+    println!("ConvertKit / Kit 2024 (SlateOS)");
     println!("  Vendor: ConvertKit, Inc. (Boise, ID — private, rebranded to 'Kit' in 2024)");
     println!("  Founders: Nathan Barry (CEO), 2013");
     println!("          Barry was a designer + indie author who needed email for his book launches");

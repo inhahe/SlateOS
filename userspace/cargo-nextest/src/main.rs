@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cargo-nextest — OurOS next-generation test runner for Rust
+//! cargo-nextest — SlateOS next-generation test runner for Rust
 //!
 //! Single personality: `cargo-nextest`
 
@@ -37,7 +37,7 @@ fn run_cargo_nextest(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("cargo-nextest 0.9.72 (OurOS)");
+            println!("cargo-nextest 0.9.72 (SlateOS)");
             0
         }
         "run" => {

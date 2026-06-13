@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gucharmap-cli — OurOS GNOME Character Map
+//! gucharmap-cli — SlateOS GNOME Character Map
 //!
 //! Single personality: `gucharmap`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gucharmap(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gucharmap [OPTIONS]");
-        println!("gucharmap v15.1 (OurOS) — Unicode character map");
+        println!("gucharmap v15.1 (SlateOS) — Unicode character map");
         println!();
         println!("Options:");
         println!("  --font FONT       Set display font");
@@ -23,7 +23,7 @@ fn run_gucharmap(args: &[String], _prog: &str) -> i32 {
         println!("Search by name, code point, or character.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("gucharmap v15.1 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("gucharmap v15.1 (SlateOS)"); return 0; }
     println!("gucharmap: character map started");
     println!("  Unicode version: 15.1");
     println!("  Total characters: 149,813");

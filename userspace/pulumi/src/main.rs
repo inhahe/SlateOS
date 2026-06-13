@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pulumi — OurOS Infrastructure as Code
+//! pulumi — SlateOS Infrastructure as Code
 //!
 //! Single personality: `pulumi`
 
@@ -33,7 +33,7 @@ fn run_pulumi(args: Vec<String>) -> i32 {
 
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match cmd {
-        "version" => println!("v3.117.0 (OurOS)"),
+        "version" => println!("v3.117.0 (SlateOS)"),
         "about" => {
             println!("CLI          ");
             println!("Version      3.117.0");
@@ -47,7 +47,7 @@ fn run_pulumi(args: Vec<String>) -> i32 {
             println!("azure    5.73.0");
             println!();
             println!("Host");
-            println!("OS       ouros");
+            println!("OS       slateos");
             println!("Arch     x86_64");
         }
         "whoami" => println!("user@example.com"),

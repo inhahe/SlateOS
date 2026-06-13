@@ -2,5 +2,5 @@
 name = "locale"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS locale/localedef/getconf - locale and system configuration"
+description = "SlateOS locale/localedef/getconf - locale and system configuration"
 [dependencies]

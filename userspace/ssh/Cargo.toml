@@ -2,5 +2,5 @@
 name = "ssh"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS SSH-2 client"
+description = "SlateOS SSH-2 client"
 [dependencies]

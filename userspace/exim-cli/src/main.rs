@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! exim-cli — OurOS Exim mail transfer agent
+//! exim-cli — SlateOS Exim mail transfer agent
 //!
 //! Single personality: `exim`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_exim(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: exim [OPTIONS]");
-        println!("Exim v4.97 (OurOS) — Mail Transfer Agent");
+        println!("Exim v4.97 (SlateOS) — Mail Transfer Agent");
         println!();
         println!("Options:");
         println!("  -bd                Run as daemon");
@@ -30,11 +30,11 @@ fn run_exim(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-bV") {
-        println!("Exim v4.97.1 (OurOS)");
+        println!("Exim v4.97.1 (SlateOS)");
         println!("  Built with: TLS (OpenSSL), DKIM, SPF, DMARC, SRS");
         return 0;
     }
-    println!("Exim v4.97.1 (OurOS)");
+    println!("Exim v4.97.1 (SlateOS)");
     println!("  Listening: 0.0.0.0:25 (SMTP), 0.0.0.0:587 (submission)");
     println!("  TLS: enabled (STARTTLS + implicit 465)");
     println!("  Queue: 3 messages pending");

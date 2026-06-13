@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ccache — OurOS compiler cache
+//! ccache — SlateOS compiler cache
 //!
 //! Single personality: `ccache`
 
@@ -28,7 +28,7 @@ fn run_ccache(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--print-version" || a == "--version" || a == "-V") {
-        println!("ccache version 4.10 (OurOS)");
+        println!("ccache version 4.10 (SlateOS)");
         println!("Features: file-storage redis-storage");
         return 0;
     }

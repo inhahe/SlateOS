@@ -2,5 +2,5 @@
 name = "ftpd"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS ftpd - FTP server daemon"
+description = "SlateOS ftpd - FTP server daemon"
 [dependencies]

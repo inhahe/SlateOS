@@ -2,5 +2,5 @@
 name = "make"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS make - build automation tool"
+description = "SlateOS make - build automation tool"
 [dependencies]

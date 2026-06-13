@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! paychex-cli — OurOS Paychex (the #2 US payroll provider, SMB-focused)
+//! paychex-cli — SlateOS Paychex (the #2 US payroll provider, SMB-focused)
 //!
 //! Single personality: `paychex`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_px(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: paychex [OPTIONS]");
-        println!("Paychex Flex (OurOS) — Payroll + HR for small/mid businesses");
+        println!("Paychex Flex (SlateOS) — Payroll + HR for small/mid businesses");
         println!();
         println!("Options:");
         println!("  --flex                 Paychex Flex (online platform)");
@@ -24,8 +24,8 @@ fn run_px(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Paychex Flex 2024 (OurOS)"); return 0; }
-    println!("Paychex Flex 2024 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Paychex Flex 2024 (SlateOS)"); return 0; }
+    println!("Paychex Flex 2024 (SlateOS)");
     println!("  Vendor: Paychex, Inc. (Rochester, NY — NASDAQ:PAYX)");
     println!("  Founded: 1971 by Tom Golisano with $3,000 starting capital");
     println!("          Golisano targeted businesses ADP considered too small (under 50 employees)");

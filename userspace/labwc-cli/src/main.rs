@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! labwc-cli — OurOS labwc Wayland stacking compositor
+//! labwc-cli — SlateOS labwc Wayland stacking compositor
 //!
 //! Single personality: `labwc`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_labwc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: labwc [OPTIONS]");
-        println!("labwc v0.7 (OurOS) — Wayland stacking compositor (Openbox-like)");
+        println!("labwc v0.7 (SlateOS) — Wayland stacking compositor (Openbox-like)");
         println!();
         println!("Options:");
         println!("  -s CMD            Startup command");
@@ -22,7 +22,7 @@ fn run_labwc(args: &[String], _prog: &str) -> i32 {
         println!("  -V                Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "-V" || a == "--version") { println!("labwc v0.7 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "-V" || a == "--version") { println!("labwc v0.7 (SlateOS)"); return 0; }
     println!("labwc compositor starting...");
     println!("  Theme: Clearlooks");
     println!("  Output: HDMI-A-1 (1920x1080@60Hz)");

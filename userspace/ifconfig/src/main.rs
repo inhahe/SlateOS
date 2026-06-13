@@ -1,4 +1,4 @@
-//! OurOS `ifconfig` -- classic network interface configuration utility.
+//! SlateOS `ifconfig` -- classic network interface configuration utility.
 //!
 //! Displays and configures network interfaces using the traditional `ifconfig`
 //! command syntax. Reads live state from `/sys/class/net/` and `/proc/net/`,
@@ -202,7 +202,7 @@ fn read_sysfs_hex_u32(path: &str, default: u32) -> u32 {
 
 /// Look up IP/netmask/broadcast for an interface from `/proc/net/if_inet`.
 ///
-/// The file format (OurOS-specific) is one line per addressed interface:
+/// The file format (SlateOS-specific) is one line per addressed interface:
 ///   `<iface>  <ip>  <netmask>  <broadcast>`
 fn get_iface_ip(iface: &str) -> (String, String, String) {
     if let Some(content) = read_file("/proc/net/if_inet") {

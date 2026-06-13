@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! seccomp-cli — OurOS seccomp/sandbox tools
+//! seccomp-cli — SlateOS seccomp/sandbox tools
 //!
 //! Multi-personality: `scmp_sys_resolver`, `firejail`, `bwrap`
 
@@ -19,7 +19,7 @@ fn run_scmp_sys_resolver(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: scmp_sys_resolver [-a ARCH] SYSCALL_NAME|SYSCALL_NUM");
         println!();
-        println!("Resolve syscall names to numbers and vice versa (OurOS).");
+        println!("Resolve syscall names to numbers and vice versa (SlateOS).");
         return 0;
     }
 
@@ -44,7 +44,7 @@ fn run_firejail(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: firejail [OPTIONS] PROGRAM [ARGS]");
         println!();
-        println!("firejail — Linux namespaces sandbox (OurOS).");
+        println!("firejail — Linux namespaces sandbox (SlateOS).");
         println!();
         println!("Options:");
         println!("  --net=IFACE       Network interface");
@@ -62,7 +62,7 @@ fn run_firejail(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("firejail version 0.9.72 (OurOS)");
+        println!("firejail version 0.9.72 (SlateOS)");
         return 0;
     }
 
@@ -90,7 +90,7 @@ fn run_bwrap(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: bwrap [OPTIONS] COMMAND [ARGS]");
         println!();
-        println!("bwrap — bubblewrap sandbox (OurOS).");
+        println!("bwrap — bubblewrap sandbox (SlateOS).");
         println!();
         println!("Options:");
         println!("  --ro-bind SRC DEST    Read-only bind mount");

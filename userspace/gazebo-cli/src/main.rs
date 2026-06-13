@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gazebo-cli — OurOS Gazebo robotics simulator
+//! gazebo-cli — SlateOS Gazebo robotics simulator
 //!
 //! Multi-personality: `gz`, `ign`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gz(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: gz COMMAND [OPTIONS]");
-        println!("Gazebo Harmonic (OurOS)");
+        println!("Gazebo Harmonic (SlateOS)");
         println!();
         println!("Commands:");
         println!("  sim          Run simulation");
@@ -30,7 +30,7 @@ fn run_gz(args: &[String]) -> i32 {
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match subcmd {
         "version" | "--version" => {
-            println!("Gazebo Harmonic (OurOS)");
+            println!("Gazebo Harmonic (SlateOS)");
             println!("gz-sim version 8.3.0");
             println!("gz-transport version 13.1.0");
             println!("gz-math version 7.3.0");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rockstar-cli — OurOS Rockstar Games Launcher
+//! rockstar-cli — SlateOS Rockstar Games Launcher
 //!
 //! Single personality: `rockstar`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rs(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: rockstar [OPTIONS]");
-        println!("Rockstar Games Launcher 1.0.106 (OurOS) — Rockstar's own launcher");
+        println!("Rockstar Games Launcher 1.0.106 (SlateOS) — Rockstar's own launcher");
         println!();
         println!("Options:");
         println!("  --library              Game library (GTA series, RDR series, Max Payne 3, etc.)");
@@ -24,8 +24,8 @@ fn run_rs(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Rockstar Games Launcher 1.0.106.842 (OurOS)"); return 0; }
-    println!("Rockstar Games Launcher 1.0.106.842 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Rockstar Games Launcher 1.0.106.842 (SlateOS)"); return 0; }
+    println!("Rockstar Games Launcher 1.0.106.842 (SlateOS)");
     println!("  Vendor: Rockstar Games (HQ New York, NY) — subsidiary of Take-Two Interactive");
     println!("  Founded: 1998 (Rockstar New York), merged BMG Interactive teams");
     println!("  Founders: Sam + Dan Houser (Sam left 2020, Dan founded 'Absurd Ventures' 2023),");

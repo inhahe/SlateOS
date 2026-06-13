@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bwa-cli — OurOS BWA sequence aligner
+//! bwa-cli — SlateOS BWA sequence aligner
 //!
 //! Multi-personality: `bwa`, `bwa-mem2`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_bwa(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Program: bwa (Burrows-Wheeler Aligner)");
-        println!("Version: 0.7.17-r1188 (OurOS)");
+        println!("Version: 0.7.17-r1188 (SlateOS)");
         println!();
         println!("Usage:   bwa <command> [options]");
         println!();
@@ -59,14 +59,14 @@ fn run_bwa(args: &[String]) -> i32 {
 fn run_bwa_mem2(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Program: bwa-mem2 (Accelerated BWA-MEM)");
-        println!("Version: 2.2.1 (OurOS, AVX-512 enabled)");
+        println!("Version: 2.2.1 (SlateOS, AVX-512 enabled)");
         println!();
         println!("Usage:   bwa-mem2 <command> [options]");
         println!("Commands: index, mem");
         return 0;
     }
     if args.iter().any(|a| a == "version") {
-        println!("bwa-mem2 2.2.1 (OurOS)");
+        println!("bwa-mem2 2.2.1 (SlateOS)");
         println!("SIMD: AVX-512");
         return 0;
     }

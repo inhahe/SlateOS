@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vagrant-cli — OurOS Vagrant CLI
+//! vagrant-cli — SlateOS Vagrant CLI
 //!
 //! Single personality: `vagrant`
 
@@ -11,7 +11,7 @@ fn run_vagrant(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: vagrant [OPTIONS] COMMAND [ARGS]");
         println!();
-        println!("Vagrant — development environment manager (OurOS).");
+        println!("Vagrant — development environment manager (SlateOS).");
         println!();
         println!("Commands:");
         println!("  init [BOX]       Initialize Vagrantfile");
@@ -33,7 +33,7 @@ fn run_vagrant(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("Vagrant 2.4.1 (OurOS)");
+        println!("Vagrant 2.4.1 (SlateOS)");
         return 0;
     }
 

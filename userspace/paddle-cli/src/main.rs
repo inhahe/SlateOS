@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! paddle-cli — OurOS Paddle Merchant-of-Record SaaS billing personality CLI.
+//! paddle-cli — SlateOS Paddle Merchant-of-Record SaaS billing personality CLI.
 
 use std::env;
 use std::process;
@@ -30,7 +30,7 @@ fn print_help(prog: &str) {
 }
 
 fn print_version() {
-    println!("paddle-cli 0.1.0 — OurOS personality binary");
+    println!("paddle-cli 0.1.0 — SlateOS personality binary");
     println!("Paddle.com Market Ltd — London, United Kingdom");
 }
 

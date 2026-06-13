@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sokol-cli — OurOS Sokol shader compiler
+//! sokol-cli — SlateOS Sokol shader compiler
 //!
 //! Single personality: `sokol-shdc`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sokol(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: sokol-shdc [OPTIONS]");
-        println!("sokol-shdc v1.0.0 (OurOS) — Sokol shader cross-compiler");
+        println!("sokol-shdc v1.0.0 (SlateOS) — Sokol shader cross-compiler");
         println!();
         println!("Options:");
         println!("  -i, --input FILE      Input shader file (.glsl)");
@@ -27,7 +27,7 @@ fn run_sokol(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("sokol-shdc v1.0.0 (OurOS)");
+        println!("sokol-shdc v1.0.0 (SlateOS)");
         return 0;
     }
     println!("sokol-shdc: Compiling shader...");

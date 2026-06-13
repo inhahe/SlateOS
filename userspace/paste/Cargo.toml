@@ -2,5 +2,5 @@
 name = "paste"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS line-merge utility"
+description = "SlateOS line-merge utility"
 [dependencies]

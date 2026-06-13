@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! renoise-cli — OurOS Renoise tracker DAW
+//! renoise-cli — SlateOS Renoise tracker DAW
 //!
 //! Single personality: `renoise`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_renoise(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: renoise [OPTIONS] [FILE.xrns]");
-        println!("Renoise v3.4.3 (OurOS) — Digital audio workstation / tracker");
+        println!("Renoise v3.4.3 (SlateOS) — Digital audio workstation / tracker");
         println!();
         println!("Options:");
         println!("  FILE.xrns         Open song file");
@@ -25,7 +25,7 @@ fn run_renoise(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Renoise v3.4.3 (OurOS)");
+        println!("Renoise v3.4.3 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "--render") {

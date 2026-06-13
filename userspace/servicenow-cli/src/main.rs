@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! servicenow-cli — OurOS ServiceNow Now Platform
+//! servicenow-cli — SlateOS ServiceNow Now Platform
 //!
 //! Single personality: `servicenow`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_snow(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: servicenow [OPTIONS]");
-        println!("ServiceNow Now Platform — Xanadu (OurOS) — IT/HR/CS workflow platform");
+        println!("ServiceNow Now Platform — Xanadu (SlateOS) — IT/HR/CS workflow platform");
         println!();
         println!("Options:");
         println!("  --instance NAME        Instance name (e.g. mycompany)");
@@ -23,8 +23,8 @@ fn run_snow(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("ServiceNow Now Platform Xanadu (Q3 2024) (OurOS)"); return 0; }
-    println!("ServiceNow Now Platform Xanadu (Q3 2024) (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("ServiceNow Now Platform Xanadu (Q3 2024) (SlateOS)"); return 0; }
+    println!("ServiceNow Now Platform Xanadu (Q3 2024) (SlateOS)");
     println!("  Releases: half-yearly families (Vancouver/Washington DC/Xanadu/Yokohama)");
     println!("  Workflow apps: ITSM, ITOM, ITBM, CSM, HRSD, SecOps, GRC, IRM, FSM, App Engine");
     println!("  Now Assist: GenAI assistants for ITSM/CSM/HRSD/Creator");

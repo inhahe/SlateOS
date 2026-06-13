@@ -1,4 +1,4 @@
-//! jq — OurOS JSON processor
+//! jq — SlateOS JSON processor
 //!
 //! A subset of jq's functionality: JSON parsing, pretty printing, and
 //! filter expressions for querying and transforming JSON data.
@@ -13,7 +13,7 @@ use std::io::{self, Read as _, Write as _};
 // Output helpers
 // ============================================================================
 //
-// These route through std, which reaches the native OurOS write syscall via
+// These route through std, which reaches the native SlateOS write syscall via
 // the posix libc layer.  (Previously they hand-rolled `syscall(1, ...)` using
 // the Linux write number — but native syscall 1 is SYS_EXIT, so every write
 // terminated the process.)
@@ -2088,7 +2088,7 @@ fn parse_args() -> Result<Options, String> {
                 std::process::exit(0);
             }
             "--version" => {
-                write_stdout("jq 0.1.0 (OurOS)\n");
+                write_stdout("jq 0.1.0 (SlateOS)\n");
                 std::process::exit(0);
             }
             arg if arg.starts_with('-') && arg.len() > 1 => {

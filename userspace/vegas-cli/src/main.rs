@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vegas-cli — OurOS MAGIX VEGAS Pro video editor
+//! vegas-cli — SlateOS MAGIX VEGAS Pro video editor
 //!
 //! Single personality: `vegas`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_vegas(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: vegas [OPTIONS] [PROJECT]");
-        println!("MAGIX VEGAS Pro 21 (OurOS) — Professional NLE for Windows");
+        println!("MAGIX VEGAS Pro 21 (SlateOS) — Professional NLE for Windows");
         println!();
         println!("Options:");
         println!("  --script FILE          Run JScript/VBScript/Python");
@@ -23,8 +23,8 @@ fn run_vegas(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("MAGIX VEGAS Pro 21.0.0.187 (OurOS)"); return 0; }
-    println!("MAGIX VEGAS Pro 21.0.0.187 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("MAGIX VEGAS Pro 21.0.0.187 (SlateOS)"); return 0; }
+    println!("MAGIX VEGAS Pro 21.0.0.187 (SlateOS)");
     println!("  Editions: Edit, Pro, Post, Suite");
     println!("  Features: Color Grading workspace, AI Style Transfer, AI Upscaling");
     println!("  Scripting: JScript, VBScript, Python, C#");

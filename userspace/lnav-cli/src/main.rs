@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lnav-cli — OurOS log file navigator
+//! lnav-cli — SlateOS log file navigator
 //!
 //! Single personality: `lnav`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_lnav(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: lnav [OPTIONS] [FILE...]");
-        println!("lnav v0.12 (OurOS) — Log file navigator");
+        println!("lnav v0.12 (SlateOS) — Log file navigator");
         println!();
         println!("Options:");
         println!("  FILE...           Log files to view");
@@ -25,7 +25,7 @@ fn run_lnav(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("lnav v0.12 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("lnav v0.12 (SlateOS)"); return 0; }
     let files: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
     if args.iter().any(|a| a == "-n") {
         for f in &files {

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! duckstation-cli — OurOS DuckStation PS1 emulator
+//! duckstation-cli — SlateOS DuckStation PS1 emulator
 //!
 //! Multi-personality: `duckstation`, `duckstation-nogui`
 
@@ -18,7 +18,7 @@ fn run_duckstation(args: &[String], prog: &str) -> i32 {
         } else {
             println!("Usage: duckstation [OPTIONS] [IMAGE]");
         }
-        println!("duckstation v0.1-6292 (OurOS) — PlayStation 1 emulator");
+        println!("duckstation v0.1-6292 (SlateOS) — PlayStation 1 emulator");
         println!();
         println!("Options:");
         println!("  -disc FILE        Boot disc image");
@@ -28,7 +28,7 @@ fn run_duckstation(args: &[String], prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("duckstation v0.1-6292 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("duckstation v0.1-6292 (SlateOS)"); return 0; }
     if nogui {
         println!("duckstation: headless PS1 emulation started");
     } else {

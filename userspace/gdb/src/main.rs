@@ -1,4 +1,4 @@
-//! OurOS `gdb` -- GDB-like debugger and gdbserver
+//! SlateOS `gdb` -- GDB-like debugger and gdbserver
 //!
 //! Multi-personality binary that acts as `gdb` or `gdbserver` depending on
 //! the name used to invoke it (detected via `argv[0]`).
@@ -65,8 +65,8 @@ use std::io::{self, Write};
 // ============================================================================
 
 const VERSION: &[u8] = b"0.1.0";
-const GDB_BANNER: &[u8] = b"OurOS GDB 0.1.0 -- A GDB-like debugger\n\
-    Copyright (C) 2026 OurOS Project.\n\
+const GDB_BANNER: &[u8] = b"SlateOS GDB 0.1.0 -- A GDB-like debugger\n\
+    Copyright (C) 2026 SlateOS Project.\n\
     Type \"help\" for a list of commands.\n";
 
 // ============================================================================
@@ -3467,7 +3467,7 @@ fn print_help_server(out: &mut dyn Write) {
 }
 
 fn print_version(out: &mut dyn Write) {
-    let _ = out.write_all(b"OurOS GDB ");
+    let _ = out.write_all(b"SlateOS GDB ");
     let _ = out.write_all(VERSION);
     let _ = out.write_all(b"\n");
 }

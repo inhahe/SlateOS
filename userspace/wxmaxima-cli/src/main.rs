@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wxmaxima-cli — OurOS wxMaxima CAS frontend
+//! wxmaxima-cli — SlateOS wxMaxima CAS frontend
 //!
 //! Single personality: `wxmaxima`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wxmaxima(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wxmaxima [OPTIONS] [FILE.wxmx]");
-        println!("wxmaxima v23.12 (OurOS) — GUI for Maxima CAS");
+        println!("wxmaxima v23.12 (SlateOS) — GUI for Maxima CAS");
         println!();
         println!("Options:");
         println!("  --version         Show version");
@@ -24,7 +24,7 @@ fn run_wxmaxima(args: &[String], _prog: &str) -> i32 {
         println!("  document-style worksheet (.wxmx)");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("wxmaxima v23.12 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("wxmaxima v23.12 (SlateOS)"); return 0; }
     println!("wxmaxima: Maxima CAS frontend started");
     println!("  Backend: Maxima 5.47");
     println!("  2D math display: enabled");

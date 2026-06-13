@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! photoshop-cli — OurOS Adobe Photoshop raster image editor
+//! photoshop-cli — SlateOS Adobe Photoshop raster image editor
 //!
 //! Single personality: `photoshop`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ps(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: photoshop [OPTIONS] [FILE]");
-        println!("Adobe Photoshop 2024 (OurOS) — Professional raster image editor");
+        println!("Adobe Photoshop 2024 (SlateOS) — Professional raster image editor");
         println!();
         println!("Options:");
         println!("  -r SCRIPT              Run ExtendScript / JSX");
@@ -24,8 +24,8 @@ fn run_ps(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Adobe Photoshop 2024 v25.7.0 (OurOS)"); return 0; }
-    println!("Adobe Photoshop 2024 v25.7.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Adobe Photoshop 2024 v25.7.0 (SlateOS)"); return 0; }
+    println!("Adobe Photoshop 2024 v25.7.0 (SlateOS)");
     println!("  Engine: GPU acceleration (OpenGL, Metal)");
     println!("  Scripting: JavaScript (ExtendScript), CEP, UXP");
     println!("  Features: Generative Fill (Firefly AI), Neural Filters, Camera Raw");

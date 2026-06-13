@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! x86-energy-perf-cli — OurOS x86_energy_perf_policy tool
+//! x86-energy-perf-cli — SlateOS x86_energy_perf_policy tool
 //!
 //! Single personality: `x86_energy_perf_policy`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_x86_energy_perf(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: x86_energy_perf_policy [OPTIONS] [POLICY]");
-        println!("x86_energy_perf_policy v2024.01 (OurOS) — CPU energy/perf bias");
+        println!("x86_energy_perf_policy v2024.01 (SlateOS) — CPU energy/perf bias");
         println!();
         println!("Policies:");
         println!("  performance    Favor performance");
@@ -28,7 +28,7 @@ fn run_x86_energy_perf(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("x86_energy_perf_policy v2024.01 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("x86_energy_perf_policy v2024.01 (SlateOS)"); return 0; }
     if let Some(policy) = args.iter().find(|a| !a.starts_with('-')) {
         println!("x86_energy_perf_policy: setting policy to '{}'", policy);
         println!("  Applied to all CPUs");

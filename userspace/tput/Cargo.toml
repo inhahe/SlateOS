@@ -2,5 +2,5 @@
 name = "tput"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS tput/reset/clear - terminal capability tools"
+description = "SlateOS tput/reset/clear - terminal capability tools"
 [dependencies]

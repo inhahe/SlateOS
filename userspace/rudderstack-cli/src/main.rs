@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rudderstack-cli — OurOS RudderStack (warehouse-native open-source CDP, SF + Bangalore)
+//! rudderstack-cli — SlateOS RudderStack (warehouse-native open-source CDP, SF + Bangalore)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rs(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: rudderstack [OPTIONS]");
-        println!("RudderStack (OurOS) — warehouse-native open-source CDP (the Segment alternative)");
+        println!("RudderStack (SlateOS) — warehouse-native open-source CDP (the Segment alternative)");
         println!();
         println!("Options:");
         println!("  --sources              SDKs + server + cloud sources (200+)");
@@ -22,8 +22,8 @@ fn run_rs(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("RudderStack 2024 (OurOS)"); return 0; }
-    println!("RudderStack 2024 (OurOS) — Warehouse-Native CDP");
+    if args.iter().any(|a| a == "--version") { println!("RudderStack 2024 (SlateOS)"); return 0; }
+    println!("RudderStack 2024 (SlateOS) — Warehouse-Native CDP");
     println!("  Vendor: RudderStack, Inc. (San Francisco + Bangalore)");
     println!("  Founders: Soumyadeb Mitra (CEO), 2019");
     println!("          Soumyadeb: ex-8x8 + 1010data + IBM (data engineering background)");

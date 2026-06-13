@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fontmatrix-cli — OurOS Fontmatrix font manager
+//! fontmatrix-cli — SlateOS Fontmatrix font manager
 //!
 //! Single personality: `fontmatrix`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_fontmatrix(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: fontmatrix [OPTIONS]");
-        println!("fontmatrix v0.9 (OurOS) — Font management and comparison tool");
+        println!("fontmatrix v0.9 (SlateOS) — Font management and comparison tool");
         println!();
         println!("Options:");
         println!("  --version         Show version");
@@ -24,7 +24,7 @@ fn run_fontmatrix(args: &[String], _prog: &str) -> i32 {
         println!("  specimen sheet generation");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("fontmatrix v0.9 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("fontmatrix v0.9 (SlateOS)"); return 0; }
     println!("fontmatrix: font management started");
     println!("  Total fonts: 142 families");
     println!("  Active: 140");

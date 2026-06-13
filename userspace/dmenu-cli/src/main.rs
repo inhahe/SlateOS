@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dmenu-cli — OurOS dmenu dynamic menu
+//! dmenu-cli — SlateOS dmenu dynamic menu
 //!
 //! Multi-personality: `dmenu`, `dmenu_run`, `dmenu_path`
 
@@ -27,11 +27,11 @@ fn run_dmenu(args: &[String], prog: &str) -> i32 {
     }
     if args.iter().any(|a| a == "--help" || a == "-h") || args.iter().any(|a| a == "-v") {
         if args.iter().any(|a| a == "-v") {
-            println!("dmenu-5.2 (OurOS)");
+            println!("dmenu-5.2 (SlateOS)");
             return 0;
         }
         println!("Usage: dmenu [OPTIONS]");
-        println!("dmenu 5.2 (OurOS) — Dynamic menu for X/Wayland");
+        println!("dmenu 5.2 (SlateOS) — Dynamic menu for X/Wayland");
         println!();
         println!("Options:");
         println!("  -b             Bottom of screen");

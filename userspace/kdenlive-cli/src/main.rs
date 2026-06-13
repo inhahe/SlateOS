@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kdenlive-cli — OurOS Kdenlive KDE video editor
+//! kdenlive-cli — SlateOS Kdenlive KDE video editor
 //!
 //! Single personality: `kdenlive`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_kd(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: kdenlive [OPTIONS] [PROJECT]");
-        println!("Kdenlive 24.05 (OurOS) — KDE-based open-source NLE");
+        println!("Kdenlive 24.05 (SlateOS) — KDE-based open-source NLE");
         println!();
         println!("Options:");
         println!("  -i FILE                Open project file");
@@ -22,8 +22,8 @@ fn run_kd(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Kdenlive 24.05.2 (OurOS)"); return 0; }
-    println!("Kdenlive 24.05.2 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Kdenlive 24.05.2 (SlateOS)"); return 0; }
+    println!("Kdenlive 24.05.2 (SlateOS)");
     println!("  Engine: MLT framework + Qt/KF5");
     println!("  Tracks: Unlimited video & audio with grouping");
     println!("  Features: Proxy editing, Motion Tracker, AI Subtitle, Speech-to-text");

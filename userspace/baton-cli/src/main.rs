@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! baton-cli — OurOS Baton identity connector
+//! baton-cli — SlateOS Baton identity connector
 //!
 //! Single personality: `baton`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_baton(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: baton [COMMAND] [OPTIONS]");
-        println!("Baton v0.9 (OurOS) — Identity & access connector");
+        println!("Baton v0.9 (SlateOS) — Identity & access connector");
         println!();
         println!("Commands:");
         println!("  sync               Sync identity data");
@@ -30,8 +30,8 @@ fn run_baton(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Baton v0.9.2 (OurOS)"); return 0; }
-    println!("Baton v0.9.2 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Baton v0.9.2 (SlateOS)"); return 0; }
+    println!("Baton v0.9.2 (SlateOS)");
     println!("  Connectors: 8 available");
     println!("  Resources: 234 synced");
     println!("  Entitlements: 56");

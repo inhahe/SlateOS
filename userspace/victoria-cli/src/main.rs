@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! victoria-cli — OurOS VictoriaMetrics tools
+//! victoria-cli — SlateOS VictoriaMetrics tools
 //!
 //! Multi-personality: `vmctl`, `vmagent`, `vmbackup`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_vmctl(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: vmctl COMMAND [OPTIONS]");
-        println!("vmctl — VictoriaMetrics migration tool (OurOS)");
+        println!("vmctl — VictoriaMetrics migration tool (SlateOS)");
         println!();
         println!("Commands:");
         println!("  prometheus   Migrate from Prometheus");
@@ -43,7 +43,7 @@ fn run_vmctl(args: &[String]) -> i32 {
 fn run_vmagent(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: vmagent [OPTIONS]");
-        println!("vmagent — lightweight Prometheus-compatible agent (OurOS)");
+        println!("vmagent — lightweight Prometheus-compatible agent (SlateOS)");
         println!("  -promscrape.config FILE   Scrape config file");
         println!("  -remoteWrite.url URL      Remote write endpoint");
         println!("  --version                 Show version");

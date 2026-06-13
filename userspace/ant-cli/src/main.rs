@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ant-cli — OurOS Apache Ant build system
+//! ant-cli — SlateOS Apache Ant build system
 //!
 //! Multi-personality: `ant`
 
@@ -10,7 +10,7 @@ use std::process;
 fn run_ant(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "-help") || args.is_empty() {
         println!("Usage: ant [OPTIONS] [TARGET [TARGET ...]]");
-        println!("Apache Ant(TM) version 1.10.14 (OurOS)");
+        println!("Apache Ant(TM) version 1.10.14 (SlateOS)");
         println!();
         println!("Options:");
         println!("  -buildfile FILE    Build file (default: build.xml)");

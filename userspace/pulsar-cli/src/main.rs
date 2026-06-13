@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pulsar-cli — OurOS Apache Pulsar CLI
+//! pulsar-cli — SlateOS Apache Pulsar CLI
 //!
 //! Single personality: `pulsar-admin`
 
@@ -11,7 +11,7 @@ fn run_pulsar_admin(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pulsar-admin <COMMAND> [OPTIONS]");
         println!();
-        println!("Apache Pulsar admin CLI (OurOS).");
+        println!("Apache Pulsar admin CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  topics       Manage topics");
@@ -24,7 +24,7 @@ fn run_pulsar_admin(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("pulsar-admin 3.2.0 (OurOS)");
+        println!("pulsar-admin 3.2.0 (SlateOS)");
         return 0;
     }
 

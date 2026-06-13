@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nextcloud — OurOS self-hosted cloud platform
+//! nextcloud — SlateOS self-hosted cloud platform
 //!
 //! Single personality: `occ` (Nextcloud command-line interface)
 
@@ -13,7 +13,7 @@ fn run_occ(args: Vec<String>) -> i32 {
 
     match cmd.as_str() {
         "--help" | "help" | "-h" | "list" => {
-            println!("Nextcloud 29.0.0 (OurOS)");
+            println!("Nextcloud 29.0.0 (SlateOS)");
             println!();
             println!("Usage: occ <command> [options]");
             println!();
@@ -41,7 +41,7 @@ fn run_occ(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "version" => {
-            println!("Nextcloud 29.0.0 (OurOS)");
+            println!("Nextcloud 29.0.0 (SlateOS)");
             0
         }
         "status" => {

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! skopeo-cli — OurOS container image inspection and transfer CLI
+//! skopeo-cli — SlateOS container image inspection and transfer CLI
 //!
 //! Single personality: `skopeo`
 

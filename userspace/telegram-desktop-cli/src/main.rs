@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! telegram-desktop-cli — OurOS Telegram Desktop client
+//! telegram-desktop-cli — SlateOS Telegram Desktop client
 //!
 //! Single personality: `telegram-desktop`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_telegram(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: telegram-desktop [OPTIONS]");
-        println!("telegram-desktop v4.15 (OurOS) — Telegram messenger");
+        println!("telegram-desktop v4.15 (SlateOS) — Telegram messenger");
         println!();
         println!("Options:");
         println!("  -startintray      Start minimized to tray");
@@ -23,7 +23,7 @@ fn run_telegram(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("telegram-desktop v4.15 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("telegram-desktop v4.15 (SlateOS)"); return 0; }
     println!("telegram-desktop: Telegram messenger started");
     println!("  Account: logged in");
     println!("  Chats: 35 active");

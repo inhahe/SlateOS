@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rofi-wayland-cli — OurOS rofi-wayland application launcher
+//! rofi-wayland-cli — SlateOS rofi-wayland application launcher
 //!
 //! Single personality: `rofi`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rofi(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: rofi [OPTIONS]");
-        println!("rofi v1.7 (OurOS, Wayland fork) — Application launcher / window switcher");
+        println!("rofi v1.7 (SlateOS, Wayland fork) — Application launcher / window switcher");
         println!();
         println!("Options:");
         println!("  -show MODE        Show mode: drun, run, window, ssh, combi");
@@ -29,7 +29,7 @@ fn run_rofi(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("rofi v1.7.5+wayland2 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("rofi v1.7.5+wayland2 (SlateOS)"); return 0; }
     if args.iter().any(|a| a == "-dmenu") {
         println!("rofi: dmenu mode (reading stdin)");
         return 0;

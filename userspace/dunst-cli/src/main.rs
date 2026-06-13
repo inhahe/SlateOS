@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dunst-cli — OurOS Dunst notification daemon
+//! dunst-cli — SlateOS Dunst notification daemon
 //!
 //! Multi-personality: `dunst`, `dunstify`, `dunstctl`
 
@@ -62,7 +62,7 @@ fn run_dunst(args: &[String], prog: &str) -> i32 {
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: dunst [OPTIONS]");
-        println!("dunst 1.11.0 (OurOS) — Notification daemon");
+        println!("dunst 1.11.0 (SlateOS) — Notification daemon");
         println!();
         println!("Options:");
         println!("  -config FILE   Config file path");

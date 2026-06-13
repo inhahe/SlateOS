@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kubectl-cli — OurOS Kubernetes command-line tool
+//! kubectl-cli — SlateOS Kubernetes command-line tool
 //!
 //! Single personality: `kubectl`
 
@@ -57,7 +57,7 @@ fn run_kubectl(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
         "version" => {
-            println!("Client Version: v1.29.1 (OurOS)");
+            println!("Client Version: v1.29.1 (SlateOS)");
             println!("Server Version: v1.29.0");
             0
         }

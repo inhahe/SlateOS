@@ -1,4 +1,4 @@
-//! OurOS File Synchronization Utility (rsync / scp)
+//! SlateOS File Synchronization Utility (rsync / scp)
 //!
 //! Multi-personality binary providing:
 //! - **rsync** -- file synchronization with delta transfer
@@ -80,7 +80,7 @@ const COPY_BUF_SIZE: usize = 64 * 1024;
 /// Adler32 modulus.
 const ADLER_MOD: u32 = 65521;
 
-/// Native OurOS monotonic clock (kernel syscall/number.rs); no-arg, returns
+/// Native SlateOS monotonic clock (kernel syscall/number.rs); no-arg, returns
 /// boot-relative nanoseconds in rax.  (Syscall 30 is SYS_IRQ_REGISTER.)
 const SYS_CLOCK_MONOTONIC: u64 = 10;
 
@@ -984,7 +984,7 @@ fn rsync_parse_args(args: &[String]) -> Result<RsyncParseResult, String> {
 
 fn rsync_print_help() {
     let help = b"\
-rsync 0.1.0 -- OurOS file synchronization
+rsync 0.1.0 -- SlateOS file synchronization
 
 Usage: rsync [OPTION]... SOURCE DEST
        rsync [OPTION]... SOURCE... DEST/
@@ -1812,7 +1812,7 @@ fn scp_parse_args(args: &[String]) -> Result<ScpParseResult, String> {
 
 fn scp_print_help() {
     let help = b"\
-scp 0.1.0 -- OurOS secure file copy
+scp 0.1.0 -- SlateOS secure file copy
 
 Usage: scp [OPTION]... SOURCE... TARGET
 
@@ -2053,7 +2053,7 @@ fn scp_run(args: &[String]) -> i32 {
         Ok(ScpParseResult::Version) => {
             write_stdout(b"scp ");
             write_stdout(VERSION.as_bytes());
-            write_stdout(b" (OurOS)\n");
+            write_stdout(b" (SlateOS)\n");
             return 0;
         }
         Ok(ScpParseResult::Run(c)) => c,

@@ -1,4 +1,4 @@
-// OurOS mesg — control and send terminal messages
+// SlateOS mesg — control and send terminal messages
 //
 // Multi-personality binary:
 //   mesg   — control write access to your terminal
@@ -455,7 +455,7 @@ fn print_version(personality: Personality) {
         Personality::WriteMsg => "write",
         Personality::Talk => "talk",
     };
-    println!("{name} (OurOS) 0.1.0");
+    println!("{name} (SlateOS) 0.1.0");
 }
 
 // ---------------------------------------------------------------------------

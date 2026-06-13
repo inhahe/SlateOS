@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! puppet-cli — OurOS Puppet configuration management
+//! puppet-cli — SlateOS Puppet configuration management
 //!
 //! Multi-personality: `puppet`, `facter`, `hiera`
 
@@ -14,7 +14,7 @@ fn run_puppet(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: puppet <subcommand> [options] [<action>]");
         println!();
-        println!("puppet — configuration management (OurOS).");
+        println!("puppet — configuration management (SlateOS).");
         println!();
         println!("Subcommands:");
         println!("  agent          Run puppet agent");
@@ -27,7 +27,7 @@ fn run_puppet(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("puppet 8.4.0 (OurOS)");
+        println!("puppet 8.4.0 (SlateOS)");
         return 0;
     }
 
@@ -37,13 +37,13 @@ fn run_puppet(args: &[String]) -> i32 {
             println!("Info: Using environment 'production'");
             println!("Info: Retrieving pluginfacts");
             println!("Info: Retrieving plugin");
-            println!("Info: Caching catalog for ouros-desktop.local");
+            println!("Info: Caching catalog for slateos-desktop.local");
             println!("Info: Applying configuration version '1716364800'");
             println!("Notice: Applied catalog in 3.45 seconds");
         }
         "apply" => {
             let manifest = args.get(1).map(|s| s.as_str()).unwrap_or("site.pp");
-            println!("Notice: Compiled catalog for ouros-desktop.local in environment production");
+            println!("Notice: Compiled catalog for slateos-desktop.local in environment production");
             println!("Info: Applying configuration from '{}' version '1716364800'", manifest);
             println!("Notice: /Stage[main]/Main/Package[nginx]/ensure: created");
             println!("Notice: /Stage[main]/Main/Service[nginx]/ensure: changed 'stopped' to 'running'");
@@ -62,11 +62,11 @@ fn run_puppet(args: &[String]) -> i32 {
             }
         }
         "facts" => {
-            println!("hostname => ouros-desktop");
-            println!("fqdn => ouros-desktop.local");
-            println!("operatingsystem => OurOS");
-            println!("osfamily => OurOS");
-            println!("kernel => ouros");
+            println!("hostname => slateos-desktop");
+            println!("fqdn => slateos-desktop.local");
+            println!("operatingsystem => SlateOS");
+            println!("osfamily => SlateOS");
+            println!("kernel => slateos");
             println!("architecture => x86_64");
             println!("memorysize => 16.00 GB");
             println!("processorcount => 8");
@@ -91,27 +91,27 @@ fn run_facter(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("4.6.1 (OurOS)");
+        println!("4.6.1 (SlateOS)");
         return 0;
     }
 
     let query = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str());
     if let Some(fact) = query {
         match fact {
-            "os" => println!("{{name => OurOS, family => OurOS, release => {{major => 1, full => 1.0}}}}"),
-            "networking" => println!("{{hostname => ouros-desktop, ip => 192.168.1.100, mac => 00:11:22:33:44:55}}"),
+            "os" => println!("{{name => SlateOS, family => SlateOS, release => {{major => 1, full => 1.0}}}}"),
+            "networking" => println!("{{hostname => slateos-desktop, ip => 192.168.1.100, mac => 00:11:22:33:44:55}}"),
             "memory" => println!("{{system => {{total => 16.00 GiB, used => 8.50 GiB, available => 7.50 GiB}}}}"),
             _ => println!("{} => (not found)", fact),
         }
     } else {
-        println!("os.name => OurOS");
-        println!("os.family => OurOS");
+        println!("os.name => SlateOS");
+        println!("os.family => SlateOS");
         println!("os.release.full => 1.0");
-        println!("networking.hostname => ouros-desktop");
+        println!("networking.hostname => slateos-desktop");
         println!("networking.ip => 192.168.1.100");
         println!("processors.count => 8");
         println!("memory.system.total => 16.00 GiB");
-        println!("kernel => ouros");
+        println!("kernel => slateos");
         println!("architecture => x86_64");
     }
     0

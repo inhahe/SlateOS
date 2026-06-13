@@ -1,4 +1,4 @@
-// OurOS e2fsprogs — ext2/3/4 filesystem utilities
+// SlateOS e2fsprogs — ext2/3/4 filesystem utilities
 //
 // Multi-personality binary:
 //   mke2fs    / mkfs.ext2 / mkfs.ext3 / mkfs.ext4 — create ext2/3/4 filesystem
@@ -407,7 +407,7 @@ impl Default for Superblock {
             s_minor_rev_level: 0,
             s_lastcheck: 1700000000,
             s_checkinterval: 0,
-            s_creator_os: 5, // OurOS
+            s_creator_os: 5, // SlateOS
             s_rev_level: EXT2_DYNAMIC_REV,
             s_def_resuid: 0,
             s_def_resgid: 0,
@@ -546,7 +546,7 @@ impl Superblock {
             2 => "Masix",
             3 => "FreeBSD",
             4 => "Lites",
-            5 => "OurOS",
+            5 => "SlateOS",
             _ => "Unknown",
         }
     }
@@ -1488,7 +1488,7 @@ fn parse_mke2fs_args(args: &[String]) -> Result<Mke2fsOptions, String> {
             "-v" => opts.verbose = true,
             "-n" => opts.dry_run = true,
             "-V" => {
-                println!("mke2fs 1.47.0 (OurOS)");
+                println!("mke2fs 1.47.0 (SlateOS)");
                 process::exit(0);
             }
             arg if arg.starts_with('-') => {
@@ -1553,7 +1553,7 @@ fn run_mke2fs(args: &[String]) -> i32 {
     if !opts.quiet {
         let sb = &img.superblock;
         let total_bytes = u64::from(sb.block_size()) * sb.total_blocks();
-        println!("mke2fs 1.47.0 (OurOS)");
+        println!("mke2fs 1.47.0 (SlateOS)");
         println!(
             "Creating filesystem with {} {}k blocks and {} inodes",
             sb.total_blocks(),
@@ -2019,7 +2019,7 @@ fn parse_dumpe2fs_args(args: &[String]) -> Result<Dumpe2fsOptions, String> {
             "-x" => opts._hex_dump = true,
             "-i" => opts.image_file = true,
             "-V" => {
-                println!("dumpe2fs 1.47.0 (OurOS)");
+                println!("dumpe2fs 1.47.0 (SlateOS)");
                 process::exit(0);
             }
             arg if arg.starts_with('-') => {
@@ -2051,7 +2051,7 @@ fn run_dumpe2fs(args: &[String]) -> i32 {
     let label = if opts.image_file { "image" } else { "" };
     let img = FilesystemImage::create_default(&opts.device, FsType::Ext4, 262144, label);
 
-    println!("dumpe2fs 1.47.0 (OurOS)");
+    println!("dumpe2fs 1.47.0 (SlateOS)");
 
     let sb = &img.superblock;
     print_superblock_info(sb);
@@ -2182,7 +2182,7 @@ fn parse_debugfs_args(args: &[String]) -> Result<DebugfsOptions, String> {
                 opts.commands.push(format!("# commands from {}", args[i]));
             }
             "-V" => {
-                println!("debugfs 1.47.0 (OurOS)");
+                println!("debugfs 1.47.0 (SlateOS)");
                 process::exit(0);
             }
             arg if arg.starts_with('-') => {
@@ -2605,7 +2605,7 @@ fn run_debugfs(args: &[String]) -> i32 {
     let img = FilesystemImage::create_default(device, FsType::Ext4, 262144, "");
 
     if opts.commands.is_empty() {
-        println!("debugfs 1.47.0 (OurOS)");
+        println!("debugfs 1.47.0 (SlateOS)");
         if !opts.device.is_empty() {
             let mode = if opts.writable {
                 "read/write"
@@ -2674,7 +2674,7 @@ fn parse_resize2fs_args(args: &[String]) -> Result<Resize2fsOptions, String> {
             "-p" => opts.progress = true,
             "-P" => opts._print_min_size = true,
             "-V" => {
-                println!("resize2fs 1.47.0 (OurOS)");
+                println!("resize2fs 1.47.0 (SlateOS)");
                 process::exit(0);
             }
             arg if arg.starts_with('-') => {
@@ -2736,7 +2736,7 @@ fn run_resize2fs(args: &[String]) -> i32 {
         current_blocks + current_blocks / 2
     };
 
-    println!("resize2fs 1.47.0 (OurOS)");
+    println!("resize2fs 1.47.0 (SlateOS)");
 
     if new_blocks == current_blocks {
         println!(
@@ -2855,7 +2855,7 @@ fn parse_e2fsck_args(args: &[String]) -> Result<E2fsckOptions, String> {
             }
             "-t" => opts.timing = true,
             "-V" => {
-                println!("e2fsck 1.47.0 (OurOS)");
+                println!("e2fsck 1.47.0 (SlateOS)");
                 process::exit(0);
             }
             arg if arg.starts_with('-') => {
@@ -2900,7 +2900,7 @@ fn run_e2fsck(args: &[String]) -> i32 {
     let sb = &img.superblock;
 
     if opts.verbosity != FsckVerbosity::Quiet {
-        println!("e2fsck 1.47.0 (OurOS)");
+        println!("e2fsck 1.47.0 (SlateOS)");
     }
 
     // Check if filesystem is clean
@@ -3087,7 +3087,7 @@ fn parse_e2image_args(args: &[String]) -> Result<E2imageOptions, String> {
             "-s" => opts.scramble_dir = true,
             "-I" => opts.install = true,
             "-V" => {
-                println!("e2image 1.47.0 (OurOS)");
+                println!("e2image 1.47.0 (SlateOS)");
                 process::exit(0);
             }
             arg if arg.starts_with('-') => {
@@ -3226,7 +3226,7 @@ fn parse_filefrag_args(args: &[String]) -> Result<FilefragOptions, String> {
             "-s" => opts.sync_first = true,
             "-e" => opts._extent_format = true,
             "-V" => {
-                println!("filefrag 1.47.0 (OurOS)");
+                println!("filefrag 1.47.0 (SlateOS)");
                 process::exit(0);
             }
             arg if arg.starts_with('-') => {
@@ -3380,7 +3380,7 @@ fn simulate_file_size(file: &str) -> u64 {
 #[allow(dead_code)]
 fn print_version(personality: Personality) {
     let name = personality_name(personality);
-    println!("{name} 1.47.0 (OurOS)");
+    println!("{name} 1.47.0 (SlateOS)");
 }
 
 #[allow(dead_code)]
@@ -3757,7 +3757,7 @@ mod tests {
         sb.s_creator_os = 0;
         assert_eq!(sb.creator_os_str(), "Linux");
         sb.s_creator_os = 5;
-        assert_eq!(sb.creator_os_str(), "OurOS");
+        assert_eq!(sb.creator_os_str(), "SlateOS");
     }
 
     #[test]

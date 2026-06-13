@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! broot — OurOS interactive tree explorer and file manager
+//! broot — SlateOS interactive tree explorer and file manager
 //!
 //! Single personality: `broot` (alias: `br`)
 
@@ -40,7 +40,7 @@ fn run_broot(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("broot 1.37.0 (OurOS)");
+        println!("broot 1.37.0 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "--install") {

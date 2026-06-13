@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! icc-cli — OurOS ICC profile inspector
+//! icc-cli — SlateOS ICC profile inspector
 //!
 //! Single personality: `iccinfo`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_icc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: iccinfo [OPTIONS] PROFILE.icc");
-        println!("iccinfo v1.0 (OurOS) — ICC profile inspector");
+        println!("iccinfo v1.0 (SlateOS) — ICC profile inspector");
         println!();
         println!("Options:");
         println!("  PROFILE.icc       ICC profile to inspect");

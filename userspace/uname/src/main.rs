@@ -1,4 +1,4 @@
-//! OurOS `uname` Utility — Print System Information
+//! SlateOS `uname` Utility — Print System Information
 //!
 //! Reads system identity from `/proc/sys/kernel/` and `/proc/cpuinfo`, then
 //! prints the requested fields separated by spaces. Falls back to hardcoded
@@ -33,7 +33,7 @@ use std::process;
 const VERSION: &str = "0.1.0";
 
 /// Default kernel name when `/proc/sys/kernel/ostype` is unavailable.
-const DEFAULT_KERNEL_NAME: &str = "OurOS";
+const DEFAULT_KERNEL_NAME: &str = "SlateOS";
 
 /// Default kernel release when `/proc/sys/kernel/osrelease` is unavailable.
 const DEFAULT_RELEASE: &str = "0.1.0";
@@ -42,7 +42,7 @@ const DEFAULT_RELEASE: &str = "0.1.0";
 const DEFAULT_MACHINE: &str = "x86_64";
 
 /// Default operating system name.
-const DEFAULT_OS_NAME: &str = "OurOS";
+const DEFAULT_OS_NAME: &str = "SlateOS";
 
 // Proc filesystem paths.
 const PROC_OSTYPE: &str = "/proc/sys/kernel/ostype";
@@ -372,7 +372,7 @@ fn push_unique(fields: &mut Vec<Field>, field: Field) {
 // ============================================================================
 
 fn print_help() {
-    println!("OurOS uname v{VERSION}");
+    println!("SlateOS uname v{VERSION}");
     println!();
     println!("Print system information.");
     println!();
@@ -424,7 +424,7 @@ fn run(request: Request) -> i32 {
         }
 
         Request::Version => {
-            println!("uname (OurOS) {VERSION}");
+            println!("uname (SlateOS) {VERSION}");
             0
         }
 

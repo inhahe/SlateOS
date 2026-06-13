@@ -2,5 +2,5 @@
 name = "mount"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS mount/umount — manage filesystem mount points"
+description = "SlateOS mount/umount — manage filesystem mount points"
 [dependencies]

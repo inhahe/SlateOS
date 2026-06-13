@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! gcore-cli — OurOS Gcore (Luxembourg edge + ML inference) personality CLI.
+//! gcore-cli — SlateOS Gcore (Luxembourg edge + ML inference) personality CLI.
 
 use std::env;
 use std::process;
@@ -29,7 +29,7 @@ fn print_help(prog: &str) {
 }
 
 fn print_version() {
-    println!("gcore-cli 0.1.0 — OurOS personality binary");
+    println!("gcore-cli 0.1.0 — SlateOS personality binary");
     println!("Gcore — Luxembourg (headquarters); R&D distributed across Europe");
 }
 

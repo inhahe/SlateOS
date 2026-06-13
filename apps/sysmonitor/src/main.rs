@@ -1,4 +1,4 @@
-//! `OurOS` System Monitor / Dashboard
+//! `SlateOS` System Monitor / Dashboard
 //!
 //! A comprehensive system monitoring application combining Task Manager
 //! and Resource Monitor functionality. Features:
@@ -14,7 +14,7 @@
 //! - Auto-refresh with configurable interval
 //!
 //! Uses the guitk library for UI rendering. All data is gathered
-//! through `OurOS` syscalls; the structs here define the presentation
+//! through `SlateOS` syscalls; the structs here define the presentation
 //! layer while the OS provides the actual system information.
 
 // Lint policy is inherited from the workspace (`[lints] workspace = true`):
@@ -669,7 +669,7 @@ impl SysMonitorState {
 
     /// Refresh all data from the OS.
     ///
-    /// In production this calls `OurOS` syscalls. The data vectors
+    /// In production this calls `SlateOS` syscalls. The data vectors
     /// are populated externally or via `load_demo_data()` for testing.
     pub fn refresh(&mut self) {
         self.rebuild_visible_list();
@@ -2675,8 +2675,8 @@ impl SysMonitorState {
     /// Populate with sample data for UI testing.
     pub fn load_demo_data(&mut self) {
         self.system_info = SystemInfo {
-            hostname: "ouros-desktop".to_string(),
-            os_version: "OurOS 0.1.0".to_string(),
+            hostname: "slateos-desktop".to_string(),
+            os_version: "SlateOS 0.1.0".to_string(),
             kernel_version: "0.1.0-alpha".to_string(),
             cpu_model: "x86_64 4-core @ 3.6GHz".to_string(),
             uptime_secs: 86472,

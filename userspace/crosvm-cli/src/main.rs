@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! crosvm-cli — OurOS crosvm Chrome OS VMM
+//! crosvm-cli — SlateOS crosvm Chrome OS VMM
 //!
 //! Single personality: `crosvm`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_crosvm(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: crosvm COMMAND [OPTIONS]");
-        println!("crosvm v126.0 (OurOS) — Chrome OS Virtual Machine Monitor");
+        println!("crosvm v126.0 (SlateOS) — Chrome OS Virtual Machine Monitor");
         println!();
         println!("Commands:");
         println!("  run               Run a VM");
@@ -45,7 +45,7 @@ fn run_crosvm(args: &[String], _prog: &str) -> i32 {
             println!("  Requested: 2048 MiB");
         }
         "snapshot" => println!("Snapshot saved: vm_snapshot.bin"),
-        "version" | "--version" => println!("crosvm v126.0 (OurOS)"),
+        "version" | "--version" => println!("crosvm v126.0 (SlateOS)"),
         _ => println!("crosvm {}: completed", cmd),
     }
     0

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rabbitmqctl-cli — OurOS RabbitMQ management CLI
+//! rabbitmqctl-cli — SlateOS RabbitMQ management CLI
 //!
 //! Single personality: `rabbitmqctl`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rabbitmqctl(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: rabbitmqctl COMMAND [OPTIONS]");
-        println!("rabbitmqctl 3.13.0 (OurOS) — RabbitMQ management CLI");
+        println!("rabbitmqctl 3.13.0 (SlateOS) — RabbitMQ management CLI");
         println!();
         println!("Commands:");
         println!("  status                  Node status");
@@ -36,7 +36,7 @@ fn run_rabbitmqctl(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("rabbitmqctl 3.13.0 (OurOS)");
+        println!("rabbitmqctl 3.13.0 (SlateOS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("status");

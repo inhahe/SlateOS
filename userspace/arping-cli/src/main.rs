@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! arping-cli — OurOS ARP ping utility
+//! arping-cli — SlateOS ARP ping utility
 //!
 //! Single personality: `arping`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_arping(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: arping [OPTIONS] HOST");
-        println!("arping v2.23 (OurOS) — Send ARP requests to a host");
+        println!("arping v2.23 (SlateOS) — Send ARP requests to a host");
         println!();
         println!("Options:");
         println!("  HOST              Target IP address");

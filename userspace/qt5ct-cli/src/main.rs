@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! qt5ct-cli — OurOS qt5ct Qt5 configuration tool
+//! qt5ct-cli — SlateOS qt5ct Qt5 configuration tool
 //!
 //! Single personality: `qt5ct`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_qt5ct(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: qt5ct [OPTIONS]");
-        println!("qt5ct v1.8 (OurOS) — Qt5 configuration tool");
+        println!("qt5ct v1.8 (SlateOS) — Qt5 configuration tool");
         println!();
         println!("Options:");
         println!("  --version         Show version");
@@ -24,7 +24,7 @@ fn run_qt5ct(args: &[String], _prog: &str) -> i32 {
         println!("Set QT_QPA_PLATFORMTHEME=qt5ct to enable.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("qt5ct v1.8 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("qt5ct v1.8 (SlateOS)"); return 0; }
     println!("qt5ct: Qt5 configuration");
     println!("  Style: Fusion");
     println!("  Color Scheme: darker");

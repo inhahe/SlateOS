@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! loki-cli — OurOS Grafana Loki log query CLI (logcli)
+//! loki-cli — SlateOS Grafana Loki log query CLI (logcli)
 //!
 //! Single personality: `logcli`
 
@@ -35,7 +35,7 @@ fn run_logcli(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("logcli version 2.9.4 (OurOS)");
+        println!("logcli version 2.9.4 (SlateOS)");
         return 0;
     }
 

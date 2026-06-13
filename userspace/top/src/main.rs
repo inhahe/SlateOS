@@ -1,4 +1,4 @@
-//! OurOS Interactive Process Monitor
+//! SlateOS Interactive Process Monitor
 //!
 //! Real-time display of system processes, CPU, and memory usage.
 //! Similar to Linux `top` or `htop` — reads from /proc for live data.
@@ -631,7 +631,7 @@ fn parse_sort_field(s: &str) -> Option<SortField> {
 }
 
 fn print_usage() {
-    println!("OurOS Process Monitor v0.1.0");
+    println!("SlateOS Process Monitor v0.1.0");
     println!();
     println!("Real-time display of running processes, CPU, and memory usage.");
     println!();

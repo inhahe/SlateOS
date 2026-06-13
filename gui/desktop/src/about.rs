@@ -37,7 +37,7 @@ const COL_PEACH: Color = Color::from_hex(0xFAB387);
 /// Collected system information for the About dialog.
 #[derive(Clone, Debug)]
 pub struct SystemInfo {
-    /// OS name (e.g., "OurOS").
+    /// OS name (e.g., "SlateOS").
     pub os_name: String,
     /// OS version string (e.g., "0.1.0-dev").
     pub os_version: String,
@@ -66,12 +66,12 @@ pub struct SystemInfo {
 impl Default for SystemInfo {
     fn default() -> Self {
         Self {
-            os_name: "OurOS".to_string(),
+            os_name: "SlateOS".to_string(),
             os_version: "0.1.0-dev".to_string(),
             kernel_version: "0.1.0".to_string(),
             build_date: "2026-05-18".to_string(),
             architecture: "x86_64".to_string(),
-            hostname: "ouros".to_string(),
+            hostname: "slateos".to_string(),
             cpu_model: "Unknown CPU".to_string(),
             cpu_cores: 1,
             total_memory_mb: 0,
@@ -801,7 +801,7 @@ mod tests {
     #[test]
     fn test_system_info_default() {
         let info = SystemInfo::default();
-        assert_eq!(info.os_name, "OurOS");
+        assert_eq!(info.os_name, "SlateOS");
         assert_eq!(info.architecture, "x86_64");
         assert_eq!(info.cpu_cores, 1);
         assert_eq!(info.total_memory_mb, 0);
@@ -881,7 +881,7 @@ mod tests {
     #[test]
     fn test_system_info_from_text_empty() {
         let info = SystemInfo::from_text("");
-        assert_eq!(info.os_name, "OurOS"); // all defaults
+        assert_eq!(info.os_name, "SlateOS"); // all defaults
     }
 
     // ---- LicenseInfo tests ----

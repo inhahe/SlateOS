@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! panda3d-cli — OurOS Panda3D game engine
+//! panda3d-cli — SlateOS Panda3D game engine
 //!
 //! Single personality: `panda3d`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_panda3d(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: panda3d [COMMAND] [OPTIONS]");
-        println!("Panda3D v1.10 (OurOS) — Open-source 3D engine (Python/C++)");
+        println!("Panda3D v1.10 (SlateOS) — Open-source 3D engine (Python/C++)");
         println!();
         println!("Commands:");
         println!("  run FILE           Run a Panda3D script");
@@ -30,8 +30,8 @@ fn run_panda3d(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Panda3D v1.10.14 (OurOS)"); return 0; }
-    println!("Panda3D v1.10.14 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Panda3D v1.10.14 (SlateOS)"); return 0; }
+    println!("Panda3D v1.10.14 (SlateOS)");
     println!("  Language bindings: Python, C++");
     println!("  Renderers: OpenGL, OpenGL ES, DirectX 9");
     println!("  Audio: OpenAL, FMOD");

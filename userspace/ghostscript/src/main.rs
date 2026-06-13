@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ghostscript — OurOS PostScript and PDF interpreter
+//! ghostscript — SlateOS PostScript and PDF interpreter
 //!
 //! Multi-personality: `gs`, `ps2pdf`, `pdf2ps`
 
@@ -28,7 +28,7 @@ fn run_gs(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("GPL Ghostscript 10.03.0 (OurOS) (2025-05-22)");
+        println!("GPL Ghostscript 10.03.0 (SlateOS) (2025-05-22)");
         return 0;
     }
 
@@ -36,7 +36,7 @@ fn run_gs(args: Vec<String>) -> i32 {
     let output = args.iter().find_map(|a| a.strip_prefix("-sOutputFile=")).unwrap_or("output");
     let input_files: Vec<&str> = args.iter().filter(|a| !a.starts_with('-') && !a.starts_with("/")).map(|s| s.as_str()).collect();
 
-    println!("GPL Ghostscript 10.03.0 (OurOS) (2025-05-22)");
+    println!("GPL Ghostscript 10.03.0 (SlateOS) (2025-05-22)");
     println!("Copyright (C) 2025 Artifex Software, Inc.  All rights reserved.");
     if !input_files.is_empty() {
         println!("Processing {} file(s) with device '{}'", input_files.len(), device);

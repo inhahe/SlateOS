@@ -2,6 +2,6 @@
 name = "markdowneditor"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS Markdown Editor — split-view editor with live preview"
+description = "SlateOS Markdown Editor — split-view editor with live preview"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }

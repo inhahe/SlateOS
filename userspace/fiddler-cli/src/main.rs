@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fiddler-cli — OurOS Fiddler web debugging proxy
+//! fiddler-cli — SlateOS Fiddler web debugging proxy
 //!
 //! Single personality: `fiddler`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_fiddler(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: fiddler [OPTIONS]");
-        println!("Fiddler Everywhere v5.1.0 (OurOS) — Web debugging proxy");
+        println!("Fiddler Everywhere v5.1.0 (SlateOS) — Web debugging proxy");
         println!();
         println!("Options:");
         println!("  --port PORT         Proxy port (default: 8866)");
@@ -25,7 +25,7 @@ fn run_fiddler(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("Fiddler Everywhere v5.1.0 (OurOS)");
+        println!("Fiddler Everywhere v5.1.0 (SlateOS)");
         return 0;
     }
     println!("Fiddler Everywhere v5.1.0");

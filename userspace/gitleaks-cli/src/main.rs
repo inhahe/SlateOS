@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gitleaks-cli — OurOS Gitleaks secret scanner
+//! gitleaks-cli — SlateOS Gitleaks secret scanner
 //!
 //! Multi-personality: `gitleaks`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gitleaks(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: gitleaks COMMAND [OPTIONS]");
-        println!("Gitleaks 8.18.0 (OurOS) — Secret scanner");
+        println!("Gitleaks 8.18.0 (SlateOS) — Secret scanner");
         println!();
         println!("Commands:");
         println!("  detect        Scan git repo for secrets");

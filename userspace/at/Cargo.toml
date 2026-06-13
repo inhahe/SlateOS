@@ -2,5 +2,5 @@
 name = "at"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS at — schedule one-time command execution at a specified time"
+description = "SlateOS at — schedule one-time command execution at a specified time"
 [dependencies]

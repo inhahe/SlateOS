@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! yard-cli — OurOS YARD Ruby documentation generator
+//! yard-cli — SlateOS YARD Ruby documentation generator
 //!
 //! Multi-personality: `yard`, `yardoc`, `yri`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_yard(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: yard COMMAND [OPTIONS]");
-        println!("YARD 0.9.36 (OurOS)");
+        println!("YARD 0.9.36 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  doc            Generate documentation");
@@ -28,7 +28,7 @@ fn run_yard(args: &[String]) -> i32 {
     }
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("doc");
     match subcmd {
-        "--version" => println!("yard 0.9.36 (OurOS)"),
+        "--version" => println!("yard 0.9.36 (SlateOS)"),
         "doc" => {
             let files: Vec<&str> = args.iter()
                 .filter(|a| a.ends_with(".rb"))
@@ -98,7 +98,7 @@ fn run_yardoc(args: &[String]) -> i32 {
 fn run_yri(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: yri [OPTIONS] NAME");
-        println!("YARD ri — documentation lookup (OurOS)");
+        println!("YARD ri — documentation lookup (SlateOS)");
         println!("  --db DIR    Database directory");
         println!("  --no-cache  Skip cache");
         return 0;

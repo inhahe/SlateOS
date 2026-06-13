@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mhddfs-cli — OurOS mhddfs multi-HDD FUSE filesystem
+//! mhddfs-cli — SlateOS mhddfs multi-HDD FUSE filesystem
 //!
 //! Single personality: `mhddfs`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mhddfs(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mhddfs DIR1,DIR2[,...] MOUNTPOINT [OPTIONS]");
-        println!("mhddfs v0.1.39 (OurOS) — Join multiple filesystems into one");
+        println!("mhddfs v0.1.39 (SlateOS) — Join multiple filesystems into one");
         println!();
         println!("Options:");
         println!("  -o mlimit=SIZE   Move limit (min free space before moving to next disk)");
@@ -23,8 +23,8 @@ fn run_mhddfs(args: &[String], _prog: &str) -> i32 {
         println!("  --version        Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("mhddfs v0.1.39 (OurOS)"); return 0; }
-    println!("mhddfs v0.1.39 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("mhddfs v0.1.39 (SlateOS)"); return 0; }
+    println!("mhddfs v0.1.39 (SlateOS)");
     println!("  Directories:");
     println!("    /mnt/hdd1: 2.0 TiB total, 0.5 TiB free");
     println!("    /mnt/hdd2: 2.0 TiB total, 1.2 TiB free");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ignition-cli — OurOS Ignition/Gazebo Sim tools
+//! ignition-cli — SlateOS Ignition/Gazebo Sim tools
 //!
 //! Multi-personality: `ign`, `gz`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gz(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: gz COMMAND [OPTIONS]");
-        println!("Gazebo Sim v8 (OurOS) — Robot simulation platform");
+        println!("Gazebo Sim v8 (SlateOS) — Robot simulation platform");
         println!();
         println!("Commands:");
         println!("  sim               Launch simulator");
@@ -27,7 +27,7 @@ fn run_gz(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("Gazebo Sim v8 (OurOS)");
+        println!("Gazebo Sim v8 (SlateOS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("sim");

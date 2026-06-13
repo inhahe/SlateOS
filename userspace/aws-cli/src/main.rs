@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! aws-cli — OurOS AWS command-line interface
+//! aws-cli — SlateOS AWS command-line interface
 //!
 //! Single personality: `aws`
 
@@ -11,7 +11,7 @@ fn run_aws(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "help") {
         println!("Usage: aws [OPTIONS] <SERVICE> <COMMAND> [PARAMETERS]");
         println!();
-        println!("The AWS Command Line Interface (OurOS).");
+        println!("The AWS Command Line Interface (SlateOS).");
         println!();
         println!("Services:");
         println!("  s3           Amazon S3");
@@ -39,7 +39,7 @@ fn run_aws(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("aws-cli/2.15.0 OurOS/1.0 exe/x86_64");
+        println!("aws-cli/2.15.0 SlateOS/1.0 exe/x86_64");
         return 0;
     }
 

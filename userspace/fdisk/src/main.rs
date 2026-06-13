@@ -1,4 +1,4 @@
-// OurOS fdisk - Multi-personality disk partitioning utility
+// SlateOS fdisk - Multi-personality disk partitioning utility
 //
 // Personalities detected via argv[0] basename:
 //   fdisk     - MBR/GPT interactive partition editor
@@ -2391,7 +2391,7 @@ fn print_gdisk_listing(out: &mut OutBuf, dev: &[u8], label: &DiskLabel,
 // ── partprobe: Inform Kernel ─────────────────────────────────────────
 
 fn do_partprobe(out: &mut OutBuf, dev: &[u8]) {
-    // In OurOS this would issue a syscall to re-read partition tables.
+    // In SlateOS this would issue a syscall to re-read partition tables.
     // For now, print what we would do and report success.
     out.push(dev);
     out.push(b": partition table re-read requested");
@@ -2469,7 +2469,7 @@ fn print_type_list_gpt(out: &mut OutBuf) {
 fn print_help(out: &mut OutBuf, personality: Personality) {
     match personality {
         Personality::Fdisk => {
-            out.push(b"OurOS fdisk - Partition Table Manipulator v0.1.0\n\n");
+            out.push(b"SlateOS fdisk - Partition Table Manipulator v0.1.0\n\n");
             out.push(b"USAGE:\n");
             out.push(b"  fdisk [options] [device]\n\n");
             out.push(b"LISTING:\n");
@@ -2495,7 +2495,7 @@ fn print_help(out: &mut OutBuf, personality: Personality) {
             out.push(b"  Name: linux, efi, swap, ntfs, lvm, raid, bios\n");
         }
         Personality::Gdisk => {
-            out.push(b"OurOS gdisk - GPT Partition Editor v0.1.0\n\n");
+            out.push(b"SlateOS gdisk - GPT Partition Editor v0.1.0\n\n");
             out.push(b"USAGE:\n");
             out.push(b"  gdisk [options] [device]\n\n");
             out.push(b"OPTIONS:\n");
@@ -2507,7 +2507,7 @@ fn print_help(out: &mut OutBuf, personality: Personality) {
             out.push(b"GPT-only editor. Use fdisk for MBR disks.\n");
         }
         Personality::Sfdisk => {
-            out.push(b"OurOS sfdisk - Scriptable Partition Tool v0.1.0\n\n");
+            out.push(b"SlateOS sfdisk - Scriptable Partition Tool v0.1.0\n\n");
             out.push(b"USAGE:\n");
             out.push(b"  sfdisk --list [device]             List partitions\n");
             out.push(b"  sfdisk --dump [device]             Dump in sfdisk format\n");
@@ -2521,14 +2521,14 @@ fn print_help(out: &mut OutBuf, personality: Personality) {
             out.push(b"  -V, --version   Show version\n");
         }
         Personality::Cfdisk => {
-            out.push(b"OurOS cfdisk - Curses Partition Editor v0.1.0\n\n");
+            out.push(b"SlateOS cfdisk - Curses Partition Editor v0.1.0\n\n");
             out.push(b"USAGE:\n");
             out.push(b"  cfdisk [device]\n\n");
             out.push(b"Displays partition table in a simple visual format.\n");
             out.push(b"Options: -h/--help, -V/--version\n");
         }
         Personality::Partprobe => {
-            out.push(b"OurOS partprobe - Inform Kernel of Partition Changes v0.1.0\n\n");
+            out.push(b"SlateOS partprobe - Inform Kernel of Partition Changes v0.1.0\n\n");
             out.push(b"USAGE:\n");
             out.push(b"  partprobe [device...]\n\n");
             out.push(b"Requests the kernel to re-read the partition table for the specified\n");
@@ -2540,13 +2540,13 @@ fn print_help(out: &mut OutBuf, personality: Personality) {
 
 fn print_version(out: &mut OutBuf, personality: Personality) {
     out.push(personality_name(personality));
-    out.push(b" (OurOS) 0.1.0\n");
+    out.push(b" (SlateOS) 0.1.0\n");
 }
 
 // ── Simulated Disk Data for Testing ──────────────────────────────────
 
 /// Build a minimal simulated disk image for listing (when no real device is available).
-/// In a real OurOS environment, we would read from /dev/sdX. This provides a
+/// In a real SlateOS environment, we would read from /dev/sdX. This provides a
 /// fallback that shows the tool is functional.
 fn build_test_gpt_disk() -> ([u8; 17408], u64, u64) {
     let mut disk = [0u8; 17408]; // 34 sectors * 512
@@ -2665,7 +2665,7 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
         _ => {}
     }
 
-    // For listing/display, we need a disk image. In OurOS we would read from
+    // For listing/display, we need a disk image. In SlateOS we would read from
     // the actual device. Here we detect the personality and dispatch.
     let dev = opts.device_bytes();
 
@@ -2708,7 +2708,7 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
         return 0;
     }
 
-    // Try to read the device. On real OurOS we read /dev/sdX.
+    // Try to read the device. On real SlateOS we read /dev/sdX.
     // For now, use simulated data when the device read fails.
     let sector_size: u64 = 512;
     let hw_sector_size: u64 = 512;

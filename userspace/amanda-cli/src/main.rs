@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! amanda-cli — OurOS Amanda backup CLI
+//! amanda-cli — SlateOS Amanda backup CLI
 //!
 //! Multi-personality: `amdump`, `amcheck`, `amrecover`, `amrestore`, `amstatus`, `amreport`
 
@@ -19,7 +19,7 @@ fn run_amdump(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: amdump [OPTIONS] CONFIG");
         println!();
-        println!("amdump — run Amanda backup (OurOS).");
+        println!("amdump — run Amanda backup (SlateOS).");
         return 0;
     }
     let config = args.first().map(|s| s.as_str()).unwrap_or("DailySet1");
@@ -37,7 +37,7 @@ fn run_amcheck(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: amcheck [OPTIONS] CONFIG");
         println!();
-        println!("amcheck — verify Amanda configuration (OurOS).");
+        println!("amcheck — verify Amanda configuration (SlateOS).");
         println!();
         println!("Options:");
         println!("  -c    Check client only");
@@ -62,7 +62,7 @@ fn run_amrecover(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: amrecover [OPTIONS] [CONFIG]");
         println!();
-        println!("amrecover — interactive Amanda recovery (OurOS).");
+        println!("amrecover — interactive Amanda recovery (SlateOS).");
         return 0;
     }
     println!("AMRECOVER - Amanda Recovery");
@@ -77,7 +77,7 @@ fn run_amrestore(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: amrestore [OPTIONS] DEVICE [HOST [DISK]]");
         println!();
-        println!("amrestore — extract Amanda backup data (OurOS).");
+        println!("amrestore — extract Amanda backup data (SlateOS).");
         return 0;
     }
     println!("amrestore: restoring from backup...");
@@ -89,7 +89,7 @@ fn run_amstatus(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: amstatus [OPTIONS] CONFIG");
         println!();
-        println!("amstatus — display Amanda backup status (OurOS).");
+        println!("amstatus — display Amanda backup status (SlateOS).");
         return 0;
     }
     let config = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("DailySet1");
@@ -110,7 +110,7 @@ fn run_amreport(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: amreport [OPTIONS] CONFIG");
         println!();
-        println!("amreport — generate Amanda report (OurOS).");
+        println!("amreport — generate Amanda report (SlateOS).");
         return 0;
     }
     let config = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("DailySet1");

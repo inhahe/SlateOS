@@ -1,4 +1,4 @@
-//! taskscheduler -- OurOS Task Scheduler
+//! taskscheduler -- SlateOS Task Scheduler
 //!
 //! A cron-like task scheduling application with a GUI built on guitk.
 //! Supports one-shot and recurring schedules including daily, weekly,
@@ -1024,7 +1024,7 @@ impl TaskSchedulerConfig {
     /// Serialize all tasks to a text config string.
     pub fn serialize(scheduler: &TaskScheduler) -> String {
         let mut lines = Vec::new();
-        lines.push(String::from("# OurOS Task Scheduler Config"));
+        lines.push(String::from("# SlateOS Task Scheduler Config"));
         lines.push("VERSION|1".to_string());
 
         for task in scheduler.tasks.values() {

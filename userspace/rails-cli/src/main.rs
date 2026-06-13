@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rails-cli — OurOS Ruby on Rails CLI
+//! rails-cli — SlateOS Ruby on Rails CLI
 //!
 //! Multi-personality: `rails`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rails(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: rails COMMAND [OPTIONS]");
-        println!("Rails 7.1.3.4 (OurOS)");
+        println!("Rails 7.1.3.4 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  new          Create a new Rails application");

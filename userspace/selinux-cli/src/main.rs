@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! selinux-cli — OurOS SELinux management tools
+//! selinux-cli — SlateOS SELinux management tools
 //!
 //! Multi-personality: `getenforce`, `setenforce`, `sestatus`, `semanage`,
 //! `setsebool`, `getsebool`, `restorecon`, `chcon`
@@ -56,7 +56,7 @@ fn run_semanage(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: semanage OBJECT [OPTIONS]");
         println!();
-        println!("semanage — SELinux policy management (OurOS).");
+        println!("semanage — SELinux policy management (SlateOS).");
         println!();
         println!("Objects: login, user, role, port, interface, fcontext, boolean, module");
         return 0;

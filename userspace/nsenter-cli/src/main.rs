@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nsenter-cli — OurOS nsenter/lsns CLI
+//! nsenter-cli — SlateOS nsenter/lsns CLI
 //!
 //! Multi-personality: `nsenter`, `lsns`
 
@@ -19,7 +19,7 @@ fn run_nsenter(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: nsenter [OPTIONS] [COMMAND [ARGS...]]");
         println!();
-        println!("nsenter — enter namespaces of another process (OurOS).");
+        println!("nsenter — enter namespaces of another process (SlateOS).");
         println!();
         println!("Options:");
         println!("  -t, --target PID       Target process");
@@ -71,7 +71,7 @@ fn run_lsns(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lsns [OPTIONS] [NAMESPACE]");
         println!();
-        println!("lsns — list namespaces (OurOS).");
+        println!("lsns — list namespaces (SlateOS).");
         println!();
         println!("Options:");
         println!("  -t, --type TYPE        Filter by type (mnt, net, pid, user, uts, ipc, cgroup)");

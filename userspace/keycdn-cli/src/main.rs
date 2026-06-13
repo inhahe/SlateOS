@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! keycdn-cli — OurOS KeyCDN Swiss personality CLI.
+//! keycdn-cli — SlateOS KeyCDN Swiss personality CLI.
 
 use std::env;
 use std::process;
@@ -28,7 +28,7 @@ fn print_help(prog: &str) {
 }
 
 fn print_version() {
-    println!("keycdn-cli 0.1.0 — OurOS personality binary");
+    println!("keycdn-cli 0.1.0 — SlateOS personality binary");
     println!("proinity GmbH — Wil/Zurich, Switzerland (KeyCDN)");
 }
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! alsa-utils — OurOS ALSA sound utilities
+//! alsa-utils — SlateOS ALSA sound utilities
 //!
 //! Multi-personality: `aplay`, `arecord`, `amixer`, `alsamixer`, `alsactl`, `speaker-test`
 
@@ -25,7 +25,7 @@ fn run_aplay(args: Vec<String>, recording: bool) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("{} version 1.2.11 (OurOS)", name);
+        println!("{} version 1.2.11 (SlateOS)", name);
         return 0;
     }
     if args.iter().any(|a| a == "-l" || a == "--list-devices") {
@@ -118,7 +118,7 @@ fn run_speaker_test(args: Vec<String>) -> i32 {
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("2");
-    println!("speaker-test 1.2.11 (OurOS)");
+    println!("speaker-test 1.2.11 (SlateOS)");
     println!("Playback device: default");
     println!("Stream parameters: 48000Hz, S16_LE, {} channels", channels);
     println!("Sine wave rate: 440.0000Hz");

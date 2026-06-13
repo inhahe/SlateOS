@@ -1,4 +1,4 @@
-// OurOS getty — virtual terminal login manager
+// SlateOS getty — virtual terminal login manager
 //
 // Multi-personality binary:
 //   getty / agetty  — open a terminal, set its mode, prompt for login name, invoke login(1)
@@ -329,7 +329,7 @@ fn display_issue(
     hostname: &str,
     tty_name: &str,
 ) -> io::Result<()> {
-    let os_name = "OurOS";
+    let os_name = "SlateOS";
     let os_release = "0.1.0";
 
     let content = match std::fs::read_to_string(issue_path) {
@@ -524,7 +524,7 @@ fn print_version(personality: Personality) {
         Personality::Getty => "getty (agetty)",
         Personality::Mingetty => "mingetty",
     };
-    println!("{name} (OurOS) 0.1.0");
+    println!("{name} (SlateOS) 0.1.0");
 }
 
 // ---------------------------------------------------------------------------
@@ -929,43 +929,43 @@ mod tests {
 
     #[test]
     fn test_process_issue_line_hostname() {
-        let result = process_issue_line("Welcome to \\n", "myhost", "tty1", "OurOS", "0.1.0");
+        let result = process_issue_line("Welcome to \\n", "myhost", "tty1", "SlateOS", "0.1.0");
         assert_eq!(result, "Welcome to myhost");
     }
 
     #[test]
     fn test_process_issue_line_os() {
-        let result = process_issue_line("\\s \\r", "myhost", "tty1", "OurOS", "0.1.0");
-        assert_eq!(result, "OurOS 0.1.0");
+        let result = process_issue_line("\\s \\r", "myhost", "tty1", "SlateOS", "0.1.0");
+        assert_eq!(result, "SlateOS 0.1.0");
     }
 
     #[test]
     fn test_process_issue_line_tty() {
-        let result = process_issue_line("on \\l", "myhost", "tty1", "OurOS", "0.1.0");
+        let result = process_issue_line("on \\l", "myhost", "tty1", "SlateOS", "0.1.0");
         assert_eq!(result, "on tty1");
     }
 
     #[test]
     fn test_process_issue_line_arch() {
-        let result = process_issue_line("\\m", "myhost", "tty1", "OurOS", "0.1.0");
+        let result = process_issue_line("\\m", "myhost", "tty1", "SlateOS", "0.1.0");
         assert_eq!(result, "x86_64");
     }
 
     #[test]
     fn test_process_issue_line_escape() {
-        let result = process_issue_line("\\\\path", "myhost", "tty1", "OurOS", "0.1.0");
+        let result = process_issue_line("\\\\path", "myhost", "tty1", "SlateOS", "0.1.0");
         assert_eq!(result, "\\path");
     }
 
     #[test]
     fn test_process_issue_line_unknown_escape() {
-        let result = process_issue_line("\\x", "myhost", "tty1", "OurOS", "0.1.0");
+        let result = process_issue_line("\\x", "myhost", "tty1", "SlateOS", "0.1.0");
         assert_eq!(result, "\\x");
     }
 
     #[test]
     fn test_process_issue_line_no_escapes() {
-        let result = process_issue_line("Hello World", "myhost", "tty1", "OurOS", "0.1.0");
+        let result = process_issue_line("Hello World", "myhost", "tty1", "SlateOS", "0.1.0");
         assert_eq!(result, "Hello World");
     }
 

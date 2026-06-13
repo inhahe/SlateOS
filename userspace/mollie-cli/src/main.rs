@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! mollie-cli — OurOS Mollie European payments personality CLI.
+//! mollie-cli — SlateOS Mollie European payments personality CLI.
 
 use std::env;
 use std::process;
@@ -30,7 +30,7 @@ fn print_help(prog: &str) {
 }
 
 fn print_version() {
-    println!("mollie-cli 0.1.0 — OurOS personality binary");
+    println!("mollie-cli 0.1.0 — SlateOS personality binary");
     println!("Mollie B.V. — Amsterdam, Netherlands");
 }
 

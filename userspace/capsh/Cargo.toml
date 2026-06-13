@@ -2,5 +2,5 @@
 name = "capsh"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS capability shell wrapper"
+description = "SlateOS capability shell wrapper"
 [dependencies]

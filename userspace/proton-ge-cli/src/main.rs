@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! proton-ge-cli — OurOS Proton GE custom Proton build
+//! proton-ge-cli — SlateOS Proton GE custom Proton build
 //!
 //! Single personality: `proton-ge`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_proton_ge(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: proton-ge [OPTIONS]");
-        println!("proton-ge v8-26 (OurOS) — GloriousEggroll custom Proton build");
+        println!("proton-ge v8-26 (SlateOS) — GloriousEggroll custom Proton build");
         println!();
         println!("Options:");
         println!("  --list            List installed GE-Proton versions");
@@ -24,7 +24,7 @@ fn run_proton_ge(args: &[String], _prog: &str) -> i32 {
         println!("  Wine-staging patches, DXVK/VKD3D-Proton, fsync, media codecs");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("proton-ge GE-Proton8-26 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("proton-ge GE-Proton8-26 (SlateOS)"); return 0; }
     if args.iter().any(|a| a == "--list") {
         println!("Installed GE-Proton versions:");
         println!("  GE-Proton8-26 (current)");

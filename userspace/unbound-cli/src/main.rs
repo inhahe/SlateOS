@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! unbound-cli — OurOS Unbound recursive DNS resolver
+//! unbound-cli — SlateOS Unbound recursive DNS resolver
 //!
 //! Multi-personality: `unbound`, `unbound-control`, `unbound-host`, `unbound-checkconf`
 
@@ -17,14 +17,14 @@ fn run_unbound(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V") {
-        println!("Version 1.19.1 (OurOS)");
+        println!("Version 1.19.1 (SlateOS)");
         println!("linked libs: libevent 2.1.12-stable, OpenSSL 3.2.1");
         println!("linked modules: dns64 respip validator iterator");
         println!("BSD licensed, see LICENSE.");
         return 0;
     }
 
-    println!("[1716364800] unbound[1234:0] notice: Start of unbound 1.19.1 (OurOS).");
+    println!("[1716364800] unbound[1234:0] notice: Start of unbound 1.19.1 (SlateOS).");
     println!("[1716364800] unbound[1234:0] info: verbosity 1");
     println!("[1716364800] unbound[1234:0] info: service (unbound 1.19.1).");
     println!("[1716364800] unbound[1234:0] info: start of service (unbound 1.19.1).");

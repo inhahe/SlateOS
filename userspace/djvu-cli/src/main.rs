@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! djvu-cli — OurOS DjVu tools CLI
+//! djvu-cli — SlateOS DjVu tools CLI
 //!
 //! Multi-personality: `djvused`, `djvudump`, `djvutxt`, `djvups`, `ddjvu`, `c44`, `cjb2`
 
@@ -20,7 +20,7 @@ fn run_djvu(prog: &str, args: &[String]) -> i32 {
         match prog {
             "djvused" => {
                 println!("Usage: djvused [OPTIONS] DJVUFILE");
-                println!("djvused — DjVu document editor (OurOS).");
+                println!("djvused — DjVu document editor (SlateOS).");
                 println!("  -e COMMAND    Execute command");
                 println!("  -f SCRIPT     Execute script file");
                 println!("  -s            Save in place");
@@ -28,23 +28,23 @@ fn run_djvu(prog: &str, args: &[String]) -> i32 {
             }
             "djvudump" => {
                 println!("Usage: djvudump DJVUFILE");
-                println!("djvudump — display DjVu file structure (OurOS).");
+                println!("djvudump — display DjVu file structure (SlateOS).");
             }
             "djvutxt" => {
                 println!("Usage: djvutxt [OPTIONS] DJVUFILE [TXTFILE]");
-                println!("djvutxt — extract text from DjVu (OurOS).");
+                println!("djvutxt — extract text from DjVu (SlateOS).");
                 println!("  --page N     Extract specific page");
                 println!("  --detail L   Detail level (page, column, region, para, line, word, char)");
             }
             "djvups" => {
                 println!("Usage: djvups [OPTIONS] DJVUFILE [PSFILE]");
-                println!("djvups — convert DjVu to PostScript (OurOS).");
+                println!("djvups — convert DjVu to PostScript (SlateOS).");
                 println!("  -page RANGE   Page range");
                 println!("  -format FMT   Format (ps, eps)");
             }
             "ddjvu" => {
                 println!("Usage: ddjvu [OPTIONS] DJVUFILE [OUTFILE]");
-                println!("ddjvu — DjVu decoder/converter (OurOS).");
+                println!("ddjvu — DjVu decoder/converter (SlateOS).");
                 println!("  -format FMT    Output format (ppm, tiff, pdf, png)");
                 println!("  -page RANGE    Page range");
                 println!("  -scale N       Scale factor");
@@ -52,13 +52,13 @@ fn run_djvu(prog: &str, args: &[String]) -> i32 {
             }
             "c44" => {
                 println!("Usage: c44 [OPTIONS] PNMFILE [DJVUFILE]");
-                println!("c44 — DjVu encoder for photographic images (OurOS).");
+                println!("c44 — DjVu encoder for photographic images (SlateOS).");
                 println!("  -slice N+N+N   Quality slices");
                 println!("  -dpi N         Resolution");
             }
             "cjb2" => {
                 println!("Usage: cjb2 [OPTIONS] PBMFILE [DJVUFILE]");
-                println!("cjb2 — DjVu encoder for bitonal images (OurOS).");
+                println!("cjb2 — DjVu encoder for bitonal images (SlateOS).");
                 println!("  -clean         Remove noise");
                 println!("  -lossy         Lossy compression");
                 println!("  -dpi N         Resolution");

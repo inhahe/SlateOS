@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lf-cli — OurOS lf file manager
+//! lf-cli — SlateOS lf file manager
 //!
 //! Single personality: `lf`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_lf(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lf [OPTIONS] [PATH]");
-        println!("lf r32 (OurOS) — Terminal file manager");
+        println!("lf r32 (SlateOS) — Terminal file manager");
         println!();
         println!("Options:");
         println!("  -command CMD      Execute command");
@@ -30,7 +30,7 @@ fn run_lf(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-version") {
-        println!("lf r32 (OurOS)");
+        println!("lf r32 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "-doc") {

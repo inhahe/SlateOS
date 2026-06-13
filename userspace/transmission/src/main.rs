@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! transmission — OurOS BitTorrent client
+//! transmission — SlateOS BitTorrent client
 //!
 //! Multi-personality: `transmission-daemon`, `transmission-cli`, `transmission-remote`
 
@@ -19,14 +19,14 @@ fn run_daemon(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("transmission-daemon 4.0.5 (OurOS)");
+        println!("transmission-daemon 4.0.5 (SlateOS)");
         return 0;
     }
     let port = args.iter().position(|a| a == "-p" || a == "--port")
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or(9091);
-    println!("[2025-05-22 10:00:00.000] Transmission 4.0.5 (OurOS) starting");
+    println!("[2025-05-22 10:00:00.000] Transmission 4.0.5 (SlateOS) starting");
     println!("[2025-05-22 10:00:00.100] RPC Server: listening on 0.0.0.0:{}", port);
     println!("[2025-05-22 10:00:00.200] Loaded 3 torrents");
     0
@@ -41,11 +41,11 @@ fn run_cli(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("transmission-cli 4.0.5 (OurOS)");
+        println!("transmission-cli 4.0.5 (SlateOS)");
         return 0;
     }
     let torrent = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("example.torrent");
-    println!("Transmission 4.0.5 (OurOS)");
+    println!("Transmission 4.0.5 (SlateOS)");
     println!("Opening torrent: {}", torrent);
     println!("Progress: 0.0%  DL: 0 kB/s  UL: 0 kB/s  Peers: 0");
     println!("Progress: 25.0% DL: 2.5 MB/s UL: 128 kB/s Peers: 12");
@@ -68,7 +68,7 @@ fn run_remote(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("transmission-remote 4.0.5 (OurOS)");
+        println!("transmission-remote 4.0.5 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "-l" || a == "--list") {

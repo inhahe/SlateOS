@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! simplenote-cli — OurOS Simplenote minimal notes
+//! simplenote-cli — SlateOS Simplenote minimal notes
 //!
 //! Single personality: `simplenote`
 
@@ -13,13 +13,13 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_simplenote(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: simplenote [OPTIONS]");
-        println!("simplenote v2.21 (OurOS) — Simple cross-platform notes");
+        println!("simplenote v2.21 (SlateOS) — Simple cross-platform notes");
         println!();
         println!("Options:");
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("simplenote v2.21 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("simplenote v2.21 (SlateOS)"); return 0; }
     println!("simplenote: minimal note-taking app started");
     println!("  Notes: 42");
     println!("  Tags: 8");

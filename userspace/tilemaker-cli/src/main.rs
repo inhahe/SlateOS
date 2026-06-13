@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tilemaker-cli — OurOS Tilemaker OSM tile builder
+//! tilemaker-cli — SlateOS Tilemaker OSM tile builder
 //!
 //! Single personality: `tilemaker`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_tilemaker(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: tilemaker [OPTIONS] --input FILE.osm.pbf --output DIR|FILE");
-        println!("Tilemaker v3.0 (OurOS) — Build vector tiles from OpenStreetMap data");
+        println!("Tilemaker v3.0 (SlateOS) — Build vector tiles from OpenStreetMap data");
         println!();
         println!("Options:");
         println!("  --input FILE      Input .osm.pbf file");
@@ -26,7 +26,7 @@ fn run_tilemaker(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Tilemaker v3.0 (OurOS)");
+        println!("Tilemaker v3.0 (SlateOS)");
         return 0;
     }
     println!("Tilemaker v3.0");

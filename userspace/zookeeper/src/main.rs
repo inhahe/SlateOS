@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zookeeper — OurOS distributed coordination service
+//! zookeeper — SlateOS distributed coordination service
 //!
 //! Multi-personality: `zkServer` (server), `zkCli` (CLI client)
 
@@ -16,7 +16,7 @@ fn run_zk_server(args: Vec<String>) -> i32 {
     }
     match cmd {
         "version" | "--version" => {
-            println!("Apache ZooKeeper, version 3.9.2 (OurOS)");
+            println!("Apache ZooKeeper, version 3.9.2 (SlateOS)");
             println!("Build: abc1234");
             0
         }

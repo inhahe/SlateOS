@@ -1,4 +1,4 @@
-//! OurOS audit framework utilities.
+//! SlateOS audit framework utilities.
 //!
 //! Multi-personality binary providing:
 //! - **auditctl** (default) — audit rule management

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! telegraf-cli — OurOS Telegraf metrics agent
+//! telegraf-cli — SlateOS Telegraf metrics agent
 //!
 //! Single personality: `telegraf`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_telegraf(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: telegraf [OPTIONS]");
-        println!("Telegraf v1.30 (OurOS) — Server metrics agent");
+        println!("Telegraf v1.30 (SlateOS) — Server metrics agent");
         println!();
         println!("Options:");
         println!("  --config FILE          Config file");
@@ -28,8 +28,8 @@ fn run_telegraf(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Telegraf v1.30.2 (OurOS)"); return 0; }
-    println!("Telegraf v1.30.2 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Telegraf v1.30.2 (SlateOS)"); return 0; }
+    println!("Telegraf v1.30.2 (SlateOS)");
     println!("  Config: /etc/telegraf/telegraf.conf");
     println!("  Inputs: cpu, mem, disk, net, system, processes");
     println!("  Outputs: influxdb_v2 (http://localhost:8086)");

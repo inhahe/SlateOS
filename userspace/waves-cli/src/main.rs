@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! waves-cli — OurOS Waves Audio plug-in suite
+//! waves-cli — SlateOS Waves Audio plug-in suite
 //!
 //! Single personality: `waves`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_waves(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: waves [PLUGIN] [OPTIONS]");
-        println!("Waves Audio (OurOS) — Industry-leading plug-in catalog (Waves V14)");
+        println!("Waves Audio (SlateOS) — Industry-leading plug-in catalog (Waves V14)");
         println!();
         println!("Plugins (over 250 total):");
         println!("  ssl-e/g/4000           SSL E/G channel strip, 4000 bundle");
@@ -30,8 +30,8 @@ fn run_waves(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Waves V14 (OurOS)"); return 0; }
-    println!("Waves V14 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Waves V14 (SlateOS)"); return 0; }
+    println!("Waves V14 (SlateOS)");
     println!("  Bundles: Diamond, Platinum, Gold, Horizon, SD7, Mercury, Abbey Road");
     println!("  License: Waves License Center (USB key or computer-bound)");
     println!("  Plug-in formats: VST2, VST3, AU, AAX, SoundGrid");

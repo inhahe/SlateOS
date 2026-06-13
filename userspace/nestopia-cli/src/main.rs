@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nestopia-cli — OurOS Nestopia NES emulator
+//! nestopia-cli — SlateOS Nestopia NES emulator
 //!
 //! Single personality: `nestopia`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_nestopia(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: nestopia [OPTIONS] [ROM]");
-        println!("nestopia v1.52 (OurOS) — Nintendo Entertainment System emulator");
+        println!("nestopia v1.52 (SlateOS) — Nintendo Entertainment System emulator");
         println!();
         println!("Options:");
         println!("  -f             Start fullscreen");
@@ -26,10 +26,10 @@ fn run_nestopia(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Nestopia UE v1.52 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("Nestopia UE v1.52 (SlateOS)"); return 0; }
     let files: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
     if files.is_empty() {
-        println!("Nestopia UE v1.52 (OurOS) — NES Emulator");
+        println!("Nestopia UE v1.52 (SlateOS) — NES Emulator");
         println!("  CPU: Ricoh 2A03 @ 1.79 MHz (emulated)");
         println!("  PPU: 2C02, 256x240, 52 colors");
         println!("  APU: 5 channels (2 pulse, triangle, noise, DMC)");

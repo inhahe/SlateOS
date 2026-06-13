@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nannou-cli — OurOS Nannou creative coding framework
+//! nannou-cli — SlateOS Nannou creative coding framework
 //!
 //! Single personality: `nannou`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_nannou(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: nannou COMMAND [OPTIONS]");
-        println!("Nannou v0.19.0 (OurOS) — Creative coding framework for Rust");
+        println!("Nannou v0.19.0 (SlateOS) — Creative coding framework for Rust");
         println!();
         println!("Commands:");
         println!("  new NAME        Create new nannou project");
@@ -26,7 +26,7 @@ fn run_nannou(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("nannou v0.19.0 (OurOS)");
+        println!("nannou v0.19.0 (SlateOS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("info");

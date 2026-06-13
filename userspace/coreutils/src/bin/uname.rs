@@ -9,7 +9,7 @@
 use std::env;
 use std::process;
 
-const SYSNAME: &str = "OurOS";
+const SYSNAME: &str = "SlateOS";
 const RELEASE: &str = "0.1.0";
 const MACHINE: &str = "x86_64";
 

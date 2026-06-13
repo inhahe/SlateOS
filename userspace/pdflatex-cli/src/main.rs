@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pdflatex-cli — OurOS pdfLaTeX/pdfTeX engine
+//! pdflatex-cli — SlateOS pdfLaTeX/pdfTeX engine
 //!
 //! Multi-personality: `pdflatex`, `pdftex`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pdflatex(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: pdflatex [OPTIONS] FILE.tex");
-        println!("pdfTeX 3.141592653-2.6-1.40.26 (TeX Live 2024/OurOS)");
+        println!("pdfTeX 3.141592653-2.6-1.40.26 (TeX Live 2024/SlateOS)");
         println!();
         println!("Options:");
         println!("  -interaction=MODE   Set interaction mode (batchmode, nonstopmode, scrollmode, errorstopmode)");
@@ -29,7 +29,7 @@ fn run_pdflatex(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("pdfTeX 3.141592653-2.6-1.40.26 (TeX Live 2024/OurOS)");
+        println!("pdfTeX 3.141592653-2.6-1.40.26 (TeX Live 2024/SlateOS)");
         println!("kpathsea version 6.4.0");
         println!("Copyright 2024 Han The Thanh (pdfTeX) et al.");
         return 0;
@@ -39,7 +39,7 @@ fn run_pdflatex(args: &[String]) -> i32 {
         .map(|s| s.as_str())
         .unwrap_or("document.tex");
     let base = file.rsplit_once('.').map_or(file, |(b, _)| b);
-    println!("This is pdfTeX, Version 3.141592653-2.6-1.40.26 (TeX Live 2024/OurOS)");
+    println!("This is pdfTeX, Version 3.141592653-2.6-1.40.26 (TeX Live 2024/SlateOS)");
     println!(" restricted \\write18 enabled.");
     println!("entering extended mode");
     println!("({})", file);
@@ -62,7 +62,7 @@ fn run_pdftex(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("pdfTeX 3.141592653-2.6-1.40.26 (TeX Live 2024/OurOS)");
+        println!("pdfTeX 3.141592653-2.6-1.40.26 (TeX Live 2024/SlateOS)");
         return 0;
     }
     run_pdflatex(args)

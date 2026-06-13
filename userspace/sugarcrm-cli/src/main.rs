@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sugarcrm-cli — OurOS SugarCRM (originally open-source CRM, now AI-driven enterprise)
+//! sugarcrm-cli — SlateOS SugarCRM (originally open-source CRM, now AI-driven enterprise)
 //!
 //! Single personality: `sugar`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sugar(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sugar [OPTIONS]");
-        println!("SugarCRM (OurOS) — enterprise CRM with AI predictions");
+        println!("SugarCRM (SlateOS) — enterprise CRM with AI predictions");
         println!();
         println!("Options:");
         println!("  --sell                 Sugar Sell (Sales — pipeline + forecasting)");
@@ -24,8 +24,8 @@ fn run_sugar(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("SugarCRM 2024 (OurOS)"); return 0; }
-    println!("SugarCRM 2024 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("SugarCRM 2024 (SlateOS)"); return 0; }
+    println!("SugarCRM 2024 (SlateOS)");
     println!("  Vendor: SugarCRM Inc. (Cupertino, CA — private)");
     println!("  Founders: Clint Oram, John Roberts, Jacob Taylor (2004)");
     println!("          built as open-source alternative to Salesforce — Sugar Community Edition");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 #![allow(dead_code)]
-//! OurOS mDNS/DNS-SD Service Discovery Utility
+//! SlateOS mDNS/DNS-SD Service Discovery Utility
 //!
 //! Multi-personality binary for mDNS (multicast DNS) and DNS-SD (DNS-based
 //! Service Discovery) operations. The personality is selected via the
@@ -40,7 +40,7 @@ const DNS_SD_META_QUERY: &str = "_services._dns-sd._udp.local";
 const MDNS_DOMAIN: &str = "local";
 
 /// Default hostname for the simulated daemon.
-const DEFAULT_HOSTNAME: &str = "ouros-host";
+const DEFAULT_HOSTNAME: &str = "slateos-host";
 
 /// Default TTL for mDNS records (seconds).
 const DEFAULT_TTL: u32 = 4500;
@@ -1888,7 +1888,7 @@ fn create_demo_registry() -> ServiceRegistry {
 
     // HTTP web server
     let http_type = ServiceType::new("_http", TransportProtocol::Tcp);
-    let http_svc = ServiceEntry::new("OurOS Web Server", http_type, "ouros-host", 80)
+    let http_svc = ServiceEntry::new("SlateOS Web Server", http_type, "slateos-host", 80)
         .with_txt(vec!["path=/".to_string(), "version=1.0".to_string()])
         .with_addr_v4(Ipv4Addr::new(192, 168, 1, 100))
         .with_iface_proto(InterfaceProto::new(2, PROTO_INET));
@@ -1896,7 +1896,7 @@ fn create_demo_registry() -> ServiceRegistry {
 
     // SSH server
     let ssh_type = ServiceType::new("_ssh", TransportProtocol::Tcp);
-    let ssh_svc = ServiceEntry::new("OurOS SSH", ssh_type, "ouros-host", 22)
+    let ssh_svc = ServiceEntry::new("SlateOS SSH", ssh_type, "slateos-host", 22)
         .with_txt(vec!["ssh-version=2".to_string()])
         .with_addr_v4(Ipv4Addr::new(192, 168, 1, 100))
         .with_iface_proto(InterfaceProto::new(2, PROTO_INET));
@@ -1908,7 +1908,7 @@ fn create_demo_registry() -> ServiceRegistry {
         .with_txt(vec![
             "txtvers=1".to_string(),
             "pdl=application/postscript".to_string(),
-            "product=(OurOS LaserJet)".to_string(),
+            "product=(SlateOS LaserJet)".to_string(),
         ])
         .with_addr_v4(Ipv4Addr::new(192, 168, 1, 50))
         .with_iface_proto(InterfaceProto::new(2, PROTO_INET));
@@ -1916,7 +1916,7 @@ fn create_demo_registry() -> ServiceRegistry {
 
     // SMB file sharing
     let smb_type = ServiceType::new("_smb", TransportProtocol::Tcp);
-    let smb_svc = ServiceEntry::new("OurOS File Share", smb_type, "ouros-host", 445)
+    let smb_svc = ServiceEntry::new("SlateOS File Share", smb_type, "slateos-host", 445)
         .with_txt(vec![
             "share=public".to_string(),
             "workgroup=WORKGROUP".to_string(),
@@ -1927,7 +1927,7 @@ fn create_demo_registry() -> ServiceRegistry {
 
     // SFTP server
     let sftp_type = ServiceType::new("_sftp-ssh", TransportProtocol::Tcp);
-    let sftp_svc = ServiceEntry::new("OurOS SFTP", sftp_type, "ouros-host", 22)
+    let sftp_svc = ServiceEntry::new("SlateOS SFTP", sftp_type, "slateos-host", 22)
         .with_txt(vec!["path=/".to_string()])
         .with_addr_v4(Ipv4Addr::new(192, 168, 1, 100))
         .with_addr_v6(Ipv6Addr::new(
@@ -1951,9 +1951,9 @@ fn create_demo_registry() -> ServiceRegistry {
     // DNS-SD browsing/meta
     let dns_sd_type = ServiceType::new("_workstation", TransportProtocol::Tcp);
     let workstation = ServiceEntry::new(
-        "ouros-host [00:11:22:33:44:55]",
+        "slateos-host [00:11:22:33:44:55]",
         dns_sd_type,
-        "ouros-host",
+        "slateos-host",
         9,
     )
     .with_addr_v4(Ipv4Addr::new(192, 168, 1, 100))
@@ -1970,7 +1970,7 @@ fn create_demo_registry() -> ServiceRegistry {
 
     // MQTT broker
     let mqtt_type = ServiceType::new("_mqtt", TransportProtocol::Tcp);
-    let mqtt_svc = ServiceEntry::new("Home Automation MQTT", mqtt_type, "ouros-host", 1883)
+    let mqtt_svc = ServiceEntry::new("Home Automation MQTT", mqtt_type, "slateos-host", 1883)
         .with_txt(vec!["protocol=3.1.1".to_string()])
         .with_addr_v4(Ipv4Addr::new(192, 168, 1, 100))
         .with_iface_proto(InterfaceProto::new(2, PROTO_INET));
@@ -1978,7 +1978,7 @@ fn create_demo_registry() -> ServiceRegistry {
 
     // VNC server
     let vnc_type = ServiceType::new("_rfb", TransportProtocol::Tcp);
-    let vnc_svc = ServiceEntry::new("OurOS Remote Desktop", vnc_type, "ouros-host", 5900)
+    let vnc_svc = ServiceEntry::new("SlateOS Remote Desktop", vnc_type, "slateos-host", 5900)
         .with_txt(vec!["display=0".to_string()])
         .with_addr_v4(Ipv4Addr::new(192, 168, 1, 100))
         .with_addr_v6(Ipv6Addr::new(
@@ -1996,7 +1996,7 @@ fn create_demo_cache() -> RecordCache {
 
     // Host A records
     let _ = cache.insert(DnsRecord::new(
-        "ouros-host.local",
+        "slateos-host.local",
         DNS_CLASS_IN,
         DEFAULT_TTL,
         DnsRecordData::A(Ipv4Addr::new(192, 168, 1, 100)),
@@ -2025,7 +2025,7 @@ fn create_demo_cache() -> RecordCache {
 
     // AAAA record
     let _ = cache.insert(DnsRecord::new(
-        "ouros-host.local",
+        "slateos-host.local",
         DNS_CLASS_IN,
         DEFAULT_TTL,
         DnsRecordData::Aaaa(Ipv6Addr::new(
@@ -2038,7 +2038,7 @@ fn create_demo_cache() -> RecordCache {
         "100.1.168.192.in-addr.arpa",
         DNS_CLASS_IN,
         DEFAULT_TTL,
-        DnsRecordData::Ptr("ouros-host.local".to_string()),
+        DnsRecordData::Ptr("slateos-host.local".to_string()),
     ));
 
     let _ = cache.insert(DnsRecord::new(
@@ -2064,7 +2064,7 @@ fn resolve_hostname(hostname: &str) -> Vec<(IpAddr, i32)> {
     };
     let mut results = Vec::new();
     match name.as_str() {
-        "ouros-host.local" => {
+        "slateos-host.local" => {
             results.push((IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)), PROTO_INET));
             results.push((
                 IpAddr::V6(Ipv6Addr::new(
@@ -2090,7 +2090,7 @@ fn resolve_hostname(hostname: &str) -> Vec<(IpAddr, i32)> {
 /// Reverse-lookup an IP address in the simulated mDNS database.
 fn resolve_address(addr: &str) -> Option<String> {
     match addr {
-        "192.168.1.100" => Some("ouros-host.local".to_string()),
+        "192.168.1.100" => Some("slateos-host.local".to_string()),
         "192.168.1.50" => Some("printer-1.local".to_string()),
         "192.168.1.150" => Some("nas-1.local".to_string()),
         "192.168.1.200" => Some("speaker-1.local".to_string()),
@@ -2109,7 +2109,7 @@ fn run_daemon(args: &[String]) -> i32 {
         "--help" | "-h" => {
             println!("Usage: avahi-daemon [OPTION...]");
             println!();
-            println!("mDNS/DNS-SD daemon for OurOS.");
+            println!("mDNS/DNS-SD daemon for SlateOS.");
             println!();
             println!("Options:");
             println!("  -D, --daemonize       Daemonize after startup");
@@ -2126,7 +2126,7 @@ fn run_daemon(args: &[String]) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("avahi-daemon 0.8 (OurOS)");
+            println!("avahi-daemon 0.8 (SlateOS)");
             println!("Compiled with mDNS/DNS-SD support.");
             println!("Features: IPv4, IPv6, D-Bus, DNS-SD, wide-area DNS-SD");
             0
@@ -2313,7 +2313,7 @@ fn run_browse(args: &[String]) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("avahi-browse 0.8 (OurOS)");
+            println!("avahi-browse 0.8 (SlateOS)");
             0
         }
         "--dump-db" | "-b" => {
@@ -2567,7 +2567,7 @@ fn run_resolve(args: &[String]) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("avahi-resolve 0.8 (OurOS)");
+            println!("avahi-resolve 0.8 (SlateOS)");
             0
         }
         "-n" | "--name" => {
@@ -2722,7 +2722,7 @@ fn run_publish(args: &[String]) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("avahi-publish 0.8 (OurOS)");
+            println!("avahi-publish 0.8 (SlateOS)");
             0
         }
         "service" | "-s" | "--service" => publish_service_cmd(&cmd_args),
@@ -2968,7 +2968,7 @@ fn run_autoipd(args: &[String]) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("avahi-autoipd 0.8 (OurOS)");
+            println!("avahi-autoipd 0.8 (SlateOS)");
             0
         }
         "--kill" | "-k" => {
@@ -3067,7 +3067,7 @@ fn run_set_hostname(args: &[String]) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("avahi-set-host-name 0.8 (OurOS)");
+            println!("avahi-set-host-name 0.8 (SlateOS)");
             0
         }
         _ => {
@@ -4478,7 +4478,7 @@ publish-hinfo=no\n\
 
     #[test]
     fn test_validate_hostname_valid() {
-        assert!(validate_hostname("ouros-host").is_ok());
+        assert!(validate_hostname("slateos-host").is_ok());
         assert!(validate_hostname("my-machine").is_ok());
         assert!(validate_hostname("host123").is_ok());
     }
@@ -4909,13 +4909,13 @@ publish-hinfo=no\n\
 
     #[test]
     fn test_resolve_hostname_known() {
-        let results = resolve_hostname("ouros-host");
+        let results = resolve_hostname("slateos-host");
         assert!(!results.is_empty());
     }
 
     #[test]
     fn test_resolve_hostname_with_domain() {
-        let results = resolve_hostname("ouros-host.local");
+        let results = resolve_hostname("slateos-host.local");
         assert!(!results.is_empty());
     }
 
@@ -4928,7 +4928,7 @@ publish-hinfo=no\n\
     #[test]
     fn test_resolve_address_known() {
         let result = resolve_address("192.168.1.100");
-        assert_eq!(result, Some("ouros-host.local".to_string()));
+        assert_eq!(result, Some("slateos-host.local".to_string()));
     }
 
     #[test]
@@ -4963,7 +4963,7 @@ publish-hinfo=no\n\
     #[test]
     fn test_demo_registry_resolve_http() {
         let reg = create_demo_registry();
-        let result = reg.resolve("OurOS Web Server", "_http._tcp");
+        let result = reg.resolve("SlateOS Web Server", "_http._tcp");
         assert!(result.is_ok());
     }
 
@@ -4976,7 +4976,7 @@ publish-hinfo=no\n\
     #[test]
     fn test_demo_cache_lookup_host() {
         let cache = create_demo_cache();
-        let results = cache.lookup("ouros-host.local", DNS_TYPE_A);
+        let results = cache.lookup("slateos-host.local", DNS_TYPE_A);
         assert!(!results.is_empty());
     }
 

@@ -2,5 +2,5 @@
 name = "strace"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS strace - system call tracing (strace/ltrace)"
+description = "SlateOS strace - system call tracing (strace/ltrace)"
 [dependencies]

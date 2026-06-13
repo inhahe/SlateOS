@@ -1,6 +1,6 @@
-//! `OurOS` Telnet Client
+//! `SlateOS` Telnet Client
 //!
-//! An RFC 854 telnet client for `OurOS`. Connects to a remote host on the
+//! An RFC 854 telnet client for `SlateOS`. Connects to a remote host on the
 //! default telnet port (23) or a specified port, negotiates telnet options,
 //! and provides an interactive terminal session.
 //!
@@ -61,7 +61,7 @@ use std::time::{Duration, Instant};
 // Syscall numbers (from kernel/src/syscall/net syscall table)
 // ============================================================================
 
-// OurOS native console syscalls (kernel syscall/number.rs).  There is no
+// SlateOS native console syscalls (kernel syscall/number.rs).  There is no
 // Linux-style fd read/write or ioctl: 0 and 1 are SYS_YIELD/SYS_EXIT here, so
 // the previous SYS_READ=0/SYS_WRITE=1 actually yielded and *terminated* the
 // process.  Terminal I/O goes through the bootstrap console syscalls instead.
@@ -259,14 +259,14 @@ fn dns_resolve(hostname: &str) -> Result<u32, i64> {
 // Terminal window size
 // ============================================================================
 
-/// Rows of the `OurOS` bootstrap framebuffer console.
+/// Rows of the `SlateOS` bootstrap framebuffer console.
 const CONSOLE_ROWS: u16 = 25;
-/// Columns of the `OurOS` bootstrap framebuffer console.
+/// Columns of the `SlateOS` bootstrap framebuffer console.
 const CONSOLE_COLS: u16 = 80;
 
 /// Return the terminal dimensions as (rows, cols).
 ///
-/// `OurOS` has no `ioctl`/`TIOCGWINSZ` syscall (and no resizable terminal yet):
+/// `SlateOS` has no `ioctl`/`TIOCGWINSZ` syscall (and no resizable terminal yet):
 /// the bootstrap console is a fixed-size framebuffer grid.  Report its actual
 /// dimensions so NAWS negotiation advertises a sensible size.
 fn get_terminal_size() -> (u16, u16) {
@@ -283,7 +283,7 @@ fn get_terminal_size() -> (u16, u16) {
 /// stdin read), then drains any further immediately-available bytes without
 /// blocking.  Returns the number of bytes read.
 ///
-/// The `OurOS` bootstrap console keyboard never reports EOF, so for a non-empty
+/// The `SlateOS` bootstrap console keyboard never reports EOF, so for a non-empty
 /// `buf` this only returns 0 on a syscall error.  Because the first read
 /// blocks, a thread parked here cannot observe a shutdown flag until the next
 /// keypress — a known limitation of the fixed bootstrap console.
@@ -350,7 +350,7 @@ fn stdout_write(data: &[u8]) {
 
 /// Write all bytes of `data` to the console (stderr).
 ///
-/// `OurOS`'s bootstrap console has no separate stderr stream, so this writes to
+/// `SlateOS`'s bootstrap console has no separate stderr stream, so this writes to
 /// the same console as `stdout_write`.
 fn stderr_write(data: &[u8]) {
     console_write_all(data);

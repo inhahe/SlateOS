@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bamboo-cli — OurOS Bamboo (Atlassian's on-prem CI/CD, complement to Bitbucket)
+//! bamboo-cli — SlateOS Bamboo (Atlassian's on-prem CI/CD, complement to Bitbucket)
 //!
 //! Single personality: `bamboo`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_bamboo(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: bamboo [OPTIONS]");
-        println!("Bamboo Data Center 10.2 (OurOS) — Atlassian on-prem CI/CD");
+        println!("Bamboo Data Center 10.2 (SlateOS) — Atlassian on-prem CI/CD");
         println!();
         println!("Options:");
         println!("  --plan                 Build plan (job + stages + tasks)");
@@ -22,8 +22,8 @@ fn run_bamboo(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Bamboo Data Center 10.2.1 (OurOS)"); return 0; }
-    println!("Bamboo Data Center 10.2.1 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Bamboo Data Center 10.2.1 (SlateOS)"); return 0; }
+    println!("Bamboo Data Center 10.2.1 (SlateOS)");
     println!("  Vendor: Atlassian Corporation (Sydney, Australia → NASDAQ:TEAM)");
     println!("  History: launched 2007 — CI/CD complement to Jira + Bitbucket");
     println!("          Atlassian discontinued Bamboo Cloud Jan 2017 (Bitbucket Pipelines replaced it)");

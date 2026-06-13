@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hddtemp-cli — OurOS hard drive temperature monitor
+//! hddtemp-cli — SlateOS hard drive temperature monitor
 //!
 //! Single personality: `hddtemp`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_hddtemp(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: hddtemp [OPTIONS] DISK...");
-        println!("hddtemp v0.4 (OurOS) — Hard drive temperature monitor");
+        println!("hddtemp v0.4 (SlateOS) — Hard drive temperature monitor");
         println!();
         println!("Options:");
         println!("  -n                Numeric output only");
@@ -26,7 +26,7 @@ fn run_hddtemp(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("hddtemp v0.4 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("hddtemp v0.4 (SlateOS)"); return 0; }
     if args.iter().any(|a| a == "-n") {
         println!("35");
         return 0;

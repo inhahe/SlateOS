@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! socat-cli — OurOS socat CLI
+//! socat-cli — SlateOS socat CLI
 //!
 //! Single personality: `socat`
 
@@ -11,7 +11,7 @@ fn run_socat(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: socat [OPTIONS] <ADDRESS1> <ADDRESS2>");
         println!();
-        println!("socat — multipurpose relay / bidirectional data transfer (OurOS).");
+        println!("socat — multipurpose relay / bidirectional data transfer (SlateOS).");
         println!();
         println!("Address types:");
         println!("  TCP:host:port         TCP client");
@@ -32,7 +32,7 @@ fn run_socat(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("socat version 1.8.0.0 (OurOS)");
+        println!("socat version 1.8.0.0 (SlateOS)");
         return 0;
     }
 

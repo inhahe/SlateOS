@@ -2,5 +2,5 @@
 name = "wget"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS HTTP file download utility"
+description = "SlateOS HTTP file download utility"
 [dependencies]

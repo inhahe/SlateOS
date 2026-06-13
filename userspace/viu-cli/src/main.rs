@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! viu-cli — OurOS viu terminal image viewer
+//! viu-cli — SlateOS viu terminal image viewer
 //!
 //! Single personality: `viu`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_viu(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: viu [OPTIONS] [FILE...]");
-        println!("viu 1.5.0 (OurOS) — Terminal image viewer");
+        println!("viu 1.5.0 (SlateOS) — Terminal image viewer");
         println!();
         println!("Options:");
         println!("  -n, --name           Print filename");
@@ -28,7 +28,7 @@ fn run_viu(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("viu 1.5.0 (OurOS)");
+        println!("viu 1.5.0 (SlateOS)");
         return 0;
     }
     let files: Vec<&str> = args.iter()

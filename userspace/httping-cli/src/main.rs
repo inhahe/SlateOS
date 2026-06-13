@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! httping-cli — OurOS HTTP ping utility
+//! httping-cli — SlateOS HTTP ping utility
 //!
 //! Single personality: `httping`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_httping(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: httping [OPTIONS] URL");
-        println!("httping v3.5 (OurOS) — Measure HTTP latency");
+        println!("httping v3.5 (SlateOS) — Measure HTTP latency");
         println!();
         println!("Options:");
         println!("  URL               Target URL to ping");
@@ -26,7 +26,7 @@ fn run_httping(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("httping v3.5 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("httping v3.5 (SlateOS)"); return 0; }
     let url = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("http://localhost");
     println!("HTTPING {} (HEAD)", url);
     if args.iter().any(|a| a == "-S") {

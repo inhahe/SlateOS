@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! Multi-personality file database utility for OurOS.
+//! Multi-personality file database utility for SlateOS.
 //!
 //! This binary detects its mode from `argv[0]`:
 //!   - `updatedb`  -> build/update the file database
@@ -1123,7 +1123,7 @@ fn print_locate_help(out: &mut dyn Write, prog: &str) {
 }
 
 fn print_version(out: &mut dyn Write, prog: &str) {
-    let _ = writeln!(out, "{prog} (OurOS) {VERSION}");
+    let _ = writeln!(out, "{prog} (SlateOS) {VERSION}");
 }
 
 // ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tigervnc — OurOS VNC server and client
+//! tigervnc — SlateOS VNC server and client
 //!
 //! Multi-personality: `vncserver`, `vncviewer`, `vncpasswd`, `vncconfig`, `x0vncserver`
 
@@ -60,9 +60,9 @@ fn run_vncviewer(args: Vec<String>) -> i32 {
     }
 
     let host = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("localhost:1");
-    println!("TigerVNC Viewer 1.13.1 (OurOS)");
+    println!("TigerVNC Viewer 1.13.1 (SlateOS)");
     println!("Connected to VNC server at {}", host);
-    println!("Desktop name: \"OurOS Desktop\"");
+    println!("Desktop name: \"SlateOS Desktop\"");
     println!("Desktop size: 1920x1080");
     0
 }

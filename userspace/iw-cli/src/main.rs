@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! iw-cli — OurOS wireless configuration tool
+//! iw-cli — SlateOS wireless configuration tool
 //!
 //! Multi-personality: `iw`, `iwconfig`, `iwlist`
 
@@ -14,14 +14,14 @@ fn run_iw(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: iw [OPTIONS] OBJECT COMMAND");
         println!();
-        println!("iw — wireless configuration tool (OurOS).");
+        println!("iw — wireless configuration tool (SlateOS).");
         println!();
         println!("Objects: dev, phy, reg");
         println!("Commands: info, link, scan, connect, disconnect, station dump");
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("iw version 6.7 (OurOS)");
+        println!("iw version 6.7 (SlateOS)");
         return 0;
     }
 

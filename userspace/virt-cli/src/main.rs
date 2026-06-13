@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! virt-cli — OurOS virt-manager CLI tools
+//! virt-cli — SlateOS virt-manager CLI tools
 //!
 //! Multi-personality: `virt-install`, `virt-clone`, `virt-viewer`, `virt-xml`
 
@@ -19,7 +19,7 @@ fn run_virt_install(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: virt-install [OPTIONS]");
         println!();
-        println!("virt-install — provision new virtual machines (OurOS).");
+        println!("virt-install — provision new virtual machines (SlateOS).");
         println!();
         println!("Options:");
         println!("  --name NAME          VM name");
@@ -54,7 +54,7 @@ fn run_virt_clone(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: virt-clone [OPTIONS]");
         println!();
-        println!("virt-clone — clone existing VMs (OurOS).");
+        println!("virt-clone — clone existing VMs (SlateOS).");
         println!();
         println!("Options:");
         println!("  --original NAME     Source VM");
@@ -77,7 +77,7 @@ fn run_virt_viewer(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: virt-viewer [OPTIONS] [DOMAIN]");
         println!();
-        println!("virt-viewer — VM console viewer (OurOS).");
+        println!("virt-viewer — VM console viewer (SlateOS).");
         println!();
         println!("Options:");
         println!("  -c, --connect URI  Hypervisor URI");
@@ -96,7 +96,7 @@ fn run_virt_xml(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: virt-xml [OPTIONS] DOMAIN");
         println!();
-        println!("virt-xml — edit libvirt XML (OurOS).");
+        println!("virt-xml — edit libvirt XML (SlateOS).");
         println!();
         println!("Options:");
         println!("  --add-device      Add device");

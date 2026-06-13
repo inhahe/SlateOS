@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pcl-cli — OurOS Point Cloud Library tools
+//! pcl-cli — SlateOS Point Cloud Library tools
 //!
 //! Multi-personality: `pcl_viewer`, `pcl_pcd2ply`, `pcl_ply2pcd`, `pcl_mesh_sampling`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pcl_viewer(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: pcl_viewer [OPTIONS] FILE.pcd");
-        println!("PCL Viewer 1.14.0 (OurOS)");
+        println!("PCL Viewer 1.14.0 (SlateOS)");
         println!("  -bc R,G,B     Background color");
         println!("  -fc R,G,B     Point color");
         println!("  -ps N         Point size");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mpd-cli — OurOS MPD music player daemon + mpc client
+//! mpd-cli — SlateOS MPD music player daemon + mpc client
 //!
 //! Multi-personality: `mpd`, `mpc`
 
@@ -14,7 +14,7 @@ fn run_mpd(args: &[String], prog: &str) -> i32 {
     if prog == "mpc" {
         if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
             println!("Usage: mpc [OPTIONS] COMMAND [ARGS...]");
-            println!("mpc 0.35 (OurOS) — MPD command-line client");
+            println!("mpc 0.35 (SlateOS) — MPD command-line client");
             println!();
             println!("Commands:");
             println!("  play [N]        Play (track N)");
@@ -76,7 +76,7 @@ fn run_mpd(args: &[String], prog: &str) -> i32 {
     // mpd
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mpd [OPTIONS] [CONFIG_FILE]");
-        println!("MPD 0.23.15 (OurOS) — Music Player Daemon");
+        println!("MPD 0.23.15 (SlateOS) — Music Player Daemon");
         println!();
         println!("Options:");
         println!("  --no-daemon          Don't daemonize");
@@ -87,7 +87,7 @@ fn run_mpd(args: &[String], prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("Music Player Daemon 0.23.15 (OurOS)");
+        println!("Music Player Daemon 0.23.15 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "--kill") {

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pipedrive-cli — OurOS Pipedrive (sales-first visual pipeline CRM)
+//! pipedrive-cli — SlateOS Pipedrive (sales-first visual pipeline CRM)
 //!
 //! Single personality: `pipedrive`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pipedrive(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pipedrive [OPTIONS]");
-        println!("Pipedrive (OurOS) — sales-first visual pipeline CRM");
+        println!("Pipedrive (SlateOS) — sales-first visual pipeline CRM");
         println!();
         println!("Options:");
         println!("  --essential            Essential $14/user/mo");
@@ -26,8 +26,8 @@ fn run_pipedrive(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Pipedrive 2024 (OurOS)"); return 0; }
-    println!("Pipedrive 2024 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Pipedrive 2024 (SlateOS)"); return 0; }
+    println!("Pipedrive 2024 (SlateOS)");
     println!("  Vendor: Pipedrive OU (HQ Tallinn, Estonia + New York, NY)");
     println!("  Founders: Timo Rein, Urmas Purde, Ragnar Sass, Martin Henk, Martin Tajur (2010)");
     println!("          all ex-salespeople — built the CRM THEY wanted (visual pipeline first)");

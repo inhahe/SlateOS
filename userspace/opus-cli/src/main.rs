@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! opus-cli — OurOS opus-tools CLI
+//! opus-cli — SlateOS opus-tools CLI
 //!
 //! Multi-personality: `opusenc`, `opusdec`, `opusinfo`
 
@@ -19,7 +19,7 @@ fn run_opusenc(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: opusenc [OPTIONS] INPUT OUTPUT.opus");
         println!();
-        println!("opusenc — encode audio to Opus format (OurOS).");
+        println!("opusenc — encode audio to Opus format (SlateOS).");
         println!();
         println!("Options:");
         println!("  --bitrate N            Target bitrate (kbps, 6-510)");
@@ -33,7 +33,7 @@ fn run_opusenc(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("opusenc from opus-tools 0.2 (OurOS)");
+        println!("opusenc from opus-tools 0.2 (SlateOS)");
         return 0;
     }
 
@@ -47,7 +47,7 @@ fn run_opusenc(args: &[String]) -> i32 {
     let bitrate = args.windows(2).find(|w| w[0] == "--bitrate")
         .map(|w| w[1].as_str()).unwrap_or("128");
 
-    println!("Encoding using libopus 1.4 (OurOS)");
+    println!("Encoding using libopus 1.4 (SlateOS)");
     println!("-----------------------------------------------------");
     println!("   Input: {}", input);
     println!("      Rate: 48000 Hz");
@@ -84,7 +84,7 @@ fn run_opusdec(args: &[String]) -> i32 {
     let input = files.first().copied().unwrap_or("input.opus");
     let output = files.get(1).copied().unwrap_or("output.wav");
 
-    println!("Decoding using libopus 1.4 (OurOS)");
+    println!("Decoding using libopus 1.4 (SlateOS)");
     println!("  Input: {}", input);
     println!("  Output: {}", output);
     println!("  Channels: 2, Rate: 48000 Hz");

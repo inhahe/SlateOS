@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! forgejo-cli — OurOS Forgejo (Codeberg-backed copyleft fork of Gitea)
+//! forgejo-cli — SlateOS Forgejo (Codeberg-backed copyleft fork of Gitea)
 //!
 //! Single personality: `forgejo`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_forgejo(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: forgejo [OPTIONS]");
-        println!("Forgejo 9.0 (OurOS) — Self-hosted lightweight software forge");
+        println!("Forgejo 9.0 (SlateOS) — Self-hosted lightweight software forge");
         println!();
         println!("Options:");
         println!("  web                    Start Forgejo server");
@@ -22,8 +22,8 @@ fn run_forgejo(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Forgejo v9.0.3 (OurOS)"); return 0; }
-    println!("Forgejo v9.0.3 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Forgejo v9.0.3 (SlateOS)"); return 0; }
+    println!("Forgejo v9.0.3 (SlateOS)");
     println!("  Project: 100% community-governed Git service (no corporate owner)");
     println!("  Pronunciation: 'for-jay-yo' (Esperanto: 'forge')");
     println!("  History: forked from Gitea Dec 2022 by Codeberg e.V. (Berlin non-profit)");

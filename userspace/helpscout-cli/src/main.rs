@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! helpscout-cli — OurOS Help Scout (email-first helpdesk that feels like real email)
+//! helpscout-cli — SlateOS Help Scout (email-first helpdesk that feels like real email)
 //!
 //! Single personality: `helpscout`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_helpscout(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: helpscout [OPTIONS]");
-        println!("Help Scout (OurOS) — invisible-helpdesk email support tool");
+        println!("Help Scout (SlateOS) — invisible-helpdesk email support tool");
         println!();
         println!("Options:");
         println!("  --standard             Standard $25/user/mo (2 mailboxes)");
@@ -24,8 +24,8 @@ fn run_helpscout(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Help Scout 2024 (OurOS)"); return 0; }
-    println!("Help Scout 2024 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Help Scout 2024 (SlateOS)"); return 0; }
+    println!("Help Scout 2024 (SlateOS)");
     println!("  Vendor: Help Scout PBC (Boston, MA — fully remote, certified B-Corp)");
     println!("  Founders: Nick Francis (CEO), Jared McDaniel, Denny Swindle (2011)");
     println!("          all three previously ran a small web design agency in Nashville → Boston");

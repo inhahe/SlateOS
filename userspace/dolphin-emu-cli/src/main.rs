@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dolphin-emu-cli — OurOS Dolphin GameCube/Wii emulator
+//! dolphin-emu-cli — SlateOS Dolphin GameCube/Wii emulator
 //!
 //! Multi-personality: `dolphin-emu`, `dolphin-emu-nogui`
 
@@ -18,7 +18,7 @@ fn run_dolphin(args: &[String], prog: &str) -> i32 {
         } else {
             println!("Usage: dolphin-emu [OPTIONS] [ROM]");
         }
-        println!("dolphin-emu v5.0-21088 (OurOS) — GameCube/Wii emulator");
+        println!("dolphin-emu v5.0-21088 (SlateOS) — GameCube/Wii emulator");
         println!();
         println!("Options:");
         println!("  -e FILE           Boot ROM/ISO");
@@ -28,7 +28,7 @@ fn run_dolphin(args: &[String], prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("dolphin-emu v5.0-21088 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("dolphin-emu v5.0-21088 (SlateOS)"); return 0; }
     if nogui {
         println!("dolphin-emu: starting headless mode...");
     } else {

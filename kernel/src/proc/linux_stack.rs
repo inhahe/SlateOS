@@ -31,7 +31,7 @@
 //!
 //! ## Why this lives in its own module, gated to Linux-ABI processes
 //!
-//! This is a Linux/System V-ABI construct.  OuRoS *native* processes do
+//! This is a Linux/System V-ABI construct.  SlateOS *native* processes do
 //! **not** get a System V stack at all — they receive argv/envp from the
 //! kernel via `SYS_PROCESS_GET_ARGS` and have no auxiliary vector by
 //! design (see `posix/src/crt.rs` and design-decision #4 in

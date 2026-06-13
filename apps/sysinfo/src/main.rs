@@ -1,4 +1,4 @@
-//! OurOS System Information Explorer
+//! SlateOS System Information Explorer
 //!
 //! Graphical application displaying hardware and OS information in a
 //! tree-navigable layout similar to Windows msinfo32. Features:
@@ -11,7 +11,7 @@
 //! - Export all information to text
 //!
 //! Uses the guitk library for UI rendering. Hardware data is gathered
-//! through OurOS syscalls; stubbed with representative data for initial
+//! through SlateOS syscalls; stubbed with representative data for initial
 //! development.
 
 pub mod hwquery;
@@ -556,7 +556,7 @@ impl SysInfoState {
 
     fn populate_cpu() -> CpuInfo {
         CpuInfo {
-            brand: "OurOS Virtual CPU @ 3.60GHz".to_string(),
+            brand: "SlateOS Virtual CPU @ 3.60GHz".to_string(),
             vendor: "GenuineIntel".to_string(),
             family: 6,
             model: 158,
@@ -636,7 +636,7 @@ impl SysInfoState {
                         mount_point: "/boot/efi".to_string(),
                     },
                     PartitionInfo {
-                        label: "OurOS Root".to_string(),
+                        label: "SlateOS Root".to_string(),
                         filesystem: "ext4".to_string(),
                         capacity_gb: 500.0,
                         used_gb: 127.3,
@@ -911,7 +911,7 @@ impl SysInfoState {
             ("PATH".to_string(), "/bin:/sbin:/usr/bin:/usr/local/bin".to_string()),
             ("HOME".to_string(), "/home/user".to_string()),
             ("SHELL".to_string(), "/bin/osh".to_string()),
-            ("TERM".to_string(), "ouros-256color".to_string()),
+            ("TERM".to_string(), "slateos-256color".to_string()),
             ("LANG".to_string(), "en_US.UTF-8".to_string()),
             ("XDG_RUNTIME_DIR".to_string(), "/run/user/1000".to_string()),
             ("DISPLAY".to_string(), ":0".to_string()),
@@ -1112,10 +1112,10 @@ impl SysInfoState {
         let cpu = &self.cpu_info;
         let mem = &self.memory_info;
         vec![
-            Property::new("OS Name", "OurOS"),
+            Property::new("OS Name", "SlateOS"),
             Property::new("OS Version", "1.0.0"),
             Property::new("OS Build", "2026.05.17-nightly"),
-            Property::new("Kernel Version", "0.1.0-ouros"),
+            Property::new("Kernel Version", "0.1.0-slateos"),
             Property::new("System Manufacturer", "SMBIOS: To Be Filled By O.E.M."),
             Property::new("Processor", &cpu.brand),
             Property::new("Cores / Threads", &format!("{} / {}", cpu.physical_cores, cpu.logical_processors)),
@@ -1551,7 +1551,7 @@ impl SysInfoState {
     /// Export all system information as a text report.
     pub fn export_text(&self) -> String {
         let mut out = String::with_capacity(4096);
-        out.push_str("=== OurOS System Information Report ===\n\n");
+        out.push_str("=== SlateOS System Information Report ===\n\n");
 
         let sections: &[(SysInfoCategory, &str)] = &[
             (SysInfoCategory::SystemSummary, "System Summary"),

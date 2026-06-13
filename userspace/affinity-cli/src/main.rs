@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! affinity-cli — OurOS Affinity creative suite
+//! affinity-cli — SlateOS Affinity creative suite
 //!
 //! Single personality: `affinity`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_affinity(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: affinity [OPTIONS] [FILE]");
-        println!("Affinity Suite 2 (OurOS) — Photo + Designer + Publisher (perpetual license)");
+        println!("Affinity Suite 2 (SlateOS) — Photo + Designer + Publisher (perpetual license)");
         println!();
         println!("Options:");
         println!("  --photo                Launch Affinity Photo");
@@ -24,8 +24,8 @@ fn run_affinity(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Affinity Suite 2.5 (OurOS)"); return 0; }
-    println!("Affinity Suite 2.5 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Affinity Suite 2.5 (SlateOS)"); return 0; }
+    println!("Affinity Suite 2.5 (SlateOS)");
     println!("  Apps: Affinity Photo 2, Designer 2, Publisher 2");
     println!("  Engine: Metal / Vulkan GPU acceleration");
     println!("  Personas: switch between vector, pixel, export modes in one app");

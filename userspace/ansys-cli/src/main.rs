@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ansys-cli — OurOS Ansys multiphysics engineering simulation
+//! ansys-cli — SlateOS Ansys multiphysics engineering simulation
 //!
 //! Single personality: `ansys`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ansys(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ansys [OPTIONS] [FILE]");
-        println!("Ansys 2024 R2 (OurOS) — Engineering simulation (multiphysics)");
+        println!("Ansys 2024 R2 (SlateOS) — Engineering simulation (multiphysics)");
         println!();
         println!("Options:");
         println!("  -b                     Batch mode (no GUI)");
@@ -23,8 +23,8 @@ fn run_ansys(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Ansys 2024 R2 (OurOS)"); return 0; }
-    println!("Ansys 2024 R2 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Ansys 2024 R2 (SlateOS)"); return 0; }
+    println!("Ansys 2024 R2 (SlateOS)");
     println!("  Products: Mechanical (FEA), Fluent/CFX (CFD), HFSS/Maxwell (EM)");
     println!("  Products: LS-DYNA (explicit), Discovery, Workbench, SpaceClaim");
     println!("  Scripting: APDL (Mechanical), Python (PyAnsys), Workbench scripting");

@@ -2,5 +2,5 @@
 name = "journalctl"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS journalctl - journal log viewer and manager"
+description = "SlateOS journalctl - journal log viewer and manager"
 [dependencies]

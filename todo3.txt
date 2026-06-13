@@ -4,5 +4,5 @@ Let me find the next int-truncation candidate. The sys_rt_sigprocmask wrapper ha
 
 
 
-The x86_64-ouros build failure is pre-existing (no_std issue in od.rs unrelated to my work). My changes don't affect that. Let me update todo.txt and commit batch 6.
+The x86_64-slateos build failure is pre-existing (no_std issue in od.rs unrelated to my work). My changes don't affect that. Let me update todo.txt and commit batch 6.
 

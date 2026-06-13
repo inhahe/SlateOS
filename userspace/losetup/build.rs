@@ -8,7 +8,7 @@
 //! cargo test runner fail with "os error 740: requires elevation". Embedding an
 //! explicit `asInvoker` manifest opts the binary out of that heuristic.
 //!
-//! The manifest is only relevant on Windows hosts; the OurOS target triple
+//! The manifest is only relevant on Windows hosts; the SlateOS target triple
 //! matches no Windows ABI, so this is a no-op when cross-compiling.
 
 fn main() {
@@ -20,6 +20,6 @@ fn main() {
     if !is_windows {
         return;
     }
-    embed_manifest::embed_manifest(embed_manifest::new_manifest("OurOS.losetup"))
+    embed_manifest::embed_manifest(embed_manifest::new_manifest("SlateOS.losetup"))
         .expect("failed to embed Windows manifest");
 }

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! argocd-cli — OurOS Argo CD GitOps tools
+//! argocd-cli — SlateOS Argo CD GitOps tools
 //!
 //! Multi-personality: `argocd`
 
@@ -11,7 +11,7 @@ fn run_argocd(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: argocd [FLAGS] COMMAND [ARGS]");
         println!();
-        println!("argocd — Argo CD GitOps CLI (OurOS).");
+        println!("argocd — Argo CD GitOps CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  app          Manage applications");
@@ -28,7 +28,7 @@ fn run_argocd(args: &[String]) -> i32 {
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match subcmd {
         "version" | "--version" => {
-            println!("argocd: v2.10.0+abcdef1 (OurOS)");
+            println!("argocd: v2.10.0+abcdef1 (SlateOS)");
             println!("  BuildDate: 2024-01-15T00:00:00Z");
             println!("  GoVersion: go1.22.0");
             println!("  Compiler:  gc");
@@ -48,8 +48,8 @@ fn run_argocd(args: &[String]) -> i32 {
                     println!("Project:            default");
                     println!("Server:             https://kubernetes.default.svc");
                     println!("Namespace:          default");
-                    println!("URL:                https://argocd.ouros.local/applications/{}", app);
-                    println!("Repo:               https://github.com/ouros/{}.git", app);
+                    println!("URL:                https://argocd.slateos.local/applications/{}", app);
+                    println!("Repo:               https://github.com/slateos/{}.git", app);
                     println!("Target:             HEAD");
                     println!("Path:               k8s/");
                     println!("SyncWindow:         Sync Allowed");
@@ -79,7 +79,7 @@ fn run_argocd(args: &[String]) -> i32 {
             }
         }
         "login" => println!("'admin:login' logged in successfully"),
-        "logout" => println!("Logged out from 'https://argocd.ouros.local'"),
+        "logout" => println!("Logged out from 'https://argocd.slateos.local'"),
         _ => println!("argocd: command '{}' completed", subcmd),
     }
     0

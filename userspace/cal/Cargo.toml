@@ -2,5 +2,5 @@
 name = "cal"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS cal utility"
+description = "SlateOS cal utility"
 [dependencies]

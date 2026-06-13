@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! siril-cli — OurOS Siril astrophotography processor
+//! siril-cli — SlateOS Siril astrophotography processor
 //!
 //! Single personality: `siril-cli`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_siril(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: siril-cli [OPTIONS]");
-        println!("Siril v1.2 (OurOS) — Astronomical image processor");
+        println!("Siril v1.2 (SlateOS) — Astronomical image processor");
         println!();
         println!("Options:");
         println!("  -s SCRIPT      Execute script");
@@ -30,7 +30,7 @@ fn run_siril(args: &[String], _prog: &str) -> i32 {
         println!("  save FILE      Save result");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Siril v1.2.3 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("Siril v1.2.3 (SlateOS)"); return 0; }
     if let Some(script) = args.windows(2).find(|w| w[0] == "-s").map(|w| w[1].as_str()) {
         println!("Siril v1.2.3: executing script {}", script);
         println!("  Loading 50 light frames...");
@@ -42,7 +42,7 @@ fn run_siril(args: &[String], _prog: &str) -> i32 {
         println!("  Done");
         return 0;
     }
-    println!("Siril v1.2.3 (OurOS) — Ready for commands");
+    println!("Siril v1.2.3 (SlateOS) — Ready for commands");
     println!("  Supported formats: FITS, TIFF, BMP, PNG, JPG, SER, AVI");
     println!("  Features: stacking, registration, photometry, astrometry");
     0

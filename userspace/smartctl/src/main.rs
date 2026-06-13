@@ -1,4 +1,4 @@
-// OurOS smartctl - SMART disk monitoring tool
+// SlateOS smartctl - SMART disk monitoring tool
 //
 // Provides S.M.A.R.T. (Self-Monitoring, Analysis and Reporting Technology)
 // disk health monitoring for ATA and SCSI devices.
@@ -300,7 +300,7 @@ fn parse_args(argc: i32, argv: *const *const u8) -> Result<Options, i32> {
             show_help();
             return Err(0);
         } else if arg == b"--version" || arg == b"-V" {
-            print_out(b"smartctl 0.1.0 (OurOS)\n");
+            print_out(b"smartctl 0.1.0 (SlateOS)\n");
             return Err(0);
         } else if arg == b"--scan" {
             opts.scan = true;
@@ -868,10 +868,10 @@ fn get_device_info(path: &[u8], dtype: DeviceType) -> DeviceInfo {
                 ata_version: 0,
                 sata_version: 0,
             };
-            let model = b"OurOS NVMe SSD 1TB";
+            let model = b"SlateOS NVMe SSD 1TB";
             info.model[..model.len()].copy_from_slice(model);
             info.model_len = model.len();
-            let serial = b"OUROS0NV001";
+            let serial = b"SLATEOS0NV001";
             info.serial[..serial.len()].copy_from_slice(serial);
             info.serial_len = serial.len();
             let fw = b"1.0.0";
@@ -896,10 +896,10 @@ fn get_device_info(path: &[u8], dtype: DeviceType) -> DeviceInfo {
                 ata_version: 10,
                 sata_version: 3,
             };
-            let model = b"OurOS ATA HDD 500GB";
+            let model = b"SlateOS ATA HDD 500GB";
             info.model[..model.len()].copy_from_slice(model);
             info.model_len = model.len();
-            let serial = b"OUROS0HD001";
+            let serial = b"SLATEOS0HD001";
             info.serial[..serial.len()].copy_from_slice(serial);
             info.serial_len = serial.len();
             let fw = b"FW01";
@@ -1873,8 +1873,8 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
 
     // Print header
     if !opts.quiet && !opts.json {
-        print_out(b"smartctl 0.1.0 (OurOS)\n");
-        print_out(b"Copyright (C) OurOS Project\n\n");
+        print_out(b"smartctl 0.1.0 (SlateOS)\n");
+        print_out(b"Copyright (C) SlateOS Project\n\n");
     }
 
     // Get device info

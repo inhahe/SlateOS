@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! svelte-cli — OurOS SvelteKit CLI
+//! svelte-cli — SlateOS SvelteKit CLI
 //!
 //! Multi-personality: `sv`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sv(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: sv COMMAND [OPTIONS]");
-        println!("SvelteKit CLI 2.0 (OurOS)");
+        println!("SvelteKit CLI 2.0 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  create       Create a new SvelteKit project");

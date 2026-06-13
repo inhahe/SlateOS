@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mistika-cli — OurOS SGO Mistika Boutique color & VFX
+//! mistika-cli — SlateOS SGO Mistika Boutique color & VFX
 //!
 //! Single personality: `mistika`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mistika(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mistika [OPTIONS] [PROJECT]");
-        println!("SGO Mistika Boutique 10 (OurOS) — High-end VR, stitching, color, finishing");
+        println!("SGO Mistika Boutique 10 (SlateOS) — High-end VR, stitching, color, finishing");
         println!();
         println!("Options:");
         println!("  --open FILE            Open project");
@@ -23,8 +23,8 @@ fn run_mistika(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("SGO Mistika Boutique 10.13.5 (OurOS)"); return 0; }
-    println!("SGO Mistika Boutique 10.13.5 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("SGO Mistika Boutique 10.13.5 (SlateOS)"); return 0; }
+    println!("SGO Mistika Boutique 10.13.5 (SlateOS)");
     println!("  Editions: Workflows, Boutique, Ultima, VR, Insight");
     println!("  Specialties: 8K/12K finishing, stereo 3D, VR/360, HDR");
     println!("  Node tree: Resolution-independent, node-based finishing");

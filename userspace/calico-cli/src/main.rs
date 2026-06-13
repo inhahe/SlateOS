@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! calico-cli — OurOS Calico container networking
+//! calico-cli — SlateOS Calico container networking
 //!
 //! Multi-personality: `calicoctl`, `calico-node`
 
@@ -15,11 +15,11 @@ fn run_calico(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "calico-node" => {
-                println!("calico-node (OurOS) — Calico per-node daemon");
+                println!("calico-node (SlateOS) — Calico per-node daemon");
                 println!("  Runs Felix (policy), BIRD (BGP), confd");
             }
             _ => {
-                println!("calicoctl v3.28 (OurOS) — Calico management CLI");
+                println!("calicoctl v3.28 (SlateOS) — Calico management CLI");
                 println!("  get                List resources");
                 println!("  create             Create resources");
                 println!("  replace            Replace resources");
@@ -33,10 +33,10 @@ fn run_calico(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Calico v3.28.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("Calico v3.28.0 (SlateOS)"); return 0; }
     match prog {
         "calico-node" => {
-            println!("calico-node v3.28.0 (OurOS)");
+            println!("calico-node v3.28.0 (SlateOS)");
             println!("  Felix: started (policy enforcement)");
             println!("  BIRD: started (BGP peering)");
             println!("  confd: started (config management)");
@@ -45,7 +45,7 @@ fn run_calico(args: &[String], prog: &str) -> i32 {
             println!("  BGP peers: 3 established");
         }
         _ => {
-            println!("calicoctl v3.28.0 (OurOS)");
+            println!("calicoctl v3.28.0 (SlateOS)");
             println!("  Cluster type: Kubernetes");
             println!("  Nodes: 5 (3 ready, 2 not-ready)");
             println!("  Network policies: 12");

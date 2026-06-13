@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! spotify-tui — OurOS Spotify terminal client
+//! spotify-tui — SlateOS Spotify terminal client
 //!
 //! Single personality: `spt`
 
@@ -38,7 +38,7 @@ fn run_spt(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("spt 0.27.0 (OurOS)");
+        println!("spt 0.27.0 (SlateOS)");
         return 0;
     }
 

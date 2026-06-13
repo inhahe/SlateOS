@@ -1,4 +1,4 @@
-//! OurOS mkfs -- Create Filesystems
+//! SlateOS mkfs -- Create Filesystems
 //!
 //! Creates filesystems on disk devices or image files. Supports ext4, FAT32,
 //! and tmpfs via the kernel's `SYS_FS_FORMAT` syscall (number 651 in the
@@ -563,7 +563,7 @@ fn parse_args() -> MkfsOptions {
             }
 
             "--version" | "-V" => {
-                println!("mkfs (OurOS) 0.1.0");
+                println!("mkfs (SlateOS) 0.1.0");
                 process::exit(0);
             }
 
@@ -1072,7 +1072,7 @@ fn do_format(dev_path: &str, fs_type_id: u64) -> Result<(), String> {
 // ============================================================================
 
 fn print_usage() {
-    println!("mkfs (OurOS) 0.1.0 -- Create filesystems on disk devices or image files");
+    println!("mkfs (SlateOS) 0.1.0 -- Create filesystems on disk devices or image files");
     println!();
     println!("USAGE:");
     println!("  mkfs -t <type> [options] <device>");

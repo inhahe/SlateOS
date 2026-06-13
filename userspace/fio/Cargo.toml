@@ -2,5 +2,5 @@
 name = "fio"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS flexible I/O tester"
+description = "SlateOS flexible I/O tester"
 [dependencies]

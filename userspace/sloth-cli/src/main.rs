@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sloth-cli — OurOS Sloth SLO generator
+//! sloth-cli — SlateOS Sloth SLO generator
 //!
 //! Single personality: `sloth`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sloth(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: sloth COMMAND [OPTIONS]");
-        println!("Sloth v0.11.0 (OurOS) — SLO generation framework");
+        println!("Sloth v0.11.0 (SlateOS) — SLO generation framework");
         println!();
         println!("Commands:");
         println!("  generate        Generate Prometheus rules");
@@ -29,7 +29,7 @@ fn run_sloth(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("Sloth v0.11.0 (OurOS)");
+        println!("Sloth v0.11.0 (SlateOS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("generate");

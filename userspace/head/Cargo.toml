@@ -2,5 +2,5 @@
 name = "head"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS head - output first part of files"
+description = "SlateOS head - output first part of files"
 [dependencies]

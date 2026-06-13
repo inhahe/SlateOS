@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! duplicity-cli — OurOS Duplicity CLI
+//! duplicity-cli — SlateOS Duplicity CLI
 //!
 //! Single personality: `duplicity`
 
@@ -11,7 +11,7 @@ fn run_duplicity(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: duplicity <COMMAND> [OPTIONS]");
         println!();
-        println!("Duplicity encrypted bandwidth-efficient backup (OurOS).");
+        println!("Duplicity encrypted bandwidth-efficient backup (SlateOS).");
         println!();
         println!("Commands:");
         println!("  full         Full backup");
@@ -25,7 +25,7 @@ fn run_duplicity(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("duplicity 2.2.0 (OurOS)");
+        println!("duplicity 2.2.0 (SlateOS)");
         return 0;
     }
 

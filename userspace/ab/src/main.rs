@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ab — OurOS Apache HTTP benchmarking tool
+//! ab — SlateOS Apache HTTP benchmarking tool
 //!
 //! Multi-personality: `ab`, `siege`
 
@@ -34,7 +34,7 @@ fn run_ab(args: Vec<String>) -> i32 {
         println!("This is ApacheBench, Version 2.3 <$Revision: 1913912 $>");
         println!("Copyright 1996 Adam Twiss, Zeus Technology Ltd, http://www.zeustech.net/");
         println!("Licensed to The Apache Software Foundation, http://www.apache.org/");
-        println!("OurOS build");
+        println!("SlateOS build");
         return 0;
     }
 
@@ -49,7 +49,7 @@ fn run_ab(args: Vec<String>) -> i32 {
         .unwrap_or("1");
     let keepalive = args.iter().any(|a| a == "-k");
 
-    println!("This is ApacheBench, Version 2.3 <$Revision: 1913912 $> (OurOS)");
+    println!("This is ApacheBench, Version 2.3 <$Revision: 1913912 $> (SlateOS)");
     println!("Benchmarking {} (be patient)...", url);
     println!();
     println!("Server Software:        nginx/1.25");
@@ -111,7 +111,7 @@ fn run_siege(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("SIEGE 4.1.6 (OurOS)");
+        println!("SIEGE 4.1.6 (SlateOS)");
         return 0;
     }
 
@@ -121,7 +121,7 @@ fn run_siege(args: Vec<String>) -> i32 {
         .map(|s| s.as_str())
         .unwrap_or("25");
 
-    println!("** SIEGE 4.1.6 (OurOS)");
+    println!("** SIEGE 4.1.6 (SlateOS)");
     println!("** Preparing {} concurrent users for battle.", concurrent);
     println!("The server is now under siege...");
     println!();

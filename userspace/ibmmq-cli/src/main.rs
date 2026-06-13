@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ibmmq-cli — OurOS IBM MQ (formerly MQSeries, the granddaddy of messaging, launched 1993)
+//! ibmmq-cli — SlateOS IBM MQ (formerly MQSeries, the granddaddy of messaging, launched 1993)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ibmmq(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ibmmq [OPTIONS]");
-        println!("IBM MQ (OurOS) — the original enterprise messaging system (formerly MQSeries, 1993+)");
+        println!("IBM MQ (SlateOS) — the original enterprise messaging system (formerly MQSeries, 1993+)");
         println!();
         println!("Options:");
         println!("  --queue-manager        Queue manager (the broker) management");
@@ -22,8 +22,8 @@ fn run_ibmmq(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("IBM MQ 2024 (OurOS) — ibmmq CLI (runmqsc + dmpmqcfg)"); return 0; }
-    println!("IBM MQ 2024 (OurOS) — Enterprise Messaging (formerly MQSeries, the original since 1993)");
+    if args.iter().any(|a| a == "--version") { println!("IBM MQ 2024 (SlateOS) — ibmmq CLI (runmqsc + dmpmqcfg)"); return 0; }
+    println!("IBM MQ 2024 (SlateOS) — Enterprise Messaging (formerly MQSeries, the original since 1993)");
     println!("  Vendor: IBM Corporation (Armonk, NY — NYSE: IBM)");
     println!("  History (the granddaddy of messaging):");
     println!("    - Announced Mar 1992, GA Dec 1993 as MQSeries v1");

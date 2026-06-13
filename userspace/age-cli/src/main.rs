@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! age-cli — OurOS age encryption CLI
+//! age-cli — SlateOS age encryption CLI
 //!
 //! Multi-personality: `age` and `age-keygen`
 
@@ -21,7 +21,7 @@ fn run_age(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: age [OPTIONS] [INPUT]");
         println!();
-        println!("age file encryption tool (OurOS).");
+        println!("age file encryption tool (SlateOS).");
         println!();
         println!("Options:");
         println!("  -e, --encrypt          Encrypt (default)");
@@ -35,7 +35,7 @@ fn run_age(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("age v1.1.1 (OurOS)");
+        println!("age v1.1.1 (SlateOS)");
         return 0;
     }
 

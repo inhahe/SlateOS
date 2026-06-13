@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! laptop-mode-cli — OurOS Laptop Mode Tools power saving
+//! laptop-mode-cli — SlateOS Laptop Mode Tools power saving
 //!
 //! Single personality: `laptop-mode`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_laptop_mode(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: laptop-mode <command> [OPTIONS]");
-        println!("laptop-mode v1.74 (OurOS) — Laptop power saving");
+        println!("laptop-mode v1.74 (SlateOS) — Laptop power saving");
         println!();
         println!("Commands:");
         println!("  status         Show current mode and module status");
@@ -24,7 +24,7 @@ fn run_laptop_mode(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("laptop-mode v1.74 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("laptop-mode v1.74 (SlateOS)"); return 0; }
     match args.first().map(|s| s.as_str()) {
         Some("status") => {
             println!("Laptop Mode Tools status:");

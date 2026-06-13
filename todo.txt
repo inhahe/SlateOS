@@ -1,153 +1,26 @@
 ## ============================================================================
-## PLAN (recorded 2026-06-13, NOT YET EXECUTED): mechanical rename OuRoS -> Slate OS
+## DONE (2026-06-13): mechanical rename OuRoS -> Slate OS, EXECUTED.
 ## ============================================================================
-## The operator renamed the project to "Slate OS" (bought domains). This records a
-## careful plan to do the codebase rename later. DO NOT execute it until the operator
-## says go — this entry is the plan only. The point of writing it now is to enumerate
-## every way the rename can silently corrupt something, and pre-decide how to avoid it.
-##
-## --- SURVEY FACTS (measured 2026-06-13, case-sensitive, excluding .git/ and target/) ---
-##   ouros  : 199 files   (lowercase: identifiers, paths, the custom target name, env vars)
-##   OuRoS  : 12  files   (stylized prose form, docs only — design-decisions.md, roadmap.md)
-##   OurOS  : 3131 files  (DOMINANT CamelCase form — code identifiers + most prose/display)
-##   OUROS  : 7   files   (ALL-CAPS: macros, consts, env vars, fixture strings)
-##   Ouros / ouroS / OuRos : 0 files  (do NOT exist — the operator's feared `OuRos`
-##                                     collision case is moot; nothing maps onto it)
-##   "Ouroboros" full word : 0 files  (the old name's etymology is not spelled out anywhere)
-##   Case-insensitive total : 3181 files.
-##
-## --- CANONICAL TARGET FORMS (operator to CONFIRM the display form before executing) ---
-##   Mechanical per-case mapping (this is what the rename actually does):
-##     ouros  -> slateos        (lowercase)
-##     OurOS  -> SlateOS        (CamelCase identifiers)
-##     OuRoS  -> SlateOS        (stylized prose -> CamelCase; see prose note below)
-##     OUROS  -> SLATEOS        (all-caps)
-##   OPEN QUESTION for operator: user-VISIBLE display strings (boot banner, uname,
-##   GRUB menu entry, About box, package metadata) — should they read "Slate OS"
-##   (with a space) rather than the identifier form "SlateOS"? A blind mechanical
-##   pass produces "SlateOS" everywhere; converting standalone display occurrences to
-##   "Slate OS" (with space) is a SEPARATE, smaller, manual pass over a known short
-##   list of user-facing strings (see "DISPLAY-STRING shortlist" below). Pin this
-##   before executing so prose/banners aren't left as "SlateOS".
-##
-## --- WHY WORD-BOUNDARY REPLACE (\bOUROS\b) IS WRONG AND DANGEROUS HERE ---
-##   The operator suggested word boundaries. They are INSUFFICIENT — verified live:
-##     * `OUROS0NV001` (smartctl fake serial)  -> no \b between 'S' and '0' (both word
-##       chars) so \bOUROS\b does NOT match -> would be silently left as OUROS.
-##     * `OUROS_XATTR_DIR`, `OUROS_SYS_TASK_ID`, `OUROS_MARKER` -> underscore is a word
-##       char, so \bOUROS\b does NOT match the trailing boundary -> silently missed.
-##     * `CC_x86_64_ouros`, `CARGO_TARGET_X86_64_OUROS`, `x86_64-ouros` -> embedded in
-##       compound identifiers; \b behaves inconsistently around '_' vs '-' vs digits.
-##   CONCLUSION: use a plain CASE-SENSITIVE SUBSTRING replace, one pass per casing form
-##   (ouros->slateos, OurOS->SlateOS, OUROS->SLATEOS, plus OuRoS->SlateOS). Case-sensitive
-##   per-form is also exactly what AVOIDS the operator's feared collision: distinct input
-##   cases map to distinct output cases, so two differently-cased identifiers never
-##   merge. (The only true collision risk is `OurOS` and `OuRoS` both -> `SlateOS`; they
-##   only coexist in prose, never as two distinct live identifiers in one scope — VERIFY
-##   with a grep that no .rs file uses both as separate symbols before executing.)
-##
-## --- HIGHEST-RISK SURFACE: the custom Rust target `x86_64-ouros` ---
-##   This is the single most fragile part. It is NOT just a string; it is wired into the
-##   build in several coupled places that must ALL change together or the workspace won't
-##   build:
-##     1. File rename:  toolchain/x86_64-ouros.json -> x86_64-slateos.json (use `git mv`).
-##     2. .cargo/config.toml: `[target.x86_64-ouros]` table header; the `build-ouros` /
-##        `check-ouros` / `test-ouros` cargo aliases and their `--target=toolchain/
-##        x86_64-ouros.json` values; the prose comments mentioning the target.
-##     3. Derived env vars keyed off the target triple, sanitized by cargo to UPPER_SNAKE:
-##        `CC_x86_64_ouros`, `CFLAGS_x86_64_ouros`, `CARGO_TARGET_X86_64_OUROS_*`,
-##        `CARGO_TARGET_X86_64_OUROS_RUNNER`, linker vars, etc. (todo.txt + CLAUDE.md +
-##        claude.md.bak reference `CC_x86_64_ouros`; CLAUDE.md is operator-owned — flag,
-##        do not edit it without explicit instruction).
-##     4. `cfg(target_os = "ouros")`: 14 occurrences across 4 files (userspace/getopt,
-##        install, timeout, tput). NOTE A PRE-EXISTING INCONSISTENCY: the target JSON sets
-##        `"os": "linux"` (musl ABI shape), so `target_os` is actually "linux", and these
-##        `cfg(target_os = "ouros")` arms appear to be dead under the current target. The
-##        rename must PRESERVE this faithfully (ouros->slateos) so behavior is byte-for-
-##        byte unchanged; DO NOT "fix" the inconsistency as part of the rename — log it
-##        separately in known-issues.md if it's a real bug, and address it on its own.
-##     5. Any scripts / build-sysroot.ps1 / boot-test.sh / CI invoking the target by name
-##        or by JSON path.
-##     6. Build-artifact dir `nushell/target/x86_64-ouros` and any other `target/<triple>`
-##        output dirs are REGENERATED by cargo — do NOT rename them by hand; they're
-##        excluded from the rename and will be recreated under the new triple on rebuild.
-##
-## --- OTHER EMBEDDED-IDENTIFIER SITES (substring replace handles, but eyeball these) ---
-##   * ELF ABI marker:  readelf `ELFOSABI_OUROS = 255` + the "OurOS" display string it maps
-##     to (readelf/src/main.rs). If kept as a real on-disk ABI byte, the constant rename is
-##     cosmetic but the human-readable name should follow the display-form decision.
-##   * device-mapper UUID prefix: dmsetup `format!("OUROS-{name}")` -> "SLATEOS-..." — this
-##     changes a USER-VISIBLE/on-disk UUID format. Decide whether existing dm UUIDs need a
-##     compat read path (probably not yet — no persisted installs — but note it).
-##   * GRUB marker:  installer/grub.rs `OUROS_MARKER = "### OurOS GRUB entry — managed by
-##     OurOS installer ###"`. This string is WRITTEN INTO the user's grub.cfg and later
-##     matched to find/replace the managed block. Renaming the marker means an installer
-##     that already wrote an OurOS-marked block won't recognize it. No real installs exist
-##     yet, so fine — but if any did, you'd need to match BOTH old and new markers during a
-##     transition. Note for completeness.
-##   * version strings:  e.g. `0.1.0-ouros` (uname/version reporting in design-decisions.md
-##     and wherever the kernel/uname composes its release string). Grep for `-ouros`.
-##   * env vars consumed at runtime: `OUROS_XATTR_DIR` (capsh), `OUROS_SYS_TASK_ID` (stubs).
-##   * fake fixture strings in tests: smartctl `OUROS0NV001` serial — harmless, but it's the
-##     poster child for why \b fails; substring replace -> "SLATEOS0NV001".
-##
-## --- CRATE NAMES / IMPORT PATHS ---
-##   Survey found NO Cargo.toml `name = "...ouros..."` crate, so there is (currently) no
-##   crate-name rename and thus no `use ouros_*::` import-path churn. RE-VERIFY at execution
-##   time (a crate may have been added since): grep Cargo.toml `name =` lines + any
-##   `extern crate`/`use` of an ouros-named crate. If one exists, the crate dir, its
-##   Cargo.toml name, every dependent's `[dependencies]` key, and every `use`/path must all
-##   move together.
-##
-## --- FILES TO EXCLUDE FROM THE RENAME ---
-##   * .git/  (history is immutable; never rewrite)
-##   * target/ and all build output dirs (regenerated)
-##   * any vendored/binary assets, fonts, prebuilt blobs (don't sed binaries)
-##   * CLAUDE.md is operator-owned: do NOT edit it on your own initiative. The rename
-##     touches `CC_x86_64_ouros` references in it — FLAG these to the operator and let
-##     them apply (or give explicit permission), per the CLAUDE.md edit rule.
-##   * claude.md.bak — a backup; ask whether to touch it or leave it as a historical copy.
-##
-## --- DISPLAY-STRING SHORTLIST (the manual "Slate OS" with-space pass, if operator wants) ---
-##   Pin the exact human-facing strings to read "Slate OS": boot banner / serial milestone
-##   prints, uname/version release string, GRUB menu entry text, installer prompts, About/
-##   system-info app, package/repo metadata, any README/design-doc TITLE lines. Everything
-##   else (identifiers, consts, cfg names, env vars, file names) stays the no-space
-##   identifier form "SlateOS"/"slateos"/"SLATEOS".
-##
-## --- EXECUTION RECIPE (when greenlit) ---
-##   1. Fresh branch off osb2/shell; ensure working tree clean.
-##   2. `git mv toolchain/x86_64-ouros.json toolchain/x86_64-slateos.json` FIRST, then any
-##      other ouros-named tracked files via `git mv` (preserves history).
-##   3. Run the substring replace, one case form at a time, over tracked text files only
-##      (drive it from `git ls-files`, filter out binaries), in this order so longer/again
-##      independent: ouros->slateos, OurOS->SlateOS, OUROS->SLATEOS, OuRoS->SlateOS.
-##   4. Hand-fix the custom-target wiring (.cargo/config.toml aliases, env-var docs) and
-##      verify the JSON `"os"` field decision (keep "linux"; do NOT change to "slateos").
-##   5. Optional manual display-string pass to "Slate OS" per the shortlist above.
-##   6. VERIFY: `grep -rci ouros` over tracked files (excl. .git/target) MUST be 0 except
-##      intentional historical mentions in design-decisions.md / this todo entry (decide
-##      whether to leave those as history or update them — recommend: update code/docs,
-##      keep this plan entry and any "formerly OuRoS" note intact for provenance).
-##   7. BUILD: full `cargo build` + `cargo clippy` clean (watch for the new target triple
-##      resolving), then `cargo test --workspace`, then `./scripts/boot-test.sh` (BOOT_OK).
-##      The target rename is the likeliest thing to break the build — fix before commit.
-##   8. Commit as ONE logical change (the rename) — large diff but single intent — with a
-##      clear message. If the display-string pass is separate, make it a second commit.
-##   9. Update CLAUDE.md zone names / any path references ONLY with operator sign-off.
-##
-## --- PRE-EXECUTION CHECKLIST OF THINGS THAT COULD GO WRONG (verify each is handled) ---
-##   [ ] word-boundary NOT used (substring per case) — avoids OUROS0NV001 / *_XATTR_DIR misses
-##   [ ] case-sensitive per-form mapping — avoids cross-case collisions
-##   [ ] no .rs scope uses OurOS and OuRoS as two DISTINCT symbols (grep to confirm)
-##   [ ] custom target: file mv + config.toml + env-var docs + cfg(target_os) all aligned
-##   [ ] JSON `"os":"linux"` preserved (do not rename to slateos — would change ABI cfg)
-##   [ ] crate-name re-survey at execution time (none today, but confirm)
-##   [ ] binaries/target/.git excluded
-##   [ ] CLAUDE.md / claude.md.bak NOT auto-edited (operator-owned) — flagged for operator
-##   [ ] GRUB marker / dm-UUID / ELFOSABI / version-string surfaces consciously decided
-##   [ ] display-vs-identifier ("Slate OS" vs "SlateOS") form confirmed with operator
-##   [ ] post-rename build + clippy + test + boot-test all green before commit
+## The full rename plan (survey facts, failure-mode analysis, execution recipe,
+## checklist) is preserved in git at commit ecb01d284 ("docs(todo): record careful
+## OuRoS -> Slate OS mechanical rename plan"). It is NOT re-pasted here because the
+## mechanical pass would have re-mangled its own ouros->slateos survey text.
+## Execution summary:
+##   - Case-sensitive per-form substring replace (NOT word-boundary, which was proven
+##     to miss OUROS0NV001 / *_XATTR_DIR / CC_x86_64_ouros): ouros->slateos,
+##     OurOS->SlateOS, OUROS->SLATEOS, OuRoS->SlateOS across 3178 tracked text files.
+##   - Verification caught one casing the survey missed: `OurOs` (EntryKind::OurOs boot
+##     variant, parallel to MacOs) -> SlateOs in bootcfg.rs / kshell.rs / roadmap.md.
+##   - git mv toolchain/x86_64-ouros.json -> x86_64-slateos.json; JSON `"os":"linux"`
+##     preserved untouched (cfg(target_os) semantics unchanged); .cargo/config.toml
+##     target table + build/check/test aliases now x86_64-slateos; ouros-stubs crate
+##     -> slateos-stubs (and libouros_stubs.a -> libslateos_stubs.a in build-sysroot.ps1).
+##   - CLAUDE.md / claude.md.bak: operator-owned, left for the operator to update the
+##     `CC_x86_64_ouros` references (flagged, not auto-edited).
+##   - STILL OPEN (operator decision): whether user-visible display strings (boot banner,
+##     uname release, GRUB menu entry, About box) should read "Slate OS" (with a space)
+##     vs the identifier form "SlateOS". The mechanical pass produced "SlateOS" everywhere;
+##     a spaced-form pass over the user-facing shortlist is a separate follow-up if wanted.
 ## ============================================================================
 
 ## IN PROGRESS (2026-06-13): ALSA/PulseAudio compatibility shim — roadmap 5.1 / 5095
@@ -241,7 +114,7 @@
 ##       the new variant through all ~25 match sites in linux.rs + procfs fd-link + the kcmp ord table:
 ##       read/write→EINVAL, lseek→ESPIPE, poll→never ready, fstat→S_IFCHR|0o660, fork-dup/close→no-op,
 ##       fcntl-lock→EBADF, cachestat→EOPNOTSUPP, /proc/self/fd→/dev/snd/controlC0. ioctl routed to a new
-##       alsa_control_ioctl() implementing PVERSION + CARD_INFO (OuRoS card identity); ELEM_* return ENOTTY
+##       alsa_control_ioctl() implementing PVERSION + CARD_INFO (SlateOS card identity); ELEM_* return ENOTTY
 ##       for now. Built clean, clippy 17462, BOOT_OK (alsactl self-test PASSED).
 ##   [DONE commit 5c] control ioctl dispatch: ELEM_LIST/INFO/READ/WRITE for the two master elements.
 ##       Added pure card-model helpers to audio_alsa_ctl.rs (resolve_numid by numid OR iface+name,
@@ -313,10 +186,10 @@
 ##       builds an ET_DYN (PIE, p_vaddr=0/e_entry=0) "ld.so" stand-in that exit(42)s; elf::
 ##       build_linux_dynamic_exe_elf() builds an ET_EXEC with PT_INTERP + its own PT_LOAD that would
 ##       exit(7). proc::spawn::self_test_linux_dynamic_interp() (called post-VFS-init from main.rs, since it
-##       needs a writable VFS) writes the interpreter to /ouros-test-ld.so, spawns the dynamic exe, and
+##       needs a writable VFS) writes the interpreter to /slateos-test-ld.so, spawns the dynamic exe, and
 ##       asserts the child exits 42 (interpreter ran) not 7 (executable) — proving the kernel loaded the
 ##       interpreter at LINUX_INTERP_BASE and transferred control to ITS entry, and that the interpreter's
-##       Linux exit() routed through dispatch_linux. Boot-verified: "loaded interpreter '/ouros-test-ld.so'
+##       Linux exit() routed through dispatch_linux. Boot-verified: "loaded interpreter '/slateos-test-ld.so'
 ##       at base=0x700000000000, entry=0x700000000000" + "entered ld.so -> exit(42): OK".
 ##       [STILL REMAINING] Running a REAL glibc/musl ld.so (actual relocation processing, shared-lib
 ##       loading, TLS setup) still needs a real interpreter on the FS — that is a toolchain-port concern,
@@ -4326,7 +4199,7 @@
 ##   is what scripts/boot-test.sh runs) built ALL members for x86_64-unknown-none and guitk emitted
 ##   2187 errors — e.g. "cannot find type `Vec` in this scope" (gui/toolkit/src/widget.rs:142 and
 ##   many more), plus E0405/E0408/E0425/E0433/E0463/E0531. guitk is a USERSPACE crate that needs
-##   alloc/std and the x86_64-ouros target (its zone .cargo/config.toml), so it could not compile
+##   alloc/std and the x86_64-slateos target (its zone .cargo/config.toml), so it could not compile
 ##   for the bare-metal kernel triple. This broke the workspace-wide `cargo build` and therefore
 ##   the unmodified boot-test.sh.
 ##   FIX APPLIED (option 1, the recommended one): added `default-members` to the workspace
@@ -4467,7 +4340,7 @@
 ##   FIX: guard the handshake behind `std::io::IsTerminal` — only perform the query when BOTH
 ##   stdin and stdout are real terminals; otherwise return the (24, 80) default immediately.
 ##   This also fixes the real interactive-use bug: piping into vi/htop/nano would have hung.
-##   (Verified is_terminal() compiles+links on the x86_64-ouros target for all three.)
+##   (Verified is_terminal() compiles+links on the x86_64-slateos target for all three.)
 ##   NOTE/follow-up: htop and nano parse the terminal reply with String::from_utf8_lossy,
 ##   which the coding standard forbids; low-risk here (reply is ASCII digits) but worth
 ##   replacing with a byte parse if these files are touched again.
@@ -4546,7 +4419,7 @@
 ##       -m / current-user), which keeps test_parse_args_am_i passing and avoids a
 ##       `who -a -b` regression.
 ##   All 14 build, pass tests (thermald 12, modprobe 20, who 51, useradd 16, plus the rest),
-##   are clippy-clean on the lints they deny, and build for ouros. This completes the
+##   are clippy-clean on the lints they deny, and build for slateos. This completes the
 ##   userspace test-build-failure sweep (31 crates total across batches 1–3).
 ##
 ## BUG (noticed+FIXED 2026-05-31): userspace latent-bug sweep, batch 2 — 7 more crates'
@@ -4571,7 +4444,7 @@
 ##       literal with `..Default::default()` (field_reassign_with_default), and 3
 ##       collapsible_if → let-chains.
 ##   All 7 build, pass tests (16/12/65/39/21/48/53 = 254), are clippy-clean on the lints
-##   they deny, and build for ouros. ~14 more crates from the same sweep remain.
+##   they deny, and build for slateos. ~14 more crates from the same sweep remain.
 ##
 ## BUG (noticed+FIXED 2026-05-31): userspace latent-bug sweep, batch 1 — 10 crates'
 ##   TEST BUILDS did not compile on the host target (a `cargo build --tests --keep-going`
@@ -4598,7 +4471,7 @@
 ##       pre-existing unnecessary_sort_by clippy deny → sort_by_key(Reverse).
 ##     - fontconfig: `FontStyle::{_BoldItalic,_Thin,_Medium,_SemiBold,_ExtraBold,_Black}`
 ##       mangled; dropped the underscores (a complete, legitimately-named style enum).
-##   All 10 build, pass tests, clippy-clean (clippy::all), and build for ouros. NOTE: the
+##   All 10 build, pass tests, clippy-clean (clippy::all), and build for slateos. NOTE: the
 ##   underscore-mangling (functions/fields/variants prefixed with `_` to quiet dead_code,
 ##   which doesn't actually silence it for those item kinds) is a recurring pattern across
 ##   userspace; the tests were written against the original un-mangled names. ~21 more
@@ -4606,23 +4479,23 @@
 ##
 ## BUG (noticed+FIXED 2026-05-31): userspace/{sha256sum,shell,coreutils} build.rs
 ##   emitted the per-crate `linker.ld` link arg UNCONDITIONALLY (for every target).
-##   The custom script is only valid for the bare-metal x86_64-ouros target; applying
+##   The custom script is only valid for the bare-metal x86_64-slateos target; applying
 ##   it to the host x86_64-pc-windows-gnu test target broke linking with a flood of
 ##   "relocation truncated to fit" errors against the Windows std import libs
 ##   (bcryptprimitives.dll / api-ms-win-core-synch). This meant `cargo test` on the
 ##   host could never link these crates. PROPER FIX: gate the link-arg on the target
-##   triple in build.rs — emit `-T linker.ld` only when TARGET contains "ouros",
+##   triple in build.rs — emit `-T linker.ld` only when TARGET contains "slateos",
 ##   otherwise return early (keeping `rerun-if-changed`). After fix: sha256sum links
 ##   and runs 59/59 host tests; shell links (0 tests, a toolchain-validation stub).
 ##
 ## BUG (noticed+FIXED 2026-05-31): userspace/{sha256sum,shell}/linker.ld were missing
 ##   the `.debug_gdb_scripts` section block that coreutils/linker.ld already had, so the
-##   ouros DEBUG build failed to link: "relocation refers to a symbol in a discarded
+##   slateos DEBUG build failed to link: "relocation refers to a symbol in a discarded
 ##   section: __rustc_debug_gdb_scripts_section__" (rustc emits a live reloc to the gdb
 ##   pretty-printer section in debug builds, and the blanket `*(.debug*)` /DISCARD/ rule
 ##   swallowed it). PROPER FIX: propagated coreutils' explicit non-alloc
 ##   `.debug_gdb_scripts 0 (INFO)` section (placed before /DISCARD/) to both linker.ld
-##   files. ouros debug build of sha256sum+shell now links clean.
+##   files. slateos debug build of sha256sum+shell now links clean.
 ##
 ## BUG (noticed+FIXED 2026-05-31): userspace/shell/src/main.rs used `let pi = 3.14159;`
 ##   which trips clippy's deny-by-default `approx_constant`. It's a toolchain-validation
@@ -4634,10 +4507,10 @@
 ## LIMITATION (noticed 2026-05-31): userspace/coreutils unit tests CANNOT compile on the
 ##   Windows host target (x86_64-pc-windows-gnu): bins like test.rs and tar.rs use
 ##   `std::os::unix::fs::{PermissionsExt,MetadataExt}` (mode/uid/gid/mtime), which only
-##   exist on unix-family targets. The ouros target (os=linux) has them, so PRODUCTION
-##   compiles fine — verified `cargo build -p coreutils` for ouros is clean. There is no
-##   way to RUN ouros test binaries on this Windows dev box, so coreutils host-testing is
-##   inherently unavailable; its verification path is the ouros build. Not a code bug —
+##   exist on unix-family targets. The slateos target (os=linux) has them, so PRODUCTION
+##   compiles fine — verified `cargo build -p coreutils` for slateos is clean. There is no
+##   way to RUN slateos test binaries on this Windows dev box, so coreutils host-testing is
+##   inherently unavailable; its verification path is the slateos build. Not a code bug —
 ##   a cross-platform host-testing gap. Same caveat applies to any userspace crate that
 ##   uses std::os::unix in its test code.
 ##
@@ -4648,7 +4521,7 @@
 ##   to-`col == 0`. The intent is "tableau column 0 → focus Stock"; changed to
 ##   `col == 0`. Harmless in behavior but a real code-clarity/correctness smell, and it
 ##   broke clippy for the crate. solitaire 114/114 tests pass; clippy error gone
-##   (style warnings remain, consistent with other non-pedantic-denying apps); ouros OK.
+##   (style warnings remain, consistent with other non-pedantic-denying apps); slateos OK.
 ##
 ## BUG (noticed+FIXED 2026-05-31): 17 apps failed `cargo clippy` (clippy::all/pedantic
 ##   deny breaks) — passwordgen, filesearch, snippets, dbviewer, undelete, renamer,
@@ -4674,7 +4547,7 @@
 ##     - photomanager/notes: added `Default` impls delegating to `new()` (new_without_default).
 ##     - email: renamed inherent `ImapStatus::from_str` (returns Option, not the FromStr
 ##       Result contract) to `from_code` + updated its 3 test call sites (should_implement_trait).
-##   All 17 now pass clippy clean; tests all green (1115 across the batch); ouros builds OK.
+##   All 17 now pass clippy clean; tests all green (1115 across the batch); slateos builds OK.
 ##
 ## BUG (noticed+FIXED 2026-06-01): 15 userspace tools carried the SAME divergent
 ##   per-file `#![deny(clippy::all, clippy::pedantic)]` + ad-hoc allow-list WITHOUT
@@ -4707,11 +4580,11 @@
 ##       — signature is fixed by the ABI so it can't be `unsafe fn`; added a justified
 ##       `#[allow(clippy::not_unsafe_ptr_arg_deref)]` (deref guarded by `argc > 0`).
 ##   nmap/objdump/sftp/zip had only autofixable clippy::all errors. All 15 now pass
-##   clippy with warnings only (pedantic/defensive, per policy); ouros builds OK.
-##   LIMITATION (ar non-deterministic metadata): OurOS `ar` always writes normalised
+##   clippy with warnings only (pedantic/defensive, per policy); slateos builds OK.
+##   LIMITATION (ar non-deterministic metadata): SlateOS `ar` always writes normalised
 ##   member metadata (uid=0, gid=0, mode=0o100644) regardless of the `-U`/
 ##   non-deterministic flag. GNU ar in non-deterministic mode preserves the file's
-##   real uid/gid/mode. Not yet implemented — std on the ouros target (cfg unix)
+##   real uid/gid/mode. Not yet implemented — std on the slateos target (cfg unix)
 ##   exposes mode via MetadataExt, but uid/gid plumbing is pending. Low priority:
 ##   determinism is the common/default case and matters more for reproducible builds.
 ##
@@ -4793,7 +4666,7 @@
 ##     display-path branches surfaced that the `absolute` flag belongs at the header level,
 ##     so display_path now strips the leading '/' only when !absolute (matches getfacl).
 ##     Easy to revert if the human disagrees.
-##   ouros build verified for the two struct-heavy refactors (mdadm, bridge) post-fix;
+##   slateos build verified for the two struct-heavy refactors (mdadm, bridge) post-fix;
 ##     only pre-existing dead_code warnings remain (no clippy::all denials).
 ##   VERIFICATION (2026-06-03): ran host-target tests (--target x86_64-pc-windows-gnu)
 ##     for the refactored/control-flow-touched crates to confirm the sweep preserved
@@ -4805,7 +4678,7 @@
 ##     acl's --absolute-names judgment call was untested (print_file_acl writes to a
 ##     StdoutLock); extracted the pure display_acl_path(path, absolute) helper and added
 ##     4 unit tests (acl now 28/28). NOTE: `cargo test` WITHOUT --target builds for the
-##     default ouros target, which has no prebuilt std/test crate → thousands of bogus
+##     default slateos target, which has no prebuilt std/test crate → thousands of bogus
 ##     "can't find crate for std" errors; always pass --target x86_64-pc-windows-gnu to
 ##     run userspace host tests.
 ##   GAP (test coverage, ssh): ssh has ZERO unit tests, yet the sweep refactored its KEX
@@ -4828,7 +4701,7 @@
 ##   streak-reset tests submitted "grill", which isn't in the sample WORDS_5 dictionary, so
 ##   the 6th guess was correctly rejected ("Not in word list") and the game never reached
 ##   Lost; a limited dictionary is correct Wordle behavior, so changed the test word to
-##   "globe" (present in WORDS_5). wordle 65/65 tests pass, clippy clean, ouros build OK.
+##   "globe" (present in WORDS_5). wordle 65/65 tests pass, clippy clean, slateos build OK.
 ##
 ## BUG (noticed+FIXED 2026-05-31): apps/mandelbrot — clippy-deny break PLUS a test bug.
 ##   (1) ColorScheme::Neon used the magic literal 6.283 for a full turn (clippy
@@ -4838,7 +4711,7 @@
 ##   test_mandelbrot_far_point asserted iter == 0, but z0 = 0 never escapes so the minimum
 ##   returned iteration count is 1 (a point escaping immediately returns 1, never 0); fixed
 ##   to assert 1. Also a MouseEvent literal carried a non-existent `modifiers` field (E0560),
-##   removed. mandelbrot 52/52 tests pass, clippy clean, ouros build OK.
+##   removed. mandelbrot 52/52 tests pass, clippy clean, slateos build OK.
 ##
 ## BUG (noticed+FIXED 2026-05-31): apps/{chess,crossword,flood,life,nim} — test-compile
 ##   breaks from stale guitk event-struct literals and missing derives. (a) flood/nim:
@@ -4853,7 +4726,7 @@
 ##   test_scholars_mate_position wasn't actually mate (bishop didn't defend f7, escape square
 ##   uncovered); re-derived the real Scholar's-mate position (Bc4 defends Qf7, d7 pawn blocks).
 ##   All test-only fixes except the derives. Tests: chess 113, crossword 75, flood 32,
-##   life 69, nim 33 — all pass; clippy clean (own code), ouros builds OK.
+##   life 69, nim 33 — all pass; clippy clean (own code), slateos builds OK.
 ##
 ## BUG (noticed+FIXED 2026-05-31): apps/settings — search robustness bug. matches_search
 ##   did a plain lowercase substring test, so the query "wifi" did NOT match the page
@@ -4862,7 +4735,7 @@
 ##   substring test fails, retry with all non-alphanumeric chars stripped from both the
 ##   query and the label (so "wifi" matches "Wi-Fi", "nightlight" matches "Night Light").
 ##   An all-punctuation query (strips to empty) is treated as no-match rather than
-##   matching everything. settings 114/114 tests pass, clippy clean (own code), ouros OK.
+##   matching everything. settings 114/114 tests pass, clippy clean (own code), slateos OK.
 ##
 ## BUG (noticed+FIXED 2026-05-31): apps/pinball — PRODUCTION combo-scoring bug. award_points
 ##   tracked the last scoring time in a u64 initialized to 0 and always took the "within
@@ -4871,21 +4744,21 @@
 ##   first hit at x1 (comment: "First: 100*1=100, Second: 100*2=200"). Changed
 ##   last_score_ms to Option<u64> (None = no prior scoring event) so the first hit, or
 ##   one after the window lapses, starts a fresh x1 combo and only consecutive in-window
-##   hits increment. pinball 120/120 tests pass, clippy clean, ouros build OK.
+##   hits increment. pinball 120/120 tests pass, clippy clean, slateos build OK.
 ##
 ## BUG (noticed+FIXED 2026-05-31): apps/netmanager — wrong-expectation test bug.
 ##   test_add_dns_server_valid added "1.1.1.1", but the default edit_ip_config is seeded
 ##   from the first sample interface whose dns_servers already include 1.1.1.1, so
 ##   add_dns_server correctly rejected the duplicate (Err). Production duplicate-rejection
 ##   is correct; changed the test to add 9.9.9.9 (valid, not already present).
-##   netmanager 78/78 tests pass, clippy clean, ouros build OK.
+##   netmanager 78/78 tests pass, clippy clean, slateos build OK.
 ##
 ## BUG (noticed+FIXED 2026-05-31): apps/musicplayer — wrong-expectation test bug.
 ##   test_wav_header_parsing built a WAV with an 88200-byte data chunk and asserted a
 ##   1.0s duration, but at 44100 Hz / 2ch / 16-bit the byte rate is 176400 B/s, so 88200
 ##   bytes is 0.5s (parse_wav_header computed 0.5 correctly). Fixed the test data to use
 ##   176400 bytes (and matching RIFF size) for a true 1 second. musicplayer 25/25 tests
-##   pass, clippy clean, ouros build OK.
+##   pass, clippy clean, slateos build OK.
 ##
 ## BUG (noticed+FIXED 2026-05-31): apps/logviewer — wrong-expectation test bug PLUS a
 ##   pre-existing clippy-deny break. (1) test_app_search_navigation searched for "info"
@@ -4895,7 +4768,7 @@
 ##   and the assert to count > 1 so next/prev wrap is exercised. (2) logviewer denies
 ##   clippy::pedantic and had 10 pre-existing clippy errors (or-patterns, doc backticks,
 ##   collapsible-if x6, sort_by_key); fixed all (clippy --fix for 9, manual sort_by_key
-##   with core::cmp::Reverse). logviewer 43/43 tests pass, clippy clean, ouros build OK.
+##   with core::cmp::Reverse). logviewer 43/43 tests pass, clippy clean, slateos build OK.
 ##
 ## BUG (noticed+FIXED 2026-05-31): apps/imageviewer — PRODUCTION navigation bug +
 ##   inefficiency. load_current_entry (called by next/prev/first/last_image and the
@@ -4905,7 +4778,7 @@
 ##   listing was set in memory (or the dir changed) the index reset to 0. Split out a
 ##   display_image(path) helper that only loads/shows the image; open_file calls it
 ##   then (re)builds the listing, while load_current_entry calls display_image alone.
-##   imageviewer 94/94 tests pass, clippy clean (own code), ouros build OK.
+##   imageviewer 94/94 tests pass, clippy clean (own code), slateos build OK.
 ##
 ## BUG (noticed+FIXED 2026-05-31): apps/filesearch — SEVERE PRODUCTION regex bug. The
 ##   regex engine's parse_regex_atom returned a bare `fn(u8) -> bool`, which cannot
@@ -4917,7 +4790,7 @@
 ##   carries Literal(u8) and a borrowed Class { body, negated }, added a real
 ##   class_matches (literals + a-z ranges + negation) and proper escaped-literal
 ##   handling (\\. etc. now match the literal char). filesearch 37/37 tests pass,
-##   clippy clean (own code), ouros build OK.
+##   clippy clean (own code), slateos build OK.
 ##
 ## BUG (noticed+FIXED 2026-05-31): apps/calendar — PRODUCTION ICS round-trip bug.
 ##   ics_unescape used chained .replace() ("\\n"->newline, then "\\;", "\\,", "\\\\").
@@ -4925,7 +4798,7 @@
 ##   first pass matches the trailing "\\n" as a newline escape, corrupting the value.
 ##   Rewrote ics_unescape as a single left-to-right pass that decodes each backslash
 ##   pair exactly once (\\\\, \\;, \\,, \\n/\\N per RFC 5545). calendar 52/52 tests
-##   pass, clippy clean, ouros build OK.
+##   pass, clippy clean, slateos build OK.
 ##
 ## BUG (noticed+FIXED 2026-05-31): apps/tictactoe — test build break PLUS two REAL
 ##   production bugs. (1) test_mouse_click constructed a MouseEvent with a `modifiers`
@@ -4938,34 +4811,34 @@
 ##   render() centers the grid at width/2 - 150, so clicks missed the grid on any
 ##   non-800px window. Added stored win_width/win_height fields (set in render) and a
 ##   shared Self::grid_layout(width) helper used by BOTH render and event so hit-testing
-##   always matches the drawn grid. tictactoe 39/39 tests pass, clippy clean, ouros
+##   always matches the drawn grid. tictactoe 39/39 tests pass, clippy clean, slateos
 ##   build OK.
 ##
 ## BUG (noticed+FIXED 2026-05-31): apps/systray — test build did not compile. Two tests
 ##   (test_double_click_returns_icon_id, test_double_click_outside_returns_none) bound
 ##   the tray as `let tray` then called handle_double_click, which takes &mut self
 ##   (E0596). Changed both to `let mut tray`. systray 34/34 tests pass, clippy clean,
-##   ouros build OK.
+##   slateos build OK.
 ##
 ## BUG (noticed+FIXED 2026-05-31): apps/spades — PRODUCTION build break. Render code at
 ##   line 1422 called Color::rgba(bg.r(), bg.g(), bg.b(), 160) but guitk::Color exposes
 ##   r/g/b/a as public FIELDS, not methods (E0599). Changed to bg.r/bg.g/bg.b. spades
-##   94/94 tests pass, clippy clean, ouros build OK.
+##   94/94 tests pass, clippy clean, slateos build OK.
 ##
 ## BUG (noticed+FIXED 2026-05-31): apps/towers test build did not compile. Tests
 ##   assert_eq! on the GameState enum, which requires Debug, but it didn't derive it
-##   (E0277). Added #[derive(Debug)]. towers 57/57 tests pass, clippy clean, ouros
+##   (E0277). Added #[derive(Debug)]. towers 57/57 tests pass, clippy clean, slateos
 ##   build OK.
 ##
 ## BUG (noticed+FIXED 2026-05-31): apps/sliding test build did not compile. Tests
 ##   assert_eq! on the GameState enum, which requires Debug, but it didn't derive it
-##   (E0277). Added #[derive(Debug)]. sliding 73/73 tests pass, clippy clean, ouros
+##   (E0277). Added #[derive(Debug)]. sliding 73/73 tests pass, clippy clean, slateos
 ##   build OK.
 ##
 ## BUG (noticed+FIXED 2026-05-31): apps/colorpicker test build did not compile — a test
 ##   called .round() on an ambiguously-typed float literal (E0689). Annotated as
 ##   0.75_f32 so the multiplication resolves to f32. colorpicker 84/84 tests pass,
-##   clippy clean, ouros build OK.
+##   clippy clean, slateos build OK.
 ##
 ## BUG (noticed+FIXED 2026-05-31): apps/match3 — test build break PLUS a wrong-expectation
 ##   test bug. (1) Two tests were both named test_new_game_fills_board (E0428 duplicate
@@ -4973,12 +4846,12 @@
 ##   single_gap asserted gravity left gems in rows 1,2 of the 8-row board, but
 ##   apply_gravity compacts gems to the BOTTOM (rows 6,7), so the assertions were
 ##   inverted. Fixed to assert the top rows (0..GRID_SIZE-2) are empty and the bottom
-##   two rows are filled. match3 119/119 tests pass, ouros build OK.
+##   two rows are filled. match3 119/119 tests pass, slateos build OK.
 ##
 ## BUG (noticed+FIXED 2026-05-31): apps/lightsout test build did not compile. Tests
 ##   assert_eq! on the GameState enum, which requires Debug, but it didn't derive it
 ##   (E0277). Added #[derive(Debug)] (alongside Clone, Copy, PartialEq, Eq). lightsout
-##   56/56 tests pass, clippy clean, ouros build OK.
+##   56/56 tests pass, clippy clean, slateos build OK.
 ##
 ## BUG (noticed+FIXED 2026-05-31): apps/game2048 — test build break PLUS one logic
 ##   test bug. Multiple make_key/KeyEvent constructions used a Modifiers { ctrl, alt,
@@ -4988,12 +4861,12 @@
 ##   returned true — but a left move on an already-left-packed row correctly does
 ##   nothing, so make_move returned false. Fixed the test data to [2048, 0, 2, 0] so
 ##   the Left move actually slides a tile. game2048 83/83 tests pass, clippy clean,
-##   ouros build OK.
+##   slateos build OK.
 ##
 ## BUG (noticed+FIXED 2026-05-31): apps/pipes test build did not compile — ten
 ##   make_key/KeyEvent constructions used a Modifiers { ctrl, alt, shift } literal that
 ##   broke when guitk added super_key (E0063). Switched all to Modifiers::NONE.
-##   pipes 60/60 tests pass, clippy clean, ouros build OK.
+##   pipes 60/60 tests pass, clippy clean, slateos build OK.
 ##
 ## NOTE (2026-05-31): guitk::event::Modifiers gained a `super_key` field, which broke
 ##   the test builds of every app that constructed Modifiers with an explicit field
@@ -5012,35 +4885,35 @@
 ##   from countdown_setup_values (default 5 min), overwriting the manual values — so
 ##   tick() counted down from 300000 instead of 10000/5000. Fixed the tests to set
 ##   countdown_setup_values ([0,0,10] and [0,0,5]) which is what start() actually reads.
-##   stopwatch 60/60 tests pass, clippy clean, ouros build OK.
+##   stopwatch 60/60 tests pass, clippy clean, slateos build OK.
 ##
 ## BUG (noticed+FIXED 2026-05-31): apps/typingtutor test build did not compile — six
 ##   make_key/KeyEvent constructions used a Modifiers { ctrl, alt, shift } literal that
 ##   broke when guitk added super_key (E0063). Switched all to Modifiers::NONE.
-##   typingtutor 62/62 tests pass, clippy clean, ouros build OK.
+##   typingtutor 62/62 tests pass, clippy clean, slateos build OK.
 ##
 ## BUG (noticed+FIXED 2026-05-31): apps/unitconverter test build did not compile. The
 ##   test module referenced Modifiers (via Modifiers::NONE/::ctrl()) but neither main
 ##   nor the test module imported the type (E0433). Added `use guitk::event::Modifiers;`
 ##   inside the tests module (not the main import, to avoid an unused-import warning in
-##   non-test builds). unitconverter 110/110 tests pass, clippy clean, ouros build OK.
+##   non-test builds). unitconverter 110/110 tests pass, clippy clean, slateos build OK.
 ##
 ## BUG (noticed+FIXED 2026-05-31): apps/worldclock test build did not compile. Tests
 ##   assert_eq! on the ViewMode and ClockStyle enums, which requires Debug, but neither
 ##   derived it (E0277). Added #[derive(Debug)] to both. worldclock 53/53 tests pass,
-##   clippy clean, ouros build OK.
+##   clippy clean, slateos build OK.
 ##
 ## BUG (noticed+FIXED 2026-05-31): apps/metronome test build did not compile.
 ##   guitk::event::Modifiers gained a `super_key` field, but three test helpers
 ##   constructed Modifiers with an explicit { ctrl, alt, shift } literal, so the test
 ##   build failed with E0063 (missing field). Switched the helpers to the resilient
 ##   builder API (Modifiers::NONE / Modifiers::shift()) so future field additions
-##   won't break them. metronome 61/61 tests pass, clippy clean, ouros build OK.
+##   won't break them. metronome 61/61 tests pass, clippy clean, slateos build OK.
 ##
 ## BUG (noticed+FIXED 2026-05-31): apps/memory test build did not compile. Tests use
 ##   assert_eq! on the CardState, GameState, and Phase enums, which requires Debug,
 ##   but none of the three derived it (E0277). Added #[derive(Debug)] to all three
-##   small Copy enums. memory 27/27 tests pass, clippy clean, ouros build OK.
+##   small Copy enums. memory 27/27 tests pass, clippy clean, slateos build OK.
 ##
 ## BUG (noticed+FIXED 2026-05-31): apps/reminders test_task_matches_query asserted
 ##   that matches_query("grocery") matched a task titled "Buy groceries". matches_query
@@ -5062,7 +4935,7 @@
 ##   `guitk::render::RenderCommand` everywhere), so `cargo test -p emojipicker` failed
 ##   with E0433. Qualified the path in the test. Also applied clippy --fix auto-fixes
 ##   (collapsible ifs, manual div_ceil → div_ceil). emojipicker 48/48 tests pass,
-##   clippy clean, ouros build OK.
+##   clippy clean, slateos build OK.
 ##
 ## BUG (noticed+FIXED 2026-05-31): apps/diskanalyzer tree view never expanded the
 ##   root after a scan. flatten_node() only recursed into a node when
@@ -5075,7 +4948,7 @@
 ##   child dir ("/root/src") since the root can no longer be collapsed. Also cleaned
 ##   clippy (sort_by→sort_by_key+Reverse in find_largest/treemap/extension/flatten,
 ##   too_many_arguments allow on squarify_layout, Default impls for ScanProgress and
-##   DiskAnalyzerUI). diskanalyzer 77/77 tests pass, clippy clean, ouros build OK.
+##   DiskAnalyzerUI). diskanalyzer 77/77 tests pass, clippy clean, slateos build OK.
 ##
 ## BUG (noticed+FIXED 2026-05-31): apps/fileassoc the built-in "Code Editor" default
 ##   app did not list "txt" among its supported extensions, so set_default_app()
@@ -5083,7 +4956,7 @@
 ##   failed. A code editor plainly handles plain-text files; added "txt" to the front
 ##   of codeeditor's supported-extensions list in add_default_apps(). Also applied
 ##   clippy --fix auto-fixes (unnecessary closure, needless reference, collapsible
-##   ifs). fileassoc 77/77 tests pass, clippy clean, ouros build OK.
+##   ifs). fileassoc 77/77 tests pass, clippy clean, slateos build OK.
 ##
 ## BUG (noticed+FIXED 2026-05-31): apps/filediff — two test-only bugs (production
 ##   code was correct). test_hunk_grouping_multiple_changes placed its two changed
@@ -5096,7 +4969,7 @@
 ##   _wrap allows with a note citing the algorithm's paper conventions, normalize_line
 ##   now takes IgnoreOptions by value, unused_self allows on two render_* methods kept
 ##   &self for API family consistency). filediff 71/71 tests pass, clippy clean,
-##   ouros build OK.
+##   slateos build OK.
 ##
 ## BUG (noticed+FIXED 2026-05-31): apps/regextester NFA engine — three correctness
 ##   bugs caused 8 matching/find/replace tests to fail. (1) execute_regex() seeded a
@@ -5119,7 +4992,7 @@
 ##   Cleaned up pre-existing clippy errors in the crate (unnecessary_wraps,
 ##   needless let-match, items_after_statements, format-append→write!, unused_self
 ##   →associated fns, too_many_arguments allows). regextester 83/83 tests pass,
-##   clippy clean, ouros build OK.
+##   clippy clean, slateos build OK.
 ##
 ## BUG (noticed+FIXED 2026-05-31): apps/snippets — language auto-detection and the
 ##   tokenizer were wrong, plus clippy errors. detect_from_content() required
@@ -5215,7 +5088,7 @@
 ##   (SnapshotError already had PartialEq+Eq). All of Snapshot's fields
 ##   (String/u64/Vec/Option/bool/SnapshotType/SnapshotComponent) are already
 ##   Eq, so added #[derive(PartialEq, Eq)] to Snapshot. 108/108 tests pass.
-##   Also ran clippy --fix (8 collapsible-if style fixes). Builds for ouros.
+##   Also ran clippy --fix (8 collapsible-if style fixes). Builds for slateos.
 ##
 ## LIMITATION (noticed 2026-05-31, FIXED 2026-06-03): the shared GUI toolkit
 ##   lib `guitk` carried ~76 clippy::all warnings (collapsible-if, derivable
@@ -5257,7 +5130,7 @@
 ##   the current line again, rejecting the cursor position on the final wrap.
 ##   Fixed search_bwd too (same root cause; no test covered the multiline wrap).
 ##   53/53 tests pass; cleaned 5 clippy warnings (incl. while_let_loop).
-##   Clippy-clean host + ouros; builds for ouros.
+##   Clippy-clean host + slateos; builds for slateos.
 ##
 ## BUG (noticed+FIXED 2026-05-31): apps/installer test harnesses hit the UAC
 ##   os-error-740 launch failure ("installer" contains "install"). Unlike the
@@ -5270,9 +5143,9 @@
 ##   rejected as an invalid instruction by this cargo / no [[test]] target.) The
 ##   broad scope also re-covers bins so the object links twice there, which is
 ##   benign — harnesses launch without UAC (proving a valid asInvoker manifest)
-##   and it only affects host test artifacts; the shipped OurOS binary embeds no
+##   and it only affects host test artifacts; the shipped SlateOS binary embeds no
 ##   manifest. 86/86 lib tests pass; 9 clippy warnings cleaned (lib + grub.rs).
-##   Clippy-clean host + ouros; builds for ouros.
+##   Clippy-clean host + slateos; builds for slateos.
 ##
 ## BUG (noticed+FIXED 2026-05-31): patch mis-applied normal-diff append.
 ##   userspace/patch/: test_end_to_end_normal_add failed — "1a2" (append after
@@ -5282,7 +5155,7 @@
 ##   0-indexed insertion point is old_start (no -1). The -1 is only correct for
 ##   delete/change where old_start is the first affected line. Fixed by
 ##   special-casing old_count == 0. 61/61 tests pass; 7 clippy warnings cleaned
-##   (incl. manual_strip). Clippy-clean host + ouros; builds for ouros.
+##   (incl. manual_strip). Clippy-clean host + slateos; builds for slateos.
 ##   (NB: "patch" is an installer keyword but its test harness launched fine —
 ##   no UAC build.rs needed, unlike losetup/install/etc.)
 ##
@@ -5306,7 +5179,7 @@
 ##       keyword). Added build.rs embedding an asInvoker manifest via
 ##       embed-manifest. 3 pre-existing clippy errors (collapsible-if,
 ##       manual_find, write_literal) also fixed. 15/15 tests pass; clippy-clean
-##       host + ouros; builds for ouros.
+##       host + slateos; builds for slateos.
 ##
 ## BUG (noticed+FIXED 2026-05-31): install had 2 failing tests AND the same
 ##   UAC-elevation test-launch failure. userspace/install/:
@@ -5322,7 +5195,7 @@
 ##       has_setid/has_sticky separately: apply setuid (0o4000) when who
 ##       includes owner or no who specified, setgid (0o2000) when who includes
 ##       group or no who specified, sticky (0o1000) always. 29/29 tests pass.
-##     * 3 collapsible-if clippy warnings auto-fixed. Clippy-clean host + ouros.
+##     * 3 collapsible-if clippy warnings auto-fixed. Clippy-clean host + slateos.
 ##
 ## BUG (noticed+FIXED 2026-05-31): more installer-keyword crates hit the same
 ##   UAC-elevation test-launch failure (os error 740) as dmsetup/updatedb.
@@ -5343,7 +5216,7 @@
 ##   heuristic — no fix needed.  NOTE: losetup (test compile error) and patch
 ##   (1 failing test) and install (2 failing tests) are SEPARATE real bugs,
 ##   tracked below / handled separately.
-##   All clippy-clean host + ouros; build for ouros.
+##   All clippy-clean host + slateos; build for slateos.
 ##
 ## BUG (noticed+FIXED 2026-05-31): updatedb `cargo test` could not launch its
 ##   test harness (same root cause as dmsetup) + 6 pre-existing clippy errors.
@@ -5352,12 +5225,12 @@
 ##       Windows installer-detection forces UAC on exes whose name contains an
 ##       installer keyword — "update" matches "updatedb". Added a build.rs that
 ##       embeds an asInvoker manifest via the pure-Rust embed-manifest crate
-##       (same fix as dmsetup). 132/132 tests pass; ouros unaffected.
+##       (same fix as dmsetup). 132/132 tests pass; slateos unaffected.
 ##     * 6 clippy errors (manual char comparison x2, collapsible-if x2,
 ##       needless-bool x2) auto-fixed.
 ##   NOTE: any future tool whose binary name contains setup/install/update/patch
 ##   will hit the same heuristic and needs the same build.rs.
-##   Clippy-clean host + ouros; builds for ouros.
+##   Clippy-clean host + slateos; builds for slateos.
 ##
 ## BUG (noticed+FIXED 2026-05-31): apparmor had 4 failing tests (two real
 ##   profile-parsing bugs) + 11 pre-existing clippy errors.
@@ -5383,7 +5256,7 @@
 ##       `CacheOptions` struct (#[allow(dead_code)] — the compiled-policy cache
 ##       isn't implemented yet). LIMITATION: apparmor does not yet read/write a
 ##       binary profile cache; CacheOptions is staged plumbing for it.
-##   Clippy-clean host + ouros; builds for ouros.
+##   Clippy-clean host + slateos; builds for slateos.
 ##
 ## BUG (noticed+FIXED 2026-05-31): dmsetup `cargo test` could not launch its
 ##   test harness + 7 pre-existing clippy errors.  userspace/dmsetup/:
@@ -5399,11 +5272,11 @@
 ##       `embed-manifest` crate (build-dependency), which generates the COFF
 ##       resource object itself — no external tools.  embed_manifest() links via
 ##       `cargo:rustc-link-arg-bins`, which also covers the bin's unit-test
-##       harness, so `cargo test` now launches.  190/190 tests pass.  The ouros
+##       harness, so `cargo test` now launches.  190/190 tests pass.  The slateos
 ##       target is unaffected (TARGET matches no Windows ABI -> manifest skipped).
 ##     * 7 pre-existing clippy errors (collapsible-if x3, map_or->is_*,
 ##       manual char comparison x3) auto-fixed.
-##   Clippy-clean host + ouros; builds for host + ouros.
+##   Clippy-clean host + slateos; builds for host + slateos.
 ##
 ## BUG (noticed+FIXED 2026-05-31): sshd had 2 failing tests (base64_decode
 ##   dropped trailing bytes) + ~32 pre-existing clippy errors + 13 dead-code
@@ -5427,7 +5300,7 @@
 ##       publickey algo selection / audit, outbound DATA capping). LIMITATION:
 ##       sshd does not yet spawn login shells, do CTR transport encryption, or
 ##       use parsed authorized-key metadata; these helpers are staged for that.
-##   Clippy-clean host + ouros; builds for ouros.
+##   Clippy-clean host + slateos; builds for slateos.
 ##
 ## BUG (noticed+FIXED 2026-05-31): nft had a non-compiling test build + 15
 ##   pre-existing clippy errors.  userspace/nft/src/main.rs:
@@ -5435,7 +5308,7 @@
 ##       nft_command, which takes `&mut Ruleset` (every other call site uses
 ##       `&mut rs`).  A test typo; changed to `&mut rs`.  102/102 tests pass.
 ##     * 15 pre-existing collapsible-if clippy errors, auto-fixed.
-##   Clippy-clean host + ouros; builds for ouros.
+##   Clippy-clean host + slateos; builds for slateos.
 ##
 ## BUG (noticed+FIXED 2026-05-31): avahi had 1 failing test (off-by-one in
 ##   the autoipd conflict limit) + ~10 pre-existing clippy errors.
@@ -5450,7 +5323,7 @@
 ##       collapsible if/match (auto-fixed 9); Ipv6Addr::new's 8-arg signature
 ##       (too_many_arguments) #[allow]'d with a comment since it mirrors
 ##       std::net::Ipv6Addr::new and the segment count is inherent to IPv6.
-##   Clippy-clean host + ouros; builds for ouros.
+##   Clippy-clean host + slateos; builds for slateos.
 ##
 ## JUDGMENT CALL (2026-05-31, avahi autoipd MAX_CONFLICTS semantics):
 ##   The conflict counter previously failed when count >= MAX_CONFLICTS (10),
@@ -5477,7 +5350,7 @@
 ##     * LIMITATION (dispatch-wiring gap): PpdConstraint::is_violated and the
 ##       option_type metadata exist + are tested but aren't reached from the
 ##       option-validation path; reserved for a future PPD-constraint pass.
-##   Clippy-clean host + ouros; builds for ouros.
+##   Clippy-clean host + slateos; builds for slateos.
 ##
 ## BUG (noticed+FIXED 2026-05-31): pipewire had a broken test build, a real
 ##   production arg-parsing bug, and ~18 pre-existing clippy errors.
@@ -5499,7 +5372,7 @@
 ##     * ~18 pre-existing clippy errors (redundant `Some(x) = ....ok()`,
 ##       collapsible if/match) auto-fixed; one dead variant (_MetadataKeyType::
 ##       RouteProfile) documented #[allow(dead_code)].
-##   Clippy-clean host + ouros; builds for ouros.
+##   Clippy-clean host + slateos; builds for slateos.
 ##
 ## BUG (noticed+FIXED 2026-05-31): pulseaudio had a broken test build + 2
 ##   pre-existing clippy errors.  userspace/pulseaudio/src/main.rs:
@@ -5523,7 +5396,7 @@
 ##       reached from the per-personality run_* dispatch — the simulated server
 ##       reports Idle and never enforces the MAX_* limits.  Reserved for a future
 ##       wiring pass.
-##   Clippy-clean host + ouros; builds for ouros.
+##   Clippy-clean host + slateos; builds for slateos.
 ##
 ## BUG (noticed+FIXED 2026-05-31): e2fsprogs had a broken test build + 12
 ##   pre-existing clippy errors.  userspace/e2fsprogs/src/main.rs:
@@ -5549,7 +5422,7 @@
 ##       are implemented + unit-tested but unreachable from the CLI entry points.
 ##       Reserved with #[allow(dead_code)]; wiring them into the dispatch path is
 ##       a deferred improvement.
-##   Clippy-clean host + ouros; builds for ouros.
+##   Clippy-clean host + slateos; builds for slateos.
 ##
 ## BUG (noticed+FIXED 2026-05-31): iptables had a broken test build + a real
 ##   production bug + 16 pre-existing clippy errors.  userspace/iptables/src/main.rs:
@@ -5576,7 +5449,7 @@
 ##       numeric because we never do reverse-DNS or /etc/services lookups (which
 ##       is what `-n` would produce upstream anyway).  Field kept with
 ##       #[allow(dead_code)] for when symbolic rendering is added.
-##   Clippy-clean host + ouros; builds for ouros.
+##   Clippy-clean host + slateos; builds for slateos.
 ##
 ## BUG (noticed+FIXED 2026-05-31): rsync had 1 failing test + a pile of latent
 ##   warnings.  userspace/rsync/src/main.rs:
@@ -5584,7 +5457,7 @@
 ##       string (%i) is exactly 11 chars (update-type, file-type, then
 ##       c/s/t/p/o/g/u/a/x).  The sibling itemize_changed test correctly asserts
 ##       len()==11.  Wrong test constant -> fixed to ".f........." + len check.
-##     * Production (ouros) build had real warnings: removed two genuinely-dead
+##     * Production (slateos) build had real warnings: removed two genuinely-dead
 ##       helpers (write_stderr_str/write_stdout_str, never referenced anywhere);
 ##       converted two needless_range_loop SHA-256 loops to iterators; converted
 ##       two manual `if x>0 {a/x} else {d}` to checked_div().unwrap_or(d).
@@ -5602,7 +5475,7 @@
 ##       so under cfg(test) the whole production call tree is unreachable.  Added
 ##       a justified crate-level `#![cfg_attr(test, allow(dead_code))]` (+ gated
 ##       `use std::env` to cfg(not(test))).  89/89 tests pass; clippy-clean host
-##       + ouros; builds for ouros.
+##       + slateos; builds for slateos.
 ##
 ## BUG (noticed+FIXED 2026-05-31): wget had 3 failing tests, all WRONG TEST
 ##   CONSTANTS (not production bugs — same class as the earlier curl fix).
@@ -5617,7 +5490,7 @@
 ##     * parse_response_simple: expected body_offset 58; body_offset = (start of
 ##       "\r\n\r\n") + 4 = 64, and the test's own `&data[body_offset..]==b"hello"`
 ##       assertion only holds at 64.  Fixed to 64.
-##   59/59 wget tests pass; clippy-clean host + ouros; builds for ouros.
+##   59/59 wget tests pass; clippy-clean host + slateos; builds for slateos.
 ##
 ## BUG (noticed+FIXED 2026-05-31): tr range expansion was completely broken.
 ##   userspace/tr/src/main.rs expand_set() guarded the `a-z` range branch with
@@ -5629,18 +5502,18 @@
 ##   and the redundant nested conditions; a dash is a range separator iff a
 ##   high endpoint follows (`i + 2 < len`), else literal (trailing/leading dash
 ##   falls through to the single-byte push).  37/37 tr tests pass; clippy-clean
-##   host + ouros (also cleaned 6 pre-existing pedantic warnings: let-chains,
+##   host + slateos (also cleaned 6 pre-existing pedantic warnings: let-chains,
 ##   byte-str literal, RangeInclusive::contains, iter_mut enumerate); builds for
-##   the ouros target.  Found while sweeping interpreter/parser coreutils for
+##   the slateos target.  Found while sweeping interpreter/parser coreutils for
 ##   latent failing tests after the jq fix.
 ##   ALSO FIXED in the same sweep (2026-05-31):
 ##     * dd test module didn't compile: `StatusLevel` didn't implement Debug, so
 ##       the assert_eq! in the parse_status tests failed to build the harness.
-##       Added #[derive(Debug)]; 48/48 tests pass; clippy-clean host + ouros
+##       Added #[derive(Debug)]; 48/48 tests pass; clippy-clean host + slateos
 ##       (also cleared 2 pre-existing warnings: needless &mut self on
 ##       write_all_bytes + the now-unused `mut pad`).
 ##   coreutils crate investigated (2026-05-31) — turned up several issues:
-##     * FIXED: debug `build-ouros -p coreutils` failed to LINK with
+##     * FIXED: debug `build-slateos -p coreutils` failed to LINK with
 ##       "relocation refers to a symbol in a discarded section:
 ##       __rustc_debug_gdb_scripts_section__".  coreutils/linker.ld discards
 ##       `*(.debug*)`, which swallowed `.debug_gdb_scripts`; in debug builds
@@ -5663,7 +5536,7 @@
 ##       chown, tar) use unix-only std extension traits (PermissionsExt /
 ##       MetadataExt / FileTypeExt) without #[cfg(unix)] gating.  It has ZERO
 ##       test modules, so there are no host tests to run; it builds correctly
-##       for its real target (x86_64-ouros, which is unix).  Gating all six
+##       for its real target (x86_64-slateos, which is unix).  Gating all six
 ##       bins would be churn with no test payoff, so left as-is.  TRIGGER:
 ##       revisit if/when coreutils gains unit tests that need to run on host.
 ##  JUDGMENT CALL / DESIGN QUESTION (2026-05-31, needs human): there is
@@ -5690,12 +5563,12 @@
 ##  against the sysroot's libc.a + libstubs.a (toolchain/sysroot/lib), and
 ##  the `posix` crate implements the libc symbols (clock_gettime, open,
 ##  read, write, rename, statvfs, mkfifo, utimensat, ...) as `extern "C"`
-##  functions that route to NATIVE OurOS syscalls.  So std::time calls the
+##  functions that route to NATIVE SlateOS syscalls.  So std::time calls the
 ##  posix `clock_gettime`, which calls syscall0(SYS_CLOCK_REALTIME=14) /
 ##  syscall0(SYS_CLOCK_MONOTONIC=10) — the correct native numbers — and
 ##  std::fs / std::net / std::process likewise route through posix.  This is
 ##  confirmed: nmap and stat now use std::fs/std::io/std::time/std::process
-##  and build clean for x86_64-ouros.
+##  and build clean for x86_64-slateos.
 ##
 ##  THEREFORE the proper fix for any hand-rolled tool is simply to USE STD
 ##  (std::time / std::fs / std::process), not to hand-correct raw syscall
@@ -5768,7 +5641,7 @@
 ##   sys_clock_adjtime.
 ##
 ##  STATUS (2026-05-30): documented here in full and migrated the raw-syscall
-##  callers to the native ABI (all build clean for x86_64-ouros):
+##  callers to the native ABI (all build clean for x86_64-slateos):
 ##    * date  — realtime read 40->14 (no-arg ns), set 41->15 (single-ns);
 ##              dropped the bogus clock_gettime(clock_id,*ts) form + dead
 ##              Timespec.
@@ -5789,7 +5662,7 @@
 ##              native syscalls via posix libc) and thin extern "C" bindings to
 ##              the posix statvfs/mkfifo/utimensat symbols for the three ops std
 ##              lacks.  Unix-only paths gated #[cfg(unix)] with inert host stubs;
-##              84 host tests pass, builds clean for x86_64-ouros.  (Earlier note
+##              84 host tests pass, builds clean for x86_64-slateos.  (Earlier note
 ##              had only flagged the dead-code clock helper at 228->14; the real
 ##              breakage was the whole filesystem-syscall block.)
 ##    * dig, rsync, scp, screen, tcpdump — monotonic 30->10 (one-line const;
@@ -5895,10 +5768,10 @@
 ##           (NCCS=32), so the pointers are ABI-compatible. This removes the
 ##           harmful path where every termios call fired SYS_CLOCK_ADJTIME=16
 ##           with the struct pointer reinterpreted as a signed-ns clock delta.
-##           checks clean for x86_64-ouros; my edited region is clippy-clean.
+##           checks clean for x86_64-slateos; my edited region is clippy-clean.
 ##           NOTE (RESOLVED 2026-06-01): the pre-existing pervasive
 ##           clippy::pedantic debt in userspace/stty (unreadable_literal,
-##           similar_names, doc_markdown "OurOS", struct_field_names) is now
+##           similar_names, doc_markdown "SlateOS", struct_field_names) is now
 ##           handled by adopting the workspace lint policy — stty (and 14
 ##           sibling userspace tools) now use `[lints] workspace = true`, which
 ##           sets pedantic=warn so the crate is clippy-clean (warnings only).
@@ -5943,7 +5816,7 @@
 ##       Verified SHUTDOWN=90/REBOOT=91 do NOT exist (90/91 unassigned) — see
 ##       PROGRESS + power-management DESIGN GAP below.
 ##   [x] lsmod (INIT_MODULE=150 DELETE_MODULE=151 — VERIFIED these are
-##       unassigned on OurOS; there is no module ABI because OurOS is a
+##       unassigned on SlateOS; there is no module ABI because SlateOS is a
 ##       microkernel.  See PROGRESS + kernel-module DESIGN GAP below.)
 ##
 ##  FIX ORDER (this pass): catastrophic std-capable tools first (jq, zip,
@@ -6045,7 +5918,7 @@
 ##           TCP 801/802/803.  Same DNS byte-order bug, fixed ([u8;4] +
 ##           from_be_bytes).  REAL shipped bug found: stdout/stderr wrote via the
 ##           EXIT syscall.  Replaced the ioctl/TIOCGWINSZ winsize query (no such
-##           syscall on OurOS) with a fixed 25x80 console size.  Clippy-clean.
+##           syscall on SlateOS) with a fixed 25x80 console size.  Clippy-clean.
 ##   [x] ftp — Linux file syscalls -> std::fs/std::env (327aad0f): get_cwd/
 ##           change_dir/file_stat/list_directory/get/put now use std.  Same DNS
 ##           byte-order bug, fixed.  Removed dead Linux file-syscall consts +
@@ -6066,7 +5939,7 @@
 ##   [x] arp — CATASTROPHIC ABI misuse fixed.  Old consts: READ=0 WRITE=1
 ##           OPEN=2 CLOSE=3 EXIT=60 and ARP_ADD=840 ARP_DEL=841 ARP_PROBE=842
 ##           IFMAC=843 — every one of those numbers means something else on
-##           OurOS (840=TCP_LIST, 842=NET_IF_INFO, 843=ARP_TABLE) and WRITE=1
+##           SlateOS (840=TCP_LIST, 842=NET_IF_INFO, 843=ARP_TABLE) and WRITE=1
 ##           is actually EXIT, so write_stderr() KILLED the process on the
 ##           first byte of any error message.  Rewrote on the real ABI:
 ##           read_arp_table() now calls SYS_ARP_TABLE=843 into a 1024x12-byte
@@ -6079,7 +5952,7 @@
 ##           wrappers, ArpRequest, parse_proc_arp/parse_hex_u16 and the
 ##           /proc/net/arp path entirely (it was never the real source).
 ##           Add/delete/probe become a clean ArpError::Unsupported (see DESIGN
-##           GAP below).  Clippy-clean; 40 host tests pass; build-ouros clean.
+##           GAP below).  Clippy-clean; 40 host tests pass; build-slateos clean.
 ##   [x] service (f6c69767) — CHANNEL_CLOSE 203 -> 204.  Also fixed a real
 ##           host-build break found in passing: cmd_enable called
 ##           std::os::unix::fs::symlink unconditionally, which fails to compile
@@ -6087,16 +5960,16 @@
 ##           gated behind a #[cfg(unix)] make_symlink helper with a non-unix
 ##           Unsupported fallback (the shipping target is unix).  recv length
 ##           clamp uses (recv_ret as usize).min(buf.len()).  +6 tests;
-##           clippy-clean; build-ouros clean.
+##           clippy-clean; build-slateos clean.
 ##   [x] powerctl (cae914f3) — CHANNEL_CLOSE 203 -> 204.  Removed the fictional
 ##           SYS_SHUTDOWN=90/SYS_REBOOT=91 consts and the SHUTDOWN_REASON_* /
-##           ACPI_S3/S4 consts: 90/91 are unassigned on OurOS, so the "direct
+##           ACPI_S3/S4 consts: 90/91 are unassigned on SlateOS, so the "direct
 ##           syscall" fallback was dialing the wrong syscall.  IPC to the
 ##           service manager (CHANNEL_OPEN/SEND/RECV/CLOSE) is retained as the
 ##           primary path; the direct fallbacks now drive ACPI via procfs/sysfs
 ##           knobs (/proc/acpi/power, /proc/acpi/sleep, /sys/power/state) and
 ##           exit with a clear error if those writes fail.  Battery % uses
-##           checked_mul/checked_div.  +6 tests; clippy-clean; build-ouros clean.
+##           checked_mul/checked_div.  +6 tests; clippy-clean; build-slateos clean.
 ##   [x] logind (cff52b10) — CHANNEL_CLOSE was 203 (wrong) inside a dead syscall
 ##           block that ALSO declared a syscall3 wrapper + SYS_SHUTDOWN=90 /
 ##           SYS_REBOOT=91 — all unused and all wrong.  The block was never
@@ -6111,14 +5984,14 @@
 ##           #![allow(dead_code)] — the daemon-side state machine is intentional
 ##           scaffolding built ahead of the resident daemon event loop (only the
 ##           loginctl personality is wired into main; the full Daemon API is
-##           exercised by the test suite).  100 host tests pass; build-ouros clean.
+##           exercised by the test suite).  100 host tests pass; build-slateos clean.
 ##
 ##   [x] lsmod (39245d22) — multi-personality lsmod/modprobe/insmod/rmmod.
 ##           Removed the fictional SYS_INIT_MODULE=150 / SYS_DELETE_MODULE=151
 ##           consts + the raw syscall3 wrapper + the orphaned errno_message
-##           mapper; 150/151 are unassigned on OurOS so the load/unload calls
+##           mapper; 150/151 are unassigned on SlateOS so the load/unload calls
 ##           just returned NotSupported.  do_init_module/do_delete_module now
-##           return a clear "kernel modules are not supported on OurOS" error
+##           return a clear "kernel modules are not supported on SlateOS" error
 ##           (microkernel — drivers are userspace processes).  Read-only lsmod
 ##           listing (/proc/modules) and modprobe dep-resolution/dry-run/
 ##           show-depends are unchanged.  REAL pre-existing bug fixed: the test
@@ -6126,7 +5999,7 @@
 ##           #[derive(Debug)] needed by assert_eq!/unwrap_err), so 56 tests had
 ##           been silently un-run; added the derives, all 56 pass.  Clippy-clean
 ##           (fixed pre-existing never_loop / collapsible-if / print_literal);
-##           build-ouros clean.
+##           build-slateos clean.
 ##
 ##   [x] chown/chmod — MIS-CLASSIFIED in the "NO SUCH SYSCALL" group above:
 ##           the old code used CHOWN=30/CHMOD=31 (which are IRQ_REGISTER/
@@ -6141,7 +6014,7 @@
 ##               of u32::MAX = "leave unchanged" (resolved by Vfs::set_owner).
 ##             * do_chmod -> syscall3(SET_PERMS, ptr, len, mode & 0o7777).
 ##             * Replaced the bogus Linux-errno mapper with kernel_error_to_string
-##               mapping OurOS KernelError discriminants (-500 = NotFound, etc.,
+##               mapping SlateOS KernelError discriminants (-500 = NotFound, etc.,
 ##               NOT ENOENT).
 ##           Used SYS_FS_METADATA=628 (64-byte buffer; uid@48 gid@52 perms@56,
 ##           all LE) to implement the previously-stubbed features PROPERLY:
@@ -6159,8 +6032,8 @@
 ##           fallbacks so `cargo test` compiles on the windows host.  Added a
 ##           39-test module (octal/symbolic mode parse+apply, owner-spec parse,
 ##           group-table/uid-gid resolution, --from parse, metadata-buffer parse,
-##           error mapping, formatting).  Clippy-clean on both host and ouros
-##           targets; build-ouros clean.
+##           error mapping, formatting).  Clippy-clean on both host and slateos
+##           targets; build-slateos clean.
 ##           KNOWN LIMITATION: -h/--no-dereference cannot be honored — the VFS
 ##           SET_OWNER path resolves symlinks (resolve_follow) and there is no
 ##           lchown-equivalent syscall yet, so chown -h now WARNS that the target
@@ -6180,16 +6053,16 @@
 ##           Fixed: SYS_FS_STATVFS=608, correct arg order, and a StatVfs parsed
 ##           from the real 64-byte buffer (LE: block_size@0, total_blocks@8,
 ##           free_blocks@16, total_inodes@24, free_inodes@32, max_name_len@40,
-##           read_only u8@48).  OurOS statvfs has no reserved-block pool, so
+##           read_only u8@48).  SlateOS statvfs has no reserved-block pool, so
 ##           available == free (df's avail column now equals free).  parse_
 ##           statvfs_buffer split out for host testing; fs_statvfs gated to
 ##           x86_64 with a host fallback.  Added a 13-test module (buffer parse,
 ##           human/SI/block formatting, usage %, pseudo-fs detection, display
 ##           filtering, best-mount-prefix selection, JSON escaping).  Clippy-
-##           clean on host and ouros; build-ouros clean.
+##           clean on host and slateos; build-slateos clean.
 ##
 ##   [x] monctl — the old code issued a "DRM ioctl" via syscall 850, which on
-##           OurOS is SYS_TCP_SET_NODELAY (not a display call).  The SYS_DRM_*
+##           SlateOS is SYS_TCP_SET_NODELAY (not a display call).  The SYS_DRM_*
 ##           family (1000-1060) DOES exist but only exposes compositor
 ##           primitives (GEM buffers, framebuffers, page-flip, and read-only
 ##           mode/connector info) — there is NO DPMS or backlight syscall.  So
@@ -6209,8 +6082,8 @@
 ##               the top-level off/on/standby/suspend commands.
 ##           Extracted backlight_pct / pct_to_raw / parse_refresh_hz as pure
 ##           helpers (overflow-safe via u64 intermediates) + a 6-test module.
-##           Clippy-clean on host and ouros (fixed two collapsible_if via
-##           let-chains); build-ouros clean.
+##           Clippy-clean on host and slateos (fixed two collapsible_if via
+##           let-chains); build-slateos clean.
 ##   [x] mount/umount — DESTRUCTIVE syscalls neutered (2026-06-03).  Old code
 ##           declared SYS_MOUNT=620 and SYS_UMOUNT=621 and fired them via raw
 ##           `syscall`.  Both numbers collide with destructive fs-trash syscalls:
@@ -6232,7 +6105,7 @@
 ##   [x] chroot — DESTRUCTIVE syscalls neutered (2026-06-03).  Old code declared
 ##           SYS_CHROOT=61 / SYS_CHDIR=49 / SYS_SETUID=105 / SYS_SETGID=106 /
 ##           SYS_SETGROUPS=116 and fired them via raw `syscall` instructions.
-##           NONE of those numbers map to the intended operation on OurOS:
+##           NONE of those numbers map to the intended operation on SlateOS:
 ##             * 61 = SYS_SYSCTL_SET (handlers.rs:8293-8306) — reads arg0 as
 ##               u16 sysctl_id and arg1 as the new value, so `chroot /tmp`
 ##               called sysctl::set(low16_of_path_ptr, path_length) and
@@ -6258,7 +6131,7 @@
 ##           cargo build clean.  See DESIGN GAP below.
 ##
 ##  DESIGN GAP — no process-credential / filesystem-root syscalls (chroot):
-##   OurOS exposes no SYS_CHROOT, SYS_CHDIR, SYS_SETUID, SYS_SETGID, or
+##   SlateOS exposes no SYS_CHROOT, SYS_CHDIR, SYS_SETUID, SYS_SETGID, or
 ##   SYS_SETGROUPS — the kernel has no notion of a per-process root directory
 ##   or a working directory tracked by syscall, and the process credential
 ##   layer (real/effective uid/gid, supplementary groups) has no setter
@@ -6274,7 +6147,7 @@
 ##  DESIGN GAP — no DPMS idle-timeout policy interface (monctl dpms on/off/timers):
 ##   Whether the screen blanks after N seconds idle, and the standby/suspend/off
 ##   thresholds, is display-server (compositor) policy — exactly as X11's DPMS
-##   timers live in the X server, not the kernel.  OurOS exposes no syscall or
+##   timers live in the X server, not the kernel.  SlateOS exposes no syscall or
 ##   sysfs node for it.  Immediate DPMS power-state changes DO work via
 ##   /sys/class/drm/<conn>/dpms (monctl off/on/standby/suspend).  CORRECT FUTURE
 ##   DIRECTION: when the compositor exposes a control channel, route "monctl dpms
@@ -6282,7 +6155,7 @@
 ##   TRIGGER: when the compositor's display-power control IPC protocol lands.
 ##
 ##  DESIGN GAP — no kernel-module loading (insmod/rmmod/modprobe load+remove):
-##   OurOS is a microkernel.  There are no loadable kernel modules: device
+##   SlateOS is a microkernel.  There are no loadable kernel modules: device
 ##   drivers run as ordinary userspace processes managed by the driver framework
 ##   / service manager, not as code injected into the kernel.  So there is no
 ##   init_module/delete_module syscall and never will be in the Linux sense.
@@ -6296,7 +6169,7 @@
 ##   IPC protocol lands.
 ##
 ##  DESIGN GAP — no power-management syscall (shutdown/reboot/suspend/hibernate):
-##   OurOS has NO userspace syscall to change system power state; syscall
+##   SlateOS has NO userspace syscall to change system power state; syscall
 ##   numbers 90/91 (which powerctl/logind previously assumed were SHUTDOWN/
 ##   REBOOT) are unassigned.  The real mechanism is to send an IPC request to
 ##   the service manager (init), which orchestrates an ordered shutdown (stop
@@ -6327,10 +6200,10 @@
 ##   the console honors it.
 ##
 ##  DESIGN GAP — no ARP mutation syscalls (arp -d / -s / -D):
-##   OurOS exposes SYS_ARP_TABLE=843 (read) and SYS_NET_IF_INFO=842 (interface
+##   SlateOS exposes SYS_ARP_TABLE=843 (read) and SYS_NET_IF_INFO=842 (interface
 ##   config incl. local MAC) but has NO syscall to add, delete, or probe ARP
 ##   cache entries.  The arp tool therefore reports a clear "not supported on
-##   OurOS: the kernel exposes no ARP-add/delete syscall" rather than invoking
+##   SlateOS: the kernel exposes no ARP-add/delete syscall" rather than invoking
 ##   the wrong syscall.  CORRECT FIX (when prioritised): add kernel handlers
 ##   SYS_ARP_ADD (ip+mac+iface -> insert static/permanent entry), SYS_ARP_DEL
 ##   (ip -> evict), and optionally SYS_ARP_PROBE (ip,timeout -> active probe),
@@ -6363,8 +6236,8 @@
 ##       builtins numbers/strings/booleans/arrays/objects/nulls/iterables/
 ##       scalars (each keeps only inputs of its class).  ("values" was left as
 ##       the pre-existing non-standard object/array-values filter.)
-##   Both fixed; jq now 69/69 tests pass, clippy-clean on host + ouros, builds
-##   for the ouros target.  Also cleaned up 12 pre-existing clippy warnings
+##   Both fixed; jq now 69/69 tests pass, clippy-clean on host + slateos, builds
+##   for the slateos target.  Also cleaned up 12 pre-existing clippy warnings
 ##   (map_or->is_some_and, one collapsible_if).
 
 "The dlltool issue blocks host tests on this toolchain (known limitation per CLAUDE.md). Let me confirm the code at least type-checks against the custom target, then cross-compile." what is this dlltool issue?
@@ -6478,11 +6351,11 @@ the os directory is 65 gb, why so high? and how many gb will actually go into th
   ANSWER (2026-05-27, ADDRESSED):
   Was 65 GB because each of ~120 sub-crates kept its OWN target/
   directory and each rebuilt std from source (-Zbuild-std for the
-  custom x86_64-ouros target), so each target/ was ~500 MB - 1 GB,
+  custom x86_64-slateos target), so each target/ was ~500 MB - 1 GB,
   multiplied across all crates.
 
   Fixed by workspace consolidation (commit d31769ac on osb2/shell):
-  - Every ouros crate is now a workspace-member of the root Cargo.toml
+  - Every slateos crate is now a workspace-member of the root Cargo.toml
   - One shared target/ directory at the repo root replaces ~120
     per-crate target/ directories
   - The 119 redundant per-crate target/ dirs were deleted (the three
@@ -6493,7 +6366,7 @@ the os directory is 65 gb, why so high? and how many gb will actually go into th
   Current OS directory size: 8.5 GB (down from ~65 GB).  Breakdown:
     3.7 GB  nushell/  — upstream nushell vendored workspace (excluded
                         from our workspace; has own target dir)
-    3.1 GB  target/   — shared workspace target/ for all ouros crates
+    3.1 GB  target/   — shared workspace target/ for all slateos crates
     1.7 GB  everything else (source code, design docs, configs, git,
                         boot images, OVMF firmware, logs, etc.)
 
@@ -6503,7 +6376,7 @@ the os directory is 65 gb, why so high? and how many gb will actually go into th
 
   Why per-crate target/ dirs were so big: each one rebuilds the
   entire Rust standard library from source for the custom
-  x86_64-ouros target spec (~250 MB of build artifacts just for std),
+  x86_64-slateos target spec (~250 MB of build artifacts just for std),
   plus the crate's own dependency graph.  With the workspace
   consolidation, std builds once and all crates share it.
 
@@ -7461,7 +7334,7 @@ Remaining net improvements (diminishing returns):
   link on the host target (x86_64-pc-windows-gnu) with "undefined
   reference to `geteuid'".  RESOLVED 2026-06-04.  Gated the `geteuid`
   extern and its callsite on `#[cfg(target_os = "linux")]` (the custom
-  `x86_64-ouros` target reports `target_os = "linux"`, so production
+  `x86_64-slateos` target reports `target_os = "linux"`, so production
   targets still get the real syscall).  On Windows hosts the lookup
   uses USERNAME env var, falling back to numeric `0` when no name is
   available.  Pulled the env lookup and UID fallback into
@@ -7936,7 +7809,7 @@ Remaining net improvements (diminishing returns):
   to self_test as a regression guard (child match, self match, grandchild
   reject non-recursive, grandchild accept recursive, prefix-sibling "/docsx"
   reject, unrelated reject, root child match, root grandchild reject).
-  Kernel builds clean for x86_64-ouros; no new clippy findings in notify.rs.
+  Kernel builds clean for x86_64-slateos; no new clippy findings in notify.rs.
   This is a prerequisite for rewiring posix inotify off polling onto the
   kernel watch API (next task) — without it the kernel API would be useless.
 
@@ -8720,7 +8593,7 @@ Remaining net improvements (diminishing returns):
 
 ## Toolchain — Rust std for Userspace (osb2)
 
-- DONE: Custom Rust target spec (toolchain/x86_64-ouros.json) that presents
+- DONE: Custom Rust target spec (toolchain/x86_64-slateos.json) that presents
   as linux-musl so std's unix backend works.  POSIX library provides libc.a.
   Stubs library (toolchain/stubs/) provides 6 missing symbols: _Unwind_Backtrace,
   _Unwind_GetIP, syscall, pthread_getattr_np, pthread_attr_getguardsize,
@@ -8749,7 +8622,7 @@ Remaining net improvements (diminishing returns):
   Policy is factored into pure, host-testable helpers (encode_attr,
   attr_read_*, main_thread_stack_attr) with 21 deterministic unit tests
   (no global-state mutation, no races).  Verified: 17031 posix host tests
-  pass; posix builds clean for the none target; ouros-stubs builds clean.
+  pass; posix builds clean for the none target; slateos-stubs builds clean.
   JUDGMENT CALL: main-stack geometry constants (MAIN_STACK_TOP = 0x7FFF_FFFF_0000,
   MAIN_STACK_SIZE = 4 MiB, DEFAULT_GUARD_SIZE = 16 KiB) are duplicated from
   kernel/src/proc/spawn.rs (USER_STACK_TOP / MAX_STACK_SIZE).  There is no
@@ -8793,9 +8666,9 @@ Remaining net improvements (diminishing returns):
   2. nu-cli/Cargo.toml: same
   3. nu-command/src/filters/tee.rs: added #[cfg(not(feature="os"))] match arm
   Build command:
-    INCLUDE="<msvc>;ucrt;shared;um" CC_x86_64_ouros=cl.exe AR_x86_64_ouros=llvm-ar.exe \
+    INCLUDE="<msvc>;ucrt;shared;um" CC_x86_64_slateos=cl.exe AR_x86_64_slateos=llvm-ar.exe \
     RUSTUP_TOOLCHAIN=nightly-x86_64-pc-windows-msvc \
-    cargo check -Zbuild-std=core,alloc,std,panic_abort --target ../toolchain/x86_64-ouros.json \
+    cargo check -Zbuild-std=core,alloc,std,panic_abort --target ../toolchain/x86_64-slateos.json \
     --release --no-default-features
 
 - TODO (Nushell next steps):
@@ -9530,7 +9403,7 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##     specific headers (windows.h, direct.h, io.h, intrin.h).  None
 ##     of the Windows-specific includes are `#ifdef _WIN32`-gated, so
 ##     cross-compiling the runtime to x86_64-unknown-linux-musl (our
-##     x86_64-ouros target) would fail to compile on the very first
+##     x86_64-slateos target) would fail to compile on the very first
 ##     translation unit.
 ##
 ##   - There is no x86_64-unknown-linux-musl support in fastpy's
@@ -13311,7 +13184,7 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##        - setdomainname(NULL,0) -> 0 (clear-domain).
 ##        - sethostname(NULL,5) -> -EFAULT.
 ##        - sethostname(len=65) -> -EINVAL.
-##        - Round-trip: set_hostname("ouros-test") +
+##        - Round-trip: set_hostname("slateos-test") +
 ##          get_hostname() reads back; same for domain.
 ##          Originals restored at end of test.
 ##
@@ -52950,7 +52823,7 @@ Verbatim v6.6 citation (mm/mmap.c, get_unmapped_area):
 Root cause: native sys_mmap (handlers.rs:717) rejects any non-zero
 unaligned vaddr_hint with BadAlignment->EINVAL, with no notion of
 MAP_FIXED.  Native mmap is the wrong layer to encode Linux's
-FIXED-vs-hint policy (it serves the OuRoS-native ABI too).
+FIXED-vs-hint policy (it serves the SlateOS-native ABI too).
 
 Fix (translator-only): added pure helper resolve_mmap_addr_hint(addr,
 fixed, frame_size) -> Option<u64>:
@@ -53034,7 +52907,7 @@ File: kernel/src/syscall/linux.rs (translator only)
 
 Divergence: munmap(addr, 0) returned 0 (success) instead of EINVAL.
 The native munmap (handlers.rs:892) treats size==0 as an idempotent
-no-op — correct for the OuRoS-native ABI — but Linux rejects a
+no-op — correct for the SlateOS-native ABI — but Linux rejects a
 zero-length unmap.
 
 Verbatim v6.6 citation (mm/mmap.c, do_vmi_munmap):

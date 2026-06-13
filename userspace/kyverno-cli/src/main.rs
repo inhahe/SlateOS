@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kyverno-cli — OurOS Kyverno Kubernetes policy engine
+//! kyverno-cli — SlateOS Kyverno Kubernetes policy engine
 //!
 //! Single personality: `kyverno`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_kyverno(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: kyverno COMMAND [OPTIONS]");
-        println!("Kyverno v1.12.0 (OurOS) — Kubernetes policy engine CLI");
+        println!("Kyverno v1.12.0 (SlateOS) — Kubernetes policy engine CLI");
         println!();
         println!("Commands:");
         println!("  apply           Apply policies to resources");
@@ -31,7 +31,7 @@ fn run_kyverno(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("Kyverno v1.12.0 (OurOS)");
+        println!("Kyverno v1.12.0 (SlateOS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("apply");

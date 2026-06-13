@@ -1,4 +1,4 @@
-//! OurOS System Information Utility
+//! SlateOS System Information Utility
 //!
 //! Queries and displays comprehensive system information from /proc, /sys,
 //! and other kernel interfaces. Similar to `neofetch`, `inxi`, or Windows
@@ -261,7 +261,7 @@ fn show_os() {
     if let Some(version) = read_proc("/proc/version") {
         println!("  Version:   {version}");
     } else {
-        println!("  Version:   OurOS (version info not available)");
+        println!("  Version:   SlateOS (version info not available)");
     }
 
     if let Some(uptime_str) = read_proc("/proc/uptime") {
@@ -411,7 +411,7 @@ fn show_all() {
 // ============================================================================
 
 fn print_usage() {
-    println!("OurOS System Information v0.1.0");
+    println!("SlateOS System Information v0.1.0");
     println!();
     println!("Query and display comprehensive system information.");
     println!();

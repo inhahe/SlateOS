@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! onefetch — OurOS command-line Git information tool
+//! onefetch — SlateOS command-line Git information tool
 //!
 //! Single personality: `onefetch`
 
@@ -36,7 +36,7 @@ fn run_onefetch(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("onefetch 2.21.0 (OurOS)");
+        println!("onefetch 2.21.0 (SlateOS)");
         return 0;
     }
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hugo-cli — OurOS Hugo static site generator
+//! hugo-cli — SlateOS Hugo static site generator
 //!
 //! Multi-personality: `hugo`
 
@@ -10,7 +10,7 @@ use std::process;
 fn run_hugo(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Hugo is a fast and flexible static site generator");
-        println!("Hugo v0.122.0 (OurOS)");
+        println!("Hugo v0.122.0 (SlateOS)");
         println!();
         println!("Usage: hugo [command] [flags]");
         println!();
@@ -27,7 +27,7 @@ fn run_hugo(args: &[String]) -> i32 {
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match subcmd {
         "version" | "--version" => {
-            println!("hugo v0.122.0-b84644c0 OurOS/amd64 BuildDate=2024-01-22T08:00:00Z");
+            println!("hugo v0.122.0-b84644c0 SlateOS/amd64 BuildDate=2024-01-22T08:00:00Z");
         }
         "new" => {
             let what = args.get(1).map(|s| s.as_str()).unwrap_or("site");
@@ -71,7 +71,7 @@ fn run_hugo(args: &[String]) -> i32 {
         }
         "env" => {
             println!("hugo v0.122.0");
-            println!("GOOS=\"ouros\"");
+            println!("GOOS=\"slateos\"");
             println!("GOARCH=\"amd64\"");
             println!("GOVERSION=\"go1.21.6\"");
         }

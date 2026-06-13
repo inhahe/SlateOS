@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! jless — OurOS command-line JSON viewer/explorer
+//! jless — SlateOS command-line JSON viewer/explorer
 //!
 //! Single personality: `jless`
 
@@ -23,7 +23,7 @@ fn run_jless(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("jless 0.9.0 (OurOS)");
+        println!("jless 0.9.0 (SlateOS)");
         return 0;
     }
 

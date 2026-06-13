@@ -1,4 +1,4 @@
-//! OurOS mount point finding and management utilities.
+//! SlateOS mount point finding and management utilities.
 //!
 //! Multi-personality binary providing:
 //! - **findmnt** — find/list mounted filesystems

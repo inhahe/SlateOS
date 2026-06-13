@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! multipath-cli — OurOS device-mapper multipath tools
+//! multipath-cli — SlateOS device-mapper multipath tools
 //!
 //! Multi-personality: `multipath`, `multipathd`, `kpartx`
 
@@ -14,7 +14,7 @@ fn run_multipath(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: multipath [OPTIONS] [device]");
         println!();
-        println!("multipath — device-mapper multipath (OurOS).");
+        println!("multipath — device-mapper multipath (SlateOS).");
         println!();
         println!("Options:");
         println!("  -l             Show topology");

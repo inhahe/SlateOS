@@ -1,4 +1,4 @@
-// OurOS ethtool - ethernet device configuration
+// SlateOS ethtool - ethernet device configuration
 //
 // Single-personality binary providing ethernet/network interface
 // configuration and statistics display (similar to Linux ethtool).
@@ -9,7 +9,7 @@
 // ioctl ABI surface (ETHTOOL_GSET / ETHTOOL_GLINKSETTINGS / ETHTOOL_GMODULEEEPROM
 // / ETHTOOL_GWOL / ETHTOOL_SWOL). The current stub binary only exercises a
 // subset of the surface, but the full vocabulary must be present so the real
-// implementation — which will speak ioctl(2) to OurOS network drivers — can
+// implementation — which will speak ioctl(2) to SlateOS network drivers — can
 // drop in without reshaping the public types. Dead-code lint cannot see
 // across that future boundary.
 #![allow(dead_code)]
@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 
 // ── Constants ──────────────────────────────────────────────────────────
 
-const VERSION: &[u8] = b"ethtool (OurOS) 1.0.0";
+const VERSION: &[u8] = b"ethtool (SlateOS) 1.0.0";
 
 // Link speeds in Mbps
 const SPEED_UNKNOWN: u32 = 0xFFFF_FFFF;
@@ -1031,7 +1031,7 @@ fn get_default_settings() -> LinkSettings {
 
 fn get_default_driver_info() -> DriverInfo {
     DriverInfo {
-        driver: b"ouros-virtio-net".to_vec(),
+        driver: b"slateos-virtio-net".to_vec(),
         version: b"1.0.0".to_vec(),
         firmware_version: b"N/A".to_vec(),
         bus_info: b"0000:00:03.0".to_vec(),
@@ -1412,7 +1412,7 @@ mod tests {
     #[test]
     fn test_default_driver_info() {
         let info = get_default_driver_info();
-        assert_eq!(&info.driver, b"ouros-virtio-net");
+        assert_eq!(&info.driver, b"slateos-virtio-net");
     }
 
     #[test]

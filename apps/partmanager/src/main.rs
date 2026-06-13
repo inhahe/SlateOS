@@ -1,4 +1,4 @@
-//! OurOS Partition Manager
+//! SlateOS Partition Manager
 //!
 //! Graphical disk partition manager for creating, deleting, resizing,
 //! formatting, and managing disk partitions. Features:
@@ -12,7 +12,7 @@
 //! - Human-readable size formatting with binary units
 //!
 //! Uses the guitk library for UI rendering. Disk data is gathered through
-//! OurOS syscalls; stubbed with representative data for initial development.
+//! SlateOS syscalls; stubbed with representative data for initial development.
 
 #![allow(dead_code)]
 
@@ -796,7 +796,7 @@ fn sample_disks() -> Vec<Disk> {
                 },
                 Partition {
                     index: 2,
-                    label: String::from("OurOS Root"),
+                    label: String::from("SlateOS Root"),
                     filesystem: FilesystemType::Ext4,
                     start_sector: 1_050_624,
                     end_sector: 839_909_375,

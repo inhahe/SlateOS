@@ -1,4 +1,4 @@
-//! Conway's Game of Life cellular automaton for OurOS.
+//! Conway's Game of Life cellular automaton for SlateOS.
 //!
 //! Features:
 //! - Toroidal grid (wraps at edges)

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rizin-cli — OurOS Rizin reverse engineering framework
+//! rizin-cli — SlateOS Rizin reverse engineering framework
 //!
 //! Multi-personality: `rizin`, `rz-bin`, `rz-asm`, `rz-hash`, `rz-diff`, `rz-find`
 
@@ -15,7 +15,7 @@ fn run_rizin(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "rz-bin" => {
-                println!("rz-bin (OurOS) — Binary info extraction");
+                println!("rz-bin (SlateOS) — Binary info extraction");
                 println!("  -I     File info");
                 println!("  -i     Imports");
                 println!("  -E     Exports");
@@ -24,18 +24,18 @@ fn run_rizin(args: &[String], prog: &str) -> i32 {
                 println!("  -z     Strings");
             }
             "rz-asm" => {
-                println!("rz-asm (OurOS) — Assembler/disassembler");
+                println!("rz-asm (SlateOS) — Assembler/disassembler");
                 println!("  -a ARCH   Architecture");
                 println!("  -b BITS   Bits (16/32/64)");
                 println!("  -d HEX    Disassemble");
             }
             "rz-hash" => {
-                println!("rz-hash (OurOS) — Hash calculator");
+                println!("rz-hash (SlateOS) — Hash calculator");
                 println!("  -a ALGO   Algorithm");
                 println!("  -s STR    Hash string");
             }
             _ => {
-                println!("Rizin v0.7 (OurOS) — Reverse engineering framework");
+                println!("Rizin v0.7 (SlateOS) — Reverse engineering framework");
                 println!("  -A       Auto-analyze");
                 println!("  -d       Debug mode");
                 println!("  -w       Write mode");
@@ -46,7 +46,7 @@ fn run_rizin(args: &[String], prog: &str) -> i32 {
         println!("  --version  Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Rizin v0.7.2 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("Rizin v0.7.2 (SlateOS)"); return 0; }
     match prog {
         "rz-bin" => {
             println!("rz-bin: binary analysis");
@@ -58,7 +58,7 @@ fn run_rizin(args: &[String], prog: &str) -> i32 {
             println!("  strings: 890");
         }
         _ => {
-            println!("Rizin v0.7.2 (OurOS)");
+            println!("Rizin v0.7.2 (SlateOS)");
             println!("  Analysis: complete");
             println!("  Functions: 567");
             println!("  Basic blocks: 3,456");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rspec-cli — OurOS RSpec testing framework
+//! rspec-cli — SlateOS RSpec testing framework
 //!
 //! Multi-personality: `rspec`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rspec(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: rspec [OPTIONS] [FILES_OR_DIRS]");
-        println!("RSpec 3.13.0 (OurOS)");
+        println!("RSpec 3.13.0 (SlateOS)");
         println!();
         println!("Options:");
         println!("  -f, --format FORMAT  Output format (progress, doc, json, html)");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ldconfig-cli — OurOS dynamic linker cache manager
+//! ldconfig-cli — SlateOS dynamic linker cache manager
 //!
 //! Multi-personality: `ldconfig`
 
@@ -19,7 +19,7 @@ fn run_ldconfig(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ldconfig [OPTIONS] [DIRS...]");
         println!();
-        println!("ldconfig — configure dynamic linker run-time bindings (OurOS).");
+        println!("ldconfig — configure dynamic linker run-time bindings (SlateOS).");
         println!();
         println!("Options:");
         println!("  -v, --verbose     Verbose mode");

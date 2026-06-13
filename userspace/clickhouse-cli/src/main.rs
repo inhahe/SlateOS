@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! clickhouse-cli — OurOS ClickHouse CLI
+//! clickhouse-cli — SlateOS ClickHouse CLI
 //!
 //! Single personality: `clickhouse-client`
 
@@ -11,7 +11,7 @@ fn run_clickhouse(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: clickhouse-client [OPTIONS]");
         println!();
-        println!("ClickHouse client CLI (OurOS).");
+        println!("ClickHouse client CLI (SlateOS).");
         println!();
         println!("Options:");
         println!("  --host HOST        Server hostname (default: localhost)");
@@ -25,7 +25,7 @@ fn run_clickhouse(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("ClickHouse client version 24.1.1 (OurOS)");
+        println!("ClickHouse client version 24.1.1 (SlateOS)");
         return 0;
     }
 

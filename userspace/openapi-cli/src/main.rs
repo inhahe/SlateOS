@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! openapi-cli — OurOS OpenAPI tools
+//! openapi-cli — SlateOS OpenAPI tools
 //!
 //! Multi-personality: `openapi`, `openapi-generator`
 
@@ -14,7 +14,7 @@ fn run_openapi(args: &[String], prog_name: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         if prog_name == "openapi-generator" {
             println!("Usage: openapi-generator COMMAND [OPTIONS]");
-            println!("OpenAPI Generator 7.7.0 (OurOS)");
+            println!("OpenAPI Generator 7.7.0 (SlateOS)");
             println!();
             println!("Commands:");
             println!("  generate     Generate client/server code");
@@ -23,7 +23,7 @@ fn run_openapi(args: &[String], prog_name: &str) -> i32 {
             println!("  config-help  Show generator config options");
         } else {
             println!("Usage: openapi COMMAND [OPTIONS]");
-            println!("OpenAPI CLI 0.68.0 (OurOS)");
+            println!("OpenAPI CLI 0.68.0 (SlateOS)");
             println!();
             println!("Commands:");
             println!("  lint         Lint/validate OpenAPI spec");

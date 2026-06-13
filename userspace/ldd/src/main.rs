@@ -1,7 +1,7 @@
-//! OurOS `ldd` — Shared Library Dependency Lister
+//! SlateOS `ldd` — Shared Library Dependency Lister
 //!
 //! Parses ELF binaries and lists their shared-library dependencies, following
-//! the same resolution order as the OurOS dynamic linker:
+//! the same resolution order as the SlateOS dynamic linker:
 //!
 //!   1. `RPATH` embedded in the binary (deprecated but honoured)
 //!   2. `LD_LIBRARY_PATH` environment variable
@@ -162,7 +162,7 @@ struct Options {
 }
 
 fn print_version() -> ! {
-    println!("{PROGRAM_NAME} (OurOS) {VERSION}");
+    println!("{PROGRAM_NAME} (SlateOS) {VERSION}");
     process::exit(0);
 }
 

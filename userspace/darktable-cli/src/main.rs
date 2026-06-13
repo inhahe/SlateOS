@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! darktable-cli — OurOS darktable open-source RAW photo workflow
+//! darktable-cli — SlateOS darktable open-source RAW photo workflow
 //!
 //! Single personality: `darktable`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_dt(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: darktable [OPTIONS]");
-        println!("darktable 5.0 (OurOS) — Open-source RAW developer + DAM");
+        println!("darktable 5.0 (SlateOS) — Open-source RAW developer + DAM");
         println!();
         println!("Options:");
         println!("  --view MODE            lighttable/darkroom/tethering/map/slideshow/print");
@@ -23,8 +23,8 @@ fn run_dt(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("darktable 5.0.0 (OurOS)"); return 0; }
-    println!("darktable 5.0.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("darktable 5.0.0 (SlateOS)"); return 0; }
+    println!("darktable 5.0.0 (SlateOS)");
     println!("  License: GPL-3.0-or-later (free software, openly developed on GitHub)");
     println!("  Origin: started 2009 by Henrik Andersson + Pascal de Bruijn — Linux RAW workflow");
     println!("  Lead maintainer: Aurélien Pierre (since ~2021)");

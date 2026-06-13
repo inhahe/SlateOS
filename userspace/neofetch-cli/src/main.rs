@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! neofetch-cli — OurOS Neofetch system information
+//! neofetch-cli — SlateOS Neofetch system information
 //!
 //! Single personality: `neofetch`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_neofetch(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: neofetch [OPTIONS]");
-        println!("neofetch v7.1 (OurOS) — System information tool");
+        println!("neofetch v7.1 (SlateOS) — System information tool");
         println!();
         println!("Options:");
         println!("  --off           Disable ASCII art");
@@ -23,17 +23,17 @@ fn run_neofetch(args: &[String], _prog: &str) -> i32 {
         println!("  --version       Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("neofetch v7.1 (OurOS)"); return 0; }
-    println!("        .--.         user@ouros-host");
+    if args.iter().any(|a| a == "--version") { println!("neofetch v7.1 (SlateOS)"); return 0; }
+    println!("        .--.         user@slateos-host");
     println!("       |o_o |        ---------------");
-    println!("       |:_/ |        OS: OurOS 1.0 x86_64");
-    println!("      //   \\ \\       Kernel: 0.1.0-ouros");
+    println!("       |:_/ |        OS: SlateOS 1.0 x86_64");
+    println!("      //   \\ \\       Kernel: 0.1.0-slateos");
     println!("     (|     | )      Uptime: 2 hours, 15 mins");
     println!("    /'\\_   _/`\\      Shell: kshell 1.0");
     println!("    \\___)=(___/      Resolution: 1920x1080");
-    println!("                     DE: OurOS Desktop");
-    println!("                     WM: OurOS Compositor");
-    println!("                     Terminal: ouros-term");
+    println!("                     DE: SlateOS Desktop");
+    println!("                     WM: SlateOS Compositor");
+    println!("                     Terminal: slateos-term");
     println!("                     CPU: AMD Ryzen 7 (8) @ 3.6GHz");
     println!("                     GPU: AMD Radeon");
     println!("                     Memory: 4096MiB / 16384MiB");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! abiword-cli — OurOS AbiWord word processor
+//! abiword-cli — SlateOS AbiWord word processor
 //!
 //! Single personality: `abiword`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_abiword(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: abiword [OPTIONS] [FILE...]");
-        println!("abiword v3.0 (OurOS) — Lightweight word processor");
+        println!("abiword v3.0 (SlateOS) — Lightweight word processor");
         println!();
         println!("Options:");
         println!("  --to=FMT          Convert to format (pdf, html, odt, rtf)");
@@ -22,7 +22,7 @@ fn run_abiword(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("abiword v3.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("abiword v3.0 (SlateOS)"); return 0; }
     println!("abiword: word processor started");
     println!("  Formats: ABW, ODT, DOCX, RTF, HTML, PDF");
     println!("  Plugins: 5 loaded");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bup-cli — OurOS bup git-based backup
+//! bup-cli — SlateOS bup git-based backup
 //!
 //! Single personality: `bup`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_bup(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: bup COMMAND [OPTIONS]");
-        println!("bup v0.33 (OurOS) — Git-based deduplicating backup");
+        println!("bup v0.33 (SlateOS) — Git-based deduplicating backup");
         println!();
         println!("Commands:");
         println!("  init              Initialize bup repository");
@@ -27,7 +27,7 @@ fn run_bup(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("bup v0.33 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("bup v0.33 (SlateOS)"); return 0; }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("ls");
     match cmd {
         "init" => println!("Initialized empty bup repository in /home/user/.bup"),

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wpa-supplicant-cli — OurOS wpa_supplicant wireless client
+//! wpa-supplicant-cli — SlateOS wpa_supplicant wireless client
 //!
 //! Multi-personality: `wpa_supplicant`, `wpa_cli`, `wpa_passphrase`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wpa_supplicant(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wpa_supplicant [OPTIONS]");
-        println!("wpa_supplicant v2.10 (OurOS) — WPA/WPA2/WPA3 supplicant");
+        println!("wpa_supplicant v2.10 (SlateOS) — WPA/WPA2/WPA3 supplicant");
         println!();
         println!("Options:");
         println!("  -i IFACE       Interface name");
@@ -24,7 +24,7 @@ fn run_wpa_supplicant(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("wpa_supplicant v2.10 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("wpa_supplicant v2.10 (SlateOS)"); return 0; }
     println!("wpa_supplicant: started");
     println!("  Interface: wlan0");
     println!("  Driver: nl80211");
@@ -35,7 +35,7 @@ fn run_wpa_supplicant(args: &[String], _prog: &str) -> i32 {
 fn run_wpa_cli(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wpa_cli [OPTIONS] [COMMAND]");
-        println!("wpa_cli v2.10 (OurOS) — WPA supplicant control");
+        println!("wpa_cli v2.10 (SlateOS) — WPA supplicant control");
         println!("  status         Show connection status");
         println!("  scan           Trigger scan");
         println!("  scan_results   Show scan results");
@@ -67,7 +67,7 @@ fn run_wpa_cli(args: &[String], _prog: &str) -> i32 {
 fn run_wpa_passphrase(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wpa_passphrase SSID [PASSPHRASE]");
-        println!("wpa_passphrase v2.10 (OurOS) — Generate WPA PSK");
+        println!("wpa_passphrase v2.10 (SlateOS) — Generate WPA PSK");
         return 0;
     }
     if let Some(ssid) = args.first() {

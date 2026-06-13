@@ -2,5 +2,5 @@
 name = "rsync"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS rsync - file synchronization (rsync/scp)"
+description = "SlateOS rsync - file synchronization (rsync/scp)"
 [dependencies]

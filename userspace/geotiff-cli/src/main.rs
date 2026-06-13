@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! geotiff-cli — OurOS libgeotiff tools
+//! geotiff-cli — SlateOS libgeotiff tools
 //!
 //! Multi-personality: `listgeo`, `geotifcp`, `applygeo`
 
@@ -15,17 +15,17 @@ fn run_geotiff(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS] FILE", prog);
         match prog {
             "geotifcp" => {
-                println!("geotifcp (OurOS) — Copy TIFF with GeoTIFF metadata");
+                println!("geotifcp (SlateOS) — Copy TIFF with GeoTIFF metadata");
                 println!("  -g FILE   GeoTIFF metadata source file");
                 println!("  -e FILE   Export metadata to file");
                 println!("  -4 EPSG   Set EPSG code");
             }
             "applygeo" => {
-                println!("applygeo (OurOS) — Apply geo metadata to TIFF");
+                println!("applygeo (SlateOS) — Apply geo metadata to TIFF");
                 println!("  applygeo GEOTIFF_FILE TIFF_FILE");
             }
             _ => {
-                println!("listgeo (OurOS) — List GeoTIFF metadata");
+                println!("listgeo (SlateOS) — List GeoTIFF metadata");
                 println!("  -d          Dump all tags");
                 println!("  -t          Terse output");
                 println!("  -no_norm    Don't normalize values");
@@ -34,7 +34,7 @@ fn run_geotiff(args: &[String], prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("libgeotiff v1.7.1 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("libgeotiff v1.7.1 (SlateOS)"); return 0; }
     match prog {
         _ if prog != "geotifcp" && prog != "applygeo" => {
             println!("listgeo: GeoTIFF metadata");

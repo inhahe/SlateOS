@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! restream-cli — OurOS Restream multistreaming platform
+//! restream-cli — SlateOS Restream multistreaming platform
 //!
 //! Single personality: `restream`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rs(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: restream [COMMAND] [OPTIONS]");
-        println!("Restream (OurOS) — Multistream to 30+ platforms simultaneously");
+        println!("Restream (SlateOS) — Multistream to 30+ platforms simultaneously");
         println!();
         println!("Commands:");
         println!("  studio                 Open Restream Studio (browser-based)");
@@ -28,8 +28,8 @@ fn run_rs(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Restream Studio v2.0 (OurOS)"); return 0; }
-    println!("Restream (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Restream Studio v2.0 (SlateOS)"); return 0; }
+    println!("Restream (SlateOS)");
     println!("  Platforms: Twitch, YouTube, Facebook, X/Twitter, LinkedIn, TikTok, ...");
     println!("  Studio: Browser-based stream creation with guests, overlays, recording");
     println!("  Multistream: up to 30+ destinations simultaneously");

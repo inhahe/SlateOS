@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rosegarden-cli — OurOS Rosegarden MIDI sequencer
+//! rosegarden-cli — SlateOS Rosegarden MIDI sequencer
 //!
 //! Single personality: `rosegarden`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rosegarden(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: rosegarden [OPTIONS] [FILE]");
-        println!("Rosegarden v23 (OurOS) — MIDI sequencer and music notation editor");
+        println!("Rosegarden v23 (SlateOS) — MIDI sequencer and music notation editor");
         println!();
         println!("Options:");
         println!("  --nosplash       Skip splash screen");
@@ -24,8 +24,8 @@ fn run_rosegarden(args: &[String], _prog: &str) -> i32 {
         println!("  --version        Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Rosegarden v23.12 (OurOS)"); return 0; }
-    println!("Rosegarden v23.12 (OurOS) — MIDI Sequencer");
+    if args.iter().any(|a| a == "--version") { println!("Rosegarden v23.12 (SlateOS)"); return 0; }
+    println!("Rosegarden v23.12 (SlateOS) — MIDI Sequencer");
     println!("  ALSA sequencer: connected");
     println!("  JACK audio: connected");
     println!("  Composition: symphony_mvt1.rg");

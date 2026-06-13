@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! confluence-cli — OurOS Confluence (Atlassian wiki + docs, NASDAQ:TEAM)
+//! confluence-cli — SlateOS Confluence (Atlassian wiki + docs, NASDAQ:TEAM)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_conf(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: confluence [OPTIONS]");
-        println!("Confluence (OurOS) — Atlassian team workspace + wiki + docs (NASDAQ:TEAM)");
+        println!("Confluence (SlateOS) — Atlassian team workspace + wiki + docs (NASDAQ:TEAM)");
         println!();
         println!("Options:");
         println!("  --free                 Free — up to 10 users");
@@ -24,8 +24,8 @@ fn run_conf(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Confluence 2024 (OurOS)"); return 0; }
-    println!("Confluence 2024 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Confluence 2024 (SlateOS)"); return 0; }
+    println!("Confluence 2024 (SlateOS)");
     println!("  Vendor: Atlassian Corporation Plc (Sydney, Australia / SF, CA — NASDAQ:TEAM)");
     println!("  Founders: Mike Cannon-Brookes + Scott Farquhar, 2002 (Atlassian); Confluence shipped 2004");
     println!("          University of New South Wales graduates, started Atlassian on $10K credit card debt");

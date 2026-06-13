@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! Multi-personality TPM 2.0 management tool suite for OurOS.
+//! Multi-personality TPM 2.0 management tool suite for SlateOS.
 //!
 //! Detects the active personality from `argv[0]` basename (stripping path
 //! separators and `.exe` suffix):
@@ -21,7 +21,7 @@
 //! - `tpm2_clear`         -- clear TPM
 //!
 //! All data is simulated (no real TPM hardware access). This provides a
-//! faithful CLI interface for development, testing, and scripting on OurOS.
+//! faithful CLI interface for development, testing, and scripting on SlateOS.
 
 use std::env;
 use std::process;
@@ -54,7 +54,7 @@ const NV_MAX_INDICES: usize = 64;
 const KEY_MAX_OBJECTS: usize = 32;
 
 /// TPM manufacturer string (simulated).
-const TPM_MANUFACTURER: &str = "OUROS-SIM";
+const TPM_MANUFACTURER: &str = "SLATEOS-SIM";
 
 /// TPM firmware version (simulated).
 const TPM_FIRMWARE_VERSION: &str = "1.0.0";

@@ -19,7 +19,7 @@ members = [
 # root inherits the root .cargo/config.toml's
 # `target = "x86_64-unknown-none"` setting; building any userspace
 # crate (apps/*, gui/*, init/*, net/*, userspace/*) against that
-# triple fails because those crates need std and use the x86_64-ouros
+# triple fails because those crates need std and use the x86_64-slateos
 # target via their zone .cargo/config.toml.
 #
 # Without this filter, `cargo build` from the workspace root tries to
@@ -31,7 +31,7 @@ members = [
 # Userspace crates remain in `members` so they share the workspace
 # target/ directory and so `cargo build -p <crate>` continues to work
 # from anywhere; building them explicitly (or from inside a zone)
-# still picks up the zone's x86_64-ouros target.
+# still picks up the zone's x86_64-slateos target.
 default-members = [
     "kernel",
     "posix",

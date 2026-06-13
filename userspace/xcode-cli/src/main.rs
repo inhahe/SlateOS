@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xcode-cli — OurOS Xcode (Apple's IDE for macOS/iOS/iPadOS/watchOS/tvOS/visionOS)
+//! xcode-cli — SlateOS Xcode (Apple's IDE for macOS/iOS/iPadOS/watchOS/tvOS/visionOS)
 //!
 //! Single personality: `xcode`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_xc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: xcode [OPTIONS]");
-        println!("Xcode 16.1 (OurOS) — Apple IDE for all Apple platforms");
+        println!("Xcode 16.1 (SlateOS) — Apple IDE for all Apple platforms");
         println!();
         println!("Options:");
         println!("  --new                  New project (App / Framework / Package / Swift Playground)");
@@ -25,8 +25,8 @@ fn run_xc(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Xcode 16.1 (build 16B40) (OurOS)"); return 0; }
-    println!("Xcode 16.1 (build 16B40) (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Xcode 16.1 (build 16B40) (SlateOS)"); return 0; }
+    println!("Xcode 16.1 (build 16B40) (SlateOS)");
     println!("  Vendor: Apple Inc. (free download from Mac App Store)");
     println!("  Origin: Project Builder (NeXTSTEP, 1990) → Xcode 1.0 (2003)");
     println!("         renamed during Mac OS X Panther era, became default Mac dev IDE");

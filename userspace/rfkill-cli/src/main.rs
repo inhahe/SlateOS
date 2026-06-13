@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rfkill-cli — OurOS radio kill switch tool
+//! rfkill-cli — SlateOS radio kill switch tool
 //!
 //! Multi-personality: `rfkill`
 
@@ -14,7 +14,7 @@ fn run_rfkill(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: rfkill [OPTIONS] COMMAND [ID|TYPE]");
         println!();
-        println!("rfkill — radio frequency kill switch (OurOS).");
+        println!("rfkill — radio frequency kill switch (SlateOS).");
         println!();
         println!("Commands:");
         println!("  list [TYPE]     List current state");
@@ -26,7 +26,7 @@ fn run_rfkill(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("rfkill from util-linux 2.39 (OurOS)");
+        println!("rfkill from util-linux 2.39 (SlateOS)");
         return 0;
     }
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! toxiproxy-cli — OurOS Toxiproxy fault injection proxy
+//! toxiproxy-cli — SlateOS Toxiproxy fault injection proxy
 //!
 //! Two personalities: `toxiproxy-server`, `toxiproxy-cli`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_toxiproxy_cli(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: toxiproxy-cli COMMAND [OPTIONS]");
-        println!("toxiproxy-cli v2.9.0 (OurOS) — Fault injection proxy");
+        println!("toxiproxy-cli v2.9.0 (SlateOS) — Fault injection proxy");
         println!();
         println!("Commands:");
         println!("  list            List proxies");
@@ -34,7 +34,7 @@ fn run_toxiproxy_cli(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("toxiproxy-cli v2.9.0 (OurOS)");
+        println!("toxiproxy-cli v2.9.0 (SlateOS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("list");

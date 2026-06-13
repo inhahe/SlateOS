@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! logzio-cli — OurOS Logz.io (open-source-based observability, Tel Aviv + Boston, private)
+//! logzio-cli — SlateOS Logz.io (open-source-based observability, Tel Aviv + Boston, private)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_logzio(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: logzio [OPTIONS]");
-        println!("Logz.io (OurOS) — Open 360 observability (ELK + Prometheus + Jaeger SaaS)");
+        println!("Logz.io (SlateOS) — Open 360 observability (ELK + Prometheus + Jaeger SaaS)");
         println!();
         println!("Options:");
         println!("  --logs                 Log Management (managed ELK/OpenSearch)");
@@ -22,8 +22,8 @@ fn run_logzio(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Logz.io 2024 (OurOS) — Open 360 Platform"); return 0; }
-    println!("Logz.io 2024 (OurOS) — Open 360 Observability Platform");
+    if args.iter().any(|a| a == "--version") { println!("Logz.io 2024 (SlateOS) — Open 360 Platform"); return 0; }
+    println!("Logz.io 2024 (SlateOS) — Open 360 Observability Platform");
     println!("  Vendor: Logz.io, Inc. (Tel Aviv, Israel + Boston, MA — private)");
     println!("  Founders: Tomer Levy + Asaf Yigal, 2014");
     println!("          founded with thesis: 'managed open-source observability — ELK + Prometheus + Jaeger as SaaS'");

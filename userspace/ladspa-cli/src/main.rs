@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ladspa-cli — OurOS LADSPA/LV2 audio plugin tools
+//! ladspa-cli — SlateOS LADSPA/LV2 audio plugin tools
 //!
 //! Multi-personality: `listplugins`, `analyseplugin`, `lv2ls`, `lv2info`
 
@@ -36,7 +36,7 @@ fn run_analyseplugin(args: &[String]) -> i32 {
     println!("Plugin Name: \"Mono Amplifier\"");
     println!("Plugin Label: \"amp_mono\"");
     println!("Plugin Unique ID: 1048");
-    println!("Maker: \"OurOS Audio Plugins\"");
+    println!("Maker: \"SlateOS Audio Plugins\"");
     println!("Copyright: \"None\"");
     println!("Must Run Real-Time: No");
     println!("Has activate() Function: No");

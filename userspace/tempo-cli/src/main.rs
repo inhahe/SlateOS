@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tempo-cli — OurOS Grafana Tempo CLI
+//! tempo-cli — SlateOS Grafana Tempo CLI
 //!
 //! Multi-personality: `tempo-cli`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_tempo(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: tempo-cli COMMAND [OPTIONS]");
-        println!("Grafana Tempo CLI 2.5.0 (OurOS)");
+        println!("Grafana Tempo CLI 2.5.0 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  query        Query traces");

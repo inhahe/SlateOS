@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ruby — OurOS Ruby interpreter
+//! ruby — SlateOS Ruby interpreter
 //!
 //! Multi-personality binary detected via argv[0]:
 //!
@@ -37,7 +37,7 @@ fn run_ruby(args: Vec<String>) -> i32 {
     }
 
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("ruby 3.3.0 (2025-01-01) [x86_64-ouros]");
+        println!("ruby 3.3.0 (2025-01-01) [x86_64-slateos]");
         return 0;
     }
 
@@ -61,7 +61,7 @@ fn run_ruby(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    println!("ruby 3.3.0 (2025-01-01) [x86_64-ouros]");
+    println!("ruby 3.3.0 (2025-01-01) [x86_64-slateos]");
     println!("(interactive mode — use irb for a better experience)");
     0
 }
@@ -76,7 +76,7 @@ fn run_irb(args: Vec<String>) -> i32 {
     }
     let _ = args;
     println!("irb(main):001:0> RUBY_PLATFORM");
-    println!("=> \"x86_64-ouros\"");
+    println!("=> \"x86_64-slateos\"");
     println!("irb(main):002:0> RUBY_VERSION");
     println!("=> \"3.3.0\"");
     println!("irb(main):003:0> [1,2,3].map {{ |x| x * 2 }}");
@@ -128,7 +128,7 @@ fn run_gem(args: Vec<String>) -> i32 {
         "environment" | "env" => {
             println!("RubyGems Environment:");
             println!("  - RUBYGEMS VERSION: 3.5.0");
-            println!("  - RUBY VERSION: 3.3.0 (2025-01-01) [x86_64-ouros]");
+            println!("  - RUBY VERSION: 3.3.0 (2025-01-01) [x86_64-slateos]");
             println!("  - INSTALLATION DIRECTORY: /usr/lib/ruby/gems/3.3.0");
             println!("  - GEM PATHS:");
             println!("     - /usr/lib/ruby/gems/3.3.0");

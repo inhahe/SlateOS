@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! payload-cli — OurOS personality CLI for Payload, the Next.js-native headless CMS.
+//! payload-cli — SlateOS personality CLI for Payload, the Next.js-native headless CMS.
 
 use std::env;
 use std::process;

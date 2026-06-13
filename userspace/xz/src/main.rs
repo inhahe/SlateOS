@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xz — OurOS XZ/LZMA compression utility
+//! xz — SlateOS XZ/LZMA compression utility
 //!
 //! Multi-personality binary detected via argv[0]:
 //!
@@ -128,7 +128,7 @@ fn run_xz(args: Vec<String>, personality: &str) -> i32 {
                 return 0;
             }
             "--version" | "-V" => {
-                println!("xz (OurOS) 0.1.0");
+                println!("xz (SlateOS) 0.1.0");
                 println!("liblzma 0.1.0");
                 return 0;
             }

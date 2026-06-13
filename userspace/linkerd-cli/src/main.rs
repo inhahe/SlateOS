@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! linkerd-cli — OurOS Linkerd service mesh CLI
+//! linkerd-cli — SlateOS Linkerd service mesh CLI
 //!
 //! Single personality: `linkerd`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_linkerd(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: linkerd COMMAND [OPTIONS]");
-        println!("linkerd v2.15.0 (OurOS) — Linkerd service mesh CLI");
+        println!("linkerd v2.15.0 (SlateOS) — Linkerd service mesh CLI");
         println!();
         println!("Commands:");
         println!("  install         Generate install manifest");

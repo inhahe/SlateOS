@@ -1,4 +1,4 @@
-//! OurOS Markdown Editor
+//! SlateOS Markdown Editor
 //!
 //! A split-view markdown editor with live preview, syntax highlighting,
 //! and a full-featured markdown parser. Features include:

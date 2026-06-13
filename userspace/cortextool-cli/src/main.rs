@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cortextool-cli — OurOS Cortex metrics management tool
+//! cortextool-cli — SlateOS Cortex metrics management tool
 //!
 //! Single personality: `cortextool`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_cortextool(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: cortextool COMMAND [OPTIONS]");
-        println!("cortextool v0.17.0 (OurOS) — Cortex metrics tool");
+        println!("cortextool v0.17.0 (SlateOS) — Cortex metrics tool");
         println!();
         println!("Commands:");
         println!("  rules           Manage recording/alerting rules");
@@ -26,7 +26,7 @@ fn run_cortextool(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("cortextool v0.17.0 (OurOS)");
+        println!("cortextool v0.17.0 (SlateOS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("rules");

@@ -1,4 +1,4 @@
-//! OurOS Contacts / Address Book
+//! SlateOS Contacts / Address Book
 //!
 //! A full-featured contacts manager with:
 //! - Contact CRUD (create, read, update, delete)

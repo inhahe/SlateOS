@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nm-cli — OurOS symbol table tools
+//! nm-cli — SlateOS symbol table tools
 //!
 //! Multi-personality: `nm`, `c++filt`, `ar`, `ranlib`
 
@@ -19,7 +19,7 @@ fn run_nm(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: nm [OPTIONS] FILE...");
         println!();
-        println!("nm — list symbols from object files (OurOS).");
+        println!("nm — list symbols from object files (SlateOS).");
         println!();
         println!("Options:");
         println!("  -a, --debug-syms     Display all symbols");
@@ -35,7 +35,7 @@ fn run_nm(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("GNU nm (GNU Binutils) 2.42 (OurOS)");
+        println!("GNU nm (GNU Binutils) 2.42 (SlateOS)");
         return 0;
     }
 
@@ -72,7 +72,7 @@ fn run_cppfilt(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: c++filt [OPTIONS] [SYMBOL...]");
         println!();
-        println!("c++filt — demangle C++/Java symbol names (OurOS).");
+        println!("c++filt — demangle C++/Java symbol names (SlateOS).");
         println!();
         println!("Options:");
         println!("  -n               Don't strip underscores");
@@ -100,7 +100,7 @@ fn run_ar(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ar [OPTIONS] ARCHIVE [MEMBER...]");
         println!();
-        println!("ar — create, modify, and extract from archives (OurOS).");
+        println!("ar — create, modify, and extract from archives (SlateOS).");
         println!();
         println!("Commands:");
         println!("  r    Insert/replace files");
@@ -112,7 +112,7 @@ fn run_ar(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("GNU ar (GNU Binutils) 2.42 (OurOS)");
+        println!("GNU ar (GNU Binutils) 2.42 (SlateOS)");
         return 0;
     }
 
@@ -136,7 +136,7 @@ fn run_ar(args: &[String]) -> i32 {
 fn run_ranlib(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help") {
         println!("Usage: ranlib [OPTIONS] ARCHIVE...");
-        println!("ranlib — generate index to archive (OurOS).");
+        println!("ranlib — generate index to archive (SlateOS).");
         return 0;
     }
     let _ = args;

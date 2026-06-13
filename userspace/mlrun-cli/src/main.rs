@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mlrun-cli — OurOS MLRun CLI
+//! mlrun-cli — SlateOS MLRun CLI
 //!
 //! Multi-personality: `mlrun`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mlrun(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: mlrun COMMAND [OPTIONS]");
-        println!("MLRun CLI 1.6.0 (OurOS)");
+        println!("MLRun CLI 1.6.0 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  project        Manage projects");

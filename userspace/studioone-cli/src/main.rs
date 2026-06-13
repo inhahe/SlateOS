@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! studioone-cli — OurOS PreSonus Studio One DAW
+//! studioone-cli — SlateOS PreSonus Studio One DAW
 //!
 //! Single personality: `studioone`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_s1(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: studioone [OPTIONS] [SONG]");
-        println!("PreSonus Studio One 6 Professional (OurOS) — Single-window DAW");
+        println!("PreSonus Studio One 6 Professional (SlateOS) — Single-window DAW");
         println!();
         println!("Options:");
         println!("  --open FILE            Open .song or .project");
@@ -23,8 +23,8 @@ fn run_s1(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("PreSonus Studio One 6.6.2 Professional (OurOS)"); return 0; }
-    println!("PreSonus Studio One 6.6.2 Professional (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("PreSonus Studio One 6.6.2 Professional (SlateOS)"); return 0; }
+    println!("PreSonus Studio One 6.6.2 Professional (SlateOS)");
     println!("  Editions: Prime (free), Artist, Professional");
     println!("  Pages: Start, Song, Project (mastering), Show (live)");
     println!("  Plug-in formats: VST2, VST3, AU, ARA (Melodyne integrated)");

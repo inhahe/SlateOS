@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! vonage-cli — OurOS personality CLI for Vonage, now an Ericsson Communications Platform.
+//! vonage-cli — SlateOS personality CLI for Vonage, now an Ericsson Communications Platform.
 
 use std::env;
 use std::process;

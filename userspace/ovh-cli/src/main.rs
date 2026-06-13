@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ovh-cli — OurOS OVHcloud (French sovereign cloud, bare metal, Roubaix, ENXTPA:OVH)
+//! ovh-cli — SlateOS OVHcloud (French sovereign cloud, bare metal, Roubaix, ENXTPA:OVH)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ovh(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ovh [OPTIONS]");
-        println!("OVHcloud (OurOS) — European sovereign cloud (bare metal, VPS, public cloud, ENXTPA:OVH)");
+        println!("OVHcloud (SlateOS) — European sovereign cloud (bare metal, VPS, public cloud, ENXTPA:OVH)");
         println!();
         println!("Options:");
         println!("  --bare-metal           Bare Metal Servers (the iconic OVH offering)");
@@ -22,8 +22,8 @@ fn run_ovh(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("OVHcloud 2024 (OurOS) — ovhai CLI 1.x + manager API"); return 0; }
-    println!("OVHcloud 2024 (OurOS) — Sovereign European Cloud + Bare Metal");
+    if args.iter().any(|a| a == "--version") { println!("OVHcloud 2024 (SlateOS) — ovhai CLI 1.x + manager API"); return 0; }
+    println!("OVHcloud 2024 (SlateOS) — Sovereign European Cloud + Bare Metal");
     println!("  Vendor: OVH Groupe SA (Roubaix, France — Euronext Paris: ENXTPA:OVH since 2021)");
     println!("  Founders: Octave Klaba (CEO/Chairman/major shareholder), 1999");
     println!("          Polish-French entrepreneur, founded OVH at age 21");

@@ -2,5 +2,5 @@
 name = "useradm"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS user account management — useradd, userdel, passwd, usermod"
+description = "SlateOS user account management — useradd, userdel, passwd, usermod"
 [dependencies]

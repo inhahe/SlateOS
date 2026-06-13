@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! bunny-cli — OurOS Bunny.net / BunnyCDN personality CLI.
+//! bunny-cli — SlateOS Bunny.net / BunnyCDN personality CLI.
 
 use std::env;
 use std::process;
@@ -29,7 +29,7 @@ fn print_help(prog: &str) {
 }
 
 fn print_version() {
-    println!("bunny-cli 0.1.0 — OurOS personality binary");
+    println!("bunny-cli 0.1.0 — SlateOS personality binary");
     println!("BunnyWay d.o.o. — Maribor, Slovenia (Bunny.net)");
 }
 

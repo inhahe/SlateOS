@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vivado-cli — OurOS AMD Xilinx Vivado FPGA toolchain
+//! vivado-cli — SlateOS AMD Xilinx Vivado FPGA toolchain
 //!
 //! Single personality: `vivado`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_vivado(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: vivado [OPTIONS] [PROJECT]");
-        println!("AMD Xilinx Vivado 2024.1 (OurOS) — FPGA/SoC design suite");
+        println!("AMD Xilinx Vivado 2024.1 (SlateOS) — FPGA/SoC design suite");
         println!();
         println!("Options:");
         println!("  -mode tcl              Interactive Tcl shell");
@@ -23,8 +23,8 @@ fn run_vivado(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("AMD Xilinx Vivado 2024.1 (OurOS)"); return 0; }
-    println!("AMD Xilinx Vivado 2024.1 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("AMD Xilinx Vivado 2024.1 (SlateOS)"); return 0; }
+    println!("AMD Xilinx Vivado 2024.1 (SlateOS)");
     println!("  Editions: ML Standard (free), ML Enterprise");
     println!("  Devices: Artix/Kintex/Virtex 7, UltraScale/UltraScale+, Versal ACAP,");
     println!("           Zynq-7000/UltraScale+ MPSoC/RFSoC, Spartan-7");

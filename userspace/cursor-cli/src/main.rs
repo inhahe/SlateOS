@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cursor-cli — OurOS Cursor (AI-first VS Code fork by Anysphere)
+//! cursor-cli — SlateOS Cursor (AI-first VS Code fork by Anysphere)
 //!
 //! Single personality: `cursor`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_curs(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: cursor [OPTIONS]");
-        println!("Cursor 0.43 (OurOS) — AI-native code editor (VS Code fork by Anysphere)");
+        println!("Cursor 0.43 (SlateOS) — AI-native code editor (VS Code fork by Anysphere)");
         println!();
         println!("Options:");
         println!("  --new                  New file");
@@ -25,8 +25,8 @@ fn run_curs(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Cursor 0.43.6 (OurOS)"); return 0; }
-    println!("Cursor 0.43.6 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Cursor 0.43.6 (SlateOS)"); return 0; }
+    println!("Cursor 0.43.6 (SlateOS)");
     println!("  Vendor: Anysphere Inc. (HQ San Francisco — founded 2022)");
     println!("  Founders: Michael Truell, Sualeh Asif, Aman Sanger, Arvid Lunnemark (MIT grads)");
     println!("  Funding: a16z + Thrive + Index — Series B $105M (Aug 2024), $2.5B valuation");

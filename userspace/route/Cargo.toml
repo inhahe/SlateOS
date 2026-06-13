@@ -2,5 +2,5 @@
 name = "route"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS routing table management"
+description = "SlateOS routing table management"
 [dependencies]

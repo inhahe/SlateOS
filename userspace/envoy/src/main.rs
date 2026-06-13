@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! envoy — OurOS L7 proxy and communication bus
+//! envoy — SlateOS L7 proxy and communication bus
 //!
 //! Single personality: `envoy`
 
@@ -26,7 +26,7 @@ fn run_envoy(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("envoy  version: 1.30.2/abc1234/Clean/RELEASE/OurOS (OurOS)");
+        println!("envoy  version: 1.30.2/abc1234/Clean/RELEASE/SlateOS (SlateOS)");
         return 0;
     }
 

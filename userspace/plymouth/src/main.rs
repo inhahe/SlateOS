@@ -1,4 +1,4 @@
-//! OurOS boot splash system.
+//! SlateOS boot splash system.
 //!
 //! Multi-personality binary providing:
 //! - **plymouth** — boot splash client
@@ -330,7 +330,7 @@ fn plymouth_main(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("plymouth (OurOS) {VERSION}");
+                println!("plymouth (SlateOS) {VERSION}");
                 return 0;
             }
             other => {
@@ -393,7 +393,7 @@ fn plymouthd_main(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("plymouthd (OurOS) {VERSION}");
+                println!("plymouthd (SlateOS) {VERSION}");
                 return 0;
             }
             s if s.starts_with("--mode=") => {
@@ -463,7 +463,7 @@ fn set_theme_main(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("plymouth-set-default-theme (OurOS) {VERSION}");
+                println!("plymouth-set-default-theme (SlateOS) {VERSION}");
                 return 0;
             }
             s if !s.starts_with('-') => {

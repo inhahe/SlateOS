@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wev-cli — OurOS wev Wayland event viewer
+//! wev-cli — SlateOS wev Wayland event viewer
 //!
 //! Single personality: `wev`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wev(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wev [OPTIONS]");
-        println!("wev v1.0 (OurOS) — Wayland event viewer");
+        println!("wev v1.0 (SlateOS) — Wayland event viewer");
         println!();
         println!("Options:");
         println!("  -f FILTER         Event filter (keyboard, pointer, touch, all)");
@@ -23,7 +23,7 @@ fn run_wev(args: &[String], _prog: &str) -> i32 {
         println!("Shows Wayland input events. Like xev for Wayland.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("wev v1.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("wev v1.0 (SlateOS)"); return 0; }
 
     let filter = args.iter().skip_while(|a| a.as_str() != "-f").nth(1)
         .map(|s| s.as_str()).unwrap_or("all");

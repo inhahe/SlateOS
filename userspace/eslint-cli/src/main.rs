@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! eslint-cli — OurOS ESLint CLI
+//! eslint-cli — SlateOS ESLint CLI
 //!
 //! Single personality: `eslint`
 
@@ -11,7 +11,7 @@ fn run_eslint(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: eslint [OPTIONS] [FILES/DIRS...]");
         println!();
-        println!("ESLint — JavaScript/TypeScript linter (OurOS).");
+        println!("ESLint — JavaScript/TypeScript linter (SlateOS).");
         println!();
         println!("Options:");
         println!("  --fix              Automatically fix problems");
@@ -26,7 +26,7 @@ fn run_eslint(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("v9.0.0 (OurOS)");
+        println!("v9.0.0 (SlateOS)");
         return 0;
     }
 

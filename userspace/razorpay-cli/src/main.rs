@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! razorpay-cli — OurOS Razorpay India payments personality CLI.
+//! razorpay-cli — SlateOS Razorpay India payments personality CLI.
 
 use std::env;
 use std::process;
@@ -30,7 +30,7 @@ fn print_help(prog: &str) {
 }
 
 fn print_version() {
-    println!("razorpay-cli 0.1.0 — OurOS personality binary");
+    println!("razorpay-cli 0.1.0 — SlateOS personality binary");
     println!("Razorpay Software Pvt Ltd — Bengaluru (Bangalore), India");
 }
 

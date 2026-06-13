@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! restic — OurOS fast, encrypted backup tool
+//! restic — SlateOS fast, encrypted backup tool
 //!
 //! Single personality: `restic`
 
@@ -22,17 +22,17 @@ fn sample_snapshots() -> Vec<Snapshot> {
     vec![
         Snapshot {
             id: "a1b2c3d4".to_string(), time: "2025-05-20 02:00:05".to_string(),
-            host: "ouros-desktop".to_string(), paths: vec!["/home/user".to_string()],
+            host: "slateos-desktop".to_string(), paths: vec!["/home/user".to_string()],
             _tags: vec!["daily".to_string()],
         },
         Snapshot {
             id: "e5f6a7b8".to_string(), time: "2025-05-21 02:00:03".to_string(),
-            host: "ouros-desktop".to_string(), paths: vec!["/home/user".to_string()],
+            host: "slateos-desktop".to_string(), paths: vec!["/home/user".to_string()],
             _tags: vec!["daily".to_string()],
         },
         Snapshot {
             id: "c9d0e1f2".to_string(), time: "2025-05-22 02:00:04".to_string(),
-            host: "ouros-desktop".to_string(), paths: vec!["/home/user".to_string()],
+            host: "slateos-desktop".to_string(), paths: vec!["/home/user".to_string()],
             _tags: vec!["daily".to_string()],
         },
     ]
@@ -67,7 +67,7 @@ fn run_restic(args: Vec<String>) -> i32 {
             println!("  --version     Show version");
             0
         }
-        "--version" | "version" => { println!("restic 0.1.0 (OurOS) compiled with rustc"); 0 }
+        "--version" | "version" => { println!("restic 0.1.0 (SlateOS) compiled with rustc"); 0 }
         "init" => {
             let repo = cmd_args.iter().position(|a| a == "-r" || a == "--repo")
                 .and_then(|i| cmd_args.get(i + 1))

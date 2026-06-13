@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wine-cli — OurOS Wine Windows compatibility layer CLI
+//! wine-cli — SlateOS Wine Windows compatibility layer CLI
 //!
 //! Multi-personality: `wine`, `wine64`, `wineserver`, `wineboot`, `winecfg`, `winepath`, `regedit`
 
@@ -19,11 +19,11 @@ fn run_wine(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help") {
         println!("Usage: wine PROGRAM [ARGUMENTS]");
         println!();
-        println!("Wine — run Windows programs (OurOS).");
+        println!("Wine — run Windows programs (SlateOS).");
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("wine-9.0 (OurOS)");
+        println!("wine-9.0 (SlateOS)");
         return 0;
     }
     let program = args.first().map(|s| s.as_str()).unwrap_or("");
@@ -39,7 +39,7 @@ fn run_wineserver(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help") {
         println!("Usage: wineserver [OPTIONS]");
         println!();
-        println!("wineserver — Wine server (OurOS).");
+        println!("wineserver — Wine server (SlateOS).");
         println!();
         println!("Options:");
         println!("  -d N    Debug level");
@@ -61,7 +61,7 @@ fn run_wineboot(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help") {
         println!("Usage: wineboot [OPTIONS]");
         println!();
-        println!("wineboot — Wine prefix initialization (OurOS).");
+        println!("wineboot — Wine prefix initialization (SlateOS).");
         println!();
         println!("Options:");
         println!("  -i, --init       Initialize prefix");
@@ -106,7 +106,7 @@ fn run_regedit(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help") {
         println!("Usage: regedit [OPTIONS] [FILE]");
         println!();
-        println!("regedit — Wine registry editor (OurOS).");
+        println!("regedit — Wine registry editor (SlateOS).");
         return 0;
     }
     if let Some(file) = args.iter().find(|a| !a.starts_with('-')) {

@@ -1,6 +1,6 @@
-//! OurOS FTP Server Daemon (`ftpd`)
+//! SlateOS FTP Server Daemon (`ftpd`)
 //!
-//! A comprehensive RFC 959 FTP server for OurOS. Supports both active (PORT)
+//! A comprehensive RFC 959 FTP server for SlateOS. Supports both active (PORT)
 //! and passive (PASV) data transfer modes, ASCII and binary transfer types,
 //! anonymous FTP, user authentication via `/etc/passwd`, chroot to user home
 //! directories, transfer rate limiting, and configurable via `/etc/ftpd.conf`.
@@ -300,7 +300,7 @@ const DEFAULT_ANON_ROOT: &str = "/srv/ftp";
 /// Default config file path.
 const DEFAULT_CONFIG_PATH: &str = "/etc/ftpd.conf";
 /// Default server greeting.
-const DEFAULT_BANNER: &str = "OurOS FTP server ready.";
+const DEFAULT_BANNER: &str = "SlateOS FTP server ready.";
 /// Maximum command line length (RFC 959 allows 512 including CRLF).
 const MAX_CMD_LEN: usize = 4096;
 /// Buffer size for data transfers.
@@ -372,7 +372,7 @@ impl Default for Config {
 /// anonymous_only = no
 /// anon_root = /srv/ftp
 /// chroot_users = yes
-/// banner = Welcome to OurOS FTP
+/// banner = Welcome to SlateOS FTP
 /// server_ip = 0.0.0.0
 /// ```
 fn parse_config_file(path: &str) -> Result<Config, FtpdError> {
@@ -568,7 +568,7 @@ fn parse_cli() -> Result<CliArgs, FtpdError> {
 
 fn print_help() {
     let help = "\
-ftpd - OurOS FTP server daemon
+ftpd - SlateOS FTP server daemon
 
 Usage: ftpd [OPTIONS]
 

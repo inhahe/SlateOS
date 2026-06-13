@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! trendmicro-cli — OurOS Trend Micro Maximum Security
+//! trendmicro-cli — SlateOS Trend Micro Maximum Security
 //!
 //! Single personality: `trendmicro`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_tm(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: trendmicro [OPTIONS]");
-        println!("Trend Micro Maximum Security 17.8 (OurOS) — Consumer + enterprise security");
+        println!("Trend Micro Maximum Security 17.8 (SlateOS) — Consumer + enterprise security");
         println!();
         println!("Options:");
         println!("  --scan TYPE            quick/full/custom");
@@ -24,8 +24,8 @@ fn run_tm(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Trend Micro Maximum Security 17.8.1308 (OurOS)"); return 0; }
-    println!("Trend Micro Maximum Security 17.8.1308 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Trend Micro Maximum Security 17.8.1308 (SlateOS)"); return 0; }
+    println!("Trend Micro Maximum Security 17.8.1308 (SlateOS)");
     println!("  Origin: Japan/US, founded 1988; Tokyo Stock Exchange listed");
     println!("  Consumer: AntiVirus+, Internet Security, Maximum Security, Premium Security Suite");
     println!("  Mobile: Trend Micro Mobile Security (Android/iOS)");

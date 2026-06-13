@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cockroach-cli — OurOS CockroachDB CLI client
+//! cockroach-cli — SlateOS CockroachDB CLI client
 //!
 //! Multi-personality: `cockroach`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_cockroach(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: cockroach COMMAND [OPTIONS]");
-        println!("CockroachDB CLI 24.1.0 (OurOS)");
+        println!("CockroachDB CLI 24.1.0 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  sql          Open SQL shell");
@@ -35,7 +35,7 @@ fn run_cockroach(args: &[String]) -> i32 {
         "version" | "--version" => {
             println!("Build Tag:    v24.1.0");
             println!("Build Time:   2024/06/10 12:00:00");
-            println!("Distribution: OurOS");
+            println!("Distribution: SlateOS");
             println!("Platform:     linux amd64");
             println!("Go Version:   go1.22.4");
         }

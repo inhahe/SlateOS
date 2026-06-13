@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! veusz-cli — OurOS Veusz scientific plotting
+//! veusz-cli — SlateOS Veusz scientific plotting
 //!
 //! Single personality: `veusz`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_veusz(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: veusz [OPTIONS] [FILE.vsz]");
-        println!("veusz v3.6 (OurOS) — Scientific plotting package");
+        println!("veusz v3.6 (SlateOS) — Scientific plotting package");
         println!();
         println!("Options:");
         println!("  --export FILE     Export plot to PDF/SVG/PNG/EMF");
@@ -25,7 +25,7 @@ fn run_veusz(args: &[String], _prog: &str) -> i32 {
         println!("  ternary, polar, boxplot, colorbar, key");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("veusz v3.6 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("veusz v3.6 (SlateOS)"); return 0; }
     println!("veusz: scientific plotting started");
     println!("  WYSIWYG editing with publication-quality output");
     println!("  Data import: CSV, FITS, HDF5, 2D arrays, numpy");

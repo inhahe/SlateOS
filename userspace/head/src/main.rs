@@ -1,4 +1,4 @@
-//! OurOS `head` / `tail` Utility -- Output First or Last Part of Files
+//! SlateOS `head` / `tail` Utility -- Output First or Last Part of Files
 //!
 //! A combined head+tail binary that detects its invocation name via `argv[0]`.
 //! When invoked as `tail`, it outputs the last part of files; when invoked as
@@ -793,7 +793,7 @@ fn follow_file<W: Write>(
                 writer.write_all(&buf[..n])?;
                 writer.flush()?;
             } else {
-                // TODO: check PID if specified (requires OurOS process query API)
+                // TODO: check PID if specified (requires SlateOS process query API)
                 thread::sleep(sleep_dur);
             }
         }
@@ -834,7 +834,7 @@ fn follow_file<W: Write>(
                 }
             }
 
-            // TODO: check PID if specified (requires OurOS process query API)
+            // TODO: check PID if specified (requires SlateOS process query API)
             thread::sleep(sleep_dur);
         }
     }
@@ -1036,7 +1036,7 @@ fn is_broken_pipe(e: &io::Error) -> bool {
 // ============================================================================
 
 fn print_help_head() {
-    println!("OurOS head v{VERSION}");
+    println!("SlateOS head v{VERSION}");
     println!();
     println!("Print the first 10 lines of each FILE to standard output.");
     println!("With more than one FILE, precede each with a header giving the file name.");
@@ -1061,7 +1061,7 @@ fn print_help_head() {
 }
 
 fn print_help_tail() {
-    println!("OurOS tail v{VERSION}");
+    println!("SlateOS tail v{VERSION}");
     println!();
     println!("Print the last 10 lines of each FILE to standard output.");
     println!("With more than one FILE, precede each with a header giving the file name.");
@@ -1112,7 +1112,7 @@ fn main() {
                 Tool::Head => "head",
                 Tool::Tail => "tail",
             };
-            println!("{name} (OurOS) {VERSION}");
+            println!("{name} (SlateOS) {VERSION}");
             process::exit(0);
         }
         ParseResult::Run(config) => {

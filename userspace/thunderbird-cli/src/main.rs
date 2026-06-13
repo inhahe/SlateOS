@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! thunderbird-cli — OurOS Thunderbird email client
+//! thunderbird-cli — SlateOS Thunderbird email client
 //!
 //! Single personality: `thunderbird`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_thunderbird(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: thunderbird [OPTIONS]");
-        println!("thunderbird v115.0 (OurOS) — Email, calendar, and contacts");
+        println!("thunderbird v115.0 (SlateOS) — Email, calendar, and contacts");
         println!();
         println!("Options:");
         println!("  -compose          Open compose window");
@@ -26,7 +26,7 @@ fn run_thunderbird(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("thunderbird v115.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("thunderbird v115.0 (SlateOS)"); return 0; }
     if args.iter().any(|a| a == "-compose") {
         println!("thunderbird: compose window opened");
         return 0;

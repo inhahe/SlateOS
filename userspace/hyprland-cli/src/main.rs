@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hyprland-cli — OurOS Hyprland compositor tools
+//! hyprland-cli — SlateOS Hyprland compositor tools
 //!
 //! Multi-personality: `hyprctl`, `hyprpm`
 
@@ -58,7 +58,7 @@ fn run_hyprland(args: &[String], prog: &str) -> i32 {
     // hyprctl
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: hyprctl [FLAGS] COMMAND [ARGS...]");
-        println!("hyprctl (Hyprland 0.40) (OurOS)");
+        println!("hyprctl (Hyprland 0.40) (SlateOS)");
         println!();
         println!("Commands:");
         println!("  monitors         List monitors");
@@ -91,7 +91,7 @@ fn run_hyprland(args: &[String], prog: &str) -> i32 {
             if json {
                 println!("{{\"branch\":\"\",\"commit\":\"main\",\"tag\":\"v0.40.0\",\"flags\":[]}}");
             } else {
-                println!("Hyprland, built from branch main at commit main (OurOS).");
+                println!("Hyprland, built from branch main at commit main (SlateOS).");
                 println!("Tag: v0.40.0");
             }
         }

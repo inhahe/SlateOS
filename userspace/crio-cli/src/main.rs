@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! crio-cli — OurOS CRI-O container runtime
+//! crio-cli — SlateOS CRI-O container runtime
 //!
 //! Multi-personality: `crio`, `crictl`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_crictl(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("NAME:");
-        println!("   crictl — CRI client CLI (OurOS)");
+        println!("   crictl — CRI client CLI (SlateOS)");
         println!();
         println!("COMMANDS:");
         println!("   ps           List containers");
@@ -33,7 +33,7 @@ fn run_crictl(args: &[String]) -> i32 {
         "version" => {
             println!("Version:  0.1.0");
             println!("RuntimeName:  cri-o");
-            println!("RuntimeVersion:  1.29.2 (OurOS)");
+            println!("RuntimeVersion:  1.29.2 (SlateOS)");
             println!("RuntimeApiVersion:  v1");
         }
         "ps" => {
@@ -81,12 +81,12 @@ fn run_crio(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("crio version 1.29.2 (OurOS)");
+        println!("crio version 1.29.2 (SlateOS)");
         println!("go: go1.22.0");
         return 0;
     }
 
-    println!("crio: Starting CRI-O 1.29.2 (OurOS)");
+    println!("crio: Starting CRI-O 1.29.2 (SlateOS)");
     println!("crio: Using default capabilities: CAP_CHOWN, CAP_DAC_OVERRIDE, ...");
     println!("crio: Listening on /var/run/crio/crio.sock");
     0

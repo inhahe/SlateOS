@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! chargebee-cli — OurOS Chargebee subscription billing personality CLI.
+//! chargebee-cli — SlateOS Chargebee subscription billing personality CLI.
 
 use std::env;
 use std::process;
@@ -31,7 +31,7 @@ fn print_help(prog: &str) {
 }
 
 fn print_version() {
-    println!("chargebee-cli 0.1.0 — OurOS personality binary");
+    println!("chargebee-cli 0.1.0 — SlateOS personality binary");
     println!("Chargebee Inc. — Chennai, India / San Francisco, USA");
 }
 

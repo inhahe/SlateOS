@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ntp-cli — OurOS NTP time synchronization tools
+//! ntp-cli — SlateOS NTP time synchronization tools
 //!
 //! Multi-personality: `ntpd`, `ntpq`, `ntpdate`, `chronyc`, `chronyd`
 
@@ -19,7 +19,7 @@ fn run_ntpd(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ntpd [OPTIONS]");
         println!();
-        println!("ntpd — NTP daemon (OurOS).");
+        println!("ntpd — NTP daemon (SlateOS).");
         println!();
         println!("Options:");
         println!("  -d         Debug mode");
@@ -31,7 +31,7 @@ fn run_ntpd(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("ntpd 4.2.8p17 (OurOS)");
+        println!("ntpd 4.2.8p17 (SlateOS)");
         return 0;
     }
 
@@ -51,7 +51,7 @@ fn run_ntpq(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ntpq [OPTIONS] [HOST]");
         println!();
-        println!("ntpq — NTP query program (OurOS).");
+        println!("ntpq — NTP query program (SlateOS).");
         println!();
         println!("Options:");
         println!("  -p         Print peers list");
@@ -70,9 +70,9 @@ fn run_ntpq(args: &[String]) -> i32 {
         println!("-3.pool.ntp.org  129.6.15.28      2 u  256  512  377   45.901    1.234   2.345");
     } else {
         println!("assID=0 status=0615 leap_none, sync_ntp, 1 event, clock_sync,");
-        println!("version=\"ntpd 4.2.8p17 (OurOS)\",");
+        println!("version=\"ntpd 4.2.8p17 (SlateOS)\",");
         println!("processor=\"x86_64\",");
-        println!("system=\"OurOS/1.0.0\",");
+        println!("system=\"SlateOS/1.0.0\",");
         println!("stratum=2,");
         println!("precision=-23,");
         println!("rootdelay=5.123,");
@@ -87,7 +87,7 @@ fn run_ntpdate(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ntpdate [OPTIONS] SERVER...");
         println!();
-        println!("ntpdate — set the date and time via NTP (OurOS).");
+        println!("ntpdate — set the date and time via NTP (SlateOS).");
         println!();
         println!("Options:");
         println!("  -q         Query only (don't set)");
@@ -113,13 +113,13 @@ fn run_chronyc(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: chronyc [OPTIONS] [COMMAND]");
         println!();
-        println!("chronyc — chronyd control program (OurOS).");
+        println!("chronyc — chronyd control program (SlateOS).");
         println!();
         println!("Commands: sources, sourcestats, tracking, ntpdata, activity, makestep");
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("chronyc (chrony) version 4.5 (OurOS)");
+        println!("chronyc (chrony) version 4.5 (SlateOS)");
         return 0;
     }
 
@@ -172,7 +172,7 @@ fn run_chronyd(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("chronyd (chrony) version 4.5 (OurOS)");
+        println!("chronyd (chrony) version 4.5 (SlateOS)");
         return 0;
     }
     println!("chronyd: starting NTP daemon");

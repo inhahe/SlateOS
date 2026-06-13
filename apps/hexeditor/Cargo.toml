@@ -2,6 +2,6 @@
 name = "hexeditor"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS Hex Editor — binary file hex editor with data inspector, search, bookmarks"
+description = "SlateOS Hex Editor — binary file hex editor with data inspector, search, bookmarks"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }

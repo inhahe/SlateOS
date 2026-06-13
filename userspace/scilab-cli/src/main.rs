@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! scilab-cli — OurOS Scilab numerical computing
+//! scilab-cli — SlateOS Scilab numerical computing
 //!
 //! Single personality: `scilab`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_scilab(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: scilab [OPTIONS]");
-        println!("Scilab v2024.1 (OurOS) — Open-source numerical computing");
+        println!("Scilab v2024.1 (SlateOS) — Open-source numerical computing");
         println!();
         println!("Options:");
         println!("  -f FILE           Execute script file");
@@ -25,7 +25,7 @@ fn run_scilab(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Scilab v2024.1 (OurOS)");
+        println!("Scilab v2024.1 (SlateOS)");
         return 0;
     }
     if let Some(pos) = args.iter().position(|a| a == "-e") {

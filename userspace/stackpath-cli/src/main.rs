@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! stackpath-cli — OurOS StackPath / Webscale exit personality CLI.
+//! stackpath-cli — SlateOS StackPath / Webscale exit personality CLI.
 
 use std::env;
 use std::process;
@@ -29,7 +29,7 @@ fn print_help(prog: &str) {
 }
 
 fn print_version() {
-    println!("stackpath-cli 0.1.0 — OurOS personality binary");
+    println!("stackpath-cli 0.1.0 — SlateOS personality binary");
     println!("StackPath, LLC (Dallas, TX) — CDN biz exited to Akamai 2022");
 }
 

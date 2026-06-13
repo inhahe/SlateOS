@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! openshot-cli — OurOS OpenShot video editor
+//! openshot-cli — SlateOS OpenShot video editor
 //!
 //! Single personality: `openshot`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_os(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: openshot [OPTIONS] [PROJECT]");
-        println!("OpenShot Video Editor 3.2 (OurOS) — Easy-to-use cross-platform NLE");
+        println!("OpenShot Video Editor 3.2 (SlateOS) — Easy-to-use cross-platform NLE");
         println!();
         println!("Options:");
         println!("  --debug                Debug logging");
@@ -21,8 +21,8 @@ fn run_os(args: &[String], _prog: &str) -> i32 {
         println!("  --lang LANG            UI language");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("OpenShot 3.2.0 (OurOS)"); return 0; }
-    println!("OpenShot 3.2.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("OpenShot 3.2.0 (SlateOS)"); return 0; }
+    println!("OpenShot 3.2.0 (SlateOS)");
     println!("  Engine: libopenshot (C++ with Python bindings)");
     println!("  Features: Drag-and-drop editing, keyframe animation, 3D titles");
     println!("  Effects: Watermarks, transparency, color shifts");

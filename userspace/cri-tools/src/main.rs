@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cri-tools — OurOS Container Runtime Interface tools
+//! cri-tools — SlateOS Container Runtime Interface tools
 //!
 //! Multi-personality: `crictl`, `critest`
 
@@ -36,7 +36,7 @@ fn run_crictl(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match cmd {
         "version" => {
-            println!("Version:  1.30.0 (OurOS)");
+            println!("Version:  1.30.0 (SlateOS)");
             println!("RuntimeName:  containerd");
             println!("RuntimeVersion:  1.7.16");
             println!("RuntimeApiVersion:  v1");

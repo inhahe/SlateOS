@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wl-kbptr-cli — OurOS wl-kbptr keyboard-driven pointer control
+//! wl-kbptr-cli — SlateOS wl-kbptr keyboard-driven pointer control
 //!
 //! Single personality: `wl-kbptr`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wl_kbptr(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wl-kbptr [OPTIONS]");
-        println!("wl-kbptr v0.3 (OurOS) — Keyboard-driven pointer control for Wayland");
+        println!("wl-kbptr v0.3 (SlateOS) — Keyboard-driven pointer control for Wayland");
         println!();
         println!("Options:");
         println!("  --mode MODE       Mode: bisect, absolute, relative");
@@ -26,7 +26,7 @@ fn run_wl_kbptr(args: &[String], _prog: &str) -> i32 {
         println!("Bisect mode: subdivide screen quadrants to quickly locate any point.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("wl-kbptr v0.3 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("wl-kbptr v0.3 (SlateOS)"); return 0; }
     let mode = args.iter().skip_while(|a| a.as_str() != "--mode").nth(1)
         .map(|s| s.as_str()).unwrap_or("bisect");
     println!("wl-kbptr: keyboard pointer control (mode={})", mode);

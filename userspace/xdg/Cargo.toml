@@ -2,5 +2,5 @@
 name = "xdg"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS xdg-open/xdg-mime/mimeopen - file association tools"
+description = "SlateOS xdg-open/xdg-mime/mimeopen - file association tools"
 [dependencies]

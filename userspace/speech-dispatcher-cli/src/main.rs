@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! speech-dispatcher-cli — OurOS Speech Dispatcher
+//! speech-dispatcher-cli — SlateOS Speech Dispatcher
 //!
 //! Multi-personality: `speech-dispatcher`, `spd-say`, `spd-conf`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_dispatcher(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: speech-dispatcher [OPTIONS]");
-        println!("speech-dispatcher v0.11 (OurOS) — Speech synthesis daemon");
+        println!("speech-dispatcher v0.11 (SlateOS) — Speech synthesis daemon");
         println!();
         println!("Options:");
         println!("  -d                Run as daemon");
@@ -32,7 +32,7 @@ fn run_dispatcher(args: &[String], _prog: &str) -> i32 {
 fn run_spd_say(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: spd-say [OPTIONS] TEXT");
-        println!("spd-say v0.11 (OurOS) — Speak text via Speech Dispatcher");
+        println!("spd-say v0.11 (SlateOS) — Speak text via Speech Dispatcher");
         println!();
         println!("Options:");
         println!("  TEXT              Text to speak");
@@ -57,7 +57,7 @@ fn run_spd_say(args: &[String], _prog: &str) -> i32 {
 fn run_spd_conf(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: spd-conf [OPTIONS]");
-        println!("spd-conf v0.11 (OurOS) — Speech Dispatcher configuration");
+        println!("spd-conf v0.11 (SlateOS) — Speech Dispatcher configuration");
         println!();
         println!("Options:");
         println!("  -u                Configure user settings");

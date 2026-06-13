@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! surrealdb-cli — OurOS SurrealDB CLI
+//! surrealdb-cli — SlateOS SurrealDB CLI
 //!
 //! Multi-personality: `surreal`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_surreal(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: surreal COMMAND [OPTIONS]");
-        println!("SurrealDB 2.0.0 (OurOS)");
+        println!("SurrealDB 2.0.0 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  start        Start a SurrealDB server");
@@ -28,7 +28,7 @@ fn run_surreal(args: &[String]) -> i32 {
     }
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match subcmd {
-        "version" | "--version" => println!("surreal 2.0.0 for ouros on x86_64"),
+        "version" | "--version" => println!("surreal 2.0.0 for slateos on x86_64"),
         "start" => {
             let bind = args.windows(2).find(|w| w[0] == "--bind")
                 .map(|w| w[1].as_str()).unwrap_or("0.0.0.0:8000");

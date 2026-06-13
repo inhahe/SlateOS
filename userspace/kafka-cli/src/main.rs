@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kafka-cli — OurOS Apache Kafka CLI
+//! kafka-cli — SlateOS Apache Kafka CLI
 //!
 //! Multi-personality: `kafka-topics`, `kafka-console-producer`, `kafka-console-consumer`, `kafka-consumer-groups`
 

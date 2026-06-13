@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pdoc-cli — OurOS pdoc Python documentation generator
+//! pdoc-cli — SlateOS pdoc Python documentation generator
 //!
 //! Multi-personality: `pdoc`, `pdoc3`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pdoc(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: pdoc [OPTIONS] MODULE [MODULE ...]");
-        println!("pdoc 14.4.0 (OurOS)");
+        println!("pdoc 14.4.0 (SlateOS)");
         println!();
         println!("Options:");
         println!("  -o DIR         Output directory");
@@ -31,7 +31,7 @@ fn run_pdoc(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("pdoc 14.4.0 (OurOS)");
+        println!("pdoc 14.4.0 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "-p") {

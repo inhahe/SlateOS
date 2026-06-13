@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! silhouette-cli — OurOS Boris FX Silhouette rotoscoping & paint
+//! silhouette-cli — SlateOS Boris FX Silhouette rotoscoping & paint
 //!
 //! Single personality: `silhouette`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_silhouette(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: silhouette [OPTIONS] [PROJECT]");
-        println!("Boris FX Silhouette 2024 (OurOS) — Rotoscoping, paint, VFX node compositor");
+        println!("Boris FX Silhouette 2024 (SlateOS) — Rotoscoping, paint, VFX node compositor");
         println!();
         println!("Options:");
         println!("  --batch                Headless batch mode");
@@ -23,8 +23,8 @@ fn run_silhouette(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Boris FX Silhouette 2024.0.0 (OurOS)"); return 0; }
-    println!("Boris FX Silhouette 2024.0.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Boris FX Silhouette 2024.0.0 (SlateOS)"); return 0; }
+    println!("Boris FX Silhouette 2024.0.0 (SlateOS)");
     println!("  Nodes: Roto, Paint, MultiFrame, ZMatte, Tracker, Stereo");
     println!("  Roto: Bezier, B-spline, X-spline tools");
     println!("  Paint: Auto Paint clone & repair");

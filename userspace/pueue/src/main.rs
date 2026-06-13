@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pueue — OurOS task manager for sequential and parallel command execution
+//! pueue — SlateOS task manager for sequential and parallel command execution
 //!
 //! Multi-personality: `pueue` (client), `pueued` (daemon)
 
@@ -31,10 +31,10 @@ fn run_pueued(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("pueued 3.4.0 (OurOS)");
+        println!("pueued 3.4.0 (SlateOS)");
         return 0;
     }
-    println!("pueued 3.4.0 (OurOS) — daemon started");
+    println!("pueued 3.4.0 (SlateOS) — daemon started");
     println!("Listening on /run/user/1000/pueue.socket");
     0
 }
@@ -75,7 +75,7 @@ fn run_pueue(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("pueue 3.4.0 (OurOS)");
+            println!("pueue 3.4.0 (SlateOS)");
             0
         }
         "add" => {

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sops — OurOS secrets OPerationS (encrypted file editor)
+//! sops — SlateOS secrets OPerationS (encrypted file editor)
 //!
 //! Single personality: `sops`
 
@@ -44,7 +44,7 @@ fn run_sops(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("sops 3.8.1 (OurOS)");
+        println!("sops 3.8.1 (SlateOS)");
         return 0;
     }
 

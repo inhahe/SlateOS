@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gradle-cli — OurOS Gradle build system
+//! gradle-cli — SlateOS Gradle build system
 //!
 //! Multi-personality: `gradle`, `gradlew`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gradle(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "-?") || args.is_empty() {
         println!("Usage: gradle [OPTION...] [TASK...]");
-        println!("Gradle 8.6 (OurOS)");
+        println!("Gradle 8.6 (SlateOS)");
         println!();
         println!("Build Setup:");
         println!("  --build-file FILE     Specify the build file");
@@ -59,8 +59,8 @@ fn run_gradle(args: &[String]) -> i32 {
         println!("Kotlin:       1.9.20");
         println!("Groovy:       3.0.17");
         println!("Ant:          Apache Ant(TM) version 1.10.13");
-        println!("JVM:          21.0.2 (OurOS 21.0.2+13)");
-        println!("OS:           OurOS amd64");
+        println!("JVM:          21.0.2 (SlateOS 21.0.2+13)");
+        println!("OS:           SlateOS amd64");
         return 0;
     }
     let quiet = args.iter().any(|a| a == "-q" || a == "--quiet");

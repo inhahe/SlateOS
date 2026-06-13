@@ -1,4 +1,4 @@
-//! OurOS `comm` Utility -- Compare Two Sorted Files Line by Line
+//! SlateOS `comm` Utility -- Compare Two Sorted Files Line by Line
 //!
 //! Reads two sorted files and produces three-column output:
 //! - Column 1: lines unique to file1
@@ -574,7 +574,7 @@ fn open_input(path: &str) -> io::Result<Box<dyn BufRead>> {
 // ============================================================================
 
 fn print_help() {
-    println!("OurOS comm v{VERSION}");
+    println!("SlateOS comm v{VERSION}");
     println!();
     println!("Compare two sorted files line by line.");
     println!();
@@ -627,7 +627,7 @@ fn main() {
             process::exit(0);
         }
         ParseResult::Version => {
-            println!("comm (OurOS) {VERSION}");
+            println!("comm (SlateOS) {VERSION}");
             process::exit(0);
         }
         ParseResult::Run(config) => {

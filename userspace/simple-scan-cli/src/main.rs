@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! simple-scan-cli — OurOS Simple Scan document scanner
+//! simple-scan-cli — SlateOS Simple Scan document scanner
 //!
 //! Single personality: `simple-scan`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_simple_scan(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: simple-scan [OPTIONS] [FILE]");
-        println!("simple-scan v42.0 (OurOS) — Simple document scanning");
+        println!("simple-scan v42.0 (SlateOS) — Simple document scanning");
         println!();
         println!("Options:");
         println!("  -d DEVICE         Use specific scanner");
@@ -21,7 +21,7 @@ fn run_simple_scan(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("simple-scan v42.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("simple-scan v42.0 (SlateOS)"); return 0; }
     println!("simple-scan: document scanner started");
     println!("  Scanner: Epson Perfection V39");
     println!("  Default mode: Flatbed, Color, 300 DPI");

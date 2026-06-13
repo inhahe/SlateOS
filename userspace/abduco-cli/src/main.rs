@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! abduco-cli — OurOS abduco session manager
+//! abduco-cli — SlateOS abduco session manager
 //!
 //! Single personality: `abduco`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_abduco(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: abduco [OPTIONS] [NAME [COMMAND...]]");
-        println!("abduco 0.6 (OurOS) — Session management");
+        println!("abduco 0.6 (SlateOS) — Session management");
         println!();
         println!("Options:");
         println!("  -a NAME    Attach to existing session");
@@ -28,7 +28,7 @@ fn run_abduco(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-v") {
-        println!("abduco-0.6 (OurOS)");
+        println!("abduco-0.6 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "-l") {

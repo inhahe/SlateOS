@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! httpie-cli — OurOS HTTPie command-line HTTP client
+//! httpie-cli — SlateOS HTTPie command-line HTTP client
 //!
 //! Multi-personality: `http`, `https`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_http(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help") || args.is_empty() {
         println!("Usage: http [METHOD] URL [REQUEST_ITEM ...]");
-        println!("HTTPie 3.2.3 (OurOS)");
+        println!("HTTPie 3.2.3 (SlateOS)");
         println!();
         println!("Options:");
         println!("  --json, -j       JSON request/response");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! redis-cli-tool — OurOS Redis CLI
+//! redis-cli-tool — SlateOS Redis CLI
 //!
 //! Single personality: `redis-cli`
 
@@ -11,7 +11,7 @@ fn run_redis_cli(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: redis-cli [OPTIONS] [COMMAND [ARGS]]");
         println!();
-        println!("Redis command line interface (OurOS).");
+        println!("Redis command line interface (SlateOS).");
         println!();
         println!("Options:");
         println!("  -h HOST        Server hostname (default: 127.0.0.1)");
@@ -27,7 +27,7 @@ fn run_redis_cli(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("redis-cli 7.2.4 (OurOS)");
+        println!("redis-cli 7.2.4 (SlateOS)");
         return 0;
     }
 
@@ -84,7 +84,7 @@ fn run_redis_cli(args: Vec<String>) -> i32 {
         "INFO" | "info" => {
             println!("# Server");
             println!("redis_version:7.2.4");
-            println!("os:OurOS x86_64");
+            println!("os:SlateOS x86_64");
             println!("tcp_port:{}", port);
             println!();
             println!("# Clients");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! minicom-cli — OurOS serial terminal emulator
+//! minicom-cli — SlateOS serial terminal emulator
 //!
 //! Multi-personality: `minicom`, `screen` (serial mode)
 
@@ -19,7 +19,7 @@ fn run_minicom(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: minicom [OPTIONS] [DEVICE]");
         println!();
-        println!("minicom — serial communication program (OurOS).");
+        println!("minicom — serial communication program (SlateOS).");
         println!();
         println!("Options:");
         println!("  -b BAUD         Set baud rate");
@@ -35,7 +35,7 @@ fn run_minicom(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("minicom version 2.8 (OurOS)");
+        println!("minicom version 2.8 (SlateOS)");
         return 0;
     }
 
@@ -63,7 +63,7 @@ fn run_minicom(args: &[String]) -> i32 {
         return 0;
     }
 
-    println!("Welcome to minicom 2.8 (OurOS)");
+    println!("Welcome to minicom 2.8 (SlateOS)");
     println!();
     println!("OPTIONS: I18n");
     println!("Port {device}, {baud} 8N1");

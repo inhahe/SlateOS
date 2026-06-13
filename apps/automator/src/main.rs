@@ -1,4 +1,4 @@
-//! OurOS Automator -- Keyboard/Mouse Automation & Macro Recorder
+//! SlateOS Automator -- Keyboard/Mouse Automation & Macro Recorder
 //!
 //! A desktop automation tool with:
 //! - **Macro recording**: capture keyboard and mouse actions with timestamps
@@ -775,7 +775,7 @@ fn parse_u8_arg(parts: &[&str], idx: usize, line: usize, name: &str) -> Result<u
 /// Serialize a list of timed actions back to the text-based script format.
 pub fn serialize_script(actions: &[TimedAction]) -> String {
     let mut lines = Vec::new();
-    lines.push("# OurOS Automator Macro Script".to_string());
+    lines.push("# SlateOS Automator Macro Script".to_string());
     lines.push(String::new());
 
     for ta in actions {
@@ -3822,7 +3822,7 @@ mod tests {
     #[test]
     fn test_serialize_empty() {
         let text = serialize_script(&[]);
-        assert!(text.contains("OurOS Automator"));
+        assert!(text.contains("SlateOS Automator"));
     }
 
     #[test]

@@ -1,6 +1,6 @@
-//! OurOS SSH-2 Client
+//! SlateOS SSH-2 Client
 //!
-//! A simplified SSH-2 protocol client for OurOS. Supports password
+//! A simplified SSH-2 protocol client for SlateOS. Supports password
 //! authentication, interactive shell sessions, and remote command execution.
 //!
 //! # Usage
@@ -17,7 +17,7 @@
 //! # Protocol
 //!
 //! Implements a subset of SSH-2 (RFC 4253, 4252, 4254):
-//! - Version exchange (SSH-2.0-OurOS_1.0)
+//! - Version exchange (SSH-2.0-SlateOS_1.0)
 //! - Key exchange: diffie-hellman-group14-sha256
 //! - Host key: ssh-rsa (fingerprint display + known_hosts)
 //! - Encryption: AES-128-CTR
@@ -240,7 +240,7 @@ impl From<io::Error> for SshError {
 // ============================================================================
 
 /// Our version identification string.
-const SSH_VERSION_STRING: &str = "SSH-2.0-OurOS_1.0";
+const SSH_VERSION_STRING: &str = "SSH-2.0-SlateOS_1.0";
 
 /// SSH message type codes (RFC 4253 / 4252 / 4254).
 mod msg {
@@ -2110,7 +2110,7 @@ impl SshSession {
     }
 
     /// Read a password from stdin with echo disabled.
-    /// On OurOS, we write to stderr to prompt, then read a line from stdin.
+    /// On SlateOS, we write to stderr to prompt, then read a line from stdin.
     /// Real echo suppression requires ioctl — here we just do a basic read.
     fn read_password(&self) -> Result<String, SshError> {
         eprint!("{}@{}'s password: ", self.config.user, self.config.hostname);

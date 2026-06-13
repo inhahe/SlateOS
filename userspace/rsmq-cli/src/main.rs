@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rsmq-cli — OurOS RSMQ Redis simple message queue CLI
+//! rsmq-cli — SlateOS RSMQ Redis simple message queue CLI
 //!
 //! Single personality: `rsmq`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rsmq(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: rsmq COMMAND [OPTIONS]");
-        println!("rsmq v1.0.0 (OurOS) — Redis Simple Message Queue CLI");
+        println!("rsmq v1.0.0 (SlateOS) — Redis Simple Message Queue CLI");
         println!();
         println!("Commands:");
         println!("  create-queue    Create a new queue");
@@ -35,7 +35,7 @@ fn run_rsmq(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("rsmq v1.0.0 (OurOS)");
+        println!("rsmq v1.0.0 (SlateOS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("list-queues");

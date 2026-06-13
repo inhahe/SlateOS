@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tcl-cli — OurOS Tcl interpreter
+//! tcl-cli — SlateOS Tcl interpreter
 //!
 //! Multi-personality: `tclsh`, `tclsh8.6`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_tclsh(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: tclsh [FILE [ARG ...]]");
-        println!("Tcl 8.6.14 (OurOS)");
+        println!("Tcl 8.6.14 (SlateOS)");
         println!("  If no file given, starts interactive shell.");
         println!("  --version    Show version");
         return 0;

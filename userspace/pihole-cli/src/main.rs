@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pihole-cli — OurOS Pi-hole DNS sinkhole
+//! pihole-cli — SlateOS Pi-hole DNS sinkhole
 //!
 //! Single personality: `pihole`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pihole(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pihole COMMAND [OPTIONS]");
-        println!("Pi-hole v5.18 (OurOS) — Network-wide ad blocking");
+        println!("Pi-hole v5.18 (SlateOS) — Network-wide ad blocking");
         println!();
         println!("Commands:");
         println!("  status          Show blocking status");
@@ -29,8 +29,8 @@ fn run_pihole(args: &[String], _prog: &str) -> i32 {
         println!("  --version       Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Pi-hole v5.18.2 (OurOS)"); return 0; }
-    println!("Pi-hole v5.18.2 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Pi-hole v5.18.2 (SlateOS)"); return 0; }
+    println!("Pi-hole v5.18.2 (SlateOS)");
     println!("  Status: enabled");
     println!("  Domains on blocklist: 234,567");
     println!("  DNS queries today: 45,678");

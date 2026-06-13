@@ -2,6 +2,6 @@
 name = "netscan"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS Network Scanner — IP/port scanning, host discovery, service detection, topology visualization"
+description = "SlateOS Network Scanner — IP/port scanning, host discovery, service detection, topology visualization"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }

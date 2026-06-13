@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mattermost-cli — OurOS Mattermost CLI
+//! mattermost-cli — SlateOS Mattermost CLI
 //!
 //! Single personality: `mmctl`
 
@@ -11,7 +11,7 @@ fn run_mmctl(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mmctl <COMMAND> [OPTIONS]");
         println!();
-        println!("Mattermost CLI for server administration (OurOS).");
+        println!("Mattermost CLI for server administration (SlateOS).");
         println!();
         println!("Commands:");
         println!("  auth         Authentication");
@@ -29,7 +29,7 @@ fn run_mmctl(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("mmctl v7.10.0 (OurOS)");
+        println!("mmctl v7.10.0 (SlateOS)");
         return 0;
     }
 

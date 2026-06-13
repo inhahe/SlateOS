@@ -2,5 +2,5 @@
 name = "grub2"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS grub2 utility"
+description = "SlateOS grub2 utility"
 [dependencies]

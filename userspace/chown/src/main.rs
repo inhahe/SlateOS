@@ -1,9 +1,9 @@
-//! OurOS File Ownership and Permission Utility
+//! SlateOS File Ownership and Permission Utility
 //!
 //! Dual-mode binary: invoked as `chown` it changes file owner/group; invoked
 //! as `chmod` it changes file permission bits. Mode detection is via `argv[0]`.
 //!
-//! User/group name resolution reads `/etc/users.yaml`, the OurOS user database.
+//! User/group name resolution reads `/etc/users.yaml`, the SlateOS user database.
 //!
 //! # Usage (chown mode)
 //!
@@ -43,8 +43,8 @@ use std::process;
 // Syscall numbers (fs zone: 600-799)
 // ============================================================================
 //
-// These map to the real OurOS VFS handlers. The previous version targeted
-// Linux numbers 30/31 — which on OurOS are IRQ_REGISTER / IRQ_WAIT, so a chown
+// These map to the real SlateOS VFS handlers. The previous version targeted
+// Linux numbers 30/31 — which on SlateOS are IRQ_REGISTER / IRQ_WAIT, so a chown
 // or chmod would have tried to register or block on a hardware interrupt line.
 
 /// Read file metadata (`SYS_FS_METADATA`).
@@ -82,7 +82,7 @@ const META_OFF_PERMS: usize = 56;
 
 /// Issue a four-argument syscall using the x86-64 `syscall` instruction.
 ///
-/// Register mapping follows the OurOS syscall ABI:
+/// Register mapping follows the SlateOS syscall ABI:
 ///   rax = syscall number, rdi = arg0, rsi = arg1, rdx = arg2, r10 = arg3
 ///   Return value in rax. rcx and r11 are clobbered by the CPU.
 ///
@@ -123,7 +123,7 @@ unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
 // Error helpers
 // ============================================================================
 
-/// Map a negative OurOS kernel error code to a human-readable string.
+/// Map a negative SlateOS kernel error code to a human-readable string.
 ///
 /// These are `KernelError` discriminants (see kernel `error.rs`), NOT Linux
 /// errnos — e.g. -2 is "operation not supported", not ENOENT.
@@ -153,7 +153,7 @@ fn kernel_error_to_string(code: i64) -> String {
 
 const USER_DB_PATH: &str = "/etc/users.yaml";
 
-/// A resolved user entry from the OurOS user database.
+/// A resolved user entry from the SlateOS user database.
 struct UserEntry {
     uid: u32,
     username: String,
@@ -162,7 +162,7 @@ struct UserEntry {
 
 /// A resolved group with a numeric GID.
 ///
-/// OurOS assigns GIDs by order of appearance in the groups collected across
+/// SlateOS assigns GIDs by order of appearance in the groups collected across
 /// all user entries. Group 0 = "root", group 1 = "admin", etc. The exact
 /// mapping is built at runtime from `/etc/users.yaml`.
 struct GroupEntry {
@@ -1110,12 +1110,12 @@ fn run_chown(
     groups: &[GroupEntry],
 ) -> bool {
     // -h / --no-dereference asks us to operate on the symlink itself. The
-    // OurOS VFS set_owner path resolves symlinks (resolve_follow) and there is
+    // SlateOS VFS set_owner path resolves symlinks (resolve_follow) and there is
     // no lchown-equivalent syscall yet, so we cannot honor this. Warn rather
     // than silently chown the target. (Tracked in todo.txt.)
     if opts.no_deref && !opts.silent {
         eprintln!(
-            "chown: warning: -h/--no-dereference is not supported on OurOS; symlink targets will be affected"
+            "chown: warning: -h/--no-dereference is not supported on SlateOS; symlink targets will be affected"
         );
     }
 
@@ -1288,7 +1288,7 @@ fn run_chmod(opts: &Options) -> bool {
 // ============================================================================
 
 fn print_chown_help() {
-    println!("OurOS chown v0.1.0 -- Change file owner and group");
+    println!("SlateOS chown v0.1.0 -- Change file owner and group");
     println!();
     println!("USAGE:");
     println!("  chown [OPTIONS] OWNER[:GROUP] FILE...");
@@ -1316,7 +1316,7 @@ fn print_chown_help() {
 }
 
 fn print_chmod_help() {
-    println!("OurOS chmod v0.1.0 -- Change file permissions");
+    println!("SlateOS chmod v0.1.0 -- Change file permissions");
     println!();
     println!("USAGE:");
     println!("  chmod [OPTIONS] MODE FILE...");

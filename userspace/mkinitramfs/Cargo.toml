@@ -2,5 +2,5 @@
 name = "mkinitramfs"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS mkinitramfs utility"
+description = "SlateOS mkinitramfs utility"
 [dependencies]

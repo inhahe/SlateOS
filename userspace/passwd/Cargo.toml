@@ -2,5 +2,5 @@
 name = "passwd"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS password management utility"
+description = "SlateOS password management utility"
 [dependencies]

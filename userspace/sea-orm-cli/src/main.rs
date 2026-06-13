@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sea-orm-cli — OurOS SeaORM code generation and migration CLI
+//! sea-orm-cli — SlateOS SeaORM code generation and migration CLI
 //!
 //! Single personality: `sea-orm-cli`
 
@@ -22,7 +22,7 @@ fn run_sea_orm(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("sea-orm-cli 0.12.15 (OurOS)");
+        println!("sea-orm-cli 0.12.15 (SlateOS)");
         return 0;
     }
 

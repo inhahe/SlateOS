@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lightgbm-cli — OurOS LightGBM gradient boosting
+//! lightgbm-cli — SlateOS LightGBM gradient boosting
 //!
 //! Single personality: `lightgbm`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_lightgbm(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lightgbm config=FILE");
-        println!("LightGBM v4.3 (OurOS) — Fast gradient boosting framework");
+        println!("LightGBM v4.3 (SlateOS) — Fast gradient boosting framework");
         println!();
         println!("Config parameters:");
         println!("  task = train|predict|convert_model");
@@ -30,8 +30,8 @@ fn run_lightgbm(args: &[String], _prog: &str) -> i32 {
         println!("  --version                Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("LightGBM v4.3.0 (OurOS)"); return 0; }
-    println!("LightGBM v4.3.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("LightGBM v4.3.0 (SlateOS)"); return 0; }
+    println!("LightGBM v4.3.0 (SlateOS)");
     println!("  Task: train");
     println!("  Boosting: GBDT");
     println!("  Objective: binary");

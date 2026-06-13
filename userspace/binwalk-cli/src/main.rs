@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! binwalk-cli — OurOS binwalk firmware analysis tool
+//! binwalk-cli — SlateOS binwalk firmware analysis tool
 //!
 //! Single personality: `binwalk`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_binwalk(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: binwalk [OPTIONS] FILE [FILE...]");
-        println!("binwalk v2.4 (OurOS) — Firmware analysis and extraction tool");
+        println!("binwalk v2.4 (SlateOS) — Firmware analysis and extraction tool");
         println!();
         println!("Scan Options:");
         println!("  -B             Signature scan (default)");
@@ -34,8 +34,8 @@ fn run_binwalk(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("binwalk v2.4.2 (OurOS)"); return 0; }
-    println!("binwalk v2.4.2 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("binwalk v2.4.2 (SlateOS)"); return 0; }
+    println!("binwalk v2.4.2 (SlateOS)");
     println!();
     println!("DECIMAL       HEXADECIMAL     DESCRIPTION");
     println!("----------------------------------------------------------------------");

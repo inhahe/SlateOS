@@ -38,7 +38,7 @@ Copy-Item (Join-Path $root "posix\target\x86_64-unknown-none\release\libposix.a"
           (Join-Path $sysroot "libc.a") -Force
 
 # libstubs.a = symbols std needs that posix doesn't have yet
-Copy-Item (Join-Path $PSScriptRoot "stubs\target\x86_64-unknown-none\release\libouros_stubs.a") `
+Copy-Item (Join-Path $PSScriptRoot "stubs\target\x86_64-unknown-none\release\libslateos_stubs.a") `
           (Join-Path $sysroot "libstubs.a") -Force
 
 # libunwind.a = empty archive (unwind symbols are in libstubs.a,

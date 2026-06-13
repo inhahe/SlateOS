@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zenity-cli — OurOS Zenity dialog CLI
+//! zenity-cli — SlateOS Zenity dialog CLI
 //!
 //! Multi-personality: `zenity`, `kdialog`
 
@@ -19,7 +19,7 @@ fn run_zenity(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: zenity [OPTIONS]");
         println!();
-        println!("Zenity — display GTK dialogs (OurOS).");
+        println!("Zenity — display GTK dialogs (SlateOS).");
         println!();
         println!("Dialog types:");
         println!("  --info               Info dialog");
@@ -47,7 +47,7 @@ fn run_zenity(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("zenity 4.0.1 (OurOS)");
+        println!("zenity 4.0.1 (SlateOS)");
         return 0;
     }
 
@@ -86,7 +86,7 @@ fn run_kdialog(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: kdialog [OPTIONS]");
         println!();
-        println!("kdialog — KDE dialog tool (OurOS).");
+        println!("kdialog — KDE dialog tool (SlateOS).");
         println!();
         println!("Options:");
         println!("  --msgbox TEXT        Message box");

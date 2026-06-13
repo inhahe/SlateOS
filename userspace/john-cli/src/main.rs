@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! john-cli — OurOS John the Ripper CLI
+//! john-cli — SlateOS John the Ripper CLI
 //!
 //! Single personality: `john`
 
@@ -11,7 +11,7 @@ fn run_john(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: john [OPTIONS] [PASSWORD_FILES]");
         println!();
-        println!("John the Ripper — password cracker (OurOS).");
+        println!("John the Ripper — password cracker (SlateOS).");
         println!();
         println!("Options:");
         println!("  --single               \"Single crack\" mode");
@@ -31,7 +31,7 @@ fn run_john(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("John the Ripper 1.9.0-jumbo-1 (OurOS)");
+        println!("John the Ripper 1.9.0-jumbo-1 (SlateOS)");
         return 0;
     }
 

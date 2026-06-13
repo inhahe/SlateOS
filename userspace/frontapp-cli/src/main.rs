@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! frontapp-cli — OurOS Front (shared inbox / customer ops hybrid email-and-helpdesk)
+//! frontapp-cli — SlateOS Front (shared inbox / customer ops hybrid email-and-helpdesk)
 //!
 //! Single personality: `front`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_front(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: front [OPTIONS]");
-        println!("Front (OurOS) — shared inbox + customer operations platform");
+        println!("Front (SlateOS) — shared inbox + customer operations platform");
         println!();
         println!("Options:");
         println!("  --starter              Starter $19/user/mo (3-10 seats)");
@@ -25,8 +25,8 @@ fn run_front(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Front 2024 (OurOS)"); return 0; }
-    println!("Front 2024 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Front 2024 (SlateOS)"); return 0; }
+    println!("Front 2024 (SlateOS)");
     println!("  Vendor: FrontApp, Inc. dba Front (San Francisco, CA — private)");
     println!("  Founders: Mathilde Collin (CEO) + Laurent Perrin (CTO), 2013");
     println!("          two French co-founders, met at Polytechnique → moved to SF for YC W14");

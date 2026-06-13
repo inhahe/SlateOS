@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! skim — OurOS fuzzy finder in Rust (fzf alternative)
+//! skim — SlateOS fuzzy finder in Rust (fzf alternative)
 //!
 //! Single personality: `sk`
 
@@ -58,7 +58,7 @@ fn run_sk(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("sk 0.10.4 (OurOS)");
+        println!("sk 0.10.4 (SlateOS)");
         return 0;
     }
 

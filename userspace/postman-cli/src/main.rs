@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! postman-cli — OurOS Postman CLI (Newman)
+//! postman-cli — SlateOS Postman CLI (Newman)
 //!
 //! Single personality: `postman` (also `newman`)
 
@@ -11,7 +11,7 @@ fn run_postman(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: postman <COMMAND> [OPTIONS]");
         println!();
-        println!("Postman/Newman API testing CLI (OurOS).");
+        println!("Postman/Newman API testing CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  run          Run a collection");

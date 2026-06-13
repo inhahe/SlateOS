@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! redoc-cli — OurOS Redoc CLI for API documentation
+//! redoc-cli — SlateOS Redoc CLI for API documentation
 //!
 //! Multi-personality: `redoc-cli`, `redocly`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_redocly(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: redocly COMMAND [OPTIONS]");
-        println!("Redocly CLI 1.16.0 (OurOS)");
+        println!("Redocly CLI 1.16.0 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  lint           Lint OpenAPI spec");

@@ -2,5 +2,5 @@
 name = "timeout"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS timeout/nohup/nice/renice process control"
+description = "SlateOS timeout/nohup/nice/renice process control"
 [dependencies]

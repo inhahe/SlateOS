@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! flexbuffers-cli — OurOS FlexBuffers schema-less binary inspector
+//! flexbuffers-cli — SlateOS FlexBuffers schema-less binary inspector
 //!
 //! Single personality: `flexbuf`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_flexbuf(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: flexbuf [OPTIONS] FILE");
-        println!("flexbuf v1.0 (OurOS) — FlexBuffers inspector");
+        println!("flexbuf v1.0 (SlateOS) — FlexBuffers inspector");
         println!();
         println!("Options:");
         println!("  FILE              FlexBuffers file to inspect");

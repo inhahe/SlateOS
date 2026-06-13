@@ -2,6 +2,6 @@
 name = "sysinfo-app"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS System Information — hardware and OS information explorer"
+description = "SlateOS System Information — hardware and OS information explorer"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pydoc-cli — OurOS Python documentation tools
+//! pydoc-cli — SlateOS Python documentation tools
 //!
 //! Multi-personality: `pydoc`, `pydoc3`
 
@@ -29,7 +29,7 @@ fn run_pydoc(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("pydoc 3.12.2 (OurOS)");
+        println!("pydoc 3.12.2 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "-p") {

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! syft-cli — OurOS Syft SBOM generator
+//! syft-cli — SlateOS Syft SBOM generator
 //!
 //! Multi-personality: `syft`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_syft(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: syft [SOURCE] [OPTIONS]");
-        println!("Syft 1.8.0 (OurOS) — SBOM generator");
+        println!("Syft 1.8.0 (SlateOS) — SBOM generator");
         println!();
         println!("Sources:");
         println!("  IMAGE           Container image");

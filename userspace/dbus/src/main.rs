@@ -1,4 +1,4 @@
-//! OurOS D-Bus Message Bus Daemon
+//! SlateOS D-Bus Message Bus Daemon
 //!
 //! A multi-personality binary providing:
 //! - `dbus-daemon`: The message bus daemon that routes D-Bus messages between clients
@@ -2168,7 +2168,7 @@ impl BusDaemon {
                 reply.destination = Some(sender.to_string());
                 reply
                     .body
-                    .push(DbusType::String("ouros-dbus-00000001".to_string()));
+                    .push(DbusType::String("slateos-dbus-00000001".to_string()));
                 reply.signature = Some("s".to_string());
                 responses.push(reply);
             }
@@ -3910,7 +3910,7 @@ mod tests {
 
         let msg = DbusMessage::method_call(1, DBUS_PATH, DBUS_INTERFACE, "GetId");
         let responses = daemon.handle_bus_message(&msg, &conn).unwrap();
-        assert_eq!(responses[0].body[0], DbusType::String("ouros-dbus-00000001".into()));
+        assert_eq!(responses[0].body[0], DbusType::String("slateos-dbus-00000001".into()));
     }
 
     #[test]

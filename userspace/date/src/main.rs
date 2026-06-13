@@ -1,4 +1,4 @@
-//! OurOS Date and Time Utility
+//! SlateOS Date and Time Utility
 //!
 //! Displays or sets the system date and time. Supports strftime-like format
 //! strings, multiple output formats (RFC 5322, RFC 3339, ISO 8601, JSON),
@@ -38,7 +38,7 @@ use std::process;
 // Syscall constants
 // ============================================================================
 
-// Native OurOS clock syscall numbers (kernel syscall/number.rs is the ABI
+// Native SlateOS clock syscall numbers (kernel syscall/number.rs is the ABI
 // source of truth).  These are NOT the Linux numbers, and they are NOT the
 // combined clock_gettime(clock_id, *ts) form: SYS_CLOCK_REALTIME takes no
 // arguments and returns wall-clock nanoseconds-since-epoch in rax;
@@ -882,7 +882,7 @@ struct Options {
 const VERSION: &str = "0.1.0";
 
 fn print_usage() {
-    println!("date (OurOS) {VERSION}");
+    println!("date (SlateOS) {VERSION}");
     println!();
     println!("Display or set the system date and time.");
     println!();
@@ -1051,7 +1051,7 @@ fn parse_args(args: &[String]) -> Options {
 ///
 /// Tries the kernel syscall first, falls back to std::time::SystemTime.
 fn get_current_time() -> Result<(i64, i64), String> {
-    // Try the direct syscall for OurOS.
+    // Try the direct syscall for SlateOS.
     if let Ok(time) = clock_gettime(CLOCK_REALTIME) { return Ok(time) }
 
     // Fallback: std::time::SystemTime (may work if the runtime is functional).
@@ -1077,7 +1077,7 @@ fn run(opts: Options) -> Result<(), String> {
             Ok(())
         }
         Action::Version => {
-            println!("date (OurOS) {VERSION}");
+            println!("date (SlateOS) {VERSION}");
             Ok(())
         }
         Action::Display { format } => {

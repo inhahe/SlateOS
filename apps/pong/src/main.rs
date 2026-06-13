@@ -1,4 +1,4 @@
-//! Pong game for OurOS.
+//! Pong game for SlateOS.
 //!
 //! Classic two-paddle ball game with AI opponent.
 //! Left paddle (player) uses Up/Down, right paddle is AI.

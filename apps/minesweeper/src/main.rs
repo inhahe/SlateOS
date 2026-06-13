@@ -5,7 +5,7 @@
 #![allow(clippy::cast_precision_loss)]
 #![allow(clippy::cast_lossless)]
 
-//! OurOS Minesweeper — classic mine-clearing puzzle game.
+//! SlateOS Minesweeper — classic mine-clearing puzzle game.
 //!
 //! Features three difficulty levels (Beginner, Intermediate, Expert),
 //! first-click-safe mine placement, flood-fill reveal, flagging,

@@ -2,5 +2,5 @@
 name = "mkfs"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS mkfs — create filesystems on disk devices or image files"
+description = "SlateOS mkfs — create filesystems on disk devices or image files"
 [dependencies]

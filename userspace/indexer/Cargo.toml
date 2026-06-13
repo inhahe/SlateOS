@@ -2,5 +2,5 @@
 name = "indexer"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS background file indexer — configurable paths and extensions, off by default"
+description = "SlateOS background file indexer — configurable paths and extensions, off by default"
 [dependencies]

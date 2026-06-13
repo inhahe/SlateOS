@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! piper-tts-cli — OurOS Piper neural text-to-speech
+//! piper-tts-cli — SlateOS Piper neural text-to-speech
 //!
 //! Single personality: `piper`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_piper(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: piper [OPTIONS]");
-        println!("Piper v1.2 (OurOS) — Fast neural text-to-speech");
+        println!("Piper v1.2 (SlateOS) — Fast neural text-to-speech");
         println!();
         println!("Options:");
         println!("  --model FILE      ONNX voice model");
@@ -28,7 +28,7 @@ fn run_piper(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Piper v1.2 (OurOS)");
+        println!("Piper v1.2 (SlateOS)");
         return 0;
     }
     println!("Piper TTS — Synthesizing...");

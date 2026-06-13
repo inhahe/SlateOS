@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pipx-cli — OurOS pipx tool for installing Python apps in isolated envs
+//! pipx-cli — SlateOS pipx tool for installing Python apps in isolated envs
 //!
 //! Multi-personality: `pipx`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pipx(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: pipx COMMAND [OPTIONS]");
-        println!("pipx 1.6.0 (OurOS)");
+        println!("pipx 1.6.0 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  install      Install a package");

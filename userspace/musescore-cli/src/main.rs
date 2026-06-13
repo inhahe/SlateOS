@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! musescore-cli — OurOS MuseScore music notation
+//! musescore-cli — SlateOS MuseScore music notation
 //!
 //! Multi-personality: `musescore`, `mscore`
 
@@ -10,7 +10,7 @@ use std::process;
 fn run_musescore(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: musescore [OPTIONS] [FILE.mscz]");
-        println!("MuseScore 4.2.1 (OurOS)");
+        println!("MuseScore 4.2.1 (SlateOS)");
         println!("  -o FILE        Export to file (pdf, png, svg, mp3, wav, midi, musicxml)");
         println!("  -r DPI         Resolution for image export");
         println!("  -T N           Trim margin (pixels)");
@@ -19,7 +19,7 @@ fn run_musescore(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("MuseScore 4.2.1 (OurOS)");
+        println!("MuseScore 4.2.1 (SlateOS)");
         println!("Built with Qt 6.6.1");
         return 0;
     }

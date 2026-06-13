@@ -1,4 +1,4 @@
-//! OurOS `at` -- schedule one-time command execution at a specified time
+//! SlateOS `at` -- schedule one-time command execution at a specified time
 //!
 //! Manages job files in `/var/spool/at/`. Each job is a text file containing
 //! a header (time, queue, user, creation timestamp) followed by shell commands.
@@ -56,7 +56,7 @@ const SPOOL_DIR: &str = "/var/spool/at";
 /// Default queue letter.
 const DEFAULT_QUEUE: char = 'a';
 
-/// Native OurOS wall-clock syscall (kernel syscall/number.rs); no-arg,
+/// Native SlateOS wall-clock syscall (kernel syscall/number.rs); no-arg,
 /// returns nanoseconds-since-epoch in rax.  The kernel has no combined
 /// clock_gettime(clock_id, *ts) form.  (Syscall 40 is SYS_PORT_READ; the old
 /// SYS_CLOCK_GETTIME=40 was wrong.)
@@ -1238,7 +1238,7 @@ fn parse_args() -> Result<Args, Error> {
 // ============================================================================
 
 fn print_usage() {
-    eprintln!("at (OurOS) v0.1.0 -- schedule one-time commands");
+    eprintln!("at (SlateOS) v0.1.0 -- schedule one-time commands");
     eprintln!();
     eprintln!("USAGE:");
     eprintln!("  at <timespec>                Schedule commands from stdin");

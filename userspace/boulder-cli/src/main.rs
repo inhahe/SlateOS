@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! boulder-cli — OurOS Boulder ACME CA server
+//! boulder-cli — SlateOS Boulder ACME CA server
 //!
 //! Single personality: `boulder`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_boulder(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: boulder [COMMAND] [OPTIONS]");
-        println!("Boulder (OurOS) — ACME-based certificate authority (Let's Encrypt)");
+        println!("Boulder (SlateOS) — ACME-based certificate authority (Let's Encrypt)");
         println!();
         println!("Commands:");
         println!("  start              Start all Boulder components");
@@ -30,8 +30,8 @@ fn run_boulder(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Boulder (OurOS) [ACME v2]"); return 0; }
-    println!("Boulder ACME CA (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Boulder (SlateOS) [ACME v2]"); return 0; }
+    println!("Boulder ACME CA (SlateOS)");
     println!("  WFE (Web Front End): https://0.0.0.0:4431");
     println!("  ACME directory: https://0.0.0.0:4431/directory");
     println!("  OCSP: http://0.0.0.0:4002");

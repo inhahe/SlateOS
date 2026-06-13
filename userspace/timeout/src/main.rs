@@ -1,5 +1,5 @@
 #![allow(unexpected_cfgs)]
-//! timeout/nohup/nice/renice — process control utilities for OurOS
+//! timeout/nohup/nice/renice — process control utilities for SlateOS
 //!
 //! Multi-personality binary detected via argv[0]:
 //! - `timeout`: run a command with a time limit
@@ -212,7 +212,7 @@ fn run_timeout(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("timeout (OurOS) 0.1.0");
+                println!("timeout (SlateOS) 0.1.0");
                 return 0;
             }
             "-s" | "--signal" => {
@@ -353,14 +353,14 @@ fn run_timeout(args: &[String]) -> i32 {
                     }
 
                     // Use our syscall to send signal
-                    #[cfg(target_os = "ouros")]
+                    #[cfg(target_os = "slateos")]
                     {
                         let pid = child.id();
                         sys_kill(pid, signal);
                     }
 
-                    // Fallback: try kill via Command (for non-ouros platforms in tests)
-                    #[cfg(not(target_os = "ouros"))]
+                    // Fallback: try kill via Command (for non-slateos platforms in tests)
+                    #[cfg(not(target_os = "slateos"))]
                     {
                         let _ = child.kill();
                     }
@@ -384,12 +384,12 @@ fn run_timeout(args: &[String]) -> i32 {
                                                 program
                                             );
                                         }
-                                        #[cfg(target_os = "ouros")]
+                                        #[cfg(target_os = "slateos")]
                                         {
                                             let pid = child.id();
                                             sys_kill(pid, SIGKILL);
                                         }
-                                        #[cfg(not(target_os = "ouros"))]
+                                        #[cfg(not(target_os = "slateos"))]
                                         {
                                             let _ = child.kill();
                                         }
@@ -431,7 +431,7 @@ fn run_nohup(args: &[String]) -> i32 {
     }
 
     if args[0] == "--version" {
-        println!("nohup (OurOS) 0.1.0");
+        println!("nohup (SlateOS) 0.1.0");
         return 0;
     }
 
@@ -475,7 +475,7 @@ fn run_nohup(args: &[String]) -> i32 {
         Stdio::inherit()
     };
 
-    // Spawn the child — on real OurOS, we'd ignore SIGHUP for this process
+    // Spawn the child — on real SlateOS, we'd ignore SIGHUP for this process
     let mut child = match Command::new(program)
         .args(child_args)
         .stdin(Stdio::inherit())
@@ -528,7 +528,7 @@ fn run_nice(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("nice (OurOS) 0.1.0");
+                println!("nice (SlateOS) 0.1.0");
                 return 0;
             }
             "-n" | "--adjustment" => {
@@ -655,7 +655,7 @@ fn run_renice(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("renice (OurOS) 0.1.0");
+                println!("renice (SlateOS) 0.1.0");
                 return 0;
             }
             "-n" | "--priority" => {
@@ -966,7 +966,7 @@ mod tests {
         // the argument parsing logic.
         let _args = ["-n".to_string(), "5".to_string()];
         // Without a command, nice should print current niceness.
-        // On non-ouros this would use the fallback syscall behavior.
+        // On non-slateos this would use the fallback syscall behavior.
     }
 
     // Duration edge cases

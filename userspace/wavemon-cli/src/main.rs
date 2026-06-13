@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wavemon-cli — OurOS wavemon wireless monitor
+//! wavemon-cli — SlateOS wavemon wireless monitor
 //!
 //! Single personality: `wavemon`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wavemon(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wavemon [OPTIONS]");
-        println!("wavemon v0.9 (OurOS) — Wireless network monitor");
+        println!("wavemon v0.9 (SlateOS) — Wireless network monitor");
         println!();
         println!("Options:");
         println!("  -i IFACE       Interface (default: wlan0)");
@@ -24,7 +24,7 @@ fn run_wavemon(args: &[String], _prog: &str) -> i32 {
         println!("statistics, AP info, and scan results.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("wavemon v0.9 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("wavemon v0.9 (SlateOS)"); return 0; }
     println!("wavemon: wireless monitor (wlan0)");
     println!("  SSID: HomeNetwork");
     println!("  Signal: -45 dBm (excellent)");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! java — OurOS Java runtime environment
+//! java — SlateOS Java runtime environment
 //!
 //! Multi-personality binary detected via argv[0]:
 //!
@@ -38,8 +38,8 @@ fn run_java(args: Vec<String>) -> i32 {
 
     if args.iter().any(|a| a == "--version" || a == "-version") {
         println!("openjdk version \"21.0.2\" 2025-01-16");
-        println!("OpenJDK Runtime Environment (OurOS build 21.0.2+13)");
-        println!("OpenJDK 64-Bit Server VM (OurOS build 21.0.2+13, mixed mode)");
+        println!("OpenJDK Runtime Environment (SlateOS build 21.0.2+13)");
+        println!("OpenJDK 64-Bit Server VM (SlateOS build 21.0.2+13, mixed mode)");
         return 0;
     }
 

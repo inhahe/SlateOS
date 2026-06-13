@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! swagger-cli — OurOS OpenAPI/Swagger CLI
+//! swagger-cli — SlateOS OpenAPI/Swagger CLI
 //!
 //! Single personality: `swagger`
 
@@ -11,7 +11,7 @@ fn run_swagger(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: swagger <COMMAND> [OPTIONS]");
         println!();
-        println!("OpenAPI/Swagger specification CLI (OurOS).");
+        println!("OpenAPI/Swagger specification CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  validate     Validate an OpenAPI spec");

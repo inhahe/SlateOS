@@ -1,4 +1,4 @@
-//! OurOS Network Configuration Utility
+//! SlateOS Network Configuration Utility
 //!
 //! Configure network interfaces, IP addresses, routes, and DNS.
 //! Reads live state from /proc/net/ and /sys/class/net/, writes
@@ -663,7 +663,7 @@ fn cmd_dns_add(server: &str) {
 // ============================================================================
 
 fn print_usage() {
-    println!("OurOS Network Configuration v0.1.0");
+    println!("SlateOS Network Configuration v0.1.0");
     println!();
     println!("Configure network interfaces, addresses, routes, and DNS.");
     println!();

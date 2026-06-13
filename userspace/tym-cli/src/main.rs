@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tym-cli — OurOS tym Lua-configurable terminal
+//! tym-cli — SlateOS tym Lua-configurable terminal
 //!
 //! Single personality: `tym`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_tym(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: tym [OPTIONS]");
-        println!("tym v3.5 (OurOS) — Lua-configurable terminal");
+        println!("tym v3.5 (SlateOS) — Lua-configurable terminal");
         println!();
         println!("Options:");
         println!("  -e CMD            Execute command");
@@ -23,7 +23,7 @@ fn run_tym(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("tym v3.5 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("tym v3.5 (SlateOS)"); return 0; }
     println!("tym terminal starting...");
     println!("  Config: Lua");
     println!("  VTE backend");

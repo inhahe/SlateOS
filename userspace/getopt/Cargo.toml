@@ -2,5 +2,5 @@
 name = "getopt"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS getopt/tsort/cksum - shell scripting helpers"
+description = "SlateOS getopt/tsort/cksum - shell scripting helpers"
 [dependencies]

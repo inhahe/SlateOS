@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! proton-cli — OurOS Proton/Steam compatibility CLI
+//! proton-cli — SlateOS Proton/Steam compatibility CLI
 //!
 //! Multi-personality: `proton`, `steam`
 
@@ -19,7 +19,7 @@ fn run_proton(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: proton VERB [OPTIONS]");
         println!();
-        println!("Proton — Steam Play compatibility tool (OurOS).");
+        println!("Proton — Steam Play compatibility tool (SlateOS).");
         println!();
         println!("Verbs:");
         println!("  run PROGRAM          Run program through Proton");
@@ -29,7 +29,7 @@ fn run_proton(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Proton 9.0-1 (OurOS)");
+        println!("Proton 9.0-1 (SlateOS)");
         return 0;
     }
 
@@ -62,7 +62,7 @@ fn run_steam(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: steam [OPTIONS] [steam://URL]");
         println!();
-        println!("Steam — game platform client (OurOS).");
+        println!("Steam — game platform client (SlateOS).");
         println!();
         println!("Options:");
         println!("  -applaunch APPID  Launch game by app ID");
@@ -77,7 +77,7 @@ fn run_steam(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Steam client version 1707267757 (OurOS)");
+        println!("Steam client version 1707267757 (SlateOS)");
         return 0;
     }
 

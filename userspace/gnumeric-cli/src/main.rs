@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gnumeric-cli — OurOS Gnumeric spreadsheet
+//! gnumeric-cli — SlateOS Gnumeric spreadsheet
 //!
 //! Multi-personality: `gnumeric`, `ssconvert`
 
@@ -13,13 +13,13 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gnumeric(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gnumeric [OPTIONS] [FILE...]");
-        println!("gnumeric v1.12 (OurOS) — GNOME spreadsheet");
+        println!("gnumeric v1.12 (SlateOS) — GNOME spreadsheet");
         println!();
         println!("Options:");
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("gnumeric v1.12 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("gnumeric v1.12 (SlateOS)"); return 0; }
     println!("gnumeric: spreadsheet application started");
     println!("  Functions: 500+ available");
     println!("  Plugins: Python, Perl");
@@ -29,7 +29,7 @@ fn run_gnumeric(args: &[String], _prog: &str) -> i32 {
 fn run_ssconvert(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ssconvert [OPTIONS] INFILE OUTFILE");
-        println!("ssconvert v1.12 (OurOS) — Spreadsheet format converter");
+        println!("ssconvert v1.12 (SlateOS) — Spreadsheet format converter");
         println!();
         println!("Options:");
         println!("  -T FMT            Output format");
@@ -37,7 +37,7 @@ fn run_ssconvert(args: &[String], _prog: &str) -> i32 {
         println!("  --list-exporters  List output formats");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("ssconvert v1.12 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("ssconvert v1.12 (SlateOS)"); return 0; }
     if args.iter().any(|a| a == "--list-exporters") {
         println!("Gnumeric_XmlIO:sax:0    Gnumeric XML (.gnumeric)");
         println!("Gnumeric_stf:stf_csv    CSV");

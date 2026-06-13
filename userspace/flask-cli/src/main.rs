@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! flask-cli — OurOS Flask web framework CLI
+//! flask-cli — SlateOS Flask web framework CLI
 //!
 //! Multi-personality: `flask`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_flask(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: flask COMMAND [OPTIONS]");
-        println!("Flask 3.0.3 (OurOS)");
+        println!("Flask 3.0.3 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  run          Run development server");

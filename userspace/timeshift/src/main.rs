@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! timeshift — OurOS system restore tool
+//! timeshift — SlateOS system restore tool
 //!
 //! Single personality: `timeshift`
 
@@ -32,7 +32,7 @@ fn run_timeshift(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Timeshift v24.06.3 (OurOS)");
+        println!("Timeshift v24.06.3 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "--list") {

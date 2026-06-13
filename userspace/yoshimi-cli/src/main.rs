@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! yoshimi-cli — OurOS Yoshimi software synthesizer
+//! yoshimi-cli — SlateOS Yoshimi software synthesizer
 //!
 //! Single personality: `yoshimi`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_yoshimi(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: yoshimi [OPTIONS]");
-        println!("Yoshimi v2.3 (OurOS) — Software synthesizer (ZynAddSubFX fork)");
+        println!("Yoshimi v2.3 (SlateOS) — Software synthesizer (ZynAddSubFX fork)");
         println!();
         println!("Options:");
         println!("  -a DRIVER     Audio backend (jack, alsa)");
@@ -28,8 +28,8 @@ fn run_yoshimi(args: &[String], _prog: &str) -> i32 {
         println!("  --version     Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Yoshimi v2.3.2 (OurOS)"); return 0; }
-    println!("Yoshimi v2.3.2 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Yoshimi v2.3.2 (SlateOS)"); return 0; }
+    println!("Yoshimi v2.3.2 (SlateOS)");
     println!("  Audio: JACK @ 48000 Hz");
     println!("  MIDI: JACK (auto-connect)");
     println!("  Buffer: 256 samples (5.3ms latency)");

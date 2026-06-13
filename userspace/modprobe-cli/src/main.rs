@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! modprobe-cli — OurOS kernel module tools
+//! modprobe-cli — SlateOS kernel module tools
 //!
 //! Multi-personality: `modprobe`, `insmod`, `rmmod`, `lsmod`, `modinfo`, `depmod`
 
@@ -19,7 +19,7 @@ fn run_modprobe(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: modprobe [OPTIONS] MODULE [PARAMS]");
         println!();
-        println!("modprobe — add/remove kernel modules (OurOS).");
+        println!("modprobe — add/remove kernel modules (SlateOS).");
         println!();
         println!("Options:");
         println!("  -r, --remove     Remove module");
@@ -33,7 +33,7 @@ fn run_modprobe(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("kmod version 31 (OurOS)");
+        println!("kmod version 31 (SlateOS)");
         return 0;
     }
 
@@ -114,7 +114,7 @@ fn run_modinfo(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: modinfo [OPTIONS] MODULE...");
         println!();
-        println!("modinfo — show kernel module information (OurOS).");
+        println!("modinfo — show kernel module information (SlateOS).");
         return 0;
     }
 
@@ -122,7 +122,7 @@ fn run_modinfo(args: &[String]) -> i32 {
     println!("filename:       /lib/modules/1.0.0/kernel/drivers/{}.ko", module);
     println!("license:        GPL");
     println!("description:    {} kernel module", module);
-    println!("author:         OurOS");
+    println!("author:         SlateOS");
     println!("srcversion:     ABCDEF0123456789");
     println!("alias:          pci:v*d*sv*sd*bc03sc00i00*");
     println!("depends:        ");
@@ -137,7 +137,7 @@ fn run_depmod(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: depmod [OPTIONS] [VERSION]");
         println!();
-        println!("depmod — generate module dependency file (OurOS).");
+        println!("depmod — generate module dependency file (SlateOS).");
         return 0;
     }
     let verbose = args.iter().any(|a| a == "-v");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! oracle-cli — OurOS Oracle Database (SQL*Plus + sqlcl)
+//! oracle-cli — SlateOS Oracle Database (SQL*Plus + sqlcl)
 //!
 //! Single personality: `oracle`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_oracle(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: oracle [OPTIONS] [USER/PASS@TNS]");
-        println!("Oracle Database 23ai (OurOS) — SQL*Plus / SQLcl client");
+        println!("Oracle Database 23ai (SlateOS) — SQL*Plus / SQLcl client");
         println!();
         println!("Options:");
         println!("  -S USER/PASS@TNS       Silent login");
@@ -23,8 +23,8 @@ fn run_oracle(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Oracle Database 23ai Enterprise Edition Release 23.4.0.24.05 (OurOS)"); return 0; }
-    println!("Oracle Database 23ai Enterprise Edition Release 23.4.0.24.05 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Oracle Database 23ai Enterprise Edition Release 23.4.0.24.05 (SlateOS)"); return 0; }
+    println!("Oracle Database 23ai Enterprise Edition Release 23.4.0.24.05 (SlateOS)");
     println!("  Editions: Free, Standard, Enterprise, Express, Cloud");
     println!("  23ai: AI Vector Search, JSON Relational Duality, JavaScript stored procs");
     println!("  Engine: multi-tenant CDB/PDB architecture, Real Application Clusters (RAC)");

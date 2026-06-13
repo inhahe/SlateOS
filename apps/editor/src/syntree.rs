@@ -1,4 +1,4 @@
-//! Syntactic structure tree for the OurOS text editor.
+//! Syntactic structure tree for the SlateOS text editor.
 //!
 //! Provides a hierarchical view of source-code scopes derived from balanced
 //! brace / paren / bracket pairs, with awareness of string and comment
@@ -22,7 +22,7 @@
 //! would require sysroot stubs, a C cross-compile, and per-language grammar
 //! crates. For the editor's needs (structural selection, outline, folding)
 //! a brace-scope tree is sufficient, native to Rust, and `no_std`-friendly.
-//! When upstream tree-sitter becomes available in the OurOS toolchain the
+//! When upstream tree-sitter becomes available in the SlateOS toolchain the
 //! editor can swap this module for a tree-sitter-backed one behind the
 //! same API; the rest of the editor will not need to change.
 //!

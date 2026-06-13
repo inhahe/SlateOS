@@ -2,6 +2,6 @@
 name = "guiremote"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS remote-desktop protocol — serialises guitk RenderCommand streams"
+description = "SlateOS remote-desktop protocol — serialises guitk RenderCommand streams"
 [dependencies]
 guitk = { path = "../toolkit" }

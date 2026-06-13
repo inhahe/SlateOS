@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vault-cli — OurOS HashiCorp Vault secrets manager CLI
+//! vault-cli — SlateOS HashiCorp Vault secrets manager CLI
 //!
 //! Single personality: `vault`
 
@@ -42,7 +42,7 @@ fn run_vault(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
         "version" | "-version" => {
-            println!("Vault v1.15.4 (OurOS)");
+            println!("Vault v1.15.4 (SlateOS)");
             0
         }
         "status" => {

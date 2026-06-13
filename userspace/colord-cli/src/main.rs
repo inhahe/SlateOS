@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! colord-cli — OurOS colord display color management
+//! colord-cli — SlateOS colord display color management
 //!
 //! Single personality: `colormgr`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_colormgr(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: colormgr COMMAND [OPTIONS]");
-        println!("colormgr v1.4 (OurOS) — Color management client");
+        println!("colormgr v1.4 (SlateOS) — Color management client");
         println!();
         println!("Commands:");
         println!("  get-devices       List color-managed devices");
@@ -23,7 +23,7 @@ fn run_colormgr(args: &[String], _prog: &str) -> i32 {
         println!("  version           Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "version" || a == "--version") { println!("colormgr v1.4 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "version" || a == "--version") { println!("colormgr v1.4 (SlateOS)"); return 0; }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("get-devices");
     match cmd {
         "get-devices" => {

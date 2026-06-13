@@ -1,4 +1,4 @@
-//! OurOS Internet Super-Server Daemon (inetd)
+//! SlateOS Internet Super-Server Daemon (inetd)
 //!
 //! Listens on configured TCP/UDP ports and dispatches incoming connections to
 //! the appropriate service program. Supports both `wait` (persistent, one

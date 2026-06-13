@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! so — OurOS StackOverflow from the terminal
+//! so — SlateOS StackOverflow from the terminal
 //!
 //! Single personality: `so`
 
@@ -22,7 +22,7 @@ fn run_so(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("so 0.4.9 (OurOS)");
+        println!("so 0.4.9 (SlateOS)");
         return 0;
     }
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zstd — OurOS Zstandard compression utility
+//! zstd — SlateOS Zstandard compression utility
 //!
 //! Multi-personality binary detected via argv[0]:
 //!
@@ -109,7 +109,7 @@ fn run_zstd(args: Vec<String>, personality: &str) -> i32 {
                 return 0;
             }
             "--version" | "-V" => {
-                println!("*** zstd command line interface 0.1.0 (OurOS) ***");
+                println!("*** zstd command line interface 0.1.0 (SlateOS) ***");
                 println!("zstd library version: 0.1.0");
                 return 0;
             }

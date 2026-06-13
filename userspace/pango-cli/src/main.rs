@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pango-cli — OurOS Pango text layout tool
+//! pango-cli — SlateOS Pango text layout tool
 //!
 //! Single personality: `pango-view`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pango(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: pango-view [OPTIONS] [FILE]");
-        println!("pango-view v1.52 (OurOS) — Pango text rendering tool");
+        println!("pango-view v1.52 (SlateOS) — Pango text rendering tool");
         println!();
         println!("Options:");
         println!("  FILE              Input text file");
@@ -28,7 +28,7 @@ fn run_pango(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("pango-view v1.52 (OurOS)");
+        println!("pango-view v1.52 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "--header") {

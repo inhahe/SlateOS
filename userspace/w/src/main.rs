@@ -1,4 +1,4 @@
-// OurOS w — show who is logged in and what they are doing
+// SlateOS w — show who is logged in and what they are doing
 //
 // Multi-personality binary:
 //   w      — show logged-in users and their activity
@@ -698,7 +698,7 @@ fn print_version(personality: Personality) {
         Personality::Finger => "finger",
         Personality::Pinky => "pinky",
     };
-    println!("{name} (OurOS) 0.1.0");
+    println!("{name} (SlateOS) 0.1.0");
 }
 
 // ---------------------------------------------------------------------------

@@ -1,10 +1,10 @@
-//! OurOS Logged-In Users Display (`who` / `w`)
+//! SlateOS Logged-In Users Display (`who` / `w`)
 //!
 //! Shows who is currently logged in to the system. Reads session data from
 //! multiple sources in priority order:
 //!
 //! 1. `/var/run/utmp` -- binary utmp records (Linux format for compatibility)
-//! 2. `/run/sessions/` -- OurOS native session directory
+//! 2. `/run/sessions/` -- SlateOS native session directory
 //! 3. `/tmp/.users/` -- fallback: files named by username
 //!
 //! When invoked as `w` (detected via `argv[0]`), displays an extended format
@@ -336,7 +336,7 @@ fn read_utmp(path: &str) -> Option<Vec<SessionRecord>> {
 }
 
 // ============================================================================
-// Data source: /run/sessions/ (OurOS native)
+// Data source: /run/sessions/ (SlateOS native)
 // ============================================================================
 
 /// Parse session files from /run/sessions/.
@@ -1028,7 +1028,7 @@ fn print_json(records: &[&SessionRecord], opts: &Options) {
 // ============================================================================
 
 fn print_help() {
-    println!("OurOS Logged-In Users Display v0.1.0");
+    println!("SlateOS Logged-In Users Display v0.1.0");
     println!();
     println!("Show who is logged in to the system.");
     println!();
@@ -1056,7 +1056,7 @@ fn print_help() {
 }
 
 fn print_version() {
-    println!("who (OurOS) 0.1.0");
+    println!("who (SlateOS) 0.1.0");
 }
 
 /// Parse command-line arguments into Options.

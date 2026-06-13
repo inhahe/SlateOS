@@ -2,5 +2,5 @@
 name = "lvm"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS lvm - logical volume management (pvcreate/vgcreate/lvcreate/pvs/vgs/lvs)"
+description = "SlateOS lvm - logical volume management (pvcreate/vgcreate/lvcreate/pvs/vgs/lvs)"
 [dependencies]

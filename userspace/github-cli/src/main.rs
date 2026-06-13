@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! github-cli — OurOS GitHub gh CLI
+//! github-cli — SlateOS GitHub gh CLI
 //!
 //! Single personality: `github`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gh(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: github [OPTIONS] [SUBCMD]");
-        println!("GitHub CLI gh 2.62 (OurOS) — Official GitHub command-line tool");
+        println!("GitHub CLI gh 2.62 (SlateOS) — Official GitHub command-line tool");
         println!();
         println!("Options:");
         println!("  auth login             Authenticate with github.com or Enterprise");
@@ -24,8 +24,8 @@ fn run_gh(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("gh version 2.62.0 (2024-11-21) — github.com/cli/cli (OurOS)"); return 0; }
-    println!("GitHub CLI gh 2.62.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("gh version 2.62.0 (2024-11-21) — github.com/cli/cli (SlateOS)"); return 0; }
+    println!("GitHub CLI gh 2.62.0 (SlateOS)");
     println!("  Source: github.com/cli/cli (Go, MIT-licensed)");
     println!("  Coverage: PRs, issues, releases, gists, repos, secrets, codespaces,");
     println!("            Actions runs/workflows, Projects (v2), Copilot extensions");

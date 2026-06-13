@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mprocs — OurOS run multiple commands in parallel with TUI
+//! mprocs — SlateOS run multiple commands in parallel with TUI
 //!
 //! Single personality: `mprocs`
 
@@ -22,7 +22,7 @@ fn run_mprocs(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("mprocs 0.7.1 (OurOS)");
+        println!("mprocs 0.7.1 (SlateOS)");
         return 0;
     }
 
@@ -32,7 +32,7 @@ fn run_mprocs(args: Vec<String>) -> i32 {
         .collect();
 
     if commands.is_empty() {
-        println!("mprocs 0.7.1 (OurOS)");
+        println!("mprocs 0.7.1 (SlateOS)");
         println!("(reading from mprocs.yaml in current directory)");
         println!();
         println!("Processes (from config):");
@@ -40,7 +40,7 @@ fn run_mprocs(args: Vec<String>) -> i32 {
         println!("  [1] client   — npm run client");
         println!("  [2] worker   — cargo run --bin worker");
     } else {
-        println!("mprocs 0.7.1 (OurOS)");
+        println!("mprocs 0.7.1 (SlateOS)");
         println!();
         println!("Processes:");
         for (i, cmd) in commands.iter().enumerate() {

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! backblaze-cli — OurOS Backblaze Personal Backup + B2 Cloud Storage
+//! backblaze-cli — SlateOS Backblaze Personal Backup + B2 Cloud Storage
 //!
 //! Single personality: `backblaze`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_bb(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: backblaze [OPTIONS]");
-        println!("Backblaze (OurOS) — Personal Backup + B2 Cloud Storage");
+        println!("Backblaze (SlateOS) — Personal Backup + B2 Cloud Storage");
         println!();
         println!("Options:");
         println!("  --personal             Personal Backup (unlimited PC/Mac for $99/yr)");
@@ -23,8 +23,8 @@ fn run_bb(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Backblaze Backup 9.0.3.836 / B2 CLI 4.0 (OurOS)"); return 0; }
-    println!("Backblaze 9.0.3.836 / B2 4.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Backblaze Backup 9.0.3.836 / B2 CLI 4.0 (SlateOS)"); return 0; }
+    println!("Backblaze 9.0.3.836 / B2 4.0 (SlateOS)");
     println!("  Vendor: Backblaze, Inc. (San Mateo, CA; founded 2007)");
     println!("  Founders: Gleb Budman (CEO), Brian Wilson, Tim Nufire, Damon Uyeda, Casey Jones");
     println!("  IPO: NASDAQ:BLZE (Nov 2021)");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! marqo-cli — OurOS Marqo (open-source multi-modal vector search engine, Sydney AU)
+//! marqo-cli — SlateOS Marqo (open-source multi-modal vector search engine, Sydney AU)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_marqo(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: marqo [OPTIONS]");
-        println!("Marqo (OurOS) — open-source multi-modal vector search engine (Sydney AU)");
+        println!("Marqo (SlateOS) — open-source multi-modal vector search engine (Sydney AU)");
         println!();
         println!("Options:");
         println!("  --multimodal           Multi-modal search (text + image + audio + video)");
@@ -20,8 +20,8 @@ fn run_marqo(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Marqo 2024 (OurOS) — marqo CLI 2.x"); return 0; }
-    println!("Marqo 2024 (OurOS) — Open-Source Multi-Modal Vector Search Engine");
+    if args.iter().any(|a| a == "--version") { println!("Marqo 2024 (SlateOS) — marqo CLI 2.x"); return 0; }
+    println!("Marqo 2024 (SlateOS) — Open-Source Multi-Modal Vector Search Engine");
     println!("  Vendor: Marqo AI, Pty Ltd (Sydney, Australia — private)");
     println!("  Founders: Tom Hamer + Jesse Clark, 2021");
     println!("          Tom Hamer: CEO, ex-Amazon (AWS), ex-Atlassian");

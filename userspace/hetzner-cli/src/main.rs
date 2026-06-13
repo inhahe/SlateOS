@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hetzner-cli — OurOS Hetzner Cloud CLI
+//! hetzner-cli — SlateOS Hetzner Cloud CLI
 //!
 //! Single personality: `hcloud`
 
@@ -11,7 +11,7 @@ fn run_hcloud(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "help") {
         println!("Usage: hcloud <COMMAND> [OPTIONS]");
         println!();
-        println!("hcloud — Hetzner Cloud CLI (OurOS).");
+        println!("hcloud — Hetzner Cloud CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  server          Manage servers");
@@ -29,7 +29,7 @@ fn run_hcloud(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "version") {
-        println!("hcloud v1.42.0 (OurOS)");
+        println!("hcloud v1.42.0 (SlateOS)");
         return 0;
     }
 

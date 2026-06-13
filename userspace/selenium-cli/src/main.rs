@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! selenium-cli — OurOS Selenium WebDriver CLI
+//! selenium-cli — SlateOS Selenium WebDriver CLI
 //!
 //! Single personality: `selenium`
 
@@ -11,7 +11,7 @@ fn run_selenium(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: selenium <COMMAND> [OPTIONS]");
         println!();
-        println!("Selenium WebDriver management CLI (OurOS).");
+        println!("Selenium WebDriver management CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  server       Start Selenium server");
@@ -23,7 +23,7 @@ fn run_selenium(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("Selenium 4.17.0 (OurOS)");
+        println!("Selenium 4.17.0 (SlateOS)");
         return 0;
     }
 
@@ -47,8 +47,8 @@ fn run_selenium(args: Vec<String>) -> i32 {
         "sessions" => {
             println!("Active Sessions:");
             println!("  ID                                   Browser     Platform");
-            println!("  abc123-def456-ghi789                 chrome 120  OurOS");
-            println!("  jkl012-mno345-pqr678                 firefox 121 OurOS");
+            println!("  abc123-def456-ghi789                 chrome 120  SlateOS");
+            println!("  jkl012-mno345-pqr678                 firefox 121 SlateOS");
             0
         }
         "drivers" => {

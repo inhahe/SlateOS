@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! citrix-cli — OurOS Citrix Workspace / DaaS / Hypervisor
+//! citrix-cli — SlateOS Citrix Workspace / DaaS / Hypervisor
 //!
 //! Single personality: `citrix`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ctx(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: citrix [OPTIONS]");
-        println!("Citrix Workspace 2410 (OurOS) — Enterprise VDI, app delivery, DaaS");
+        println!("Citrix Workspace 2410 (SlateOS) — Enterprise VDI, app delivery, DaaS");
         println!();
         println!("Options:");
         println!("  --workspace            Citrix Workspace app (client)");
@@ -26,8 +26,8 @@ fn run_ctx(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Citrix Workspace 2410.10.0.16 (OurOS)"); return 0; }
-    println!("Citrix Workspace 2410.10.0.16 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Citrix Workspace 2410.10.0.16 (SlateOS)"); return 0; }
+    println!("Citrix Workspace 2410.10.0.16 (SlateOS)");
     println!("  Vendor: Cloud Software Group (formed Sep 2022 — Citrix + TIBCO merger)");
     println!("  Citrix founded: 1989 by Ed Iacobucci (Texas) — pioneered terminal session protocols");
     println!("  Made famous by: WinFrame (Multi-Win on NT 3.51), MetaFrame, Presentation Server,");

@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-//! Internet Radio — streaming radio player for OurOS.
+//! Internet Radio — streaming radio player for SlateOS.
 //!
 //! Features:
 //! - Preset stations organized by genre

@@ -54,7 +54,7 @@ fn print_help(prog: &str) {
 }
 
 fn print_version() {
-    println!("logrotate 0.1.0 (OurOS personality CLI)");
+    println!("logrotate 0.1.0 (SlateOS personality CLI)");
 }
 
 fn run_about() {

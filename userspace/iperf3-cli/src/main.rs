@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! iperf3-cli — OurOS iPerf3 network bandwidth tester
+//! iperf3-cli — SlateOS iPerf3 network bandwidth tester
 //!
 //! Single personality: `iperf3`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_iperf3(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: iperf3 -s|-c HOST [OPTIONS]");
-        println!("iperf3 v3.16 (OurOS) — Network bandwidth measurement");
+        println!("iperf3 v3.16 (SlateOS) — Network bandwidth measurement");
         println!();
         println!("Server mode:");
         println!("  -s                Run as server");

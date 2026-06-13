@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! premiere-cli — OurOS Adobe Premiere Pro video editing
+//! premiere-cli — SlateOS Adobe Premiere Pro video editing
 //!
 //! Single personality: `premiere`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_premiere(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: premiere [OPTIONS] [PROJECT]");
-        println!("Adobe Premiere Pro 2024 (OurOS) — Professional video editing");
+        println!("Adobe Premiere Pro 2024 (SlateOS) — Professional video editing");
         println!();
         println!("Options:");
         println!("  -open FILE             Open project (.prproj)");
@@ -23,8 +23,8 @@ fn run_premiere(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Adobe Premiere Pro 2024 v24.5.0 (OurOS)"); return 0; }
-    println!("Adobe Premiere Pro 2024 v24.5.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Adobe Premiere Pro 2024 v24.5.0 (SlateOS)"); return 0; }
+    println!("Adobe Premiere Pro 2024 v24.5.0 (SlateOS)");
     println!("  Engine: Mercury Playback Engine (GPU accelerated)");
     println!("  Codecs: All major formats incl. RED, ARRI, BRAW, ProRes");
     println!("  Scripting: ExtendScript, CEP panels");

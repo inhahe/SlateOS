@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gopass-cli — OurOS gopass CLI
+//! gopass-cli — SlateOS gopass CLI
 //!
 //! Single personality: `gopass`
 
@@ -11,7 +11,7 @@ fn run_gopass(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gopass <COMMAND> [OPTIONS]");
         println!();
-        println!("gopass — the team password manager (OurOS).");
+        println!("gopass — the team password manager (SlateOS).");
         println!();
         println!("Commands:");
         println!("  init         Initialize store");
@@ -34,7 +34,7 @@ fn run_gopass(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("gopass 1.15.0 (OurOS)");
+        println!("gopass 1.15.0 (SlateOS)");
         return 0;
     }
 

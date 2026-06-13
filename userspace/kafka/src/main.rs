@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kafka — OurOS distributed event streaming platform
+//! kafka — SlateOS distributed event streaming platform
 //!
 //! Multi-personality: `kafka-server-start` (broker), `kafka-topics`,
 //!   `kafka-console-producer`, `kafka-console-consumer`, `kafka-consumer-groups`
@@ -17,7 +17,7 @@ fn run_kafka_server(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Apache Kafka 3.7.0 (OurOS) (Commit: abc1234)");
+        println!("Apache Kafka 3.7.0 (SlateOS) (Commit: abc1234)");
         return 0;
     }
     let config = args.first().map(|s| s.as_str()).unwrap_or("config/server.properties");

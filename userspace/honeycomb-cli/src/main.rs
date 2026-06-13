@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! honeycomb-cli — OurOS Honeycomb.io (Charity Majors' observability platform, high-cardinality events)
+//! honeycomb-cli — SlateOS Honeycomb.io (Charity Majors' observability platform, high-cardinality events)
 //!
 //! Single personality: `honeycomb`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_hc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: honeycomb [OPTIONS]");
-        println!("Honeycomb.io (OurOS) — Observability for distributed systems");
+        println!("Honeycomb.io (SlateOS) — Observability for distributed systems");
         println!();
         println!("Options:");
         println!("  --query                Query (group by + filter + heatmap)");
@@ -23,8 +23,8 @@ fn run_hc(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Honeycomb.io (OurOS)"); return 0; }
-    println!("Honeycomb.io (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Honeycomb.io (SlateOS)"); return 0; }
+    println!("Honeycomb.io (SlateOS)");
     println!("  Vendor: Hound Technology, Inc. (San Francisco, dba 'Honeycomb', founded 2016)");
     println!("  Founders: Charity Majors (ex-Parse/Facebook ops legend) + Christine Yen");
     println!("           also founded the modern 'observability' (vs monitoring) discourse");

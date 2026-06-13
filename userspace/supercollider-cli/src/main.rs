@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! supercollider-cli — OurOS SuperCollider audio synthesis
+//! supercollider-cli — SlateOS SuperCollider audio synthesis
 //!
 //! Multi-personality: `sclang`, `scsynth`, `scide`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sclang(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sclang [OPTIONS] [FILE.scd]");
-        println!("SuperCollider Language 3.13.0 (OurOS)");
+        println!("SuperCollider Language 3.13.0 (SlateOS)");
         println!("  -d DIR         Runtime directory");
         println!("  -u PORT        UDP port for server");
         println!("  -l N           Post window lines");
@@ -21,7 +21,7 @@ fn run_sclang(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("sclang 3.13.0 (OurOS)");
+        println!("sclang 3.13.0 (SlateOS)");
         return 0;
     }
     let file = args.iter().find(|a| a.ends_with(".scd") || a.ends_with(".sc")).map(|s| s.as_str());
@@ -53,7 +53,7 @@ fn run_scsynth(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("scsynth 3.13.0 (OurOS)");
+        println!("scsynth 3.13.0 (SlateOS)");
         return 0;
     }
     let port = args.windows(2).find(|w| w[0] == "-u").map(|w| w[1].as_str()).unwrap_or("57110");
@@ -73,7 +73,7 @@ fn run_scide(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("SuperCollider IDE 3.13.0 (OurOS)");
+        println!("SuperCollider IDE 3.13.0 (SlateOS)");
         return 0;
     }
     println!("SuperCollider IDE 3.13.0 — Starting...");

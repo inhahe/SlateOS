@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! glusterfs-cli — OurOS GlusterFS distributed filesystem
+//! glusterfs-cli — SlateOS GlusterFS distributed filesystem
 //!
 //! Multi-personality: `gluster`, `glusterd`, `glusterfsd`
 
@@ -15,19 +15,19 @@ fn run_gluster(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [COMMAND] [OPTIONS]", prog);
         match prog {
             "glusterd" => {
-                println!("glusterd (OurOS) — GlusterFS management daemon");
+                println!("glusterd (SlateOS) — GlusterFS management daemon");
                 println!("  --volfile-id ID    Volume file ID");
                 println!("  --pid-file FILE    PID file");
                 println!("  --log-file FILE    Log file");
                 println!("  --log-level LEVEL  Log level");
             }
             "glusterfsd" => {
-                println!("glusterfsd (OurOS) — GlusterFS brick daemon");
+                println!("glusterfsd (SlateOS) — GlusterFS brick daemon");
                 println!("  --volfile-id ID    Volume file ID");
                 println!("  --brick-name NAME  Brick name");
             }
             _ => {
-                println!("GlusterFS v11.1 (OurOS) — Scalable distributed filesystem");
+                println!("GlusterFS v11.1 (SlateOS) — Scalable distributed filesystem");
                 println!();
                 println!("Commands:");
                 println!("  volume create|start|stop|delete  Manage volumes");
@@ -40,14 +40,14 @@ fn run_gluster(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("GlusterFS v11.1.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("GlusterFS v11.1.0 (SlateOS)"); return 0; }
     match prog {
         "glusterd" | "glusterfsd" => {
-            println!("GlusterFS Daemon v11.1.0 (OurOS)");
+            println!("GlusterFS Daemon v11.1.0 (SlateOS)");
             println!("  Status: running");
         }
         _ => {
-            println!("GlusterFS v11.1.0 (OurOS)");
+            println!("GlusterFS v11.1.0 (SlateOS)");
             println!("  Peers: 4 connected");
             println!("  Volumes: 3 (2 distributed-replicate, 1 dispersed)");
             println!("  Bricks: 12 total");

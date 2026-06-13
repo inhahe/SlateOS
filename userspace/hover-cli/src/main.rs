@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! hover-cli — OurOS personality CLI for Hover, the Tucows-owned no-upsell registrar.
+//! hover-cli — SlateOS personality CLI for Hover, the Tucows-owned no-upsell registrar.
 
 use std::env;
 use std::process;

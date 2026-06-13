@@ -1,4 +1,4 @@
-//! OurOS shuf/factor/numfmt — randomization and number tools
+//! SlateOS shuf/factor/numfmt — randomization and number tools
 //!
 //! Multi-personality binary detected via argv[0]:
 //! - `shuf`: Randomly permute lines / select random lines

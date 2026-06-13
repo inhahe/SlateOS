@@ -1,4 +1,4 @@
-//! OurOS password aging utility.
+//! SlateOS password aging utility.
 //!
 //! Multi-personality binary providing:
 //! - **chage** — change user password expiry information

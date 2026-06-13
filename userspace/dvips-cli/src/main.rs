@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dvips-cli — OurOS DVI to PostScript converter & DVI tools
+//! dvips-cli — SlateOS DVI to PostScript converter & DVI tools
 //!
 //! Multi-personality: `dvips`, `dvipdfmx`, `dvisvgm`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_dvips(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: dvips [OPTIONS] FILE.dvi");
-        println!("dvips 2024.1 (OurOS)");
+        println!("dvips 2024.1 (SlateOS)");
         println!();
         println!("Options:");
         println!("  -o FILE       Output file (default: FILE.ps)");
@@ -29,7 +29,7 @@ fn run_dvips(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("dvips(k) 2024.1 (TeX Live 2024/OurOS)");
+        println!("dvips(k) 2024.1 (TeX Live 2024/SlateOS)");
         return 0;
     }
     let file = args.iter()
@@ -42,7 +42,7 @@ fn run_dvips(args: &[String]) -> i32 {
         .map(|w| w[1].as_str());
     let out_default = format!("{}.ps", base);
     let out = outfile.unwrap_or(out_default.as_str());
-    println!("This is dvips(k) 2024.1 (TeX Live 2024/OurOS)");
+    println!("This is dvips(k) 2024.1 (TeX Live 2024/SlateOS)");
     println!("' TeX output {}.dvi' ->  {}", base, out);
     println!("<texc.pro><texps.pro>.");
     println!("[1] [2] [3] [4] [5]");
@@ -53,7 +53,7 @@ fn run_dvips(args: &[String]) -> i32 {
 fn run_dvipdfmx(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: dvipdfmx [OPTIONS] FILE.dvi");
-        println!("dvipdfmx 20240116 (OurOS)");
+        println!("dvipdfmx 20240116 (SlateOS)");
         println!();
         println!("Options:");
         println!("  -o FILE       Output file");
@@ -65,7 +65,7 @@ fn run_dvipdfmx(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("dvipdfmx version 20240116 (OurOS)");
+        println!("dvipdfmx version 20240116 (SlateOS)");
         return 0;
     }
     let file = args.iter()
@@ -87,7 +87,7 @@ fn run_dvipdfmx(args: &[String]) -> i32 {
 fn run_dvisvgm(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: dvisvgm [OPTIONS] FILE.dvi");
-        println!("dvisvgm 3.2.2 (OurOS)");
+        println!("dvisvgm 3.2.2 (SlateOS)");
         println!();
         println!("Options:");
         println!("  -o FILE       Output file");
@@ -100,7 +100,7 @@ fn run_dvisvgm(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("dvisvgm 3.2.2 (OurOS)");
+        println!("dvisvgm 3.2.2 (SlateOS)");
         return 0;
     }
     let file = args.iter()

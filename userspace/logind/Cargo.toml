@@ -2,5 +2,5 @@
 name = "logind"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS logind - session manager (logind/loginctl)"
+description = "SlateOS logind - session manager (logind/loginctl)"
 [dependencies]

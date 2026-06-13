@@ -1,7 +1,7 @@
-//! OurOS Flatpak — sandboxed application management
+//! SlateOS Flatpak — sandboxed application management
 //!
 //! A multi-personality binary providing sandboxed application packaging,
-//! installation, and management for OurOS. Implements the core flatpak
+//! installation, and management for SlateOS. Implements the core flatpak
 //! command set for managing applications and runtimes from OSTree-based
 //! remotes.
 //!
@@ -1466,13 +1466,13 @@ fn cmd_config(args: &[String]) -> i32 {
 // ============================================================================
 
 fn print_version() {
-    println!("flatpak 1.0.0 (OurOS)");
+    println!("flatpak 1.0.0 (SlateOS)");
 }
 
 fn print_help(prog: &str) {
     println!("Usage: {} COMMAND [OPTIONS]", prog);
     println!();
-    println!("Sandboxed application management for OurOS");
+    println!("Sandboxed application management for SlateOS");
     println!();
     println!("Application commands:");
     println!("  install [REMOTE] REF      Install an application or runtime");

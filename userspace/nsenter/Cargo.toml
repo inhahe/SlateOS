@@ -2,5 +2,5 @@
 name = "nsenter"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS namespace enter utility"
+description = "SlateOS namespace enter utility"
 [dependencies]

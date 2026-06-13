@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! strapi-cli — OurOS personality CLI for Strapi, the open-source Node.js headless CMS.
+//! strapi-cli — SlateOS personality CLI for Strapi, the open-source Node.js headless CMS.
 
 use std::env;
 use std::process;

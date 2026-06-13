@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! graywolf-cli — OurOS GrayWolf placement tool
+//! graywolf-cli — SlateOS GrayWolf placement tool
 //!
 //! Single personality: `graywolf`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_graywolf(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: graywolf [OPTIONS] DESIGN");
-        println!("GrayWolf v0.1.6 (OurOS) — Standard cell placement");
+        println!("GrayWolf v0.1.6 (SlateOS) — Standard cell placement");
         println!();
         println!("Options:");
         println!("  -n             No graphics mode");
@@ -23,8 +23,8 @@ fn run_graywolf(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("GrayWolf v0.1.6 (OurOS)"); return 0; }
-    println!("GrayWolf v0.1.6 (OurOS) — Standard Cell Placement");
+    if args.iter().any(|a| a == "--version") { println!("GrayWolf v0.1.6 (SlateOS)"); return 0; }
+    println!("GrayWolf v0.1.6 (SlateOS) — Standard Cell Placement");
     println!("  Design: processor_core");
     println!("  Reading .cel file...");
     println!("  Cells: 8,901");

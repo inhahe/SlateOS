@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mailgun-cli — OurOS Mailgun email CLI
+//! mailgun-cli — SlateOS Mailgun email CLI
 //!
 //! Single personality: `mailgun`
 
@@ -11,7 +11,7 @@ fn run_mailgun(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mailgun <COMMAND> [OPTIONS]");
         println!();
-        println!("Mailgun email API CLI (OurOS).");
+        println!("Mailgun email API CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  send         Send an email");

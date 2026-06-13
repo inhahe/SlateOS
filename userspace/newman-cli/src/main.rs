@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! newman-cli — OurOS Newman Postman collection runner
+//! newman-cli — SlateOS Newman Postman collection runner
 //!
 //! Multi-personality: `newman`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_newman(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: newman COMMAND [OPTIONS]");
-        println!("Newman v6.1.3 (OurOS)");
+        println!("Newman v6.1.3 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  run          Run a collection");

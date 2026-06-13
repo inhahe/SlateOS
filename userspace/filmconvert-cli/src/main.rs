@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! filmconvert-cli — OurOS FilmConvert film emulation
+//! filmconvert-cli — SlateOS FilmConvert film emulation
 //!
 //! Single personality: `filmconvert`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_fc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: filmconvert [OPTIONS] [FILE]");
-        println!("FilmConvert Nitrate 3 (OurOS) — Film stock emulation plug-in");
+        println!("FilmConvert Nitrate 3 (SlateOS) — Film stock emulation plug-in");
         println!();
         println!("Options:");
         println!("  --camera MODEL         Source camera (RED/ARRI/SONY/Canon profiles)");
@@ -23,8 +23,8 @@ fn run_fc(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("FilmConvert Nitrate 3.5 (OurOS)"); return 0; }
-    println!("FilmConvert Nitrate 3.5 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("FilmConvert Nitrate 3.5 (SlateOS)"); return 0; }
+    println!("FilmConvert Nitrate 3.5 (SlateOS)");
     println!("  Film stocks: 18 cinema, photographic, TV stocks (Kodak, Fuji, Polaroid)");
     println!("  Camera profiles: 50+ digital camera color matching");
     println!("  Grain: real film grain scanned from celluloid");

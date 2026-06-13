@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pdfcpu-cli — OurOS pdfcpu PDF processor
+//! pdfcpu-cli — SlateOS pdfcpu PDF processor
 //!
 //! Single personality: `pdfcpu`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pdfcpu(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "help") || args.is_empty() {
         println!("Usage: pdfcpu COMMAND [OPTIONS]");
-        println!("pdfcpu 0.8.0 (OurOS) — PDF processor");
+        println!("pdfcpu 0.8.0 (SlateOS) — PDF processor");
         println!();
         println!("Commands:");
         println!("  validate        Validate PDF");
@@ -39,7 +39,7 @@ fn run_pdfcpu(args: &[String], _prog: &str) -> i32 {
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match cmd {
-        "version" => println!("pdfcpu v0.8.0 (OurOS)"),
+        "version" => println!("pdfcpu v0.8.0 (SlateOS)"),
         "info" => {
             let file = args.get(1).map(|s| s.as_str()).unwrap_or("doc.pdf");
             println!("pdfcpu info for '{}':", file);

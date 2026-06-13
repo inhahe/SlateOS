@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! elastic-cli — OurOS Elastic (Elasticsearch + Kibana + ELK Stack, Mountain View + Amsterdam, NYSE:ESTC)
+//! elastic-cli — SlateOS Elastic (Elasticsearch + Kibana + ELK Stack, Mountain View + Amsterdam, NYSE:ESTC)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_elastic(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: elastic [OPTIONS]");
-        println!("Elastic (OurOS) — Elasticsearch + Kibana + Beats (NYSE:ESTC, search + observability + security)");
+        println!("Elastic (SlateOS) — Elasticsearch + Kibana + Beats (NYSE:ESTC, search + observability + security)");
         println!();
         println!("Options:");
         println!("  --search               Elasticsearch (the search engine)");
@@ -23,8 +23,8 @@ fn run_elastic(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Elastic 2024 (OurOS) — Elasticsearch 8.x"); return 0; }
-    println!("Elastic 2024 (OurOS) — Search + Observability + Security Platform");
+    if args.iter().any(|a| a == "--version") { println!("Elastic 2024 (SlateOS) — Elasticsearch 8.x"); return 0; }
+    println!("Elastic 2024 (SlateOS) — Search + Observability + Security Platform");
     println!("  Vendor: Elastic N.V. (Mountain View, CA + Amsterdam — NYSE:ESTC since 2018)");
     println!("  Founder: Shay Banon, 2012 (Elasticsearch BV — then 'Elastic')");
     println!("          Shay built Compass (search lib, 2004) → Elasticsearch (2010 — open-source)");

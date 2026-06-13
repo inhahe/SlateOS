@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cellwriter-cli — OurOS handwriting recognition input
+//! cellwriter-cli — SlateOS handwriting recognition input
 //!
 //! Single personality: `cellwriter`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_cellwriter(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: cellwriter [OPTIONS]");
-        println!("cellwriter v1.3 (OurOS) — Handwriting recognition input panel");
+        println!("cellwriter v1.3 (SlateOS) — Handwriting recognition input panel");
         println!();
         println!("Options:");
         println!("  --show           Show input panel");
@@ -28,7 +28,7 @@ fn run_cellwriter(args: &[String], _prog: &str) -> i32 {
         println!("  --version        Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("CellWriter v1.3.6 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("CellWriter v1.3.6 (SlateOS)"); return 0; }
     if args.iter().any(|a| a == "--train") {
         println!("CellWriter Training Mode");
         println!("  Profile: default");
@@ -38,7 +38,7 @@ fn run_cellwriter(args: &[String], _prog: &str) -> i32 {
         println!("  Ready for additional training.");
         return 0;
     }
-    println!("CellWriter v1.3.6 (OurOS) — Handwriting Input");
+    println!("CellWriter v1.3.6 (SlateOS) — Handwriting Input");
     println!("  Cells: 8");
     println!("  Profile: default");
     println!("  Recognition engine: built-in");

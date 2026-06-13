@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! choose — OurOS human-friendly alternative to awk/cut
+//! choose — SlateOS human-friendly alternative to awk/cut
 //!
 //! Single personality: `choose`
 
@@ -36,7 +36,7 @@ fn run_choose(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("choose 1.3.4 (OurOS)");
+        println!("choose 1.3.4 (SlateOS)");
         return 0;
     }
 

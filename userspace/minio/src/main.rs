@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! minio — OurOS S3-compatible object storage
+//! minio — SlateOS S3-compatible object storage
 //!
 //! Multi-personality: `minio` (server), `mc` (client)
 
@@ -19,8 +19,8 @@ fn run_minio_server(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("minio version RELEASE.2025-05-22 (OurOS)");
-        println!("Runtime: go1.22.2 ouros/amd64");
+        println!("minio version RELEASE.2025-05-22 (SlateOS)");
+        println!("Runtime: go1.22.2 slateos/amd64");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("server");
@@ -32,7 +32,7 @@ fn run_minio_server(args: Vec<String>) -> i32 {
         println!("MinIO Object Storage Server");
         println!("Copyright: 2015-2025 MinIO, Inc.");
         println!("License: GNU AGPLv3 — https://www.gnu.org/licenses/agpl-3.0.html");
-        println!("Version: RELEASE.2025-05-22 (OurOS)");
+        println!("Version: RELEASE.2025-05-22 (SlateOS)");
         println!();
         println!("API: http://0.0.0.0{}", addr);
         println!("WebUI: http://0.0.0.0:9001");
@@ -77,7 +77,7 @@ fn run_mc(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "version" => {
-            println!("mc version RELEASE.2025-05-22 (OurOS)");
+            println!("mc version RELEASE.2025-05-22 (SlateOS)");
             0
         }
         "alias" => {

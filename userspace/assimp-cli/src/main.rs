@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! assimp-cli — OurOS Open Asset Import Library
+//! assimp-cli — SlateOS Open Asset Import Library
 //!
 //! Single personality: `assimp`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_assimp(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: assimp COMMAND [OPTIONS] FILE");
-        println!("Assimp v5.4 (OurOS) — Open Asset Import Library");
+        println!("Assimp v5.4 (SlateOS) — Open Asset Import Library");
         println!();
         println!("Commands:");
         println!("  info FILE         Show model info");
@@ -25,7 +25,7 @@ fn run_assimp(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("assimp v5.4 (OurOS)");
+        println!("assimp v5.4 (SlateOS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("info");

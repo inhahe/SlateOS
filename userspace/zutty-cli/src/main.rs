@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zutty-cli — OurOS Zutty GPU terminal emulator
+//! zutty-cli — SlateOS Zutty GPU terminal emulator
 //!
 //! Single personality: `zutty`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_zutty(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: zutty [OPTIONS] [CMD...]");
-        println!("zutty v0.14 (OurOS) — OpenGL ES compute-shader terminal");
+        println!("zutty v0.14 (SlateOS) — OpenGL ES compute-shader terminal");
         println!();
         println!("Options:");
         println!("  CMD               Command to run");
@@ -26,7 +26,7 @@ fn run_zutty(args: &[String], _prog: &str) -> i32 {
         println!("  -version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "-version" || a == "--version") { println!("zutty v0.14 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "-version" || a == "--version") { println!("zutty v0.14 (SlateOS)"); return 0; }
     println!("Zutty terminal starting...");
     println!("  Renderer: OpenGL ES 3.1 compute shader");
     println!("  Font: monospace 14pt");

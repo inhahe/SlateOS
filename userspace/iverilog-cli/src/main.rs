@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! iverilog-cli — OurOS Icarus Verilog simulator
+//! iverilog-cli — SlateOS Icarus Verilog simulator
 //!
 //! Multi-personality: `iverilog`, `vvp`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_iverilog(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: iverilog [OPTIONS] FILE.v [FILE.v ...]");
-        println!("Icarus Verilog 12.0 (OurOS)");
+        println!("Icarus Verilog 12.0 (SlateOS)");
         println!();
         println!("  -o FILE        Output file (default: a.out)");
         println!("  -g SPEC        Generation (2001, 2005, 2005-sv, 2009, 2012)");
@@ -25,7 +25,7 @@ fn run_iverilog(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("Icarus Verilog version 12.0 (stable) (OurOS)");
+        println!("Icarus Verilog version 12.0 (stable) (SlateOS)");
         println!("Copyright (c) 1998-2024 Stephen Williams (steve@icarus.com)");
         return 0;
     }
@@ -52,7 +52,7 @@ fn run_vvp(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Icarus Verilog runtime version 12.0 (OurOS)");
+        println!("Icarus Verilog runtime version 12.0 (SlateOS)");
         return 0;
     }
     let file = args.iter().find(|a| !a.starts_with('-') && !a.starts_with('+')).map(|s| s.as_str()).unwrap_or("a.out");

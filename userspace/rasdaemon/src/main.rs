@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rasdaemon — OurOS RAS (Reliability, Availability, Serviceability) event logger
+//! rasdaemon — SlateOS RAS (Reliability, Availability, Serviceability) event logger
 //!
 //! Multi-personality binary for monitoring and logging hardware error events.
 //! Detected via argv[0]:
@@ -233,7 +233,7 @@ fn run_rasdaemon(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("rasdaemon 0.1.0 (OurOS)");
+            println!("rasdaemon 0.1.0 (SlateOS)");
             0
         }
         "--summary" | "summary" => cmd_summary(),
@@ -481,9 +481,9 @@ fn mc_status() -> i32 {
 fn mc_mainboard() -> i32 {
     println!("Mainboard Information");
     println!("=====================");
-    println!("  Manufacturer: OurOS Virtual Hardware");
+    println!("  Manufacturer: SlateOS Virtual Hardware");
     println!("  Product: Virtual Desktop Board");
-    println!("  BIOS: OurOS BIOS v1.0");
+    println!("  BIOS: SlateOS BIOS v1.0");
     println!("  Memory controller: Integrated IMC");
     0
 }

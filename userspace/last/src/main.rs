@@ -1,4 +1,4 @@
-//! OurOS Login Records Viewer (`last` / `lastb` / `lastlog`)
+//! SlateOS Login Records Viewer (`last` / `lastb` / `lastlog`)
 //!
 //! Multi-personality binary that shows historical login information. The
 //! personality is detected via `argv[0]`:
@@ -1106,7 +1106,7 @@ fn print_last_help(personality: Personality) {
         Personality::Lastb => "lastb",
         Personality::Lastlog => "lastlog",
     };
-    println!("OurOS Login Records Viewer v0.1.0");
+    println!("SlateOS Login Records Viewer v0.1.0");
     println!();
     println!("Show listing of last logged-in users.");
     println!();
@@ -1133,7 +1133,7 @@ fn print_last_help(personality: Personality) {
 }
 
 fn print_lastlog_help() {
-    println!("OurOS Last Login Viewer v0.1.0");
+    println!("SlateOS Last Login Viewer v0.1.0");
     println!();
     println!("Show last login information for all users.");
     println!();
@@ -1155,7 +1155,7 @@ fn print_version(personality: Personality) {
         Personality::Lastb => "lastb",
         Personality::Lastlog => "lastlog",
     };
-    println!("{name} (OurOS) 0.1.0");
+    println!("{name} (SlateOS) 0.1.0");
 }
 
 // ============================================================================

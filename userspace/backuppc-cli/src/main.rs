@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! backuppc-cli — OurOS BackupPC enterprise backup
+//! backuppc-cli — SlateOS BackupPC enterprise backup
 //!
 //! Multi-personality: `backuppc`, `backuppc-nightly`, `backuppc-servermesg`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_backuppc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: backuppc [OPTIONS]");
-        println!("backuppc v4.4 (OurOS) — Enterprise-grade backup system");
+        println!("backuppc v4.4 (SlateOS) — Enterprise-grade backup system");
         println!();
         println!("Options:");
         println!("  -d            Run as daemon");
@@ -23,7 +23,7 @@ fn run_backuppc(args: &[String], _prog: &str) -> i32 {
         println!("Features: pooling, dedup, compression, rsync/tar/smb transport");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("backuppc v4.4 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("backuppc v4.4 (SlateOS)"); return 0; }
     if args.iter().any(|a| a == "--status") {
         println!("BackupPC Status:");
         println!("  Hosts configured: 8");
@@ -42,7 +42,7 @@ fn run_backuppc(args: &[String], _prog: &str) -> i32 {
 fn run_backuppc_nightly(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: backuppc-nightly [OPTIONS]");
-        println!("backuppc-nightly v4.4 (OurOS) — Nightly maintenance");
+        println!("backuppc-nightly v4.4 (SlateOS) — Nightly maintenance");
         return 0;
     }
     let _ = args;
@@ -55,7 +55,7 @@ fn run_backuppc_nightly(args: &[String], _prog: &str) -> i32 {
 fn run_backuppc_servermesg(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: backuppc-servermesg <command>");
-        println!("backuppc-servermesg v4.4 (OurOS) — Send messages to server");
+        println!("backuppc-servermesg v4.4 (SlateOS) — Send messages to server");
         return 0;
     }
     if let Some(cmd) = args.first() {

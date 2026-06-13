@@ -102,14 +102,14 @@ programs that call it:
   NUMA-tuned server apps.
 
 The genuine "fourth option" is the *trigger condition*, not a different
-behavior today: **if OuRoS ever targets real multi-socket hardware**, implement
+behavior today: **if SlateOS ever targets real multi-socket hardware**, implement
 NUMA properly (real node tracking + placement) — and at that point per-VMA
 policy (option C) comes along for free and *is* worth it. Until then there's no
 multi-node to be aware of.
 
 ### "What's the end result on native and Linux programs? What % is affected?"
 
-- **Native OuRoS programs:** **zero affected.** NUMA mempolicy is a Linux-ABI
+- **Native SlateOS programs:** **zero affected.** NUMA mempolicy is a Linux-ABI
   construct; native programs don't call these syscalls at all.
 - **Linux programs:** only those using `libnuma` / `numactl` /
   `set_mempolicy_home_node` — i.e. **server software hand-tuned for
@@ -231,7 +231,7 @@ You're right that even with everything configurable, we still have to pick a
 shipped default. My recommendation (and what's currently set), consistent with
 the design spec's "committed memory by default, no silent overcommit":
 
-- **Native default → strict-commit.** Matches the OuRoS principle; native apps
+- **Native default → strict-commit.** Matches the SlateOS principle; native apps
   are written for our ABI and can opt into lazy explicitly.
 - **Linux default → lazy/overcommit (value 0).** Matches what Linux software
   expects; maximizes the number of Linux programs that run — your stated
@@ -256,10 +256,10 @@ Your decisions here are recorded in `design-decisions.md §9`:
   initiative (roadmap task 5031). One nuance I flagged: the dependency is
   *mostly* the other way around (Make/configure scripts are driven *by* a
   shell), but it doesn't actually block us, because the toolchain is
-  **cross-built on the dev host** initially, not self-hosted on OuRoS — and we
+  **cross-built on the dev host** initially, not self-hosted on SlateOS — and we
   already have a kernel shell + coreutils. So toolchain-first is fine; a real
   `/bin/sh` (bash or a smaller POSIX sh) becomes the natural follow-on when we
-  want `make`/`configure` running *on* OuRoS.
+  want `make`/`configure` running *on* SlateOS.
 
 - **fastpy vs CPython — one correction.** Your comment suggested porting fastpy
   *before, or instead of,* CPython. fastpy is indeed our preferred *fast* Python

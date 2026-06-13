@@ -1,6 +1,6 @@
-//! `OurOS` SSH Server Daemon (sshd)
+//! `SlateOS` SSH Server Daemon (sshd)
 //!
-//! An SSH-2 protocol server for `OurOS`. Listens for incoming SSH connections,
+//! An SSH-2 protocol server for `SlateOS`. Listens for incoming SSH connections,
 //! authenticates users, and spawns interactive shell sessions or executes
 //! commands on behalf of authenticated users.
 //!
@@ -21,7 +21,7 @@
 //! # Protocol
 //!
 //! Implements a subset of SSH-2 (RFC 4253, 4252, 4254):
-//! - Version exchange (SSH-2.0-OurOS_SSHD_1.0)
+//! - Version exchange (SSH-2.0-SlateOS_SSHD_1.0)
 //! - Key exchange: diffie-hellman-group14-sha256
 //! - Host key: ssh-ed25519 (structured)
 //! - Encryption: AES-128-CTR
@@ -398,7 +398,7 @@ impl From<io::Error> for SshdError {
 // ============================================================================
 
 /// Our server version identification string.
-const SSH_SERVER_VERSION: &str = "SSH-2.0-OurOS_SSHD_1.0";
+const SSH_SERVER_VERSION: &str = "SSH-2.0-SlateOS_SSHD_1.0";
 
 /// SSH message type codes (RFC 4253 / 4252 / 4254).
 mod msg {
@@ -1455,7 +1455,7 @@ impl HostKey {
     /// Generate a deterministic host key from the daemon's identity.
     fn generate_default() -> Self {
         let mut material = Vec::new();
-        material.extend_from_slice(b"ouros-sshd-default-host-key");
+        material.extend_from_slice(b"slateos-sshd-default-host-key");
         material.extend_from_slice(&get_pid().to_le_bytes());
         let seed = sha256(&material);
         Self::from_seed(seed)
@@ -2814,7 +2814,7 @@ fn handle_channel_request(conn: &mut ConnectionState, payload: &[u8]) -> Result<
             }
 
             // Send a welcome message.
-            let welcome = format!("Welcome to OurOS, {}!\r\n$ ", conn.username);
+            let welcome = format!("Welcome to SlateOS, {}!\r\n$ ", conn.username);
             send_channel_data(conn, remote_id, welcome.as_bytes())?;
         }
         "exec" => {
@@ -3275,9 +3275,9 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_version_string_ouros() {
-        let sw = parse_version_string("SSH-2.0-OurOS_1.0");
-        assert_eq!(sw, Some("OurOS_1.0"));
+    fn test_parse_version_string_slateos() {
+        let sw = parse_version_string("SSH-2.0-SlateOS_1.0");
+        assert_eq!(sw, Some("SlateOS_1.0"));
     }
 
     #[test]

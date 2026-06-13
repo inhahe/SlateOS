@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! filmora-cli — OurOS Wondershare Filmora (consumer video editor)
+//! filmora-cli — SlateOS Wondershare Filmora (consumer video editor)
 //!
 //! Single personality: `filmora`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_fil(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: filmora [OPTIONS]");
-        println!("Wondershare Filmora 14 (OurOS) — Consumer video editor (China-based)");
+        println!("Wondershare Filmora 14 (SlateOS) — Consumer video editor (China-based)");
         println!();
         println!("Options:");
         println!("  --new                  New project");
@@ -24,8 +24,8 @@ fn run_fil(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Wondershare Filmora 14.0.11 (OurOS)"); return 0; }
-    println!("Wondershare Filmora 14.0.11 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Wondershare Filmora 14.0.11 (SlateOS)"); return 0; }
+    println!("Wondershare Filmora 14.0.11 (SlateOS)");
     println!("  Vendor: Wondershare Technology (HQ Shenzhen, China — founded 2003)");
     println!("  Founder: Wu Taibing (CEO)");
     println!("  Platforms: Windows, macOS, iOS, iPadOS, Android (cross-platform parity)");

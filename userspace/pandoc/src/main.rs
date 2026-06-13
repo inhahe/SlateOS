@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pandoc — OurOS universal document converter
+//! pandoc — SlateOS universal document converter
 //!
 //! Single personality: `pandoc`
 
@@ -32,7 +32,7 @@ fn run_pandoc(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("pandoc 3.2 (OurOS)");
+        println!("pandoc 3.2 (SlateOS)");
         println!("Features: +server +lua");
         return 0;
     }

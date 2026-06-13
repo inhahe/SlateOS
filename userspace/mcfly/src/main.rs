@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mcfly — OurOS fly through your shell history with smart search
+//! mcfly — SlateOS fly through your shell history with smart search
 //!
 //! Single personality: `mcfly`
 
@@ -30,7 +30,7 @@ fn run_mcfly(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("mcfly 0.9.1 (OurOS)");
+            println!("mcfly 0.9.1 (SlateOS)");
             0
         }
         "init" => {

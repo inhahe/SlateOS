@@ -1,4 +1,4 @@
-//! OurOS ELF Binary Inspector
+//! SlateOS ELF Binary Inspector
 //!
 //! Parses and displays information from ELF32 and ELF64 binary files.
 //! Supports both little-endian and big-endian ELF files.
@@ -79,7 +79,7 @@ const EM_RISCV: u16 = 243;
 const ELFOSABI_NONE: u8 = 0;
 const ELFOSABI_LINUX: u8 = 3;
 const ELFOSABI_FREEBSD: u8 = 9;
-const ELFOSABI_OUROS: u8 = 255; // OurOS custom ABI marker
+const ELFOSABI_SLATEOS: u8 = 255; // SlateOS custom ABI marker
 
 // Program header types (p_type)
 const PT_NULL: u32 = 0;
@@ -1254,7 +1254,7 @@ fn osabi_name(a: u8) -> &'static str {
         ELFOSABI_NONE => "UNIX - System V",
         ELFOSABI_LINUX => "Linux",
         ELFOSABI_FREEBSD => "FreeBSD",
-        ELFOSABI_OUROS => "OurOS",
+        ELFOSABI_SLATEOS => "SlateOS",
         _ => "<unknown>",
     }
 }
@@ -2474,7 +2474,7 @@ mod tests {
     fn test_osabi_names() {
         assert_eq!(osabi_name(ELFOSABI_NONE), "UNIX - System V");
         assert_eq!(osabi_name(ELFOSABI_LINUX), "Linux");
-        assert_eq!(osabi_name(ELFOSABI_OUROS), "OurOS");
+        assert_eq!(osabi_name(ELFOSABI_SLATEOS), "SlateOS");
     }
 
     #[test]

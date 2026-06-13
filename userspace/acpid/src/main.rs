@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! acpid — OurOS ACPI event daemon
+//! acpid — SlateOS ACPI event daemon
 //!
 //! Multi-personality binary for handling ACPI events (power button, lid,
 //! AC adapter, thermal, sleep/wake).
@@ -238,7 +238,7 @@ fn run_acpid(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-v" => {
-            println!("acpid 0.1.0 (OurOS)");
+            println!("acpid 0.1.0 (SlateOS)");
             0
         }
         "--status" | "status" => daemon_status(),
@@ -392,7 +392,7 @@ fn run_acpi(args: Vec<String>) -> i32 {
             0
         }
         "--version" => {
-            println!("acpi 0.1.0 (OurOS)");
+            println!("acpi 0.1.0 (SlateOS)");
             0
         }
         "-b" | "--battery" => show_battery(false),

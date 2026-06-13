@@ -2,7 +2,7 @@
 name = "inetd"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS inetd - internet super-server daemon"
+description = "SlateOS inetd - internet super-server daemon"
 [dependencies]
 
 [lints]

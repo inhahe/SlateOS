@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mdbook — OurOS create books from Markdown files
+//! mdbook — SlateOS create books from Markdown files
 //!
 //! Single personality: `mdbook`
 
@@ -29,7 +29,7 @@ fn run_mdbook(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("mdbook v0.4.37 (OurOS)");
+            println!("mdbook v0.4.37 (SlateOS)");
             0
         }
         "init" => {

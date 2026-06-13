@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vuepress-cli — OurOS VuePress CLI
+//! vuepress-cli — SlateOS VuePress CLI
 //!
 //! Multi-personality: `vuepress`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_vuepress(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: vuepress COMMAND [OPTIONS]");
-        println!("VuePress 2.0.0-rc.14 (OurOS)");
+        println!("VuePress 2.0.0-rc.14 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  dev            Start development server");
@@ -41,7 +41,7 @@ fn run_vuepress(args: &[String]) -> i32 {
         }
         "info" => {
             println!("Environment Info:");
-            println!("  System: OurOS x86_64");
+            println!("  System: SlateOS x86_64");
             println!("  Node: v20.11.0");
             println!("  VuePress: 2.0.0-rc.14");
             println!("  Vue: 3.4.21");

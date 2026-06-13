@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! asana-cli — OurOS Asana CLI
+//! asana-cli — SlateOS Asana CLI
 //!
 //! Single personality: `asana`
 
@@ -11,7 +11,7 @@ fn run_asana(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: asana <COMMAND> [OPTIONS]");
         println!();
-        println!("Asana project management CLI (OurOS).");
+        println!("Asana project management CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  tasks        Manage tasks");

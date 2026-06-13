@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pulumi-cli — OurOS Pulumi infrastructure as code
+//! pulumi-cli — SlateOS Pulumi infrastructure as code
 //!
 //! Multi-personality: `pulumi`
 
@@ -11,7 +11,7 @@ fn run_pulumi(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: pulumi [FLAGS] COMMAND [ARGS]");
         println!();
-        println!("pulumi — infrastructure as code (OurOS).");
+        println!("pulumi — infrastructure as code (SlateOS).");
         println!();
         println!("Commands:");
         println!("  new            Create new project");
@@ -29,7 +29,7 @@ fn run_pulumi(args: &[String]) -> i32 {
 
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match subcmd {
-        "version" | "--version" => println!("v3.105.0 (OurOS)"),
+        "version" | "--version" => println!("v3.105.0 (SlateOS)"),
         "whoami" => {
             println!("User: admin");
             println!("Backend URL: https://app.pulumi.com/admin");
@@ -38,7 +38,7 @@ fn run_pulumi(args: &[String]) -> i32 {
             println!("Previewing update (dev):");
             println!();
             println!("     Type                 Name             Plan");
-            println!(" +   pulumi:pulumi:Stack  ouros-infra-dev  create");
+            println!(" +   pulumi:pulumi:Stack  slateos-infra-dev  create");
             println!(" +   ├─ aws:ec2:Instance  web-server       create");
             println!(" +   ├─ aws:ec2:SecurityGroup  web-sg      create");
             println!(" +   └─ aws:s3:Bucket     data-bucket      create");
@@ -50,7 +50,7 @@ fn run_pulumi(args: &[String]) -> i32 {
             println!("Updating (dev):");
             println!();
             println!("     Type                 Name             Status");
-            println!(" +   pulumi:pulumi:Stack  ouros-infra-dev  created (3s)");
+            println!(" +   pulumi:pulumi:Stack  slateos-infra-dev  created (3s)");
             println!(" +   ├─ aws:ec2:SecurityGroup  web-sg      created (2s)");
             println!(" +   ├─ aws:ec2:Instance  web-server       created (25s)");
             println!(" +   └─ aws:s3:Bucket     data-bucket      created (3s)");
@@ -68,7 +68,7 @@ fn run_pulumi(args: &[String]) -> i32 {
             println!("Destroying (dev):");
             println!();
             println!("     Type                 Name             Status");
-            println!(" -   pulumi:pulumi:Stack  ouros-infra-dev  deleted");
+            println!(" -   pulumi:pulumi:Stack  slateos-infra-dev  deleted");
             println!(" -   ├─ aws:ec2:Instance  web-server       deleted (15s)");
             println!(" -   ├─ aws:ec2:SecurityGroup  web-sg      deleted (2s)");
             println!(" -   └─ aws:s3:Bucket     data-bucket      deleted (3s)");
@@ -83,9 +83,9 @@ fn run_pulumi(args: &[String]) -> i32 {
             match cmd {
                 "ls" => {
                     println!("NAME   LAST UPDATE  RESOURCE COUNT  URL");
-                    println!("dev    2h ago       4               https://app.pulumi.com/admin/ouros-infra/dev");
-                    println!("staging 1d ago      4               https://app.pulumi.com/admin/ouros-infra/staging");
-                    println!("prod   3d ago       8               https://app.pulumi.com/admin/ouros-infra/prod");
+                    println!("dev    2h ago       4               https://app.pulumi.com/admin/slateos-infra/dev");
+                    println!("staging 1d ago      4               https://app.pulumi.com/admin/slateos-infra/staging");
+                    println!("prod   3d ago       8               https://app.pulumi.com/admin/slateos-infra/prod");
                 }
                 "select" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("dev");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vega-cli — OurOS Vega/Vega-Lite visualization CLI
+//! vega-cli — SlateOS Vega/Vega-Lite visualization CLI
 //!
 //! Multi-personality: `vg2png`, `vg2svg`, `vg2pdf`, `vl2vg`
 
@@ -15,7 +15,7 @@ fn run_vega(args: &[String], prog: &str) -> i32 {
         match prog {
             "vl2vg" => {
                 println!("Usage: vl2vg [OPTIONS] [FILE]");
-                println!("vl2vg v5.0 (OurOS) — Compile Vega-Lite to Vega");
+                println!("vl2vg v5.0 (SlateOS) — Compile Vega-Lite to Vega");
                 println!("  -o FILE    Output file");
                 println!("  --pretty   Pretty-print JSON");
             }
@@ -26,7 +26,7 @@ fn run_vega(args: &[String], prog: &str) -> i32 {
                     _ => "SVG",
                 };
                 println!("Usage: {} [OPTIONS] [FILE]", prog);
-                println!("{} v5.0 (OurOS) — Render Vega spec to {}", prog, format);
+                println!("{} v5.0 (SlateOS) — Render Vega spec to {}", prog, format);
                 println!("  -o FILE    Output file");
                 println!("  -s SCALE   Scale factor (default: 1)");
                 println!("  -b COLOR   Background color");
@@ -36,7 +36,7 @@ fn run_vega(args: &[String], prog: &str) -> i32 {
         println!("  --version  Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("vega-cli v5.28.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("vega-cli v5.28.0 (SlateOS)"); return 0; }
     let files: Vec<&String> = args.iter().filter(|a| !a.starts_with('-') && {
         let idx = args.iter().position(|x| std::ptr::eq(x, *a)).unwrap_or(0);
         idx == 0 || !matches!(args.get(idx.wrapping_sub(1)).map(|s| s.as_str()), Some("-o" | "-s" | "-b" | "--seed"))

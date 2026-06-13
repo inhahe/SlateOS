@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cosign-cli — OurOS Sigstore container signing CLI
+//! cosign-cli — SlateOS Sigstore container signing CLI
 //!
 //! Single personality: `cosign`
 
@@ -31,7 +31,7 @@ fn run_cosign(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
         "version" => {
-            println!("cosign 2.2.3 (OurOS)");
+            println!("cosign 2.2.3 (SlateOS)");
             0
         }
         "generate-key-pair" => {

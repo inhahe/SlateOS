@@ -9,7 +9,7 @@ Add the 60 coreutils binaries to the kernel's embedded binaries and
 deploy them to /bin/ on boot, alongside hello, ticker, and shell.
 
 Recommend using a loop over the binary directory or a build script that
-scans `userspace/coreutils/target/x86_64-ouros/release/` for all
+scans `userspace/coreutils/target/x86_64-slateos/release/` for all
 binaries and generates `include_bytes!` statics automatically.
 
 Example pattern in `kernel/src/main.rs`:
@@ -18,9 +18,9 @@ Example pattern in `kernel/src/main.rs`:
 // One include_bytes per utility. Generate with a build script or
 // maintain a list. Key binaries (sorted):
 const COREUTILS: &[(&str, &[u8])] = &[
-    ("basename", include_bytes!("../../userspace/coreutils/target/x86_64-ouros/release/basename")),
-    ("cat", include_bytes!("../../userspace/coreutils/target/x86_64-ouros/release/cat")),
-    ("chmod", include_bytes!("../../userspace/coreutils/target/x86_64-ouros/release/chmod")),
+    ("basename", include_bytes!("../../userspace/coreutils/target/x86_64-slateos/release/basename")),
+    ("cat", include_bytes!("../../userspace/coreutils/target/x86_64-slateos/release/cat")),
+    ("chmod", include_bytes!("../../userspace/coreutils/target/x86_64-slateos/release/chmod")),
     // ... etc for all 60 binaries
 ];
 

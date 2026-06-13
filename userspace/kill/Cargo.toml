@@ -2,5 +2,5 @@
 name = "kill"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS process termination utility"
+description = "SlateOS process termination utility"
 [dependencies]

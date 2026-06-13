@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! drawio-cli — OurOS draw.io diagram editor
+//! drawio-cli — SlateOS draw.io diagram editor
 //!
 //! Single personality: `drawio`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_drawio(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: drawio [OPTIONS] [FILE]");
-        println!("drawio v24.0 (OurOS) — Diagram editor");
+        println!("drawio v24.0 (SlateOS) — Diagram editor");
         println!();
         println!("Options:");
         println!("  -x                Export mode");
@@ -24,7 +24,7 @@ fn run_drawio(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("drawio v24.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("drawio v24.0 (SlateOS)"); return 0; }
     if args.iter().any(|a| a == "-x") {
         println!("drawio: exporting diagram...");
         println!("  Output format: PNG");

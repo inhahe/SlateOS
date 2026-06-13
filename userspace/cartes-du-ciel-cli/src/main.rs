@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cartes-du-ciel-cli — OurOS Cartes du Ciel / SkyChart
+//! cartes-du-ciel-cli — SlateOS Cartes du Ciel / SkyChart
 //!
 //! Single personality: `skychart`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_skychart(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: skychart [OPTIONS]");
-        println!("Cartes du Ciel / SkyChart v4.3 (OurOS) — Star chart generator");
+        println!("Cartes du Ciel / SkyChart v4.3 (SlateOS) — Star chart generator");
         println!();
         println!("Options:");
         println!("  --lat N         Observer latitude");
@@ -27,8 +27,8 @@ fn run_skychart(args: &[String], _prog: &str) -> i32 {
         println!("  --version       Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Cartes du Ciel v4.3 (OurOS)"); return 0; }
-    println!("Cartes du Ciel v4.3 (OurOS) — Sky Chart");
+    if args.iter().any(|a| a == "--version") { println!("Cartes du Ciel v4.3 (SlateOS)"); return 0; }
+    println!("Cartes du Ciel v4.3 (SlateOS) — Sky Chart");
     println!("  Catalogs loaded:");
     println!("    Stars: Tycho-2 (2,539,913 stars)");
     println!("    Deep sky: NGC/IC (13,226 objects)");

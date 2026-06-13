@@ -2,5 +2,5 @@
 name = "mktemp"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS temp file/user identity utilities"
+description = "SlateOS temp file/user identity utilities"
 [dependencies]

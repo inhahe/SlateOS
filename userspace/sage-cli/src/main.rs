@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sage-cli — OurOS SageMath computer algebra system
+//! sage-cli — SlateOS SageMath computer algebra system
 //!
 //! Multi-personality: `sage`, `sage-notebook`
 
@@ -23,7 +23,7 @@ fn run_sage(args: &[String]) -> i32 {
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
         println!("SageMath version 10.2, Release Date: 2024-01-20");
-        println!("Using Python 3.12.0 (OurOS)");
+        println!("Using Python 3.12.0 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "--info") {

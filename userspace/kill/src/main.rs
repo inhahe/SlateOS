@@ -1,6 +1,6 @@
-//! OurOS Process Termination Utility
+//! SlateOS Process Termination Utility
 //!
-//! Sends termination messages to processes. In OurOS, process control uses
+//! Sends termination messages to processes. In SlateOS, process control uses
 //! IPC messages rather than Unix signals. The `kill` utility first attempts
 //! a graceful shutdown via IPC (giving the target process a chance to clean
 //! up), then falls back to the `SYS_PROCESS_KILL` syscall for forceful
@@ -97,7 +97,7 @@ const SYS_THREAD_RESUME: u64 = 514;
 
 /// Issue a three-argument syscall using the x86-64 `syscall` instruction.
 ///
-/// Register mapping follows the OurOS syscall ABI:
+/// Register mapping follows the SlateOS syscall ABI:
 ///   rax = syscall number, rdi = arg1, rsi = arg2, rdx = arg3
 ///   Return value in rax. rcx and r11 are clobbered by the CPU.
 #[cfg(target_arch = "x86_64")]
@@ -125,7 +125,7 @@ unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
 // Signal compatibility mapping
 // ============================================================================
 
-/// Signal entry for the compatibility table. OurOS does not use Unix signals,
+/// Signal entry for the compatibility table. SlateOS does not use Unix signals,
 /// but we map traditional signal names/numbers to IPC actions for familiarity.
 struct SignalEntry {
     number: u32,
@@ -227,7 +227,7 @@ fn signal_by_name(name: &str) -> Option<&'static SignalEntry> {
 
 /// The process manager's well-known IPC endpoint. Used for sending graceful
 /// shutdown/restart requests to processes via the service infrastructure.
-const PROCESS_MANAGER_NAME: &[u8] = b"org.ouros.ProcessManager\0";
+const PROCESS_MANAGER_NAME: &[u8] = b"org.slateos.ProcessManager\0";
 
 /// Send an IPC command to the process manager requesting an action on a PID.
 ///
@@ -930,7 +930,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
 // ============================================================================
 
 fn print_signal_list() {
-    println!("Available signal names (OurOS compatibility mapping):");
+    println!("Available signal names (SlateOS compatibility mapping):");
     println!();
     println!(" {:>3}  {:<6}  Description", "Num", "Name");
     println!(" {:>3}  {:<6}  -----------", "---", "------");
@@ -941,7 +941,7 @@ fn print_signal_list() {
         );
     }
     println!();
-    println!("Note: OurOS uses IPC messages, not Unix signals.");
+    println!("Note: SlateOS uses IPC messages, not Unix signals.");
     println!("Signal names are provided for familiarity only.");
 }
 
@@ -951,7 +951,7 @@ fn print_signal_list() {
 
 fn print_usage(is_killall: bool) {
     if is_killall {
-        println!("OurOS killall v0.1.0 -- Kill processes by name");
+        println!("SlateOS killall v0.1.0 -- Kill processes by name");
         println!();
         println!("USAGE:");
         println!("  killall [options] <name>");
@@ -976,7 +976,7 @@ fn print_usage(is_killall: bool) {
         println!("  killall -9 myserver        Force kill all 'myserver'");
         println!("  killall -i -w myserver     Confirm and wait for each");
     } else {
-        println!("OurOS kill v0.1.0 -- Send termination messages to processes");
+        println!("SlateOS kill v0.1.0 -- Send termination messages to processes");
         println!();
         println!("USAGE:");
         println!("  kill [options] <pid> [pid...]");

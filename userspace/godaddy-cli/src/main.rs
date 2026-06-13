@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! godaddy-cli — OurOS personality CLI for GoDaddy, the world's largest domain registrar.
+//! godaddy-cli — SlateOS personality CLI for GoDaddy, the world's largest domain registrar.
 
 use std::env;
 use std::process;

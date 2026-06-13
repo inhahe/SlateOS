@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! osmium-cli — OurOS Osmium OpenStreetMap data processing
+//! osmium-cli — SlateOS Osmium OpenStreetMap data processing
 //!
 //! Multi-personality: `osmium`
 
@@ -10,7 +10,7 @@ use std::process;
 fn run_osmium(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: osmium COMMAND [OPTIONS]");
-        println!("Osmium 1.16.0 (OurOS)");
+        println!("Osmium 1.16.0 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  fileinfo       Show file info");
@@ -27,7 +27,7 @@ fn run_osmium(args: &[String]) -> i32 {
     }
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match subcmd {
-        "--version" => println!("osmium 1.16.0 (OurOS)"),
+        "--version" => println!("osmium 1.16.0 (SlateOS)"),
         "fileinfo" => {
             let file = args.get(1).map(|s| s.as_str()).unwrap_or("planet.osm.pbf");
             println!("File:");

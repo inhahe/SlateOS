@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bracken-cli — OurOS Bracken abundance estimation
+//! bracken-cli — SlateOS Bracken abundance estimation
 //!
 //! Single personality: `bracken`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_bracken(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: bracken [OPTIONS]");
-        println!("Bracken v2.8 (OurOS) — Bayesian Re-estimation of Abundance with KrakEN");
+        println!("Bracken v2.8 (SlateOS) — Bayesian Re-estimation of Abundance with KrakEN");
         println!();
         println!("Options:");
         println!("  -d DB_DIR     Kraken2 database directory");
@@ -26,8 +26,8 @@ fn run_bracken(args: &[String], _prog: &str) -> i32 {
         println!("  --version     Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Bracken v2.8 (OurOS)"); return 0; }
-    println!("Bracken v2.8 (OurOS) — Abundance Estimation");
+    if args.iter().any(|a| a == "--version") { println!("Bracken v2.8 (SlateOS)"); return 0; }
+    println!("Bracken v2.8 (SlateOS) — Abundance Estimation");
     println!("  Database: standard_db");
     println!("  Read length: 150 bp");
     println!("  Level: Species (S)");

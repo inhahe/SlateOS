@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! watchexec — OurOS execute commands in response to file modifications
+//! watchexec — SlateOS execute commands in response to file modifications
 //!
 //! Single personality: `watchexec`
 
@@ -46,7 +46,7 @@ fn run_watchexec(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("watchexec 2.1.1 (OurOS)");
+        println!("watchexec 2.1.1 (SlateOS)");
         return 0;
     }
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! yad-cli — OurOS YAD (Yet Another Dialog) display
+//! yad-cli — SlateOS YAD (Yet Another Dialog) display
 //!
 //! Single personality: `yad`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_yad(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: yad [OPTIONS]");
-        println!("yad v13.0 (OurOS) — Yet Another Dialog");
+        println!("yad v13.0 (SlateOS) — Yet Another Dialog");
         println!();
         println!("Dialog types:");
         println!("  --info            Information dialog");
@@ -34,7 +34,7 @@ fn run_yad(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("yad v13.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("yad v13.0 (SlateOS)"); return 0; }
     if args.iter().any(|a| a == "--info") {
         println!("yad: [INFO] Dialog displayed");
         return 0;

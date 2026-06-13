@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rdiff-backup-cli — OurOS rdiff-backup CLI
+//! rdiff-backup-cli — SlateOS rdiff-backup CLI
 //!
 //! Single personality: `rdiff-backup`
 
@@ -11,7 +11,7 @@ fn run_rdiff_backup(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: rdiff-backup [OPTIONS] COMMAND [ARGS ...]");
         println!();
-        println!("rdiff-backup — reverse differential backup (OurOS).");
+        println!("rdiff-backup — reverse differential backup (SlateOS).");
         println!();
         println!("Commands:");
         println!("  backup SRC DEST       Create backup");
@@ -33,7 +33,7 @@ fn run_rdiff_backup(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("rdiff-backup 2.2.6 (OurOS)");
+        println!("rdiff-backup 2.2.6 (SlateOS)");
         return 0;
     }
 

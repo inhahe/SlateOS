@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lmms-cli — OurOS LMMS music production
+//! lmms-cli — SlateOS LMMS music production
 //!
 //! Multi-personality: `lmms`
 
@@ -10,7 +10,7 @@ use std::process;
 fn run_lmms(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lmms [OPTIONS] [FILE.mmp]");
-        println!("LMMS 1.2.2 (OurOS)");
+        println!("LMMS 1.2.2 (SlateOS)");
         println!("  -r, --render FILE   Render to audio file");
         println!("  -f, --format FMT    Output format (wav, ogg, mp3)");
         println!("  -s, --samplerate N  Sample rate");
@@ -20,7 +20,7 @@ fn run_lmms(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("LMMS 1.2.2 (OurOS)");
+        println!("LMMS 1.2.2 (SlateOS)");
         return 0;
     }
     let render = args.iter().any(|a| a == "-r" || a == "--render");

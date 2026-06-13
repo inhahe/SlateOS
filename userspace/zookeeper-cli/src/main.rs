@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zookeeper-cli — OurOS ZooKeeper CLI
+//! zookeeper-cli — SlateOS ZooKeeper CLI
 //!
 //! Single personality: `zkCli`
 
@@ -11,7 +11,7 @@ fn run_zkcli(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: zkCli <COMMAND> [OPTIONS]");
         println!();
-        println!("Apache ZooKeeper CLI (OurOS).");
+        println!("Apache ZooKeeper CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  ls           List znodes");
@@ -27,7 +27,7 @@ fn run_zkcli(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("ZooKeeper CLI 3.9.1 (OurOS)");
+        println!("ZooKeeper CLI 3.9.1 (SlateOS)");
         return 0;
     }
 

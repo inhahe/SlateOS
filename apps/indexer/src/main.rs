@@ -1,4 +1,4 @@
-//! indexer — OurOS background file indexer service.
+//! indexer — SlateOS background file indexer service.
 //!
 //! Builds and maintains a searchable index of the filesystem, enabling
 //! near-instant file search by name, glob pattern, path, or content.
@@ -159,7 +159,7 @@ impl Config {
     /// Serialize configuration to the config file format.
     fn serialize(&self) -> String {
         let mut out = String::new();
-        out.push_str("# OurOS File Indexer Configuration\n\n");
+        out.push_str("# SlateOS File Indexer Configuration\n\n");
         out.push_str(&format!("enabled = {}\n", self.enabled));
         out.push_str(&format!("index_paths = {}\n", self.index_paths.join(", ")));
         out.push_str(&format!("exclude_paths = {}\n", self.exclude_paths.join(", ")));
@@ -1170,7 +1170,7 @@ fn cmd_stop() {
         Ok(pid_str) => {
             let pid = pid_str.trim();
             println!("Stopping indexer service (PID {})...", pid);
-            // On OurOS, we'd send an IPC shutdown message. For now, remove PID file.
+            // On SlateOS, we'd send an IPC shutdown message. For now, remove PID file.
             if let Err(e) = fs::remove_file(PID_FILE) {
                 eprintln!("warning: could not remove PID file: {}", e);
             }

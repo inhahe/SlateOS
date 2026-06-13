@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nsd-cli — OurOS NSD authoritative DNS server
+//! nsd-cli — SlateOS NSD authoritative DNS server
 //!
 //! Multi-personality: `nsd`, `nsd-control`, `nsd-checkzone`, `nsd-checkconf`
 
@@ -15,7 +15,7 @@ fn run_nsd(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "nsd-control" => {
-                println!("nsd-control (OurOS) — NSD remote control");
+                println!("nsd-control (SlateOS) — NSD remote control");
                 println!("  status         Show server status");
                 println!("  reload         Reload zones");
                 println!("  reconfig       Reload config");
@@ -23,15 +23,15 @@ fn run_nsd(args: &[String], prog: &str) -> i32 {
                 println!("  zonestatus Z   Zone status");
             }
             "nsd-checkzone" => {
-                println!("nsd-checkzone (OurOS) — Check zone file");
+                println!("nsd-checkzone (SlateOS) — Check zone file");
                 println!("  nsd-checkzone ZONE ZONEFILE");
             }
             "nsd-checkconf" => {
-                println!("nsd-checkconf (OurOS) — Check config");
+                println!("nsd-checkconf (SlateOS) — Check config");
                 println!("  nsd-checkconf CONFIGFILE");
             }
             _ => {
-                println!("NSD v4.9 (OurOS) — Authoritative DNS server");
+                println!("NSD v4.9 (SlateOS) — Authoritative DNS server");
                 println!("  -c FILE    Config file");
                 println!("  -d         Debug mode");
                 println!("  -p PORT    Port (default: 53)");
@@ -41,7 +41,7 @@ fn run_nsd(args: &[String], prog: &str) -> i32 {
         println!("  --version  Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("NSD v4.9.1 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("NSD v4.9.1 (SlateOS)"); return 0; }
     match prog {
         "nsd-control" => {
             println!("NSD status:");
@@ -54,7 +54,7 @@ fn run_nsd(args: &[String], prog: &str) -> i32 {
             println!("zone example.com is ok");
         }
         _ => {
-            println!("NSD v4.9.1 (OurOS)");
+            println!("NSD v4.9.1 (SlateOS)");
             println!("  Zones: 67 loaded");
             println!("  Listening: 0.0.0.0:53 (UDP+TCP)");
             println!("  Control: /var/run/nsd/nsd.ctl");

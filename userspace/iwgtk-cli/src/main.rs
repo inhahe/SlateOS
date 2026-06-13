@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! iwgtk-cli — OurOS iwgtk iwd wireless GUI
+//! iwgtk-cli — SlateOS iwgtk iwd wireless GUI
 //!
 //! Single personality: `iwgtk`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_iwgtk(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: iwgtk [OPTIONS]");
-        println!("iwgtk v0.9 (OurOS) — iwd wireless GTK frontend");
+        println!("iwgtk v0.9 (SlateOS) — iwd wireless GTK frontend");
         println!();
         println!("Options:");
         println!("  --indicator    Start as tray indicator");
@@ -23,7 +23,7 @@ fn run_iwgtk(args: &[String], _prog: &str) -> i32 {
         println!("Scan, connect, manage known networks, view adapters.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("iwgtk v0.9 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("iwgtk v0.9 (SlateOS)"); return 0; }
     println!("iwgtk: iwd wireless manager");
     println!("  Adapter: wlan0 (powered)");
     println!("  Connected: HomeNetwork (-45 dBm)");

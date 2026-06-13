@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tokei — OurOS code statistics tool (count lines of code)
+//! tokei — SlateOS code statistics tool (count lines of code)
 //!
 //! Single personality: `tokei`
 
@@ -28,7 +28,7 @@ fn run_tokei(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("tokei 12.1.2 (OurOS)");
+        println!("tokei 12.1.2 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "-l" || a == "--languages") {

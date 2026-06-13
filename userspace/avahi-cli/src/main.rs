@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! avahi-cli — OurOS Avahi mDNS/DNS-SD tools
+//! avahi-cli — SlateOS Avahi mDNS/DNS-SD tools
 //!
 //! Multi-personality: `avahi-browse`, `avahi-resolve`, `avahi-publish`, `avahi-daemon`
 
@@ -14,7 +14,7 @@ fn run_avahi_browse(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: avahi-browse [OPTIONS] <service-type>");
         println!();
-        println!("avahi-browse — browse for mDNS/DNS-SD services (OurOS).");
+        println!("avahi-browse — browse for mDNS/DNS-SD services (SlateOS).");
         println!();
         println!("Options:");
         println!("  -a, --all             Browse all services");
@@ -28,9 +28,9 @@ fn run_avahi_browse(args: &[String]) -> i32 {
     let resolve = args.iter().any(|a| a == "-r" || a == "--resolve");
 
     if all {
-        println!("+   eth0 IPv4 ouros-desktop                          _workstation._tcp    local");
-        println!("+   eth0 IPv4 ouros-desktop                          _ssh._tcp            local");
-        println!("+   eth0 IPv4 ouros-desktop                          _sftp-ssh._tcp       local");
+        println!("+   eth0 IPv4 slateos-desktop                          _workstation._tcp    local");
+        println!("+   eth0 IPv4 slateos-desktop                          _ssh._tcp            local");
+        println!("+   eth0 IPv4 slateos-desktop                          _sftp-ssh._tcp       local");
         println!("+   eth0 IPv4 Living Room Speaker                    _raop._tcp           local");
         println!("+   eth0 IPv4 Printer-HP4500                         _ipp._tcp            local");
         println!("+   eth0 IPv4 NAS-Storage                            _smb._tcp            local");
@@ -40,8 +40,8 @@ fn run_avahi_browse(args: &[String]) -> i32 {
     }
 
     if resolve {
-        println!("=   eth0 IPv4 ouros-desktop                          _ssh._tcp            local");
-        println!("   hostname = [ouros-desktop.local]");
+        println!("=   eth0 IPv4 slateos-desktop                          _ssh._tcp            local");
+        println!("   hostname = [slateos-desktop.local]");
         println!("   address = [192.168.1.100]");
         println!("   port = [22]");
         println!("   txt = []");
@@ -56,9 +56,9 @@ fn run_avahi_resolve(args: &[String]) -> i32 {
         return 0;
     }
 
-    let target = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("ouros-desktop.local");
+    let target = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("slateos-desktop.local");
     if args.iter().any(|a| a == "-a") {
-        println!("{}\touros-desktop.local", target);
+        println!("{}\tslateos-desktop.local", target);
     } else {
         println!("{}\t192.168.1.100", target);
     }
@@ -85,7 +85,7 @@ fn run_avahi_daemon(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("avahi-daemon 0.8 (OurOS)");
+        println!("avahi-daemon 0.8 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "-c" || a == "--check") {
@@ -101,7 +101,7 @@ fn run_avahi_daemon(args: &[String]) -> i32 {
     println!("New relevant interface eth0.IPv4 for mDNS.");
     println!("Network interface enumeration completed.");
     println!("Registering new address record for 192.168.1.100 on eth0.IPv4.");
-    println!("Server startup complete. Host name is ouros-desktop.local.");
+    println!("Server startup complete. Host name is slateos-desktop.local.");
     0
 }
 

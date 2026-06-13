@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! racket-cli — OurOS Racket language tools
+//! racket-cli — SlateOS Racket language tools
 //!
 //! Multi-personality: `racket`, `raco`, `drracket`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_racket(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: racket [OPTIONS] [FILE]");
-        println!("Racket v8.12 (OurOS)");
+        println!("Racket v8.12 (SlateOS)");
         println!("  -e EXPR      Evaluate expression");
         println!("  -f FILE      Load file");
         println!("  -l LANG      Use language");
@@ -45,7 +45,7 @@ fn run_racket(args: &[String]) -> i32 {
 fn run_raco(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: raco COMMAND [OPTIONS]");
-        println!("Racket Command-Line Tools (OurOS)");
+        println!("Racket Command-Line Tools (SlateOS)");
         println!();
         println!("Commands:");
         println!("  pkg          Package management");
@@ -100,7 +100,7 @@ fn main() {
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
         "raco" => run_raco(&rest),
-        "drracket" => { println!("DrRacket IDE v8.12 (OurOS)"); 0 }
+        "drracket" => { println!("DrRacket IDE v8.12 (SlateOS)"); 0 }
         _ => run_racket(&rest),
     };
     process::exit(code);

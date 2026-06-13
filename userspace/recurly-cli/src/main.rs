@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! recurly-cli — OurOS Recurly subscription billing personality CLI.
+//! recurly-cli — SlateOS Recurly subscription billing personality CLI.
 
 use std::env;
 use std::process;
@@ -31,7 +31,7 @@ fn print_help(prog: &str) {
 }
 
 fn print_version() {
-    println!("recurly-cli 0.1.0 — OurOS personality binary");
+    println!("recurly-cli 0.1.0 — SlateOS personality binary");
     println!("Recurly, Inc. — San Francisco, California, USA");
 }
 

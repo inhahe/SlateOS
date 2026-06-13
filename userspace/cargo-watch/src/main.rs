@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cargo-watch — OurOS watches over your project's source for changes
+//! cargo-watch — SlateOS watches over your project's source for changes
 //!
 //! Single personality: `cargo-watch`
 
@@ -38,7 +38,7 @@ fn run_cargo_watch(args: Vec<String>) -> i32 {
         return 0;
     }
     if subargs.iter().any(|a| a == "-V" || a == "--version") {
-        println!("cargo-watch 8.5.2 (OurOS)");
+        println!("cargo-watch 8.5.2 (SlateOS)");
         return 0;
     }
 

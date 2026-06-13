@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! iar-cli — OurOS IAR Embedded Workbench
+//! iar-cli — SlateOS IAR Embedded Workbench
 //!
 //! Single personality: `iar`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_iar(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: iar [OPTIONS] [PROJECT]");
-        println!("IAR Embedded Workbench 9.60 (OurOS) — Premium embedded IDE+compiler");
+        println!("IAR Embedded Workbench 9.60 (SlateOS) — Premium embedded IDE+compiler");
         println!();
         println!("Options:");
         println!("  --open FILE            Open .eww workspace");
@@ -23,8 +23,8 @@ fn run_iar(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("IAR Embedded Workbench 9.60.4 (OurOS)"); return 0; }
-    println!("IAR Embedded Workbench 9.60.4 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("IAR Embedded Workbench 9.60.4 (SlateOS)"); return 0; }
+    println!("IAR Embedded Workbench 9.60.4 (SlateOS)");
     println!("  Targets: Arm Cortex-M/A/R, RISC-V, RH850, AVR, MSP430, 8051, STM8, etc.");
     println!("  Compiler: IAR C/C++ — best-in-class code density and performance");
     println!("  Debugger: C-SPY (instruction-set sim, J-Link, I-jet, Lauterbach)");

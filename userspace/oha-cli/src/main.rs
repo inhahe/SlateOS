@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! oha-cli — OurOS oha HTTP load generator
+//! oha-cli — SlateOS oha HTTP load generator
 //!
 //! Single personality: `oha`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_oha(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: oha [OPTIONS] URL");
-        println!("oha v1.4.0 (OurOS) — HTTP load generator with TUI");
+        println!("oha v1.4.0 (SlateOS) — HTTP load generator with TUI");
         println!();
         println!("Options:");
         println!("  URL                     Target URL");
@@ -31,7 +31,7 @@ fn run_oha(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("oha 1.4.0 (OurOS)");
+        println!("oha 1.4.0 (SlateOS)");
         return 0;
     }
     let url = args.iter().find(|a| a.starts_with("http")).map(|s| s.as_str()).unwrap_or("http://localhost");

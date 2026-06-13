@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ytdlp — OurOS video/audio downloader (yt-dlp compatible)
+//! ytdlp — SlateOS video/audio downloader (yt-dlp compatible)
 //!
 //! Single personality: `yt-dlp`
 
@@ -59,7 +59,7 @@ fn run_ytdlp(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("yt-dlp 2024.01.01 (OurOS)");
+        println!("yt-dlp 2024.01.01 (SlateOS)");
         return 0;
     }
 

@@ -869,7 +869,7 @@ impl Default for NetworkSettings {
             dns: DnsConfig::default(),
             proxy: ProxyConfig::default(),
             firewall: FirewallConfig::default(),
-            hostname: "ouros-desktop".to_string(),
+            hostname: "slateos-desktop".to_string(),
             data_usage_tracking: true,
             metered_connection: false,
         }

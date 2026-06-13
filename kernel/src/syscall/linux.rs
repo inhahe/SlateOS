@@ -5391,7 +5391,7 @@ fn sys_munmap(args: &SyscallArgs) -> SyscallResult {
     //   if (end == start) return -EINVAL;
     // so a zero length (PAGE_ALIGN(0) == 0 → end == start) is EINVAL.
     // Our native munmap treats size==0 as an idempotent no-op (returns 0),
-    // which is the OuRoS-native ABI; the Linux translator must instead
+    // which is the SlateOS-native ABI; the Linux translator must instead
     // report EINVAL.  An unaligned start also yields EINVAL on Linux
     // (offset_in_page(start)), which the native handler already maps via
     // BadAlignment → EINVAL — and when both apply the errno is identical,
@@ -6801,8 +6801,8 @@ fn alsa_pcm_ioctl_info(entry: &FdEntry, argp: u64) -> SyscallResult {
     info.card = 0;
     info.subdevices_count = 1;
     info.subdevices_avail = 0;
-    write_cstr_field(&mut info.id, b"OuRoS");
-    write_cstr_field(&mut info.name, b"OuRoS Virtual Audio");
+    write_cstr_field(&mut info.id, b"SlateOS");
+    write_cstr_field(&mut info.name, b"SlateOS Virtual Audio");
     write_cstr_field(&mut info.subname, b"subdevice #0");
     match write_user_struct(argp, &info) {
         Ok(()) => SyscallResult::ok(0),
@@ -7003,7 +7003,7 @@ fn alsa_control_ioctl(_entry: &FdEntry, request: u32, argp: u64) -> SyscallResul
 }
 
 /// `SNDRV_CTL_IOCTL_CARD_INFO` — fill a `snd_ctl_card_info` describing the
-/// single virtual sound card (card 0) that the OuRoS mixer exposes.
+/// single virtual sound card (card 0) that the SlateOS mixer exposes.
 fn alsa_control_ioctl_card_info(argp: u64) -> SyscallResult {
     use crate::audio_alsa_ctl as ctl;
     // SAFETY: SndCtlCardInfo is a plain `#[repr(C)]` aggregate of integers and
@@ -7012,11 +7012,11 @@ fn alsa_control_ioctl_card_info(argp: u64) -> SyscallResult {
     let mut info: ctl::SndCtlCardInfo = unsafe { core::mem::zeroed() };
     info.card = 0;
     info.pad = 0;
-    write_cstr_field(&mut info.id, b"OuRoS");
-    write_cstr_field(&mut info.driver, b"OuRoS");
-    write_cstr_field(&mut info.name, b"OuRoS Virtual Audio");
-    write_cstr_field(&mut info.longname, b"OuRoS Virtual Audio - software mixer");
-    write_cstr_field(&mut info.mixername, b"OuRoS Mixer");
+    write_cstr_field(&mut info.id, b"SlateOS");
+    write_cstr_field(&mut info.driver, b"SlateOS");
+    write_cstr_field(&mut info.name, b"SlateOS Virtual Audio");
+    write_cstr_field(&mut info.longname, b"SlateOS Virtual Audio - software mixer");
+    write_cstr_field(&mut info.mixername, b"SlateOS Mixer");
     match write_user_struct(argp, &info) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => linux_err(e),
@@ -36620,10 +36620,10 @@ fn sys_uname(args: &SyscallArgs) -> SyscallResult {
     // The release string MUST satisfy glibc's startup version gate
     // (`__libc_start_main` → "FATAL: kernel too old" if the leading
     // MAJOR.MINOR is below glibc's build-time minimum). glibc parses
-    // only the leading integer triple, so "6.6.0-ouros" reads as the
+    // only the leading integer triple, so "6.6.0-slateos" reads as the
     // 6.6.0 baseline kernel we faithfully implement (see §72
     // "Version-surface policy" in roadmap-detailed.md) while the
-    // "-ouros" suffix still signals our build to anything that prints
+    // "-slateos" suffix still signals our build to anything that prints
     // the full string.
     fill(&mut buf, 0, b"Linux");                    // sysname
     // Batch 511: pure read of nameservice state — no substitution
@@ -36634,7 +36634,7 @@ fn sys_uname(args: &SyscallArgs) -> SyscallResult {
     // as Linux's `newuname` would.
     let nodename = crate::fs::nameservice::get_hostname();
     fill(&mut buf, 1, nodename.as_bytes());
-    fill(&mut buf, 2, b"6.6.0-ouros");              // release
+    fill(&mut buf, 2, b"6.6.0-slateos");              // release
     fill(&mut buf, 3, b"#1 SMP");                   // version
     fill(&mut buf, 4, b"x86_64");                   // machine
     let domain = crate::fs::nameservice::get_domain();
@@ -52274,11 +52274,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         {
             crate::fs::nameservice::init_defaults();
             let original = crate::fs::nameservice::get_hostname();
-            crate::fs::nameservice::set_hostname("ouros-test")
+            crate::fs::nameservice::set_hostname("slateos-test")
                 .expect("set_hostname");
             assert_eq!(
                 crate::fs::nameservice::get_hostname(),
-                "ouros-test",
+                "slateos-test",
             );
             let orig_domain = crate::fs::nameservice::get_domain();
             crate::fs::nameservice::set_domain("test.local")
@@ -52480,14 +52480,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // release are Linux-ABI-only surfaces — in our architecture
         // native code uses native APIs, so the only callers of uname(2)
         // are Linux binaries that expect Linux values.  Two invariants:
-        //   - sysname == "Linux" (was "OuRoS"): a Linux binary that
+        //   - sysname == "Linux" (was "SlateOS"): a Linux binary that
         //     branches on `uname().sysname` must see "Linux".
-        //   - release leads with "6.6" (was "0.1.0-ouros"): glibc's
+        //   - release leads with "6.6" (was "0.1.0-slateos"): glibc's
         //     startup gate parses the leading MAJOR.MINOR and aborts
         //     with "FATAL: kernel too old" if it is below its
         //     build-time minimum.  6.6 is the baseline we faithfully
         //     implement (roadmap-detailed.md §72 version-surface
-        //     policy).  The "-ouros" suffix is preserved for anything
+        //     policy).  The "-slateos" suffix is preserved for anything
         //     printing the full string.
         {
             crate::fs::nameservice::init_defaults();

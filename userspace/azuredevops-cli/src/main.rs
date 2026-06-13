@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! azuredevops-cli — OurOS Azure DevOps (Microsoft's enterprise dev suite, formerly VSTS/TFS)
+//! azuredevops-cli — SlateOS Azure DevOps (Microsoft's enterprise dev suite, formerly VSTS/TFS)
 //!
 //! Single personality: `azuredevops`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ado(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: azuredevops [OPTIONS]");
-        println!("Azure DevOps Services (OurOS) — Microsoft's enterprise DevOps platform");
+        println!("Azure DevOps Services (SlateOS) — Microsoft's enterprise DevOps platform");
         println!();
         println!("Options:");
         println!("  --boards               Azure Boards (work tracking / kanban / sprints)");
@@ -24,8 +24,8 @@ fn run_ado(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Azure DevOps Services (OurOS)"); return 0; }
-    println!("Azure DevOps Services (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Azure DevOps Services (SlateOS)"); return 0; }
+    println!("Azure DevOps Services (SlateOS)");
     println!("  Vendor: Microsoft Corporation (Redmond, WA — NASDAQ:MSFT)");
     println!("  History: started as Visual Studio Team System 2005");
     println!("          → Team Foundation Server (TFS) 2008–2017 (on-prem)");

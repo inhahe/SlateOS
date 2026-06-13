@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mdcat — OurOS render Markdown in the terminal
+//! mdcat — SlateOS render Markdown in the terminal
 //!
 //! Single personality: `mdcat`
 
@@ -26,7 +26,7 @@ fn run_mdcat(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("mdcat 2.1.2 (OurOS)");
+        println!("mdcat 2.1.2 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "--detect-terminal") {

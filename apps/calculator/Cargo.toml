@@ -2,6 +2,6 @@
 name = "calculator"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS Calculator — graphical scientific calculator"
+description = "SlateOS Calculator — graphical scientific calculator"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }

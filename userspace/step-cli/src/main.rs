@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! step-cli — OurOS Smallstep certificate management
+//! step-cli — SlateOS Smallstep certificate management
 //!
 //! Multi-personality: `step`, `step-ca`
 
@@ -25,7 +25,7 @@ fn run_step(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match cmd {
         "version" => {
-            println!("Smallstep CLI/0.26.1 (OurOS, linux/amd64)");
+            println!("Smallstep CLI/0.26.1 (SlateOS, linux/amd64)");
             println!("Release Date: 2025-05-22");
         }
         "certificate" => {
@@ -41,7 +41,7 @@ fn run_step(args: Vec<String>) -> i32 {
                     println!("        Version: 3 (0x2)");
                     println!("        Serial Number: 1234567890");
                     println!("    Signature Algorithm: ECDSA-SHA256");
-                    println!("        Issuer: CN=OurOS Root CA");
+                    println!("        Issuer: CN=SlateOS Root CA");
                     println!("        Validity:");
                     println!("            Not Before: 2025-05-22 00:00:00 +0000 UTC");
                     println!("            Not After : 2026-05-22 00:00:00 +0000 UTC");
@@ -103,12 +103,12 @@ fn run_step_ca(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Smallstep CA/0.26.1 (OurOS)");
+        println!("Smallstep CA/0.26.1 (SlateOS)");
         return 0;
     }
 
     let config = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("ca.json");
-    println!("Smallstep CA/0.26.1 (OurOS)");
+    println!("Smallstep CA/0.26.1 (SlateOS)");
     println!("Loading configuration from {}", config);
     println!("Starting Certificate Authority...");
     println!("Listening on :443 ...");

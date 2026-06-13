@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! railway-cli — OurOS Railway CLI
+//! railway-cli — SlateOS Railway CLI
 //!
 //! Single personality: `railway`
 
@@ -11,7 +11,7 @@ fn run_railway(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "help") {
         println!("Usage: railway <COMMAND> [OPTIONS]");
         println!();
-        println!("Railway CLI — deploy apps on Railway (OurOS).");
+        println!("Railway CLI — deploy apps on Railway (SlateOS).");
         println!();
         println!("Commands:");
         println!("  login          Login to Railway");
@@ -32,7 +32,7 @@ fn run_railway(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "version") {
-        println!("railway version 3.5.0 (OurOS)");
+        println!("railway version 3.5.0 (SlateOS)");
         return 0;
     }
 

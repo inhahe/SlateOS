@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zmq-cli — OurOS ZeroMQ CLI tool
+//! zmq-cli — SlateOS ZeroMQ CLI tool
 //!
 //! Single personality: `zmq`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_zmq(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: zmq COMMAND [OPTIONS]");
-        println!("zmq v1.0.0 (OurOS) — ZeroMQ CLI tool");
+        println!("zmq v1.0.0 (SlateOS) — ZeroMQ CLI tool");
         println!();
         println!("Commands:");
         println!("  pub             Publish messages");
@@ -36,7 +36,7 @@ fn run_zmq(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("zmq 1.0.0 (OurOS)");
+        println!("zmq 1.0.0 (SlateOS)");
         println!("libzmq: 4.3.5");
         return 0;
     }

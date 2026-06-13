@@ -2,5 +2,5 @@
 name = "smartctl"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS smartctl - SMART disk monitoring"
+description = "SlateOS smartctl - SMART disk monitoring"
 [dependencies]

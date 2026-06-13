@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! starship-cli — OurOS Starship cross-shell prompt
+//! starship-cli — SlateOS Starship cross-shell prompt
 //!
 //! Single personality: `starship`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_starship(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: starship [COMMAND]");
-        println!("Starship 1.21.1 (OurOS) — Cross-shell prompt");
+        println!("Starship 1.21.1 (SlateOS) — Cross-shell prompt");
         println!();
         println!("Commands:");
         println!("  init SHELL       Print shell init script");
@@ -32,7 +32,7 @@ fn run_starship(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("starship 1.21.1 (OurOS)");
+        println!("starship 1.21.1 (SlateOS)");
         return 0;
     }
     let cmd = args.iter().find(|a| !a.starts_with('-'))
@@ -73,8 +73,8 @@ fn run_starship(args: &[String], _prog: &str) -> i32 {
             println!("character        0ms");
         }
         "bug-report" => {
-            println!("Starship 1.21.1 (OurOS)");
-            println!("OS: OurOS x86_64");
+            println!("Starship 1.21.1 (SlateOS)");
+            println!("OS: SlateOS x86_64");
             println!("Shell: bash");
             println!("Config: ~/.config/starship.toml");
         }

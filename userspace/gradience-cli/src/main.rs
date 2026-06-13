@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gradience-cli — OurOS Gradience GNOME/libadwaita theming
+//! gradience-cli — SlateOS Gradience GNOME/libadwaita theming
 //!
 //! Single personality: `gradience`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gradience(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gradience [OPTIONS]");
-        println!("gradience v0.4 (OurOS) — Customize libadwaita/GTK4 colors");
+        println!("gradience v0.4 (SlateOS) — Customize libadwaita/GTK4 colors");
         println!();
         println!("Options:");
         println!("  --apply PRESET    Apply preset by name");
@@ -23,7 +23,7 @@ fn run_gradience(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("gradience v0.4 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("gradience v0.4 (SlateOS)"); return 0; }
     if args.iter().any(|a| a == "--list") {
         println!("Adwaita (default)");
         println!("Catppuccin Mocha");

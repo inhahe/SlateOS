@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! psql-cli — OurOS PostgreSQL client
+//! psql-cli — SlateOS PostgreSQL client
 //!
 //! Multi-personality: `psql`, `pg_dump`, `pg_restore`, `createdb`, `dropdb`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_psql(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help") {
         println!("Usage: psql [OPTIONS] [DBNAME [USERNAME]]");
-        println!("psql (PostgreSQL) 16.3 (OurOS)");
+        println!("psql (PostgreSQL) 16.3 (SlateOS)");
         println!();
         println!("Options:");
         println!("  -h HOST      Database server host");

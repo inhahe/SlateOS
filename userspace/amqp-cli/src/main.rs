@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! amqp-cli — OurOS AMQP command-line tools
+//! amqp-cli — SlateOS AMQP command-line tools
 //!
 //! Multi-personality: `amqp-publish`, `amqp-consume`, `amqp-declare-queue`
 
@@ -35,7 +35,7 @@ fn run_amqp(args: &[String], prog_name: &str) -> i32 {
                 println!("  --exclusive        Exclusive queue");
             }
         }
-        println!("AMQP CLI tools (amqp-tools 0.10.0, OurOS)");
+        println!("AMQP CLI tools (amqp-tools 0.10.0, SlateOS)");
         return 0;
     }
     let url = args.windows(2).find(|w| w[0] == "--url")

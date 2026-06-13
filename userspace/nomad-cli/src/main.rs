@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nomad-cli — OurOS HashiCorp Nomad workload orchestrator CLI
+//! nomad-cli — SlateOS HashiCorp Nomad workload orchestrator CLI
 //!
 //! Single personality: `nomad`
 
@@ -46,7 +46,7 @@ fn run_nomad(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
         "version" => {
-            println!("Nomad v1.7.4 (OurOS)");
+            println!("Nomad v1.7.4 (SlateOS)");
             0
         }
         "status" => {

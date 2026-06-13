@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! heroic-cli — OurOS Heroic Games Launcher
+//! heroic-cli — SlateOS Heroic Games Launcher
 //!
 //! Single personality: `heroic`
 
@@ -13,14 +13,14 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_heroic(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: heroic [OPTIONS]");
-        println!("heroic v2.12 (OurOS) — Epic/GOG/Amazon game launcher");
+        println!("heroic v2.12 (SlateOS) — Epic/GOG/Amazon game launcher");
         println!();
         println!("Options:");
         println!("  --no-gui          Headless mode");
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("heroic v2.12 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("heroic v2.12 (SlateOS)"); return 0; }
     println!("heroic: game launcher started");
     println!("  Epic Games: 5 games");
     println!("  GOG: 3 games");

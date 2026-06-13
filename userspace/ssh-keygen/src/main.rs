@@ -1,6 +1,6 @@
-//! OurOS SSH Key Generation Utility
+//! SlateOS SSH Key Generation Utility
 //!
-//! Generates and manages SSH key pairs for use with OurOS's SSH client.
+//! Generates and manages SSH key pairs for use with SlateOS's SSH client.
 //! Supports Ed25519 key pairs (the primary and recommended key type).
 //!
 //! # Usage
@@ -52,7 +52,7 @@ use std::path::{Path, PathBuf};
 // ============================================================================
 //
 // All file and stdout/stderr I/O routes through std, which reaches the native
-// OurOS syscalls via the posix libc layer.  A previous hand-rolled syscall
+// SlateOS syscalls via the posix libc layer.  A previous hand-rolled syscall
 // stub here hardcoded Linux numbers that collide with unrelated native
 // syscalls — WRITE=1=SYS_EXIT (so every write terminated the process),
 // OPEN=2=SYS_TASK_ID, CLOSE=3 unassigned, STAT=4 unassigned, EXIT=60=

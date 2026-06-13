@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bigeye-cli — OurOS Bigeye (data observability, Uber data team alumni)
+//! bigeye-cli — SlateOS Bigeye (data observability, Uber data team alumni)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_bigeye(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: bigeye [OPTIONS]");
-        println!("Bigeye (OurOS) — data observability for enterprise data teams");
+        println!("Bigeye (SlateOS) — data observability for enterprise data teams");
         println!();
         println!("Options:");
         println!("  --metrics              200+ pre-built quality metrics");
@@ -21,8 +21,8 @@ fn run_bigeye(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Bigeye 2024 (OurOS)"); return 0; }
-    println!("Bigeye 2024 (OurOS) — Data Observability");
+    if args.iter().any(|a| a == "--version") { println!("Bigeye 2024 (SlateOS)"); return 0; }
+    println!("Bigeye 2024 (SlateOS) — Data Observability");
     println!("  Vendor: Bigeye Inc. (San Francisco)");
     println!("  Founders: Kyle Kirwan (CEO) + Egor Gryaznov (CTO), 2019");
     println!("          both: ex-Uber data team — built Databook, Uber's internal data catalog (2017-2019)");

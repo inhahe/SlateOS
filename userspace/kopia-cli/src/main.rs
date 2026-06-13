@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kopia-cli — OurOS Kopia backup CLI
+//! kopia-cli — SlateOS Kopia backup CLI
 //!
 //! Single personality: `kopia`
 
@@ -11,7 +11,7 @@ fn run_kopia(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: kopia <COMMAND> [OPTIONS]");
         println!();
-        println!("Kopia fast and secure backup tool (OurOS).");
+        println!("Kopia fast and secure backup tool (SlateOS).");
         println!();
         println!("Commands:");
         println!("  repository   Manage repository");
@@ -25,7 +25,7 @@ fn run_kopia(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("kopia 0.15.0 (OurOS)");
+        println!("kopia 0.15.0 (SlateOS)");
         return 0;
     }
 

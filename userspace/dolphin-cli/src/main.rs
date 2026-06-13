@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dolphin-cli — OurOS Dolphin GameCube/Wii emulator
+//! dolphin-cli — SlateOS Dolphin GameCube/Wii emulator
 //!
 //! Multi-personality: `dolphin-emu`, `dolphin-emu-nogui`
 
@@ -14,7 +14,7 @@ fn run_dolphin(args: &[String], nogui: bool) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: dolphin-emu [OPTIONS] [FILE]");
         println!();
-        println!("dolphin-emu — GameCube/Wii emulator (OurOS).");
+        println!("dolphin-emu — GameCube/Wii emulator (SlateOS).");
         println!();
         println!("Options:");
         println!("  -e, --exec <file>     Launch game ISO/WBFS");
@@ -26,7 +26,7 @@ fn run_dolphin(args: &[String], nogui: bool) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-v" || a == "--version") {
-        println!("Dolphin 5.0-21088 (OurOS)");
+        println!("Dolphin 5.0-21088 (SlateOS)");
         return 0;
     }
 
@@ -34,7 +34,7 @@ fn run_dolphin(args: &[String], nogui: bool) -> i32 {
         .map(|w| w[1].as_str())
         .or_else(|| args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()));
 
-    println!("[Dolphin] Version 5.0-21088 (OurOS)");
+    println!("[Dolphin] Version 5.0-21088 (SlateOS)");
     println!("[Dolphin] Video backend: Vulkan");
     println!("[Dolphin] Audio backend: PulseAudio");
     if nogui {

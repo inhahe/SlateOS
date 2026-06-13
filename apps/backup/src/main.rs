@@ -1,4 +1,4 @@
-//! backup — OurOS snapshot-based backup system.
+//! backup — SlateOS snapshot-based backup system.
 //!
 //! A CLI tool for creating, managing, and restoring backups with content
 //! deduplication via a SHA-256 content-addressed store.
@@ -2499,7 +2499,7 @@ fn parse_info_args(args: &[String]) -> Result<Command, String> {
 // ============================================================================
 
 fn print_help() {
-    println!("backup — OurOS snapshot-based backup system");
+    println!("backup — SlateOS snapshot-based backup system");
     println!();
     println!("USAGE:");
     println!("  backup <COMMAND> [OPTIONS]");

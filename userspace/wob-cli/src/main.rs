@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wob-cli — OurOS wob Wayland overlay bar
+//! wob-cli — SlateOS wob Wayland overlay bar
 //!
 //! Single personality: `wob`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wob(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wob [OPTIONS]");
-        println!("wob v0.15 (OurOS) — Wayland overlay bar (volume/brightness)");
+        println!("wob v0.15 (SlateOS) — Wayland overlay bar (volume/brightness)");
         println!();
         println!("Reads values (0-100) from stdin and displays overlay bar.");
         println!();
@@ -31,7 +31,7 @@ fn run_wob(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("wob v0.15 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("wob v0.15 (SlateOS)"); return 0; }
     println!("wob: overlay bar ready");
     println!("  Anchor: bottom");
     println!("  Size: 400x50");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! openssl — OurOS OpenSSL command-line toolkit
+//! openssl — SlateOS OpenSSL command-line toolkit
 //!
 //! Single personality: `openssl`
 
@@ -9,7 +9,7 @@ use std::process;
 
 // ── Constants ──────────────────────────────────────────────────────────
 
-const _VERSION_STRING: &str = "OpenSSL 0.1.0 (OurOS)";
+const _VERSION_STRING: &str = "OpenSSL 0.1.0 (SlateOS)";
 
 // ── Data structures ────────────────────────────────────────────────────
 
@@ -26,8 +26,8 @@ struct CertInfo {
 
 fn sample_cert() -> CertInfo {
     CertInfo {
-        subject: "CN=ouros.local, O=OurOS Project, C=US".to_string(),
-        issuer: "CN=OurOS Root CA, O=OurOS Project, C=US".to_string(),
+        subject: "CN=slateos.local, O=SlateOS Project, C=US".to_string(),
+        issuer: "CN=SlateOS Root CA, O=SlateOS Project, C=US".to_string(),
         serial: "0A:1B:2C:3D:4E:5F:60:71".to_string(),
         not_before: "May 22 00:00:00 2025 GMT".to_string(),
         not_after: "May 22 00:00:00 2026 GMT".to_string(),
@@ -84,11 +84,11 @@ fn run_openssl(args: Vec<String>) -> i32 {
 
 fn openssl_version(args: &[String]) -> i32 {
     let show_all = args.iter().any(|a| a == "-a");
-    println!("OpenSSL 0.1.0 (OurOS)");
+    println!("OpenSSL 0.1.0 (SlateOS)");
     if show_all {
         println!("built on: May 22 2025");
-        println!("platform: x86_64-ouros");
-        println!("compiler: rustc (OurOS nightly)");
+        println!("platform: x86_64-slateos");
+        println!("compiler: rustc (SlateOS nightly)");
         println!("OPENSSLDIR: \"/etc/ssl\"");
         println!("ENGINESDIR: \"/usr/lib/engines-3\"");
         println!("MODULESDIR: \"/usr/lib/ossl-modules\"");
@@ -136,7 +136,7 @@ fn openssl_req(args: &[String]) -> i32 {
 
     if new && x509 {
         println!("Generating self-signed certificate (simulated):");
-        println!("  Subject: CN=ouros.local, O=OurOS Project, C=US");
+        println!("  Subject: CN=slateos.local, O=SlateOS Project, C=US");
         println!("  Validity: 365 days");
         println!("  Key: RSA 2048 bit");
         println!("-----BEGIN CERTIFICATE-----");
@@ -144,7 +144,7 @@ fn openssl_req(args: &[String]) -> i32 {
         println!("-----END CERTIFICATE-----");
     } else if new {
         println!("Generating certificate signing request (simulated):");
-        println!("  Subject: CN=ouros.local, O=OurOS Project, C=US");
+        println!("  Subject: CN=slateos.local, O=SlateOS Project, C=US");
         println!("-----BEGIN CERTIFICATE REQUEST-----");
         println!("MIICYjCCAUoCAQAw... (simulated)");
         println!("-----END CERTIFICATE REQUEST-----");
@@ -236,7 +236,7 @@ fn openssl_s_client(args: &[String]) -> i32 {
     println!("---");
     println!("Certificate chain");
     println!(" 0 s:CN = {}", connect.split(':').next().unwrap_or("localhost"));
-    println!("   i:CN = OurOS Root CA");
+    println!("   i:CN = SlateOS Root CA");
     println!("---");
     println!("Server certificate");
     println!("-----BEGIN CERTIFICATE-----");
@@ -378,7 +378,7 @@ mod tests {
     #[test]
     fn test_sample_cert() {
         let cert = sample_cert();
-        assert!(cert.subject.contains("ouros.local"));
+        assert!(cert.subject.contains("slateos.local"));
         assert!(cert.issuer.contains("Root CA"));
     }
 

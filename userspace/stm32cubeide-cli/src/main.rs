@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! stm32cubeide-cli — OurOS STMicroelectronics STM32CubeIDE
+//! stm32cubeide-cli — SlateOS STMicroelectronics STM32CubeIDE
 //!
 //! Single personality: `stm32cubeide`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_cubeide(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: stm32cubeide [OPTIONS] [WORKSPACE]");
-        println!("STMicroelectronics STM32CubeIDE 1.16 (OurOS) — STM32 development IDE");
+        println!("STMicroelectronics STM32CubeIDE 1.16 (SlateOS) — STM32 development IDE");
         println!();
         println!("Options:");
         println!("  -data WORKSPACE        Workspace path");
@@ -23,8 +23,8 @@ fn run_cubeide(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("STMicroelectronics STM32CubeIDE 1.16.0 (OurOS)"); return 0; }
-    println!("STMicroelectronics STM32CubeIDE 1.16.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("STMicroelectronics STM32CubeIDE 1.16.0 (SlateOS)"); return 0; }
+    println!("STMicroelectronics STM32CubeIDE 1.16.0 (SlateOS)");
     println!("  Targets: STM32 Cortex-M0/M3/M4/M7/M33/M55, STM32MP1/MP2 (A7/A35)");
     println!("  Based on: Eclipse CDT + GNU MCU plugins + STM32CubeMX integration");
     println!("  CubeMX: pin/clock/peripheral configuration with code generation");

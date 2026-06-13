@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gnome-disks-cli — OurOS GNOME Disks utility
+//! gnome-disks-cli — SlateOS GNOME Disks utility
 //!
 //! Single personality: `gnome-disks`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gnome_disks(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gnome-disks [OPTIONS]");
-        println!("gnome-disks v46.0 (OurOS) — GNOME Disk Utility");
+        println!("gnome-disks v46.0 (SlateOS) — GNOME Disk Utility");
         println!();
         println!("Options:");
         println!("  --block-device DEV  Select device on startup");
@@ -24,12 +24,12 @@ fn run_gnome_disks(args: &[String], _prog: &str) -> i32 {
         println!("  benchmark, disk image create/restore, LUKS setup");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("gnome-disks v46.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("gnome-disks v46.0 (SlateOS)"); return 0; }
     println!("gnome-disks: disk utility");
     println!("  Disks:");
     println!("    500 GB Hard Disk — /dev/sda");
     println!("      Partition 1: EFI System (512 MB, mounted)");
-    println!("      Partition 2: OurOS Root (480 GB, mounted at /)");
+    println!("      Partition 2: SlateOS Root (480 GB, mounted at /)");
     println!("      Partition 3: Swap (19 GB, active)");
     println!("  SMART: Disk is healthy (32C, 1234 hours)");
     0

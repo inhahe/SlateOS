@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sioyek-cli — OurOS Sioyek PDF viewer for research
+//! sioyek-cli — SlateOS Sioyek PDF viewer for research
 //!
 //! Single personality: `sioyek`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sioyek(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sioyek [OPTIONS] [FILE]");
-        println!("sioyek v2.0 (OurOS) — PDF viewer for research papers");
+        println!("sioyek v2.0 (SlateOS) — PDF viewer for research papers");
         println!();
         println!("Options:");
         println!("  --new-window      Open in new window");
@@ -23,7 +23,7 @@ fn run_sioyek(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("sioyek v2.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("sioyek v2.0 (SlateOS)"); return 0; }
     println!("sioyek: research PDF viewer started");
     println!("  Features: portals, bookmarks, highlights, links");
     println!("  SyncTeX: supported");

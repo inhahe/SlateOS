@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xelatex-cli — OurOS XeLaTeX/XeTeX engine
+//! xelatex-cli — SlateOS XeLaTeX/XeTeX engine
 //!
 //! Multi-personality: `xelatex`, `xetex`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_xelatex(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: xelatex [OPTIONS] FILE.tex");
-        println!("XeTeX 3.141592653-2.6-0.999996 (TeX Live 2024/OurOS)");
+        println!("XeTeX 3.141592653-2.6-0.999996 (TeX Live 2024/SlateOS)");
         println!();
         println!("Options:");
         println!("  -interaction=MODE    Set interaction mode");
@@ -28,7 +28,7 @@ fn run_xelatex(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("XeTeX 3.141592653-2.6-0.999996 (TeX Live 2024/OurOS)");
+        println!("XeTeX 3.141592653-2.6-0.999996 (TeX Live 2024/SlateOS)");
         println!("kpathsea version 6.4.0");
         println!("ICU version 74.1, HarfBuzz version 8.3.0");
         return 0;
@@ -40,7 +40,7 @@ fn run_xelatex(args: &[String]) -> i32 {
     let base = file.rsplit_once('.').map_or(file, |(b, _)| b);
     let no_pdf = args.iter().any(|a| a == "-no-pdf");
     let ext = if no_pdf { "xdv" } else { "pdf" };
-    println!("This is XeTeX, Version 3.141592653-2.6-0.999996 (TeX Live 2024/OurOS)");
+    println!("This is XeTeX, Version 3.141592653-2.6-0.999996 (TeX Live 2024/SlateOS)");
     println!(" restricted \\write18 enabled.");
     println!("entering extended mode");
     println!("({})", file);

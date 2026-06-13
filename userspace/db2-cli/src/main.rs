@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! db2-cli — OurOS IBM Db2 database
+//! db2-cli — SlateOS IBM Db2 database
 //!
 //! Single personality: `db2`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_db2(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: db2 [OPTIONS] [SQL]");
-        println!("IBM Db2 12.1 (OurOS) — Enterprise database (LUW)");
+        println!("IBM Db2 12.1 (SlateOS) — Enterprise database (LUW)");
         println!();
         println!("Options:");
         println!("  -tf FILE               Run SQL script file");
@@ -23,8 +23,8 @@ fn run_db2(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("IBM Db2 v12.1.0.0 LUW (OurOS)"); return 0; }
-    println!("IBM Db2 v12.1.0.0 LUW (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("IBM Db2 v12.1.0.0 LUW (SlateOS)"); return 0; }
+    println!("IBM Db2 v12.1.0.0 LUW (SlateOS)");
     println!("  Editions: Community (free), Standard, Advanced; mainframe Db2 z/OS");
     println!("  Db2 LUW: Linux/Unix/Windows; Db2 z/OS: IBM Z mainframe");
     println!("  Languages: SQL PL, PL/SQL compatibility (Oracle migration), Java, Python");

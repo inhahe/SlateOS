@@ -150,7 +150,7 @@ impl WindowPicker {
             window_id: 0x1A3F,
             pid: 203,
             process_name: "editor".to_string(),
-            window_title: "untitled.rs - OurOS Editor".to_string(),
+            window_title: "untitled.rs - SlateOS Editor".to_string(),
         }
     }
 
@@ -1370,7 +1370,7 @@ impl EnvViewer {
                 ("USER".to_string(), "user".to_string()),
                 ("SHELL".to_string(), "/usr/bin/oursh".to_string()),
                 ("LANG".to_string(), "en_US.UTF-8".to_string()),
-                ("TERM".to_string(), "ouros-256color".to_string()),
+                ("TERM".to_string(), "slateos-256color".to_string()),
                 ("DISPLAY".to_string(), ":0".to_string()),
                 ("XDG_RUNTIME_DIR".to_string(), "/run/user/1000".to_string()),
                 ("XDG_DATA_HOME".to_string(), "/home/user/.local/share".to_string()),

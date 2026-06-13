@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mlflow-cli — OurOS MLflow CLI
+//! mlflow-cli — SlateOS MLflow CLI
 //!
 //! Single personality: `mlflow`
 
@@ -11,7 +11,7 @@ fn run_mlflow(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mlflow <COMMAND> [OPTIONS]");
         println!();
-        println!("MLflow ML lifecycle management CLI (OurOS).");
+        println!("MLflow ML lifecycle management CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  server       Start tracking server");

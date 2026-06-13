@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rustup — OurOS Rust toolchain installer and manager
+//! rustup — SlateOS Rust toolchain installer and manager
 //!
 //! Multi-personality binary detected via argv[0]:
 //!
@@ -41,20 +41,20 @@ fn run_rustup(args: Vec<String>) -> i32 {
             println!("  --version   Show version");
             0
         }
-        "--version" | "-V" => { println!("rustup 1.27.0 (OurOS)"); 0 }
+        "--version" | "-V" => { println!("rustup 1.27.0 (SlateOS)"); 0 }
         "show" => {
-            println!("Default host: x86_64-ouros");
+            println!("Default host: x86_64-slateos");
             println!("rustup home:  /home/user/.rustup");
             println!();
             println!("installed toolchains");
             println!("--------------------");
-            println!("stable-x86_64-ouros (default)");
-            println!("nightly-x86_64-ouros");
+            println!("stable-x86_64-slateos (default)");
+            println!("nightly-x86_64-slateos");
             println!();
             println!("active toolchain");
             println!("----------------");
-            println!("stable-x86_64-ouros (default)");
-            println!("rustc 1.77.0 (OurOS)");
+            println!("stable-x86_64-slateos (default)");
+            println!("rustc 1.77.0 (SlateOS)");
             0
         }
         "update" => {
@@ -66,10 +66,10 @@ fn run_rustup(args: Vec<String>) -> i32 {
                     println!("  {} updated - rustc 1.77.0", tc);
                 }
                 None => {
-                    println!("info: syncing channel updates for 'stable-x86_64-ouros'");
-                    println!("info: syncing channel updates for 'nightly-x86_64-ouros'");
-                    println!("  stable-x86_64-ouros unchanged - rustc 1.77.0");
-                    println!("  nightly-x86_64-ouros updated - rustc 1.79.0-nightly");
+                    println!("info: syncing channel updates for 'stable-x86_64-slateos'");
+                    println!("info: syncing channel updates for 'nightly-x86_64-slateos'");
+                    println!("  stable-x86_64-slateos unchanged - rustc 1.77.0");
+                    println!("  nightly-x86_64-slateos updated - rustc 1.79.0-nightly");
                 }
             }
             0
@@ -78,7 +78,7 @@ fn run_rustup(args: Vec<String>) -> i32 {
             if let Some(tc) = cmd_args.first() {
                 println!("info: default toolchain set to '{}'", tc);
             } else {
-                println!("stable-x86_64-ouros (default)");
+                println!("stable-x86_64-slateos (default)");
             }
             0
         }
@@ -86,8 +86,8 @@ fn run_rustup(args: Vec<String>) -> i32 {
             let sub = cmd_args.first().map(|s| s.as_str()).unwrap_or("list");
             match sub {
                 "list" => {
-                    println!("stable-x86_64-ouros (default)");
-                    println!("nightly-x86_64-ouros");
+                    println!("stable-x86_64-slateos (default)");
+                    println!("nightly-x86_64-slateos");
                 }
                 "install" => {
                     let tc = cmd_args.get(1).map(|s| s.as_str()).unwrap_or("stable");
@@ -106,10 +106,10 @@ fn run_rustup(args: Vec<String>) -> i32 {
             let sub = cmd_args.first().map(|s| s.as_str()).unwrap_or("list");
             match sub {
                 "list" => {
-                    println!("x86_64-ouros (installed)");
+                    println!("x86_64-slateos (installed)");
                     println!("x86_64-unknown-linux-gnu");
                     println!("x86_64-pc-windows-msvc");
-                    println!("aarch64-ouros");
+                    println!("aarch64-slateos");
                     println!("wasm32-unknown-unknown");
                 }
                 "add" => {
@@ -125,13 +125,13 @@ fn run_rustup(args: Vec<String>) -> i32 {
             let sub = cmd_args.first().map(|s| s.as_str()).unwrap_or("list");
             match sub {
                 "list" => {
-                    println!("cargo-x86_64-ouros (installed)");
-                    println!("clippy-x86_64-ouros (installed)");
-                    println!("rust-analyzer-x86_64-ouros (installed)");
+                    println!("cargo-x86_64-slateos (installed)");
+                    println!("clippy-x86_64-slateos (installed)");
+                    println!("rust-analyzer-x86_64-slateos (installed)");
                     println!("rust-src (installed)");
-                    println!("rust-std-x86_64-ouros (installed)");
-                    println!("rustc-x86_64-ouros (installed)");
-                    println!("rustfmt-x86_64-ouros (installed)");
+                    println!("rust-std-x86_64-slateos (installed)");
+                    println!("rustc-x86_64-slateos (installed)");
+                    println!("rustfmt-x86_64-slateos (installed)");
                     println!("llvm-tools");
                     println!("miri");
                 }
@@ -146,7 +146,7 @@ fn run_rustup(args: Vec<String>) -> i32 {
         }
         "which" => {
             let binary = cmd_args.first().map(|s| s.as_str()).unwrap_or("rustc");
-            println!("/home/user/.rustup/toolchains/stable-x86_64-ouros/bin/{}", binary);
+            println!("/home/user/.rustup/toolchains/stable-x86_64-slateos/bin/{}", binary);
             0
         }
         "doc" => { println!("Opening documentation in browser (simulated)"); 0 }
@@ -171,7 +171,7 @@ fn run_rustup(args: Vec<String>) -> i32 {
 
 fn run_rustc(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("rustc 1.77.0 (OurOS)");
+        println!("rustc 1.77.0 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -186,7 +186,7 @@ fn run_rustc(args: Vec<String>) -> i32 {
 fn run_cargo(args: Vec<String>) -> i32 {
     let cmd = args.first().cloned().unwrap_or_else(|| "help".to_string());
     match cmd.as_str() {
-        "--version" | "-V" => { println!("cargo 1.77.0 (OurOS)"); 0 }
+        "--version" | "-V" => { println!("cargo 1.77.0 (SlateOS)"); 0 }
         "build" | "b" => { println!("   Compiling myproject v0.1.0 (/project)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.5s"); 0 }
         "run" | "r" => { println!("   Compiling myproject v0.1.0\n    Finished `dev` profile\n     Running `target/debug/myproject`\n(simulated)"); 0 }
         "test" | "t" => { println!("   Compiling myproject v0.1.0\n    Finished `test` profile\n     Running tests\ntest result: ok. 5 passed; 0 failed (simulated)"); 0 }
@@ -225,7 +225,7 @@ fn main() {
         "cargo" => run_cargo(rest),
         "rustfmt" => { println!("(rustfmt — simulated)"); 0 }
         "clippy-driver" => { println!("(clippy — simulated)"); 0 }
-        "rust-analyzer" => { println!("rust-analyzer 1.77.0 (OurOS) — language server"); 0 }
+        "rust-analyzer" => { println!("rust-analyzer 1.77.0 (SlateOS) — language server"); 0 }
         _ => run_rustup(rest),
     };
 

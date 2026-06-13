@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tinc-cli — OurOS tinc mesh VPN
+//! tinc-cli — SlateOS tinc mesh VPN
 //!
 //! Multi-personality: `tincd`, `tinc`
 
@@ -15,7 +15,7 @@ fn run_tinc(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "tincd" => {
-                println!("tincd (OurOS) — tinc VPN daemon");
+                println!("tincd (SlateOS) — tinc VPN daemon");
                 println!("  -n NET             Network name");
                 println!("  -c DIR             Config directory");
                 println!("  -D                 No detach (debug)");
@@ -23,7 +23,7 @@ fn run_tinc(args: &[String], prog: &str) -> i32 {
                 println!("  -k [SIGNAL]        Kill running daemon");
             }
             _ => {
-                println!("tinc (OurOS) — tinc VPN control");
+                println!("tinc (SlateOS) — tinc VPN control");
                 println!("  -n NET             Network name");
                 println!("  init NAME          Initialize node");
                 println!("  start              Start VPN");
@@ -39,10 +39,10 @@ fn run_tinc(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("tinc v1.1pre18 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("tinc v1.1pre18 (SlateOS)"); return 0; }
     match prog {
         "tincd" => {
-            println!("tincd v1.1pre18 (OurOS)");
+            println!("tincd v1.1pre18 (SlateOS)");
             println!("  Network: mynet");
             println!("  Node: server1");
             println!("  Listening: 0.0.0.0:655");
@@ -50,7 +50,7 @@ fn run_tinc(args: &[String], prog: &str) -> i32 {
             println!("  Subnet: 10.99.0.0/24");
         }
         _ => {
-            println!("tinc v1.1pre18 (OurOS)");
+            println!("tinc v1.1pre18 (SlateOS)");
             println!("  Network: mynet");
             println!("  Nodes: 6 (5 reachable)");
             println!("  Edges: 12");

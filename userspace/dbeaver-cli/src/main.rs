@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dbeaver-cli — OurOS DBeaver database manager CLI
+//! dbeaver-cli — SlateOS DBeaver database manager CLI
 //!
 //! Single personality: `dbeaver`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_dbeaver(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: dbeaver [OPTIONS]");
-        println!("DBeaver CE 24.0 (OurOS) — Universal database manager");
+        println!("DBeaver CE 24.0 (SlateOS) — Universal database manager");
         println!();
         println!("Options:");
         println!("  -con NAME           Connect to saved connection");
@@ -32,7 +32,7 @@ fn run_dbeaver(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("DBeaver CE 24.0.0 (OurOS)");
+        println!("DBeaver CE 24.0.0 (SlateOS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("connections");

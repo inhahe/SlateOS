@@ -2,5 +2,5 @@
 name = "m4"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS m4 - macro processor"
+description = "SlateOS m4 - macro processor"
 [dependencies]

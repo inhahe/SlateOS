@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! diptrace-cli — OurOS Novarm DipTrace PCB EDA
+//! diptrace-cli — SlateOS Novarm DipTrace PCB EDA
 //!
 //! Single personality: `diptrace`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_dt(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: diptrace [OPTIONS] [FILE]");
-        println!("Novarm DipTrace 5.0 (OurOS) — Affordable schematic + PCB EDA");
+        println!("Novarm DipTrace 5.0 (SlateOS) — Affordable schematic + PCB EDA");
         println!();
         println!("Options:");
         println!("  --schematic FILE       Open .dch schematic");
@@ -23,8 +23,8 @@ fn run_dt(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Novarm DipTrace 5.0 (OurOS)"); return 0; }
-    println!("Novarm DipTrace 5.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Novarm DipTrace 5.0 (SlateOS)"); return 0; }
+    println!("Novarm DipTrace 5.0 (SlateOS)");
     println!("  Tools: Schematic, PCB Layout, Component Editor, Pattern Editor, 3D Viewer");
     println!("  Format: .dch (schematic), .dip (PCB) + DXF, IDF, STEP, Gerber, IPC-2581");
     println!("  Routing: ShapeRouter (autorouter) + manual with rule checking");

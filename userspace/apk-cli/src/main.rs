@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! apk-cli — OurOS Alpine Package Keeper
+//! apk-cli — SlateOS Alpine Package Keeper
 //!
 //! Multi-personality: `apk`
 
@@ -10,7 +10,7 @@ use std::process;
 fn run_apk(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: apk COMMAND [OPTIONS]");
-        println!("apk-tools 2.14.0 (OurOS)");
+        println!("apk-tools 2.14.0 (SlateOS)");
         println!();
         println!("Package management:");
         println!("  add          Install packages");

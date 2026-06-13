@@ -2,7 +2,7 @@
 name = "zip"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS zip/unzip archive utility"
+description = "SlateOS zip/unzip archive utility"
 [dependencies]
 
 [lints]

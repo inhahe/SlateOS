@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! neomutt-cli — OurOS NeoMutt email client
+//! neomutt-cli — SlateOS NeoMutt email client
 //!
 //! Single personality: `neomutt`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_neomutt(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: neomutt [OPTIONS]");
-        println!("neomutt v2024.01 (OurOS) — Terminal email client (NeoMutt)");
+        println!("neomutt v2024.01 (SlateOS) — Terminal email client (NeoMutt)");
         println!();
         println!("Options:");
         println!("  -f MAILBOX        Open specific mailbox");
@@ -27,7 +27,7 @@ fn run_neomutt(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-v") {
-        println!("NeoMutt 2024-01-01 (OurOS)");
+        println!("NeoMutt 2024-01-01 (SlateOS)");
         println!("  +IMAP +POP +SMTP +TLS +SASL +NOTMUCH");
         return 0;
     }

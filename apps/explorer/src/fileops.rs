@@ -1,4 +1,4 @@
-//! Atomic file operations for the OurOS file explorer.
+//! Atomic file operations for the SlateOS file explorer.
 //!
 //! Provides copy, move, delete, recycle, and undo operations with:
 //! - Progress tracking (bytes, files, ETA)
@@ -959,7 +959,7 @@ enum ActionOutcome {
 /// The real OS will expose this via a proper syscall. The std implementation
 /// may or may not support it, so we silently ignore errors.
 fn set_file_mtime(path: &Path, _mtime: SystemTime) -> io::Result<()> {
-    // Placeholder: on OurOS this would call the appropriate filesystem
+    // Placeholder: on SlateOS this would call the appropriate filesystem
     // syscall to set the modification time. On the host (for testing)
     // std::fs does not provide a portable setter, so this is a no-op.
     let _ = path;

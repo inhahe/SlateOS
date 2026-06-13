@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! qucs-cli — OurOS Qucs circuit simulator
+//! qucs-cli — SlateOS Qucs circuit simulator
 //!
 //! Multi-personality: `qucs`, `qucsator`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_qucs(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: qucs [OPTIONS] [FILE.sch]");
-        println!("qucs v24.2 (OurOS) — Quite Universal Circuit Simulator");
+        println!("qucs v24.2 (SlateOS) — Quite Universal Circuit Simulator");
         println!();
         println!("Options:");
         println!("  --version         Show version");
@@ -23,7 +23,7 @@ fn run_qucs(args: &[String], _prog: &str) -> i32 {
         println!("  digital, harmonic balance, parameter sweep");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("qucs v24.2 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("qucs v24.2 (SlateOS)"); return 0; }
     println!("qucs: circuit simulator GUI started");
     println!("  Components: R, L, C, diodes, BJT, MOSFET, OpAmp, ...");
     println!("  Simulation: DC/AC/Transient/S-parameter");
@@ -34,7 +34,7 @@ fn run_qucs(args: &[String], _prog: &str) -> i32 {
 fn run_qucsator(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: qucsator [OPTIONS] -i INPUT -o OUTPUT");
-        println!("qucsator v24.2 (OurOS) — Qucs simulation engine");
+        println!("qucsator v24.2 (SlateOS) — Qucs simulation engine");
         println!();
         println!("Options:");
         println!("  -i FILE           Input netlist");
@@ -42,7 +42,7 @@ fn run_qucsator(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("qucsator v24.2 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("qucsator v24.2 (SlateOS)"); return 0; }
     println!("qucsator: running simulation...");
     0
 }

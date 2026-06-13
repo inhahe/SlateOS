@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ripgrep — OurOS recursively search directories for a regex pattern
+//! ripgrep — SlateOS recursively search directories for a regex pattern
 //!
 //! Single personality: `rg`
 
@@ -53,7 +53,7 @@ fn run_rg(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("ripgrep 14.1.0 (OurOS)");
+        println!("ripgrep 14.1.0 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "--type-list") {

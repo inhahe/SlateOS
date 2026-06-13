@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! grafana — OurOS observability and visualization platform
+//! grafana — SlateOS observability and visualization platform
 //!
 //! Multi-personality: `grafana-server` (default), `grafana-cli`
 
@@ -20,7 +20,7 @@ fn run_grafana_server(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("Version 10.4.0 (OurOS)");
+        println!("Version 10.4.0 (SlateOS)");
         println!("Commit: abc1234");
         println!("Branch: main");
         return 0;
@@ -46,7 +46,7 @@ fn run_grafana_cli(args: Vec<String>) -> i32 {
             println!("  --version  Show version");
             0
         }
-        "--version" => { println!("Grafana CLI version 10.4.0 (OurOS)"); 0 }
+        "--version" => { println!("Grafana CLI version 10.4.0 (SlateOS)"); 0 }
         "plugins" => {
             let sub = cmd_args.first().map(|s| s.as_str()).unwrap_or("list-remote");
             match sub {

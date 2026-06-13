@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! flax-cli — OurOS Flax game engine
+//! flax-cli — SlateOS Flax game engine
 //!
 //! Single personality: `flax`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_flax(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: flax [COMMAND] [OPTIONS]");
-        println!("Flax Engine v1.8 (OurOS) — Modern AAA-quality game engine");
+        println!("Flax Engine v1.8 (SlateOS) — Modern AAA-quality game engine");
         println!();
         println!("Commands:");
         println!("  new PROJECT        Create new project");
@@ -31,8 +31,8 @@ fn run_flax(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Flax Engine v1.8.0 (OurOS)"); return 0; }
-    println!("Flax Engine v1.8.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Flax Engine v1.8.0 (SlateOS)"); return 0; }
+    println!("Flax Engine v1.8.0 (SlateOS)");
     println!("  Scripting: C#, C++, Visual Script");
     println!("  Renderer: DirectX 11/12, Vulkan");
     println!("  Lighting: PBR, GI, baked & realtime");

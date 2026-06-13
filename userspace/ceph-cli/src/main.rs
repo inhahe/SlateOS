@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ceph-cli — OurOS Ceph distributed storage tools
+//! ceph-cli — SlateOS Ceph distributed storage tools
 //!
 //! Multi-personality: `ceph`, `rados`, `rbd`, `ceph-fuse`
 
@@ -19,7 +19,7 @@ fn run_ceph(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "version") {
-        println!("ceph version 18.2.1 (reef) (OurOS)");
+        println!("ceph version 18.2.1 (reef) (SlateOS)");
         return 0;
     }
 

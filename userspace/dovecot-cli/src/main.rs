@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dovecot-cli — OurOS Dovecot IMAP/POP3 server CLI
+//! dovecot-cli — SlateOS Dovecot IMAP/POP3 server CLI
 //!
 //! Multi-personality: `dovecot`, `doveconf`, `doveadm`
 
@@ -19,7 +19,7 @@ fn run_dovecot(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: dovecot [OPTIONS]");
         println!();
-        println!("Dovecot — IMAP/POP3 server (OurOS).");
+        println!("Dovecot — IMAP/POP3 server (SlateOS).");
         println!();
         println!("Options:");
         println!("  -F               Run in foreground");
@@ -30,7 +30,7 @@ fn run_dovecot(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("dovecot 2.3.21 (OurOS)");
+        println!("dovecot 2.3.21 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "--build-options") {
@@ -53,7 +53,7 @@ fn run_doveconf(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: doveconf [OPTIONS] [SETTING ...]");
         println!();
-        println!("doveconf — dump Dovecot configuration (OurOS).");
+        println!("doveconf — dump Dovecot configuration (SlateOS).");
         println!();
         println!("Options:");
         println!("  -n    Show non-default settings");
@@ -84,7 +84,7 @@ fn run_doveadm(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: doveadm [OPTIONS] COMMAND [ARGS ...]");
         println!();
-        println!("doveadm — Dovecot administration tool (OurOS).");
+        println!("doveadm — Dovecot administration tool (SlateOS).");
         println!();
         println!("Commands:");
         println!("  mailbox list      List mailboxes");

@@ -9,7 +9,7 @@
 #![allow(clippy::struct_excessive_bools)]
 #![allow(clippy::fn_params_excessive_bools)]
 
-//! OurOS Sudoku — classic 9x9 number puzzle game.
+//! SlateOS Sudoku — classic 9x9 number puzzle game.
 //!
 //! Features three difficulty levels (Easy, Medium, Hard), a backtracking
 //! solver for puzzle generation and hint delivery, pencil marks / notes mode,

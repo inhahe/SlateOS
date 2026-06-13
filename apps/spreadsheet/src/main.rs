@@ -1,4 +1,4 @@
-//! OurOS Spreadsheet
+//! SlateOS Spreadsheet
 //!
 //! Full-featured spreadsheet application with:
 //! - Cell grid with columns A-Z and rows 1-999

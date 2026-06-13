@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! notify-send-cli — OurOS notify-send desktop notification CLI
+//! notify-send-cli — SlateOS notify-send desktop notification CLI
 //!
 //! Single personality: `notify-send`
 
@@ -11,7 +11,7 @@ fn run_notify_send(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: notify-send [OPTIONS] SUMMARY [BODY]");
         println!();
-        println!("notify-send — desktop notification sender (OurOS).");
+        println!("notify-send — desktop notification sender (SlateOS).");
         println!();
         println!("Options:");
         println!("  -u, --urgency LEVEL  Urgency (low/normal/critical)");
@@ -27,7 +27,7 @@ fn run_notify_send(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("notify-send 0.8.3 (OurOS)");
+        println!("notify-send 0.8.3 (SlateOS)");
         return 0;
     }
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! netgen-cli — OurOS NETGEN mesh generator
+//! netgen-cli — SlateOS NETGEN mesh generator
 //!
 //! Single personality: `netgen`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_netgen(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: netgen [OPTIONS] [GEOMETRY_FILE]");
-        println!("NETGEN v6.2 (OurOS) — Automatic 3D mesh generator");
+        println!("NETGEN v6.2 (SlateOS) — Automatic 3D mesh generator");
         println!();
         println!("Options:");
         println!("  -geofile FILE     Input geometry file (.geo, .stl, .step)");
@@ -27,8 +27,8 @@ fn run_netgen(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("NETGEN v6.2.2307 (OurOS)"); return 0; }
-    println!("NETGEN v6.2 (OurOS) — Mesh Generator");
+    if args.iter().any(|a| a == "--version") { println!("NETGEN v6.2.2307 (SlateOS)"); return 0; }
+    println!("NETGEN v6.2 (SlateOS) — Mesh Generator");
     println!("  Reading geometry...");
     println!("  Surface meshing: 4,567 triangles");
     println!("  Volume meshing: 23,456 tetrahedra");

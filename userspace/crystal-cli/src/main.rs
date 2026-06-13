@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! crystal-cli — OurOS Crystal language tools
+//! crystal-cli — SlateOS Crystal language tools
 //!
 //! Multi-personality: `crystal`, `shards`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_crystal(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: crystal COMMAND [OPTIONS]");
-        println!("Crystal 1.11.2 (OurOS)");
+        println!("Crystal 1.11.2 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  init           Initialize project");
@@ -33,7 +33,7 @@ fn run_crystal(args: &[String]) -> i32 {
         "version" | "--version" => {
             println!("Crystal 1.11.2 [abc123] (2024-02-15)");
             println!("LLVM: 17.0.6");
-            println!("Default target: x86_64-ouros");
+            println!("Default target: x86_64-slateos");
         }
         "build" => {
             let file = args.get(1).map(|s| s.as_str()).unwrap_or("src/main.cr");
@@ -87,7 +87,7 @@ fn run_crystal(args: &[String]) -> i32 {
 fn run_shards(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: shards COMMAND [OPTIONS]");
-        println!("Shards 0.17.4 (OurOS)");
+        println!("Shards 0.17.4 (SlateOS)");
         println!("  install    Install dependencies");
         println!("  update     Update dependencies");
         println!("  list       List dependencies");
@@ -99,7 +99,7 @@ fn run_shards(args: &[String]) -> i32 {
     }
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("install");
     match subcmd {
-        "--version" => println!("Shards 0.17.4 (OurOS)"),
+        "--version" => println!("Shards 0.17.4 (SlateOS)"),
         "install" => {
             println!("Resolving dependencies...");
             println!("Fetching https://github.com/crystal-lang/...");

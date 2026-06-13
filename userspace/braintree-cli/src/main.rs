@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! braintree-cli — OurOS Braintree payment CLI
+//! braintree-cli — SlateOS Braintree payment CLI
 //!
 //! Single personality: `braintree`
 
@@ -11,7 +11,7 @@ fn run_braintree(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: braintree <COMMAND> [OPTIONS]");
         println!();
-        println!("Braintree payment gateway CLI (OurOS).");
+        println!("Braintree payment gateway CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  transactions  Manage transactions");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! anthy-cli — OurOS Anthy Japanese input method
+//! anthy-cli — SlateOS Anthy Japanese input method
 //!
 //! Multi-personality: `anthy`, `anthy-dic-tool`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_anthy(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: anthy [OPTIONS]");
-        println!("anthy v0.4 (OurOS) — Japanese kana-kanji conversion engine");
+        println!("anthy v0.4 (SlateOS) — Japanese kana-kanji conversion engine");
         println!();
         println!("Options:");
         println!("  --version         Show version");
@@ -22,7 +22,7 @@ fn run_anthy(args: &[String], _prog: &str) -> i32 {
         println!("Used as backend for IBus, uim, SCIM, fcitx.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("anthy v0.4 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("anthy v0.4 (SlateOS)"); return 0; }
     println!("anthy: Japanese conversion engine");
     println!("  Dictionary: system + user");
     println!("  Prediction: frequency-based");
@@ -32,10 +32,10 @@ fn run_anthy(args: &[String], _prog: &str) -> i32 {
 fn run_dic_tool(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: anthy-dic-tool [--dump|--load|--export]");
-        println!("anthy-dic-tool v0.4 (OurOS) — Anthy dictionary tool");
+        println!("anthy-dic-tool v0.4 (SlateOS) — Anthy dictionary tool");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("anthy-dic-tool v0.4 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("anthy-dic-tool v0.4 (SlateOS)"); return 0; }
     if args.iter().any(|a| a == "--dump") {
         println!("anthy-dic-tool: dumping user dictionary...");
         return 0;

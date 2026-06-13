@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ipsec-cli — OurOS IPsec/IKE VPN tools
+//! ipsec-cli — SlateOS IPsec/IKE VPN tools
 //!
 //! Multi-personality: `ipsec`, `swanctl`, `strongswan`
 
@@ -14,7 +14,7 @@ fn run_ipsec(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: ipsec COMMAND [OPTIONS]");
         println!();
-        println!("ipsec — strongSwan IPsec VPN (OurOS).");
+        println!("ipsec — strongSwan IPsec VPN (SlateOS).");
         println!();
         println!("Commands:");
         println!("  start          Start strongSwan");
@@ -30,7 +30,7 @@ fn run_ipsec(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Linux strongSwan 5.9.11 (OurOS)");
+        println!("Linux strongSwan 5.9.11 (SlateOS)");
         return 0;
     }
 
@@ -43,7 +43,7 @@ fn run_ipsec(args: &[String]) -> i32 {
             println!("    office-vpn{{1}}:   10.0.0.0/8 === 192.168.1.0/24");
         }
         "statusall" => {
-            println!("Status of IKE charon daemon (strongSwan 5.9.11, OurOS):");
+            println!("Status of IKE charon daemon (strongSwan 5.9.11, SlateOS):");
             println!("  uptime: 4 hours, since May 22 08:00:00 2024");
             println!("  worker threads: 16 of 16 idle, 5/0/0/0 working, job queue: 0/0/0/0");
             println!("  loaded plugins: charon aes des sha2 sha1 hmac x509 pem openssl");
@@ -87,7 +87,7 @@ fn run_ipsec(args: &[String]) -> i32 {
         "listcerts" => {
             println!("List of X.509 End Entity Certificates:");
             println!("  subject: \"CN=me\"");
-            println!("  issuer:  \"CN=OurOS-CA\"");
+            println!("  issuer:  \"CN=SlateOS-CA\"");
             println!("  serial:   01:23:45:67:89:ab:cd:ef");
             println!("  validity: not before May 01 00:00:00 2024, ok");
             println!("            not after  May 01 00:00:00 2025, ok");

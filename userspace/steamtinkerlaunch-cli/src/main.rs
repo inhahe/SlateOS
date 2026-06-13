@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! steamtinkerlaunch-cli — OurOS SteamTinkerLaunch tweaking tool
+//! steamtinkerlaunch-cli — SlateOS SteamTinkerLaunch tweaking tool
 //!
 //! Single personality: `steamtinkerlaunch`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_stl(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: steamtinkerlaunch COMMAND [OPTIONS]");
-        println!("steamtinkerlaunch v12.0 (OurOS) — Steam game tweaking wrapper");
+        println!("steamtinkerlaunch v12.0 (SlateOS) — Steam game tweaking wrapper");
         println!();
         println!("Commands:");
         println!("  gui               Open settings GUI");
@@ -25,7 +25,7 @@ fn run_stl(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("steamtinkerlaunch v12.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("steamtinkerlaunch v12.0 (SlateOS)"); return 0; }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("gui");
     match cmd {
         "gui" => println!("steamtinkerlaunch: settings GUI opened"),

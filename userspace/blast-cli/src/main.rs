@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! blast-cli — OurOS NCBI BLAST+ sequence search
+//! blast-cli — SlateOS NCBI BLAST+ sequence search
 //!
 //! Multi-personality: `blastn`, `blastp`, `blastx`, `tblastn`, `tblastx`, `makeblastdb`, `blastdbcmd`
 

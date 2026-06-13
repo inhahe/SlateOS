@@ -2,5 +2,5 @@
 name = "stat"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS file status and manipulation tools"
+description = "SlateOS file status and manipulation tools"
 [dependencies]

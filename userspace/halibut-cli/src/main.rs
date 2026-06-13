@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! halibut-cli — OurOS Halibut documentation system
+//! halibut-cli — SlateOS Halibut documentation system
 //!
 //! Single personality: `halibut`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_halibut(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: halibut [OPTIONS] FILE [FILE...]");
-        println!("Halibut v1.3 (OurOS) — Multi-format documentation tool");
+        println!("Halibut v1.3 (SlateOS) — Multi-format documentation tool");
         println!();
         println!("Options:");
         println!("  --text[=FILE]  Generate plain text");
@@ -28,8 +28,8 @@ fn run_halibut(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Halibut v1.3 (OurOS)"); return 0; }
-    println!("Halibut v1.3 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Halibut v1.3 (SlateOS)"); return 0; }
+    println!("Halibut v1.3 (SlateOS)");
     println!("  Input: manual.but");
     println!("  Generating:");
     println!("    PDF: manual.pdf (89 pages)");

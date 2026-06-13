@@ -2,5 +2,5 @@
 name = "sort"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS line sorter utility"
+description = "SlateOS line sorter utility"
 [dependencies]

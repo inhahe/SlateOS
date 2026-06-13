@@ -1,4 +1,4 @@
-//! OurOS Process Explorer
+//! SlateOS Process Explorer
 //!
 //! Graphical system monitor and task manager with:
 //! - Process list with sortable columns and tree view
@@ -8,7 +8,7 @@
 //! - Toolbar with actions and search
 //!
 //! Uses the guitk library for UI rendering. All data is gathered
-//! through OurOS syscalls; the structs here define the presentation
+//! through SlateOS syscalls; the structs here define the presentation
 //! layer while the OS provides the actual process/system information.
 
 mod features;
@@ -624,7 +624,7 @@ impl ProcessExplorerState {
 
     /// Refresh all data from the OS.
     ///
-    /// In a real implementation this calls OurOS syscalls to enumerate
+    /// In a real implementation this calls SlateOS syscalls to enumerate
     /// processes, read system stats, and list network connections. Here
     /// we define the API shape; the actual syscalls are provided by the
     /// kernel's process and network subsystems.

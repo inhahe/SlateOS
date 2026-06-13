@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! espeak-cli — OurOS eSpeak-NG text-to-speech CLI
+//! espeak-cli — SlateOS eSpeak-NG text-to-speech CLI
 //!
 //! Multi-personality: `espeak`, `espeak-ng`
 
@@ -21,7 +21,7 @@ fn run_espeak(args: &[String], ng: bool) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: {} [OPTIONS] [WORDS]", name);
         println!();
-        println!("{} — text to speech synthesizer (OurOS).", name);
+        println!("{} — text to speech synthesizer (SlateOS).", name);
         println!();
         println!("Options:");
         println!("  -v VOICE         Voice name (default en)");
@@ -45,9 +45,9 @@ fn run_espeak(args: &[String], ng: bool) -> i32 {
     }
     if args.iter().any(|a| a == "--version") {
         if ng {
-            println!("eSpeak NG text-to-speech: 1.51.1 (OurOS)");
+            println!("eSpeak NG text-to-speech: 1.51.1 (SlateOS)");
         } else {
-            println!("eSpeak text-to-speech: 1.48.15 (OurOS)");
+            println!("eSpeak text-to-speech: 1.48.15 (SlateOS)");
         }
         return 0;
     }

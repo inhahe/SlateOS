@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sejda-cli — OurOS Sejda PDF manipulation
+//! sejda-cli — SlateOS Sejda PDF manipulation
 //!
 //! Single personality: `sejda-console`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sejda(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: sejda-console COMMAND [OPTIONS]");
-        println!("sejda-console v3.2 (OurOS) — PDF manipulation toolkit");
+        println!("sejda-console v3.2 (SlateOS) — PDF manipulation toolkit");
         println!();
         println!("Commands:");
         println!("  merge             Merge PDF files");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pyrra-cli — OurOS Pyrra SLO management tool
+//! pyrra-cli — SlateOS Pyrra SLO management tool
 //!
 //! Single personality: `pyrra`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pyrra(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: pyrra COMMAND [OPTIONS]");
-        println!("Pyrra v0.7.0 (OurOS) — SLO management tool");
+        println!("Pyrra v0.7.0 (SlateOS) — SLO management tool");
         println!();
         println!("Commands:");
         println!("  api             Start API server");
@@ -29,7 +29,7 @@ fn run_pyrra(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("Pyrra v0.7.0 (OurOS)");
+        println!("Pyrra v0.7.0 (SlateOS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("generate");

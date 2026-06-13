@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! garage-cli — OurOS Garage S3-compatible storage
+//! garage-cli — SlateOS Garage S3-compatible storage
 //!
 //! Multi-personality: `garage`, `garage-server`
 
@@ -15,13 +15,13 @@ fn run_garage(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [COMMAND] [OPTIONS]", prog);
         match prog {
             "garage-server" => {
-                println!("garage-server (OurOS) — Garage storage node");
+                println!("garage-server (SlateOS) — Garage storage node");
                 println!("  --config FILE      Config file");
                 println!("  --metadata-dir DIR Metadata directory");
                 println!("  --data-dir DIR     Data directory");
             }
             _ => {
-                println!("Garage v1.0 (OurOS) — S3-compatible distributed storage");
+                println!("Garage v1.0 (SlateOS) — S3-compatible distributed storage");
                 println!();
                 println!("Commands:");
                 println!("  status             Show cluster status");
@@ -36,8 +36,8 @@ fn run_garage(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Garage v1.0.1 (OurOS)"); return 0; }
-    println!("Garage v1.0.1 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Garage v1.0.1 (SlateOS)"); return 0; }
+    println!("Garage v1.0.1 (SlateOS)");
     println!("  Nodes: 3 (all healthy)");
     println!("  Buckets: 8");
     println!("  Objects: 234,567");

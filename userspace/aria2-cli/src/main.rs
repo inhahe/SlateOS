@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! aria2-cli — OurOS aria2 download utility
+//! aria2-cli — SlateOS aria2 download utility
 //!
 //! Single personality: `aria2c`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_aria2c(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: aria2c [OPTIONS] URL...");
-        println!("aria2c v1.37 (OurOS) — Multi-protocol download utility");
+        println!("aria2c v1.37 (SlateOS) — Multi-protocol download utility");
         println!();
         println!("Options:");
         println!("  -d DIR            Download directory");
@@ -31,7 +31,7 @@ fn run_aria2c(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("aria2c v1.37 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("aria2c v1.37 (SlateOS)"); return 0; }
     if args.iter().any(|a| a == "--enable-rpc") {
         println!("aria2c: JSON-RPC server listening on port 6800");
         return 0;

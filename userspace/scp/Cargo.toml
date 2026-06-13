@@ -2,5 +2,5 @@
 name = "scp"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS secure file copy"
+description = "SlateOS secure file copy"
 [dependencies]

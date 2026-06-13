@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! epicgames-cli — OurOS Epic Games Launcher / Store
+//! epicgames-cli — SlateOS Epic Games Launcher / Store
 //!
 //! Single personality: `epicgames`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_eg(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: epicgames [OPTIONS]");
-        println!("Epic Games Launcher 16.5 (OurOS) — Epic Games Store + Unreal/Fortnite hub");
+        println!("Epic Games Launcher 16.5 (SlateOS) — Epic Games Store + Unreal/Fortnite hub");
         println!();
         println!("Options:");
         println!("  --library              Game library");
@@ -24,8 +24,8 @@ fn run_eg(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Epic Games Launcher 16.5.4 (OurOS)"); return 0; }
-    println!("Epic Games Launcher 16.5.4 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Epic Games Launcher 16.5.4 (SlateOS)"); return 0; }
+    println!("Epic Games Launcher 16.5.4 (SlateOS)");
     println!("  Vendor: Epic Games Inc. (HQ Cary, NC — founded 1991 as 'Potomac Computer Systems')");
     println!("  Founder/CEO: Tim Sweeney (Pennsylvania State Univ. dropout, started Epic at age 20)");
     println!("  Major shareholder: Tencent (40% non-voting, $330M acquisition 2012)");

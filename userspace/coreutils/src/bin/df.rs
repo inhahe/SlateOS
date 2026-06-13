@@ -5,7 +5,7 @@
 //!   Without arguments: show all mounted filesystems.
 //!   With FILE: show the filesystem containing FILE.
 //!
-//! Portability: on POSIX-y targets (Linux, and our `x86_64-ouros` custom
+//! Portability: on POSIX-y targets (Linux, and our `x86_64-slateos` custom
 //! target which reports `target_os = "linux"`) we use the `statvfs()`
 //! C-runtime call to read filesystem stats.  On Windows hosts the symbol
 //! is not in mingw-w64; `stat_fs` falls back to a stub error so the

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! geda-cli — OurOS gEDA electronic design suite
+//! geda-cli — SlateOS gEDA electronic design suite
 //!
 //! Multi-personality: `gschem`, `gnetlist`, `gattrib`, `gsch2pcb`
 
@@ -13,13 +13,13 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gschem(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gschem [OPTIONS] [FILE.sch]");
-        println!("gschem v1.10 (OurOS) — gEDA schematic editor");
+        println!("gschem v1.10 (SlateOS) — gEDA schematic editor");
         println!();
         println!("Options:");
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("gschem v1.10 (OurOS, gEDA)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("gschem v1.10 (SlateOS, gEDA)"); return 0; }
     println!("gschem: schematic editor started");
     println!("  Symbol library: standard, SPICE, simulation");
     println!("  Hierarchical schematics supported");
@@ -29,7 +29,7 @@ fn run_gschem(args: &[String], _prog: &str) -> i32 {
 fn run_gnetlist(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gnetlist [OPTIONS] FILE.sch...");
-        println!("gnetlist v1.10 (OurOS) — gEDA netlist generator");
+        println!("gnetlist v1.10 (SlateOS) — gEDA netlist generator");
         println!();
         println!("Options:");
         println!("  -g BACKEND        Output backend (spice, pcb, verilog)");
@@ -37,7 +37,7 @@ fn run_gnetlist(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("gnetlist v1.10 (OurOS, gEDA)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("gnetlist v1.10 (SlateOS, gEDA)"); return 0; }
     println!("gnetlist: generating netlist...");
     0
 }
@@ -45,10 +45,10 @@ fn run_gnetlist(args: &[String], _prog: &str) -> i32 {
 fn run_gattrib(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gattrib [OPTIONS] FILE.sch...");
-        println!("gattrib v1.10 (OurOS) — gEDA attribute spreadsheet editor");
+        println!("gattrib v1.10 (SlateOS) — gEDA attribute spreadsheet editor");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("gattrib v1.10 (OurOS, gEDA)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("gattrib v1.10 (SlateOS, gEDA)"); return 0; }
     println!("gattrib: attribute editor started");
     0
 }
@@ -56,10 +56,10 @@ fn run_gattrib(args: &[String], _prog: &str) -> i32 {
 fn run_gsch2pcb(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gsch2pcb [OPTIONS] FILE.sch");
-        println!("gsch2pcb v1.10 (OurOS) — Schematic to PCB layout bridge");
+        println!("gsch2pcb v1.10 (SlateOS) — Schematic to PCB layout bridge");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("gsch2pcb v1.10 (OurOS, gEDA)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("gsch2pcb v1.10 (SlateOS, gEDA)"); return 0; }
     println!("gsch2pcb: generating PCB layout from schematic...");
     0
 }

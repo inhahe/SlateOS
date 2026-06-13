@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! spades-cli — OurOS SPAdes genome assembler
+//! spades-cli — SlateOS SPAdes genome assembler
 //!
 //! Single personality: `spades`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_spades(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: spades [OPTIONS]");
-        println!("SPAdes v3.15 (OurOS) — De novo genome assembler");
+        println!("SPAdes v3.15 (SlateOS) — De novo genome assembler");
         println!();
         println!("Input:");
         println!("  -1 FILE        Forward reads");
@@ -37,8 +37,8 @@ fn run_spades(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("SPAdes v3.15.5 (OurOS)"); return 0; }
-    println!("SPAdes v3.15.5 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("SPAdes v3.15.5 (SlateOS)"); return 0; }
+    println!("SPAdes v3.15.5 (SlateOS)");
     println!("  Error correction: BayesHammer");
     println!("  Assembly: k=21,33,55,77,99,127");
     println!("  Scaffolding: done");

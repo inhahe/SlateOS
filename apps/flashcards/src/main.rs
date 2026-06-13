@@ -7,7 +7,7 @@
 #![allow(clippy::similar_names)]
 #![allow(clippy::struct_excessive_bools)]
 
-//! OurOS Flashcards -- spaced-repetition study application.
+//! SlateOS Flashcards -- spaced-repetition study application.
 //!
 //! Features:
 //! - Multiple decks with create/edit/delete

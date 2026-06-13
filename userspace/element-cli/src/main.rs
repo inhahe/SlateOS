@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! element-cli — OurOS Element Matrix client (open federated chat)
+//! element-cli — SlateOS Element Matrix client (open federated chat)
 //!
 //! Single personality: `element`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_el(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: element [OPTIONS]");
-        println!("Element (OurOS) — Matrix protocol client, decentralized E2EE chat");
+        println!("Element (SlateOS) — Matrix protocol client, decentralized E2EE chat");
         println!();
         println!("Options:");
         println!("  --homeserver URL       Connect to Matrix homeserver");
@@ -24,8 +24,8 @@ fn run_el(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Element Desktop 1.11.86 (OurOS)"); return 0; }
-    println!("Element Desktop 1.11.86 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Element Desktop 1.11.86 (SlateOS)"); return 0; }
+    println!("Element Desktop 1.11.86 (SlateOS)");
     println!("  Vendor: Element Software / New Vector Ltd (UK, founded 2017)");
     println!("  Founders: Matthew Hodgson, Amandine Le Pape");
     println!("  Protocol: Matrix (Matrix.org Foundation) — open, federated, decentralized");

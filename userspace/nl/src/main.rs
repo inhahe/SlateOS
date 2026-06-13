@@ -1,4 +1,4 @@
-//! OurOS `nl` Utility -- Number Lines of Files
+//! SlateOS `nl` Utility -- Number Lines of Files
 //!
 //! Numbers lines of files according to configurable numbering styles, section
 //! delimiters, and formatting options. Supports logical page sections (header,
@@ -971,7 +971,7 @@ fn run(config: &Config) -> i32 {
 // ============================================================================
 
 fn print_help() {
-    println!("OurOS nl v{VERSION}");
+    println!("SlateOS nl v{VERSION}");
     println!();
     println!("Write each FILE to standard output, with line numbers added.");
     println!("With no FILE, or when FILE is -, read standard input.");
@@ -1029,7 +1029,7 @@ fn main() {
             process::exit(0);
         }
         ParseResult::Version => {
-            println!("nl (OurOS) {VERSION}");
+            println!("nl (SlateOS) {VERSION}");
             process::exit(0);
         }
         ParseResult::Run(config) => {

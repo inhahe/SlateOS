@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! salt-cli — OurOS SaltStack CLI
+//! salt-cli — SlateOS SaltStack CLI
 //!
 //! Multi-personality: `salt`, `salt-call`, `salt-key`, `salt-run`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_salt(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: salt TARGET FUNCTION [ARGS...]");
-        println!("Salt 3006.8 (OurOS)");
+        println!("Salt 3006.8 (SlateOS)");
         println!();
         println!("Options:");
         println!("  --version             Show version");
@@ -63,9 +63,9 @@ fn run_salt(args: &[String]) -> i32 {
         }
         "grains.items" => {
             println!("    ----------");
-            println!("    os: OurOS");
+            println!("    os: SlateOS");
             println!("    osrelease: 1.0");
-            println!("    kernel: OurOS");
+            println!("    kernel: SlateOS");
             println!("    cpuarch: x86_64");
             println!("    mem_total: 8192");
         }

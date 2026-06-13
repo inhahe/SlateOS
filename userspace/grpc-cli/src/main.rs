@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! grpc-cli — OurOS gRPC tools
+//! grpc-cli — SlateOS gRPC tools
 //!
 //! Multi-personality: `grpcurl`, `grpc_health_probe`, `grpc_cli`
 
@@ -14,7 +14,7 @@ fn run_grpcurl(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: grpcurl [FLAGS] [ADDRESS] [LIST|DESCRIBE] [SYMBOL]");
         println!();
-        println!("grpcurl — gRPC CLI client (OurOS).");
+        println!("grpcurl — gRPC CLI client (SlateOS).");
         println!();
         println!("Options:");
         println!("  -plaintext           Use plaintext (no TLS)");
@@ -27,7 +27,7 @@ fn run_grpcurl(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("grpcurl v1.9.1 (OurOS)");
+        println!("grpcurl v1.9.1 (SlateOS)");
         return 0;
     }
 

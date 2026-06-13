@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! copper-cli — OurOS Copper (CRM built natively inside Google Workspace)
+//! copper-cli — SlateOS Copper (CRM built natively inside Google Workspace)
 //!
 //! Single personality: `copper`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_copper(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: copper [OPTIONS]");
-        println!("Copper (OurOS) — CRM built for Google Workspace");
+        println!("Copper (SlateOS) — CRM built for Google Workspace");
         println!();
         println!("Options:");
         println!("  --starter              Starter $9/user/mo (billed annually)");
@@ -24,8 +24,8 @@ fn run_copper(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Copper 2024 (OurOS)"); return 0; }
-    println!("Copper 2024 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Copper 2024 (SlateOS)"); return 0; }
+    println!("Copper 2024 (SlateOS)");
     println!("  Vendor: Copper CRM, Inc. (San Francisco, CA — private)");
     println!("  Founder: Dennis Fois (CEO from 2017, ex-AdRoll, Newscred)");
     println!("          original founder Jon Aniano (ex-Salesforce VP product)");

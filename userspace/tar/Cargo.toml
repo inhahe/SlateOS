@@ -2,5 +2,5 @@
 name = "tar"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS tape archive utility"
+description = "SlateOS tape archive utility"
 [dependencies]

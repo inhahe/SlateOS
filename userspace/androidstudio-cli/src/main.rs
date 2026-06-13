@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! androidstudio-cli — OurOS Android Studio (Google's official Android IDE)
+//! androidstudio-cli — SlateOS Android Studio (Google's official Android IDE)
 //!
 //! Single personality: `androidstudio`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_as(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: androidstudio [OPTIONS]");
-        println!("Android Studio Ladybug 2024.2.2 (OurOS) — Google's IDE for Android development");
+        println!("Android Studio Ladybug 2024.2.2 (SlateOS) — Google's IDE for Android development");
         println!();
         println!("Options:");
         println!("  --new                  New project (Compose / Views / Wear / Auto / TV)");
@@ -25,8 +25,8 @@ fn run_as(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Android Studio Ladybug | 2024.2.2 Patch 1 (OurOS)"); return 0; }
-    println!("Android Studio Ladybug | 2024.2.2 Patch 1 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Android Studio Ladybug | 2024.2.2 Patch 1 (SlateOS)"); return 0; }
+    println!("Android Studio Ladybug | 2024.2.2 Patch 1 (SlateOS)");
     println!("  Vendor: Google LLC");
     println!("  Origin: replaced Eclipse-based ADT (Android Developer Tools) plugin — May 2013 announce");
     println!("         GA Dec 2014 (Android Studio 1.0)");

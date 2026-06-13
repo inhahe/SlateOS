@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dotool-cli — OurOS dotool input automation
+//! dotool-cli — SlateOS dotool input automation
 //!
 //! Multi-personality: `dotool`, `dotoold`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_dotool(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: dotool [OPTIONS]");
-        println!("dotool v1.3 (OurOS) — Read commands from stdin to simulate input");
+        println!("dotool v1.3 (SlateOS) — Read commands from stdin to simulate input");
         println!();
         println!("Commands (from stdin):");
         println!("  key KEY           Press and release a key");
@@ -41,7 +41,7 @@ fn run_dotool(args: &[String], _prog: &str) -> i32 {
 fn run_dotoold(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: dotoold [OPTIONS]");
-        println!("dotoold v1.3 (OurOS) — dotool daemon (persistent /tmp/dotool pipe)");
+        println!("dotoold v1.3 (SlateOS) — dotool daemon (persistent /tmp/dotool pipe)");
         println!();
         println!("Options:");
         println!("  --pipe PATH       Named pipe path (default: /tmp/dotool)");

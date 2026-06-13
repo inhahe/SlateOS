@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fontconfig — OurOS font configuration and discovery
+//! fontconfig — SlateOS font configuration and discovery
 //!
 //! Multi-personality binary for font management.
 //! Detected via argv[0]:
@@ -246,7 +246,7 @@ fn run_fc_list(args: Vec<String>) -> i32 {
     while i < args.len() {
         match args[i].as_str() {
             "--help" | "-h" => show_help = true,
-            "--version" | "-V" => { println!("fc-list 0.1.0 (OurOS)"); return 0; }
+            "--version" | "-V" => { println!("fc-list 0.1.0 (SlateOS)"); return 0; }
             "-f" | "--format" => {
                 if let Some(val) = args.get(i + 1) { format_str = Some(val.as_str()); i += 1; }
             }
@@ -309,7 +309,7 @@ fn run_fc_match(args: Vec<String>) -> i32 {
             println!("  -V, --version Show version");
             0
         }
-        "--version" | "-V" => { println!("fc-match 0.1.0 (OurOS)"); 0 }
+        "--version" | "-V" => { println!("fc-match 0.1.0 (SlateOS)"); 0 }
         _ => {
             let show_all = args.iter().any(|a| a == "-a" || a == "--all");
             let pattern = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("sans-serif");
@@ -362,7 +362,7 @@ fn run_fc_cache(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("fc-cache 0.1.0 (OurOS)");
+        println!("fc-cache 0.1.0 (SlateOS)");
         return 0;
     }
 

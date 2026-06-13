@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tiddlywiki-cli — OurOS TiddlyWiki personal wiki
+//! tiddlywiki-cli — SlateOS TiddlyWiki personal wiki
 //!
 //! Single personality: `tiddlywiki`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_tiddlywiki(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: tiddlywiki [WIKIDIR] [OPTIONS]");
-        println!("TiddlyWiki v5.3 (OurOS) — Non-linear personal wiki");
+        println!("TiddlyWiki v5.3 (SlateOS) — Non-linear personal wiki");
         println!();
         println!("Options:");
         println!("  --listen           Start server (default port 8080)");
@@ -27,8 +27,8 @@ fn run_tiddlywiki(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("TiddlyWiki v5.3.3 (OurOS)"); return 0; }
-    println!("TiddlyWiki v5.3.3 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("TiddlyWiki v5.3.3 (SlateOS)"); return 0; }
+    println!("TiddlyWiki v5.3.3 (SlateOS)");
     println!("  Wiki: ./mywiki");
     println!("  Tiddlers: 456");
     println!("  Tags: 89");

@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! checkout-cli — OurOS Checkout.com personality CLI.
+//! checkout-cli — SlateOS Checkout.com personality CLI.
 
 use std::env;
 use std::process;
@@ -30,7 +30,7 @@ fn print_help(prog: &str) {
 }
 
 fn print_version() {
-    println!("checkout-cli 0.1.0 — OurOS personality binary");
+    println!("checkout-cli 0.1.0 — SlateOS personality binary");
     println!("Checkout Ltd — London, United Kingdom");
 }
 

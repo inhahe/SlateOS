@@ -2,7 +2,7 @@
 name = "update-alternatives"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS update-alternatives utility"
+description = "SlateOS update-alternatives utility"
 [dependencies]
 
 [build-dependencies]

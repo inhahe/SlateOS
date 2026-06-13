@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wfuzz-cli — OurOS wfuzz web fuzzer
+//! wfuzz-cli — SlateOS wfuzz web fuzzer
 //!
 //! Single personality: `wfuzz`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wfuzz(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wfuzz [OPTIONS] -u URL");
-        println!("wfuzz v3.1 (OurOS) — Web application fuzzer");
+        println!("wfuzz v3.1 (SlateOS) — Web application fuzzer");
         println!();
         println!("Options:");
         println!("  -u URL         Target URL (use FUZZ as placeholder)");
@@ -31,8 +31,8 @@ fn run_wfuzz(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("wfuzz v3.1.0 (OurOS)"); return 0; }
-    println!("wfuzz v3.1.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("wfuzz v3.1.0 (SlateOS)"); return 0; }
+    println!("wfuzz v3.1.0 (SlateOS)");
     println!("  Target: http://target.local/FUZZ");
     println!("  Wordlist: common.txt (4614 words)");
     println!("  Hiding: 404 responses");

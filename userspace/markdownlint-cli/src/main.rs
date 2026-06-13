@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! markdownlint-cli — OurOS markdownlint CLI
+//! markdownlint-cli — SlateOS markdownlint CLI
 //!
 //! Multi-personality: `markdownlint`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_markdownlint(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: markdownlint [OPTIONS] FILES...");
-        println!("markdownlint-cli2 0.13.0 (OurOS) — Markdown linter");
+        println!("markdownlint-cli2 0.13.0 (SlateOS) — Markdown linter");
         println!();
         println!("Options:");
         println!("  -c, --config FILE    Config file (.markdownlint.json)");

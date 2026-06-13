@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! displaycal-cli — OurOS DisplayCAL display calibration
+//! displaycal-cli — SlateOS DisplayCAL display calibration
 //!
 //! Multi-personality: `displaycal`, `displaycal-apply-profiles`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_displaycal(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: displaycal [OPTIONS]");
-        println!("displaycal v3.9 (OurOS) — Display calibration and profiling");
+        println!("displaycal v3.9 (SlateOS) — Display calibration and profiling");
         println!();
         println!("Options:");
         println!("  -d N              Display number");
@@ -60,7 +60,7 @@ fn run_displaycal(args: &[String], _prog: &str) -> i32 {
 fn run_apply_profiles(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: displaycal-apply-profiles [OPTIONS]");
-        println!("displaycal-apply-profiles v3.9 (OurOS) — Apply display ICC profiles");
+        println!("displaycal-apply-profiles v3.9 (SlateOS) — Apply display ICC profiles");
         println!();
         println!("Options:");
         println!("  --skip N          Skip display N");

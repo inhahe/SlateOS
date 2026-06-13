@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! trilium-cli — OurOS Trilium Notes knowledge base
+//! trilium-cli — SlateOS Trilium Notes knowledge base
 //!
 //! Single personality: `trilium`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_trilium(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: trilium [COMMAND] [OPTIONS]");
-        println!("Trilium Notes v0.63 (OurOS) — Hierarchical note-taking knowledge base");
+        println!("Trilium Notes v0.63 (SlateOS) — Hierarchical note-taking knowledge base");
         println!();
         println!("Commands:");
         println!("  serve              Start Trilium server");
@@ -31,8 +31,8 @@ fn run_trilium(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Trilium Notes v0.63.7 (OurOS)"); return 0; }
-    println!("Trilium Notes v0.63.7 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Trilium Notes v0.63.7 (SlateOS)"); return 0; }
+    println!("Trilium Notes v0.63.7 (SlateOS)");
     println!("  Notes: 3,456");
     println!("  Branches: 4,123");
     println!("  Attributes: 12,890");

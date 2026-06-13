@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ardour-cli — OurOS Ardour digital audio workstation
+//! ardour-cli — SlateOS Ardour digital audio workstation
 //!
 //! Multi-personality: `ardour`, `ardour-export`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ardour(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ardour [OPTIONS] [SESSION]");
-        println!("Ardour 8.4.0 (OurOS)");
+        println!("Ardour 8.4.0 (SlateOS)");
         println!("  -N NAME        New session name");
         println!("  -S RATE        Sample rate");
         println!("  -b SIZE        Buffer size");
@@ -23,7 +23,7 @@ fn run_ardour(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Ardour 8.4.0 (OurOS)");
+        println!("Ardour 8.4.0 (SlateOS)");
         println!("  Built with JACK, ALSA, PulseAudio");
         println!("  LV2, VST3, AudioUnit plugin support");
         return 0;

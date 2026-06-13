@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xbox-cli — OurOS Xbox app (Microsoft Game Pass + xCloud)
+//! xbox-cli — SlateOS Xbox app (Microsoft Game Pass + xCloud)
 //!
 //! Single personality: `xbox`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_xbox(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: xbox [OPTIONS]");
-        println!("Xbox app 2411 (OurOS) — Microsoft Game Pass / xCloud / Xbox Network");
+        println!("Xbox app 2411 (SlateOS) — Microsoft Game Pass / xCloud / Xbox Network");
         println!();
         println!("Options:");
         println!("  --library              Game library (installed + Game Pass + ready-to-install)");
@@ -24,8 +24,8 @@ fn run_xbox(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Xbox app 2411.1001.27.0 (OurOS)"); return 0; }
-    println!("Xbox app 2411.1001.27.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Xbox app 2411.1001.27.0 (SlateOS)"); return 0; }
+    println!("Xbox app 2411.1001.27.0 (SlateOS)");
     println!("  Vendor: Microsoft Corporation (Microsoft Gaming division)");
     println!("  CEO Microsoft Gaming: Phil Spencer (since 2017)");
     println!("  Brand: Xbox launched Nov 15 2001 (original Xbox console)");

@@ -1,4 +1,4 @@
-//! OurOS Disk Imager / ISO Tool
+//! SlateOS Disk Imager / ISO Tool
 //!
 //! GUI disk imaging tool with:
 //! - Image creation from drives/partitions (raw dd-style, compressed)
@@ -1092,7 +1092,7 @@ impl DiskImagerApp {
                     },
                     Partition {
                         index: 2,
-                        label: "OurOS".to_string(),
+                        label: "SlateOS".to_string(),
                         filesystem: "ext4".to_string(),
                         offset_bytes: 269_484_032,
                         size_bytes: 999_935_401_984,

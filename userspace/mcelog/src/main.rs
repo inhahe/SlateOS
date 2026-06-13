@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mcelog — OurOS machine check exception logger
+//! mcelog — SlateOS machine check exception logger
 //!
 //! Multi-personality binary for handling CPU hardware errors (MCEs).
 //! Detected via argv[0]:
@@ -260,7 +260,7 @@ fn run_mcelog(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "version" => {
-            println!("mcelog 0.1.0 (OurOS)");
+            println!("mcelog 0.1.0 (SlateOS)");
             0
         }
         "summary" => cmd_summary(),

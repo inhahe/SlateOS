@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nnn — OurOS terminal file manager (n³)
+//! nnn — SlateOS terminal file manager (n³)
 //!
 //! Single personality: `nnn`
 
@@ -50,7 +50,7 @@ fn run_nnn(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V") {
-        println!("nnn 4.9 (OurOS)");
+        println!("nnn 4.9 (SlateOS)");
         return 0;
     }
 

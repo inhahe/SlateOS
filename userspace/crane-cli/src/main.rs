@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! crane-cli — OurOS container registry interaction CLI
+//! crane-cli — SlateOS container registry interaction CLI
 //!
 //! Single personality: `crane`
 
@@ -36,7 +36,7 @@ fn run_crane(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
         "version" => {
-            println!("crane 0.19.0 (OurOS)");
+            println!("crane 0.19.0 (SlateOS)");
             0
         }
         "ls" => {

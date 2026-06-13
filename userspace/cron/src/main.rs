@@ -1,4 +1,4 @@
-//! Multi-personality job scheduling utility for OurOS.
+//! Multi-personality job scheduling utility for SlateOS.
 //!
 //! This binary detects its personality from `argv[0]`:
 //!   - `crond`    — cron daemon: reads crontabs, matches schedules

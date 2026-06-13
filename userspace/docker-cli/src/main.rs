@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! docker-cli — OurOS Docker-compatible container CLI
+//! docker-cli — SlateOS Docker-compatible container CLI
 //!
 //! Single personality: `docker`
 
@@ -49,7 +49,7 @@ fn run_docker(args: Vec<String>) -> i32 {
     match cmd {
         "version" => {
             println!("Client:");
-            println!("  Version:    25.0.2 (OurOS)");
+            println!("  Version:    25.0.2 (SlateOS)");
             println!("  API version: 1.44");
             println!("  Go version:  go1.21.6");
             println!();
@@ -133,7 +133,7 @@ fn run_docker(args: Vec<String>) -> i32 {
                     println!("Docker Root Dir: /var/lib/docker");
                     println!("Total Memory: 8 GiB");
                     println!("CPUs: 4");
-                    println!("OS: OurOS");
+                    println!("OS: SlateOS");
                 }
                 "prune" => {
                     println!("Deleted containers: 1");

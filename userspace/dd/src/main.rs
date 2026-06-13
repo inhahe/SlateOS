@@ -1,4 +1,4 @@
-//! OurOS Data Copy and Conversion Utility
+//! SlateOS Data Copy and Conversion Utility
 //!
 //! Copies and converts data between files or devices with configurable block
 //! sizes, offsets, and inline transformations. Modeled after the POSIX `dd`

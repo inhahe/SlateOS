@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! docker — OurOS container management tool
+//! docker — SlateOS container management tool
 //!
 //! Multi-personality binary detected via argv[0]:
 //!
@@ -96,7 +96,7 @@ fn run_docker(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "version" => {
-            println!("Docker version 26.0.0, build abcdef0 (OurOS)");
+            println!("Docker version 26.0.0, build abcdef0 (SlateOS)");
             0
         }
         "run" => {
@@ -253,9 +253,9 @@ fn run_docker(args: Vec<String>) -> i32 {
             let sub = cmd_args.first().map(|s| s.as_str()).unwrap_or("info");
             match sub {
                 "info" => {
-                    println!("Client: Docker Engine - OurOS");
+                    println!("Client: Docker Engine - SlateOS");
                     println!(" Version:    26.0.0");
-                    println!(" OS/Arch:    ouros/amd64");
+                    println!(" OS/Arch:    slateos/amd64");
                     println!("Server:");
                     println!(" Containers: 3 (2 running, 1 stopped)");
                     println!(" Images:     4");
@@ -308,7 +308,7 @@ fn run_compose(args: Vec<String>) -> i32 {
             println!("  --version Show version");
             0
         }
-        "--version" | "version" => { println!("Docker Compose version v2.26.0 (OurOS)"); 0 }
+        "--version" | "version" => { println!("Docker Compose version v2.26.0 (SlateOS)"); 0 }
         "up" => {
             println!("[+] Running 3/3");
             println!(" ✔ Container cache       Started");
@@ -354,11 +354,11 @@ fn run_dockerd(args: Vec<String>) -> i32 {
     }
 
     if args.iter().any(|a| a == "--version") {
-        println!("Docker version 26.0.0 (OurOS)");
+        println!("Docker version 26.0.0 (SlateOS)");
         return 0;
     }
 
-    println!("INFO[0000] Starting up (OurOS)");
+    println!("INFO[0000] Starting up (SlateOS)");
     println!("INFO[0000] containerd not running, starting managed containerd");
     println!("INFO[0001] Loading containers: start.");
     println!("INFO[0001] Daemon has completed initialization");

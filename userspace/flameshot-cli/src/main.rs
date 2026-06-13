@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! flameshot-cli — OurOS Flameshot screenshot tool
+//! flameshot-cli — SlateOS Flameshot screenshot tool
 //!
 //! Single personality: `flameshot`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_flameshot(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: flameshot COMMAND [OPTIONS]");
-        println!("flameshot v12.1 (OurOS) — Powerful screenshot tool");
+        println!("flameshot v12.1 (SlateOS) — Powerful screenshot tool");
         println!();
         println!("Commands:");
         println!("  gui               Interactive capture");
@@ -38,7 +38,7 @@ fn run_flameshot(args: &[String], _prog: &str) -> i32 {
         }
         "screen" => println!("Screen capture: monitor 1"),
         "config" => println!("Opening configuration dialog..."),
-        "version" | "--version" => println!("flameshot v12.1 (OurOS)"),
+        "version" | "--version" => println!("flameshot v12.1 (SlateOS)"),
         _ => println!("flameshot {}: completed", cmd),
     }
     0

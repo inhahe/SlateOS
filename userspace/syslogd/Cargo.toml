@@ -2,5 +2,5 @@
 name = "syslogd"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS system log daemon — JSON-lines log aggregation and query"
+description = "SlateOS system log daemon — JSON-lines log aggregation and query"
 [dependencies]

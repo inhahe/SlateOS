@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! harfbuzz-cli — OurOS HarfBuzz text shaping tool
+//! harfbuzz-cli — SlateOS HarfBuzz text shaping tool
 //!
 //! Multi-personality: `hb-shape`, `hb-view`, `hb-subset`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_hb_shape(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: hb-shape [OPTIONS] FONT TEXT");
-        println!("hb-shape v8.5 (OurOS) — Shape text using HarfBuzz");
+        println!("hb-shape v8.5 (SlateOS) — Shape text using HarfBuzz");
         println!();
         println!("Options:");
         println!("  --font-file FILE   Font file");
@@ -31,7 +31,7 @@ fn run_hb_shape(args: &[String], _prog: &str) -> i32 {
 fn run_hb_view(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: hb-view [OPTIONS] FONT TEXT");
-        println!("hb-view v8.5 (OurOS) — Render shaped text to image");
+        println!("hb-view v8.5 (SlateOS) — Render shaped text to image");
         println!();
         println!("Options:");
         println!("  --output-file FILE  Output PNG/SVG");
@@ -51,7 +51,7 @@ fn run_hb_view(args: &[String], _prog: &str) -> i32 {
 fn run_hb_subset(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: hb-subset [OPTIONS] FONT");
-        println!("hb-subset v8.5 (OurOS) — Create font subsets");
+        println!("hb-subset v8.5 (SlateOS) — Create font subsets");
         println!();
         println!("Options:");
         println!("  --text TEXT         Include glyphs for text");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! broot-cli — OurOS Broot file manager/navigator
+//! broot-cli — SlateOS Broot file manager/navigator
 //!
 //! Single personality: `broot`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_broot(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: broot [OPTIONS] [ROOT]");
-        println!("broot 1.36.1 (OurOS) — An interactive tree view, file manager, and launcher");
+        println!("broot 1.36.1 (SlateOS) — An interactive tree view, file manager, and launcher");
         println!();
         println!("Options:");
         println!("  -d, --dates            Show last modified dates");
@@ -40,7 +40,7 @@ fn run_broot(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("broot 1.36.1 (OurOS)");
+        println!("broot 1.36.1 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "--install") {

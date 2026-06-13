@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! usql — OurOS universal database CLI
+//! usql — SlateOS universal database CLI
 //!
 //! Single personality: `usql`
 
@@ -40,7 +40,7 @@ fn run_usql(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("usql 0.17.5 (OurOS)");
+        println!("usql 0.17.5 (SlateOS)");
         return 0;
     }
 

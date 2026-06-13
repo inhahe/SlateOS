@@ -1,4 +1,4 @@
-//! OurOS System Uptime Display
+//! SlateOS System Uptime Display
 //!
 //! Displays how long the system has been running, the number of logged-in
 //! users, and load averages — matching the output format of Linux `uptime`.
@@ -174,7 +174,7 @@ fn read_btime() -> Option<u64> {
 ///
 /// 1. `/var/run/utmp` — parse binary utmp records (simplified)
 /// 2. Count directories in `/run/user/` (each UID with an active session)
-/// 3. Count entries in `/tmp/.users/` (OurOS-specific fallback)
+/// 3. Count entries in `/tmp/.users/` (SlateOS-specific fallback)
 /// 4. Default to 0 if nothing works.
 fn count_users() -> u32 {
     // Try /run/user/ directory listing — each subdirectory is a UID with an
@@ -186,7 +186,7 @@ fn count_users() -> u32 {
         }
     }
 
-    // Try /tmp/.users/ as an OurOS-specific fallback.
+    // Try /tmp/.users/ as an SlateOS-specific fallback.
     if let Ok(entries) = fs::read_dir("/tmp/.users") {
         let count = entries.filter(|e| e.is_ok()).count();
         if count > 0 {
@@ -207,7 +207,7 @@ fn count_users() -> u32 {
 /// The utmp record format on Linux x86_64 is 384 bytes per entry. We look for
 /// records with ut_type == 7 (USER_PROCESS) to count logged-in users.
 ///
-/// On OurOS the utmp format may differ; this function degrades gracefully by
+/// On SlateOS the utmp format may differ; this function degrades gracefully by
 /// returning `None` if the file is too small or does not parse.
 fn read_utmp_user_count(path: &str) -> Option<u32> {
     let data = fs::read(path).ok()?;
@@ -554,7 +554,7 @@ fn print_json(info: &SystemInfo) {
 // ============================================================================
 
 fn print_help() {
-    println!("OurOS System Uptime Display v0.1.0");
+    println!("SlateOS System Uptime Display v0.1.0");
     println!();
     println!("Show how long the system has been running.");
     println!();
@@ -571,7 +571,7 @@ fn print_help() {
 }
 
 fn print_version() {
-    println!("uptime (OurOS) 0.1.0");
+    println!("uptime (SlateOS) 0.1.0");
 }
 
 // ============================================================================

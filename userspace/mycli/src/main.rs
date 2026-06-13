@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mycli — OurOS MySQL interactive CLI
+//! mycli — SlateOS MySQL interactive CLI
 //!
 //! Single personality: `mycli`
 
@@ -11,7 +11,7 @@ fn run_mycli(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mycli [OPTIONS] [DATABASE]");
         println!();
-        println!("mycli — MySQL CLI with auto-completion and syntax highlighting (OurOS).");
+        println!("mycli — MySQL CLI with auto-completion and syntax highlighting (SlateOS).");
         println!();
         println!("Options:");
         println!("  -h, --host HOST       Host name (default: localhost)");
@@ -25,7 +25,7 @@ fn run_mycli(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("mycli 1.27.0 (OurOS)");
+        println!("mycli 1.27.0 (SlateOS)");
         return 0;
     }
 

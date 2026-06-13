@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mako-cli — OurOS mako Wayland notification daemon
+//! mako-cli — SlateOS mako Wayland notification daemon
 //!
 //! Multi-personality: `mako`, `makoctl`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mako(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mako [OPTIONS]");
-        println!("mako v1.9 (OurOS) — Lightweight Wayland notification daemon");
+        println!("mako v1.9 (SlateOS) — Lightweight Wayland notification daemon");
         println!();
         println!("Options:");
         println!("  -c FILE           Config file");
@@ -36,7 +36,7 @@ fn run_mako(args: &[String], _prog: &str) -> i32 {
 fn run_makoctl(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: makoctl COMMAND");
-        println!("makoctl v1.9 (OurOS) — mako control client");
+        println!("makoctl v1.9 (SlateOS) — mako control client");
         println!();
         println!("Commands:");
         println!("  dismiss           Dismiss notification");

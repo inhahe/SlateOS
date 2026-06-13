@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vector-cli — OurOS Vector data pipeline CLI
+//! vector-cli — SlateOS Vector data pipeline CLI
 //!
 //! Single personality: `vector`
 
@@ -35,7 +35,7 @@ fn run_vector(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("vector 0.36.0 (OurOS)");
+        println!("vector 0.36.0 (SlateOS)");
         return 0;
     }
 

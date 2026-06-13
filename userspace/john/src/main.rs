@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! john — OurOS John the Ripper password cracker
+//! john — SlateOS John the Ripper password cracker
 //!
 //! Multi-personality: `john`, `unshadow`, `zip2john`, `rar2john`, `pdf2john`
 
@@ -29,7 +29,7 @@ fn run_john(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--test") {
-        println!("John the Ripper 1.9.0-jumbo-1 (OurOS) [64-bit AVX2]");
+        println!("John the Ripper 1.9.0-jumbo-1 (SlateOS) [64-bit AVX2]");
         println!("Benchmarking: descrypt, traditional crypt(3) [DES 256/256 AVX2]... DONE");
         println!("Many salts:  5432K c/s real, 5432K c/s virtual");
         println!("Only one salt: 4567K c/s real, 4567K c/s virtual");
@@ -67,7 +67,7 @@ fn run_john(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    println!("John the Ripper 1.9.0-jumbo-1 (OurOS) [64-bit AVX2]");
+    println!("John the Ripper 1.9.0-jumbo-1 (SlateOS) [64-bit AVX2]");
     println!("Using default input encoding: UTF-8");
     println!("Loaded 5 password hashes with 5 different salts (bcrypt)");
     println!("Press 'q' or Ctrl-C to abort, almost any other key for status");

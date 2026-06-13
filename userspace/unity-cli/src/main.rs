@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! unity-cli — OurOS Unity Hub CLI
+//! unity-cli — SlateOS Unity Hub CLI
 //!
 //! Multi-personality: `unity-hub`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_unity(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: unity-hub COMMAND [OPTIONS]");
-        println!("Unity Hub CLI 3.8.0 (OurOS)");
+        println!("Unity Hub CLI 3.8.0 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  editors        Manage Unity editor installations");

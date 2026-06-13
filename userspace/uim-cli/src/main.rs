@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! uim-cli — OurOS uim input method framework
+//! uim-cli — SlateOS uim input method framework
 //!
 //! Multi-personality: `uim-xim`, `uim-toolbar`, `uim-pref`
 
@@ -13,14 +13,14 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_uim_xim(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: uim-xim [OPTIONS]");
-        println!("uim-xim v1.8 (OurOS) — uim XIM bridge");
+        println!("uim-xim v1.8 (SlateOS) — uim XIM bridge");
         println!();
         println!("Options:");
         println!("  --engine NAME     Default IM engine");
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("uim-xim v1.8 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("uim-xim v1.8 (SlateOS)"); return 0; }
     println!("uim-xim: XIM input method bridge started");
     println!("  Engines: anthy, pinyin, hangul, m17n, skk");
     0
@@ -29,10 +29,10 @@ fn run_uim_xim(args: &[String], _prog: &str) -> i32 {
 fn run_toolbar(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: uim-toolbar [OPTIONS]");
-        println!("uim-toolbar v1.8 (OurOS) — uim input method toolbar");
+        println!("uim-toolbar v1.8 (SlateOS) — uim input method toolbar");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("uim-toolbar v1.8 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("uim-toolbar v1.8 (SlateOS)"); return 0; }
     println!("uim-toolbar: input method toolbar started");
     0
 }
@@ -40,10 +40,10 @@ fn run_toolbar(args: &[String], _prog: &str) -> i32 {
 fn run_pref(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: uim-pref [OPTIONS]");
-        println!("uim-pref v1.8 (OurOS) — uim preferences");
+        println!("uim-pref v1.8 (SlateOS) — uim preferences");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("uim-pref v1.8 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("uim-pref v1.8 (SlateOS)"); return 0; }
     println!("uim-pref: preferences dialog opened");
     0
 }

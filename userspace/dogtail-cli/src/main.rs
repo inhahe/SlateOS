@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dogtail-cli — OurOS Dogtail GUI test framework
+//! dogtail-cli — SlateOS Dogtail GUI test framework
 //!
 //! Single personality: `dogtail`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_dogtail(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: dogtail COMMAND [OPTIONS]");
-        println!("Dogtail v0.9 (OurOS) — GUI test automation via accessibility");
+        println!("Dogtail v0.9 (SlateOS) — GUI test automation via accessibility");
         println!();
         println!("Commands:");
         println!("  run SCRIPT        Run test script");
@@ -24,7 +24,7 @@ fn run_dogtail(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("Dogtail v0.9 (OurOS)");
+        println!("Dogtail v0.9 (SlateOS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("info");

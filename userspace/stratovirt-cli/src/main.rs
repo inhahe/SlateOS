@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! stratovirt-cli — OurOS StratoVirt lightweight VMM
+//! stratovirt-cli — SlateOS StratoVirt lightweight VMM
 //!
 //! Single personality: `stratovirt`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_stratovirt(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: stratovirt [OPTIONS]");
-        println!("stratovirt v2.4 (OurOS) — Lightweight VMM for cloud");
+        println!("stratovirt v2.4 (SlateOS) — Lightweight VMM for cloud");
         println!();
         println!("Options:");
         println!("  -kernel PATH      Kernel image");

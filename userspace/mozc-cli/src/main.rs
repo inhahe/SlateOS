@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mozc-cli — OurOS Mozc Japanese input method
+//! mozc-cli — SlateOS Mozc Japanese input method
 //!
 //! Multi-personality: `mozc_server`, `mozc_tool`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_server(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mozc_server [OPTIONS]");
-        println!("mozc_server v2.29 (OurOS) — Mozc conversion server");
+        println!("mozc_server v2.29 (SlateOS) — Mozc conversion server");
         println!();
         println!("Options:");
         println!("  --version         Show version");
@@ -22,7 +22,7 @@ fn run_server(args: &[String], _prog: &str) -> i32 {
         println!("Google Japanese Input, providing intelligent conversion.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("mozc_server v2.29 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("mozc_server v2.29 (SlateOS)"); return 0; }
     println!("mozc_server: Japanese conversion server started");
     println!("  Dictionary: system + user + suggestion");
     println!("  Prediction: context-aware");
@@ -33,7 +33,7 @@ fn run_server(args: &[String], _prog: &str) -> i32 {
 fn run_tool(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mozc_tool [OPTIONS]");
-        println!("mozc_tool v2.29 (OurOS) — Mozc configuration tool");
+        println!("mozc_tool v2.29 (SlateOS) — Mozc configuration tool");
         println!();
         println!("Options:");
         println!("  --mode config_dialog   Open settings");
@@ -42,7 +42,7 @@ fn run_tool(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("mozc_tool v2.29 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("mozc_tool v2.29 (SlateOS)"); return 0; }
     println!("mozc_tool: configuration tool started");
     0
 }

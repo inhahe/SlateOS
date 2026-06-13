@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! valgrind-cli — OurOS Valgrind memory debugging suite
+//! valgrind-cli — SlateOS Valgrind memory debugging suite
 //!
 //! Multi-personality: `valgrind`, `callgrind_annotate`, `cachegrind_annotate`,
 //! `cg_annotate`, `ms_print`
@@ -20,7 +20,7 @@ fn run_valgrind(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: valgrind [OPTIONS] PROGRAM [ARGS]");
         println!();
-        println!("valgrind — memory debugging and profiling (OurOS).");
+        println!("valgrind — memory debugging and profiling (SlateOS).");
         println!();
         println!("Tool selection:");
         println!("  --tool=memcheck      Memory error detector (default)");
@@ -45,7 +45,7 @@ fn run_valgrind(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("valgrind-3.22.0 (OurOS)");
+        println!("valgrind-3.22.0 (SlateOS)");
         return 0;
     }
 
@@ -137,7 +137,7 @@ fn run_callgrind_annotate(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help") {
         println!("Usage: callgrind_annotate [OPTIONS] [CALLGRIND_OUT_FILE]");
         println!();
-        println!("callgrind_annotate — annotate callgrind output (OurOS).");
+        println!("callgrind_annotate — annotate callgrind output (SlateOS).");
         return 0;
     }
 
@@ -156,7 +156,7 @@ fn run_cg_annotate(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help") {
         println!("Usage: cg_annotate [OPTIONS] CACHEGRIND_OUT_FILE");
         println!();
-        println!("cg_annotate — annotate cachegrind output (OurOS).");
+        println!("cg_annotate — annotate cachegrind output (SlateOS).");
         return 0;
     }
 
@@ -172,7 +172,7 @@ fn run_ms_print(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help") {
         println!("Usage: ms_print [OPTIONS] MASSIF_OUT_FILE");
         println!();
-        println!("ms_print — display massif heap profiles (OurOS).");
+        println!("ms_print — display massif heap profiles (SlateOS).");
         return 0;
     }
 

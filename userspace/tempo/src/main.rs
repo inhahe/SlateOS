@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tempo — OurOS distributed tracing backend
+//! tempo — SlateOS distributed tracing backend
 //!
 //! Single personality: `tempo`
 
@@ -23,7 +23,7 @@ fn run_tempo(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("tempo, version 2.5.0 (OurOS)");
+        println!("tempo, version 2.5.0 (SlateOS)");
         println!("  branch: main");
         println!("  build date: 2025-05-22");
         return 0;
@@ -34,7 +34,7 @@ fn run_tempo(args: Vec<String>) -> i32 {
     let target = args.iter().find_map(|a| a.strip_prefix("--target="))
         .unwrap_or("all");
 
-    println!("level=info ts=2025-05-22T10:00:00.000Z msg=\"Starting Tempo\" version=\"2.5.0 (OurOS)\"");
+    println!("level=info ts=2025-05-22T10:00:00.000Z msg=\"Starting Tempo\" version=\"2.5.0 (SlateOS)\"");
     println!("level=info ts=2025-05-22T10:00:00.001Z msg=\"Loading configuration\" file=\"{}\"", config);
     println!("level=info ts=2025-05-22T10:00:00.010Z msg=\"Initializing module\" target=\"{}\"", target);
     println!("level=info ts=2025-05-22T10:00:00.050Z msg=\"Tempo started\" http=:3200 grpc=:9095");

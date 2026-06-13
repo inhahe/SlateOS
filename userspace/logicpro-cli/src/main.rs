@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! logicpro-cli — OurOS Logic Pro (Apple pro DAW)
+//! logicpro-cli — SlateOS Logic Pro (Apple pro DAW)
 //!
 //! Single personality: `logicpro`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_lp(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: logicpro [OPTIONS]");
-        println!("Logic Pro 11 (OurOS) — Apple pro digital audio workstation");
+        println!("Logic Pro 11 (SlateOS) — Apple pro digital audio workstation");
         println!();
         println!("Options:");
         println!("  --new                  New project");
@@ -24,8 +24,8 @@ fn run_lp(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Logic Pro 11.1 (OurOS)"); return 0; }
-    println!("Logic Pro 11.1 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Logic Pro 11.1 (SlateOS)"); return 0; }
+    println!("Logic Pro 11.1 (SlateOS)");
     println!("  Vendor: Apple Inc. (acquired Emagic 2002, Notator/Logic ex-C-Lab)");
     println!("  Origin: Notator (Atari ST, 1987 by Gerhard Lengeling) → Logic Audio →");
     println!("          Apple acquisition 2002 → Logic Pro 7 (2004 Mac-only) → Logic Pro X (2013) → 11");

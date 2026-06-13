@@ -1,4 +1,4 @@
-//! OurOS Mind Map Application
+//! SlateOS Mind Map Application
 //!
 //! A full-featured mind mapping tool with:
 //! - Central root node with branching children in a radial layout

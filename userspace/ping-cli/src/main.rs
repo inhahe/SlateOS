@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ping-cli — OurOS Ping Identity (enterprise IDaaS, Denver CO, Thoma Bravo, merged with ForgeRock 2023)
+//! ping-cli — SlateOS Ping Identity (enterprise IDaaS, Denver CO, Thoma Bravo, merged with ForgeRock 2023)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ping(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ping [OPTIONS]");
-        println!("Ping Identity (OurOS) — enterprise identity (PingOne + PingFederate + PingAccess + PingAuthorize)");
+        println!("Ping Identity (SlateOS) — enterprise identity (PingOne + PingFederate + PingAccess + PingAuthorize)");
         println!();
         println!("Options:");
         println!("  --pingone              PingOne Cloud (IDaaS unified platform)");
@@ -22,8 +22,8 @@ fn run_ping(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Ping Identity 2024 (OurOS) — ping-cli (PingOne admin)"); return 0; }
-    println!("Ping Identity 2024 (OurOS) — Enterprise IDaaS Platform (Thoma Bravo / ForgeRock merger)");
+    if args.iter().any(|a| a == "--version") { println!("Ping Identity 2024 (SlateOS) — ping-cli (PingOne admin)"); return 0; }
+    println!("Ping Identity 2024 (SlateOS) — Enterprise IDaaS Platform (Thoma Bravo / ForgeRock merger)");
     println!("  Vendor: Ping Identity Corporation (Denver, CO — private under Thoma Bravo)");
     println!("  Founders: Andre Durand, 2002 (CEO until 2023, founder-led for 21 years)");
     println!("          Andre Durand: serial entrepreneur, founded Ping Identity from scratch");

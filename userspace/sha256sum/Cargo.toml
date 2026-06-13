@@ -2,5 +2,5 @@
 name = "sha256sum"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS cryptographic checksum utilities"
+description = "SlateOS cryptographic checksum utilities"
 [dependencies]

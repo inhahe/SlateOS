@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! groff-cli — OurOS groff/troff CLI
+//! groff-cli — SlateOS groff/troff CLI
 //!
 //! Multi-personality: `groff`, `troff`, `nroff`, `tbl`, `eqn`, `pic`
 
@@ -21,7 +21,7 @@ fn run_groff(prog: &str, args: &[String]) -> i32 {
             "groff" => {
                 println!("Usage: groff [OPTIONS] [FILE...]");
                 println!();
-                println!("groff — GNU roff typesetter (OurOS).");
+                println!("groff — GNU roff typesetter (SlateOS).");
                 println!();
                 println!("Options:");
                 println!("  -T DEVICE    Output device (ascii, utf8, html, pdf, ps)");
@@ -35,29 +35,29 @@ fn run_groff(prog: &str, args: &[String]) -> i32 {
             }
             "nroff" => {
                 println!("Usage: nroff [OPTIONS] [FILE...]");
-                println!("nroff — format documents for terminal display (OurOS).");
+                println!("nroff — format documents for terminal display (SlateOS).");
             }
             "tbl" => {
                 println!("Usage: tbl [FILE...]");
-                println!("tbl — format tables for groff (OurOS).");
+                println!("tbl — format tables for groff (SlateOS).");
             }
             "eqn" => {
                 println!("Usage: eqn [FILE...]");
-                println!("eqn — format equations for groff (OurOS).");
+                println!("eqn — format equations for groff (SlateOS).");
             }
             "pic" => {
                 println!("Usage: pic [FILE...]");
-                println!("pic — compile pictures for groff (OurOS).");
+                println!("pic — compile pictures for groff (SlateOS).");
             }
             _ => {
                 println!("Usage: troff [OPTIONS] [FILE...]");
-                println!("troff — the troff processor (OurOS).");
+                println!("troff — the troff processor (SlateOS).");
             }
         }
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("GNU groff version 1.23.0 (OurOS)");
+        println!("GNU groff version 1.23.0 (SlateOS)");
         return 0;
     }
 

@@ -1,4 +1,4 @@
-//! OurOS Journal Log Viewer (`journalctl`)
+//! SlateOS Journal Log Viewer (`journalctl`)
 //!
 //! Reads, filters, and manages structured JSON-lines log files stored under
 //! `/var/log/journal/`. Compatible with our syslogd's output format.
@@ -1520,7 +1520,7 @@ fn entry_passes_filters(entry: &JournalEntry, cfg: &Config) -> bool {
 // ============================================================================
 
 fn print_usage() {
-    println!("OurOS Journal Log Viewer v0.1.0");
+    println!("SlateOS Journal Log Viewer v0.1.0");
     println!();
     println!("Query and display messages from the journal.");
     println!();

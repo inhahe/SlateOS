@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mongocompass-cli — OurOS MongoDB Compass GUI
+//! mongocompass-cli — SlateOS MongoDB Compass GUI
 //!
 //! Single personality: `mongocompass`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mongocompass [OPTIONS] [URI]");
-        println!("MongoDB Compass 1.45 (OurOS) — Official GUI for MongoDB");
+        println!("MongoDB Compass 1.45 (SlateOS) — Official GUI for MongoDB");
         println!();
         println!("Options:");
         println!("  URI                    mongodb:// or mongodb+srv:// connection string");
@@ -22,8 +22,8 @@ fn run_mc(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("MongoDB Compass 1.45.1 (OurOS)"); return 0; }
-    println!("MongoDB Compass 1.45.1 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("MongoDB Compass 1.45.1 (SlateOS)"); return 0; }
+    println!("MongoDB Compass 1.45.1 (SlateOS)");
     println!("  Official MongoDB GUI — connect to MongoDB Community/Enterprise/Atlas");
     println!("  Features: schema visualization, query builder, aggregation pipeline builder");
     println!("  Documents: CRUD operations, JSON tree/table/list views, validation rules");

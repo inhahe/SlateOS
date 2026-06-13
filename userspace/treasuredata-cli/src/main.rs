@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! treasuredata-cli — OurOS Treasure Data (enterprise CDP, MV + Tokyo, Arm-owned then SoftBank)
+//! treasuredata-cli — SlateOS Treasure Data (enterprise CDP, MV + Tokyo, Arm-owned then SoftBank)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_td(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: td [OPTIONS]");
-        println!("Treasure Data (OurOS) — enterprise CDP (Japan-rooted, global)");
+        println!("Treasure Data (SlateOS) — enterprise CDP (Japan-rooted, global)");
         println!();
         println!("Options:");
         println!("  --plazma               Plazma — proprietary columnar query engine");
@@ -22,8 +22,8 @@ fn run_td(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Treasure Data 2024 (OurOS)"); return 0; }
-    println!("Treasure Data 2024 (OurOS) — Enterprise CDP");
+    if args.iter().any(|a| a == "--version") { println!("Treasure Data 2024 (SlateOS)"); return 0; }
+    println!("Treasure Data 2024 (SlateOS) — Enterprise CDP");
     println!("  Vendor: Treasure Data, Inc. (Mountain View + Tokyo)");
     println!("  Founders: Hiro Yoshikawa (former CEO) + Kazuki Ohta (CTO) + Sadayuki Furuhashi, 2011");
     println!("          all three Japanese — founded in Tokyo, moved HQ to Bay Area");

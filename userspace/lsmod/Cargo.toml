@@ -2,5 +2,5 @@
 name = "lsmod"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS kernel module management tools"
+description = "SlateOS kernel module management tools"
 [dependencies]

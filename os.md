@@ -233,7 +233,7 @@ itself during development.
 
 **Custom Rust target for the OS:**
 Once the OS has a stable syscall interface, define a custom Rust target
-(e.g., `x86_64-unknown-youros`) so Rust programs can be compiled as
+(e.g., `x86_64-unknown-yslateos`) so Rust programs can be compiled as
 native OS applications rather than bare-metal binaries. This involves:
 - A **target specification JSON file** for rustc, defining the executable
   format (ELF, PE, or custom), C ABI, linking conventions, dynamic

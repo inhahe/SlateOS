@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wireguard — OurOS WireGuard VPN management
+//! wireguard — SlateOS WireGuard VPN management
 //!
 //! Multi-personality binary for WireGuard VPN tunnels.
 //! Detected via argv[0]:
@@ -158,7 +158,7 @@ fn run_wg(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "version" => {
-            println!("wireguard-tools 0.1.0 (OurOS)");
+            println!("wireguard-tools 0.1.0 (SlateOS)");
             0
         }
         "show" => wg_show(&cmd_args),

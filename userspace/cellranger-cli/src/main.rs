@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cellranger-cli — OurOS Cell Ranger single-cell analysis
+//! cellranger-cli — SlateOS Cell Ranger single-cell analysis
 //!
 //! Single personality: `cellranger`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_cellranger(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: cellranger COMMAND [OPTIONS]");
-        println!("Cell Ranger v8.0 (OurOS) — 10x Genomics single-cell analysis");
+        println!("Cell Ranger v8.0 (SlateOS) — 10x Genomics single-cell analysis");
         println!();
         println!("Commands:");
         println!("  count             Gene expression quantification");
@@ -27,7 +27,7 @@ fn run_cellranger(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("cellranger v8.0 (OurOS)");
+        println!("cellranger v8.0 (SlateOS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("sitecheck");

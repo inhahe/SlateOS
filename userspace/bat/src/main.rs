@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bat — OurOS cat clone with syntax highlighting
+//! bat — SlateOS cat clone with syntax highlighting
 //!
 //! Single personality: `bat`
 
@@ -31,7 +31,7 @@ fn run_bat(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("bat 0.24.0 (OurOS)");
+        println!("bat 0.24.0 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "--list-themes") {

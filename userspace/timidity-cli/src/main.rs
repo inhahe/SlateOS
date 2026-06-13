@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! timidity-cli — OurOS TiMidity++ MIDI player
+//! timidity-cli — SlateOS TiMidity++ MIDI player
 //!
 //! Single personality: `timidity`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_timidity(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: timidity [OPTIONS] FILE [FILE...]");
-        println!("TiMidity++ v2.15 (OurOS) — MIDI to audio converter/player");
+        println!("TiMidity++ v2.15 (SlateOS) — MIDI to audio converter/player");
         println!();
         println!("Options:");
         println!("  -o FILE       Output file (WAV, AIFF, etc.)");
@@ -28,8 +28,8 @@ fn run_timidity(args: &[String], _prog: &str) -> i32 {
         println!("  --version     Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("TiMidity++ v2.15.0 (OurOS)"); return 0; }
-    println!("TiMidity++ v2.15.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("TiMidity++ v2.15.0 (SlateOS)"); return 0; }
+    println!("TiMidity++ v2.15.0 (SlateOS)");
     println!("  Soundfont: FluidR3_GM.sf2");
     println!("  Playing: bach_bwv846.mid");
     println!("    Format: Standard MIDI (type 1)");

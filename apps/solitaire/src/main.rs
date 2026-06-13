@@ -11,7 +11,7 @@
 #![allow(clippy::needless_range_loop)]
 #![allow(unused_imports)]
 
-//! OurOS Solitaire — Klondike solitaire card game.
+//! SlateOS Solitaire — Klondike solitaire card game.
 //!
 //! Standard 52-card deck with 7 tableau columns, stock/waste piles,
 //! and 4 foundation piles. Keyboard-driven with Tab navigation,

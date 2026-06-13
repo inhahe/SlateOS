@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! aria2 — OurOS lightweight multi-protocol download utility
+//! aria2 — SlateOS lightweight multi-protocol download utility
 //!
 //! Single personality: `aria2c`
 
@@ -28,7 +28,7 @@ fn run_aria2c(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("aria2 version 1.37.0 (OurOS)");
+        println!("aria2 version 1.37.0 (SlateOS)");
         println!("Protocols: http(s), ftp, sftp, BitTorrent, Metalink");
         println!("Libraries: OpenSSL 3.2.1, zlib 1.3.1, libxml2 2.12.5, sqlite3 3.45.1");
         return 0;

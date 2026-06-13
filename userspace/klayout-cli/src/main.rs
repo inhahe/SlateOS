@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! klayout-cli — OurOS KLayout IC layout viewer
+//! klayout-cli — SlateOS KLayout IC layout viewer
 //!
 //! Single personality: `klayout`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_klayout(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: klayout [OPTIONS] [FILE.gds|.oas]");
-        println!("KLayout v0.29 (OurOS) — IC layout viewer and editor");
+        println!("KLayout v0.29 (SlateOS) — IC layout viewer and editor");
         println!();
         println!("Options:");
         println!("  FILE              Layout file (GDSII, OASIS, LEF/DEF)");
@@ -26,7 +26,7 @@ fn run_klayout(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("KLayout v0.29 (OurOS)");
+        println!("KLayout v0.29 (SlateOS)");
         return 0;
     }
     let file = args.iter()

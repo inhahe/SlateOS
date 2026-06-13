@@ -2,6 +2,6 @@
 name = "taskscheduler"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS Task Scheduler — cron-like task scheduling with GUI"
+description = "SlateOS Task Scheduler — cron-like task scheduling with GUI"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }

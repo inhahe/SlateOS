@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sqlx-cli — OurOS SQLx database migration and management CLI
+//! sqlx-cli — SlateOS SQLx database migration and management CLI
 //!
 //! Single personality: `sqlx`
 
@@ -24,7 +24,7 @@ fn run_sqlx(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("sqlx-cli 0.7.4 (OurOS)");
+        println!("sqlx-cli 0.7.4 (SlateOS)");
         return 0;
     }
 

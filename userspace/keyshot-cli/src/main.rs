@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! keyshot-cli — OurOS KeyShot (Luxion product visualization renderer)
+//! keyshot-cli — SlateOS KeyShot (Luxion product visualization renderer)
 //!
 //! Single personality: `keyshot`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ks(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: keyshot [OPTIONS]");
-        println!("KeyShot 2024 (OurOS) — Product / industrial design renderer (real-time on CPU)");
+        println!("KeyShot 2024 (SlateOS) — Product / industrial design renderer (real-time on CPU)");
         println!();
         println!("Options:");
         println!("  --import FILE          Import CAD (SolidWorks/Creo/NX/Inventor/CATIA/Rhino/Fusion/STEP/IGES)");
@@ -24,8 +24,8 @@ fn run_ks(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("KeyShot 2024.3 (build 13.3.4) (OurOS)"); return 0; }
-    println!("KeyShot 2024.3 (build 13.3.4) (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("KeyShot 2024.3 (build 13.3.4) (SlateOS)"); return 0; }
+    println!("KeyShot 2024.3 (build 13.3.4) (SlateOS)");
     println!("  Vendor: Luxion ApS (HQ Tustin CA — founded 2002 Denmark, US HQ since)");
     println!("  Founder: Henrik Wann Jensen (PhD CalTech, Oscar Sci-Tech 2003 for photon mapping)");
     println!("  Pricing: KeyShot Pro $999/yr, KeyShot Enterprise $1999/yr, perpetual still available");

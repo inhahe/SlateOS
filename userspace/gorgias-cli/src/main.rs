@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gorgias-cli — OurOS Gorgias (e-commerce-native helpdesk built for Shopify)
+//! gorgias-cli — SlateOS Gorgias (e-commerce-native helpdesk built for Shopify)
 //!
 //! Single personality: `gorgias`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gorgias(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gorgias [OPTIONS]");
-        println!("Gorgias (OurOS) — e-commerce helpdesk for Shopify/Magento/BigCommerce");
+        println!("Gorgias (SlateOS) — e-commerce helpdesk for Shopify/Magento/BigCommerce");
         println!();
         println!("Options:");
         println!("  --starter              Starter $10/mo (50 tickets, 3 users)");
@@ -25,8 +25,8 @@ fn run_gorgias(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Gorgias 2024 (OurOS)"); return 0; }
-    println!("Gorgias 2024 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Gorgias 2024 (SlateOS)"); return 0; }
+    println!("Gorgias 2024 (SlateOS)");
     println!("  Vendor: Gorgias, Inc. (SF + Paris — fully remote-friendly)");
     println!("  Founders: Romain Lapeyre (CEO) + Alex Plugaru + Aasif Osmany, 2015");
     println!("          met at YC Demo Day after independent prior attempts at email tools");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wandb-cli — OurOS Weights & Biases CLI
+//! wandb-cli — SlateOS Weights & Biases CLI
 //!
 //! Single personality: `wandb`
 
@@ -11,7 +11,7 @@ fn run_wandb(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wandb <COMMAND> [OPTIONS]");
         println!();
-        println!("Weights & Biases experiment tracking CLI (OurOS).");
+        println!("Weights & Biases experiment tracking CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  login        Login to W&B");
@@ -25,7 +25,7 @@ fn run_wandb(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("wandb 0.16.0 (OurOS)");
+        println!("wandb 0.16.0 (SlateOS)");
         return 0;
     }
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! horst-cli — OurOS horst wireless LAN analyzer
+//! horst-cli — SlateOS horst wireless LAN analyzer
 //!
 //! Single personality: `horst`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_horst(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: horst [OPTIONS]");
-        println!("horst v5.1 (OurOS) — Highly Optimized Radio Scanning Tool");
+        println!("horst v5.1 (SlateOS) — Highly Optimized Radio Scanning Tool");
         println!();
         println!("Options:");
         println!("  -i IFACE       Interface (monitor mode)");
@@ -26,7 +26,7 @@ fn run_horst(args: &[String], _prog: &str) -> i32 {
         println!("Lightweight 802.11 wireless LAN analyzer with ncurses UI.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("horst v5.1 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("horst v5.1 (SlateOS)"); return 0; }
     println!("horst: wireless LAN analyzer");
     println!("  Interface: wlan0mon");
     println!("  Packets: 1,234 received");

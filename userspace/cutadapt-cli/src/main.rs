@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cutadapt-cli — OurOS Cutadapt adapter trimmer
+//! cutadapt-cli — SlateOS Cutadapt adapter trimmer
 //!
 //! Single personality: `cutadapt`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_cutadapt(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: cutadapt [OPTIONS] -a ADAPTER -o OUTPUT INPUT");
-        println!("cutadapt v4.6 (OurOS) — Remove adapter sequences");
+        println!("cutadapt v4.6 (SlateOS) — Remove adapter sequences");
         println!();
         println!("Options:");
         println!("  -a ADAPTER     3' adapter sequence");
@@ -30,8 +30,8 @@ fn run_cutadapt(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("cutadapt v4.6 (OurOS)"); return 0; }
-    println!("cutadapt v4.6 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("cutadapt v4.6 (SlateOS)"); return 0; }
+    println!("cutadapt v4.6 (SlateOS)");
     println!("  Total reads: 5,000,000");
     println!("  Reads with adapters: 3,456,789 (69.1%)");
     println!("  Reads written: 4,923,456 (98.5%)");

@@ -1,4 +1,4 @@
-//! `OurOS` Code Snippet Manager
+//! `SlateOS` Code Snippet Manager
 //!
 //! A code snippet organizer and manager with:
 //! - Snippet storage with language detection and syntax highlighting

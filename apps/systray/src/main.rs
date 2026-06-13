@@ -1,7 +1,7 @@
 #![allow(dead_code, clippy::too_many_arguments)]
-//! OurOS System Tray — notification area and quick settings
+//! SlateOS System Tray — notification area and quick settings
 //!
-//! Provides the system tray (notification area) for the OurOS taskbar.
+//! Provides the system tray (notification area) for the SlateOS taskbar.
 //! Features:
 //! - Tray icons with notification badges and tooltip support
 //! - Built-in system icons (volume, network, battery, clock, notifications, power)

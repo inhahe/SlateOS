@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sccache — OurOS shared compilation cache
+//! sccache — SlateOS shared compilation cache
 //!
 //! Multi-personality: `sccache`, `sccache-dist`
 
@@ -23,7 +23,7 @@ fn run_sccache(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("sccache 0.8.1 (OurOS)");
+        println!("sccache 0.8.1 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "--start-server") {

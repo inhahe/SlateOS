@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! diesel-cli — OurOS Diesel ORM CLI
+//! diesel-cli — SlateOS Diesel ORM CLI
 //!
 //! Single personality: `diesel`
 
@@ -27,7 +27,7 @@ fn run_diesel(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("diesel 2.1.4 (OurOS)");
+        println!("diesel 2.1.4 (SlateOS)");
         return 0;
     }
 

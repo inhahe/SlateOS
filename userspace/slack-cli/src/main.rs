@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! slack-cli — OurOS Slack CLI
+//! slack-cli — SlateOS Slack CLI
 //!
 //! Single personality: `slack`
 
@@ -11,7 +11,7 @@ fn run_slack(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: slack <COMMAND> [OPTIONS]");
         println!();
-        println!("Slack CLI for workspace management and messaging (OurOS).");
+        println!("Slack CLI for workspace management and messaging (SlateOS).");
         println!();
         println!("Commands:");
         println!("  auth         Authenticate with Slack");

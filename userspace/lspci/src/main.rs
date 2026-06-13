@@ -1,4 +1,4 @@
-//! OurOS PCI Device Lister
+//! SlateOS PCI Device Lister
 //!
 //! Lists PCI devices by reading from /sys/bus/pci/ or /proc/pci.
 //! Includes a built-in vendor/device ID database for common hardware.
@@ -599,7 +599,7 @@ fn display_json(devices: &[PciDevice]) {
 // ============================================================================
 
 fn print_usage() {
-    println!("OurOS PCI Device Lister v0.1.0");
+    println!("SlateOS PCI Device Lister v0.1.0");
     println!();
     println!("List PCI devices and their configuration.");
     println!();

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! usql-cli — OurOS usql universal SQL client
+//! usql-cli — SlateOS usql universal SQL client
 //!
 //! Single personality: `usql`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_usql(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: usql [OPTIONS] DSN");
-        println!("usql v0.17.5 (OurOS) — Universal SQL client");
+        println!("usql v0.17.5 (SlateOS) — Universal SQL client");
         println!();
         println!("Options:");
         println!("  DSN                   Connection string (driver://user:pass@host/db)");
@@ -32,7 +32,7 @@ fn run_usql(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("usql v0.17.5 (OurOS)");
+        println!("usql v0.17.5 (SlateOS)");
         return 0;
     }
     let dsn = args.first().map(|s| s.as_str()).unwrap_or("sqlite3://local.db");

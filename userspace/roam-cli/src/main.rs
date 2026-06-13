@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! roam-cli — OurOS Roam Research networked-thought tool
+//! roam-cli — SlateOS Roam Research networked-thought tool
 //!
 //! Single personality: `roam`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_roam(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: roam [OPTIONS]");
-        println!("Roam Research (OurOS) — Bidirectional-linked networked thought");
+        println!("Roam Research (SlateOS) — Bidirectional-linked networked thought");
         println!();
         println!("Options:");
         println!("  --daily                Daily Notes page (date-stamped)");
@@ -23,8 +23,8 @@ fn run_roam(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Roam Research 1.0.42 (OurOS)"); return 0; }
-    println!("Roam Research 1.0.42 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Roam Research 1.0.42 (SlateOS)"); return 0; }
+    println!("Roam Research 1.0.42 (SlateOS)");
     println!("  Vendor: Roam Research (San Francisco, founded 2017)");
     println!("  Founder: Conor White-Sullivan");
     println!("  Concept: outliner + bidirectional links + block references");

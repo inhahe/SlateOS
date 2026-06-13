@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nextcloud-cli — OurOS Nextcloud file sync & collaboration
+//! nextcloud-cli — SlateOS Nextcloud file sync & collaboration
 //!
 //! Single personality: `nextcloud`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_nextcloud(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: nextcloud [COMMAND] [OPTIONS]");
-        println!("Nextcloud v29.0 (OurOS) — Self-hosted file sync & share");
+        println!("Nextcloud v29.0 (SlateOS) — Self-hosted file sync & share");
         println!();
         println!("Commands:");
         println!("  occ maintenance:mode   Toggle maintenance mode");
@@ -30,8 +30,8 @@ fn run_nextcloud(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Nextcloud v29.0.4 (OurOS)"); return 0; }
-    println!("Nextcloud v29.0.4 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Nextcloud v29.0.4 (SlateOS)"); return 0; }
+    println!("Nextcloud v29.0.4 (SlateOS)");
     println!("  Users: 45");
     println!("  Files: 123,456");
     println!("  Storage used: 234 GiB");

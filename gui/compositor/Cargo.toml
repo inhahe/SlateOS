@@ -2,6 +2,6 @@
 name = "compositor"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS Compositor — display server with window compositing and input routing"
+description = "SlateOS Compositor — display server with window compositing and input routing"
 [dependencies]
 guitk = { path = "../toolkit" }

@@ -1,4 +1,4 @@
-//! `OurOS` Batch File Renamer
+//! `SlateOS` Batch File Renamer
 //!
 //! A powerful batch file renaming tool with:
 //! - Multiple rename operations (find/replace, insert, remove, case change,

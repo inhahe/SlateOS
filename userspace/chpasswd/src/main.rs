@@ -1,4 +1,4 @@
-// OurOS chpasswd — batch password change utility
+// SlateOS chpasswd — batch password change utility
 //
 // Multi-personality binary:
 //   chpasswd — batch change user passwords (from stdin or file)
@@ -657,7 +657,7 @@ fn print_version(personality: Personality) {
         Personality::Chpasswd => "chpasswd",
         Personality::Passwd => "passwd",
     };
-    println!("{name} (OurOS) 0.1.0");
+    println!("{name} (SlateOS) 0.1.0");
 }
 
 // ---------------------------------------------------------------------------

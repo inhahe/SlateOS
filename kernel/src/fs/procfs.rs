@@ -11909,7 +11909,7 @@ fn gen_sys(rel: &str) -> KernelResult<Vec<u8>> {
     let text: String = match rel {
         // The uname(2) surface — must stay byte-consistent with sys_uname.
         "kernel/ostype" => String::from("Linux\n"),
-        "kernel/osrelease" => String::from("6.6.0-ouros\n"),
+        "kernel/osrelease" => String::from("6.6.0-slateos\n"),
         "kernel/version" => String::from("#1 SMP\n"),
         "kernel/hostname" => {
             crate::fs::nameservice::init_defaults();
@@ -11942,7 +11942,7 @@ fn gen_sys(rel: &str) -> KernelResult<Vec<u8>> {
             format!("{avail}\n")
         }
         // Memory-commit policy as seen through the Linux ABI.  `/proc/sys/vm/`
-        // is a Linux-ABI-only surface — native OuRoS programs use native APIs,
+        // is a Linux-ABI-only surface — native SlateOS programs use native APIs,
         // so the only readers of this file are Linux binaries.  Per the
         // memory-commit policy decision (design-decisions.md §11), this file is
         // the canonical userspace name for the Linux-ABI system-wide commit
@@ -14538,7 +14538,7 @@ pub fn self_test() -> KernelResult<()> {
 
         // 5. Values: uname-surface consistency + parseable ceilings.
         let osrelease = fs.read_file("/sys/kernel/osrelease")?;
-        if core::str::from_utf8(&osrelease).ok() != Some("6.6.0-ouros\n") {
+        if core::str::from_utf8(&osrelease).ok() != Some("6.6.0-slateos\n") {
             serial_println!("[procfs]   FAIL: osrelease = {:?}", osrelease);
             return Err(KernelError::InternalError);
         }
@@ -14564,7 +14564,7 @@ pub fn self_test() -> KernelResult<()> {
 
         // 5b. /sys/vm lists overcommit_memory, which reads as the Linux-ABI
         //     default policy `0` (heuristic). This surface is Linux-compat only:
-        //     OuRoS's Linux mmap path always passes MAP_LAZY (demand-paged), so
+        //     SlateOS's Linux mmap path always passes MAP_LAZY (demand-paged), so
         //     reporting overcommit_memory=0 is honest — Linux programs see the
         //     lazy/overcommit allocation idiom they expect. overcommit_ratio /
         //     overcommit_kbytes are deliberately absent (no commit accounting).

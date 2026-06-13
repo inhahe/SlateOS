@@ -1,4 +1,4 @@
-//! OurOS `sort` Utility -- Sort Lines of Text
+//! SlateOS `sort` Utility -- Sort Lines of Text
 //!
 //! Reads lines from files (or stdin) and writes them to stdout (or a file) in
 //! sorted order. Modeled after GNU coreutils `sort` with the same flag set.
@@ -1051,7 +1051,7 @@ fn write_output(
 // ============================================================================
 
 fn print_help() {
-    println!("OurOS sort v{VERSION}");
+    println!("SlateOS sort v{VERSION}");
     println!();
     println!("Write sorted concatenation of all FILE(s) to standard output.");
     println!("With no FILE, or when FILE is -, read standard input.");
@@ -1116,7 +1116,7 @@ fn main() {
             process::exit(0);
         }
         ParseResult::Version => {
-            println!("sort (OurOS) {VERSION}");
+            println!("sort (SlateOS) {VERSION}");
             process::exit(0);
         }
         ParseResult::Run(config) => {

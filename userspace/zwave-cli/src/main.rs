@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zwave-cli — OurOS Z-Wave home automation
+//! zwave-cli — SlateOS Z-Wave home automation
 //!
 //! Multi-personality: `zwave-js`, `zwcli`
 
@@ -27,7 +27,7 @@ fn run_zwcli(args: &[String]) -> i32 {
     }
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match subcmd {
-        "version" | "--version" => println!("zwcli 12.4.0 (Z-Wave JS, OurOS)"),
+        "version" | "--version" => println!("zwcli 12.4.0 (Z-Wave JS, SlateOS)"),
         "nodes" => {
             println!("Z-Wave nodes:");
             println!("  #1   Controller              ready    USB (Aeotec Z-Stick 7)");
@@ -77,7 +77,7 @@ fn run_zwave_js(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Z-Wave JS 12.4.0 (OurOS)");
+        println!("Z-Wave JS 12.4.0 (SlateOS)");
         return 0;
     }
     let port = args.windows(2).find(|w| w[0] == "--port").map(|w| w[1].as_str()).unwrap_or("/dev/ttyACM0");

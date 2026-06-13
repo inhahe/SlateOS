@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fscrypt — OurOS filesystem-level encryption
+//! fscrypt — SlateOS filesystem-level encryption
 //!
 //! Multi-personality binary for managing filesystem encryption policies.
 //! Detected via argv[0]:
@@ -153,7 +153,7 @@ fn run_fscrypt(args: Vec<String>) -> i32 {
             println!("  --version              Show version");
             0
         }
-        "--version" | "-V" => { println!("fscrypt 0.1.0 (OurOS)"); 0 }
+        "--version" | "-V" => { println!("fscrypt 0.1.0 (SlateOS)"); 0 }
         "status" => fscrypt_status(&cmd_args),
         "setup" => fscrypt_setup(&cmd_args),
         "encrypt" => fscrypt_encrypt(&cmd_args),
@@ -309,7 +309,7 @@ fn run_fscryptctl(args: Vec<String>) -> i32 {
             println!("  remove_key KEY_DESC    Remove key from keyring");
             0
         }
-        "--version" | "-V" => { println!("fscryptctl 0.1.0 (OurOS)"); 0 }
+        "--version" | "-V" => { println!("fscryptctl 0.1.0 (SlateOS)"); 0 }
         "get_policy" => {
             let dir = args.get(1).map(|s| s.as_str()).unwrap_or(".");
             println!("Encryption policy for {}:", dir);

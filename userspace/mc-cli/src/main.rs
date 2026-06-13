@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mc-cli — OurOS Midnight Commander
+//! mc-cli — SlateOS Midnight Commander
 //!
 //! Multi-personality: `mc`, `mcedit`, `mcview`, `mcdiff`
 
@@ -23,7 +23,7 @@ fn run_mc(args: &[String], prog: &str) -> i32 {
                 return 0;
             }
             if args.iter().any(|a| a == "-V" || a == "--version") {
-                println!("mcedit (mc) 4.8.31 (OurOS)");
+                println!("mcedit (mc) 4.8.31 (SlateOS)");
                 return 0;
             }
             let file = args.iter().rfind(|a| !a.starts_with('-'))
@@ -58,7 +58,7 @@ fn run_mc(args: &[String], prog: &str) -> i32 {
     // mc
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mc [OPTIONS] [THIS_DIR [OTHER_DIR]]");
-        println!("GNU Midnight Commander 4.8.31 (OurOS)");
+        println!("GNU Midnight Commander 4.8.31 (SlateOS)");
         println!();
         println!("Options:");
         println!("  -a, --stickchars       No langstrstrstrstrstrstrstr strstrstrstrstr");
@@ -81,7 +81,7 @@ fn run_mc(args: &[String], prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("GNU Midnight Commander 4.8.31 (OurOS)");
+        println!("GNU Midnight Commander 4.8.31 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "-f" || a == "--datadir") {

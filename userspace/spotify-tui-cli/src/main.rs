@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! spotify-tui-cli — OurOS spotify-tui client
+//! spotify-tui-cli — SlateOS spotify-tui client
 //!
 //! Single personality: `spt`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_spt(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: spt [OPTIONS] [COMMAND]");
-        println!("spotify-tui 0.25.0 (OurOS) — Terminal Spotify client");
+        println!("spotify-tui 0.25.0 (SlateOS) — Terminal Spotify client");
         println!();
         println!("Commands:");
         println!("  playback         Interact with playback");
@@ -28,7 +28,7 @@ fn run_spt(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("spotify-tui 0.25.0 (OurOS)");
+        println!("spotify-tui 0.25.0 (SlateOS)");
         return 0;
     }
     let cmd = args.iter().find(|a| !a.starts_with('-'))

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! druid-cli — OurOS Apache Druid analytics database
+//! druid-cli — SlateOS Apache Druid analytics database
 //!
 //! Single personality: `druid`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_druid(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: druid [COMMAND] [OPTIONS]");
-        println!("Apache Druid v29.0 (OurOS) — Real-time analytics database");
+        println!("Apache Druid v29.0 (SlateOS) — Real-time analytics database");
         println!();
         println!("Commands:");
         println!("  server             Start server (single-server mode)");
@@ -30,8 +30,8 @@ fn run_druid(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Apache Druid v29.0.1 (OurOS)"); return 0; }
-    println!("Apache Druid v29.0.1 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Apache Druid v29.0.1 (SlateOS)"); return 0; }
+    println!("Apache Druid v29.0.1 (SlateOS)");
     println!("  Mode: single-server");
     println!("  Datasources: 8");
     println!("  Segments: 12,345");

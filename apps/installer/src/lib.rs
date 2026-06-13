@@ -1,7 +1,7 @@
-//! OurOS Installer — unattended and interactive installation library.
+//! SlateOS Installer — unattended and interactive installation library.
 //!
 //! Provides YAML-based configuration parsing, validation, and install plan
-//! generation for automated OurOS installations. The installer reads a YAML
+//! generation for automated SlateOS installations. The installer reads a YAML
 //! config file describing disk layout, users, network, packages, and services,
 //! validates the configuration, and produces an ordered sequence of install
 //! steps that the runtime executor can carry out.
@@ -1446,7 +1446,7 @@ pub enum InstallStep {
     FormatPartition { label: String, fs: String },
     /// Mount a partition at a path.
     MountPartition { label: String, mount_point: String },
-    /// Copy the base OurOS system files.
+    /// Copy the base SlateOS system files.
     CopyBaseSystem,
     /// Install additional packages from the package manager.
     InstallPackages { packages: Vec<String> },
@@ -1738,11 +1738,11 @@ impl InstallProgress {
 /// Generate a sample YAML configuration string suitable for use as a starting
 /// template.  This can be parsed back via `InstallConfig::from_yaml`.
 pub fn generate_sample_config() -> String {
-    r#"# OurOS Installer Configuration
+    r#"# SlateOS Installer Configuration
 # ================================
 # Edit this file to customize your installation.
 
-hostname: my-ouros-pc
+hostname: my-slateos-pc
 locale: en_US.UTF-8
 timezone: America/New_York
 keyboard_layout: us
@@ -2029,7 +2029,7 @@ mod tests {
     fn config_parse_full_yaml() {
         let yaml = generate_sample_config();
         let config = InstallConfig::from_yaml(&yaml).unwrap();
-        assert_eq!(config.hostname, "my-ouros-pc");
+        assert_eq!(config.hostname, "my-slateos-pc");
         assert_eq!(config.locale, "en_US.UTF-8");
         assert_eq!(config.timezone, "America/New_York");
         assert_eq!(config.keyboard_layout, "us");
@@ -2549,7 +2549,7 @@ users:
         let config = InstallConfig::from_yaml(&yaml).unwrap();
         assert!(config.validate().is_ok());
         // Verify key fields survived the round trip.
-        assert_eq!(config.hostname, "my-ouros-pc");
+        assert_eq!(config.hostname, "my-slateos-pc");
         assert_eq!(config.disk.partitions.len(), 3);
         assert_eq!(config.users.len(), 1);
         assert_eq!(config.packages, vec!["firefox", "vim", "git"]);

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! at-spi2-cli — OurOS AT-SPI2 accessibility toolkit
+//! at-spi2-cli — SlateOS AT-SPI2 accessibility toolkit
 //!
 //! Multi-personality: `at-spi2-registryd`, `at-spi2-bus-launcher`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_registryd(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: at-spi2-registryd [OPTIONS]");
-        println!("at-spi2-registryd v2.52 (OurOS) — AT-SPI2 accessibility registry");
+        println!("at-spi2-registryd v2.52 (SlateOS) — AT-SPI2 accessibility registry");
         println!();
         println!("Options:");
         println!("  --dbus-name NAME  D-Bus name");
@@ -23,7 +23,7 @@ fn run_registryd(args: &[String], _prog: &str) -> i32 {
         println!("Manages screen reader and assistive technology connections.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("at-spi2-registryd v2.52 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("at-spi2-registryd v2.52 (SlateOS)"); return 0; }
     println!("at-spi2-registryd: accessibility registry started");
     println!("  D-Bus: org.a11y.atspi.Registry");
     println!("  Clients: 0 connected");
@@ -33,14 +33,14 @@ fn run_registryd(args: &[String], _prog: &str) -> i32 {
 fn run_bus_launcher(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: at-spi2-bus-launcher [OPTIONS]");
-        println!("at-spi2-bus-launcher v2.52 (OurOS) — AT-SPI2 bus launcher");
+        println!("at-spi2-bus-launcher v2.52 (SlateOS) — AT-SPI2 bus launcher");
         println!();
         println!("Options:");
         println!("  --launch          Launch accessibility bus");
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("at-spi2-bus-launcher v2.52 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("at-spi2-bus-launcher v2.52 (SlateOS)"); return 0; }
     println!("at-spi2-bus-launcher: starting accessibility bus");
     println!("  Bus address: unix:path=/run/user/1000/at-spi/bus");
     0

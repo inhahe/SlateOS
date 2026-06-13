@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dust — OurOS intuitive disk usage tool (du + rust = dust)
+//! dust — SlateOS intuitive disk usage tool (du + rust = dust)
 //!
 //! Single personality: `dust`
 
@@ -43,7 +43,7 @@ fn run_dust(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("dust 1.1.1 (OurOS)");
+        println!("dust 1.1.1 (SlateOS)");
         return 0;
     }
 

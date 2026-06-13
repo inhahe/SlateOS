@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! torch-cli — OurOS PyTorch machine learning framework
+//! torch-cli — SlateOS PyTorch machine learning framework
 //!
 //! Multi-personality: `torch`, `torchrun`
 
@@ -20,7 +20,7 @@ fn run_torch(args: &[String]) -> i32 {
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match subcmd {
         "version" | "--version" => {
-            println!("PyTorch 2.2.0 (OurOS)");
+            println!("PyTorch 2.2.0 (SlateOS)");
             println!("CUDA: 12.1");
             println!("cuDNN: 8.9.7");
         }

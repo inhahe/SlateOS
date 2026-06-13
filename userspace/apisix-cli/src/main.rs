@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! apisix-cli — OurOS Apache APISIX API gateway
+//! apisix-cli — SlateOS Apache APISIX API gateway
 //!
 //! Single personality: `apisix`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_apisix(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: apisix [COMMAND] [OPTIONS]");
-        println!("Apache APISIX v3.9 (OurOS) — Dynamic API gateway");
+        println!("Apache APISIX v3.9 (SlateOS) — Dynamic API gateway");
         println!();
         println!("Commands:");
         println!("  start              Start APISIX");
@@ -28,8 +28,8 @@ fn run_apisix(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Apache APISIX v3.9.1 (OurOS)"); return 0; }
-    println!("Apache APISIX v3.9.1 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Apache APISIX v3.9.1 (SlateOS)"); return 0; }
+    println!("Apache APISIX v3.9.1 (SlateOS)");
     println!("  Proxy: http://0.0.0.0:9080, https://0.0.0.0:9443");
     println!("  Admin API: http://0.0.0.0:9180");
     println!("  etcd: localhost:2379");

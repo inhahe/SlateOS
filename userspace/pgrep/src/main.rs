@@ -1,4 +1,4 @@
-//! OurOS Process Grep / Kill Utility
+//! SlateOS Process Grep / Kill Utility
 //!
 //! Multi-personality binary: detects its invocation name from `argv[0]` to
 //! act as either `pgrep` (find processes by pattern) or `pkill` (send signals
@@ -90,7 +90,7 @@ fn detect_mode(argv0: &str) -> Mode {
 }
 
 // ============================================================================
-// Signal mapping (OurOS uses IPC, not Unix signals -- names kept for
+// Signal mapping (SlateOS uses IPC, not Unix signals -- names kept for
 // familiarity)
 // ============================================================================
 
@@ -127,7 +127,7 @@ struct SignalDef {
     action: SignalAction,
 }
 
-/// Compatibility signal table mapping POSIX names/numbers to OurOS actions.
+/// Compatibility signal table mapping POSIX names/numbers to SlateOS actions.
 const SIGNALS: &[SignalDef] = &[
     SignalDef {
         number: 1,
@@ -228,7 +228,7 @@ unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
 // ============================================================================
 
 /// The process manager's well-known IPC endpoint.
-const PROCESS_MANAGER_NAME: &[u8] = b"org.ouros.ProcessManager\0";
+const PROCESS_MANAGER_NAME: &[u8] = b"org.slateos.ProcessManager\0";
 
 /// Send a command to the process manager and return its response.
 fn send_process_command(command: &str) -> Result<String, String> {
@@ -1418,7 +1418,7 @@ fn process_matches(proc_info: &ProcessInfo, opts: &Options, my_pid: u32) -> bool
 fn print_usage(mode: Mode) {
     match mode {
         Mode::Pgrep => {
-            println!("OurOS pgrep v0.1.0 -- Find processes by pattern");
+            println!("SlateOS pgrep v0.1.0 -- Find processes by pattern");
             println!();
             println!("USAGE:");
             println!("  pgrep [options] <pattern>");
@@ -1457,7 +1457,7 @@ fn print_usage(mode: Mode) {
             println!("  pgrep -x init           Only exact match 'init'");
         }
         Mode::Pkill => {
-            println!("OurOS pkill v0.1.0 -- Signal processes by pattern");
+            println!("SlateOS pkill v0.1.0 -- Signal processes by pattern");
             println!();
             println!("USAGE:");
             println!("  pkill [options] <pattern>");

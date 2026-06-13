@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cloudflare-cli — OurOS Cloudflare (edge + security + Workers + R2 + AI, San Francisco, NYSE:NET)
+//! cloudflare-cli — SlateOS Cloudflare (edge + security + Workers + R2 + AI, San Francisco, NYSE:NET)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_cf(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: cloudflare [OPTIONS]");
-        println!("Cloudflare (OurOS) — connectivity cloud (CDN + security + Workers + AI, NYSE:NET)");
+        println!("Cloudflare (SlateOS) — connectivity cloud (CDN + security + Workers + AI, NYSE:NET)");
         println!();
         println!("Options:");
         println!("  --workers              Workers (serverless edge compute, V8 isolates)");
@@ -24,8 +24,8 @@ fn run_cf(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Cloudflare 2024 (OurOS) — wrangler 3.x"); return 0; }
-    println!("Cloudflare 2024 (OurOS) — Connectivity Cloud");
+    if args.iter().any(|a| a == "--version") { println!("Cloudflare 2024 (SlateOS) — wrangler 3.x"); return 0; }
+    println!("Cloudflare 2024 (SlateOS) — Connectivity Cloud");
     println!("  Vendor: Cloudflare, Inc. (San Francisco, CA — NYSE:NET since 2019)");
     println!("  Founders: Matthew Prince (CEO) + Lee Holloway + Michelle Zatlyn, 2009");
     println!("          founded as Project Honey Pot (spam tracking) → pivoted to Cloudflare (DDoS+CDN)");

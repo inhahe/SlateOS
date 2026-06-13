@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! velero-cli — OurOS Velero Kubernetes backup tool
+//! velero-cli — SlateOS Velero Kubernetes backup tool
 //!
 //! Single personality: `velero`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_velero(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: velero COMMAND [OPTIONS]");
-        println!("Velero v1.13.1 (OurOS) — Kubernetes backup & restore");
+        println!("Velero v1.13.1 (SlateOS) — Kubernetes backup & restore");
         println!();
         println!("Commands:");
         println!("  install         Install Velero server");

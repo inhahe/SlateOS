@@ -2,7 +2,7 @@
 name = "httpclient"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS HTTP Client — native HTTP/1.1 client library"
+description = "SlateOS HTTP Client — native HTTP/1.1 client library"
 [lib]
 name = "httpclient"
 path = "src/lib.rs"

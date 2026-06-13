@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! playwright-cli — OurOS Playwright testing CLI
+//! playwright-cli — SlateOS Playwright testing CLI
 //!
 //! Single personality: `playwright`
 
@@ -11,7 +11,7 @@ fn run_playwright(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: playwright <COMMAND> [OPTIONS]");
         println!();
-        println!("Playwright end-to-end testing CLI (OurOS).");
+        println!("Playwright end-to-end testing CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  test         Run tests");
@@ -25,7 +25,7 @@ fn run_playwright(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Version 1.41.0 (OurOS)");
+        println!("Version 1.41.0 (SlateOS)");
         return 0;
     }
 

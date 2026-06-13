@@ -1,4 +1,4 @@
-//! OurOS process resource limits utility.
+//! SlateOS process resource limits utility.
 //!
 //! Multi-personality binary providing:
 //! - **prlimit** — get/set process resource limits

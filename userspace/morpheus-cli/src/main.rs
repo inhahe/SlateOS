@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! morpheus-cli — OurOS Morpheus cloud management
+//! morpheus-cli — SlateOS Morpheus cloud management
 //!
 //! Single personality: `morpheus`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_morpheus(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: morpheus [COMMAND] [OPTIONS]");
-        println!("Morpheus v7.0 (OurOS) — Hybrid cloud management platform");
+        println!("Morpheus v7.0 (SlateOS) — Hybrid cloud management platform");
         println!();
         println!("Commands:");
         println!("  instances list|get|add     Manage instances");
@@ -32,8 +32,8 @@ fn run_morpheus(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Morpheus v7.0.4 (OurOS)"); return 0; }
-    println!("Morpheus v7.0.4 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Morpheus v7.0.4 (SlateOS)"); return 0; }
+    println!("Morpheus v7.0.4 (SlateOS)");
     println!("  Clouds: 3 (AWS, Azure, VMware)");
     println!("  Instances: 156 running");
     println!("  Apps: 23");

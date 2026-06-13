@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! qtiplot-cli — OurOS QtiPlot scientific graphing
+//! qtiplot-cli — SlateOS QtiPlot scientific graphing
 //!
 //! Single personality: `qtiplot`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_qtiplot(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: qtiplot [OPTIONS] [FILE.qti]");
-        println!("qtiplot v0.9.9 (OurOS) — Scientific data analysis and graphing");
+        println!("qtiplot v0.9.9 (SlateOS) — Scientific data analysis and graphing");
         println!();
         println!("Options:");
         println!("  -x SCRIPT         Execute script");
@@ -25,7 +25,7 @@ fn run_qtiplot(args: &[String], _prog: &str) -> i32 {
         println!("  export to EPS/PDF/SVG/PNG");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("qtiplot v0.9.9 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("qtiplot v0.9.9 (SlateOS)"); return 0; }
     println!("qtiplot: data analysis application started");
     println!("  Tables: spreadsheet with formulas");
     println!("  Graphs: 2D line/scatter/bar/pie, 3D surface/bar");

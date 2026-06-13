@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! freetype-cli — OurOS FreeType font inspection tool
+//! freetype-cli — SlateOS FreeType font inspection tool
 //!
 //! Single personality: `freetype-info`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_freetype(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: freetype-info [OPTIONS] FONT");
-        println!("freetype-info v2.13 (OurOS) — FreeType font information tool");
+        println!("freetype-info v2.13 (SlateOS) — FreeType font information tool");
         println!();
         println!("Options:");
         println!("  FONT              Font file (.ttf, .otf, .woff2)");
@@ -25,7 +25,7 @@ fn run_freetype(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("FreeType v2.13 (OurOS)");
+        println!("FreeType v2.13 (SlateOS)");
         return 0;
     }
     let file = args.iter()

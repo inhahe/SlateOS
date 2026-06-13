@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fuzzel-cli — OurOS Fuzzel application launcher
+//! fuzzel-cli — SlateOS Fuzzel application launcher
 //!
 //! Single personality: `fuzzel`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_fuzzel(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: fuzzel [OPTIONS]");
-        println!("fuzzel v1.10 (OurOS) — Application launcher and fuzzy finder");
+        println!("fuzzel v1.10 (SlateOS) — Application launcher and fuzzy finder");
         println!();
         println!("Options:");
         println!("  -d                Application launcher mode (default)");
@@ -32,7 +32,7 @@ fn run_fuzzel(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("fuzzel v1.10 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("fuzzel v1.10 (SlateOS)"); return 0; }
     let dmenu = args.iter().any(|a| a == "-D");
     if dmenu {
         println!("fuzzel: dmenu mode (reading stdin)");

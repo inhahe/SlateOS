@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! edgio-cli — OurOS Edgio bankruptcy / Akamai acquisition obituary CLI.
+//! edgio-cli — SlateOS Edgio bankruptcy / Akamai acquisition obituary CLI.
 
 use std::env;
 use std::process;
@@ -29,7 +29,7 @@ fn print_help(prog: &str) {
 }
 
 fn print_version() {
-    println!("edgio-cli 0.1.0 — OurOS personality binary");
+    println!("edgio-cli 0.1.0 — SlateOS personality binary");
     println!("Edgio, Inc. (formerly Limelight Networks) — Chapter 11 Sep 2024");
 }
 

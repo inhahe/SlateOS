@@ -2,5 +2,5 @@
 name = "hostnamectl"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS hostnamectl utility"
+description = "SlateOS hostnamectl utility"
 [dependencies]

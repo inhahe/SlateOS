@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pyinfra-cli — OurOS pyinfra infrastructure automation
+//! pyinfra-cli — SlateOS pyinfra infrastructure automation
 //!
 //! Single personality: `pyinfra`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pyinfra(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: pyinfra INVENTORY OPERATIONS [OPTIONS]");
-        println!("pyinfra v3.0 (OurOS) — Infrastructure automation in Python");
+        println!("pyinfra v3.0 (SlateOS) — Infrastructure automation in Python");
         println!();
         println!("Options:");
         println!("  INVENTORY         Target hosts (hostname, @group, inventory.py)");
@@ -25,7 +25,7 @@ fn run_pyinfra(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("pyinfra v3.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("pyinfra v3.0 (SlateOS)"); return 0; }
     let inventory = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("inventory.py");
     let dry = args.iter().any(|a| a == "--dry");
     println!("pyinfra: targeting {}", inventory);

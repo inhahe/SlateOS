@@ -56,7 +56,7 @@ pub enum BootloaderType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryKind {
     /// Our OS kernel.
-    OurOs,
+    SlateOs,
     /// Another Linux installation.
     Linux,
     /// Windows installation.
@@ -467,7 +467,7 @@ pub fn init_defaults() {
     state.entries.push(BootEntry {
         id: id1,
         name: String::from("Mint Cinnamon OS"),
-        kind: EntryKind::OurOs,
+        kind: EntryKind::SlateOs,
         kernel_path: String::from("/boot/kernel"),
         initrd_path: String::from("/boot/initrd"),
         parameters: String::from("root=/dev/sda2 quiet splash"),
@@ -553,7 +553,7 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 1: add entries.
     serial_println!("bootcfg::self_test 1: add entries");
-    let e1 = add_entry("TestOS", EntryKind::OurOs, "/boot/kernel", "/boot/initrd", "root=/dev/sda1 quiet", false)?;
+    let e1 = add_entry("TestOS", EntryKind::SlateOs, "/boot/kernel", "/boot/initrd", "root=/dev/sda1 quiet", false)?;
     let e2 = add_entry("Linux", EntryKind::Linux, "/boot/vmlinuz", "/boot/initramfs", "root=/dev/sda2", true)?;
     assert_eq!(list_entries().len(), 2);
     // First entry is automatically default.

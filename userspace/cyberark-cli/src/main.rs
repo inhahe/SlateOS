@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cyberark-cli — OurOS CyberArk (PAM market leader, founded 1999 Israel, NASDAQ:CYBR)
+//! cyberark-cli — SlateOS CyberArk (PAM market leader, founded 1999 Israel, NASDAQ:CYBR)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_cyberark(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: cyberark [OPTIONS]");
-        println!("CyberArk (OurOS) — privileged access management market leader (NASDAQ:CYBR)");
+        println!("CyberArk (SlateOS) — privileged access management market leader (NASDAQ:CYBR)");
         println!();
         println!("Options:");
         println!("  --pam                  Privileged Access Manager (PAM Self-Hosted + Privilege Cloud)");
@@ -22,8 +22,8 @@ fn run_cyberark(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("CyberArk 2024 (OurOS) — cyberark CLI (REST + PSM-CLI)"); return 0; }
-    println!("CyberArk 2024 (OurOS) — Privileged Access Management Market Leader");
+    if args.iter().any(|a| a == "--version") { println!("CyberArk 2024 (SlateOS) — cyberark CLI (REST + PSM-CLI)"); return 0; }
+    println!("CyberArk 2024 (SlateOS) — Privileged Access Management Market Leader");
     println!("  Vendor: CyberArk Software Ltd. (Newton, MA US HQ; Petah Tikva, Israel — NASDAQ: CYBR)");
     println!("  Founders: Udi Mokady + Alon Cohen, 1999");
     println!("          Udi Mokady: CEO 1999-2023 (24 years!), CISO before founding");

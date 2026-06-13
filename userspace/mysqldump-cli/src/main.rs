@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mysqldump-cli — OurOS mysqldump CLI
+//! mysqldump-cli — SlateOS mysqldump CLI
 //!
 //! Single personality: `mysqldump`
 
@@ -11,7 +11,7 @@ fn run_mysqldump(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mysqldump [OPTIONS] DATABASE [TABLES]");
         println!();
-        println!("mysqldump — MySQL database backup tool (OurOS).");
+        println!("mysqldump — MySQL database backup tool (SlateOS).");
         println!();
         println!("Options:");
         println!("  -h, --host HOST        Server host");
@@ -30,7 +30,7 @@ fn run_mysqldump(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("mysqldump  Ver 8.0.35 (OurOS)");
+        println!("mysqldump  Ver 8.0.35 (SlateOS)");
         return 0;
     }
 
@@ -40,7 +40,7 @@ fn run_mysqldump(args: Vec<String>) -> i32 {
     let db = args.iter().find(|a| !a.starts_with('-'))
         .map(|s| s.as_str());
 
-    println!("-- MySQL dump 8.0.35 (OurOS)");
+    println!("-- MySQL dump 8.0.35 (SlateOS)");
     println!("-- Host: localhost    Database: {}", db.unwrap_or("(all)"));
     println!("-- Server version  8.0.35");
     println!();

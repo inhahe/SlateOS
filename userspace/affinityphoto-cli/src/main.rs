@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! affinityphoto-cli — OurOS Serif Affinity Photo 2 (Canva-owned)
+//! affinityphoto-cli — SlateOS Serif Affinity Photo 2 (Canva-owned)
 //!
 //! Single personality: `affinityphoto`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ap(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: affinityphoto [OPTIONS]");
-        println!("Affinity Photo 2 (OurOS) — Pro raster photo editor (Photoshop alternative)");
+        println!("Affinity Photo 2 (SlateOS) — Pro raster photo editor (Photoshop alternative)");
         println!();
         println!("Options:");
         println!("  --persona TYPE         photo/liquify/develop/tone-mapping/export");
@@ -24,8 +24,8 @@ fn run_ap(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Affinity Photo 2.5.7 (OurOS)"); return 0; }
-    println!("Affinity Photo 2.5.7 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Affinity Photo 2.5.7 (SlateOS)"); return 0; }
+    println!("Affinity Photo 2.5.7 (SlateOS)");
     println!("  Vendor: Serif Europe Ltd (Nottingham, UK; founded 1987)");
     println!("  Acquired by: Canva (Mar 2024, undisclosed terms — significant for design industry)");
     println!("  Suite: Affinity Photo + Affinity Designer + Affinity Publisher (V2 2022)");

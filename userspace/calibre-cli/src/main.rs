@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! calibre-cli — OurOS Calibre e-book management
+//! calibre-cli — SlateOS Calibre e-book management
 //!
 //! Multi-personality: `calibre`, `calibredb`, `ebook-convert`, `ebook-meta`
 
@@ -13,14 +13,14 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_calibredb(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: calibredb COMMAND [OPTIONS]");
-        println!("calibredb 7.4.0 (OurOS)");
+        println!("calibredb 7.4.0 (SlateOS)");
         println!();
         println!("Commands: list, add, remove, search, export, catalog, set_metadata");
         return 0;
     }
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("list");
     match subcmd {
-        "--version" => println!("calibredb (calibre 7.4.0, OurOS)"),
+        "--version" => println!("calibredb (calibre 7.4.0, SlateOS)"),
         "list" => {
             println!("id  title                          authors              formats");
             println!("1   The Art of Unix Programming    Eric S. Raymond      EPUB, PDF");
@@ -50,7 +50,7 @@ fn run_ebook_convert(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("ebook-convert (calibre 7.4.0, OurOS)");
+        println!("ebook-convert (calibre 7.4.0, SlateOS)");
         return 0;
     }
     let input = args.first().map(|s| s.as_str()).unwrap_or("book.epub");
@@ -74,7 +74,7 @@ fn run_ebook_meta(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("ebook-meta (calibre 7.4.0, OurOS)");
+        println!("ebook-meta (calibre 7.4.0, SlateOS)");
         return 0;
     }
     let file = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("book.epub");
@@ -95,7 +95,7 @@ fn run_calibre(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("calibre 7.4.0 (OurOS)");
+        println!("calibre 7.4.0 (SlateOS)");
         return 0;
     }
     println!("calibre 7.4.0 — Starting...");

@@ -2,6 +2,6 @@
 name = "terminal"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS Terminal Emulator — graphical VT100/xterm terminal"
+description = "SlateOS Terminal Emulator — graphical VT100/xterm terminal"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }

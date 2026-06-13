@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ab-cli — OurOS Apache Bench (ab) HTTP benchmarking tool
+//! ab-cli — SlateOS Apache Bench (ab) HTTP benchmarking tool
 //!
 //! Multi-personality: `ab`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ab(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "-?") || args.is_empty() {
         println!("Usage: ab [OPTIONS] URL");
-        println!("Apache HTTP server benchmarking tool (OurOS)");
+        println!("Apache HTTP server benchmarking tool (SlateOS)");
         println!();
         println!("Options:");
         println!("  -n NUM       Number of requests");
@@ -29,7 +29,7 @@ fn run_ab(args: &[String]) -> i32 {
     }
     if args.iter().any(|a| a == "-V") {
         println!("This is ApacheBench, Version 2.3 <$Revision: 1913912 $>");
-        println!("OurOS port");
+        println!("SlateOS port");
         return 0;
     }
     let url = args.iter().rfind(|a| !a.starts_with('-'))
@@ -44,7 +44,7 @@ fn run_ab(args: &[String]) -> i32 {
     println!("This is ApacheBench, Version 2.3 <$Revision: 1913912 $>");
     println!("Benchmarking {} (be patient)", url);
     println!();
-    println!("Server Software:        OurOS-httpd");
+    println!("Server Software:        SlateOS-httpd");
     println!("Server Hostname:        localhost");
     println!("Server Port:            80");
     println!();

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fd-find — OurOS fast alternative to find
+//! fd-find — SlateOS fast alternative to find
 //!
 //! Single personality: `fd`
 
@@ -38,7 +38,7 @@ fn run_fd(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("fd 10.1.0 (OurOS)");
+        println!("fd 10.1.0 (SlateOS)");
         return 0;
     }
 

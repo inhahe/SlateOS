@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! slirp4netns-cli — OurOS slirp4netns user-mode networking
+//! slirp4netns-cli — SlateOS slirp4netns user-mode networking
 //!
 //! Single personality: `slirp4netns`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_slirp4netns(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: slirp4netns [OPTIONS] PID TAPNAME");
-        println!("slirp4netns v1.2 (OurOS) — User-mode networking for rootless containers");
+        println!("slirp4netns v1.2 (SlateOS) — User-mode networking for rootless containers");
         println!();
         println!("Options:");
         println!("  --configure        Auto-configure tap interface");
@@ -26,8 +26,8 @@ fn run_slirp4netns(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("slirp4netns v1.2.3 (OurOS)"); return 0; }
-    println!("slirp4netns v1.2.3 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("slirp4netns v1.2.3 (SlateOS)"); return 0; }
+    println!("slirp4netns v1.2.3 (SlateOS)");
     println!("  PID: 12345");
     println!("  TAP: tap0");
     println!("  Network: 10.0.2.0/24");

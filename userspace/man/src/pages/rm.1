@@ -1,4 +1,4 @@
-.TH RM 1 "2026-05-18" "OurOS" "User Commands"
+.TH RM 1 "2026-05-18" "SlateOS" "User Commands"
 .SH NAME
 rm \- remove files or directories
 .SH SYNOPSIS
@@ -8,7 +8,7 @@ rm \- remove files or directories
 Remove (unlink) the FILE(s).  By default, rm does not remove directories.
 Use \fB\-r\fR to remove directories and their contents recursively.
 .PP
-OurOS moves deleted files to the Recycle Bin by default.  Use \fB\-\-permanent\fR
+SlateOS moves deleted files to the Recycle Bin by default.  Use \fB\-\-permanent\fR
 to bypass the Recycle Bin and delete immediately.
 .SH OPTIONS
 .TP
@@ -31,7 +31,7 @@ Explain what is being done.
 Remove empty directories.
 .TP
 \fB\-\-permanent\fR
-Bypass the Recycle Bin and delete immediately (OurOS extension).
+Bypass the Recycle Bin and delete immediately (SlateOS extension).
 .SH EXAMPLES
 .nf
 rm file.txt              Remove a file (to Recycle Bin)
@@ -45,4 +45,4 @@ rm --permanent secret    Permanently delete a file
 .SH BUGS
 Use \fBrm\fR with caution.  There is no easy undo for \fB\-\-permanent\fR.
 .SH AUTHOR
-OurOS Contributors.
+SlateOS Contributors.

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fzf — OurOS command-line fuzzy finder
+//! fzf — SlateOS command-line fuzzy finder
 //!
 //! Single personality: `fzf`
 
@@ -78,7 +78,7 @@ fn run_fzf(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("fzf 0.53.0 (OurOS)");
+        println!("fzf 0.53.0 (SlateOS)");
         return 0;
     }
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! black-cli — OurOS Black Python formatter
+//! black-cli — SlateOS Black Python formatter
 //!
 //! Single personality: `black`
 
@@ -11,7 +11,7 @@ fn run_black(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: black [OPTIONS] [SRC]...");
         println!();
-        println!("Black — the uncompromising Python code formatter (OurOS).");
+        println!("Black — the uncompromising Python code formatter (SlateOS).");
         println!();
         println!("Options:");
         println!("  --check              Check if files would be reformatted");
@@ -25,7 +25,7 @@ fn run_black(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("black, 24.1.1 (OurOS)");
+        println!("black, 24.1.1 (SlateOS)");
         return 0;
     }
 

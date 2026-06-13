@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! proxmox-cli — OurOS Proxmox VE / Backup Server / Mail Gateway
+//! proxmox-cli — SlateOS Proxmox VE / Backup Server / Mail Gateway
 //!
 //! Single personality: `proxmox`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pmx(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: proxmox [OPTIONS]");
-        println!("Proxmox VE 8.3 (OurOS) — Open-source virtualization platform");
+        println!("Proxmox VE 8.3 (SlateOS) — Open-source virtualization platform");
         println!();
         println!("Options:");
         println!("  --ve                   Proxmox Virtual Environment (KVM + LXC + Ceph)");
@@ -26,8 +26,8 @@ fn run_pmx(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Proxmox Virtual Environment 8.3.1 / pve-manager 8.3.1 (OurOS)"); return 0; }
-    println!("Proxmox VE 8.3.1 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Proxmox Virtual Environment 8.3.1 / pve-manager 8.3.1 (SlateOS)"); return 0; }
+    println!("Proxmox VE 8.3.1 (SlateOS)");
     println!("  Vendor: Proxmox Server Solutions GmbH (Vienna, Austria; founded 2005)");
     println!("  License: AGPL-3.0 (entire stack; no proprietary edition)");
     println!("  Base: Debian 12 (Bookworm) — full Debian under the hood");

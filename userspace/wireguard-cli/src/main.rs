@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wireguard-cli — OurOS WireGuard VPN CLI
+//! wireguard-cli — SlateOS WireGuard VPN CLI
 //!
 //! Multi-personality: `wg`, `wg-quick`
 

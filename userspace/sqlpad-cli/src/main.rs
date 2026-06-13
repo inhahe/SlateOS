@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sqlpad-cli — OurOS SQLPad web SQL editor
+//! sqlpad-cli — SlateOS SQLPad web SQL editor
 //!
 //! Single personality: `sqlpad`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sqlpad(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sqlpad [OPTIONS]");
-        println!("SQLPad v7.4 (OurOS) — Web-based SQL editor & visualization");
+        println!("SQLPad v7.4 (SlateOS) — Web-based SQL editor & visualization");
         println!();
         println!("Options:");
         println!("  --port PORT        Server port (default: 3000)");
@@ -27,8 +27,8 @@ fn run_sqlpad(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("SQLPad v7.4.2 (OurOS)"); return 0; }
-    println!("SQLPad v7.4.2 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("SQLPad v7.4.2 (SlateOS)"); return 0; }
+    println!("SQLPad v7.4.2 (SlateOS)");
     println!("  Server: http://0.0.0.0:3000");
     println!("  Connections: 4 configured");
     println!("  Queries: 56 saved");

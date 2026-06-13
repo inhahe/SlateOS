@@ -1,4 +1,4 @@
-//! OurOS Filesystem Snapshot Management Utility (`snapper`)
+//! SlateOS Filesystem Snapshot Management Utility (`snapper`)
 //!
 //! Multi-personality binary providing:
 //! - **snapper** (default) — snapshot management CLI (create, list, delete,

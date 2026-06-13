@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! foliate-cli — OurOS Foliate e-book reader
+//! foliate-cli — SlateOS Foliate e-book reader
 //!
 //! Single personality: `foliate`
 
@@ -13,13 +13,13 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_foliate(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: foliate [OPTIONS] [FILE]");
-        println!("foliate v3.0 (OurOS) — GNOME e-book reader");
+        println!("foliate v3.0 (SlateOS) — GNOME e-book reader");
         println!();
         println!("Options:");
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("foliate v3.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("foliate v3.0 (SlateOS)"); return 0; }
     println!("foliate: e-book reader started");
     println!("  Formats: EPUB, MOBI, KF8, FB2, CBZ, PDF");
     println!("  Library: 15 books");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! terraform — OurOS infrastructure as code tool
+//! terraform — SlateOS infrastructure as code tool
 //!
 //! Single personality: `terraform`
 
@@ -45,8 +45,8 @@ fn run_terraform(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-version" | "version" => {
-            println!("Terraform v1.8.0 (OurOS)");
-            println!("on ouros_amd64");
+            println!("Terraform v1.8.0 (SlateOS)");
+            println!("on slateos_amd64");
             0
         }
         "init" => {

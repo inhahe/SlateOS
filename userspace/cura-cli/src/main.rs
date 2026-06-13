@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cura-cli — OurOS Cura 3D printing slicer
+//! cura-cli — SlateOS Cura 3D printing slicer
 //!
 //! Multi-personality: `cura`, `CuraEngine`
 
@@ -21,7 +21,7 @@ fn run_cura(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Ultimaker Cura 5.6.0 (OurOS)");
+        println!("Ultimaker Cura 5.6.0 (SlateOS)");
         println!("CuraEngine 5.6.0");
         return 0;
     }
@@ -58,7 +58,7 @@ fn run_curaengine(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("CuraEngine 5.6.0 (OurOS)");
+        println!("CuraEngine 5.6.0 (SlateOS)");
         return 0;
     }
     println!("CuraEngine 5.6.0 — slicing...");

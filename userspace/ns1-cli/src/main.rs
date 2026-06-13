@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! ns1-cli — OurOS personality CLI for NS1, the intelligent DNS + traffic steering platform.
+//! ns1-cli — SlateOS personality CLI for NS1, the intelligent DNS + traffic steering platform.
 
 use std::env;
 use std::process;

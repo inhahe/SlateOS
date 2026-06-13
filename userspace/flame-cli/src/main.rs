@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! flame-cli — OurOS Autodesk Flame VFX & finishing
+//! flame-cli — SlateOS Autodesk Flame VFX & finishing
 //!
 //! Single personality: `flame`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_flame(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: flame [OPTIONS]");
-        println!("Autodesk Flame 2025 (OurOS) — High-end VFX, compositing & finishing");
+        println!("Autodesk Flame 2025 (SlateOS) — High-end VFX, compositing & finishing");
         println!();
         println!("Options:");
         println!("  --start-project NAME   Start specific project");
@@ -24,8 +24,8 @@ fn run_flame(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Autodesk Flame 2025.0.1 (OurOS)"); return 0; }
-    println!("Autodesk Flame 2025.0.1 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Autodesk Flame 2025.0.1 (SlateOS)"); return 0; }
+    println!("Autodesk Flame 2025.0.1 (SlateOS)");
     println!("  Editions: Flame, Flare, Flame Assist, Lustre");
     println!("  Modules: Action 3D compositing, Batch, BFX, Timeline FX");
     println!("  Scripting: Python (hooks API)");

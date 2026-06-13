@@ -1,4 +1,4 @@
-//! OurOS Background File Indexer
+//! SlateOS Background File Indexer
 //!
 //! A configurable file indexing service that maintains a searchable database
 //! of files across specified directories. Designed to run as a background
@@ -157,7 +157,7 @@ impl Config {
 
     fn save(&self, path: &str) -> Result<(), String> {
         let mut out = String::new();
-        out.push_str("# OurOS File Indexer Configuration\n");
+        out.push_str("# SlateOS File Indexer Configuration\n");
         out.push_str("# Generated — edits are preserved on next write.\n\n");
 
         out.push_str(&format!("enabled = {}\n", self.enabled));
@@ -1082,7 +1082,7 @@ fn load_state(index_dir: &str) -> Option<(u64, usize)> {
 // ============================================================================
 
 fn print_usage() {
-    println!("OurOS File Indexer v0.1.0");
+    println!("SlateOS File Indexer v0.1.0");
     println!();
     println!("A background file indexing service for fast filename queries.");
     println!("Off by default — must be explicitly enabled.");

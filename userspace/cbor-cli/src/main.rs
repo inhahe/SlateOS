@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cbor-cli — OurOS CBOR diagnostic tool
+//! cbor-cli — SlateOS CBOR diagnostic tool
 //!
 //! Single personality: `cbor-diag`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_cbor(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: cbor-diag [OPTIONS] [FILE]");
-        println!("cbor-diag v0.5 (OurOS) — CBOR diagnostic notation tool");
+        println!("cbor-diag v0.5 (SlateOS) — CBOR diagnostic notation tool");
         println!();
         println!("Options:");
         println!("  FILE              CBOR file to decode (stdin if omitted)");

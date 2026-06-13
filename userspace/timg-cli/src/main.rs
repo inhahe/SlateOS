@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! timg-cli — OurOS timg terminal image/video viewer
+//! timg-cli — SlateOS timg terminal image/video viewer
 //!
 //! Single personality: `timg`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_timg(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: timg [OPTIONS] FILE...");
-        println!("timg 1.6.0 (OurOS) — Terminal image and video viewer");
+        println!("timg 1.6.0 (SlateOS) — Terminal image and video viewer");
         println!();
         println!("Options:");
         println!("  -g WxH             Grid size for multiple images");
@@ -33,7 +33,7 @@ fn run_timg(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("timg 1.6.0 (OurOS)");
+        println!("timg 1.6.0 (SlateOS)");
         return 0;
     }
     let files: Vec<&str> = args.iter()

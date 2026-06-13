@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lua-cli — OurOS Lua interpreter
+//! lua-cli — SlateOS Lua interpreter
 //!
 //! Multi-personality: `lua`, `luac`, `lua5.4`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_lua(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lua [OPTIONS] [FILE [ARGS]]");
-        println!("Lua 5.4.6 (OurOS)");
+        println!("Lua 5.4.6 (SlateOS)");
         println!("  -e EXPR     Execute string");
         println!("  -l LIB      Require library");
         println!("  -i          Interactive mode after running script");

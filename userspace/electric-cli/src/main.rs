@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! electric-cli — OurOS Electric VLSI Design System
+//! electric-cli — SlateOS Electric VLSI Design System
 //!
 //! Single personality: `electric`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_electric(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: electric [OPTIONS] [FILE]");
-        println!("Electric v9.08 (OurOS) — VLSI Design System");
+        println!("Electric v9.08 (SlateOS) — VLSI Design System");
         println!();
         println!("Options:");
         println!("  -batch         Batch mode (no GUI)");
@@ -26,8 +26,8 @@ fn run_electric(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Electric v9.08 (OurOS)"); return 0; }
-    println!("Electric v9.08 (OurOS) — VLSI Design System");
+    if args.iter().any(|a| a == "--version") { println!("Electric v9.08 (SlateOS)"); return 0; }
+    println!("Electric v9.08 (SlateOS) — VLSI Design System");
     println!("  Technology: mocmos (MOSIS CMOS)");
     println!("  Library: chip_design.jelib");
     println!("  Cells: 128");

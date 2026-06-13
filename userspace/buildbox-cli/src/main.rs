@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! buildbox-cli — OurOS Buildbox (no-code mobile game maker)
+//! buildbox-cli — SlateOS Buildbox (no-code mobile game maker)
 //!
 //! Single personality: `buildbox`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_bb(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: buildbox [OPTIONS]");
-        println!("Buildbox 4 (OurOS) — No-code 3D/2D mobile game maker");
+        println!("Buildbox 4 (SlateOS) — No-code 3D/2D mobile game maker");
         println!();
         println!("Options:");
         println!("  --new                  New project");
@@ -24,8 +24,8 @@ fn run_bb(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Buildbox 4.1 (OurOS)"); return 0; }
-    println!("Buildbox 4.1 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Buildbox 4.1 (SlateOS)"); return 0; }
+    println!("Buildbox 4.1 (SlateOS)");
     println!("  Vendor: Buildbox Inc. (Las Vegas, NV — founded 2014)");
     println!("  Founder: Trey Smith");
     println!("  Pricing: Free Plan (limited), Plus $19.99/mo, Pro $49.99/mo, Premier $99.99/mo");

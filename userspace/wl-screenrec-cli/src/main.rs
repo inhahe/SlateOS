@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wl-screenrec-cli — OurOS wl-screenrec hardware-accelerated screen recording
+//! wl-screenrec-cli — SlateOS wl-screenrec hardware-accelerated screen recording
 //!
 //! Single personality: `wl-screenrec`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wl_screenrec(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wl-screenrec [OPTIONS] -f OUTPUT");
-        println!("wl-screenrec v0.1 (OurOS) — GPU-accelerated screen recording");
+        println!("wl-screenrec v0.1 (SlateOS) — GPU-accelerated screen recording");
         println!();
         println!("Options:");
         println!("  -f OUTPUT         Output file");
@@ -25,7 +25,7 @@ fn run_wl_screenrec(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("wl-screenrec v0.1 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("wl-screenrec v0.1 (SlateOS)"); return 0; }
     let output = args.iter().skip_while(|a| a.as_str() != "-f").nth(1)
         .map(|s| s.as_str()).unwrap_or("recording.mp4");
     let codec = args.iter().skip_while(|a| a.as_str() != "--codec").nth(1)

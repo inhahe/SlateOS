@@ -1,4 +1,4 @@
-//! OurOS Network Scanner
+//! SlateOS Network Scanner
 //!
 //! Graphical network scanner / discovery application with:
 //! - IP range scanning (CIDR, individual, custom ranges)
@@ -16,7 +16,7 @@
 //! - Simulated traceroute
 //!
 //! Uses the guitk library for UI rendering. Network I/O is
-//! performed through OurOS syscalls; simulated with representative
+//! performed through SlateOS syscalls; simulated with representative
 //! data for initial development.
 
 #![allow(dead_code)]

@@ -1,4 +1,4 @@
-//! OurOS ext2/ext4 file attribute utilities.
+//! SlateOS ext2/ext4 file attribute utilities.
 //!
 //! Multi-personality binary providing:
 //! - **chattr** — change file attributes on an ext2/ext3/ext4 filesystem

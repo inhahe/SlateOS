@@ -2,5 +2,5 @@
 name = "getty"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS getty - virtual terminal login manager (agetty/mingetty)"
+description = "SlateOS getty - virtual terminal login manager (agetty/mingetty)"
 [dependencies]

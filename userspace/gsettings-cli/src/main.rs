@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gsettings-cli — OurOS GSettings CLI
+//! gsettings-cli — SlateOS GSettings CLI
 //!
 //! Single personality: `gsettings`
 
@@ -11,7 +11,7 @@ fn run_gsettings(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: gsettings [--schemadir DIR] COMMAND [ARGS]");
         println!();
-        println!("gsettings — GSettings configuration tool (OurOS).");
+        println!("gsettings — GSettings configuration tool (SlateOS).");
         println!();
         println!("Commands:");
         println!("  get SCHEMA KEY          Get key value");

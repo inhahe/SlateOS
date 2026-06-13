@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xfce4-notifyd-cli — OurOS XFCE notification daemon
+//! xfce4-notifyd-cli — SlateOS XFCE notification daemon
 //!
 //! Multi-personality: `xfce4-notifyd`, `xfce4-notifyd-config`
 
@@ -13,11 +13,11 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_notifyd(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: xfce4-notifyd [OPTIONS]");
-        println!("xfce4-notifyd v0.9 (OurOS) — XFCE notification daemon");
+        println!("xfce4-notifyd v0.9 (SlateOS) — XFCE notification daemon");
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("xfce4-notifyd v0.9 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("xfce4-notifyd v0.9 (SlateOS)"); return 0; }
     println!("xfce4-notifyd: notification daemon running");
     println!("  Theme: Default");
     println!("  Position: top-right");
@@ -28,7 +28,7 @@ fn run_notifyd(args: &[String], _prog: &str) -> i32 {
 fn run_notifyd_config(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: xfce4-notifyd-config [OPTIONS]");
-        println!("xfce4-notifyd-config v0.9 (OurOS) — Notification settings");
+        println!("xfce4-notifyd-config v0.9 (SlateOS) — Notification settings");
         return 0;
     }
     let _ = args;

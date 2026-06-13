@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! deja-dup-cli — OurOS Deja Dup backup tool
+//! deja-dup-cli — SlateOS Deja Dup backup tool
 //!
 //! Multi-personality: `deja-dup`, `deja-dup-monitor`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_deja_dup(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: deja-dup [COMMAND] [OPTIONS]");
-        println!("deja-dup v44.0 (OurOS) — Simple backup tool");
+        println!("deja-dup v44.0 (SlateOS) — Simple backup tool");
         println!();
         println!("Commands:");
         println!("  backup            Start a backup");
@@ -23,7 +23,7 @@ fn run_deja_dup(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("deja-dup v44.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("deja-dup v44.0 (SlateOS)"); return 0; }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("status");
     match cmd {
         "backup" => {
@@ -59,10 +59,10 @@ fn run_deja_dup(args: &[String], _prog: &str) -> i32 {
 fn run_monitor(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: deja-dup-monitor [OPTIONS]");
-        println!("deja-dup-monitor v44.0 (OurOS) — Backup monitor daemon");
+        println!("deja-dup-monitor v44.0 (SlateOS) — Backup monitor daemon");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("deja-dup-monitor v44.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("deja-dup-monitor v44.0 (SlateOS)"); return 0; }
     println!("deja-dup-monitor: watching for scheduled backups");
     println!("  Next backup: 2024-01-16 10:30");
     0

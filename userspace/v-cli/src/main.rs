@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! v-cli — OurOS V programming language
+//! v-cli — SlateOS V programming language
 //!
 //! Multi-personality: `v`
 
@@ -10,7 +10,7 @@ use std::process;
 fn run_v(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: v [COMMAND] [OPTIONS] [FILE.v]");
-        println!("V 0.4.4 (OurOS)");
+        println!("V 0.4.4 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  run          Build and run");
@@ -30,7 +30,7 @@ fn run_v(args: &[String]) -> i32 {
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match subcmd {
         "version" | "--version" => {
-            println!("V 0.4.4 abc123, OurOS");
+            println!("V 0.4.4 abc123, SlateOS");
         }
         "run" => {
             let file = args.get(1).map(|s| s.as_str()).unwrap_or("main.v");

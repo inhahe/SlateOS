@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! altium-cli — OurOS Altium Designer PCB EDA
+//! altium-cli — SlateOS Altium Designer PCB EDA
 //!
 //! Single personality: `altium`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_altium(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: altium [OPTIONS] [FILE]");
-        println!("Altium Designer 24 (OurOS) — Professional PCB design");
+        println!("Altium Designer 24 (SlateOS) — Professional PCB design");
         println!();
         println!("Options:");
         println!("  -openPrj FILE          Open project (.PrjPCB)");
@@ -24,8 +24,8 @@ fn run_altium(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Altium Designer 24.10.1 (OurOS)"); return 0; }
-    println!("Altium Designer 24.10.1 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Altium Designer 24.10.1 (SlateOS)"); return 0; }
+    println!("Altium Designer 24.10.1 (SlateOS)");
     println!("  Workflow: Unified schematic + PCB + library + harness + multi-board");
     println!("  Format: .SchDoc/.PcbDoc/.PrjPCB native + IPC-2581, ODB++, Gerber X2");
     println!("  Routing: ActiveRoute (auto), Glossy routing, length tuning, differential pairs");

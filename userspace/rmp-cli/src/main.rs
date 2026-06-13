@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rmp-cli — OurOS MessagePack inspector (rmp-based)
+//! rmp-cli — SlateOS MessagePack inspector (rmp-based)
 //!
 //! Single personality: `msgpack-inspect`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rmp(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: msgpack-inspect [OPTIONS] FILE");
-        println!("msgpack-inspect v1.0 (OurOS) — MessagePack binary inspector");
+        println!("msgpack-inspect v1.0 (SlateOS) — MessagePack binary inspector");
         println!();
         println!("Options:");
         println!("  FILE              MessagePack file to inspect");

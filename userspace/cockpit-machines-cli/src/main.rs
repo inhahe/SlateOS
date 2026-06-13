@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cockpit-machines-cli — OurOS Cockpit Machines VM management
+//! cockpit-machines-cli — SlateOS Cockpit Machines VM management
 //!
 //! Single personality: `cockpit-machines`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_cockpit_machines(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: cockpit-machines [OPTIONS]");
-        println!("cockpit-machines v306 (OurOS) — Web-based VM management");
+        println!("cockpit-machines v306 (SlateOS) — Web-based VM management");
         println!();
         println!("Options:");
         println!("  --port PORT      Web server port (default: 9090)");
@@ -23,7 +23,7 @@ fn run_cockpit_machines(args: &[String], _prog: &str) -> i32 {
         println!("from a web browser. Create, start, stop, and manage VMs.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("cockpit-machines v306 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("cockpit-machines v306 (SlateOS)"); return 0; }
     println!("cockpit-machines: web VM management");
     println!("  URL: https://localhost:9090/machines");
     println!("  VMs: 3 (1 running)");

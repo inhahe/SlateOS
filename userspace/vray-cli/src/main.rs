@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vray-cli — OurOS V-Ray (Chaos Group production renderer)
+//! vray-cli — SlateOS V-Ray (Chaos Group production renderer)
 //!
 //! Single personality: `vray`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_vray(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: vray [OPTIONS]");
-        println!("V-Ray 6 (OurOS) — Chaos Group production renderer (biased + path tracing)");
+        println!("V-Ray 6 (SlateOS) — Chaos Group production renderer (biased + path tracing)");
         println!();
         println!("Options:");
         println!("  --render SCENE         Render a .vrscene file");
@@ -24,8 +24,8 @@ fn run_vray(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("V-Ray 6.20.05 (OurOS)"); return 0; }
-    println!("V-Ray 6.20.05 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("V-Ray 6.20.05 (SlateOS)"); return 0; }
+    println!("V-Ray 6.20.05 (SlateOS)");
     println!("  Vendor: Chaos Software (Sofia, Bulgaria — founded 1997)");
     println!("  Founders: Peter Mitev, Vladimir Koylazov ('Vlado')");
     println!("  Merger: Chaos + Enscape merged 2022 — also acquired Cylindo, AXYZ");

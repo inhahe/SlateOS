@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lynis — OurOS security auditing tool
+//! lynis — SlateOS security auditing tool
 //!
 //! Single personality: `lynis`
 
@@ -37,7 +37,7 @@ fn run_lynis(args: Vec<String>) -> i32 {
         "audit" => {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("system");
             if sub == "system" {
-                println!("[ Lynis 3.1.1 (OurOS) ]");
+                println!("[ Lynis 3.1.1 (SlateOS) ]");
                 println!();
                 println!("################################################################################");
                 println!("  Lynis comes with ABSOLUTELY NO WARRANTY. This is free software, and you are");
@@ -77,7 +77,7 @@ fn run_lynis(args: Vec<String>) -> i32 {
         "show" => {
             let what = args.get(1).map(|s| s.as_str()).unwrap_or("version");
             match what {
-                "version" => println!("Lynis 3.1.1 (OurOS)"),
+                "version" => println!("Lynis 3.1.1 (SlateOS)"),
                 "details" => {
                     println!("Lynis version: 3.1.1");
                     println!("Status: Enterprise (simulated)");

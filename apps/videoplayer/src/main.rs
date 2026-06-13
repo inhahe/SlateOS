@@ -1,4 +1,4 @@
-//! Video Player application for OurOS.
+//! Video Player application for SlateOS.
 //!
 //! Full-featured media player with playlist management, subtitle support,
 //! audio track selection, playback controls, and a modern UI. Supports

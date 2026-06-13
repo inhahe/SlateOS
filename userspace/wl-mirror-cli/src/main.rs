@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wl-mirror-cli — OurOS wl-mirror Wayland output mirroring
+//! wl-mirror-cli — SlateOS wl-mirror Wayland output mirroring
 //!
 //! Single personality: `wl-mirror`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wl_mirror(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: wl-mirror [OPTIONS] OUTPUT");
-        println!("wl-mirror v0.16 (OurOS) — Mirror a Wayland output");
+        println!("wl-mirror v0.16 (SlateOS) — Mirror a Wayland output");
         println!();
         println!("Options:");
         println!("  OUTPUT            Output name to mirror (e.g. HDMI-A-1)");
@@ -27,7 +27,7 @@ fn run_wl_mirror(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("wl-mirror v0.16 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("wl-mirror v0.16 (SlateOS)"); return 0; }
     let output = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("HDMI-A-1");
     println!("wl-mirror: mirroring output {}", output);
     if args.iter().any(|a| a == "--fullscreen") {

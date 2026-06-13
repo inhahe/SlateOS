@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hyperfine — OurOS command-line benchmarking tool
+//! hyperfine — SlateOS command-line benchmarking tool
 //!
 //! Single personality: `hyperfine`
 
@@ -46,7 +46,7 @@ fn run_hyperfine(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("hyperfine 1.18.0 (OurOS)");
+        println!("hyperfine 1.18.0 (SlateOS)");
         return 0;
     }
 

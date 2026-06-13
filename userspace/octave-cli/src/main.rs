@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! octave-cli — OurOS GNU Octave CLI
+//! octave-cli — SlateOS GNU Octave CLI
 //!
 //! Single personality: `octave`
 
@@ -11,7 +11,7 @@ fn run_octave(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: octave [OPTIONS] [FILE [ARGS...]]");
         println!();
-        println!("GNU Octave — numerical computation (OurOS).");
+        println!("GNU Octave — numerical computation (SlateOS).");
         println!();
         println!("Options:");
         println!("  --eval CODE            Evaluate CODE");
@@ -23,7 +23,7 @@ fn run_octave(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("GNU Octave, version 8.4.0 (OurOS)");
+        println!("GNU Octave, version 8.4.0 (SlateOS)");
         return 0;
     }
 
@@ -40,7 +40,7 @@ fn run_octave(args: Vec<String>) -> i32 {
         let _ = code;
     } else {
         if !quiet {
-            println!("GNU Octave, version 8.4.0 (OurOS)");
+            println!("GNU Octave, version 8.4.0 (SlateOS)");
             println!("Copyright (C) 1993-2024 The Octave Project Developers.");
             println!("This is free software; see the source code for copying conditions.");
             println!();

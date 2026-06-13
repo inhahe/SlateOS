@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mosquitto-cli — OurOS Mosquitto MQTT CLI
+//! mosquitto-cli — SlateOS Mosquitto MQTT CLI
 //!
 //! Multi-personality: `mosquitto_pub`, `mosquitto_sub`
 
@@ -21,7 +21,7 @@ fn run_pub(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mosquitto_pub [OPTIONS] -t <topic> -m <message>");
         println!();
-        println!("Publish MQTT messages (OurOS).");
+        println!("Publish MQTT messages (SlateOS).");
         println!();
         println!("Options:");
         println!("  -h HOST       Broker hostname (default: localhost)");
@@ -62,7 +62,7 @@ fn run_sub(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mosquitto_sub [OPTIONS] -t <topic>");
         println!();
-        println!("Subscribe to MQTT topics (OurOS).");
+        println!("Subscribe to MQTT topics (SlateOS).");
         println!();
         println!("Options:");
         println!("  -h HOST       Broker hostname (default: localhost)");

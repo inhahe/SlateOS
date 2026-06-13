@@ -1,4 +1,4 @@
-//! OurOS nproc/arch/pathchk/logname/users/tty — simple system info tools
+//! SlateOS nproc/arch/pathchk/logname/users/tty — simple system info tools
 //!
 //! Multi-personality binary detected via argv[0]:
 //! - `nproc`: Print the number of available processors

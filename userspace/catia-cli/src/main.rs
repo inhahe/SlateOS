@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! catia-cli — OurOS Dassault Systèmes CATIA aerospace/automotive CAD/CAE/PLM
+//! catia-cli — SlateOS Dassault Systèmes CATIA aerospace/automotive CAD/CAE/PLM
 //!
 //! Single personality: `catia`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_catia(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: catia [OPTIONS] [FILE]");
-        println!("Dassault CATIA V5-6R2024 / 3DEXPERIENCE (OurOS) — Aerospace/automotive CAD");
+        println!("Dassault CATIA V5-6R2024 / 3DEXPERIENCE (SlateOS) — Aerospace/automotive CAD");
         println!();
         println!("Options:");
         println!("  -object FILE           Open CATPart/CATProduct/CATDrawing");
@@ -23,8 +23,8 @@ fn run_catia(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Dassault CATIA V5-6R2024 (OurOS)"); return 0; }
-    println!("Dassault CATIA V5-6R2024 / 3DEXPERIENCE (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Dassault CATIA V5-6R2024 (SlateOS)"); return 0; }
+    println!("Dassault CATIA V5-6R2024 / 3DEXPERIENCE (SlateOS)");
     println!("  Industries: Aerospace, automotive, shipbuilding, industrial machinery");
     println!("  Workbenches: Part Design, Assembly, Generative Shape Design, DMU, FEA, NC");
     println!("  Surface modeling: Class-A surfaces (ICEM Surf-derived)");

@@ -1,4 +1,4 @@
-//! OurOS SMBIOS/DMI system information utility.
+//! SlateOS SMBIOS/DMI system information utility.
 //!
 //! Multi-personality binary providing:
 //! - **dmidecode** — DMI table decoder (SMBIOS data from firmware)
@@ -150,8 +150,8 @@ fn generate_default_entries() -> Vec<DmiEntry> {
             length: 18,
             data: vec![0; 18],
             strings: vec![
-                "OurOS".to_string(),
-                "OurOS BIOS".to_string(),
+                "SlateOS".to_string(),
+                "SlateOS BIOS".to_string(),
                 "01/01/2026".to_string(),
             ],
         },
@@ -162,8 +162,8 @@ fn generate_default_entries() -> Vec<DmiEntry> {
             length: 27,
             data: vec![1; 27],
             strings: vec![
-                "OurOS Project".to_string(),
-                "OurOS System".to_string(),
+                "SlateOS Project".to_string(),
+                "SlateOS System".to_string(),
                 "1.0".to_string(),
                 "SN-00000001".to_string(),
             ],
@@ -175,8 +175,8 @@ fn generate_default_entries() -> Vec<DmiEntry> {
             length: 8,
             data: vec![2; 8],
             strings: vec![
-                "OurOS Project".to_string(),
-                "OurOS Baseboard".to_string(),
+                "SlateOS Project".to_string(),
+                "SlateOS Baseboard".to_string(),
                 "1.0".to_string(),
                 "BSN-00000001".to_string(),
             ],
@@ -187,7 +187,7 @@ fn generate_default_entries() -> Vec<DmiEntry> {
             handle: 3,
             length: 13,
             data: vec![3; 13],
-            strings: vec!["OurOS Project".to_string(), "Desktop".to_string()],
+            strings: vec!["SlateOS Project".to_string(), "Desktop".to_string()],
         },
         // Processor.
         DmiEntry {
@@ -195,7 +195,7 @@ fn generate_default_entries() -> Vec<DmiEntry> {
             handle: 4,
             length: 28,
             data: vec![4; 28],
-            strings: vec!["CPU0".to_string(), "OurOS Processor".to_string()],
+            strings: vec!["CPU0".to_string(), "SlateOS Processor".to_string()],
         },
         // Physical Memory Array.
         DmiEntry {

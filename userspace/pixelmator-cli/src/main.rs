@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pixelmator-cli — OurOS Pixelmator Pro (Apple-acquired) image editor
+//! pixelmator-cli — SlateOS Pixelmator Pro (Apple-acquired) image editor
 //!
 //! Single personality: `pixelmator`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_px(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pixelmator [OPTIONS]");
-        println!("Pixelmator Pro 3.6.6 (OurOS) — Apple-acquired macOS image editor");
+        println!("Pixelmator Pro 3.6.6 (SlateOS) — Apple-acquired macOS image editor");
         println!();
         println!("Options:");
         println!("  --new                  New document");
@@ -24,8 +24,8 @@ fn run_px(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Pixelmator Pro 3.6.6 (OurOS)"); return 0; }
-    println!("Pixelmator Pro 3.6.6 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Pixelmator Pro 3.6.6 (SlateOS)"); return 0; }
+    println!("Pixelmator Pro 3.6.6 (SlateOS)");
     println!("  Vendor: Pixelmator Team (Vilnius, Lithuania; founded 2007 by Saulius + Aidas Dailide)");
     println!("  Acquired by: Apple Inc. (Nov 2024, announced — pending regulatory approval)");
     println!("  Reason: Apple has interest in native pro creative apps on Mac (Final Cut/Logic/etc.)");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! apparmor-cli — OurOS AppArmor profile management tools
+//! apparmor-cli — SlateOS AppArmor profile management tools
 //!
 //! Multi-personality: `aa-status`, `aa-enforce`, `aa-complain`, `aa-disable`,
 //! `aa-genprof`, `aa-logprof`, `apparmor_parser`
@@ -73,7 +73,7 @@ fn run_aa_genprof(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: aa-genprof PROGRAM");
         println!();
-        println!("aa-genprof — generate AppArmor profile (OurOS).");
+        println!("aa-genprof — generate AppArmor profile (SlateOS).");
         return 0;
     }
     let program = args.first().map(|s| s.as_str()).unwrap_or("program");
@@ -99,7 +99,7 @@ fn run_apparmor_parser(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("AppArmor parser version 4.0.1 (OurOS)");
+        println!("AppArmor parser version 4.0.1 (SlateOS)");
         return 0;
     }
     let profile = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("profile");

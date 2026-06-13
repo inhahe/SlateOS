@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tmux-cli — OurOS tmux CLI
+//! tmux-cli — SlateOS tmux CLI
 //!
 //! Single personality: `tmux`
 
@@ -11,7 +11,7 @@ fn run_tmux(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: tmux <COMMAND> [OPTIONS]");
         println!();
-        println!("tmux — terminal multiplexer (OurOS).");
+        println!("tmux — terminal multiplexer (SlateOS).");
         println!();
         println!("Commands:");
         println!("  new-session, new    Create a new session");
@@ -27,7 +27,7 @@ fn run_tmux(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V") {
-        println!("tmux 3.4 (OurOS)");
+        println!("tmux 3.4 (SlateOS)");
         return 0;
     }
 

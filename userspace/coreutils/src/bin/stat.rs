@@ -3,7 +3,7 @@
 //! Usage: stat FILE...
 //!   Shows file type, permissions, size, timestamps, etc.
 //!
-//! Built only on unix-family targets (our x86_64-ouros presents as
+//! Built only on unix-family targets (our x86_64-slateos presents as
 //! linux-musl, so `cfg(unix)` matches).  On non-unix hosts (e.g.
 //! Windows when running `cargo test --workspace`), a stub `main` keeps
 //! the workspace compile-clean.  The pure formatting helpers

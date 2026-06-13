@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kopano-cli — OurOS Kopano groupware
+//! kopano-cli — SlateOS Kopano groupware
 //!
 //! Multi-personality: `kopano-server`, `kopano-admin`, `kopano-gateway`
 
@@ -15,7 +15,7 @@ fn run_kopano(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "kopano-admin" => {
-                println!("kopano-admin (OurOS) — Kopano user management");
+                println!("kopano-admin (SlateOS) — Kopano user management");
                 println!("  -l                 List users");
                 println!("  -c USER            Create user");
                 println!("  --create-store USER  Create mailbox store");
@@ -24,13 +24,13 @@ fn run_kopano(args: &[String], prog: &str) -> i32 {
                 println!("  --add-sendas       Add send-as permission");
             }
             "kopano-gateway" => {
-                println!("kopano-gateway (OurOS) — IMAP/POP3 gateway");
+                println!("kopano-gateway (SlateOS) — IMAP/POP3 gateway");
                 println!("  --imap-port PORT   IMAP port (default: 143)");
                 println!("  --pop3-port PORT   POP3 port (default: 110)");
                 println!("  --ssl              Enable SSL");
             }
             _ => {
-                println!("kopano-server (OurOS) — Kopano groupware server");
+                println!("kopano-server (SlateOS) — Kopano groupware server");
                 println!("  --config FILE      Config file");
                 println!("  --foreground       Run in foreground");
                 println!("  --restart          Restart server");
@@ -39,7 +39,7 @@ fn run_kopano(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Kopano v8.7.27 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("Kopano v8.7.27 (SlateOS)"); return 0; }
     match prog {
         "kopano-admin" => {
             println!("Kopano User List:");
@@ -55,7 +55,7 @@ fn run_kopano(args: &[String], prog: &str) -> i32 {
             println!("  Connected to kopano-server on localhost:236");
         }
         _ => {
-            println!("Kopano Server v8.7.27 (OurOS)");
+            println!("Kopano Server v8.7.27 (SlateOS)");
             println!("  Database: MySQL (localhost)");
             println!("  Users: 45");
             println!("  Stores: 48 (12.4 GB total)");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rtl-sdr-cli — OurOS RTL-SDR tools
+//! rtl-sdr-cli — SlateOS RTL-SDR tools
 //!
 //! Multi-personality: `rtl_sdr`, `rtl_fm`, `rtl_power`, `rtl_test`, `rtl_tcp`
 
@@ -15,7 +15,7 @@ fn run_rtl(args: &[String], prog: &str) -> i32 {
         match prog {
             "rtl_fm" => {
                 println!("Usage: rtl_fm [OPTIONS] -f FREQ [-f FREQ2 ...]");
-                println!("rtl_fm v0.6 (OurOS) — FM demodulator");
+                println!("rtl_fm v0.6 (SlateOS) — FM demodulator");
                 println!("  -f FREQ    Center frequency (Hz)");
                 println!("  -M MODE    Modulation (fm, wfm, am, usb, lsb, raw)");
                 println!("  -s RATE    Sample rate");
@@ -27,7 +27,7 @@ fn run_rtl(args: &[String], prog: &str) -> i32 {
             }
             "rtl_power" => {
                 println!("Usage: rtl_power [OPTIONS] -f FREQ1:FREQ2:BIN_SIZE");
-                println!("rtl_power v0.6 (OurOS) — Wideband spectrum scanner");
+                println!("rtl_power v0.6 (SlateOS) — Wideband spectrum scanner");
                 println!("  -f RANGE   Frequency range (Hz:Hz:Hz)");
                 println!("  -i TIME    Integration time");
                 println!("  -g GAIN    Tuner gain");
@@ -36,7 +36,7 @@ fn run_rtl(args: &[String], prog: &str) -> i32 {
             }
             "rtl_test" => {
                 println!("Usage: rtl_test [OPTIONS]");
-                println!("rtl_test v0.6 (OurOS) — RTL-SDR benchmark");
+                println!("rtl_test v0.6 (SlateOS) — RTL-SDR benchmark");
                 println!("  -s RATE    Sample rate");
                 println!("  -t         Activate tuner benchmark");
                 println!("  -b N       Buffer count");
@@ -44,7 +44,7 @@ fn run_rtl(args: &[String], prog: &str) -> i32 {
             }
             "rtl_tcp" => {
                 println!("Usage: rtl_tcp [OPTIONS]");
-                println!("rtl_tcp v0.6 (OurOS) — I/Q spectrum server");
+                println!("rtl_tcp v0.6 (SlateOS) — I/Q spectrum server");
                 println!("  -a ADDR    Listen address");
                 println!("  -p PORT    Listen port (default: 1234)");
                 println!("  -f FREQ    Tuner frequency");
@@ -53,7 +53,7 @@ fn run_rtl(args: &[String], prog: &str) -> i32 {
             }
             _ => {
                 println!("Usage: rtl_sdr [OPTIONS] FILE");
-                println!("rtl_sdr v0.6 (OurOS) — I/Q recorder");
+                println!("rtl_sdr v0.6 (SlateOS) — I/Q recorder");
                 println!("  -f FREQ    Center frequency");
                 println!("  -s RATE    Sample rate (default: 2048000)");
                 println!("  -g GAIN    Tuner gain (dB)");
@@ -65,7 +65,7 @@ fn run_rtl(args: &[String], prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("rtl-sdr v0.6.0 (OurOS)");
+        println!("rtl-sdr v0.6.0 (SlateOS)");
         return 0;
     }
     match prog {

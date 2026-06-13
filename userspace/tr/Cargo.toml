@@ -2,5 +2,5 @@
 name = "tr"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS character translation utility"
+description = "SlateOS character translation utility"
 [dependencies]

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! boomi-cli — OurOS Boomi (iPaaS pioneer, Conshohocken PA, ex-Dell, now PE-owned)
+//! boomi-cli — SlateOS Boomi (iPaaS pioneer, Conshohocken PA, ex-Dell, now PE-owned)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_boomi(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: boomi [OPTIONS]");
-        println!("Boomi (OurOS) — AtomSphere iPaaS (was Dell Boomi)");
+        println!("Boomi (SlateOS) — AtomSphere iPaaS (was Dell Boomi)");
         println!();
         println!("Options:");
         println!("  --atomsphere           AtomSphere Integration (the flagship iPaaS)");
@@ -23,8 +23,8 @@ fn run_boomi(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Boomi 2024 (OurOS) — AtomSphere"); return 0; }
-    println!("Boomi 2024 (OurOS) — AtomSphere iPaaS");
+    if args.iter().any(|a| a == "--version") { println!("Boomi 2024 (SlateOS) — AtomSphere"); return 0; }
+    println!("Boomi 2024 (SlateOS) — AtomSphere iPaaS");
     println!("  Vendor: Boomi, LP (Conshohocken, PA — private after 2021 Dell carve-out)");
     println!("  Founder: Rick Nucci, 2000 (in basement-startup style)");
     println!("          early SaaS-delivered integration platform — pioneered the iPaaS category");

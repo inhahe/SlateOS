@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! syslog-ng-cli — OurOS syslog-ng log management
+//! syslog-ng-cli — SlateOS syslog-ng log management
 //!
 //! Multi-personality: `syslog-ng`, `syslog-ng-ctl`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_syslog_ng(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: syslog-ng [OPTIONS]");
-        println!("syslog-ng v4.6 (OurOS) — System logging daemon");
+        println!("syslog-ng v4.6 (SlateOS) — System logging daemon");
         println!();
         println!("Options:");
         println!("  --cfgfile FILE    Configuration file");
@@ -24,7 +24,7 @@ fn run_syslog_ng(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("syslog-ng v4.6 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("syslog-ng v4.6 (SlateOS)"); return 0; }
     if args.iter().any(|a| a == "--syntax-only") {
         println!("Configuration file syntax check successful.");
         return 0;
@@ -40,7 +40,7 @@ fn run_syslog_ng(args: &[String], _prog: &str) -> i32 {
 fn run_syslog_ng_ctl(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: syslog-ng-ctl COMMAND [OPTIONS]");
-        println!("syslog-ng-ctl v4.6 (OurOS) — syslog-ng control tool");
+        println!("syslog-ng-ctl v4.6 (SlateOS) — syslog-ng control tool");
         println!();
         println!("Commands:");
         println!("  stats             Show statistics");

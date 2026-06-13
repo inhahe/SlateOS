@@ -2,5 +2,5 @@
 name = "libservicebus"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS service bus client library — connect to services, call methods, subscribe to signals"
+description = "SlateOS service bus client library — connect to services, call methods, subscribe to signals"
 [dependencies]

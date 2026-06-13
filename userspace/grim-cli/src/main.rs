@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! grim-cli — OurOS grim Wayland screenshot tool
+//! grim-cli — SlateOS grim Wayland screenshot tool
 //!
 //! Single personality: `grim`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_grim(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: grim [OPTIONS] [FILE]");
-        println!("grim v1.4 (OurOS) — Grab images from Wayland compositor");
+        println!("grim v1.4 (SlateOS) — Grab images from Wayland compositor");
         println!();
         println!("Options:");
         println!("  FILE              Output file (default: screenshot.png)");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! virsh-cli — OurOS virsh libvirt shell
+//! virsh-cli — SlateOS virsh libvirt shell
 //!
 //! Single personality: `virsh`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_virsh(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: virsh [OPTIONS] [COMMAND [ARGS]]");
-        println!("virsh v10.0 (OurOS) — Libvirt management shell");
+        println!("virsh v10.0 (SlateOS) — Libvirt management shell");
         println!();
         println!("Domain commands:");
         println!("  list              List domains");
@@ -28,13 +28,13 @@ fn run_virsh(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("virsh v10.0 (OurOS, libvirt)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("virsh v10.0 (SlateOS, libvirt)"); return 0; }
     match args.first().map(|s| s.as_str()) {
         Some("list") => {
             let all = args.iter().any(|a| a == "--all");
             println!(" Id   Name          State");
             println!("----------------------------");
-            println!(" 1    ouros-dev     running");
+            println!(" 1    slateos-dev     running");
             if all {
                 println!(" -    fedora39      shut off");
                 println!(" -    ubuntu22      shut off");

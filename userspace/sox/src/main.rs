@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sox — OurOS Sound eXchange audio processor
+//! sox — SlateOS Sound eXchange audio processor
 //!
 //! Multi-personality: `sox`, `soxi`, `play`, `rec`
 
@@ -41,7 +41,7 @@ fn run_sox(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("sox:      SoX v14.4.2 (OurOS)");
+        println!("sox:      SoX v14.4.2 (SlateOS)");
         return 0;
     }
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! acronis-cli — OurOS Acronis Cyber Protect backup/security
+//! acronis-cli — SlateOS Acronis Cyber Protect backup/security
 //!
 //! Single personality: `acronis`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_acr(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: acronis [OPTIONS]");
-        println!("Acronis Cyber Protect Home Office 2024 / Cyber Protect 16 (OurOS)");
+        println!("Acronis Cyber Protect Home Office 2024 / Cyber Protect 16 (SlateOS)");
         println!();
         println!("Options:");
         println!("  --backup TYPE          full/incremental/differential/image");
@@ -24,8 +24,8 @@ fn run_acr(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Acronis Cyber Protect Home Office 2024 41478 (OurOS)"); return 0; }
-    println!("Acronis Cyber Protect Home Office 2024 build 41478 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Acronis Cyber Protect Home Office 2024 41478 (SlateOS)"); return 0; }
+    println!("Acronis Cyber Protect Home Office 2024 build 41478 (SlateOS)");
     println!("  Vendor: Acronis International GmbH (Schaffhausen, Switzerland; founded 2003 Singapore)");
     println!("  Founders: Serguei Beloussov (Belarusian-Singaporean entrepreneur)");
     println!("  Originally: Acronis True Image (disk imaging) since 2003 — pioneer in space");

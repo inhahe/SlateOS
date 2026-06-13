@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! freecad-cli — OurOS FreeCAD CLI
+//! freecad-cli — SlateOS FreeCAD CLI
 //!
 //! Multi-personality: `freecad`, `freecadcmd`
 
@@ -21,7 +21,7 @@ fn run_freecad(args: &[String], cmd_mode: bool) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: {} [OPTIONS] [FILE ...]", name);
         println!();
-        println!("FreeCAD — parametric 3D CAD (OurOS).");
+        println!("FreeCAD — parametric 3D CAD (SlateOS).");
         println!();
         println!("Options:");
         println!("  --run-macro FILE    Run macro");
@@ -37,7 +37,7 @@ fn run_freecad(args: &[String], cmd_mode: bool) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("FreeCAD 0.21.2 (OurOS)");
+        println!("FreeCAD 0.21.2 (SlateOS)");
         return 0;
     }
 
@@ -55,7 +55,7 @@ fn run_freecad(args: &[String], cmd_mode: bool) -> i32 {
         println!(">>> ");
     } else {
         if files.is_empty() {
-            println!("FreeCAD 0.21.2 (OurOS)");
+            println!("FreeCAD 0.21.2 (SlateOS)");
             println!("Starting FreeCAD GUI...");
         } else {
             for f in &files {

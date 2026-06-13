@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xbps-cli — OurOS Void Linux XBPS package manager
+//! xbps-cli — SlateOS Void Linux XBPS package manager
 //!
 //! Multi-personality: `xbps-install`, `xbps-remove`, `xbps-query`, `xbps-reconfigure`
 

@@ -2,5 +2,5 @@
 name = "dmesg"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS kernel message buffer viewer"
+description = "SlateOS kernel message buffer viewer"
 [dependencies]

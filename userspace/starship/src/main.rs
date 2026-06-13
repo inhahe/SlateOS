@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! starship — OurOS cross-shell prompt customization
+//! starship — SlateOS cross-shell prompt customization
 //!
 //! Single personality: `starship`
 
@@ -36,7 +36,7 @@ fn run_starship(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("starship 1.19.0 (OurOS)");
+            println!("starship 1.19.0 (SlateOS)");
             0
         }
         "init" => {

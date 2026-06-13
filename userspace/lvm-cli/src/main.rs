@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lvm-cli — OurOS LVM2 CLI tools
+//! lvm-cli — SlateOS LVM2 CLI tools
 //!
 //! Multi-personality: `pvcreate`, `vgcreate`, `lvcreate`, `pvs`, `vgs`, `lvs`, `pvdisplay`, `vgdisplay`, `lvdisplay`
 
@@ -17,7 +17,7 @@ fn strip_ext(name: &str) -> &str {
 
 fn run_lvm(prog: &str, args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("{} — LVM2 tool (OurOS). See man {}.", prog, prog);
+        println!("{} — LVM2 tool (SlateOS). See man {}.", prog, prog);
         return 0;
     }
 

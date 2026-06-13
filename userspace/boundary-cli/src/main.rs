@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! boundary-cli — OurOS HashiCorp Boundary identity-based access
+//! boundary-cli — SlateOS HashiCorp Boundary identity-based access
 //!
 //! Multi-personality: `boundary`
 
@@ -10,7 +10,7 @@ use std::process;
 fn run_boundary(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: boundary COMMAND [OPTIONS]");
-        println!("HashiCorp Boundary 0.15.0 (OurOS)");
+        println!("HashiCorp Boundary 0.15.0 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  connect      Connect to a target through a session");

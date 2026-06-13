@@ -1,4 +1,4 @@
-//! OurOS PDF Viewer
+//! SlateOS PDF Viewer
 //!
 //! Graphical PDF document viewer with:
 //! - PDF document model (pages, metadata, bookmarks/outline)
@@ -313,7 +313,7 @@ impl PdfDocument {
     pub fn create_sample(path: PathBuf, page_count: usize) -> Self {
         let mut doc = Self::new(path);
         doc.metadata.title = Some("Sample Document".to_string());
-        doc.metadata.author = Some("OurOS PDF Viewer".to_string());
+        doc.metadata.author = Some("SlateOS PDF Viewer".to_string());
         doc.metadata.pdf_version = Some("1.7".to_string());
         doc.metadata.page_count = page_count;
         doc.metadata.file_size_bytes = (page_count as u64) * 4096;

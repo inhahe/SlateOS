@@ -1,4 +1,4 @@
-//! File type definitions, detection, and categorisation for OurOS.
+//! File type definitions, detection, and categorisation for SlateOS.
 //!
 //! Provides a centralised registry of known file extensions, magic-byte
 //! signatures, MIME types, icon glyphs, and category tags.  Every GUI
@@ -176,8 +176,8 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
     // -- OS-specific --------------------------------------------------------
     FileTypeInfo {
         extension: ".nx",
-        description: "OurOS Native Executable",
-        mime_type: "application/x-ouros-executable",
+        description: "SlateOS Native Executable",
+        mime_type: "application/x-slateos-executable",
         category: FileCategory::Executable,
         icon_glyph: '\u{2699}', // gear
         is_text: false,
@@ -187,7 +187,7 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
     FileTypeInfo {
         extension: ".dso",
         description: "Dynamic Shared Object",
-        mime_type: "application/x-ouros-shared-library",
+        mime_type: "application/x-slateos-shared-library",
         category: FileCategory::Library,
         icon_glyph: '\u{1F4E6}', // package
         is_text: false,
@@ -197,7 +197,7 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
     FileTypeInfo {
         extension: ".slib",
         description: "Static Library",
-        mime_type: "application/x-ouros-static-library",
+        mime_type: "application/x-slateos-static-library",
         category: FileCategory::Library,
         icon_glyph: '\u{1F4E6}',
         is_text: false,
@@ -206,8 +206,8 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
     },
     FileTypeInfo {
         extension: ".pkg",
-        description: "OurOS Package Archive",
-        mime_type: "application/x-ouros-package",
+        description: "SlateOS Package Archive",
+        mime_type: "application/x-slateos-package",
         category: FileCategory::Package,
         icon_glyph: '\u{1F4E6}',
         is_text: false,
@@ -1185,7 +1185,7 @@ struct MagicSignature {
 /// Known magic-byte patterns, checked in order (longest / most specific
 /// first where ambiguity exists).
 const MAGIC_TABLE: &[MagicSignature] = &[
-    // OurOS native formats
+    // SlateOS native formats
     MagicSignature {
         bytes: b"\x4fNXE",
         offset: 0,
@@ -1311,7 +1311,7 @@ const MAGIC_TABLE: &[MagicSignature] = &[
         offset: 0,
         extension: FileExtension::Mkv,
     },
-    // ELF — not an OurOS format but useful for detection
+    // ELF — not an SlateOS format but useful for detection
     MagicSignature {
         bytes: b"\x7fELF",
         offset: 0,
@@ -1997,7 +1997,7 @@ mod tests {
         assert_eq!(mime_for_extension(".html"), "text/html");
         assert_eq!(mime_for_extension(".json"), "application/json");
         assert_eq!(mime_for_extension(".mp3"), "audio/mpeg");
-        assert_eq!(mime_for_extension(".nx"), "application/x-ouros-executable");
+        assert_eq!(mime_for_extension(".nx"), "application/x-slateos-executable");
     }
 
     #[test]
@@ -2104,7 +2104,7 @@ mod tests {
     #[test]
     fn file_type_info_fields() {
         let info = detect_from_extension(".nx");
-        assert_eq!(info.description, "OurOS Native Executable");
+        assert_eq!(info.description, "SlateOS Native Executable");
         assert_eq!(info.default_app, None);
         assert!(info.is_executable);
         assert!(!info.is_text);

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! orca-cli — OurOS Orca screen reader CLI
+//! orca-cli — SlateOS Orca screen reader CLI
 //!
 //! Single personality: `orca`
 
@@ -11,7 +11,7 @@ fn run_orca(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: orca [OPTIONS]");
         println!();
-        println!("Orca — screen reader for visually impaired (OurOS).");
+        println!("Orca — screen reader for visually impaired (SlateOS).");
         println!();
         println!("Options:");
         println!("  -s, --setup        GUI setup");
@@ -26,7 +26,7 @@ fn run_orca(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("Orca 45.1 (OurOS)");
+        println!("Orca 45.1 (SlateOS)");
         return 0;
     }
 

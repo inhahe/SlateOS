@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cubase-cli — OurOS Steinberg Cubase DAW
+//! cubase-cli — SlateOS Steinberg Cubase DAW
 //!
 //! Single personality: `cubase`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_cubase(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: cubase [OPTIONS] [PROJECT]");
-        println!("Steinberg Cubase Pro 13 (OurOS) — Professional MIDI/audio DAW");
+        println!("Steinberg Cubase Pro 13 (SlateOS) — Professional MIDI/audio DAW");
         println!();
         println!("Options:");
         println!("  --open FILE            Open .cpr project");
@@ -23,8 +23,8 @@ fn run_cubase(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Steinberg Cubase Pro 13.0.40 (OurOS)"); return 0; }
-    println!("Steinberg Cubase Pro 13.0.40 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Steinberg Cubase Pro 13.0.40 (SlateOS)"); return 0; }
+    println!("Steinberg Cubase Pro 13.0.40 (SlateOS)");
     println!("  Editions: Elements, Artist, Pro");
     println!("  Plug-in format: VST (Steinberg invented it), VST3, ASIO");
     println!("  Features: VariAudio (pitch), Chord Track, Score Editor");

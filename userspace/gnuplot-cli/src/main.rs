@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gnuplot-cli — OurOS gnuplot CLI
+//! gnuplot-cli — SlateOS gnuplot CLI
 //!
 //! Single personality: `gnuplot`
 
@@ -11,7 +11,7 @@ fn run_gnuplot(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gnuplot [OPTIONS] [FILE...]");
         println!();
-        println!("gnuplot — interactive plotting program (OurOS).");
+        println!("gnuplot — interactive plotting program (SlateOS).");
         println!();
         println!("Options:");
         println!("  -e \"COMMAND\"           Execute command");
@@ -22,7 +22,7 @@ fn run_gnuplot(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("gnuplot 5.4 patchlevel 10 (OurOS)");
+        println!("gnuplot 5.4 patchlevel 10 (SlateOS)");
         return 0;
     }
 
@@ -46,7 +46,7 @@ fn run_gnuplot(args: Vec<String>) -> i32 {
         println!("  [Plot(s) generated]");
     } else {
         println!("        G N U P L O T");
-        println!("        Version 5.4 patchlevel 10 (OurOS)");
+        println!("        Version 5.4 patchlevel 10 (SlateOS)");
         println!("        Terminal type set to 'qt'");
         println!();
         println!("gnuplot> ");

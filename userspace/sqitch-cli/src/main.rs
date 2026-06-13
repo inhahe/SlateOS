@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sqitch-cli — OurOS Sqitch database change management
+//! sqitch-cli — SlateOS Sqitch database change management
 //!
 //! Single personality: `sqitch`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sqitch(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: sqitch COMMAND [OPTIONS]");
-        println!("sqitch v1.4.1 (OurOS) — Sensible database change management");
+        println!("sqitch v1.4.1 (SlateOS) — Sensible database change management");
         println!();
         println!("Commands:");
         println!("  init            Initialize project");
@@ -32,7 +32,7 @@ fn run_sqitch(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("sqitch v1.4.1 (OurOS)");
+        println!("sqitch v1.4.1 (SlateOS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("status");

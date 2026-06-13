@@ -2,7 +2,7 @@
 name = "ldd"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS shared library dependency lister"
+description = "SlateOS shared library dependency lister"
 [dependencies]
 
 [lints]

@@ -1,4 +1,4 @@
-//! OurOS Weather Application
+//! SlateOS Weather Application
 //!
 //! A weather dashboard application providing:
 //! - Current weather conditions with detailed metrics

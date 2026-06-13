@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wl-clipboard-cli — OurOS wl-clipboard Wayland clipboard
+//! wl-clipboard-cli — SlateOS wl-clipboard Wayland clipboard
 //!
 //! Multi-personality: `wl-copy`, `wl-paste`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wl_copy(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wl-copy [OPTIONS] [TEXT]");
-        println!("wl-copy v2.2 (OurOS) — Copy data to Wayland clipboard");
+        println!("wl-copy v2.2 (SlateOS) — Copy data to Wayland clipboard");
         println!();
         println!("Options:");
         println!("  TEXT              Text to copy (stdin if omitted)");
@@ -41,7 +41,7 @@ fn run_wl_copy(args: &[String], _prog: &str) -> i32 {
 fn run_wl_paste(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wl-paste [OPTIONS]");
-        println!("wl-paste v2.2 (OurOS) — Paste from Wayland clipboard");
+        println!("wl-paste v2.2 (SlateOS) — Paste from Wayland clipboard");
         println!();
         println!("Options:");
         println!("  -t MIME           Request specific MIME type");

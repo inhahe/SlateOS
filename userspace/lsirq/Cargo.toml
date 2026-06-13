@@ -2,5 +2,5 @@
 name = "lsirq"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS IRQ information display"
+description = "SlateOS IRQ information display"
 [dependencies]

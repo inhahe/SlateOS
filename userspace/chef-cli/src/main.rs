@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! chef-cli — OurOS Chef configuration management
+//! chef-cli — SlateOS Chef configuration management
 //!
 //! Multi-personality: `knife`, `chef-client`, `chef-solo`, `ohai`
 
@@ -14,7 +14,7 @@ fn run_knife(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: knife SUBCOMMAND [OPTIONS]");
         println!();
-        println!("knife — Chef server CLI (OurOS).");
+        println!("knife — Chef server CLI (SlateOS).");
         println!();
         println!("Subcommands:");
         println!("  node list             List nodes");
@@ -28,7 +28,7 @@ fn run_knife(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Chef Infra Client: 18.3.0 (OurOS)");
+        println!("Chef Infra Client: 18.3.0 (SlateOS)");
         return 0;
     }
 
@@ -36,18 +36,18 @@ fn run_knife(args: &[String]) -> i32 {
     let sub2 = args.get(1).map(|s| s.as_str()).unwrap_or("list");
     match (subcmd, sub2) {
         ("node", "list") => {
-            println!("ouros-desktop.local");
-            println!("ouros-server-1.local");
-            println!("ouros-server-2.local");
+            println!("slateos-desktop.local");
+            println!("slateos-server-1.local");
+            println!("slateos-server-2.local");
         }
         ("node", "show") => {
-            let name = args.get(2).map(|s| s.as_str()).unwrap_or("ouros-desktop.local");
+            let name = args.get(2).map(|s| s.as_str()).unwrap_or("slateos-desktop.local");
             println!("Node Name:   {}", name);
             println!("Environment: production");
             println!("FQDN:        {}", name);
             println!("IP:          192.168.1.100");
             println!("Run List:    recipe[base], recipe[nginx], role[webserver]");
-            println!("Platform:    ouros 1.0");
+            println!("Platform:    slateos 1.0");
         }
         ("cookbook", "list") => {
             println!("apt        7.4.0");
@@ -61,8 +61,8 @@ fn run_knife(args: &[String]) -> i32 {
             println!("database");
         }
         ("status", _) => {
-            println!("1 hour ago, ouros-desktop.local, ouros-desktop.local, 192.168.1.100, ouros 1.0.");
-            println!("2 hours ago, ouros-server-1.local, ouros-server-1.local, 192.168.1.101, ouros 1.0.");
+            println!("1 hour ago, slateos-desktop.local, slateos-desktop.local, 192.168.1.100, slateos 1.0.");
+            println!("2 hours ago, slateos-server-1.local, slateos-server-1.local, 192.168.1.101, slateos 1.0.");
         }
         _ => println!("knife: {} {} completed", subcmd, sub2),
     }
@@ -79,12 +79,12 @@ fn run_chef_client(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Chef Infra Client: 18.3.0 (OurOS)");
+        println!("Chef Infra Client: 18.3.0 (SlateOS)");
         return 0;
     }
 
     println!("[2024-05-22T12:00:00+00:00] INFO: *** Chef Infra Client 18.3.0 ***");
-    println!("[2024-05-22T12:00:00+00:00] INFO: Platform: x86_64-ouros");
+    println!("[2024-05-22T12:00:00+00:00] INFO: Platform: x86_64-slateos");
     println!("[2024-05-22T12:00:01+00:00] INFO: Setting the run_list to [\"recipe[base]\", \"recipe[nginx]\"]");
     println!("[2024-05-22T12:00:02+00:00] INFO: Run List is [recipe[base], recipe[nginx]]");
     println!("[2024-05-22T12:00:03+00:00] INFO: Processing package[nginx] action install");
@@ -95,15 +95,15 @@ fn run_chef_client(args: &[String]) -> i32 {
 
 fn run_ohai(_args: &[String]) -> i32 {
     println!("{{");
-    println!("  \"os\": \"ouros\",");
+    println!("  \"os\": \"slateos\",");
     println!("  \"os_version\": \"1.0\",");
-    println!("  \"platform\": \"ouros\",");
-    println!("  \"hostname\": \"ouros-desktop\",");
-    println!("  \"fqdn\": \"ouros-desktop.local\",");
+    println!("  \"platform\": \"slateos\",");
+    println!("  \"hostname\": \"slateos-desktop\",");
+    println!("  \"fqdn\": \"slateos-desktop.local\",");
     println!("  \"ipaddress\": \"192.168.1.100\",");
     println!("  \"memory\": {{\"total\": \"16384MB\"}},");
     println!("  \"cpu\": {{\"total\": 8}},");
-    println!("  \"kernel\": {{\"name\": \"ouros\", \"machine\": \"x86_64\"}}");
+    println!("  \"kernel\": {{\"name\": \"slateos\", \"machine\": \"x86_64\"}}");
     println!("}}");
     0
 }

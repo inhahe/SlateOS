@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tfsec-cli — OurOS tfsec Terraform security scanner
+//! tfsec-cli — SlateOS tfsec Terraform security scanner
 //!
 //! Single personality: `tfsec`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_tfsec(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: tfsec [OPTIONS] [PATH]");
-        println!("tfsec v1.28.6 (OurOS) — Terraform security scanner");
+        println!("tfsec v1.28.6 (SlateOS) — Terraform security scanner");
         println!();
         println!("Options:");
         println!("  PATH                    Terraform directory");
@@ -28,7 +28,7 @@ fn run_tfsec(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("tfsec v1.28.6 (OurOS)");
+        println!("tfsec v1.28.6 (SlateOS)");
         return 0;
     }
     let path = args.first().map(|s| s.as_str()).unwrap_or(".");

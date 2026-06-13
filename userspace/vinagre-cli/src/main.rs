@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vinagre-cli — OurOS Vinagre remote desktop viewer
+//! vinagre-cli — SlateOS Vinagre remote desktop viewer
 //!
 //! Single personality: `vinagre`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_vinagre(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: vinagre [OPTIONS] [URI]");
-        println!("vinagre v3.22 (OurOS) — GNOME remote desktop viewer");
+        println!("vinagre v3.22 (SlateOS) — GNOME remote desktop viewer");
         println!();
         println!("Options:");
         println!("  --new-window      Open in new window");
@@ -23,7 +23,7 @@ fn run_vinagre(args: &[String], _prog: &str) -> i32 {
         println!("URI: vnc://host:port, rdp://host, spice://host");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("vinagre v3.22 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("vinagre v3.22 (SlateOS)"); return 0; }
     println!("vinagre: remote desktop viewer started");
     println!("  Protocols: VNC, RDP, SPICE, SSH");
     println!("  Avahi: network discovery enabled");

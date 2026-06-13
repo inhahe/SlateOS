@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! simulink-cli — OurOS MathWorks Simulink model-based design
+//! simulink-cli — SlateOS MathWorks Simulink model-based design
 //!
 //! Single personality: `simulink`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_simulink(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: simulink [OPTIONS] [MODEL]");
-        println!("MathWorks Simulink R2024b (OurOS) — Block-diagram model-based design");
+        println!("MathWorks Simulink R2024b (SlateOS) — Block-diagram model-based design");
         println!();
         println!("Options:");
         println!("  -open MODEL            Open .slx/.mdl model");
@@ -23,8 +23,8 @@ fn run_simulink(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("MathWorks Simulink 24.2.0 (R2024b) (OurOS)"); return 0; }
-    println!("MathWorks Simulink R2024b (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("MathWorks Simulink 24.2.0 (R2024b) (SlateOS)"); return 0; }
+    println!("MathWorks Simulink R2024b (SlateOS)");
     println!("  Modeling: graphical block diagrams, hierarchical, multi-domain");
     println!("  Solvers: ODE45 (variable-step), ode15s (stiff), discrete, fixed-step");
     println!("  Stateflow: state machines, flow charts, truth tables");

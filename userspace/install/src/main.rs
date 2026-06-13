@@ -1,4 +1,4 @@
-//! OurOS install — copy files and set attributes
+//! SlateOS install — copy files and set attributes
 //!
 //! GNU coreutils-compatible `install` command for copying files
 //! with specified permissions, ownership, and directory creation.
@@ -208,7 +208,7 @@ fn parse_args() -> Args {
                 process::exit(0);
             }
             "--version" => {
-                println!("install (OurOS) 0.1.0");
+                println!("install (SlateOS) 0.1.0");
                 process::exit(0);
             }
             "-d" | "--directory" => args.directory_mode = true,
@@ -484,7 +484,7 @@ fn resolve_group(name: &str) -> Result<u32, String> {
 
 #[allow(dead_code)]
 fn sys_chmod(path: &str, mode: u32) -> io::Result<()> {
-    #[cfg(target_os = "ouros")]
+    #[cfg(target_os = "slateos")]
     {
         let path_bytes = path.as_bytes();
         let ret: i64;
@@ -506,7 +506,7 @@ fn sys_chmod(path: &str, mode: u32) -> io::Result<()> {
             Ok(())
         }
     }
-    #[cfg(not(target_os = "ouros"))]
+    #[cfg(not(target_os = "slateos"))]
     {
         let _ = (path, mode);
         Ok(())
@@ -515,7 +515,7 @@ fn sys_chmod(path: &str, mode: u32) -> io::Result<()> {
 
 #[allow(dead_code)]
 fn sys_chown(path: &str, uid: u32, gid: u32) -> io::Result<()> {
-    #[cfg(target_os = "ouros")]
+    #[cfg(target_os = "slateos")]
     {
         let path_bytes = path.as_bytes();
         let ret: i64;
@@ -538,7 +538,7 @@ fn sys_chown(path: &str, uid: u32, gid: u32) -> io::Result<()> {
             Ok(())
         }
     }
-    #[cfg(not(target_os = "ouros"))]
+    #[cfg(not(target_os = "slateos"))]
     {
         let _ = (path, uid, gid);
         Ok(())
@@ -617,7 +617,7 @@ fn create_directory_with_parents(path: &Path, mode: u32, verbose: bool) -> Resul
         println!("install: creating directory '{}'", path.display());
     }
 
-    // Set mode on OurOS
+    // Set mode on SlateOS
     sys_chmod(&path.to_string_lossy(), mode)
         .map_err(|e| format!("cannot set mode on '{}': {e}", path.display()))?;
 
@@ -699,10 +699,10 @@ fn install_file(src: &Path, dst: &Path, args: &Args) -> Result<(), String> {
 
     // Preserve timestamps
     if args.preserve_timestamps {
-        // On OurOS we'd copy atime/mtime from source via syscall.
+        // On SlateOS we'd copy atime/mtime from source via syscall.
         // For now, this is a placeholder that will work when the
         // utimensat syscall is available.
-        #[cfg(target_os = "ouros")]
+        #[cfg(target_os = "slateos")]
         {
             // TODO: implement utimensat call to copy timestamps
         }

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tuned-cli — OurOS TuneD system tuning daemon
+//! tuned-cli — SlateOS TuneD system tuning daemon
 //!
 //! Multi-personality: `tuned`, `tuned-adm`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_tuned(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: tuned [OPTIONS]");
-        println!("tuned v2.22 (OurOS) — System tuning daemon");
+        println!("tuned v2.22 (SlateOS) — System tuning daemon");
         println!();
         println!("Options:");
         println!("  -d                Run as daemon");
@@ -22,7 +22,7 @@ fn run_tuned(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("tuned v2.22 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("tuned v2.22 (SlateOS)"); return 0; }
     println!("tuned: system tuning daemon started");
     println!("  Active profile: balanced");
     0
@@ -31,7 +31,7 @@ fn run_tuned(args: &[String], _prog: &str) -> i32 {
 fn run_adm(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: tuned-adm COMMAND [OPTIONS]");
-        println!("tuned-adm v2.22 (OurOS) — TuneD administration");
+        println!("tuned-adm v2.22 (SlateOS) — TuneD administration");
         println!();
         println!("Commands:");
         println!("  active            Show active profile");

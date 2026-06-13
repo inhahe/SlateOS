@@ -1,4 +1,4 @@
-//! OurOS Sysctl — View and Modify Kernel Parameters
+//! SlateOS Sysctl — View and Modify Kernel Parameters
 //!
 //! Reads and writes kernel tunable parameters exposed via `/proc/sys/` and
 //! `/sys/kernel/`. Provides the standard `sysctl` interface for inspecting
@@ -33,7 +33,7 @@
 //!
 //! ```text
 //! # Comment lines start with hash
-//! kernel.hostname = ouros
+//! kernel.hostname = slateos
 //! net.ipv4.ip_forward = 1
 //! ```
 
@@ -473,7 +473,7 @@ fn parse_args(args: &[String]) -> Action {
 // ============================================================================
 
 fn print_usage() {
-    println!("OurOS Kernel Parameter Utility v0.1.0");
+    println!("SlateOS Kernel Parameter Utility v0.1.0");
     println!();
     println!("View and modify kernel runtime parameters from /proc/sys/ and /sys/kernel/.");
     println!();
@@ -500,7 +500,7 @@ fn print_usage() {
     println!();
     println!("CONFIG FILE FORMAT ({DEFAULT_CONF}):");
     println!("  # Lines starting with # or ; are comments");
-    println!("  kernel.hostname = ouros");
+    println!("  kernel.hostname = slateos");
     println!("  net.ipv4.ip_forward = 1");
 }
 

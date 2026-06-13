@@ -1,4 +1,4 @@
-//! Multi-personality snap package management utility for OurOS.
+//! Multi-personality snap package management utility for SlateOS.
 //!
 //! This binary detects its personality from `argv[0]`:
 //!   - `snap`          — snap package management CLI
@@ -1312,7 +1312,7 @@ impl SnapState {
             format!("snap    {}", VERSION),
             format!("snapd   {}", VERSION),
             "series  16".to_string(),
-            "ouros   0.1.0".to_string(),
+            "slateos   0.1.0".to_string(),
         ]
     }
 }

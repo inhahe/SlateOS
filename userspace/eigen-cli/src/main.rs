@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! eigen-cli — OurOS Eigen C++ linear algebra info
+//! eigen-cli — SlateOS Eigen C++ linear algebra info
 //!
 //! Single personality: `eigen-info`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_eigen(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: eigen-info COMMAND [OPTIONS]");
-        println!("Eigen v3.4.0 (OurOS) — C++ linear algebra library info");
+        println!("Eigen v3.4.0 (SlateOS) — C++ linear algebra library info");
         println!();
         println!("Commands:");
         println!("  info              Show Eigen configuration");
@@ -23,7 +23,7 @@ fn run_eigen(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("Eigen v3.4.0 (OurOS)");
+        println!("Eigen v3.4.0 (SlateOS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("info");

@@ -2,7 +2,7 @@
 name = "ssh-keygen"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS SSH key generation and management"
+description = "SlateOS SSH key generation and management"
 [dependencies]
 
 [lints]

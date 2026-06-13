@@ -2,4 +2,4 @@
 name = "servicebus"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS Service Bus — named service registry with typed RPC"
+description = "SlateOS Service Bus — named service registry with typed RPC"

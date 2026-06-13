@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pnpm-cli — OurOS pnpm package manager
+//! pnpm-cli — SlateOS pnpm package manager
 //!
 //! Multi-personality: `pnpm`, `pnpx`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pnpm(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: pnpm COMMAND [OPTIONS]");
-        println!("pnpm 9.4.0 (OurOS)");
+        println!("pnpm 9.4.0 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  add         Install a package");

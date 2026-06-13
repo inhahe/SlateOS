@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! k6-cli — OurOS k6 load testing CLI
+//! k6-cli — SlateOS k6 load testing CLI
 //!
 //! Single personality: `k6`
 
@@ -11,7 +11,7 @@ fn run_k6(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: k6 <COMMAND> [OPTIONS]");
         println!();
-        println!("k6 load testing CLI (OurOS).");
+        println!("k6 load testing CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  run          Run a test script");
@@ -24,7 +24,7 @@ fn run_k6(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("k6 v0.49.0 (OurOS)");
+        println!("k6 v0.49.0 (SlateOS)");
         return 0;
     }
 

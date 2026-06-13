@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! workos-cli — OurOS WorkOS (developer-friendly enterprise-readiness API: SSO, SCIM, audit logs)
+//! workos-cli — SlateOS WorkOS (developer-friendly enterprise-readiness API: SSO, SCIM, audit logs)
 //!
 //! Single personality: `workos`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wos(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: workos [OPTIONS]");
-        println!("WorkOS (OurOS) — Enterprise readiness APIs for SaaS apps");
+        println!("WorkOS (SlateOS) — Enterprise readiness APIs for SaaS apps");
         println!();
         println!("Options:");
         println!("  --sso                  SSO (SAML/OIDC, all enterprise IdPs)");
@@ -24,8 +24,8 @@ fn run_wos(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("WorkOS 2024 (OurOS)"); return 0; }
-    println!("WorkOS 2024 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("WorkOS 2024 (SlateOS)"); return 0; }
+    println!("WorkOS 2024 (SlateOS)");
     println!("  Vendor: WorkOS Inc. (San Francisco — founded 2019)");
     println!("  Founder: Michael Grinich (ex-Cofounder Nylas, MIT)");
     println!("          Grinich: prolific essayist/blog poster, advocate for 'SaaS enterprise readiness'");

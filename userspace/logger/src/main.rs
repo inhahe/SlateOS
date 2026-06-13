@@ -1,4 +1,4 @@
-//! logger — send messages to the system log for OurOS
+//! logger — send messages to the system log for SlateOS
 //!
 //! Compatible with POSIX/BSD logger(1). Writes log entries to
 //! the system log via /dev/log socket or direct file append.
@@ -427,7 +427,7 @@ fn parse_args(args: &[String]) -> Options {
                 process::exit(0);
             }
             "--version" => {
-                println!("logger (OurOS) 0.1.0");
+                println!("logger (SlateOS) 0.1.0");
                 process::exit(0);
             }
             _ if arg.starts_with("--priority=") => {

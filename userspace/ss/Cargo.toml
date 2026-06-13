@@ -2,5 +2,5 @@
 name = "ss"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS ss - socket statistics (ss/sockstat)"
+description = "SlateOS ss - socket statistics (ss/sockstat)"
 [dependencies]

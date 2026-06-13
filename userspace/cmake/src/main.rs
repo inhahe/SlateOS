@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cmake — OurOS CMake build system generator
+//! cmake — SlateOS CMake build system generator
 //!
 //! Multi-personality binary detected via argv[0]:
 //!
@@ -34,8 +34,8 @@ fn run_cmake(args: Vec<String>) -> i32 {
     }
 
     if args.iter().any(|a| a == "--version") {
-        println!("cmake version 0.1.0 (OurOS)");
-        println!("CMake suite maintained by OurOS");
+        println!("cmake version 0.1.0 (SlateOS)");
+        println!("CMake suite maintained by SlateOS");
         return 0;
     }
 
@@ -99,7 +99,7 @@ fn run_ctest(args: Vec<String>) -> i32 {
     }
 
     if args.iter().any(|a| a == "--version") {
-        println!("ctest version 0.1.0 (OurOS)");
+        println!("ctest version 0.1.0 (SlateOS)");
         return 0;
     }
 
@@ -132,7 +132,7 @@ fn run_cpack(args: Vec<String>) -> i32 {
     }
 
     if args.iter().any(|a| a == "--version") {
-        println!("cpack version 0.1.0 (OurOS)");
+        println!("cpack version 0.1.0 (SlateOS)");
         return 0;
     }
 

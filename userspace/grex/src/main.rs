@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! grex — OurOS command-line tool for generating regular expressions from examples
+//! grex — SlateOS command-line tool for generating regular expressions from examples
 //!
 //! Single personality: `grex`
 
@@ -32,7 +32,7 @@ fn run_grex(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("grex 1.4.1 (OurOS)");
+        println!("grex 1.4.1 (SlateOS)");
         return 0;
     }
 

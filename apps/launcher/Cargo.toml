@@ -2,6 +2,6 @@
 name = "launcher"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS App Launcher — quick launch dialog with search"
+description = "SlateOS App Launcher — quick launch dialog with search"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }

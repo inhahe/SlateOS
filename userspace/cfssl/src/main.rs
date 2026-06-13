@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cfssl — OurOS CloudFlare PKI/TLS toolkit
+//! cfssl — SlateOS CloudFlare PKI/TLS toolkit
 //!
 //! Multi-personality: `cfssl`, `cfssljson`, `mkbundle`, `multirootca`
 
@@ -29,7 +29,7 @@ fn run_cfssl(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match cmd {
         "version" => {
-            println!("Version: 1.6.5 (OurOS)");
+            println!("Version: 1.6.5 (SlateOS)");
             println!("Runtime: go1.22");
         }
         "gencert" => {
@@ -42,7 +42,7 @@ fn run_cfssl(args: Vec<String>) -> i32 {
         "certinfo" => {
             println!("{{");
             println!("  \"subject\": {{\"common_name\": \"example.com\"}},");
-            println!("  \"issuer\": {{\"common_name\": \"OurOS Root CA\"}},");
+            println!("  \"issuer\": {{\"common_name\": \"SlateOS Root CA\"}},");
             println!("  \"serial_number\": \"1234567890\",");
             println!("  \"not_before\": \"2025-05-22T00:00:00Z\",");
             println!("  \"not_after\": \"2026-05-22T00:00:00Z\",");

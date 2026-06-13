@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xsv — OurOS fast CSV command-line toolkit
+//! xsv — SlateOS fast CSV command-line toolkit
 //!
 //! Single personality: `xsv`
 
@@ -41,7 +41,7 @@ fn run_xsv(args: Vec<String>) -> i32 {
             0
         }
         "--version" => {
-            println!("xsv 0.13.0 (OurOS)");
+            println!("xsv 0.13.0 (SlateOS)");
             0
         }
         "headers" => {

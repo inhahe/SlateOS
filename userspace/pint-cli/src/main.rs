@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pint-cli — OurOS pint Prometheus rule linter
+//! pint-cli — SlateOS pint Prometheus rule linter
 //!
 //! Single personality: `pint`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pint(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: pint COMMAND [OPTIONS]");
-        println!("pint v0.60.0 (OurOS) — Prometheus rule linter");
+        println!("pint v0.60.0 (SlateOS) — Prometheus rule linter");
         println!();
         println!("Commands:");
         println!("  lint            Lint rules");
@@ -28,7 +28,7 @@ fn run_pint(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("pint v0.60.0 (OurOS)");
+        println!("pint v0.60.0 (SlateOS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("lint");

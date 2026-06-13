@@ -2,5 +2,5 @@
 name = "coredumpctl"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS coredumpctl utility"
+description = "SlateOS coredumpctl utility"
 [dependencies]

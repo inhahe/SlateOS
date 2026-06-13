@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xh-cli — OurOS xh friendly HTTP client
+//! xh-cli — SlateOS xh friendly HTTP client
 //!
 //! Single personality: `xh`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_xh(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: xh [OPTIONS] METHOD URL [BODY...]");
-        println!("xh v0.22.0 (OurOS) — Friendly HTTP client (HTTPie-compatible)");
+        println!("xh v0.22.0 (SlateOS) — Friendly HTTP client (HTTPie-compatible)");
         println!();
         println!("Options:");
         println!("  -j, --json        JSON mode (default)");
@@ -33,7 +33,7 @@ fn run_xh(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("xh 0.22.0 (OurOS)");
+        println!("xh 0.22.0 (SlateOS)");
         return 0;
     }
     let verbose = args.iter().any(|a| a == "-v" || a == "--verbose");

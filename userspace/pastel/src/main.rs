@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pastel — OurOS command-line tool for working with colors
+//! pastel — SlateOS command-line tool for working with colors
 //!
 //! Single personality: `pastel`
 
@@ -44,7 +44,7 @@ fn run_pastel(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("pastel 0.9.0 (OurOS)");
+            println!("pastel 0.9.0 (SlateOS)");
             0
         }
         "color" => {

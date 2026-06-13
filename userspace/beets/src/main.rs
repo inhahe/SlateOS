@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! beets — OurOS music library manager
+//! beets — SlateOS music library manager
 //!
 //! Single personality: `beet`
 
@@ -31,7 +31,7 @@ fn run_beet(args: Vec<String>) -> i32 {
 
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match cmd {
-        "version" => println!("beets version 1.6.0 (OurOS)"),
+        "version" => println!("beets version 1.6.0 (SlateOS)"),
         "list" | "ls" => {
             let query = args.get(1).map(|s| s.as_str()).unwrap_or("");
             if query.is_empty() {

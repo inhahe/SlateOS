@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! useradd-cli — OurOS user management CLIs
+//! useradd-cli — SlateOS user management CLIs
 //!
 //! Multi-personality: `useradd`, `userdel`, `usermod`, `groupadd`, `groupdel`
 

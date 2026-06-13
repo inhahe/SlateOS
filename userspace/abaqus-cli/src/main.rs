@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! abaqus-cli — OurOS Dassault Abaqus FEA
+//! abaqus-cli — SlateOS Dassault Abaqus FEA
 //!
 //! Single personality: `abaqus`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_abaqus(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: abaqus [OPTIONS] [COMMAND]");
-        println!("Dassault Abaqus 2024 (OurOS) — Nonlinear FEA (SIMULIA)");
+        println!("Dassault Abaqus 2024 (SlateOS) — Nonlinear FEA (SIMULIA)");
         println!();
         println!("Options:");
         println!("  cae                    Launch Abaqus/CAE GUI");
@@ -23,8 +23,8 @@ fn run_abaqus(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Dassault Abaqus 2024 (OurOS) — Standard/Explicit/CFD/CAE"); return 0; }
-    println!("Dassault Abaqus 2024 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Dassault Abaqus 2024 (SlateOS) — Standard/Explicit/CFD/CAE"); return 0; }
+    println!("Dassault Abaqus 2024 (SlateOS)");
     println!("  Solvers: Abaqus/Standard (implicit), /Explicit, /CFD, /Electromagnetic");
     println!("  CAE: pre/post-processor with Python scripting");
     println!("  Strengths: nonlinear, contact, materials, fracture, composites");

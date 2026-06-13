@@ -1,4 +1,4 @@
-//! OurOS VPN Connection Manager
+//! SlateOS VPN Connection Manager
 //!
 //! GUI application for managing VPN connections, profiles, and tunneling
 //! configuration. Provides:
@@ -14,7 +14,7 @@
 //! - Data usage tracking per profile
 //!
 //! Uses the guitk library for UI rendering with Catppuccin Mocha dark theme.
-//! Network I/O is performed through OurOS syscalls; simulated with
+//! Network I/O is performed through SlateOS syscalls; simulated with
 //! representative data for initial development.
 
 #[allow(unused_imports)]

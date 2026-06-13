@@ -1,4 +1,4 @@
-//! OurOS Memory Information Display
+//! SlateOS Memory Information Display
 //!
 //! Displays system memory and swap usage by reading `/proc/meminfo`.
 //! Similar to Linux `free` command.
@@ -106,7 +106,7 @@ fn read_meminfo() -> Option<MemInfo> {
     let shmem = get_meminfo_value(&content, "Shmem");
     let s_reclaimable = get_meminfo_value(&content, "SReclaimable");
 
-    // If MemAvailable is missing (older kernels / early OurOS builds),
+    // If MemAvailable is missing (older kernels / early SlateOS builds),
     // estimate it as free + buffers + cached.
     let mem_available = if mem_available == 0 && mem_free > 0 {
         mem_free.saturating_add(buffers).saturating_add(cached)
@@ -435,7 +435,7 @@ fn run(config: &Config) -> i32 {
 // ============================================================================
 
 fn print_usage() {
-    println!("OurOS Memory Information Display v0.1.0");
+    println!("SlateOS Memory Information Display v0.1.0");
     println!();
     println!("Display amount of free and used memory in the system.");
     println!();

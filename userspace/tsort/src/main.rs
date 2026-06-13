@@ -1,4 +1,4 @@
-//! tsort — topological sort for OurOS
+//! tsort — topological sort for SlateOS
 //!
 //! Reads pairs of strings from input and produces a topological
 //! ordering. Reports cycles to stderr.
@@ -125,7 +125,7 @@ fn run(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("tsort (OurOS coreutils) 0.1.0");
+                println!("tsort (SlateOS coreutils) 0.1.0");
                 return 0;
             }
             _ if arg.starts_with('-') && arg.len() > 1 => {

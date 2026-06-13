@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! multitail-cli — OurOS MultiTail multi-log viewer
+//! multitail-cli — SlateOS MultiTail multi-log viewer
 //!
 //! Single personality: `multitail`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_multitail(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: multitail [OPTIONS] FILE [FILE...]");
-        println!("multitail v7.1 (OurOS) — Multiple log file viewer");
+        println!("multitail v7.1 (SlateOS) — Multiple log file viewer");
         println!();
         println!("Options:");
         println!("  -s N              Split vertically into N columns");
@@ -25,7 +25,7 @@ fn run_multitail(args: &[String], _prog: &str) -> i32 {
         println!("View multiple log files in split-screen terminal windows.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("multitail v7.1 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("multitail v7.1 (SlateOS)"); return 0; }
     println!("multitail: viewing {} log file(s)", args.len());
     0
 }

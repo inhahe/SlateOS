@@ -1,4 +1,4 @@
-//! pkg — OurOS package manager.
+//! pkg — SlateOS package manager.
 //!
 //! Content-addressed package store with atomic generational updates.
 //!
@@ -53,7 +53,7 @@ const GEN_DIR: &str = "/var/pkg/generations";
 const REPO_DIR: &str = "/var/pkg/repos";
 
 /// Default repository URL (placeholder — will point to actual repo server).
-const DEFAULT_REPO: &str = "https://repo.ouros.org/stable";
+const DEFAULT_REPO: &str = "https://repo.slateos.org/stable";
 
 /// Config file location.
 const CONFIG_PATH: &str = "/etc/pkg.conf";
@@ -629,7 +629,7 @@ fn parse_file_entry(value: &str) -> Option<PackageFile> {
 struct RepoConfig {
     /// Short name for the repository (e.g. "stable", "community").
     name: String,
-    /// Base URL for the repository (e.g. "https://repo.ouros.org/stable").
+    /// Base URL for the repository (e.g. "https://repo.slateos.org/stable").
     url: String,
     /// Priority: lower numbers are preferred. Official repos use 100, user
     /// repos default to 500.
@@ -672,14 +672,14 @@ impl PkgConfig {
     ///
     /// Format:
     /// ```yaml
-    /// # OurOS package manager configuration
+    /// # SlateOS package manager configuration
     /// repo: stable
-    ///   url: https://repo.ouros.org/stable
+    ///   url: https://repo.slateos.org/stable
     ///   priority: 100
     ///   enabled: yes
     ///
     /// repo: community
-    ///   url: https://community.ouros.org/packages
+    ///   url: https://community.slateos.org/packages
     ///   priority: 500
     ///   enabled: yes
     /// ```
@@ -744,7 +744,7 @@ impl PkgConfig {
     /// Serialize config to text format for saving.
     fn serialize(&self) -> String {
         let mut out = String::new();
-        out.push_str("# OurOS package manager configuration\n");
+        out.push_str("# SlateOS package manager configuration\n");
         out.push_str("# Repositories are checked in priority order (lower = preferred).\n\n");
 
         for repo in &self.repos {
@@ -4735,7 +4735,7 @@ fn cmd_snapshot(db: &PackageDb, args: &[String], dry_run: bool) {
 
 fn print_usage() {
     println!(
-        "pkg — OurOS package manager
+        "pkg — SlateOS package manager
 
 Usage: pkg <command> [options] [arguments]
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! linear-cli — OurOS Linear CLI
+//! linear-cli — SlateOS Linear CLI
 //!
 //! Single personality: `linear`
 
@@ -11,7 +11,7 @@ fn run_linear(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: linear <COMMAND> [OPTIONS]");
         println!();
-        println!("Linear issue tracker CLI (OurOS).");
+        println!("Linear issue tracker CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  issue        Manage issues");

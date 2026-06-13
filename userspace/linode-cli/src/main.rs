@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! linode-cli — OurOS Linode CLI
+//! linode-cli — SlateOS Linode CLI
 //!
 //! Single personality: `linode-cli`
 
@@ -11,7 +11,7 @@ fn run_linode(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "help") {
         println!("Usage: linode-cli <COMMAND> [ACTION] [OPTIONS]");
         println!();
-        println!("Linode CLI — manage Linode/Akamai cloud (OurOS).");
+        println!("Linode CLI — manage Linode/Akamai cloud (SlateOS).");
         println!();
         println!("Commands:");
         println!("  linodes       Manage Linode instances");
@@ -27,7 +27,7 @@ fn run_linode(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("linode-cli 5.45.0 (OurOS)");
+        println!("linode-cli 5.45.0 (SlateOS)");
         return 0;
     }
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hisat2-cli — OurOS HISAT2 RNA-seq aligner
+//! hisat2-cli — SlateOS HISAT2 RNA-seq aligner
 //!
 //! Multi-personality: `hisat2`, `hisat2-build`, `hisat2-inspect`
 
@@ -15,15 +15,15 @@ fn run_hisat2(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "hisat2-build" => {
-                println!("HISAT2-build v2.2 (OurOS) — Index builder");
+                println!("HISAT2-build v2.2 (SlateOS) — Index builder");
                 println!("  hisat2-build REFERENCE INDEX_PREFIX");
             }
             "hisat2-inspect" => {
-                println!("HISAT2-inspect v2.2 (OurOS) — Index inspector");
+                println!("HISAT2-inspect v2.2 (SlateOS) — Index inspector");
                 println!("  hisat2-inspect INDEX_PREFIX");
             }
             _ => {
-                println!("HISAT2 v2.2 (OurOS) — Spliced read aligner");
+                println!("HISAT2 v2.2 (SlateOS) — Spliced read aligner");
                 println!("  -x INDEX     Index prefix");
                 println!("  -1 FILE      Mate 1 reads");
                 println!("  -2 FILE      Mate 2 reads");
@@ -36,7 +36,7 @@ fn run_hisat2(args: &[String], prog: &str) -> i32 {
         println!("  --version    Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("HISAT2 v2.2.1 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("HISAT2 v2.2.1 (SlateOS)"); return 0; }
     match prog {
         "hisat2-build" => {
             println!("HISAT2-build: building index...");

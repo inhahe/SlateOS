@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sonic-pi-cli — OurOS Sonic Pi live coding synth
+//! sonic-pi-cli — SlateOS Sonic Pi live coding synth
 //!
 //! Single personality: `sonic-pi`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sonic_pi(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: sonic-pi COMMAND [OPTIONS]");
-        println!("Sonic Pi v4.5 (OurOS) — The live coding music synth");
+        println!("Sonic Pi v4.5 (SlateOS) — The live coding music synth");
         println!();
         println!("Commands:");
         println!("  start           Start Sonic Pi server");
@@ -26,7 +26,7 @@ fn run_sonic_pi(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("Sonic Pi v4.5 (OurOS)");
+        println!("Sonic Pi v4.5 (SlateOS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("info");

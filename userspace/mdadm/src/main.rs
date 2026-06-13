@@ -1,4 +1,4 @@
-//! Multi-personality software RAID management utility for OurOS.
+//! Multi-personality software RAID management utility for SlateOS.
 //!
 //! Detects personality from `argv[0]`:
 //!   - `mdadm`  — create, assemble, manage, monitor, and query software RAID arrays
@@ -1265,7 +1265,7 @@ fn run_mdadm(args: &[String], out: &mut Vec<u8>, err: &mut Vec<u8>) -> i32 {
             0
         }
         MdadmMode::Version => {
-            let _ = writeln!(out, "mdadm - v{} - Software Raid management for OurOS", VERSION);
+            let _ = writeln!(out, "mdadm - v{} - Software Raid management for SlateOS", VERSION);
             0
         }
         MdadmMode::Create => run_create(&opts, out, err),

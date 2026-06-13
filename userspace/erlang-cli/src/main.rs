@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! erlang-cli — OurOS Erlang/OTP tools
+//! erlang-cli — SlateOS Erlang/OTP tools
 //!
 //! Multi-personality: `erl`, `erlc`, `escript`, `dialyzer`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_erl(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: erl [OPTIONS]");
-        println!("Erlang/OTP 26 (OurOS)");
+        println!("Erlang/OTP 26 (SlateOS)");
         println!("  -noshell       Don't start a shell");
         println!("  -eval EXPR     Evaluate expression");
         println!("  -s MOD FUNC    Start module:function");

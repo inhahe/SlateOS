@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! energia-cli — OurOS Energia IDE for TI MSP430/MSP432/Tiva/CC3200
+//! energia-cli — SlateOS Energia IDE for TI MSP430/MSP432/Tiva/CC3200
 //!
 //! Single personality: `energia`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_energia(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: energia [OPTIONS] [SKETCH]");
-        println!("Energia 1.8.10E23 (OurOS) — Arduino-style IDE for TI LaunchPads");
+        println!("Energia 1.8.10E23 (SlateOS) — Arduino-style IDE for TI LaunchPads");
         println!();
         println!("Options:");
         println!("  --sketch FILE          Open .ino sketch");
@@ -22,8 +22,8 @@ fn run_energia(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Energia 1.8.10E23 (OurOS)"); return 0; }
-    println!("Energia 1.8.10E23 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Energia 1.8.10E23 (SlateOS)"); return 0; }
+    println!("Energia 1.8.10E23 (SlateOS)");
     println!("  Targets: TI MSP430, MSP432 (Cortex-M4F), Tiva C (Cortex-M4F), CC3200 (Wi-Fi)");
     println!("  CC2650 BLE LaunchPad, CC1310/CC1352 sub-GHz LaunchPads");
     println!("  Language: Arduino-compatible C/C++ wireless library");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wget2-cli — OurOS wget2 HTTP/HTTPS downloader
+//! wget2-cli — SlateOS wget2 HTTP/HTTPS downloader
 //!
 //! Single personality: `wget2`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wget2(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wget2 [OPTIONS] URL...");
-        println!("wget2 v2.1 (OurOS) — Network downloader");
+        println!("wget2 v2.1 (SlateOS) — Network downloader");
         println!();
         println!("Options:");
         println!("  -O FILE           Output file");
@@ -30,7 +30,7 @@ fn run_wget2(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("wget2 v2.1 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("wget2 v2.1 (SlateOS)"); return 0; }
     let urls: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
     if urls.is_empty() {
         println!("wget2: missing URL");

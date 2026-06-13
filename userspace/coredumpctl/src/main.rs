@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! coredumpctl — OurOS core dump management
+//! coredumpctl — SlateOS core dump management
 //!
 //! Multi-personality binary for viewing, analyzing, and managing core dumps.
 //! Detected via argv[0]:

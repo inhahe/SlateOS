@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dbvisualizer-cli — OurOS DbVisualizer database tool
+//! dbvisualizer-cli — SlateOS DbVisualizer database tool
 //!
 //! Single personality: `dbvis`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_dbvis(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: dbvis [OPTIONS]");
-        println!("DbVisualizer v24.1 (OurOS) — Universal database tool");
+        println!("DbVisualizer v24.1 (SlateOS) — Universal database tool");
         println!();
         println!("Options:");
         println!("  --connection NAME  Use saved connection");
@@ -26,8 +26,8 @@ fn run_dbvis(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("DbVisualizer v24.1.3 (OurOS)"); return 0; }
-    println!("DbVisualizer v24.1.3 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("DbVisualizer v24.1.3 (SlateOS)"); return 0; }
+    println!("DbVisualizer v24.1.3 (SlateOS)");
     println!("  Connections: 9 saved");
     println!("  Supported: 50+ databases via JDBC");
     println!("  SQL history: 234 queries");

@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! contentful-cli — OurOS Contentful headless CMS personality CLI.
+//! contentful-cli — SlateOS Contentful headless CMS personality CLI.
 
 use std::env;
 use std::process;
@@ -29,7 +29,7 @@ fn print_help(prog: &str) {
 }
 
 fn print_version() {
-    println!("contentful-cli 0.1.0 — OurOS personality binary");
+    println!("contentful-cli 0.1.0 — SlateOS personality binary");
     println!("Contentful GmbH — Berlin, Germany");
 }
 

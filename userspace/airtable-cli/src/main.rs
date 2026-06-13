@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! airtable-cli — OurOS Airtable spreadsheet-database hybrid
+//! airtable-cli — SlateOS Airtable spreadsheet-database hybrid
 //!
 //! Single personality: `airtable`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_at(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: airtable [OPTIONS]");
-        println!("Airtable (OurOS) — Spreadsheet-database hybrid platform");
+        println!("Airtable (SlateOS) — Spreadsheet-database hybrid platform");
         println!();
         println!("Options:");
         println!("  --base NAME            Open base (collection of tables)");
@@ -24,8 +24,8 @@ fn run_at(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Airtable Desktop 2.10.0 (OurOS)"); return 0; }
-    println!("Airtable Desktop 2.10.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Airtable Desktop 2.10.0 (SlateOS)"); return 0; }
+    println!("Airtable Desktop 2.10.0 (SlateOS)");
     println!("  Vendor: Formagrid Inc. dba Airtable (San Francisco, founded 2012)");
     println!("  Founders: Howie Liu, Andrew Ofstad, Emmett Nicholas");
     println!("  Concept: low-code database that looks like a spreadsheet");

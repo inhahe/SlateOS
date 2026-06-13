@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! asdf-cli — OurOS asdf version manager
+//! asdf-cli — SlateOS asdf version manager
 //!
 //! Single personality: `asdf`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_asdf(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "help") || args.is_empty() {
         println!("Usage: asdf COMMAND [ARGS...]");
-        println!("asdf v0.14.1 (OurOS) — Extendable version manager");
+        println!("asdf v0.14.1 (SlateOS) — Extendable version manager");
         println!();
         println!("Plugin commands:");
         println!("  plugin add NAME [URL]   Add a plugin");
@@ -43,9 +43,9 @@ fn run_asdf(args: &[String], _prog: &str) -> i32 {
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match cmd {
-        "version" => println!("v0.14.1-OurOS"),
+        "version" => println!("v0.14.1-SlateOS"),
         "info" => {
-            println!("OS: OurOS x86_64");
+            println!("OS: SlateOS x86_64");
             println!("SHELL: /bin/bash");
             println!("ASDF_DIR: ~/.asdf");
             println!("ASDF_DATA_DIR: ~/.asdf");

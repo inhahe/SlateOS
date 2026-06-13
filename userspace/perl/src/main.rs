@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! perl — OurOS Perl interpreter
+//! perl — SlateOS Perl interpreter
 //!
 //! Multi-personality: `perl`, `cpan`, `perldoc`
 
@@ -27,7 +27,7 @@ fn run_perl(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-v") {
-        println!("This is perl 5, version 40, subversion 0 (v5.40.0) built for x86_64-ouros");
+        println!("This is perl 5, version 40, subversion 0 (v5.40.0) built for x86_64-slateos");
         println!();
         println!("Copyright 1987-2025, Larry Wall");
         return 0;

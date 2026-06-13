@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! acpi-cli — OurOS ACPI information tools
+//! acpi-cli — SlateOS ACPI information tools
 //!
 //! Multi-personality: `acpi`, `acpid`, `acpi_listen`
 
@@ -19,7 +19,7 @@ fn run_acpi(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: acpi [OPTIONS]");
         println!();
-        println!("acpi — show ACPI information (OurOS).");
+        println!("acpi — show ACPI information (SlateOS).");
         println!();
         println!("Options:");
         println!("  -b, --battery    Battery information");
@@ -32,7 +32,7 @@ fn run_acpi(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("acpi 1.7 (OurOS)");
+        println!("acpi 1.7 (SlateOS)");
         return 0;
     }
 
@@ -75,7 +75,7 @@ fn run_acpi(args: &[String]) -> i32 {
 }
 
 fn run_acpid(_args: &[String]) -> i32 {
-    println!("acpid: starting daemon (OurOS)");
+    println!("acpid: starting daemon (SlateOS)");
     println!("acpid: listening on /var/run/acpid.socket");
     println!("acpid: 4 rules loaded");
     println!("acpid: waiting for events");

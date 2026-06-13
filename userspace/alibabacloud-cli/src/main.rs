@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! alibabacloud-cli — OurOS Alibaba Cloud (Aliyun, China's #1 cloud, AI/Qwen, Hangzhou, NYSE:BABA)
+//! alibabacloud-cli — SlateOS Alibaba Cloud (Aliyun, China's #1 cloud, AI/Qwen, Hangzhou, NYSE:BABA)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_aliyun(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: alibabacloud [OPTIONS]");
-        println!("Alibaba Cloud (OurOS) — China's largest cloud (Aliyun), Qwen AI, parent NYSE:BABA");
+        println!("Alibaba Cloud (SlateOS) — China's largest cloud (Aliyun), Qwen AI, parent NYSE:BABA");
         println!();
         println!("Options:");
         println!("  --ecs                  Elastic Compute Service (Alibaba VMs)");
@@ -22,8 +22,8 @@ fn run_aliyun(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Alibaba Cloud 2024 (OurOS) — aliyun CLI 3.x"); return 0; }
-    println!("Alibaba Cloud 2024 (OurOS) — China's #1 Cloud Provider (Aliyun)");
+    if args.iter().any(|a| a == "--version") { println!("Alibaba Cloud 2024 (SlateOS) — aliyun CLI 3.x"); return 0; }
+    println!("Alibaba Cloud 2024 (SlateOS) — China's #1 Cloud Provider (Aliyun)");
     println!("  Vendor: Alibaba Cloud (Aliyun), subsidiary of Alibaba Group (Hangzhou, China)");
     println!("          Parent: Alibaba Group Holding Ltd (NYSE:BABA, HKEX:9988)");
     println!("  Founders: Jack Ma (Ma Yun) + Joseph Tsai + 16 others, Alibaba founded 1999");

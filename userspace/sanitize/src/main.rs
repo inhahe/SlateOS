@@ -1,4 +1,4 @@
-//! OurOS Filename Sanitizer
+//! SlateOS Filename Sanitizer
 //!
 //! A utility that renames files and directories with problematic characters
 //! to safe, portable names. Handles spaces, special characters, control
@@ -348,7 +348,7 @@ fn split_name_ext(name: &str) -> (String, String) {
 // ============================================================================
 
 fn print_usage() {
-    println!("OurOS Filename Sanitizer v0.1.0");
+    println!("SlateOS Filename Sanitizer v0.1.0");
     println!();
     println!("Clean up problematic filenames (spaces, special chars, control chars).");
     println!();

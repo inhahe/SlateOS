@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kexec — OurOS kexec tools for fast kernel replacement and kdump
+//! kexec — SlateOS kexec tools for fast kernel replacement and kdump
 //!
 //! Multi-personality binary for loading new kernels and crash dump setup.
 //! Detected via argv[0]:
@@ -113,8 +113,8 @@ fn current_kexec_state() -> (Option<KexecImage>, Option<KexecImage>) {
 
     // Crash kernel (simulated as loaded)
     let crash = Some(KexecImage {
-        kernel: "/boot/vmlinuz-6.1.0-ouros".to_string(),
-        initrd: Some("/boot/initrd.img-6.1.0-ouros".to_string()),
+        kernel: "/boot/vmlinuz-6.1.0-slateos".to_string(),
+        initrd: Some("/boot/initrd.img-6.1.0-slateos".to_string()),
         cmdline: "root=/dev/sda2 ro crashkernel=256M irqpoll maxcpus=1 reset_devices".to_string(),
         _image_type: KexecType::Crash,
         loaded: true,
@@ -135,8 +135,8 @@ fn default_kdump_config() -> KdumpConfig {
 
 fn list_crash_dumps() -> Vec<(String, String, u64)> {
     vec![
-        ("/var/crash/2025-05-20-142355".to_string(), "6.1.0-ouros".to_string(), 128_000_000),
-        ("/var/crash/2025-05-15-091200".to_string(), "6.1.0-ouros".to_string(), 256_000_000),
+        ("/var/crash/2025-05-20-142355".to_string(), "6.1.0-slateos".to_string(), 128_000_000),
+        ("/var/crash/2025-05-15-091200".to_string(), "6.1.0-slateos".to_string(), 256_000_000),
     ]
 }
 
@@ -156,7 +156,7 @@ fn run_kexec(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("kexec-tools 0.1.0 (OurOS)");
+            println!("kexec-tools 0.1.0 (SlateOS)");
             0
         }
         "-l" | "--load" => kexec_load(&args),
@@ -367,7 +367,7 @@ fn run_kdump(args: Vec<String>) -> i32 {
         "list" => kdump_list(),
         "propagate" => {
             println!("kdump: propagating initramfs to all installed kernels...");
-            println!("  Updated: /boot/initrd-kdump.img-6.1.0-ouros");
+            println!("  Updated: /boot/initrd-kdump.img-6.1.0-slateos");
             println!("kdump: propagation complete");
             0
         }
@@ -477,7 +477,7 @@ fn run_makedumpfile(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("makedumpfile 0.1.0 (OurOS)");
+            println!("makedumpfile 0.1.0 (SlateOS)");
             0
         }
         "--mem-usage" => makedumpfile_mem_usage(),
@@ -608,14 +608,14 @@ fn run_vmcore_dmesg(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("vmcore-dmesg 0.1.0 (OurOS)");
+            println!("vmcore-dmesg 0.1.0 (SlateOS)");
             0
         }
         _ => {
             // Simulate extracting dmesg from vmcore
             println!("vmcore-dmesg: extracting kernel log from crash dump");
             println!();
-            println!("[    0.000000] Linux version 6.1.0-ouros (build@ouros) (gcc 13.2.0)");
+            println!("[    0.000000] Linux version 6.1.0-slateos (build@slateos) (gcc 13.2.0)");
             println!("[    0.000000] Command line: root=/dev/sda2 ro crashkernel=256M");
             println!("[    0.000000] BIOS-provided physical RAM map:");
             println!("[    0.000000]  BIOS-e820: [mem 0x0000000000000000-0x000000000009ffff] usable");

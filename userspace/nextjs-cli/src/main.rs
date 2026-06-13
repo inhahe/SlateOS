@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nextjs-cli — OurOS Next.js CLI
+//! nextjs-cli — SlateOS Next.js CLI
 //!
 //! Multi-personality: `next`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_next(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: next COMMAND [OPTIONS]");
-        println!("Next.js 14.2.4 (OurOS)");
+        println!("Next.js 14.2.4 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  dev          Start development server");
@@ -57,7 +57,7 @@ fn run_next(args: &[String]) -> i32 {
             println!("  ✓ No ESLint warnings or errors");
         }
         "info" => {
-            println!("Operating System: OurOS");
+            println!("Operating System: SlateOS");
             println!("Node.js: v20.14.0");
             println!("Next.js: 14.2.4");
             println!("React: 18.3.1");

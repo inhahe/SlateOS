@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mkcert-cli — OurOS mkcert local CA tool
+//! mkcert-cli — SlateOS mkcert local CA tool
 //!
 //! Single personality: `mkcert`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mkcert(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mkcert [OPTIONS] [HOSTNAMES...]");
-        println!("mkcert v1.4 (OurOS) — Zero-config local CA for development certs");
+        println!("mkcert v1.4 (SlateOS) — Zero-config local CA for development certs");
         println!();
         println!("Options:");
         println!("  -install           Install local CA in system trust store");
@@ -27,8 +27,8 @@ fn run_mkcert(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("mkcert v1.4.4 (OurOS)"); return 0; }
-    println!("mkcert v1.4.4 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("mkcert v1.4.4 (SlateOS)"); return 0; }
+    println!("mkcert v1.4.4 (SlateOS)");
     println!("  CA root: ~/.local/share/mkcert");
     println!("  CA installed in: system trust store");
     println!("  Created cert for: localhost, 127.0.0.1, ::1");

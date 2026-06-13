@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mapshaper-cli — OurOS Mapshaper geometry editor
+//! mapshaper-cli — SlateOS Mapshaper geometry editor
 //!
 //! Single personality: `mapshaper`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mapshaper(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mapshaper [OPTIONS] INPUT [COMMANDS]");
-        println!("Mapshaper v0.6 (OurOS) — Geometry editing and simplification");
+        println!("Mapshaper v0.6 (SlateOS) — Geometry editing and simplification");
         println!();
         println!("Commands:");
         println!("  -simplify PCT  Simplify geometries (e.g. 10%)");
@@ -27,8 +27,8 @@ fn run_mapshaper(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Mapshaper v0.6.7 (OurOS)"); return 0; }
-    println!("Mapshaper v0.6.7 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Mapshaper v0.6.7 (SlateOS)"); return 0; }
+    println!("Mapshaper v0.6.7 (SlateOS)");
     println!("  Input: countries.shp");
     println!("  Features: 250 polygons");
     println!("  Vertices: 1,234,567");

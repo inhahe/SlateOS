@@ -2,5 +2,5 @@
 name = "file"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS file type identification"
+description = "SlateOS file type identification"
 [dependencies]

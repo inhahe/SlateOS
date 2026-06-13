@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! construct-cli — OurOS Construct 3 game maker
+//! construct-cli — SlateOS Construct 3 game maker
 //!
 //! Single personality: `construct`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_construct(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: construct [COMMAND] [OPTIONS]");
-        println!("Construct 3 r400 (OurOS) — Visual game development");
+        println!("Construct 3 r400 (SlateOS) — Visual game development");
         println!();
         println!("Commands:");
         println!("  open PROJECT       Open project");
@@ -30,8 +30,8 @@ fn run_construct(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Construct 3 r400 (OurOS)"); return 0; }
-    println!("Construct 3 r400 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Construct 3 r400 (SlateOS)"); return 0; }
+    println!("Construct 3 r400 (SlateOS)");
     println!("  Editor: https://0.0.0.0:8443");
     println!("  Project format: C3P");
     println!("  Export targets: HTML5, Android, iOS, Steam, Scirra Arcade");

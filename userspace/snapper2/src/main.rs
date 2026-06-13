@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! snapper2 — OurOS filesystem snapshot management
+//! snapper2 — SlateOS filesystem snapshot management
 //!
 //! Single personality: `snapper2` (avoiding conflict with existing `snapper` crate)
 
@@ -35,7 +35,7 @@ fn run_snapper(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("snapper 0.10.7 (OurOS)");
+        println!("snapper 0.10.7 (SlateOS)");
         return 0;
     }
 

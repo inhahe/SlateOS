@@ -1,4 +1,4 @@
-//! Camera/Webcam Viewer application for OurOS.
+//! Camera/Webcam Viewer application for SlateOS.
 //!
 //! Full-featured camera application with live viewfinder, photo capture,
 //! video recording, camera settings, multiple camera support, photo gallery,

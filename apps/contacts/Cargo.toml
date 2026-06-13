@@ -2,6 +2,6 @@
 name = "contacts"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS Contacts — address book and contact manager"
+description = "SlateOS Contacts — address book and contact manager"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }

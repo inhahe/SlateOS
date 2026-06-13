@@ -2,5 +2,5 @@
 name = "taskset"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS taskset - CPU affinity tools (taskset/chrt/ionice/renice)"
+description = "SlateOS taskset - CPU affinity tools (taskset/chrt/ionice/renice)"
 [dependencies]

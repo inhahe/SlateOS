@@ -2,5 +2,5 @@
 name = "vmstat"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS virtual memory statistics utility"
+description = "SlateOS virtual memory statistics utility"
 [dependencies]

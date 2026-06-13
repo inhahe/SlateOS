@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! azion-cli — OurOS Azion (Brazilian edge platform) personality CLI.
+//! azion-cli — SlateOS Azion (Brazilian edge platform) personality CLI.
 
 use std::env;
 use std::process;
@@ -28,7 +28,7 @@ fn print_help(prog: &str) {
 }
 
 fn print_version() {
-    println!("azion-cli 0.1.0 — OurOS personality binary");
+    println!("azion-cli 0.1.0 — SlateOS personality binary");
     println!("Azion Technologies — Sao Paulo, Brazil");
 }
 

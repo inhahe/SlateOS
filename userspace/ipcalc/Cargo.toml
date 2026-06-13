@@ -2,5 +2,5 @@
 name = "ipcalc"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS IP subnet calculator"
+description = "SlateOS IP subnet calculator"
 [dependencies]

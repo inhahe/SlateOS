@@ -2,5 +2,5 @@
 name = "nft"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS nft - firewall configuration (nft/iptables/ip6tables)"
+description = "SlateOS nft - firewall configuration (nft/iptables/ip6tables)"
 [dependencies]

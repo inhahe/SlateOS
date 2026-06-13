@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! maim-cli — OurOS maim screenshot utility
+//! maim-cli — SlateOS maim screenshot utility
 //!
 //! Single personality: `maim`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_maim(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: maim [OPTIONS] [FILE]");
-        println!("maim v5.7 (OurOS) — Screenshot utility (Make Image)");
+        println!("maim v5.7 (SlateOS) — Screenshot utility (Make Image)");
         println!();
         println!("Options:");
         println!("  -s, --select      Select region (use with slop)");
@@ -27,7 +27,7 @@ fn run_maim(args: &[String], _prog: &str) -> i32 {
         println!("Pipe to clipboard: maim -s | xclip -selection clipboard -t image/png");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("maim v5.7 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("maim v5.7 (SlateOS)"); return 0; }
     let file = args.last().map(|s| s.as_str()).unwrap_or("screenshot.png");
     println!("maim: captured to '{}'", file);
     0

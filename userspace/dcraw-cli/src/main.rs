@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dcraw-cli — OurOS dcraw RAW photo decoder
+//! dcraw-cli — SlateOS dcraw RAW photo decoder
 //!
 //! Single personality: `dcraw`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_dcraw(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: dcraw [OPTIONS] FILE.raw...");
-        println!("dcraw v9.28 (OurOS) — RAW photo decoder");
+        println!("dcraw v9.28 (SlateOS) — RAW photo decoder");
         println!();
         println!("Options:");
         println!("  -i                Identify files (no decode)");

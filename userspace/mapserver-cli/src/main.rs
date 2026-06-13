@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mapserver-cli — OurOS MapServer map rendering
+//! mapserver-cli — SlateOS MapServer map rendering
 //!
 //! Multi-personality: `mapserv`, `shp2img`, `legend`, `scalebar`
 
@@ -15,7 +15,7 @@ fn run_mapserver(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "shp2img" => {
-                println!("shp2img (OurOS) — Render mapfile to image");
+                println!("shp2img (SlateOS) — Render mapfile to image");
                 println!("  -m MAPFILE     Mapfile path");
                 println!("  -o IMAGE       Output image file");
                 println!("  -s W H         Image size");
@@ -23,12 +23,12 @@ fn run_mapserver(args: &[String], prog: &str) -> i32 {
                 println!("  -l LAYERS      Layers to render");
             }
             "legend" | "scalebar" => {
-                println!("{} (OurOS) — Generate map {}", prog, prog);
+                println!("{} (SlateOS) — Generate map {}", prog, prog);
                 println!("  -m MAPFILE     Mapfile path");
                 println!("  -o IMAGE       Output image file");
             }
             _ => {
-                println!("MapServer v8.0 (OurOS) — Map rendering engine");
+                println!("MapServer v8.0 (SlateOS) — Map rendering engine");
                 println!("  Typically run as CGI or via shp2img for testing");
                 println!("  -v             Show version info");
             }
@@ -36,7 +36,7 @@ fn run_mapserver(args: &[String], prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("MapServer v8.0.1 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("MapServer v8.0.1 (SlateOS)"); return 0; }
     match prog {
         "shp2img" => {
             println!("shp2img: rendering map...");
@@ -47,7 +47,7 @@ fn run_mapserver(args: &[String], prog: &str) -> i32 {
             println!("  Render time: 0.34s");
         }
         _ => {
-            println!("MapServer v8.0.1 (OurOS)");
+            println!("MapServer v8.0.1 (SlateOS)");
             println!("  WMS/WFS/WCS service ready");
             println!("  Supported formats: PNG, JPEG, GeoTIFF, GML, KML");
             println!("  Projections: EPSG:4326, EPSG:3857, +2500 others");

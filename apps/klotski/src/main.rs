@@ -9,7 +9,7 @@
 #![allow(clippy::struct_excessive_bools)]
 #![allow(clippy::fn_params_excessive_bools)]
 
-//! OurOS Klotski — classic sliding block puzzle game.
+//! SlateOS Klotski — classic sliding block puzzle game.
 //!
 //! Features a 4x5 grid with blocks of various sizes (1x1, 1x2, 2x1, 2x2).
 //! The goal is to slide the large 2x2 block to the exit at the bottom center.

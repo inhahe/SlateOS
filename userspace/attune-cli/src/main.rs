@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! attune-cli — OurOS Attune automation
+//! attune-cli — SlateOS Attune automation
 //!
 //! Single personality: `attune`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_attune(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: attune [COMMAND] [OPTIONS]");
-        println!("Attune v1.12 (OurOS) — Server orchestration & automation");
+        println!("Attune v1.12 (SlateOS) — Server orchestration & automation");
         println!();
         println!("Commands:");
         println!("  project list|create  Manage projects");
@@ -29,8 +29,8 @@ fn run_attune(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Attune v1.12.0 (OurOS)"); return 0; }
-    println!("Attune v1.12.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Attune v1.12.0 (SlateOS)"); return 0; }
+    println!("Attune v1.12.0 (SlateOS)");
     println!("  Projects: 6");
     println!("  Blueprints: 34");
     println!("  Nodes: 18");

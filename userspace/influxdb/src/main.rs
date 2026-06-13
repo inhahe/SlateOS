@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! influxdb — OurOS time series database
+//! influxdb — SlateOS time series database
 //!
 //! Multi-personality: `influxd` (server daemon), `influx` (CLI)
 
@@ -27,7 +27,7 @@ fn run_influxd(args: Vec<String>) -> i32 {
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("run");
     if cmd == "version" || args.iter().any(|a| a == "--version") {
-        println!("InfluxDB v2.7.6 (OurOS) (git: abc1234)");
+        println!("InfluxDB v2.7.6 (SlateOS) (git: abc1234)");
         return 0;
     }
     if cmd == "inspect" {
@@ -78,12 +78,12 @@ fn run_influx_cli(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "version" => {
-            println!("Influx CLI v2.7.6 (OurOS)");
+            println!("Influx CLI v2.7.6 (SlateOS)");
             0
         }
         "setup" => {
             println!("User\tOrganization\tBucket");
-            println!("admin\touros-org\touros-bucket");
+            println!("admin\tslateos-org\tslateos-bucket");
             println!();
             println!("Setup complete!");
             0
@@ -100,9 +100,9 @@ fn run_influx_cli(args: Vec<String>) -> i32 {
             let query_str = cmd_args.first().map(|s| s.as_str()).unwrap_or("from(bucket:\"b\")");
             let _ = query_str;
             println!("result,table,_start,_stop,_time,_value,_field,_measurement,host");
-            println!(",0,2025-05-22T00:00:00Z,2025-05-22T10:00:00Z,2025-05-22T09:30:00Z,42.5,cpu_usage,system,ouros-host-1");
-            println!(",0,2025-05-22T00:00:00Z,2025-05-22T10:00:00Z,2025-05-22T09:35:00Z,38.2,cpu_usage,system,ouros-host-1");
-            println!(",0,2025-05-22T00:00:00Z,2025-05-22T10:00:00Z,2025-05-22T09:40:00Z,45.1,cpu_usage,system,ouros-host-1");
+            println!(",0,2025-05-22T00:00:00Z,2025-05-22T10:00:00Z,2025-05-22T09:30:00Z,42.5,cpu_usage,system,slateos-host-1");
+            println!(",0,2025-05-22T00:00:00Z,2025-05-22T10:00:00Z,2025-05-22T09:35:00Z,38.2,cpu_usage,system,slateos-host-1");
+            println!(",0,2025-05-22T00:00:00Z,2025-05-22T10:00:00Z,2025-05-22T09:40:00Z,45.1,cpu_usage,system,slateos-host-1");
             0
         }
         "bucket" => {
@@ -110,7 +110,7 @@ fn run_influx_cli(args: Vec<String>) -> i32 {
             match sub {
                 "list" | "ls" => {
                     println!("ID\t\t\t\tName\t\tRetention\tShard group duration\tOrganization ID");
-                    println!("abc123def456\t\touros-bucket\tinfinite\t168h0m0s\t\torg123abc456");
+                    println!("abc123def456\t\tslateos-bucket\tinfinite\t168h0m0s\t\torg123abc456");
                     println!("def456ghi789\t\t_monitoring\t168h0m0s\t24h0m0s\t\t\torg123abc456");
                     println!("ghi789jkl012\t\t_tasks\t\t72h0m0s\t\t24h0m0s\t\t\torg123abc456");
                 }
@@ -128,7 +128,7 @@ fn run_influx_cli(args: Vec<String>) -> i32 {
             match sub {
                 "list" | "ls" => {
                     println!("ID\t\t\tName");
-                    println!("org123abc456\touros-org");
+                    println!("org123abc456\tslateos-org");
                 }
                 "create" => {
                     let name = cmd_args.get(1).map(|s| s.as_str()).unwrap_or("new-org");
@@ -169,7 +169,7 @@ fn run_influx_cli(args: Vec<String>) -> i32 {
             match sub {
                 "list" | "ls" => {
                     println!("Active\tName\tURL\t\t\t\tOrg");
-                    println!("*\tdefault\thttp://localhost:8086\touros-org");
+                    println!("*\tdefault\thttp://localhost:8086\tslateos-org");
                 }
                 "create" => println!("Config created successfully"),
                 "set" => println!("Config updated"),

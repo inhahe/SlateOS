@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pelican-cli — OurOS Pelican static site generator
+//! pelican-cli — SlateOS Pelican static site generator
 //!
 //! Multi-personality: `pelican`, `pelican-quickstart`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pelican(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: pelican [OPTIONS] [PATH]");
-        println!("Pelican 4.9.1 (OurOS)");
+        println!("Pelican 4.9.1 (SlateOS)");
         println!("  -s FILE        Settings file");
         println!("  -o DIR         Output directory");
         println!("  -t THEME       Theme");
@@ -23,7 +23,7 @@ fn run_pelican(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("pelican 4.9.1 (OurOS)");
+        println!("pelican 4.9.1 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "--listen") {
@@ -44,7 +44,7 @@ fn run_pelican_quickstart(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("pelican-quickstart 4.9.1 (OurOS)");
+        println!("pelican-quickstart 4.9.1 (SlateOS)");
         return 0;
     }
     let _ = args;

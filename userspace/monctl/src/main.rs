@@ -1,4 +1,4 @@
-//! OurOS Monitor/Display Control Utility
+//! SlateOS Monitor/Display Control Utility
 //!
 //! Control display power state, brightness, and DPMS settings.
 //! Similar to `xset dpms` or Windows `nircmd monitor off`.
@@ -33,9 +33,9 @@ use std::process;
 //   * DPMS power state: /sys/class/drm/<connector>/dpms
 //   * Backlight:        /sys/class/backlight/<dev>/brightness (+ max_brightness)
 //
-// The previous version issued a "DRM ioctl" via syscall 850 — which on OurOS
+// The previous version issued a "DRM ioctl" via syscall 850 — which on SlateOS
 // is SYS_TCP_SET_NODELAY, NOT a display call. There is no DPMS or backlight
-// syscall in the OurOS ABI (the SYS_DRM_* family, 1000-1060, exposes only the
+// syscall in the SlateOS ABI (the SYS_DRM_* family, 1000-1060, exposes only the
 // compositor's GEM/framebuffer/mode-info primitives). Calling 850 to control a
 // monitor was meaningless and potentially harmful, so the raw-syscall path has
 // been removed; sysfs is the sole control mechanism. DPMS *policy* (idle-timeout
@@ -183,7 +183,7 @@ fn read_backlight_percent() -> u32 {
 fn set_backlight_percent(percent: u32) -> Result<(), String> {
     let percent = percent.min(100);
 
-    // sysfs is the only backlight-control interface on OurOS.
+    // sysfs is the only backlight-control interface on SlateOS.
     if let Ok(entries) = fs::read_dir("/sys/class/backlight") {
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str() {
@@ -350,7 +350,7 @@ fn cmd_dpms(args: &[String]) {
 
     // DPMS *policy* — whether the display server blanks the screen after an
     // idle timeout, and the standby/suspend/off thresholds — is owned by the
-    // display server (compositor), not the kernel. OurOS exposes no syscall or
+    // display server (compositor), not the kernel. SlateOS exposes no syscall or
     // sysfs node for it, so these subcommands report that clearly rather than
     // pretending to succeed. Immediate power-state changes (on/off/standby/
     // suspend) are available as the top-level commands and go through sysfs.
@@ -378,7 +378,7 @@ fn cmd_dpms(args: &[String]) {
 // ============================================================================
 
 fn print_usage() {
-    println!("OurOS Monitor Control v0.1.0");
+    println!("SlateOS Monitor Control v0.1.0");
     println!();
     println!("Control display power state, brightness, and DPMS.");
     println!();

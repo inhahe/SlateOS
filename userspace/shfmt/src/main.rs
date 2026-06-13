@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! shfmt — OurOS shell script formatter
+//! shfmt — SlateOS shell script formatter
 //!
 //! Single personality: `shfmt`
 
@@ -33,7 +33,7 @@ fn run_shfmt(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("shfmt 3.8.0 (OurOS)");
+        println!("shfmt 3.8.0 (SlateOS)");
         return 0;
     }
 

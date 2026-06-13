@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cqlsh-cli — OurOS Apache Cassandra CQL shell
+//! cqlsh-cli — SlateOS Apache Cassandra CQL shell
 //!
 //! Multi-personality: `cqlsh`, `nodetool`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_cqlsh(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: cqlsh [OPTIONS] [HOST [PORT]]");
-        println!("CQL Shell 6.1.0 (Cassandra 4.1.5, OurOS)");
+        println!("CQL Shell 6.1.0 (Cassandra 4.1.5, SlateOS)");
         println!();
         println!("Options:");
         println!("  -k KEYSPACE    Use keyspace");

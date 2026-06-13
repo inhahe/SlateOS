@@ -1,6 +1,6 @@
-//! OurOS native remote-desktop protocol.
+//! SlateOS native remote-desktop protocol.
 //!
-//! The compositor in OurOS already drives the screen from a stream of
+//! The compositor in SlateOS already drives the screen from a stream of
 //! [`guitk::render::RenderCommand`]s — high-level draw primitives (rect
 //! fills, text, lines, clips, transforms). For remote display we serialise
 //! that same command stream and ship it to a remote viewer, which decodes
@@ -24,7 +24,7 @@
 //! +--------+------+--------+----------+----------+-----+----------+
 //! ```
 //!
-//! * **magic** = `b"ORDR"` (0x4F 0x52 0x44 0x52 — "OurOS Render")
+//! * **magic** = `b"ORDR"` (0x4F 0x52 0x44 0x52 — "SlateOS Render")
 //! * **ver** = [`PROTOCOL_VERSION`]
 //! * **flags** = reserved, must be zero
 //! * **n_cmds** = number of render commands in this frame, little-endian u32
@@ -694,7 +694,7 @@ mod tests {
         t.commands.push(RenderCommand::Text {
             x: 10.0,
             y: 20.0,
-            text: "Hello, OurOS!".to_string(),
+            text: "Hello, SlateOS!".to_string(),
             color: Color::rgb(255, 255, 255),
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,

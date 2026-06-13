@@ -1,4 +1,4 @@
-//! Multi-personality iptables packet filtering and NAT utility for OurOS.
+//! Multi-personality iptables packet filtering and NAT utility for SlateOS.
 //!
 //! Personalities detected via `argv[0]` basename:
 //!   - `iptables`         -- IPv4 packet filter (default)
@@ -2237,7 +2237,7 @@ fn run() -> i32 {
 
 fn print_help(personality: &Personality) {
     let name = personality.prog_name();
-    println!("{name} v1.0.0 - OurOS packet filtering utility");
+    println!("{name} v1.0.0 - SlateOS packet filtering utility");
     println!();
     println!("Usage: {name} [-t table] command chain [options]");
     println!();

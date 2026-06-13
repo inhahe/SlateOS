@@ -2,5 +2,5 @@
 name = "fdisk"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS partition table manipulator (GPT/MBR)"
+description = "SlateOS partition table manipulator (GPT/MBR)"
 [dependencies]

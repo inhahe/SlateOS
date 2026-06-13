@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! opentelemetry — OurOS OpenTelemetry Collector
+//! opentelemetry — SlateOS OpenTelemetry Collector
 //!
 //! Multi-personality: `otelcol`, `otelcol-contrib`
 
@@ -24,9 +24,9 @@ fn run_otelcol(args: Vec<String>, contrib: bool) -> i32 {
     }
     if args.iter().any(|a| a == "--version") {
         if contrib {
-            println!("otelcol-contrib version 0.100.0 (OurOS)");
+            println!("otelcol-contrib version 0.100.0 (SlateOS)");
         } else {
-            println!("otelcol version 0.100.0 (OurOS)");
+            println!("otelcol version 0.100.0 (SlateOS)");
         }
         return 0;
     }

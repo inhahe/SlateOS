@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! astrometry-cli — OurOS Astrometry.net plate solver
+//! astrometry-cli — SlateOS Astrometry.net plate solver
 //!
 //! Multi-personality: `solve-field`, `image2xy`, `wcs-xy2rd`, `wcs-rd2xy`
 
@@ -15,17 +15,17 @@ fn run_astrometry(args: &[String], prog: &str) -> i32 {
         match prog {
             "image2xy" => {
                 println!("Usage: image2xy [OPTIONS] IMAGE");
-                println!("image2xy v0.85 (OurOS) — Source extraction from image");
+                println!("image2xy v0.85 (SlateOS) — Source extraction from image");
                 println!("  -o FILE    Output file");
                 println!("  -w         Use median-filtered background");
             }
             "wcs-xy2rd" | "wcs-rd2xy" => {
                 println!("Usage: {} WCS_FILE X Y", prog);
-                println!("{} v0.85 (OurOS) — Coordinate conversion", prog);
+                println!("{} v0.85 (SlateOS) — Coordinate conversion", prog);
             }
             _ => {
                 println!("Usage: solve-field [OPTIONS] IMAGE");
-                println!("solve-field v0.85 (OurOS) — Astrometric plate solver");
+                println!("solve-field v0.85 (SlateOS) — Astrometric plate solver");
                 println!();
                 println!("Options:");
                 println!("  --ra RA          Estimated RA (degrees)");
@@ -42,7 +42,7 @@ fn run_astrometry(args: &[String], prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("astrometry.net v0.85 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("astrometry.net v0.85 (SlateOS)"); return 0; }
     match prog {
         "image2xy" => {
             println!("image2xy: extracting sources...");

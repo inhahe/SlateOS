@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! evernote-cli — OurOS Evernote note-taking app
+//! evernote-cli — SlateOS Evernote note-taking app
 //!
 //! Single personality: `evernote`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_en(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: evernote [OPTIONS]");
-        println!("Evernote (OurOS) — Note-taking, web clipping, document scan");
+        println!("Evernote (SlateOS) — Note-taking, web clipping, document scan");
         println!();
         println!("Options:");
         println!("  --new                  Create new note");
@@ -24,8 +24,8 @@ fn run_en(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Evernote 10.107.4 (OurOS)"); return 0; }
-    println!("Evernote 10.107.4 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Evernote 10.107.4 (SlateOS)"); return 0; }
+    println!("Evernote 10.107.4 (SlateOS)");
     println!("  Owner: Bending Spoons (Italy, acquired Evernote from owner Nov 2022)");
     println!("  Founded: 2008 by Stepan Pachikov; Phil Libin CEO 2010-15");
     println!("  Original 'remember everything' note-taking pioneer");

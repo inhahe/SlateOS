@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kicad-cli — OurOS KiCad EDA suite
+//! kicad-cli — SlateOS KiCad EDA suite
 //!
 //! Multi-personality: `kicad`, `kicad-cli`, `pcbnew`, `eeschema`
 
@@ -17,7 +17,7 @@ fn run_kicad(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("KiCad 8.0.1 (OurOS)");
+        println!("KiCad 8.0.1 (SlateOS)");
         return 0;
     }
     let project = args.iter().find(|a| a.ends_with(".kicad_pro")).map(|s| s.as_str());
@@ -33,7 +33,7 @@ fn run_kicad(args: &[String]) -> i32 {
 fn run_kicad_cli(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: kicad-cli <command> [options]");
-        println!("KiCad CLI 8.0.1 (OurOS)");
+        println!("KiCad CLI 8.0.1 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  pcb export gerbers    Export Gerber files");
@@ -51,7 +51,7 @@ fn run_kicad_cli(args: &[String]) -> i32 {
         return 0;
     }
     if args.first().map(|s| s.as_str()) == Some("version") || args.iter().any(|a| a == "--version") {
-        println!("kicad-cli 8.0.1 (OurOS)");
+        println!("kicad-cli 8.0.1 (SlateOS)");
         return 0;
     }
     let cmd: String = args.iter().take(3).cloned().collect::<Vec<_>>().join(" ");
@@ -91,7 +91,7 @@ fn run_pcbnew(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("pcbnew 8.0.1 (KiCad, OurOS)");
+        println!("pcbnew 8.0.1 (KiCad, SlateOS)");
         return 0;
     }
     let file = args.iter().find(|a| a.ends_with(".kicad_pcb")).map(|s| s.as_str());
@@ -111,7 +111,7 @@ fn run_eeschema(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("eeschema 8.0.1 (KiCad, OurOS)");
+        println!("eeschema 8.0.1 (KiCad, SlateOS)");
         return 0;
     }
     let file = args.iter().find(|a| a.ends_with(".kicad_sch")).map(|s| s.as_str());

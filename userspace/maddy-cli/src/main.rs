@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! maddy-cli — OurOS Maddy mail server
+//! maddy-cli — SlateOS Maddy mail server
 //!
 //! Single personality: `maddy`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_maddy(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: maddy [COMMAND] [OPTIONS]");
-        println!("Maddy v0.7 (OurOS) — Composable all-in-one mail server");
+        println!("Maddy v0.7 (SlateOS) — Composable all-in-one mail server");
         println!();
         println!("Commands:");
         println!("  run                Start mail server");
@@ -30,8 +30,8 @@ fn run_maddy(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Maddy v0.7.1 (OurOS)"); return 0; }
-    println!("Maddy v0.7.1 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Maddy v0.7.1 (SlateOS)"); return 0; }
+    println!("Maddy v0.7.1 (SlateOS)");
     println!("  SMTP: 0.0.0.0:25, 0.0.0.0:587 (submission)");
     println!("  IMAP: 0.0.0.0:143, 0.0.0.0:993 (implicit TLS)");
     println!("  TLS: automatic (ACME / Let's Encrypt)");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bullet-cli — OurOS Bullet Physics engine tool
+//! bullet-cli — SlateOS Bullet Physics engine tool
 //!
 //! Single personality: `bullet`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_bullet(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: bullet COMMAND [OPTIONS]");
-        println!("Bullet Physics v3.25 (OurOS) — Real-time physics simulation");
+        println!("Bullet Physics v3.25 (SlateOS) — Real-time physics simulation");
         println!();
         println!("Commands:");
         println!("  bench             Run physics benchmarks");
@@ -24,7 +24,7 @@ fn run_bullet(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("Bullet Physics v3.25 (OurOS)");
+        println!("Bullet Physics v3.25 (SlateOS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("info");

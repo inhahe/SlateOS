@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! procs — OurOS modern replacement for ps written in Rust
+//! procs — SlateOS modern replacement for ps written in Rust
 //!
 //! Single personality: `procs`
 
@@ -37,7 +37,7 @@ fn run_procs(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("procs 0.14.6 (OurOS)");
+        println!("procs 0.14.6 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "-l" || a == "--list") {

@@ -1,4 +1,4 @@
-//! OurOS Pipe/File Management Tools
+//! SlateOS Pipe/File Management Tools
 //!
 //! Multi-personality binary combining four file/pipe utilities, selected via
 //! argv\[0\]:

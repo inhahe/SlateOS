@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! coqui-cli — OurOS Coqui TTS neural speech synthesis
+//! coqui-cli — SlateOS Coqui TTS neural speech synthesis
 //!
 //! Single personality: `coqui-tts`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_coqui(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: coqui-tts COMMAND [OPTIONS]");
-        println!("Coqui TTS v0.22 (OurOS) — Deep learning text-to-speech");
+        println!("Coqui TTS v0.22 (SlateOS) — Deep learning text-to-speech");
         println!();
         println!("Commands:");
         println!("  synthesize TEXT   Synthesize speech");
@@ -25,7 +25,7 @@ fn run_coqui(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("Coqui TTS v0.22 (OurOS)");
+        println!("Coqui TTS v0.22 (SlateOS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("info");

@@ -18,7 +18,7 @@
 //! lib unit-test build — pointing at the COFF object that `embed_manifest`
 //! generated, so the lib harness is opted out as well.
 //!
-//! The manifest is only relevant on Windows hosts; the OurOS target triple
+//! The manifest is only relevant on Windows hosts; the SlateOS target triple
 //! matches no Windows ABI, so this is a no-op when cross-compiling.
 
 use std::path::PathBuf;
@@ -33,7 +33,7 @@ fn main() {
         return;
     }
 
-    embed_manifest::embed_manifest(embed_manifest::new_manifest("OurOS.installer"))
+    embed_manifest::embed_manifest(embed_manifest::new_manifest("SlateOS.installer"))
         .expect("failed to embed Windows manifest");
 
     // embed_manifest() generates the COFF object at OUT_DIR/embed-manifest.o and
@@ -43,7 +43,7 @@ fn main() {
     // covers bins, so the bin and bin unit-test link the object twice; that is
     // benign (the harnesses launch without UAC, proving Windows parsed a valid
     // asInvoker manifest) and in any case only affects the host test artifacts
-    // — the shipped OurOS binary takes the early `return` above and has no
+    // — the shipped SlateOS binary takes the early `return` above and has no
     // embedded manifest at all.
     if (target.contains("windows-gnu") || target.contains("windows-gnullvm"))
         && let Some(out_dir) = std::env::var_os("OUT_DIR")

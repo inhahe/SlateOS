@@ -1,4 +1,4 @@
-//! OurOS Change Root Directory Utility
+//! SlateOS Change Root Directory Utility
 //!
 //! Changes the apparent root directory for a command invocation, providing
 //! filesystem isolation. Only the superuser (uid 0) may invoke `chroot`.
@@ -31,7 +31,7 @@ const DEFAULT_SHELL: &str = "/bin/sh";
 // DESIGN GAP -- chroot/chdir/setuid/setgid/setgroups have no kernel ABI yet
 // ============================================================================
 //
-// The OurOS kernel does **not** currently expose syscalls for changing the
+// The SlateOS kernel does **not** currently expose syscalls for changing the
 // process root directory, working directory, real/effective UID/GID, or
 // supplementary group set. There is no SYS_CHROOT, SYS_CHDIR, SYS_SETUID,
 // SYS_SETGID, or SYS_SETGROUPS in the kernel's syscall table.
@@ -115,7 +115,7 @@ fn do_setgroups(_gids: &[u32]) -> Result<(), String> {
 
 const USER_DB_PATH: &str = "/etc/users.yaml";
 
-/// A resolved user entry from the OurOS user database.
+/// A resolved user entry from the SlateOS user database.
 struct UserEntry {
     uid: u32,
     username: String,
@@ -505,7 +505,7 @@ fn validate_newroot(path: &str) -> Result<(), String> {
 // ============================================================================
 
 fn print_help() {
-    println!("OurOS chroot v{VERSION} -- Change root directory and run command");
+    println!("SlateOS chroot v{VERSION} -- Change root directory and run command");
     println!();
     println!("USAGE:");
     println!("  chroot [OPTIONS] NEWROOT [COMMAND [ARGS...]]");
@@ -537,7 +537,7 @@ fn print_help() {
 }
 
 fn print_version() {
-    println!("chroot (OurOS) {VERSION}");
+    println!("chroot (SlateOS) {VERSION}");
 }
 
 // ============================================================================

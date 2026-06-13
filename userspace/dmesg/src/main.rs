@@ -1,4 +1,4 @@
-//! OurOS Kernel Message Buffer Viewer
+//! SlateOS Kernel Message Buffer Viewer
 //!
 //! Reads and displays kernel log messages from /proc/kmsg or /var/log/kernel.
 //! Similar to Linux `dmesg` — essential for boot diagnostics and driver debugging.
@@ -317,7 +317,7 @@ fn current_uptime_us() -> u64 {
 // ============================================================================
 
 fn print_usage() {
-    println!("OurOS Kernel Message Viewer v0.1.0");
+    println!("SlateOS Kernel Message Viewer v0.1.0");
     println!();
     println!("Display kernel ring buffer messages for boot diagnostics and debugging.");
     println!();

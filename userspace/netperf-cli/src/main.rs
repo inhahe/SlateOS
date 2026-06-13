@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! netperf-cli — OurOS netperf network performance benchmark
+//! netperf-cli — SlateOS netperf network performance benchmark
 //!
 //! Multi-personality: `netperf`, `netserver`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_netperf(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: netperf [OPTIONS] -H HOST");
-        println!("netperf v2.7 (OurOS) — Network performance benchmark");
+        println!("netperf v2.7 (SlateOS) — Network performance benchmark");
         println!();
         println!("Options:");
         println!("  -H HOST           Remote host");
@@ -58,7 +58,7 @@ fn run_netperf(args: &[String], _prog: &str) -> i32 {
 fn run_netserver(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: netserver [OPTIONS]");
-        println!("netserver v2.7 (OurOS) — netperf server daemon");
+        println!("netserver v2.7 (SlateOS) — netperf server daemon");
         println!();
         println!("Options:");
         println!("  -p PORT           Listen port (default 12865)");

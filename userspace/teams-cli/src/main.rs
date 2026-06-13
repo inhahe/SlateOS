@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! teams-cli — OurOS Microsoft Teams (PWA/web client)
+//! teams-cli — SlateOS Microsoft Teams (PWA/web client)
 //!
 //! Single personality: `teams`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_teams(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: teams [OPTIONS]");
-        println!("teams v1.0 (OurOS) — Microsoft Teams web client wrapper");
+        println!("teams v1.0 (SlateOS) — Microsoft Teams web client wrapper");
         println!();
         println!("Options:");
         println!("  --minimized       Start minimized");
@@ -21,7 +21,7 @@ fn run_teams(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("teams v1.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("teams v1.0 (SlateOS)"); return 0; }
     println!("teams: launching Microsoft Teams web client");
     println!("  URL: https://teams.microsoft.com");
     println!("  Mode: PWA wrapper");

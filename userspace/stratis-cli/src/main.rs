@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! stratis-cli — OurOS Stratis storage management
+//! stratis-cli — SlateOS Stratis storage management
 //!
 //! Multi-personality: `stratis`, `stratisd`
 
@@ -15,12 +15,12 @@ fn run_stratis(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "stratisd" => {
-                println!("stratisd v3.6 (OurOS) — Stratis storage daemon");
+                println!("stratisd v3.6 (SlateOS) — Stratis storage daemon");
                 println!("  --log-level LEVEL  Log level");
                 println!("  --sim              Simulation mode");
             }
             _ => {
-                println!("stratis v3.6 (OurOS) — Local storage management");
+                println!("stratis v3.6 (SlateOS) — Local storage management");
                 println!("  pool create NAME DEVICE...  Create pool");
                 println!("  pool list                   List pools");
                 println!("  pool destroy NAME           Destroy pool");
@@ -34,17 +34,17 @@ fn run_stratis(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Stratis v3.6.7 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("Stratis v3.6.7 (SlateOS)"); return 0; }
     match prog {
         "stratisd" => {
-            println!("stratisd v3.6.7 (OurOS)");
+            println!("stratisd v3.6.7 (SlateOS)");
             println!("  D-Bus: org.storage.stratis3");
             println!("  Pools: 2");
             println!("  Filesystems: 5");
             println!("  Listening for requests...");
         }
         _ => {
-            println!("Stratis v3.6.7 (OurOS)");
+            println!("Stratis v3.6.7 (SlateOS)");
             println!("  Pool: mypool");
             println!("    Devices: /dev/sda, /dev/sdb");
             println!("    Size: 2.0 TiB");

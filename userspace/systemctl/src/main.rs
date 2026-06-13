@@ -1,4 +1,4 @@
-//! Multi-personality service management utility for OurOS.
+//! Multi-personality service management utility for SlateOS.
 //!
 //! This binary detects its personality from `argv[0]`:
 //!   - `systemctl`       — main service control (start/stop/status/enable/…)
@@ -535,7 +535,7 @@ fn expand_specifiers(input: &str, unit_name: &str) -> String {
                 Some('N') => result.push_str(&unescaped),
                 Some('p') => result.push_str(prefix),
                 Some('i') => result.push_str(instance),
-                Some('H') => result.push_str("ouros"),
+                Some('H') => result.push_str("slateos"),
                 Some('%') => result.push('%'),
                 Some(c) => {
                     result.push('%');
@@ -976,7 +976,7 @@ fn cmd_status(
         writeln!(out, "● {} - {}", u.name, u.description)?;
         writeln!(
             out,
-            "     Loaded: {} (/etc/ouros/system/{}; enabled)",
+            "     Loaded: {} (/etc/slateos/system/{}; enabled)",
             u.load.as_str(),
             u.name
         )?;
@@ -1060,7 +1060,7 @@ fn cmd_unit_action(
             "enable" => {
                 writeln!(
                     out,
-                    "Created symlink /etc/ouros/system/multi-user.target.wants/{} -> /usr/lib/ouros/system/{}.",
+                    "Created symlink /etc/slateos/system/multi-user.target.wants/{} -> /usr/lib/slateos/system/{}.",
                     name_with_suffix, name_with_suffix
                 )?;
                 if flags.now {
@@ -1070,7 +1070,7 @@ fn cmd_unit_action(
             "disable" => {
                 writeln!(
                     out,
-                    "Removed /etc/ouros/system/multi-user.target.wants/{}.",
+                    "Removed /etc/slateos/system/multi-user.target.wants/{}.",
                     name_with_suffix
                 )?;
                 if flags.now {
@@ -1079,10 +1079,10 @@ fn cmd_unit_action(
             }
             "mask" => writeln!(
                 out,
-                "Created symlink /etc/ouros/system/{} -> /dev/null.",
+                "Created symlink /etc/slateos/system/{} -> /dev/null.",
                 name_with_suffix
             )?,
-            "unmask" => writeln!(out, "Removed /etc/ouros/system/{}.", name_with_suffix)?,
+            "unmask" => writeln!(out, "Removed /etc/slateos/system/{}.", name_with_suffix)?,
             _ => writeln!(out, "Unknown action: {}", action)?,
         }
     }
@@ -1158,7 +1158,7 @@ fn cmd_cat_unit(out: &mut dyn Write, unit_name: &str) -> io::Result<i32> {
     // Produce a synthetic unit file for known units.
     let units = simulated_units();
     if units.iter().any(|u| u.name == unit_name) {
-        writeln!(out, "# /usr/lib/ouros/system/{}", unit_name)?;
+        writeln!(out, "# /usr/lib/slateos/system/{}", unit_name)?;
         writeln!(out, "[Unit]")?;
         let desc = units
             .iter()
@@ -1184,7 +1184,7 @@ fn cmd_cat_unit(out: &mut dyn Write, unit_name: &str) -> io::Result<i32> {
 fn cmd_edit_unit(out: &mut dyn Write, unit_name: &str) -> io::Result<i32> {
     writeln!(
         out,
-        "Editing /etc/ouros/system/{}.d/override.conf...",
+        "Editing /etc/slateos/system/{}.d/override.conf...",
         unit_name
     )?;
     writeln!(out, "(editor not available in this environment)")?;
@@ -1539,25 +1539,25 @@ fn run_path(out: &mut dyn Write, args: &[String]) -> io::Result<i32> {
         ("system-binaries", "/usr/bin"),
         ("system-include", "/usr/include"),
         ("system-library-private", "/usr/lib"),
-        ("system-library-arch", "/usr/lib/x86_64-ouros"),
+        ("system-library-arch", "/usr/lib/x86_64-slateos"),
         ("system-configuration", "/etc"),
         ("system-state-private", "/var/lib"),
         ("system-state-logs", "/var/log"),
         ("system-state-cache", "/var/cache"),
         ("system-state-spool", "/var/spool"),
         ("system-runtime", "/run"),
-        ("system-generator-early", "/run/ouros/system-generators.early"),
-        ("system-generator", "/usr/lib/ouros/system-generators"),
-        ("system-generator-late", "/run/ouros/system-generators.late"),
-        ("system-preset", "/usr/lib/ouros/system-preset"),
-        ("system-shutdown", "/usr/lib/ouros/system-shutdown"),
-        ("system-sleep", "/usr/lib/ouros/system-sleep"),
-        ("system-unit-path", "/usr/lib/ouros/system"),
+        ("system-generator-early", "/run/slateos/system-generators.early"),
+        ("system-generator", "/usr/lib/slateos/system-generators"),
+        ("system-generator-late", "/run/slateos/system-generators.late"),
+        ("system-preset", "/usr/lib/slateos/system-preset"),
+        ("system-shutdown", "/usr/lib/slateos/system-shutdown"),
+        ("system-sleep", "/usr/lib/slateos/system-sleep"),
+        ("system-unit-path", "/usr/lib/slateos/system"),
         ("user-binaries", "/usr/local/bin"),
         ("user-library-private", "/usr/local/lib"),
-        ("user-configuration", "/etc/ouros/user"),
+        ("user-configuration", "/etc/slateos/user"),
         ("user-runtime", "/run/user"),
-        ("user-unit-path", "/usr/lib/ouros/user"),
+        ("user-unit-path", "/usr/lib/slateos/user"),
         ("search-binaries", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
         ("search-binaries-default", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
         ("search-library-private", "/usr/local/lib:/usr/lib"),
@@ -2498,7 +2498,7 @@ mod tests {
     #[test]
     fn test_specifier_h() {
         let result = expand_specifiers("%H", "sshd.service");
-        assert_eq!(result, "ouros");
+        assert_eq!(result, "slateos");
     }
 
     #[test]

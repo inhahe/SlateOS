@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! splunk-cli — OurOS Splunk (the original log/SIEM platform)
+//! splunk-cli — SlateOS Splunk (the original log/SIEM platform)
 //!
 //! Single personality: `splunk`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_splunk(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: splunk [OPTIONS]");
-        println!("Splunk Enterprise 9.3 (OurOS) — Operational intelligence platform");
+        println!("Splunk Enterprise 9.3 (SlateOS) — Operational intelligence platform");
         println!();
         println!("Options:");
         println!("  search 'spl query'     SPL (Search Processing Language) search");
@@ -24,8 +24,8 @@ fn run_splunk(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Splunk Enterprise 9.3.2 (OurOS)"); return 0; }
-    println!("Splunk Enterprise 9.3.2 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Splunk Enterprise 9.3.2 (SlateOS)"); return 0; }
+    println!("Splunk Enterprise 9.3.2 (SlateOS)");
     println!("  Vendor: Splunk Inc. (San Francisco, founded 2003)");
     println!("          acquired by Cisco Mar 2024 for $28B (largest cybersecurity acquisition ever)");
     println!("  Founders: Michael Baum, Rob Das, Erik Swan (former systems engineers — 'spelunking' logs)");

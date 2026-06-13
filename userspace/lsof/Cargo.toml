@@ -2,5 +2,5 @@
 name = "lsof"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS list open files utility"
+description = "SlateOS list open files utility"
 [dependencies]

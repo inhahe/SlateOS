@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ksnip-cli — OurOS ksnip screenshot annotation tool
+//! ksnip-cli — SlateOS ksnip screenshot annotation tool
 //!
 //! Single personality: `ksnip`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ksnip(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ksnip [OPTIONS]");
-        println!("ksnip v1.10 (OurOS) — Screenshot and annotation tool");
+        println!("ksnip v1.10 (SlateOS) — Screenshot and annotation tool");
         println!();
         println!("Options:");
         println!("  -r, --rectarea    Rectangular area capture");
@@ -27,7 +27,7 @@ fn run_ksnip(args: &[String], _prog: &str) -> i32 {
         println!("  pixelate, text, number, sticker");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("ksnip v1.10 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("ksnip v1.10 (SlateOS)"); return 0; }
     println!("ksnip: screenshot and annotation tool started");
     println!("  Capture modes: rect, fullscreen, window, freehand");
     println!("  Upload: imgur, custom script");

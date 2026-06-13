@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zig-tools — OurOS Zig language tools (separate from zig compiler)
+//! zig-tools — SlateOS Zig language tools (separate from zig compiler)
 //!
 //! Multi-personality: `zig-fmt`, `zig-test`, `zig-fetch`
 

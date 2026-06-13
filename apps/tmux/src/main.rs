@@ -1,4 +1,4 @@
-//! `OurOS` Terminal Multiplexer (tmux)
+//! `SlateOS` Terminal Multiplexer (tmux)
 //!
 //! A graphical terminal multiplexer that allows splitting a terminal window
 //! into multiple panes, creating tabbed windows, and detaching/reattaching

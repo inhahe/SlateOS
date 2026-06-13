@@ -2,5 +2,5 @@
 name = "dnsmasq"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS dnsmasq utility"
+description = "SlateOS dnsmasq utility"
 [dependencies]

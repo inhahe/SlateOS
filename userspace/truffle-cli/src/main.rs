@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! truffle-cli — OurOS Truffle Ethereum dev suite
+//! truffle-cli — SlateOS Truffle Ethereum dev suite
 //!
 //! Single personality: `truffle`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_truffle(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: truffle COMMAND [OPTIONS]");
-        println!("Truffle v5.11.5 (OurOS)");
+        println!("Truffle v5.11.5 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  build        Build project");
@@ -39,7 +39,7 @@ fn run_truffle(args: &[String], _prog: &str) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match cmd {
         "version" => {
-            println!("Truffle v5.11.5 (OurOS)");
+            println!("Truffle v5.11.5 (SlateOS)");
             println!("Solidity - 0.8.24 (solc-js)");
             println!("Node.js v20.11.1");
         }

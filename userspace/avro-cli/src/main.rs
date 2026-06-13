@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! avro-cli — OurOS Apache Avro tools
+//! avro-cli — SlateOS Apache Avro tools
 //!
 //! Multi-personality: `avro`, `avro-tools`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_avro(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: avro COMMAND [OPTIONS]");
-        println!("Apache Avro 1.11.3 (OurOS)");
+        println!("Apache Avro 1.11.3 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  compile      Compile Avro schema to code");
@@ -29,7 +29,7 @@ fn run_avro(args: &[String]) -> i32 {
     }
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match subcmd {
-        "--version" => println!("avro 1.11.3 (OurOS)"),
+        "--version" => println!("avro 1.11.3 (SlateOS)"),
         "compile" => {
             let lang = args.windows(2)
                 .find(|w| w[0] == "-l" || w[0] == "--language")
@@ -98,7 +98,7 @@ fn run_avro(args: &[String]) -> i32 {
 fn run_avro_tools(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: avro-tools COMMAND [OPTIONS]");
-        println!("Avro Tools 1.11.3 (OurOS)");
+        println!("Avro Tools 1.11.3 (SlateOS)");
         return 0;
     }
     run_avro(args)

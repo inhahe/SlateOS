@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ldap-cli — OurOS LDAP client tools
+//! ldap-cli — SlateOS LDAP client tools
 //!
 //! Multi-personality: `ldapsearch`, `ldapadd`, `ldapmodify`, `ldapdelete`, `ldapwhoami`, `ldappasswd`
 
@@ -14,7 +14,7 @@ fn run_ldapsearch(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: ldapsearch [OPTIONS] <filter> [attrs...]");
         println!();
-        println!("ldapsearch — LDAP search tool (OurOS, OpenLDAP 2.6).");
+        println!("ldapsearch — LDAP search tool (SlateOS, OpenLDAP 2.6).");
         println!();
         println!("Options:");
         println!("  -H <URI>       LDAP URI");

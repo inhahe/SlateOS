@@ -11,7 +11,7 @@
 #![allow(clippy::needless_range_loop)]
 #![allow(unused_imports)]
 
-//! OurOS Battleship -- classic naval combat game with AI opponent.
+//! SlateOS Battleship -- classic naval combat game with AI opponent.
 //!
 //! Features two 10x10 grids (player's fleet and opponent's ocean),
 //! a ship placement phase with rotation and arrow-key positioning,

@@ -2,7 +2,7 @@
 name = "losetup"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS losetup utility"
+description = "SlateOS losetup utility"
 [dependencies]
 
 [build-dependencies]

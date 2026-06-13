@@ -1,4 +1,4 @@
-//! OurOS `m4` -- macro processor
+//! SlateOS `m4` -- macro processor
 //!
 //! A POSIX-compatible m4(1) implementation.  Reads input, identifies defined
 //! macro names, collects parenthesized arguments, substitutes `$1`..`$9`,

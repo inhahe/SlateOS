@@ -2,5 +2,5 @@
 name = "timedatectl"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS timedatectl - system configuration managers (timedatectl/hostnamectl/localectl)"
+description = "SlateOS timedatectl - system configuration managers (timedatectl/hostnamectl/localectl)"
 [dependencies]

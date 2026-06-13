@@ -1,4 +1,4 @@
-// OurOS logind — login/session manager daemon
+// SlateOS logind — login/session manager daemon
 //
 // Multi-personality binary:
 //   logind    — session/seat/user tracking daemon (systemd-logind compatible)
@@ -82,7 +82,7 @@ const MAX_SESSION_ID: u64 = 999_999;
 // NOTE: logind/loginctl currently performs no syscalls of its own. Power
 // actions (poweroff/reboot/suspend/hibernate) are *decided* here
 // (request_power_action enforces inhibitor + policy), but the actual state
-// change must be delegated to the service manager over IPC — OurOS has no
+// change must be delegated to the service manager over IPC — SlateOS has no
 // power-management syscall (see the power-management DESIGN GAP in todo.txt).
 // The previous scaffolding declared a syscall3 wrapper and SYS_SHUTDOWN=90 /
 // SYS_REBOOT=91 / SYS_CHANNEL_CLOSE=203 constants that were both unused and

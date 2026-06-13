@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gnome-calendar-cli — OurOS GNOME Calendar
+//! gnome-calendar-cli — SlateOS GNOME Calendar
 //!
 //! Single personality: `gnome-calendar`
 
@@ -13,14 +13,14 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gnome_calendar(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gnome-calendar [OPTIONS]");
-        println!("gnome-calendar v45.0 (OurOS) — GNOME desktop calendar");
+        println!("gnome-calendar v45.0 (SlateOS) — GNOME desktop calendar");
         println!();
         println!("Options:");
         println!("  --date DATE       Open on specific date");
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("gnome-calendar v45.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("gnome-calendar v45.0 (SlateOS)"); return 0; }
     println!("gnome-calendar: calendar application started");
     println!("  Calendars: 3 (Personal, Work, Holidays)");
     println!("  Today's events: 2");

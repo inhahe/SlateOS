@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cortex-cli — OurOS Cortex tools
+//! cortex-cli — SlateOS Cortex tools
 //!
 //! Multi-personality: `cortextool`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_cortextool(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: cortextool COMMAND [OPTIONS]");
-        println!("cortextool 0.17.0 (OurOS)");
+        println!("cortextool 0.17.0 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  rules        Manage alerting/recording rules");

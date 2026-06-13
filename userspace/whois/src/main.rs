@@ -1,8 +1,8 @@
-//! OurOS WHOIS Lookup Utility
+//! SlateOS WHOIS Lookup Utility
 //!
 //! Queries WHOIS servers for registration and contact information about domain
 //! names, IPv4/IPv6 addresses, and autonomous system numbers (ASNs). Built for
-//! OurOS using the kernel's TCP and DNS syscall interface.
+//! SlateOS using the kernel's TCP and DNS syscall interface.
 //!
 //! # Usage
 //!
@@ -29,7 +29,7 @@ use std::process;
 // Syscall numbers
 // ============================================================================
 
-// Native OurOS syscall numbers (kernel/src/syscall/number.rs). These were
+// Native SlateOS syscall numbers (kernel/src/syscall/number.rs). These were
 // previously off by one (802/803/804), colliding with TCP_RECV/CLOSE and an
 // unassigned slot — every send/recv/close hit the wrong syscall.
 const SYS_TCP_CONNECT: u64 = 800;

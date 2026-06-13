@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kafkactl-cli — OurOS kafkactl Apache Kafka management
+//! kafkactl-cli — SlateOS kafkactl Apache Kafka management
 //!
 //! Single personality: `kafkactl`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_kafkactl(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: kafkactl COMMAND [OPTIONS]");
-        println!("kafkactl v5.0.0 (OurOS) — Apache Kafka CLI");
+        println!("kafkactl v5.0.0 (SlateOS) — Apache Kafka CLI");
         println!();
         println!("Commands:");
         println!("  consume         Consume messages");
@@ -30,7 +30,7 @@ fn run_kafkactl(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("kafkactl v5.0.0 (OurOS)");
+        println!("kafkactl v5.0.0 (SlateOS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("get");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dapr-cli — OurOS Dapr CLI
+//! dapr-cli — SlateOS Dapr CLI
 //!
 //! Single personality: `dapr`
 
@@ -11,7 +11,7 @@ fn run_dapr(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: dapr <COMMAND> [OPTIONS]");
         println!();
-        println!("Dapr distributed application runtime CLI (OurOS).");
+        println!("Dapr distributed application runtime CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  init         Initialize Dapr");
@@ -26,7 +26,7 @@ fn run_dapr(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("CLI version: 1.13.0 (OurOS)");
+        println!("CLI version: 1.13.0 (SlateOS)");
         println!("Runtime version: 1.13.0");
         return 0;
     }

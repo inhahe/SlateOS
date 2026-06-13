@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sakura-cli — OurOS Sakura terminal emulator
+//! sakura-cli — SlateOS Sakura terminal emulator
 //!
 //! Single personality: `sakura`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sakura(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sakura [OPTIONS]");
-        println!("sakura v3.8 (OurOS) — GTK/VTE terminal emulator");
+        println!("sakura v3.8 (SlateOS) — GTK/VTE terminal emulator");
         println!();
         println!("Options:");
         println!("  -c COLUMNS        Columns");
@@ -25,7 +25,7 @@ fn run_sakura(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("sakura v3.8 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("sakura v3.8 (SlateOS)"); return 0; }
     println!("Sakura terminal starting...");
     println!("  Toolkit: GTK3/VTE");
     println!("  Tabs: 1");

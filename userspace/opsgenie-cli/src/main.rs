@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! opsgenie-cli — OurOS Opsgenie CLI
+//! opsgenie-cli — SlateOS Opsgenie CLI
 //!
 //! Single personality: `opsgenie`
 
@@ -11,7 +11,7 @@ fn run_opsgenie(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: opsgenie <COMMAND> [OPTIONS]");
         println!();
-        println!("Opsgenie alert management CLI (OurOS).");
+        println!("Opsgenie alert management CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  alert        Manage alerts");
@@ -23,7 +23,7 @@ fn run_opsgenie(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("opsgenie 0.5.0 (OurOS)");
+        println!("opsgenie 0.5.0 (SlateOS)");
         return 0;
     }
 

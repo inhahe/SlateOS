@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! azote-cli — OurOS Azote wallpaper manager GUI
+//! azote-cli — SlateOS Azote wallpaper manager GUI
 //!
 //! Single personality: `azote`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_azote(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: azote [OPTIONS]");
-        println!("azote v1.12 (OurOS) — Wallpaper manager for Wayland/X11");
+        println!("azote v1.12 (SlateOS) — Wallpaper manager for Wayland/X11");
         println!();
         println!("Options:");
         println!("  -d DIR            Wallpaper directory");
@@ -23,7 +23,7 @@ fn run_azote(args: &[String], _prog: &str) -> i32 {
         println!("Features: thumbnail preview, per-monitor wallpaper, color picker.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("azote v1.12 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("azote v1.12 (SlateOS)"); return 0; }
     let dir = args.iter().skip_while(|a| a.as_str() != "-d").nth(1)
         .map(|s| s.as_str()).unwrap_or("~/Pictures");
     println!("azote: opening wallpaper browser ({})", dir);

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fastly-cli — OurOS Fastly (edge cloud + Compute@Edge Wasm, San Francisco, NYSE:FSLY)
+//! fastly-cli — SlateOS Fastly (edge cloud + Compute@Edge Wasm, San Francisco, NYSE:FSLY)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_fastly(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: fastly [OPTIONS]");
-        println!("Fastly (OurOS) — edge cloud platform (CDN + Compute@Edge Wasm + security, NYSE:FSLY)");
+        println!("Fastly (SlateOS) — edge cloud platform (CDN + Compute@Edge Wasm + security, NYSE:FSLY)");
         println!();
         println!("Options:");
         println!("  --compute              Compute@Edge (WebAssembly serverless at edge)");
@@ -21,8 +21,8 @@ fn run_fastly(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Fastly 2024 (OurOS) — fastly CLI 10.x"); return 0; }
-    println!("Fastly 2024 (OurOS) — Edge Cloud Platform");
+    if args.iter().any(|a| a == "--version") { println!("Fastly 2024 (SlateOS) — fastly CLI 10.x"); return 0; }
+    println!("Fastly 2024 (SlateOS) — Edge Cloud Platform");
     println!("  Vendor: Fastly, Inc. (San Francisco, CA — NYSE:FSLY since 2019)");
     println!("  Founders: Artur Bergman (CEO/CTO until 2020), 2011");
     println!("          Artur Bergman: ex-Wikia CTO, Perl hacker, beloved/eccentric founder figure");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bitwig-cli — OurOS Bitwig Studio DAW
+//! bitwig-cli — SlateOS Bitwig Studio DAW
 //!
 //! Single personality: `bitwig`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_bitwig(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: bitwig [OPTIONS] [FILE.bwproject]");
-        println!("Bitwig Studio v5.2 (OurOS) — Modern music production");
+        println!("Bitwig Studio v5.2 (SlateOS) — Modern music production");
         println!();
         println!("Options:");
         println!("  FILE.bwproject    Open project file");
@@ -24,7 +24,7 @@ fn run_bitwig(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Bitwig Studio v5.2 (OurOS)");
+        println!("Bitwig Studio v5.2 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "--scan-plugins") {

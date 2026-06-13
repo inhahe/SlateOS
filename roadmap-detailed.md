@@ -157,11 +157,11 @@ Rule of thumb: **6.6 is the floor we guarantee; anything above it is
 opt-in but must be truthful and internally consistent** — no lying
 functions, and no lone features whose presence would mislead a caller
 about absent siblings. (Resolved 2026-06-10, batch 526: `uname` now
-reports `sysname = "Linux"` and `release = "6.6.0-ouros"`. These are
+reports `sysname = "Linux"` and `release = "6.6.0-slateos"`. These are
 Linux-ABI-only surfaces — only Linux binaries call `uname(2)` in our
 architecture — so reporting the Linux personality is the faithful
 answer, and the leading `6.6` satisfies glibc's startup "kernel too
-old" version gate while the `-ouros` suffix still marks our build.)
+old" version gate while the `-slateos` suffix still marks our build.)
 
 The truncation-audit work (batches 281+ in `todo.txt`) is purely inside
 `linux.rs`: masking high-half register garbage at the ABI boundary to
@@ -493,7 +493,7 @@ _Scoping mechanics: the grant carries a list of extension strings (or `*` if the
 - [ ] `admin.user` — create/delete/modify users
 - [ ] `admin.user_caps` — change other users' capabilities
 - [ ] `admin.cross_user` — install/modify across user accounts
-- [ ] `admin.memory_policy` — change a **system-wide** memory-commit policy (strict-commit vs lazy/overcommit). Gates **both** per-ABI knobs: the native default (`mm.lazy_default`) and the Linux default (`mm.linux_lazy_default`, surfaced as `/proc/sys/vm/overcommit_memory`). Fine-grained replacement for the slice of Linux's `CAP_SYS_ADMIN` that gates writing `/proc/sys/vm/overcommit_memory`; the Linux compat layer maps that CAP_SYS_ADMIN check to this capability. Needed when the "both commit strategies, configurable" feature lands (see design-decisions.md §11). Note: a user changing their *own program's* per-program overcommit override via Settings is a normal user action and does **not** require this elevated capability — only changing the global default does. We deliberately do **not** add `CAP_SYS_ADMIN` itself as a native capability (it is Linux's ambient-authority junk drawer; OuRoS maps each CAP_SYS_ADMIN-gated operation to its own fine-grained native capability).
+- [ ] `admin.memory_policy` — change a **system-wide** memory-commit policy (strict-commit vs lazy/overcommit). Gates **both** per-ABI knobs: the native default (`mm.lazy_default`) and the Linux default (`mm.linux_lazy_default`, surfaced as `/proc/sys/vm/overcommit_memory`). Fine-grained replacement for the slice of Linux's `CAP_SYS_ADMIN` that gates writing `/proc/sys/vm/overcommit_memory`; the Linux compat layer maps that CAP_SYS_ADMIN check to this capability. Needed when the "both commit strategies, configurable" feature lands (see design-decisions.md §11). Note: a user changing their *own program's* per-program overcommit override via Settings is a normal user action and does **not** require this elevated capability — only changing the global default does. We deliberately do **not** add `CAP_SYS_ADMIN` itself as a native capability (it is Linux's ambient-authority junk drawer; SlateOS maps each CAP_SYS_ADMIN-gated operation to its own fine-grained native capability).
 
 #### Capability Types — Libraries
 - [ ] `lib.load` — load dynamic libraries

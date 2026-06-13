@@ -2,6 +2,6 @@
 name = "procexplorer"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS Process Explorer — graphical system monitor and task manager"
+description = "SlateOS Process Explorer — graphical system monitor and task manager"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }

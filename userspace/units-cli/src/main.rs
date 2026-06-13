@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! units-cli — OurOS GNU Units CLI
+//! units-cli — SlateOS GNU Units CLI
 //!
 //! Single personality: `units`
 
@@ -11,7 +11,7 @@ fn run_units(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: units [OPTIONS] [FROM-UNIT TO-UNIT]");
         println!();
-        println!("GNU Units — unit conversion (OurOS).");
+        println!("GNU Units — unit conversion (SlateOS).");
         println!();
         println!("Options:");
         println!("  -f FILE            Units data file");
@@ -23,7 +23,7 @@ fn run_units(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("GNU Units version 2.22 (OurOS)");
+        println!("GNU Units version 2.22 (SlateOS)");
         return 0;
     }
 
@@ -43,7 +43,7 @@ fn run_units(args: Vec<String>) -> i32 {
             println!("    {to} = {from} / 3.2808399");
         }
     } else {
-        println!("Units version 2.22 (OurOS)");
+        println!("Units version 2.22 (SlateOS)");
         println!("3877 units, 109 prefixes, 99 nonlinear units");
         println!();
         println!("You have: ");

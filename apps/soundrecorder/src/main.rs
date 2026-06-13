@@ -1,4 +1,4 @@
-//! OurOS Sound Recorder
+//! SlateOS Sound Recorder
 //!
 //! A sound recording utility providing WAV capture with real-time waveform
 //! visualization, VU metering, markers, trim tool, playback, and a file

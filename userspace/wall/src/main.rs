@@ -1,4 +1,4 @@
-//! wall/write/mesg — terminal messaging utilities for OurOS
+//! wall/write/mesg — terminal messaging utilities for SlateOS
 //!
 //! Multi-personality binary detected via argv[0]:
 //! - `wall`: broadcast message to all logged-in users
@@ -174,7 +174,7 @@ fn run_wall(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("wall (OurOS) 0.1.0");
+                println!("wall (SlateOS) 0.1.0");
                 return 0;
             }
             "-n" | "--nobanner" => {
@@ -274,7 +274,7 @@ fn run_write(args: &[String]) -> i32 {
     }
 
     if args[0] == "--version" {
-        println!("write (OurOS) 0.1.0");
+        println!("write (SlateOS) 0.1.0");
         return 0;
     }
 
@@ -359,7 +359,7 @@ fn run_mesg(args: &[String]) -> i32 {
     }
 
     if !args.is_empty() && args[0] == "--version" {
-        println!("mesg (OurOS) 0.1.0");
+        println!("mesg (SlateOS) 0.1.0");
         return 0;
     }
 
@@ -381,7 +381,7 @@ fn run_mesg(args: &[String]) -> i32 {
     match args[0].as_str() {
         "y" | "Y" | "yes" => {
             // Enable messages: chmod g+w on terminal
-            // On OurOS, this would use a chmod syscall
+            // On SlateOS, this would use a chmod syscall
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;

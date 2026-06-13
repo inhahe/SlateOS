@@ -2,5 +2,5 @@
 name = "irqbalance"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS IRQ balancing daemon"
+description = "SlateOS IRQ balancing daemon"
 [dependencies]

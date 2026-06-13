@@ -1,11 +1,11 @@
-//! OurOS Disk Utility
+//! SlateOS Disk Utility
 //!
 //! Comprehensive disk management tool for listing devices, displaying detailed
 //! information, formatting partitions, verifying/repairing filesystems,
 //! benchmarking I/O performance, querying S.M.A.R.T. status, and issuing TRIM.
 //!
 //! Reads from `/sys/block/`, `/proc/partitions`, and `/proc/mounts`.
-//! Write operations (format, repair, trim) use OurOS syscalls in the FS range
+//! Write operations (format, repair, trim) use SlateOS syscalls in the FS range
 //! (600-799).
 //!
 //! # Usage
@@ -1325,7 +1325,7 @@ fn cmd_smart(device_name: &str) {
     println!();
 
     // Read SMART attributes from /sys/block/<dev>/device/ subdirectories.
-    // OurOS exposes these in a simplified sysfs interface.
+    // SlateOS exposes these in a simplified sysfs interface.
     let smart_base = format!("/sys/block/{}/device", dev.name);
 
     let smart_attrs: &[(&str, &str)] = &[
@@ -1552,7 +1552,7 @@ fn detect_partition_table_type(disk_name: &str) -> &'static str {
 // ============================================================================
 
 fn print_usage() {
-    println!("OurOS Disk Utility v0.1.0");
+    println!("SlateOS Disk Utility v0.1.0");
     println!();
     println!("Disk management, diagnostics, and benchmarking.");
     println!();

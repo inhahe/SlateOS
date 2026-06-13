@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! monday-cli — OurOS monday.com CLI
+//! monday-cli — SlateOS monday.com CLI
 //!
 //! Single personality: `monday`
 
@@ -11,7 +11,7 @@ fn run_monday(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: monday <COMMAND> [OPTIONS]");
         println!();
-        println!("monday.com work management CLI (OurOS).");
+        println!("monday.com work management CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  boards       Manage boards");

@@ -1,4 +1,4 @@
-//! OurOS PolicyKit Authorization Framework
+//! SlateOS PolicyKit Authorization Framework
 //!
 //! A multi-personality binary providing:
 //! - **polkitd** -- PolicyKit authorization daemon that manages policy rules,
@@ -86,7 +86,7 @@ impl core::fmt::Display for AuthResult {
 /// A registered PolicyKit action, parsed from a `.policy` XML file.
 #[derive(Debug, Clone)]
 struct Action {
-    /// Unique action identifier, e.g. `org.ouros.pkexec.run-program`.
+    /// Unique action identifier, e.g. `org.slateos.pkexec.run-program`.
     id: String,
     /// Short human-readable description.
     description: String,
@@ -134,8 +134,8 @@ impl Action {
 /// Rules are matched in order. The first matching rule wins.
 #[derive(Debug, Clone)]
 struct Rule {
-    /// Action ID pattern. Supports trailing wildcards: `org.ouros.*` matches
-    /// any action starting with `org.ouros.`.
+    /// Action ID pattern. Supports trailing wildcards: `org.slateos.*` matches
+    /// any action starting with `org.slateos.`.
     action_pattern: String,
     /// If set, the rule only applies to this user.
     user: Option<String>,
@@ -157,8 +157,8 @@ impl Rule {
 /// Test whether an action pattern matches a given action ID.
 ///
 /// Supports:
-/// - Exact match: `org.ouros.foo` matches `org.ouros.foo`
-/// - Trailing wildcard: `org.ouros.*` matches `org.ouros.foo` and `org.ouros.bar.baz`
+/// - Exact match: `org.slateos.foo` matches `org.slateos.foo`
+/// - Trailing wildcard: `org.slateos.*` matches `org.slateos.foo` and `org.slateos.bar.baz`
 /// - Universal wildcard: `*` matches everything
 fn action_pattern_matches(pattern: &str, action_id: &str) -> bool {
     if pattern == "*" {
@@ -408,9 +408,9 @@ const POLICY_DIR: &str = "/usr/share/polkit-1/actions";
 /// ```xml
 /// <?xml version="1.0" encoding="UTF-8"?>
 /// <policyconfig>
-///   <vendor>OurOS</vendor>
-///   <vendor_url>https://ouros.example.com</vendor_url>
-///   <action id="org.ouros.example">
+///   <vendor>SlateOS</vendor>
+///   <vendor_url>https://slateos.example.com</vendor_url>
+///   <action id="org.slateos.example">
 ///     <description>Do something</description>
 ///     <message>Authentication is required to do something</message>
 ///     <icon_name>dialog-password</icon_name>
@@ -419,7 +419,7 @@ const POLICY_DIR: &str = "/usr/share/polkit-1/actions";
 ///       <allow_inactive>no</allow_inactive>
 ///       <allow_active>auth_admin</allow_active>
 ///     </defaults>
-///     <annotate key="org.ouros.policykit.exec.path">/usr/bin/something</annotate>
+///     <annotate key="org.slateos.policykit.exec.path">/usr/bin/something</annotate>
 ///   </action>
 /// </policyconfig>
 /// ```
@@ -570,12 +570,12 @@ const RULES_DIRS: &[&str] = &[
 ///
 /// Format (one rule per YAML document-like block):
 /// ```yaml
-/// - action: org.ouros.pkexec.*
+/// - action: org.slateos.pkexec.*
 ///   user: alice
 ///   result: yes
 ///   priority: 10
 ///
-/// - action: org.ouros.mount.*
+/// - action: org.slateos.mount.*
 ///   group: storage
 ///   result: auth_self
 ///   priority: 50
@@ -842,7 +842,7 @@ fn run_polkitd(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" | "-V" => {
-                println!("polkitd 0.1.0 (OurOS)");
+                println!("polkitd 0.1.0 (SlateOS)");
                 return 0;
             }
             _ => {
@@ -857,7 +857,7 @@ fn run_polkitd(args: &[String]) -> i32 {
         i += 1;
     }
 
-    // In a daemon, we would fork into the background. On OurOS the service
+    // In a daemon, we would fork into the background. On SlateOS the service
     // manager starts us, so we always run in the foreground.
     let _ = foreground;
     let _ = replace;
@@ -966,7 +966,7 @@ fn run_polkitd(args: &[String]) -> i32 {
 fn print_polkitd_usage() {
     println!("Usage: polkitd [OPTIONS]");
     println!();
-    println!("OurOS PolicyKit authorization daemon.");
+    println!("SlateOS PolicyKit authorization daemon.");
     println!();
     println!("Options:");
     println!("  --no-debug     Suppress debug output on stderr");
@@ -1007,7 +1007,7 @@ fn run_pkexec(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" | "-V" => {
-                println!("pkexec 0.1.0 (OurOS)");
+                println!("pkexec 0.1.0 (SlateOS)");
                 return 0;
             }
             "--user" => {
@@ -1109,17 +1109,17 @@ fn run_pkexec(args: &[String]) -> i32 {
 
 /// Determine the PolicyKit action ID for a pkexec invocation.
 ///
-/// Looks for a matching annotation `org.ouros.policykit.exec.path` in the
-/// loaded actions. Falls back to `org.ouros.policykit.exec`.
+/// Looks for a matching annotation `org.slateos.policykit.exec.path` in the
+/// loaded actions. Falls back to `org.slateos.policykit.exec`.
 fn determine_pkexec_action(command_path: &str) -> String {
     let store = PolicyStore::load();
     for action in &store.actions {
-        if let Some(path) = action.annotations.get("org.ouros.policykit.exec.path")
+        if let Some(path) = action.annotations.get("org.slateos.policykit.exec.path")
             && path == command_path {
                 return action.id.clone();
             }
     }
-    "org.ouros.policykit.exec".to_string()
+    "org.slateos.policykit.exec".to_string()
 }
 
 /// Execute a command as the target user with a sanitized environment.
@@ -1132,7 +1132,7 @@ fn exec_command(command_args: &[String], target_user: &str, users: &[UserInfo]) 
         .filter_map(|key| env::var(key).ok().map(|val| (key.to_string(), val)))
         .collect();
 
-    // On OurOS we would use exec() to replace the process. Since we cannot
+    // On SlateOS we would use exec() to replace the process. Since we cannot
     // exec in this stub environment, we simulate with std::process::Command.
     let program = &command_args[0];
     let program_args = if command_args.len() > 1 {
@@ -1214,7 +1214,7 @@ fn run_pkaction(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" | "-V" => {
-                println!("pkaction 0.1.0 (OurOS)");
+                println!("pkaction 0.1.0 (SlateOS)");
                 return 0;
             }
             "--action-id" => {
@@ -1334,7 +1334,7 @@ fn run_pkcheck(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" | "-V" => {
-                println!("pkcheck 0.1.0 (OurOS)");
+                println!("pkcheck 0.1.0 (SlateOS)");
                 return 0;
             }
             "--action-id" => {
@@ -1647,12 +1647,12 @@ mod tests {
 
     #[test]
     fn test_pattern_exact_match() {
-        assert!(action_pattern_matches("org.ouros.foo", "org.ouros.foo"));
+        assert!(action_pattern_matches("org.slateos.foo", "org.slateos.foo"));
     }
 
     #[test]
     fn test_pattern_exact_no_match() {
-        assert!(!action_pattern_matches("org.ouros.foo", "org.ouros.bar"));
+        assert!(!action_pattern_matches("org.slateos.foo", "org.slateos.bar"));
     }
 
     #[test]
@@ -1662,28 +1662,28 @@ mod tests {
 
     #[test]
     fn test_pattern_wildcard_dot_star() {
-        assert!(action_pattern_matches("org.ouros.*", "org.ouros.foo"));
+        assert!(action_pattern_matches("org.slateos.*", "org.slateos.foo"));
     }
 
     #[test]
     fn test_pattern_wildcard_dot_star_nested() {
-        assert!(action_pattern_matches("org.ouros.*", "org.ouros.foo.bar"));
+        assert!(action_pattern_matches("org.slateos.*", "org.slateos.foo.bar"));
     }
 
     #[test]
     fn test_pattern_wildcard_dot_star_exact_prefix() {
-        // `org.ouros.*` should match `org.ouros` itself (the prefix without a dot).
-        assert!(action_pattern_matches("org.ouros.*", "org.ouros"));
+        // `org.slateos.*` should match `org.slateos` itself (the prefix without a dot).
+        assert!(action_pattern_matches("org.slateos.*", "org.slateos"));
     }
 
     #[test]
     fn test_pattern_wildcard_dot_star_no_match() {
-        assert!(!action_pattern_matches("org.ouros.*", "com.other.foo"));
+        assert!(!action_pattern_matches("org.slateos.*", "com.other.foo"));
     }
 
     #[test]
     fn test_pattern_trailing_star() {
-        assert!(action_pattern_matches("org.our*", "org.ouros.foo"));
+        assert!(action_pattern_matches("org.our*", "org.slateos.foo"));
     }
 
     #[test]
@@ -1693,12 +1693,12 @@ mod tests {
 
     #[test]
     fn test_pattern_empty_pattern() {
-        assert!(!action_pattern_matches("", "org.ouros.foo"));
+        assert!(!action_pattern_matches("", "org.slateos.foo"));
     }
 
     #[test]
     fn test_pattern_empty_action() {
-        assert!(!action_pattern_matches("org.ouros.foo", ""));
+        assert!(!action_pattern_matches("org.slateos.foo", ""));
     }
 
     #[test]
@@ -1711,8 +1711,8 @@ mod tests {
     #[test]
     fn test_extract_xml_text_simple() {
         assert_eq!(
-            extract_xml_text("<vendor>OurOS</vendor>", "vendor"),
-            Some("OurOS".to_string())
+            extract_xml_text("<vendor>SlateOS</vendor>", "vendor"),
+            Some("SlateOS".to_string())
         );
     }
 
@@ -1732,8 +1732,8 @@ mod tests {
     #[test]
     fn test_extract_action_id() {
         assert_eq!(
-            extract_action_id("<action id=\"org.ouros.test\">"),
-            Some("org.ouros.test".to_string())
+            extract_action_id("<action id=\"org.slateos.test\">"),
+            Some("org.slateos.test".to_string())
         );
     }
 
@@ -1745,8 +1745,8 @@ mod tests {
     #[test]
     fn test_extract_annotate_simple() {
         assert_eq!(
-            extract_annotate("<annotate key=\"org.ouros.exec.path\">/usr/bin/foo</annotate>"),
-            Some(("org.ouros.exec.path".to_string(), "/usr/bin/foo".to_string()))
+            extract_annotate("<annotate key=\"org.slateos.exec.path\">/usr/bin/foo</annotate>"),
+            Some(("org.slateos.exec.path".to_string(), "/usr/bin/foo".to_string()))
         );
     }
 
@@ -1759,9 +1759,9 @@ mod tests {
     fn test_parse_policy_xml_full() {
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <policyconfig>
-  <vendor>OurOS</vendor>
-  <vendor_url>https://ouros.example.com</vendor_url>
-  <action id="org.ouros.test.action1">
+  <vendor>SlateOS</vendor>
+  <vendor_url>https://slateos.example.com</vendor_url>
+  <action id="org.slateos.test.action1">
     <description>Test action one</description>
     <message>Auth required for test one</message>
     <icon_name>test-icon</icon_name>
@@ -1770,9 +1770,9 @@ mod tests {
       <allow_inactive>auth_admin</allow_inactive>
       <allow_active>yes</allow_active>
     </defaults>
-    <annotate key="org.ouros.policykit.exec.path">/usr/bin/test1</annotate>
+    <annotate key="org.slateos.policykit.exec.path">/usr/bin/test1</annotate>
   </action>
-  <action id="org.ouros.test.action2">
+  <action id="org.slateos.test.action2">
     <description>Test action two</description>
     <message>Auth required for test two</message>
     <defaults>
@@ -1786,21 +1786,21 @@ mod tests {
         let actions = parse_policy_xml(xml);
         assert_eq!(actions.len(), 2);
 
-        assert_eq!(actions[0].id, "org.ouros.test.action1");
+        assert_eq!(actions[0].id, "org.slateos.test.action1");
         assert_eq!(actions[0].description, "Test action one");
         assert_eq!(actions[0].message, "Auth required for test one");
         assert_eq!(actions[0].icon_name, "test-icon");
-        assert_eq!(actions[0].vendor, "OurOS");
-        assert_eq!(actions[0].vendor_url, "https://ouros.example.com");
+        assert_eq!(actions[0].vendor, "SlateOS");
+        assert_eq!(actions[0].vendor_url, "https://slateos.example.com");
         assert_eq!(actions[0].defaults_any, AuthResult::No);
         assert_eq!(actions[0].defaults_inactive, AuthResult::AuthAdmin);
         assert_eq!(actions[0].defaults_active, AuthResult::Yes);
         assert_eq!(
-            actions[0].annotations.get("org.ouros.policykit.exec.path"),
+            actions[0].annotations.get("org.slateos.policykit.exec.path"),
             Some(&"/usr/bin/test1".to_string())
         );
 
-        assert_eq!(actions[1].id, "org.ouros.test.action2");
+        assert_eq!(actions[1].id, "org.slateos.test.action2");
         assert_eq!(actions[1].defaults_active, AuthResult::AuthSelf);
     }
 
@@ -1814,7 +1814,7 @@ mod tests {
     #[test]
     fn test_parse_policy_xml_no_defaults() {
         let xml = r#"<policyconfig>
-  <action id="org.ouros.minimal">
+  <action id="org.slateos.minimal">
     <description>Minimal</description>
   </action>
 </policyconfig>"#;
@@ -1832,15 +1832,15 @@ mod tests {
     #[test]
     fn test_parse_rules_basic() {
         let rules_text = r#"
-# Allow alice to run anything under org.ouros.pkexec
-- action: org.ouros.pkexec.*
+# Allow alice to run anything under org.slateos.pkexec
+- action: org.slateos.pkexec.*
   user: alice
   result: yes
   priority: 10
 "#;
         let rules = parse_rules_file(rules_text);
         assert_eq!(rules.len(), 1);
-        assert_eq!(rules[0].action_pattern, "org.ouros.pkexec.*");
+        assert_eq!(rules[0].action_pattern, "org.slateos.pkexec.*");
         assert_eq!(rules[0].user, Some("alice".to_string()));
         assert_eq!(rules[0].group, None);
         assert_eq!(rules[0].result, AuthResult::Yes);
@@ -1850,7 +1850,7 @@ mod tests {
     #[test]
     fn test_parse_rules_group() {
         let rules_text = r#"
-- action: org.ouros.mount.*
+- action: org.slateos.mount.*
   group: storage
   result: auth_self
   priority: 50
@@ -1864,20 +1864,20 @@ mod tests {
     #[test]
     fn test_parse_rules_multiple() {
         let rules_text = r#"
-- action: org.ouros.a
+- action: org.slateos.a
   user: bob
   result: yes
   priority: 1
 
-- action: org.ouros.b
+- action: org.slateos.b
   user: charlie
   result: no
   priority: 2
 "#;
         let rules = parse_rules_file(rules_text);
         assert_eq!(rules.len(), 2);
-        assert_eq!(rules[0].action_pattern, "org.ouros.a");
-        assert_eq!(rules[1].action_pattern, "org.ouros.b");
+        assert_eq!(rules[0].action_pattern, "org.slateos.a");
+        assert_eq!(rules[1].action_pattern, "org.slateos.b");
     }
 
     #[test]
@@ -1895,7 +1895,7 @@ mod tests {
 
     #[test]
     fn test_parse_rules_default_priority() {
-        let rules_text = "- action: org.ouros.x\n  result: yes\n";
+        let rules_text = "- action: org.slateos.x\n  result: yes\n";
         let rules = parse_rules_file(rules_text);
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].priority, 100); // default
@@ -1903,7 +1903,7 @@ mod tests {
 
     #[test]
     fn test_parse_rules_default_result() {
-        let rules_text = "- action: org.ouros.x\n";
+        let rules_text = "- action: org.slateos.x\n";
         let rules = parse_rules_file(rules_text);
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].result, AuthResult::No); // default
@@ -1914,27 +1914,27 @@ mod tests {
     #[test]
     fn test_rule_matches_exact_action() {
         let rule = Rule {
-            action_pattern: "org.ouros.foo".to_string(),
+            action_pattern: "org.slateos.foo".to_string(),
             user: None,
             group: None,
             result: AuthResult::Yes,
             priority: 0,
         };
-        assert!(rule.matches_action("org.ouros.foo"));
-        assert!(!rule.matches_action("org.ouros.bar"));
+        assert!(rule.matches_action("org.slateos.foo"));
+        assert!(!rule.matches_action("org.slateos.bar"));
     }
 
     #[test]
     fn test_rule_matches_wildcard_action() {
         let rule = Rule {
-            action_pattern: "org.ouros.*".to_string(),
+            action_pattern: "org.slateos.*".to_string(),
             user: None,
             group: None,
             result: AuthResult::Yes,
             priority: 0,
         };
-        assert!(rule.matches_action("org.ouros.foo"));
-        assert!(rule.matches_action("org.ouros.bar.baz"));
+        assert!(rule.matches_action("org.slateos.foo"));
+        assert!(rule.matches_action("org.slateos.bar.baz"));
         assert!(!rule.matches_action("com.other"));
     }
 
@@ -1945,7 +1945,7 @@ mod tests {
         let store = PolicyStore {
             actions: vec![],
             rules: vec![Rule {
-                action_pattern: "org.ouros.test".to_string(),
+                action_pattern: "org.slateos.test".to_string(),
                 user: Some("alice".to_string()),
                 group: None,
                 result: AuthResult::Yes,
@@ -1963,7 +1963,7 @@ mod tests {
         };
 
         assert_eq!(
-            store.check_authorization("org.ouros.test", &user, true),
+            store.check_authorization("org.slateos.test", &user, true),
             AuthResult::Yes
         );
     }
@@ -1973,7 +1973,7 @@ mod tests {
         let store = PolicyStore {
             actions: vec![],
             rules: vec![Rule {
-                action_pattern: "org.ouros.test".to_string(),
+                action_pattern: "org.slateos.test".to_string(),
                 user: Some("alice".to_string()),
                 group: None,
                 result: AuthResult::Yes,
@@ -1992,7 +1992,7 @@ mod tests {
 
         // No matching rule, no matching action -> No.
         assert_eq!(
-            store.check_authorization("org.ouros.test", &user, true),
+            store.check_authorization("org.slateos.test", &user, true),
             AuthResult::No
         );
     }
@@ -2002,7 +2002,7 @@ mod tests {
         let store = PolicyStore {
             actions: vec![],
             rules: vec![Rule {
-                action_pattern: "org.ouros.mount.*".to_string(),
+                action_pattern: "org.slateos.mount.*".to_string(),
                 user: None,
                 group: Some("storage".to_string()),
                 result: AuthResult::AuthSelf,
@@ -2020,7 +2020,7 @@ mod tests {
         };
 
         assert_eq!(
-            store.check_authorization("org.ouros.mount.disk", &user, true),
+            store.check_authorization("org.slateos.mount.disk", &user, true),
             AuthResult::AuthSelf
         );
     }
@@ -2030,7 +2030,7 @@ mod tests {
         let store = PolicyStore {
             actions: vec![],
             rules: vec![Rule {
-                action_pattern: "org.ouros.mount.*".to_string(),
+                action_pattern: "org.slateos.mount.*".to_string(),
                 user: None,
                 group: Some("storage".to_string()),
                 result: AuthResult::AuthSelf,
@@ -2048,7 +2048,7 @@ mod tests {
         };
 
         assert_eq!(
-            store.check_authorization("org.ouros.mount.disk", &user, true),
+            store.check_authorization("org.slateos.mount.disk", &user, true),
             AuthResult::No
         );
     }
@@ -2057,7 +2057,7 @@ mod tests {
     fn test_check_auth_falls_back_to_action_defaults_active() {
         let store = PolicyStore {
             actions: vec![Action {
-                id: "org.ouros.test".to_string(),
+                id: "org.slateos.test".to_string(),
                 description: "Test".to_string(),
                 message: String::new(),
                 icon_name: String::new(),
@@ -2081,7 +2081,7 @@ mod tests {
         };
 
         assert_eq!(
-            store.check_authorization("org.ouros.test", &user, true),
+            store.check_authorization("org.slateos.test", &user, true),
             AuthResult::AuthAdmin
         );
     }
@@ -2090,7 +2090,7 @@ mod tests {
     fn test_check_auth_falls_back_to_action_defaults_inactive() {
         let store = PolicyStore {
             actions: vec![Action {
-                id: "org.ouros.test".to_string(),
+                id: "org.slateos.test".to_string(),
                 description: "Test".to_string(),
                 message: String::new(),
                 icon_name: String::new(),
@@ -2114,7 +2114,7 @@ mod tests {
         };
 
         assert_eq!(
-            store.check_authorization("org.ouros.test", &user, false),
+            store.check_authorization("org.slateos.test", &user, false),
             AuthResult::AuthSelf
         );
     }
@@ -2136,7 +2136,7 @@ mod tests {
         };
 
         assert_eq!(
-            store.check_authorization("org.ouros.nonexistent", &user, true),
+            store.check_authorization("org.slateos.nonexistent", &user, true),
             AuthResult::No
         );
     }
@@ -2148,14 +2148,14 @@ mod tests {
             actions: vec![],
             rules: vec![
                 Rule {
-                    action_pattern: "org.ouros.test".to_string(),
+                    action_pattern: "org.slateos.test".to_string(),
                     user: None,
                     group: None,
                     result: AuthResult::No,
                     priority: 50,
                 },
                 Rule {
-                    action_pattern: "org.ouros.test".to_string(),
+                    action_pattern: "org.slateos.test".to_string(),
                     user: None,
                     group: None,
                     result: AuthResult::Yes,
@@ -2182,7 +2182,7 @@ mod tests {
         };
 
         assert_eq!(
-            store.check_authorization("org.ouros.test", &user, true),
+            store.check_authorization("org.slateos.test", &user, true),
             AuthResult::Yes
         );
     }
@@ -2353,8 +2353,8 @@ mod tests {
 
     #[test]
     fn test_action_new_defaults() {
-        let action = Action::new("org.ouros.test");
-        assert_eq!(action.id, "org.ouros.test");
+        let action = Action::new("org.slateos.test");
+        assert_eq!(action.id, "org.slateos.test");
         assert_eq!(action.defaults_active, AuthResult::AuthAdmin);
         assert_eq!(action.defaults_inactive, AuthResult::No);
         assert_eq!(action.defaults_any, AuthResult::No);
@@ -2389,7 +2389,7 @@ mod tests {
     #[test]
     fn test_parse_policy_xml_multiple_annotations() {
         let xml = r#"<policyconfig>
-  <action id="org.ouros.multi">
+  <action id="org.slateos.multi">
     <description>Multi-annotated</description>
     <defaults>
       <allow_active>yes</allow_active>
@@ -2413,10 +2413,10 @@ mod tests {
         let xml = r#"<policyconfig>
   <vendor>MyVendor</vendor>
   <vendor_url>https://example.com</vendor_url>
-  <action id="org.ouros.a">
+  <action id="org.slateos.a">
     <description>A</description>
   </action>
-  <action id="org.ouros.b">
+  <action id="org.slateos.b">
     <description>B</description>
   </action>
 </policyconfig>"#;
@@ -2438,7 +2438,7 @@ mod tests {
         let store = PolicyStore {
             actions: vec![],
             rules: vec![Rule {
-                action_pattern: "org.ouros.test".to_string(),
+                action_pattern: "org.slateos.test".to_string(),
                 user: Some("alice".to_string()),
                 group: Some("admin".to_string()),
                 result: AuthResult::Yes,
@@ -2474,15 +2474,15 @@ mod tests {
         };
 
         assert_eq!(
-            store.check_authorization("org.ouros.test", &alice_admin, true),
+            store.check_authorization("org.slateos.test", &alice_admin, true),
             AuthResult::Yes
         );
         assert_eq!(
-            store.check_authorization("org.ouros.test", &alice_no_admin, true),
+            store.check_authorization("org.slateos.test", &alice_no_admin, true),
             AuthResult::No
         );
         assert_eq!(
-            store.check_authorization("org.ouros.test", &bob_admin, true),
+            store.check_authorization("org.slateos.test", &bob_admin, true),
             AuthResult::No
         );
     }
@@ -2493,22 +2493,22 @@ mod tests {
     fn test_find_action_found() {
         let store = PolicyStore {
             actions: vec![
-                Action::new("org.ouros.a"),
-                Action::new("org.ouros.b"),
+                Action::new("org.slateos.a"),
+                Action::new("org.slateos.b"),
             ],
             rules: vec![],
         };
-        assert!(store.find_action("org.ouros.a").is_some());
-        assert_eq!(store.find_action("org.ouros.a").unwrap().id, "org.ouros.a");
+        assert!(store.find_action("org.slateos.a").is_some());
+        assert_eq!(store.find_action("org.slateos.a").unwrap().id, "org.slateos.a");
     }
 
     #[test]
     fn test_find_action_not_found() {
         let store = PolicyStore {
-            actions: vec![Action::new("org.ouros.a")],
+            actions: vec![Action::new("org.slateos.a")],
             rules: vec![],
         };
-        assert!(store.find_action("org.ouros.missing").is_none());
+        assert!(store.find_action("org.slateos.missing").is_none());
     }
 
     // --- Edge case: unclosed action tag in XML ---
@@ -2516,12 +2516,12 @@ mod tests {
     #[test]
     fn test_parse_policy_xml_unclosed_action() {
         let xml = r#"<policyconfig>
-  <action id="org.ouros.unclosed">
+  <action id="org.slateos.unclosed">
     <description>Unclosed action</description>
 "#;
         let actions = parse_policy_xml(xml);
         // Should still capture the action (lenient parsing).
         assert_eq!(actions.len(), 1);
-        assert_eq!(actions[0].id, "org.ouros.unclosed");
+        assert_eq!(actions[0].id, "org.slateos.unclosed");
     }
 }

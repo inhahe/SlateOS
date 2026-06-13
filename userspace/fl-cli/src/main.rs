@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fl-cli — OurOS Image-Line FL Studio DAW
+//! fl-cli — SlateOS Image-Line FL Studio DAW
 //!
 //! Single personality: `fl`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_fl(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: fl [OPTIONS] [PROJECT]");
-        println!("Image-Line FL Studio 21 (OurOS) — Pattern-based DAW & step sequencer");
+        println!("Image-Line FL Studio 21 (SlateOS) — Pattern-based DAW & step sequencer");
         println!();
         println!("Options:");
         println!("  --open FILE            Open .flp project");
@@ -23,8 +23,8 @@ fn run_fl(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("FL Studio 21.2.3 Producer Edition (OurOS)"); return 0; }
-    println!("FL Studio 21.2.3 Producer Edition (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("FL Studio 21.2.3 Producer Edition (SlateOS)"); return 0; }
+    println!("FL Studio 21.2.3 Producer Edition (SlateOS)");
     println!("  Editions: Fruity, Producer, Signature Bundle, All Plugins Bundle");
     println!("  Workflow: Pattern blocks → Playlist → Mixer");
     println!("  Generators: Sytrus, Harmor, FLEX, Slicex, FPC drum sampler");

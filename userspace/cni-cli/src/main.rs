@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cni-cli — OurOS CNI (Container Network Interface) plugins
+//! cni-cli — SlateOS CNI (Container Network Interface) plugins
 //!
 //! Multi-personality: `cnitool`, `flannel`, `calico`
 
@@ -14,7 +14,7 @@ fn run_cnitool(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: cnitool COMMAND NETCONF NETNS");
         println!();
-        println!("cnitool — CNI network management (OurOS).");
+        println!("cnitool — CNI network management (SlateOS).");
         println!();
         println!("Commands:");
         println!("  add <net> <ns>     Add container to network");
@@ -23,7 +23,7 @@ fn run_cnitool(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("cnitool version 1.1.2 (OurOS)");
+        println!("cnitool version 1.1.2 (SlateOS)");
         return 0;
     }
 
@@ -65,7 +65,7 @@ fn run_flannel(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("flannel version 0.24.2 (OurOS)");
+        println!("flannel version 0.24.2 (SlateOS)");
         return 0;
     }
 
@@ -96,7 +96,7 @@ fn run_calico(args: &[String]) -> i32 {
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match subcmd {
         "version" => {
-            println!("Client Version:    v3.27.0 (OurOS)");
+            println!("Client Version:    v3.27.0 (SlateOS)");
             println!("Cluster Version:   v3.27.0");
             println!("Cluster Type:      typha,kdd,k8s,bgp,kubeadm");
         }
@@ -113,8 +113,8 @@ fn run_calico(args: &[String]) -> i32 {
         }
         "get" => {
             println!("NAME              ASN       IPV4          STATUS");
-            println!("ouros-node-1      (64512)   192.168.1.100 up");
-            println!("ouros-node-2      (64512)   192.168.1.101 up");
+            println!("slateos-node-1      (64512)   192.168.1.100 up");
+            println!("slateos-node-2      (64512)   192.168.1.101 up");
         }
         _ => println!("calico: command '{}' completed", subcmd),
     }

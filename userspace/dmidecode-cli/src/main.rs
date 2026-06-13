@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dmidecode-cli — OurOS DMI/SMBIOS table decoder
+//! dmidecode-cli — SlateOS DMI/SMBIOS table decoder
 //!
 //! Multi-personality: `dmidecode`, `biosdecode`, `vpddecode`
 
@@ -19,7 +19,7 @@ fn run_dmidecode(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: dmidecode [OPTIONS]");
         println!();
-        println!("dmidecode — DMI/SMBIOS table decoder (OurOS).");
+        println!("dmidecode — DMI/SMBIOS table decoder (SlateOS).");
         println!();
         println!("Options:");
         println!("  -t TYPE        Only display given type");
@@ -31,7 +31,7 @@ fn run_dmidecode(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("dmidecode 3.5 (OurOS)");
+        println!("dmidecode 3.5 (SlateOS)");
         return 0;
     }
 

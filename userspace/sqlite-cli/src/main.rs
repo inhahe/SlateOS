@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sqlite-cli — OurOS SQLite3 CLI
+//! sqlite-cli — SlateOS SQLite3 CLI
 //!
 //! Single personality: `sqlite3`
 
@@ -11,7 +11,7 @@ fn run_sqlite(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-help" || a == "-h") {
         println!("Usage: sqlite3 [OPTIONS] [DATABASE [SQL]]");
         println!();
-        println!("SQLite3 — SQLite database shell (OurOS).");
+        println!("SQLite3 — SQLite database shell (SlateOS).");
         println!();
         println!("Options:");
         println!("  -init FILE           Read/process FILE");
@@ -30,7 +30,7 @@ fn run_sqlite(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-version") {
-        println!("3.44.2 2024-01-15 (OurOS)");
+        println!("3.44.2 2024-01-15 (SlateOS)");
         return 0;
     }
 
@@ -68,7 +68,7 @@ fn run_sqlite(args: Vec<String>) -> i32 {
         }
         let _ = query;
     } else {
-        println!("SQLite version 3.44.2 2024-01-15 (OurOS)");
+        println!("SQLite version 3.44.2 2024-01-15 (SlateOS)");
         println!("Enter \".help\" for usage hints.");
         if db == ":memory:" {
             println!("Connected to a transient in-memory database.");

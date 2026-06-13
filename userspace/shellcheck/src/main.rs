@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! shellcheck — OurOS shell script static analysis tool
+//! shellcheck — SlateOS shell script static analysis tool
 //!
 //! Single personality: `shellcheck`
 
@@ -31,7 +31,7 @@ fn run_shellcheck(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("ShellCheck 0.10.0 (OurOS)");
+        println!("ShellCheck 0.10.0 (SlateOS)");
         return 0;
     }
 

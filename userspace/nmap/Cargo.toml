@@ -2,7 +2,7 @@
 name = "nmap"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS network port scanner"
+description = "SlateOS network port scanner"
 [dependencies]
 
 [lints]

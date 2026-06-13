@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lz4 — OurOS LZ4 compression utility
+//! lz4 — SlateOS LZ4 compression utility
 //!
 //! Multi-personality binary detected via argv[0]:
 //!
@@ -116,7 +116,7 @@ fn run_lz4(args: Vec<String>, personality: &str) -> i32 {
                 return 0;
             }
             "-V" | "--version" => {
-                println!("*** LZ4 command line interface 0.1.0 (OurOS) ***");
+                println!("*** LZ4 command line interface 0.1.0 (SlateOS) ***");
                 println!("LZ4 library version: 0.1.0");
                 return 0;
             }

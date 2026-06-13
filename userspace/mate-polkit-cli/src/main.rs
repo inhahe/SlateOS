@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mate-polkit-cli — OurOS MATE PolicyKit authentication agent
+//! mate-polkit-cli — SlateOS MATE PolicyKit authentication agent
 //!
 //! Single personality: `mate-polkit`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_agent(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mate-polkit");
-        println!("mate-polkit v1.28 (OurOS) — MATE PolicyKit agent");
+        println!("mate-polkit v1.28 (SlateOS) — MATE PolicyKit agent");
         println!();
         println!("GTK+ PolicyKit authentication agent for MATE desktop.");
         return 0;

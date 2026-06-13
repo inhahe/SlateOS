@@ -2,7 +2,7 @@
 name = "whois"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS WHOIS domain/IP lookup"
+description = "SlateOS WHOIS domain/IP lookup"
 [dependencies]
 
 [lints]

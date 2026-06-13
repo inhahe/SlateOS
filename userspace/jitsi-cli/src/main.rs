@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! jitsi-cli — OurOS Jitsi Meet video conferencing
+//! jitsi-cli — SlateOS Jitsi Meet video conferencing
 //!
 //! Multi-personality: `jitsi-meet`, `jitsi-videobridge`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_meet(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: jitsi-meet [OPTIONS] [ROOM_URL]");
-        println!("jitsi-meet v2.0 (OurOS) — Video conferencing client");
+        println!("jitsi-meet v2.0 (SlateOS) — Video conferencing client");
         println!();
         println!("Options:");
         println!("  --no-audio        Join without audio");
@@ -21,7 +21,7 @@ fn run_meet(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("jitsi-meet v2.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("jitsi-meet v2.0 (SlateOS)"); return 0; }
     println!("jitsi-meet: video conferencing client started");
     println!("  Server: meet.jit.si");
     println!("  WebRTC: enabled");
@@ -33,10 +33,10 @@ fn run_meet(args: &[String], _prog: &str) -> i32 {
 fn run_videobridge(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: jitsi-videobridge [OPTIONS]");
-        println!("jitsi-videobridge v2.3 (OurOS) — Jitsi video bridge server");
+        println!("jitsi-videobridge v2.3 (SlateOS) — Jitsi video bridge server");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("jitsi-videobridge v2.3 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("jitsi-videobridge v2.3 (SlateOS)"); return 0; }
     println!("jitsi-videobridge: SFU server started");
     println!("  Port: 10000 (UDP)");
     println!("  REST API: http://localhost:8080");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gnome-boxes-cli — OurOS GNOME Boxes VM manager
+//! gnome-boxes-cli — SlateOS GNOME Boxes VM manager
 //!
 //! Single personality: `gnome-boxes`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gnome_boxes(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gnome-boxes [OPTIONS] [URI]");
-        println!("gnome-boxes v46.0 (OurOS) — Simple VM management");
+        println!("gnome-boxes v46.0 (SlateOS) — Simple VM management");
         println!();
         println!("Options:");
         println!("  --search TEXT    Search for a box");
@@ -24,10 +24,10 @@ fn run_gnome_boxes(args: &[String], _prog: &str) -> i32 {
         println!("Supports QEMU/KVM, remote VNC/SPICE connections.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("gnome-boxes v46.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("gnome-boxes v46.0 (SlateOS)"); return 0; }
     println!("gnome-boxes: virtual machine manager");
     println!("  Boxes:");
-    println!("    OurOS Dev    Running   2 vCPUs, 4 GiB RAM");
+    println!("    SlateOS Dev    Running   2 vCPUs, 4 GiB RAM");
     println!("    Fedora 39    Shutoff   2 vCPUs, 2 GiB RAM");
     0
 }

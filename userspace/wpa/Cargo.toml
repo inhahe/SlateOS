@@ -2,5 +2,5 @@
 name = "wpa"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS wpa - WiFi authentication (wpa_supplicant/wpa_cli/wpa_passphrase)"
+description = "SlateOS wpa - WiFi authentication (wpa_supplicant/wpa_cli/wpa_passphrase)"
 [dependencies]

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ekiga-cli — OurOS Ekiga VoIP softphone
+//! ekiga-cli — SlateOS Ekiga VoIP softphone
 //!
 //! Single personality: `ekiga`
 
@@ -13,14 +13,14 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ekiga(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ekiga [OPTIONS] [SIP_URI]");
-        println!("ekiga v4.1 (OurOS) — VoIP softphone");
+        println!("ekiga v4.1 (SlateOS) — VoIP softphone");
         println!();
         println!("Options:");
         println!("  -c URI            Call URI on startup");
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("ekiga v4.1 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("ekiga v4.1 (SlateOS)"); return 0; }
     println!("ekiga: VoIP softphone started");
     println!("  SIP: registered");
     println!("  H.323: available");

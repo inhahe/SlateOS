@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gitui — OurOS blazing fast terminal UI for git
+//! gitui — SlateOS blazing fast terminal UI for git
 //!
 //! Single personality: `gitui`
 
@@ -23,20 +23,20 @@ fn run_gitui(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("gitui 0.26.3 (OurOS)");
+        println!("gitui 0.26.3 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "--bugreport") {
         println!("gitui bug report info:");
         println!("  Version: 0.26.3");
-        println!("  OS: OurOS x86_64");
+        println!("  OS: SlateOS x86_64");
         println!("  Git: 2.44.0");
         println!("  Terminal: xterm-256color");
         println!("  Color support: truecolor");
         return 0;
     }
 
-    println!("gitui 0.26.3 (OurOS) — TUI launched");
+    println!("gitui 0.26.3 (SlateOS) — TUI launched");
     println!();
     println!("┌─ Status ──────────────────────────────────────────────┐");
     println!("│  Changes (3)                                          │");

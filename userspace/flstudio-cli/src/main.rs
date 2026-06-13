@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! flstudio-cli — OurOS FL Studio (Image-Line DAW, pattern-based)
+//! flstudio-cli — SlateOS FL Studio (Image-Line DAW, pattern-based)
 //!
 //! Single personality: `flstudio`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_fl(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: flstudio [OPTIONS]");
-        println!("FL Studio 21 (OurOS) — Image-Line DAW (originally 'FruityLoops')");
+        println!("FL Studio 21 (SlateOS) — Image-Line DAW (originally 'FruityLoops')");
         println!();
         println!("Options:");
         println!("  --new                  New project");
@@ -24,8 +24,8 @@ fn run_fl(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("FL Studio 21.2.3 (OurOS)"); return 0; }
-    println!("FL Studio 21.2.3 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("FL Studio 21.2.3 (SlateOS)"); return 0; }
+    println!("FL Studio 21.2.3 (SlateOS)");
     println!("  Vendor: Image-Line BVBA (Ghent, Belgium — founded 1994)");
     println!("  Creator: Didier Dambrin (a.k.a. gol) — solo dev of original FruityLoops 1.0 (Dec 1997)");
     println!("  Rename: 'FruityLoops' → 'FL Studio' in 2003 (Hasbro Fruit Loops trademark dispute)");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xournalpp-cli — OurOS Xournal++ handwriting note app
+//! xournalpp-cli — SlateOS Xournal++ handwriting note app
 //!
 //! Single personality: `xournalpp`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_xournalpp(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: xournalpp [OPTIONS] [FILE]");
-        println!("xournalpp v1.2 (OurOS) — Handwriting & PDF annotation");
+        println!("xournalpp v1.2 (SlateOS) — Handwriting & PDF annotation");
         println!();
         println!("Options:");
         println!("  --create-img=FILE Export to image");
@@ -22,7 +22,7 @@ fn run_xournalpp(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("xournalpp v1.2 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("xournalpp v1.2 (SlateOS)"); return 0; }
     println!("xournalpp: handwriting note application started");
     println!("  Tools: pen, eraser, highlighter, text, shapes");
     println!("  Pressure sensitivity: enabled");

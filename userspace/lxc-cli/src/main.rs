@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lxc-cli — OurOS LXC/LXD container CLI
+//! lxc-cli — SlateOS LXC/LXD container CLI
 //!
 //! Multi-personality: `lxc`, `lxc-create`, `lxc-start`, `lxc-stop`, `lxc-ls`, `lxc-info`
 
@@ -19,7 +19,7 @@ fn run_lxc(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: lxc COMMAND [OPTIONS]");
         println!();
-        println!("LXD — system container and VM manager (OurOS).");
+        println!("LXD — system container and VM manager (SlateOS).");
         println!();
         println!("Commands:");
         println!("  launch IMAGE [NAME]  Create and start");
@@ -39,7 +39,7 @@ fn run_lxc(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("lxc 5.21 (OurOS)");
+        println!("lxc 5.21 (SlateOS)");
         return 0;
     }
 
@@ -129,7 +129,7 @@ fn run_lxc_legacy(args: &[String], cmd_name: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: {} [OPTIONS]", cmd_name);
         println!();
-        println!("{} — LXC legacy command (OurOS).", cmd_name);
+        println!("{} — LXC legacy command (SlateOS).", cmd_name);
         return 0;
     }
     match cmd_name {

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lacework-cli — OurOS Lacework (cloud security, San Jose, acquired by Fortinet 2024)
+//! lacework-cli — SlateOS Lacework (cloud security, San Jose, acquired by Fortinet 2024)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_lw(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lacework [OPTIONS]");
-        println!("Lacework (OurOS) — cloud security platform (acquired by Fortinet Aug 2024)");
+        println!("Lacework (SlateOS) — cloud security platform (acquired by Fortinet Aug 2024)");
         println!();
         println!("Options:");
         println!("  --polygraph            Polygraph Data Platform — behavioral baseline");
@@ -21,8 +21,8 @@ fn run_lw(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Lacework 2024 (OurOS)"); return 0; }
-    println!("Lacework 2024 (OurOS) — Cloud Security Platform");
+    if args.iter().any(|a| a == "--version") { println!("Lacework 2024 (SlateOS)"); return 0; }
+    println!("Lacework 2024 (SlateOS) — Cloud Security Platform");
     println!("  Vendor: Lacework, Inc. (San Jose) — ACQUIRED by Fortinet Aug 2024 for ~$150-250M");
     println!("  Founders: Vikram Kapoor + Sanjay Kalra, 2014");
     println!("          Vikram: ex-NextGenJV + EMC + Sun Microsystems infrastructure");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! yacas-cli — OurOS YACAS computer algebra system
+//! yacas-cli — SlateOS YACAS computer algebra system
 //!
 //! Single personality: `yacas`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_yacas(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: yacas [OPTIONS] [FILE]");
-        println!("yacas v1.9 (OurOS) — Yet Another Computer Algebra System");
+        println!("yacas v1.9 (SlateOS) — Yet Another Computer Algebra System");
         println!();
         println!("Options:");
         println!("  -e EXPR        Evaluate expression and exit");
@@ -26,13 +26,13 @@ fn run_yacas(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("YACAS v1.9 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("YACAS v1.9 (SlateOS)"); return 0; }
     if let Some(expr) = args.windows(2).find(|w| w[0] == "-e").map(|w| w[1].as_str()) {
         println!("In> {}", expr);
         println!("Out> 42");
         return 0;
     }
-    println!("YACAS v1.9 (OurOS) — Computer Algebra System");
+    println!("YACAS v1.9 (SlateOS) — Computer Algebra System");
     println!("Type ?command for help on a command.");
     println!();
     println!("In> D(x) Sin(x)*Cos(x)");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! catboost-cli — OurOS CatBoost gradient boosting
+//! catboost-cli — SlateOS CatBoost gradient boosting
 //!
 //! Single personality: `catboost`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_catboost(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: catboost MODE [OPTIONS]");
-        println!("CatBoost v1.2 (OurOS) — Gradient boosting with categorical features");
+        println!("CatBoost v1.2 (SlateOS) — Gradient boosting with categorical features");
         println!();
         println!("Modes:");
         println!("  fit            Train model");
@@ -33,8 +33,8 @@ fn run_catboost(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("CatBoost v1.2.7 (OurOS)"); return 0; }
-    println!("CatBoost v1.2.7 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("CatBoost v1.2.7 (SlateOS)"); return 0; }
+    println!("CatBoost v1.2.7 (SlateOS)");
     println!("  Mode: fit");
     println!("  Loss: Logloss");
     println!("  Data: 200,000 rows, 30 features (8 categorical)");

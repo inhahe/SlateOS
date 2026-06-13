@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! amplitude-cli — OurOS Amplitude (product analytics, the category leader)
+//! amplitude-cli — SlateOS Amplitude (product analytics, the category leader)
 //!
 //! Single personality: `amplitude`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_amplitude(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: amplitude [OPTIONS]");
-        println!("Amplitude (OurOS) — product analytics platform");
+        println!("Amplitude (SlateOS) — product analytics platform");
         println!();
         println!("Options:");
         println!("  --analytics            Amplitude Analytics (core product)");
@@ -26,8 +26,8 @@ fn run_amplitude(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Amplitude 2024 (OurOS)"); return 0; }
-    println!("Amplitude 2024 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Amplitude 2024 (SlateOS)"); return 0; }
+    println!("Amplitude 2024 (SlateOS)");
     println!("  Vendor: Amplitude, Inc. (San Francisco, CA — NASDAQ:AMPL)");
     println!("  Founders: Spenser Skates (CEO), Curtis Liu, Jeffrey Wang, 2012");
     println!("          all three MIT grads — original product was 'Sonalight' voice dialer");

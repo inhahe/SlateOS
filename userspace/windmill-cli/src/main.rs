@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! windmill-cli — OurOS Windmill developer platform
+//! windmill-cli — SlateOS Windmill developer platform
 //!
 //! Single personality: `windmill`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_windmill(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: windmill [COMMAND] [OPTIONS]");
-        println!("Windmill v1.360 (OurOS) — Developer platform for scripts & flows");
+        println!("Windmill v1.360 (SlateOS) — Developer platform for scripts & flows");
         println!();
         println!("Commands:");
         println!("  workspace list|switch  Manage workspaces");
@@ -31,8 +31,8 @@ fn run_windmill(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Windmill v1.360.0 (OurOS)"); return 0; }
-    println!("Windmill v1.360.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Windmill v1.360.0 (SlateOS)"); return 0; }
+    println!("Windmill v1.360.0 (SlateOS)");
     println!("  Workspace: production");
     println!("  Scripts: 89 (Python, TypeScript, Go, Bash)");
     println!("  Flows: 23");

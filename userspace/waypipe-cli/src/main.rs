@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! waypipe-cli — OurOS waypipe remote Wayland display
+//! waypipe-cli — SlateOS waypipe remote Wayland display
 //!
 //! Single personality: `waypipe`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_waypipe(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: waypipe [OPTIONS] COMMAND [ARGS]");
-        println!("waypipe v0.9 (OurOS) — Proxy Wayland connections over SSH");
+        println!("waypipe v0.9 (SlateOS) — Proxy Wayland connections over SSH");
         println!();
         println!("Commands:");
         println!("  server            Run as server (remote side)");
@@ -29,7 +29,7 @@ fn run_waypipe(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("waypipe v0.9 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("waypipe v0.9 (SlateOS)"); return 0; }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("ssh");
     match cmd {
         "server" => println!("waypipe server: listening for connections"),

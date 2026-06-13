@@ -2,5 +2,5 @@
 name = "udevd"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS udevd - device manager daemon (udevd/udevadm)"
+description = "SlateOS udevd - device manager daemon (udevd/udevadm)"
 [dependencies]

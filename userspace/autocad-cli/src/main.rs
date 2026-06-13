@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! autocad-cli — OurOS Autodesk AutoCAD 2D/3D CAD
+//! autocad-cli — SlateOS Autodesk AutoCAD 2D/3D CAD
 //!
 //! Single personality: `autocad`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_acad(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: autocad [OPTIONS] [FILE]");
-        println!("Autodesk AutoCAD 2025 (OurOS) — Industry-standard 2D/3D CAD");
+        println!("Autodesk AutoCAD 2025 (SlateOS) — Industry-standard 2D/3D CAD");
         println!();
         println!("Options:");
         println!("  /b SCRIPT              Run AutoCAD script (.scr)");
@@ -24,8 +24,8 @@ fn run_acad(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Autodesk AutoCAD 2025.1 (OurOS)"); return 0; }
-    println!("Autodesk AutoCAD 2025.1 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Autodesk AutoCAD 2025.1 (SlateOS)"); return 0; }
+    println!("Autodesk AutoCAD 2025.1 (SlateOS)");
     println!("  Industries: Architecture, MEP, Civil, Electrical, Mechanical, Mapping");
     println!("  Scripting: AutoLISP, Visual LISP, VBA, .NET (ObjectARX/AcCoreMgd)");
     println!("  Specialized toolsets: Architecture, Mechanical, Electrical, Plant 3D, etc.");

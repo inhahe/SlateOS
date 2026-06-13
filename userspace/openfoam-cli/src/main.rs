@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! openfoam-cli — OurOS OpenFOAM CFD toolkit
+//! openfoam-cli — SlateOS OpenFOAM CFD toolkit
 //!
 //! Multi-personality: `simpleFoam`, `icoFoam`, `blockMesh`, `paraFoam`,
 //! `checkMesh`, `decomposePar`
@@ -14,7 +14,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_openfoam(args: &[String], prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: {} [OPTIONS]", prog);
-        println!("OpenFOAM v11 (OurOS) — Open-source CFD toolbox");
+        println!("OpenFOAM v11 (SlateOS) — Open-source CFD toolbox");
         println!();
         println!("Options:");
         println!("  -case DIR       Case directory");
@@ -25,8 +25,8 @@ fn run_openfoam(args: &[String], prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("OpenFOAM v11 (OurOS)");
-        println!("Build: OurOS-x86_64");
+        println!("OpenFOAM v11 (SlateOS)");
+        println!("Build: SlateOS-x86_64");
         return 0;
     }
     match prog {

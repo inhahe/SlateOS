@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pdfimages-cli — OurOS pdfimages image extractor
+//! pdfimages-cli — SlateOS pdfimages image extractor
 //!
 //! Single personality: `pdfimages`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pdfimages(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: pdfimages [OPTIONS] PDF ROOT");
-        println!("pdfimages v24.01 (OurOS) — Extract images from PDF files");
+        println!("pdfimages v24.01 (SlateOS) — Extract images from PDF files");
         println!();
         println!("Options:");
         println!("  PDF               Input PDF file");

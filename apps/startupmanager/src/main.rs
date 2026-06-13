@@ -1,4 +1,4 @@
-//! startupmanager -- OurOS Startup Apps Manager
+//! startupmanager -- SlateOS Startup Apps Manager
 //!
 //! A graphical application for managing programs that launch automatically
 //! at system startup. Supports four startup categories (Login, Service,
@@ -615,7 +615,7 @@ impl StartupManager {
             "",
             StartupType::Login,
             StartupImpact::Low,
-            "OurOS",
+            "SlateOS",
             "System tray notification area",
             1700000000,
         );
@@ -625,7 +625,7 @@ impl StartupManager {
             "--daemon",
             StartupType::Service,
             StartupImpact::Medium,
-            "OurOS",
+            "SlateOS",
             "Manages network connections and interfaces",
             1700000100,
         );
@@ -635,7 +635,7 @@ impl StartupManager {
             "",
             StartupType::Service,
             StartupImpact::Low,
-            "OurOS",
+            "SlateOS",
             "Audio mixing and output service",
             1700000200,
         );
@@ -655,7 +655,7 @@ impl StartupManager {
             "",
             StartupType::Scheduled,
             StartupImpact::None,
-            "OurOS",
+            "SlateOS",
             "Monitors disk health via SMART",
             1700000400,
         );
@@ -685,7 +685,7 @@ impl StartupManager {
             "",
             StartupType::Service,
             StartupImpact::Low,
-            "OurOS",
+            "SlateOS",
             "Bluetooth device management service",
             1700000700,
         );
@@ -717,7 +717,7 @@ impl StartupConfig {
     /// Serialize a `StartupManager` to a line-based text format.
     pub fn serialize(manager: &StartupManager) -> String {
         let mut out = String::new();
-        out.push_str("# OurOS Startup Manager Configuration\n");
+        out.push_str("# SlateOS Startup Manager Configuration\n");
         out.push_str("VERSION|1\n");
 
         for entry in manager.entries.values() {
@@ -2918,7 +2918,7 @@ mod tests {
             "",
             StartupType::Service,
             StartupImpact::High,
-            "OurOS",
+            "SlateOS",
             "Core svc",
             2000,
         );

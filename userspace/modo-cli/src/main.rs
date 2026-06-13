@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! modo-cli — OurOS Foundry Modo 3D modeling
+//! modo-cli — SlateOS Foundry Modo 3D modeling
 //!
 //! Single personality: `modo`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_modo(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: modo [OPTIONS] [FILE]");
-        println!("Foundry Modo 17 (OurOS) — 3D modeling, sculpting & rendering");
+        println!("Foundry Modo 17 (SlateOS) — 3D modeling, sculpting & rendering");
         println!();
         println!("Options:");
         println!("  -cmd CMD              Run script command");
@@ -24,8 +24,8 @@ fn run_modo(args: &[String], _prog: &str) -> i32 {
         println!("  --version             Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Foundry Modo 17.0v5 (OurOS)"); return 0; }
-    println!("Foundry Modo 17.0v5 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Foundry Modo 17.0v5 (SlateOS)"); return 0; }
+    println!("Foundry Modo 17.0v5 (SlateOS)");
     println!("  Renderer: mPath (default), modo Renderer, V-Ray");
     println!("  Scripting: Python, Lua, command system");
     println!("  Modeling: MeshFusion, procedurals, sculpting");

@@ -1,4 +1,4 @@
-//! tac/rev — reverse line printer and character reverser for OurOS
+//! tac/rev — reverse line printer and character reverser for SlateOS
 //!
 //! Multi-personality binary:
 //! - `tac`: concatenate and print files in reverse line order
@@ -67,7 +67,7 @@ fn parse_tac_args(args: &[String]) -> TacOptions {
                 process::exit(0);
             }
             "--version" => {
-                println!("tac (OurOS coreutils) 0.1.0");
+                println!("tac (SlateOS coreutils) 0.1.0");
                 process::exit(0);
             }
             _ if arg.starts_with("--separator=") => {
@@ -469,7 +469,7 @@ fn parse_rev_args(args: &[String]) -> RevOptions {
                 process::exit(0);
             }
             "--version" => {
-                println!("rev (OurOS coreutils) 0.1.0");
+                println!("rev (SlateOS coreutils) 0.1.0");
                 process::exit(0);
             }
             _ if arg.starts_with('-') && arg.len() > 1 => {

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ea-cli — OurOS EA app (Electronic Arts, replaced Origin)
+//! ea-cli — SlateOS EA app (Electronic Arts, replaced Origin)
 //!
 //! Single personality: `ea`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ea(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ea [OPTIONS]");
-        println!("EA app 13.421 (OurOS) — Electronic Arts game launcher (replaced Origin 2022)");
+        println!("EA app 13.421 (SlateOS) — Electronic Arts game launcher (replaced Origin 2022)");
         println!();
         println!("Options:");
         println!("  --library              Game library");
@@ -24,8 +24,8 @@ fn run_ea(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("EA app 13.421.0.5859 (OurOS)"); return 0; }
-    println!("EA app 13.421.0.5859 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("EA app 13.421.0.5859 (SlateOS)"); return 0; }
+    println!("EA app 13.421.0.5859 (SlateOS)");
     println!("  Vendor: Electronic Arts Inc. (HQ Redwood City, CA — founded 1982 by Trip Hawkins)");
     println!("  Stock: EA on NASDAQ — $40B market cap (2024)");
     println!("  Replaced: Origin client (2011-2022) — EA app is full rewrite, lighter + faster");

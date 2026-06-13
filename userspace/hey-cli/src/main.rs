@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hey-cli — OurOS hey HTTP load generator
+//! hey-cli — SlateOS hey HTTP load generator
 //!
 //! Multi-personality: `hey`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_hey(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: hey [OPTIONS] URL");
-        println!("hey — HTTP load generator (OurOS)");
+        println!("hey — HTTP load generator (SlateOS)");
         println!();
         println!("Options:");
         println!("  -n NUM       Number of requests (default: 200)");

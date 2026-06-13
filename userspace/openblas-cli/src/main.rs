@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! openblas-cli — OurOS OpenBLAS info/benchmark
+//! openblas-cli — SlateOS OpenBLAS info/benchmark
 //!
 //! Single personality: `openblas-test`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_openblas(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: openblas-test COMMAND [OPTIONS]");
-        println!("OpenBLAS v0.3.27 (OurOS) — BLAS benchmark/info tool");
+        println!("OpenBLAS v0.3.27 (SlateOS) — BLAS benchmark/info tool");
         println!();
         println!("Commands:");
         println!("  bench N           Benchmark NxN matrix multiply");
@@ -22,7 +22,7 @@ fn run_openblas(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("OpenBLAS v0.3.27 (OurOS)");
+        println!("OpenBLAS v0.3.27 (SlateOS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("info");

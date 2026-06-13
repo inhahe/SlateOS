@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! squid — OurOS caching proxy server
+//! squid — SlateOS caching proxy server
 //!
 //! Multi-personality: `squid` (proxy server), `squidclient` (HTTP client)
 
@@ -21,7 +21,7 @@ fn run_squid(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-v") {
-        println!("Squid Cache: Version 6.9 (OurOS)");
+        println!("Squid Cache: Version 6.9 (SlateOS)");
         println!("Service Name: squid");
         println!("configure options: --prefix=/usr --sysconfdir=/etc/squid --with-openssl");
         return 0;
@@ -51,7 +51,7 @@ fn run_squid(args: Vec<String>) -> i32 {
     }
 
     // Start server
-    println!("2025/05/22 10:00:00| Starting Squid Cache version 6.9 for OurOS...");
+    println!("2025/05/22 10:00:00| Starting Squid Cache version 6.9 for SlateOS...");
     println!("2025/05/22 10:00:00| Service Name: squid");
     println!("2025/05/22 10:00:00| Process ID 12345");
     println!("2025/05/22 10:00:00| Process Roles: master worker");

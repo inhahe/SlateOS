@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! argyll-cli — OurOS ArgyllCMS color management
+//! argyll-cli — SlateOS ArgyllCMS color management
 //!
 //! Multi-personality: `dispwin`, `colprof`, `spotread`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_dispwin(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: dispwin [OPTIONS] [PROFILE.icc]");
-        println!("dispwin v3.0 (OurOS) — Load display calibration");
+        println!("dispwin v3.0 (SlateOS) — Load display calibration");
         println!();
         println!("Options:");
         println!("  PROFILE.icc       ICC profile to load");
@@ -33,7 +33,7 @@ fn run_dispwin(args: &[String], _prog: &str) -> i32 {
 fn run_colprof(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: colprof [OPTIONS] BASENAME");
-        println!("colprof v3.0 (OurOS) — Create ICC profile from measurements");
+        println!("colprof v3.0 (SlateOS) — Create ICC profile from measurements");
         return 0;
     }
     println!("Creating ICC profile...");
@@ -46,7 +46,7 @@ fn run_colprof(args: &[String], _prog: &str) -> i32 {
 fn run_spotread(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: spotread [OPTIONS]");
-        println!("spotread v3.0 (OurOS) — Read color measurements");
+        println!("spotread v3.0 (SlateOS) — Read color measurements");
         return 0;
     }
     println!("Reading spot color...");

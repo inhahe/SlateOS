@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bzip2 — OurOS bzip2 compression utility
+//! bzip2 — SlateOS bzip2 compression utility
 //!
 //! Multi-personality binary detected via argv[0]:
 //!
@@ -95,7 +95,7 @@ fn run_bzip2(args: Vec<String>, personality: &str) -> i32 {
                 return 0;
             }
             "--version" | "-V" => {
-                println!("bzip2 0.1.0 (OurOS), block sorting file compressor.");
+                println!("bzip2 0.1.0 (SlateOS), block sorting file compressor.");
                 return 0;
             }
             "-z" | "--compress" => opts.action = Action::Compress,
@@ -200,7 +200,7 @@ fn run_bzip2recover(args: &[String]) -> i32 {
             return 0;
         }
         Some(f) if f == "--version" || f == "-V" => {
-            println!("bzip2recover 0.1.0 (OurOS)");
+            println!("bzip2recover 0.1.0 (SlateOS)");
             return 0;
         }
         Some(f) => f.as_str(),

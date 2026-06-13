@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! plivo-cli — OurOS personality CLI for Plivo, the value-CPaaS challenger.
+//! plivo-cli — SlateOS personality CLI for Plivo, the value-CPaaS challenger.
 
 use std::env;
 use std::process;

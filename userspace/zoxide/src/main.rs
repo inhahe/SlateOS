@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zoxide — OurOS smarter cd command that learns your habits
+//! zoxide — SlateOS smarter cd command that learns your habits
 //!
 //! Multi-personality: `zoxide` (manager), `z` (jump), `zi` (interactive)
 
@@ -132,7 +132,7 @@ fn run_zoxide(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("zoxide 0.9.4 (OurOS)");
+            println!("zoxide 0.9.4 (SlateOS)");
             0
         }
         _ => {

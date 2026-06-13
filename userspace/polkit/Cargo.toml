@@ -2,5 +2,5 @@
 name = "polkit"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS polkit - authorization framework (polkitd/pkexec/pkaction/pkcheck)"
+description = "SlateOS polkit - authorization framework (polkitd/pkexec/pkaction/pkcheck)"
 [dependencies]

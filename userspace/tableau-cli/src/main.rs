@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tableau-cli — OurOS Salesforce Tableau data visualization
+//! tableau-cli — SlateOS Salesforce Tableau data visualization
 //!
 //! Single personality: `tableau`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_tab(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: tableau [OPTIONS] [FILE]");
-        println!("Salesforce Tableau Desktop 2024.3 (OurOS) — Data visualization");
+        println!("Salesforce Tableau Desktop 2024.3 (SlateOS) — Data visualization");
         println!();
         println!("Options:");
         println!("  --open FILE            Open .twb/.twbx/.hyper");
@@ -24,8 +24,8 @@ fn run_tab(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Salesforce Tableau Desktop 2024.3.0 (OurOS)"); return 0; }
-    println!("Salesforce Tableau Desktop 2024.3.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Salesforce Tableau Desktop 2024.3.0 (SlateOS)"); return 0; }
+    println!("Salesforce Tableau Desktop 2024.3.0 (SlateOS)");
     println!("  Products: Desktop, Prep, Server, Cloud (was Online), Public, Mobile");
     println!("  Data sources: 80+ native connectors (DBs, files, cloud apps, REST APIs)");
     println!("  Storage: Hyper (columnar in-memory engine) — fast extracts");

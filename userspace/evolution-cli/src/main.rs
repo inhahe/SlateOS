@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! evolution-cli — OurOS GNOME Evolution groupware suite
+//! evolution-cli — SlateOS GNOME Evolution groupware suite
 //!
 //! Multi-personality: `evolution`, `evolution-data-server`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_evolution(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: evolution [OPTIONS]");
-        println!("evolution v3.50 (OurOS) — GNOME groupware (mail, calendar, contacts)");
+        println!("evolution v3.50 (SlateOS) — GNOME groupware (mail, calendar, contacts)");
         println!();
         println!("Options:");
         println!("  -c COMPONENT      Start with component (mail, calendar, contacts, tasks, memos)");
@@ -21,7 +21,7 @@ fn run_evolution(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("evolution v3.50 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("evolution v3.50 (SlateOS)"); return 0; }
     let component = args.iter().position(|a| a == "-c")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
@@ -35,10 +35,10 @@ fn run_evolution(args: &[String], _prog: &str) -> i32 {
 fn run_data_server(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: evolution-data-server [OPTIONS]");
-        println!("evolution-data-server v3.50 (OurOS) — Backend data service");
+        println!("evolution-data-server v3.50 (SlateOS) — Backend data service");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("evolution-data-server v3.50 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("evolution-data-server v3.50 (SlateOS)"); return 0; }
     println!("evolution-data-server: backend service started");
     println!("  Address books: 2");
     println!("  Calendars: 3");

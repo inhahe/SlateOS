@@ -2,7 +2,7 @@
 name = "oswindow"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS Window Library — compositor client for creating windows and receiving events"
+description = "SlateOS Window Library — compositor client for creating windows and receiving events"
 [lib]
 name = "oswindow"
 path = "src/lib.rs"

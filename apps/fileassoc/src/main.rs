@@ -1,4 +1,4 @@
-//! OurOS File Association Manager — GUI for File Type Associations
+//! SlateOS File Association Manager — GUI for File Type Associations
 //!
 //! A graphical application for managing which applications open which file
 //! types. Provides browsing by category, search/filter, default-app assignment,
@@ -556,7 +556,7 @@ impl AssociationRegistry {
     /// Export all associations to a line-based config string.
     /// Format: `extension=app_id` per line, with a header comment.
     pub fn export_config(&self) -> String {
-        let mut out = String::from("# OurOS File Associations\n");
+        let mut out = String::from("# SlateOS File Associations\n");
         for (ext, assoc) in &self.associations {
             out.push_str(ext);
             out.push('=');
@@ -2454,7 +2454,7 @@ mod tests {
         let _ = reg.set_default_app("txt", "myapp");
         let config = reg.export_config();
         assert!(config.contains("txt=myapp"));
-        assert!(config.starts_with("# OurOS File Associations"));
+        assert!(config.starts_with("# SlateOS File Associations"));
     }
 
     #[test]

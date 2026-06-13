@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wshowkeys-cli — OurOS wshowkeys key press display
+//! wshowkeys-cli — SlateOS wshowkeys key press display
 //!
 //! Single personality: `wshowkeys`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wshowkeys(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wshowkeys [OPTIONS]");
-        println!("wshowkeys v1.0 (OurOS) — Display keypresses on Wayland");
+        println!("wshowkeys v1.0 (SlateOS) — Display keypresses on Wayland");
         println!();
         println!("Options:");
         println!("  -b COLOR          Background color (RRGGBBAA hex)");
@@ -25,7 +25,7 @@ fn run_wshowkeys(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("wshowkeys v1.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("wshowkeys v1.0 (SlateOS)"); return 0; }
 
     let anchor = args.iter().skip_while(|a| a.as_str() != "-a").nth(1)
         .map(|s| s.as_str()).unwrap_or("bottom");

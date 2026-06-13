@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! avizo-cli — OurOS Avizo OSD notification daemon
+//! avizo-cli — SlateOS Avizo OSD notification daemon
 //!
 //! Multi-personality: `avizo-service`, `volumectl`, `lightctl`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_avizo_service(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: avizo-service [OPTIONS]");
-        println!("avizo-service v1.0 (OurOS) — OSD notification daemon");
+        println!("avizo-service v1.0 (SlateOS) — OSD notification daemon");
         println!();
         println!("Options:");
         println!("  --version      Show version");
@@ -21,7 +21,7 @@ fn run_avizo_service(args: &[String], _prog: &str) -> i32 {
         println!("Neat volume/brightness OSD for Wayland. macOS-style overlay.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("avizo-service v1.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("avizo-service v1.0 (SlateOS)"); return 0; }
     println!("avizo-service: OSD daemon running");
     0
 }
@@ -29,7 +29,7 @@ fn run_avizo_service(args: &[String], _prog: &str) -> i32 {
 fn run_volumectl(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: volumectl [raise|lower|toggle-mute]");
-        println!("volumectl v1.0 (OurOS) — Volume control with OSD");
+        println!("volumectl v1.0 (SlateOS) — Volume control with OSD");
         return 0;
     }
     match args.first().map(|s| s.as_str()) {
@@ -44,7 +44,7 @@ fn run_volumectl(args: &[String], _prog: &str) -> i32 {
 fn run_lightctl(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lightctl [raise|lower]");
-        println!("lightctl v1.0 (OurOS) — Brightness control with OSD");
+        println!("lightctl v1.0 (SlateOS) — Brightness control with OSD");
         return 0;
     }
     match args.first().map(|s| s.as_str()) {

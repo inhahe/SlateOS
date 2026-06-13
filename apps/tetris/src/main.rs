@@ -9,7 +9,7 @@
 #![allow(clippy::struct_excessive_bools)]
 #![allow(clippy::fn_params_excessive_bools)]
 
-//! OurOS Tetris — classic falling-blocks puzzle game.
+//! SlateOS Tetris — classic falling-blocks puzzle game.
 //!
 //! Features a 10x20 playfield, 7 standard tetrominoes with SRS rotation
 //! and wall kicks, ghost piece preview, hold piece, next-3 preview queue,

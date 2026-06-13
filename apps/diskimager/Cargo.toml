@@ -2,6 +2,6 @@
 name = "diskimager"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS Disk Imager / ISO Tool — create, write, browse, and verify disk images"
+description = "SlateOS Disk Imager / ISO Tool — create, write, browse, and verify disk images"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }

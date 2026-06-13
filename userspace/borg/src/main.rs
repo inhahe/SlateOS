@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! borg — OurOS BorgBackup deduplicating backup tool
+//! borg — SlateOS BorgBackup deduplicating backup tool
 //!
 //! Single personality: `borg`
 
@@ -112,7 +112,7 @@ fn run_borg(args: Vec<String>) -> i32 {
             println!("  --version      Show version");
             0
         }
-        "--version" | "-V" => { println!("borg 0.1.0 (OurOS)"); 0 }
+        "--version" | "-V" => { println!("borg 0.1.0 (SlateOS)"); 0 }
         "init" => borg_init(&cmd_args),
         "create" => borg_create(&cmd_args),
         "list" => borg_list(&cmd_args),

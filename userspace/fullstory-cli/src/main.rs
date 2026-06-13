@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fullstory-cli — OurOS FullStory (session replay + digital experience intelligence)
+//! fullstory-cli — SlateOS FullStory (session replay + digital experience intelligence)
 //!
 //! Single personality: `fullstory`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_fullstory(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: fullstory [OPTIONS]");
-        println!("FullStory (OurOS) — session replay + digital experience intelligence");
+        println!("FullStory (SlateOS) — session replay + digital experience intelligence");
         println!();
         println!("Options:");
         println!("  --free                 Free tier (1K sessions/mo)");
@@ -26,8 +26,8 @@ fn run_fullstory(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("FullStory 2024 (OurOS)"); return 0; }
-    println!("FullStory 2024 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("FullStory 2024 (SlateOS)"); return 0; }
+    println!("FullStory 2024 (SlateOS)");
     println!("  Vendor: FullStory, Inc. (Atlanta, GA — private)");
     println!("  Founders: Scott Voigt (CEO), Bruce Johnson, Joel Webber, Hugh Higgins, 2014");
     println!("          all four ex-Google Wave/Gmail/AppEngine — deep Java/JS systems pedigree");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! microchipstudio-cli — OurOS Microchip Studio (formerly Atmel Studio)
+//! microchipstudio-cli — SlateOS Microchip Studio (formerly Atmel Studio)
 //!
 //! Single personality: `microchipstudio`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ms(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: microchipstudio [OPTIONS] [SOLUTION]");
-        println!("Microchip Studio 7.0 (OurOS) — AVR/SAM development IDE (was Atmel Studio)");
+        println!("Microchip Studio 7.0 (SlateOS) — AVR/SAM development IDE (was Atmel Studio)");
         println!();
         println!("Options:");
         println!("  --open FILE            Open .atsln solution");
@@ -23,8 +23,8 @@ fn run_ms(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Microchip Studio 7.0.2594 (OurOS)"); return 0; }
-    println!("Microchip Studio 7.0.2594 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Microchip Studio 7.0.2594 (SlateOS)"); return 0; }
+    println!("Microchip Studio 7.0.2594 (SlateOS)");
     println!("  Targets: 8-bit AVR (tiny/mega), 32-bit AVR, SAM (Cortex-M0+/M4/M7)");
     println!("  Based on: Visual Studio Isolated Shell");
     println!("  Compiler: avr-gcc, arm-none-eabi-gcc (free, bundled)");

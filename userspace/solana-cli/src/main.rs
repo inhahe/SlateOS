@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! solana-cli — OurOS Solana CLI
+//! solana-cli — SlateOS Solana CLI
 //!
 //! Single personality: `solana`
 
@@ -11,7 +11,7 @@ fn run_solana(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: solana <COMMAND> [OPTIONS]");
         println!();
-        println!("Solana blockchain CLI (OurOS).");
+        println!("Solana blockchain CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  balance      Get SOL balance");
@@ -32,7 +32,7 @@ fn run_solana(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("solana-cli 1.18.0 (OurOS)");
+        println!("solana-cli 1.18.0 (SlateOS)");
         return 0;
     }
 

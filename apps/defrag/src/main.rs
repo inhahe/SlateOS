@@ -1,4 +1,4 @@
-//! defrag -- OurOS Disk Defragmenter & Optimizer
+//! defrag -- SlateOS Disk Defragmenter & Optimizer
 //!
 //! A visual disk defragmentation and optimization utility. Provides drive
 //! analysis, block-level visualization, multiple defragmentation modes,

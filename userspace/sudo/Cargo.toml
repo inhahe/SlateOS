@@ -2,5 +2,5 @@
 name = "sudo"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS sudo utility"
+description = "SlateOS sudo utility"
 [dependencies]

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! iperf3 — OurOS network throughput testing tool
+//! iperf3 — SlateOS network throughput testing tool
 //!
 //! Single personality: `iperf3`
 
@@ -34,7 +34,7 @@ fn run_iperf3(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("iperf 3.16 (OurOS)");
+        println!("iperf 3.16 (SlateOS)");
         return 0;
     }
 

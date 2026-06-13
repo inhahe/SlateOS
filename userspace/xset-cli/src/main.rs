@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xset-cli — OurOS xset/xsetroot/xrdb X11 settings CLI
+//! xset-cli — SlateOS xset/xsetroot/xrdb X11 settings CLI
 //!
 //! Multi-personality: `xset`, `xsetroot`, `xrdb`
 
@@ -19,7 +19,7 @@ fn run_xset(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: xset [OPTIONS]");
         println!();
-        println!("xset — X11 user preference utility (OurOS).");
+        println!("xset — X11 user preference utility (SlateOS).");
         println!();
         println!("Options:");
         println!("  q               Query current settings");
@@ -61,7 +61,7 @@ fn run_xsetroot(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: xsetroot [OPTIONS]");
         println!();
-        println!("xsetroot — X11 root window settings (OurOS).");
+        println!("xsetroot — X11 root window settings (SlateOS).");
         println!();
         println!("Options:");
         println!("  -solid COLOR    Solid background color");
@@ -80,7 +80,7 @@ fn run_xrdb(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: xrdb [OPTIONS] [FILE]");
         println!();
-        println!("xrdb — X server resource database (OurOS).");
+        println!("xrdb — X server resource database (SlateOS).");
         println!();
         println!("Options:");
         println!("  -query         Show current resources");

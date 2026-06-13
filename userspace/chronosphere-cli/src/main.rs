@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! chronosphere-cli — OurOS Chronosphere (cloud-native observability for K8s, NYC, private unicorn)
+//! chronosphere-cli — SlateOS Chronosphere (cloud-native observability for K8s, NYC, private unicorn)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_chronosphere(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: chronosphere [OPTIONS]");
-        println!("Chronosphere (OurOS) — cloud-native observability built on M3 + OpenTelemetry");
+        println!("Chronosphere (SlateOS) — cloud-native observability built on M3 + OpenTelemetry");
         println!();
         println!("Options:");
         println!("  --metrics              Metrics platform (M3-based, Prometheus-compatible)");
@@ -22,8 +22,8 @@ fn run_chronosphere(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Chronosphere 2024 (OurOS) — M3 v1.x"); return 0; }
-    println!("Chronosphere 2024 (OurOS) — Cloud-Native Observability Platform");
+    if args.iter().any(|a| a == "--version") { println!("Chronosphere 2024 (SlateOS) — M3 v1.x"); return 0; }
+    println!("Chronosphere 2024 (SlateOS) — Cloud-Native Observability Platform");
     println!("  Vendor: Chronosphere, Inc. (New York City, NY — private unicorn)");
     println!("  Founders: Martin Mao (CEO) + Rob Skillington (CTO), 2019");
     println!("          Both ex-Uber engineers who built M3 (Uber's Prometheus-scale TSDB)");

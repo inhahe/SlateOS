@@ -1,4 +1,4 @@
-//! OurOS Multi-Personality File Operations Utility
+//! SlateOS Multi-Personality File Operations Utility
 //!
 //! A single binary that determines its behavior based on `argv[0]`:
 //!
@@ -82,18 +82,18 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 // ============================================================================
-// libc bindings (OurOS posix layer)
+// libc bindings (SlateOS posix layer)
 // ============================================================================
 //
 // std::fs covers stat/lstat/readlink/link/symlink/unlink/rename, all of which
-// route through the posix libc layer to native OurOS syscalls.  The three
+// route through the posix libc layer to native SlateOS syscalls.  The three
 // operations std does not expose — statvfs, mkfifo, and utimensat — are called
 // directly through their C ABI symbols, which the posix crate implements as
 // `extern "C"` functions backed by native syscalls.
 //
 // The libc-backed paths require the unix platform abstractions
 // (`std::os::unix`, `extern "C"` symbols from the posix sysroot), so they are
-// gated to `#[cfg(unix)]`.  This matches the real target (x86_64-ouros, which
+// gated to `#[cfg(unix)]`.  This matches the real target (x86_64-slateos, which
 // is `target-family = unix`); host unit tests run on a non-unix toolchain and
 // exercise only the portable argument-parsing/formatting logic, so the gated
 // functions get inert stubs there.
@@ -153,7 +153,7 @@ fn nonneg_u64(v: i64) -> u64 {
 // Kernel data structures
 // ============================================================================
 
-/// Matches the OurOS kernel stat buffer layout (128 bytes).
+/// Matches the SlateOS kernel stat buffer layout (128 bytes).
 /// All fields are little-endian u64 for simplicity on x86-64.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -176,7 +176,7 @@ struct KernelStat {
     st_ctime_nsec: u64,
 }
 
-/// Matches the OurOS kernel statfs buffer layout.
+/// Matches the SlateOS kernel statfs buffer layout.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct KernelStatFs {
@@ -378,7 +378,7 @@ fn is_leap_year(y: u64) -> bool {
 // ============================================================================
 
 /// Populate a [`KernelStat`] from a `std::fs::Metadata`, which routes through
-/// the posix libc layer to the native OurOS `stat`/`lstat` syscalls.
+/// the posix libc layer to the native SlateOS `stat`/`lstat` syscalls.
 #[cfg(unix)]
 fn metadata_to_kernel_stat(meta: &fs::Metadata) -> KernelStat {
     use std::os::unix::fs::MetadataExt;
@@ -1962,7 +1962,7 @@ fn run_mkfifo(opts: &MkfifoOpts) -> bool {
 // ============================================================================
 
 fn print_stat_help() {
-    println!("OurOS stat v0.1.0 -- Display file or filesystem status");
+    println!("SlateOS stat v0.1.0 -- Display file or filesystem status");
     println!();
     println!("USAGE:");
     println!("  stat [OPTIONS] FILE...");
@@ -1991,7 +1991,7 @@ fn print_stat_help() {
 }
 
 fn print_touch_help() {
-    println!("OurOS touch v0.1.0 -- Update file access and modification times");
+    println!("SlateOS touch v0.1.0 -- Update file access and modification times");
     println!();
     println!("USAGE:");
     println!("  touch [OPTIONS] FILE...");
@@ -2010,7 +2010,7 @@ fn print_touch_help() {
 }
 
 fn print_ln_help() {
-    println!("OurOS ln v0.1.0 -- Create links between files");
+    println!("SlateOS ln v0.1.0 -- Create links between files");
     println!();
     println!("USAGE:");
     println!("  ln [OPTIONS] TARGET LINK_NAME");
@@ -2031,7 +2031,7 @@ fn print_ln_help() {
 }
 
 fn print_readlink_help() {
-    println!("OurOS readlink v0.1.0 -- Print symlink target or canonical path");
+    println!("SlateOS readlink v0.1.0 -- Print symlink target or canonical path");
     println!();
     println!("USAGE:");
     println!("  readlink [OPTIONS] FILE...");
@@ -2046,7 +2046,7 @@ fn print_readlink_help() {
 }
 
 fn print_realpath_help() {
-    println!("OurOS realpath v0.1.0 -- Print resolved absolute path");
+    println!("SlateOS realpath v0.1.0 -- Print resolved absolute path");
     println!();
     println!("USAGE:");
     println!("  realpath [OPTIONS] FILE...");
@@ -2061,7 +2061,7 @@ fn print_realpath_help() {
 }
 
 fn print_mkfifo_help() {
-    println!("OurOS mkfifo v0.1.0 -- Create named pipes (FIFOs)");
+    println!("SlateOS mkfifo v0.1.0 -- Create named pipes (FIFOs)");
     println!();
     println!("USAGE:");
     println!("  mkfifo [OPTIONS] NAME...");

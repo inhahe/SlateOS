@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! consul — OurOS service discovery and configuration
+//! consul — SlateOS service discovery and configuration
 //!
 //! Single personality: `consul`
 
@@ -33,7 +33,7 @@ fn run_consul(args: Vec<String>) -> i32 {
             0
         }
         "version" | "--version" => {
-            println!("Consul v1.18.1 (OurOS)");
+            println!("Consul v1.18.1 (SlateOS)");
             println!("Revision: abc1234");
             println!("Protocol: 2 (Understands back to: 1)");
             0
@@ -49,7 +49,7 @@ fn run_consul(args: Vec<String>) -> i32 {
             println!("           Version: '1.18.1'");
             println!("        Build Date: '2025-05-22 00:00:00 +0000 UTC'");
             println!("           Node ID: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890'");
-            println!("         Node name: 'ouros-node-1'");
+            println!("         Node name: 'slateos-node-1'");
             println!("        Datacenter: 'dc1' (Segment: '<all>')");
             if is_server || is_dev {
                 println!("            Server: true (Bootstrap: true)");
@@ -72,7 +72,7 @@ fn run_consul(args: Vec<String>) -> i32 {
         }
         "members" => {
             println!("Node           Address          Status  Type    Build   Protocol  DC   Partition  Segment");
-            println!("ouros-node-1   127.0.0.1:8301   alive   server  1.18.1  2         dc1  default    <all>");
+            println!("slateos-node-1   127.0.0.1:8301   alive   server  1.18.1  2         dc1  default    <all>");
             0
         }
         "catalog" => {
@@ -87,7 +87,7 @@ fn run_consul(args: Vec<String>) -> i32 {
                 }
                 "nodes" => {
                     println!("Node           ID                                    Address      DC");
-                    println!("ouros-node-1   a1b2c3d4-e5f6-7890-abcd-ef1234567890  127.0.0.1    dc1");
+                    println!("slateos-node-1   a1b2c3d4-e5f6-7890-abcd-ef1234567890  127.0.0.1    dc1");
                 }
                 "datacenters" => println!("dc1"),
                 _ => println!("Usage: consul catalog <services|nodes|datacenters>"),

@@ -10,7 +10,7 @@
 //! issue a sequence of `ioctl(DRM_IOCTL_*)` calls to learn the driver
 //! version and capabilities, enumerate KMS resources (connectors, CRTCs,
 //! planes), allocate buffers, and program scanout.  Providing this
-//! interface lets those clients drive the OuRoS native [`crate::drm`]
+//! interface lets those clients drive the SlateOS native [`crate::drm`]
 //! subsystem without modification, exactly as the ALSA shim
 //! ([`crate::audio_alsa`]) lets Linux audio clients drive the software
 //! mixer.
@@ -295,13 +295,13 @@ pub const DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT: u64 = 6;
 /// Driver name reported by `DRM_IOCTL_VERSION` (matches the module name a
 /// libdrm client would look for).  No trailing NUL — the dispatch layer
 /// copies exactly `min(name_len, len)` bytes like the Linux kernel.
-pub const DRIVER_NAME: &[u8] = b"ouros";
+pub const DRIVER_NAME: &[u8] = b"slateos";
 /// Driver "date" string (build/ABI date), `DRM_IOCTL_VERSION`.
 pub const DRIVER_DATE: &[u8] = b"20260613";
 /// Human-readable driver description, `DRM_IOCTL_VERSION`.
-pub const DRIVER_DESC: &[u8] = b"OuRoS virtual display (KMS compatibility)";
+pub const DRIVER_DESC: &[u8] = b"SlateOS virtual display (KMS compatibility)";
 /// Unique bus-id string reported by `DRM_IOCTL_GET_UNIQUE`.
-pub const DRIVER_UNIQUE: &[u8] = b"ouros-drm";
+pub const DRIVER_UNIQUE: &[u8] = b"slateos-drm";
 
 /// Driver version major reported by `DRM_IOCTL_VERSION`.
 pub const DRIVER_VERSION_MAJOR: i32 = 1;

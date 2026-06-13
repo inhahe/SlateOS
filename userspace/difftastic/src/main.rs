@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! difftastic — OurOS structural diff tool that understands syntax
+//! difftastic — SlateOS structural diff tool that understands syntax
 //!
 //! Single personality: `difft`
 
@@ -36,7 +36,7 @@ fn run_difft(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("difftastic 0.58.0 (OurOS)");
+        println!("difftastic 0.58.0 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "--list-languages") {

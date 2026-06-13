@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pascal-cli — OurOS Free Pascal compiler
+//! pascal-cli — SlateOS Free Pascal compiler
 //!
 //! Multi-personality: `fpc`, `ppcx64`, `fpcmake`, `instantfpc`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_fpc(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "-?") || args.is_empty() {
         println!("Usage: fpc [OPTIONS] FILE.pas");
-        println!("Free Pascal Compiler 3.2.2 (OurOS)");
+        println!("Free Pascal Compiler 3.2.2 (SlateOS)");
         println!();
         println!("Options:");
         println!("  -o FILE        Output file name");
@@ -45,7 +45,7 @@ fn run_fpc(args: &[String]) -> i32 {
     for f in &files {
         let base = f.rsplit_once('.').map_or(*f, |(b, _)| b);
         println!("Free Pascal Compiler version 3.2.2 [2024/02/15] for x86_64");
-        println!("Target OS: OurOS for x86-64");
+        println!("Target OS: SlateOS for x86-64");
         println!("Compiling {}...", f);
         println!("Linking {}", base);
         println!("{} lines compiled, 0.1 sec", 150);

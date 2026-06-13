@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! toad-cli — OurOS Quest Toad database tools
+//! toad-cli — SlateOS Quest Toad database tools
 //!
 //! Single personality: `toad`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_toad(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: toad [OPTIONS]");
-        println!("Quest Toad for Oracle 17.2 (OurOS) — Database development & administration");
+        println!("Quest Toad for Oracle 17.2 (SlateOS) — Database development & administration");
         println!();
         println!("Options:");
         println!("  --product PROD         oracle/sql-server/db2/mysql/postgres/dataPoint");
@@ -23,8 +23,8 @@ fn run_toad(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Quest Toad for Oracle 17.2 (OurOS)"); return 0; }
-    println!("Quest Toad for Oracle 17.2 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Quest Toad for Oracle 17.2 (SlateOS)"); return 0; }
+    println!("Quest Toad for Oracle 17.2 (SlateOS)");
     println!("  Editions: Toad for Oracle / SQL Server / IBM Db2 / MySQL / PostgreSQL");
     println!("  Toad Data Point (cross-platform query/reporting on 50+ data sources)");
     println!("  Features: SQL editor with autocomplete, schema browser, debugger, profiler");

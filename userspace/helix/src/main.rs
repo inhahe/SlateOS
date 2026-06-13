@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! helix — OurOS post-modern modal text editor
+//! helix — SlateOS post-modern modal text editor
 //!
 //! Single personality: `hx`
 
@@ -24,7 +24,7 @@ fn run_hx(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("helix 24.07 (OurOS)");
+        println!("helix 24.07 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "--health") {
@@ -58,7 +58,7 @@ fn run_hx(args: Vec<String>) -> i32 {
 
     let files: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
     if files.is_empty() {
-        println!("helix 24.07 (OurOS) — post-modern modal editor");
+        println!("helix 24.07 (SlateOS) — post-modern modal editor");
     } else {
         for f in &files {
             println!("Opening: {}", f);

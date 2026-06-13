@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nextpnr-cli — OurOS nextpnr FPGA place-and-route
+//! nextpnr-cli — SlateOS nextpnr FPGA place-and-route
 //!
 //! Multi-personality: `nextpnr-ice40`, `nextpnr-ecp5`, `nextpnr-gowin`
 
@@ -18,7 +18,7 @@ fn run_nextpnr(args: &[String], prog: &str) -> i32 {
     };
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: nextpnr-{} [OPTIONS]", arch);
-        println!("nextpnr-{} v0.7 (OurOS) — FPGA place and route", arch);
+        println!("nextpnr-{} v0.7 (SlateOS) — FPGA place and route", arch);
         println!();
         println!("Options:");
         println!("  --json FILE       Input JSON netlist (from Yosys)");
@@ -33,7 +33,7 @@ fn run_nextpnr(args: &[String], prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("nextpnr-{} v0.7 (OurOS)", arch);
+        println!("nextpnr-{} v0.7 (SlateOS)", arch);
         return 0;
     }
     println!("nextpnr-{} v0.7", arch);

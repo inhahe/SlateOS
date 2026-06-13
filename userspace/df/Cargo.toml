@@ -2,5 +2,5 @@
 name = "df"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS disk free space utility"
+description = "SlateOS disk free space utility"
 [dependencies]

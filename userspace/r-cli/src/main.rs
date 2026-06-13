@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! r-cli — OurOS R language CLI
+//! r-cli — SlateOS R language CLI
 //!
 //! Multi-personality: `R`, `Rscript`
 
@@ -19,7 +19,7 @@ fn run_r(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: R [OPTIONS] [< infile] [> outfile]");
         println!();
-        println!("R — statistical computing (OurOS).");
+        println!("R — statistical computing (SlateOS).");
         println!();
         println!("Options:");
         println!("  --vanilla              No init files");
@@ -32,7 +32,7 @@ fn run_r(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("R version 4.3.2 (2024-01-15) -- \"Eye Holes\" (OurOS)");
+        println!("R version 4.3.2 (2024-01-15) -- \"Eye Holes\" (SlateOS)");
         return 0;
     }
 
@@ -45,9 +45,9 @@ fn run_r(args: &[String]) -> i32 {
         let _ = e;
     } else {
         if !quiet {
-            println!("R version 4.3.2 (2024-01-15) -- \"Eye Holes\" (OurOS)");
+            println!("R version 4.3.2 (2024-01-15) -- \"Eye Holes\" (SlateOS)");
             println!("Copyright (C) 2024 The R Foundation for Statistical Computing");
-            println!("Platform: x86_64-ouros (64-bit)");
+            println!("Platform: x86_64-slateos (64-bit)");
             println!();
             println!("Type 'demo()' for some demos, 'help()' for on-line help.");
             println!();
@@ -66,7 +66,7 @@ fn run_rscript(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("R scripting front-end version 4.3.2 (OurOS)");
+        println!("R scripting front-end version 4.3.2 (SlateOS)");
         return 0;
     }
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! iperf-cli — OurOS iperf3 CLI
+//! iperf-cli — SlateOS iperf3 CLI
 //!
 //! Multi-personality: `iperf3`, `iperf`
 
@@ -19,7 +19,7 @@ fn run_iperf(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: iperf3 [OPTIONS]");
         println!();
-        println!("iperf3 — network bandwidth measurement (OurOS).");
+        println!("iperf3 — network bandwidth measurement (SlateOS).");
         println!();
         println!("Server/Client:");
         println!("  -s, --server           Run in server mode");
@@ -39,7 +39,7 @@ fn run_iperf(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("iperf 3.16 (OurOS)");
+        println!("iperf 3.16 (SlateOS)");
         return 0;
     }
 

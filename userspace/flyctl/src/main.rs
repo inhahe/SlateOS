@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! flyctl — OurOS Fly.io CLI
+//! flyctl — SlateOS Fly.io CLI
 //!
 //! Single personality: `fly` (or `flyctl`)
 
@@ -11,7 +11,7 @@ fn run_fly(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: fly <COMMAND> [OPTIONS]");
         println!();
-        println!("The Fly.io command-line interface (OurOS).");
+        println!("The Fly.io command-line interface (SlateOS).");
         println!();
         println!("Commands:");
         println!("  apps         Manage apps");
@@ -38,7 +38,7 @@ fn run_fly(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("flyctl v0.2.20 OurOS (2024-01-15)");
+        println!("flyctl v0.2.20 SlateOS (2024-01-15)");
         return 0;
     }
 

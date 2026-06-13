@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! montecarlo-cli — OurOS Monte Carlo Data (data observability category creator, SF)
+//! montecarlo-cli — SlateOS Monte Carlo Data (data observability category creator, SF)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: montecarlo [OPTIONS]");
-        println!("Monte Carlo (OurOS) — data observability platform (the category creator)");
+        println!("Monte Carlo (SlateOS) — data observability platform (the category creator)");
         println!();
         println!("Options:");
         println!("  --incidents            View data incidents (freshness, volume, schema, distribution)");
@@ -21,8 +21,8 @@ fn run_mc(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Monte Carlo 2024 (OurOS)"); return 0; }
-    println!("Monte Carlo 2024 (OurOS) — Data Observability");
+    if args.iter().any(|a| a == "--version") { println!("Monte Carlo 2024 (SlateOS)"); return 0; }
+    println!("Monte Carlo 2024 (SlateOS) — Data Observability");
     println!("  Vendor: Monte Carlo Data, Inc. (San Francisco)");
     println!("  Founders: Barr Moses (CEO) + Lior Gavish (CTO), 2019");
     println!("          Barr: ex-Gainsight (VP Ops, ran a 60-person data team — coined 'data downtime')");

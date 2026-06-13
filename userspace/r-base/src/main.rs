@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! r-base — OurOS R statistical computing
+//! r-base — SlateOS R statistical computing
 //!
 //! Multi-personality: `R`, `Rscript`
 
@@ -25,8 +25,8 @@ fn run_r(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("R version 4.4.1 (2025-05-22) -- \"OurOS\"");
-        println!("Platform: x86_64-ouros (64-bit)");
+        println!("R version 4.4.1 (2025-05-22) -- \"SlateOS\"");
+        println!("Platform: x86_64-slateos (64-bit)");
         return 0;
     }
 
@@ -40,9 +40,9 @@ fn run_r(args: Vec<String>) -> i32 {
 
     let quiet = args.iter().any(|a| a == "--quiet" || a == "-q");
     if !quiet {
-        println!("R version 4.4.1 (2025-05-22) -- \"OurOS\"");
+        println!("R version 4.4.1 (2025-05-22) -- \"SlateOS\"");
         println!("Copyright (C) 2025 The R Foundation for Statistical Computing");
-        println!("Platform: x86_64-ouros (64-bit)");
+        println!("Platform: x86_64-slateos (64-bit)");
         println!();
         println!("Type 'demo()' for some demos, 'help()' for on-line help.");
         println!("Type 'q()' to quit R.");
@@ -63,7 +63,7 @@ fn run_rscript(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("R scripting front-end version 4.4.1 (2025-05-22) (OurOS)");
+        println!("R scripting front-end version 4.4.1 (2025-05-22) (SlateOS)");
         return 0;
     }
 

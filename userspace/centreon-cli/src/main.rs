@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! centreon-cli — OurOS Centreon IT monitoring
+//! centreon-cli — SlateOS Centreon IT monitoring
 //!
 //! Single personality: `centreon`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_centreon(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: centreon [COMMAND] [OPTIONS]");
-        println!("Centreon v24.04 (OurOS) — IT infrastructure monitoring");
+        println!("Centreon v24.04 (SlateOS) — IT infrastructure monitoring");
         println!();
         println!("Commands:");
         println!("  host list|add|del    Manage hosts");
@@ -32,8 +32,8 @@ fn run_centreon(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Centreon v24.04.2 (OurOS)"); return 0; }
-    println!("Centreon v24.04.2 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Centreon v24.04.2 (SlateOS)"); return 0; }
+    println!("Centreon v24.04.2 (SlateOS)");
     println!("  Pollers: 3 (all running)");
     println!("  Hosts: 345 (330 up, 15 down)");
     println!("  Services: 5,678 (5,234 ok, 234 warning, 210 critical)");

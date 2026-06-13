@@ -1,4 +1,4 @@
-//! Wallpaper Manager for the OurOS desktop shell.
+//! Wallpaper Manager for the SlateOS desktop shell.
 //!
 //! Provides desktop background rendering with multiple modes: solid color,
 //! single image, slideshow, and dynamic time-of-day gradients. Supports

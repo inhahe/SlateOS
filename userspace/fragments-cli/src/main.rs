@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fragments-cli — OurOS Fragments GNOME BitTorrent client
+//! fragments-cli — SlateOS Fragments GNOME BitTorrent client
 //!
 //! Single personality: `fragments`
 
@@ -13,13 +13,13 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_fragments(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: fragments [OPTIONS] [TORRENT...]");
-        println!("fragments v3.0 (OurOS) — GNOME BitTorrent client");
+        println!("fragments v3.0 (SlateOS) — GNOME BitTorrent client");
         println!();
         println!("Options:");
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("fragments v3.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("fragments v3.0 (SlateOS)"); return 0; }
     println!("fragments: GNOME BitTorrent client started");
     println!("  Download directory: ~/Downloads");
     println!("  Active torrents: 0");

@@ -1,4 +1,4 @@
-//! OurOS Device Manager
+//! SlateOS Device Manager
 //!
 //! Graphical hardware device manager inspired by Windows Device Manager.
 //! Features:
@@ -17,7 +17,7 @@
 //! - Export hardware report
 //!
 //! Uses the guitk library for UI rendering. Hardware data is gathered
-//! through OurOS syscalls; stubbed with representative data for initial
+//! through SlateOS syscalls; stubbed with representative data for initial
 //! development.
 
 #[allow(unused_imports)]
@@ -949,7 +949,7 @@ impl DeviceManagerState {
     /// Generate a hardware report as text.
     pub fn export_report(&self) -> String {
         let mut report = String::new();
-        report.push_str("=== OurOS Hardware Report ===\n\n");
+        report.push_str("=== SlateOS Hardware Report ===\n\n");
         report.push_str(&format!("Total Devices: {}\n", self.devices.len()));
         report.push_str(&format!(
             "Problem Devices: {}\n",
@@ -1134,7 +1134,7 @@ fn sample_devices() -> Vec<DeviceInfo> {
             driver: Some(DriverInfo::new(
                 "virtio-gpu",
                 "1.2.0",
-                "OurOS Project",
+                "SlateOS Project",
                 "2026-04-01",
                 false,
             )),
@@ -1156,7 +1156,7 @@ fn sample_devices() -> Vec<DeviceInfo> {
             driver: Some(DriverInfo::new(
                 "hda-intel",
                 "3.1.4",
-                "OurOS Project",
+                "SlateOS Project",
                 "2026-03-15",
                 true,
             )),
@@ -1178,7 +1178,7 @@ fn sample_devices() -> Vec<DeviceInfo> {
             driver: Some(DriverInfo::new(
                 "virtio-net",
                 "2.0.1",
-                "OurOS Project",
+                "SlateOS Project",
                 "2026-04-10",
                 false,
             )),
@@ -1200,7 +1200,7 @@ fn sample_devices() -> Vec<DeviceInfo> {
             driver: Some(DriverInfo::new(
                 "virtio-blk",
                 "1.5.0",
-                "OurOS Project",
+                "SlateOS Project",
                 "2026-02-20",
                 false,
             )),
@@ -1222,7 +1222,7 @@ fn sample_devices() -> Vec<DeviceInfo> {
             driver: Some(DriverInfo::new(
                 "xhci-hcd",
                 "1.0.3",
-                "OurOS Project",
+                "SlateOS Project",
                 "2026-01-10",
                 false,
             )),
@@ -1244,7 +1244,7 @@ fn sample_devices() -> Vec<DeviceInfo> {
             driver: Some(DriverInfo::new(
                 "i8042-kbd",
                 "1.0.0",
-                "OurOS Project",
+                "SlateOS Project",
                 "2025-12-01",
                 false,
             )),
@@ -1266,7 +1266,7 @@ fn sample_devices() -> Vec<DeviceInfo> {
             driver: Some(DriverInfo::new(
                 "i8042-mouse",
                 "1.0.0",
-                "OurOS Project",
+                "SlateOS Project",
                 "2025-12-01",
                 false,
             )),
@@ -1288,7 +1288,7 @@ fn sample_devices() -> Vec<DeviceInfo> {
             driver: Some(DriverInfo::new(
                 "acpi-pm",
                 "1.0.0",
-                "OurOS Project",
+                "SlateOS Project",
                 "2025-11-15",
                 false,
             )),
@@ -1310,7 +1310,7 @@ fn sample_devices() -> Vec<DeviceInfo> {
             driver: Some(DriverInfo::new(
                 "piix3-isa",
                 "1.0.0",
-                "OurOS Project",
+                "SlateOS Project",
                 "2025-11-15",
                 false,
             )),
@@ -1370,7 +1370,7 @@ fn sample_devices() -> Vec<DeviceInfo> {
             driver: Some(DriverInfo::new(
                 "usb-storage",
                 "1.1.0",
-                "OurOS Project",
+                "SlateOS Project",
                 "2026-01-20",
                 false,
             )),
@@ -3038,7 +3038,7 @@ fn is_node_visible(state: &DeviceManagerState, index: usize) -> bool {
 // ============================================================================
 
 fn main() {
-    // Placeholder: in a real OurOS environment, this would create a window,
+    // Placeholder: in a real SlateOS environment, this would create a window,
     // enter the event loop, and call render() / handle_event() each frame.
 }
 

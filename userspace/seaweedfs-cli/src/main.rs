@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! seaweedfs-cli — OurOS SeaweedFS distributed storage
+//! seaweedfs-cli — SlateOS SeaweedFS distributed storage
 //!
 //! Multi-personality: `weed`, `weed-master`, `weed-volume`
 
@@ -15,20 +15,20 @@ fn run_weed(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [COMMAND] [OPTIONS]", prog);
         match prog {
             "weed-master" => {
-                println!("weed master (OurOS) — SeaweedFS master server");
+                println!("weed master (SlateOS) — SeaweedFS master server");
                 println!("  --port PORT        Master port (default: 9333)");
                 println!("  --mdir DIR         Metadata directory");
                 println!("  --volumeSizeLimitMB N  Volume size limit");
             }
             "weed-volume" => {
-                println!("weed volume (OurOS) — SeaweedFS volume server");
+                println!("weed volume (SlateOS) — SeaweedFS volume server");
                 println!("  --port PORT        Volume port (default: 8080)");
                 println!("  --dir DIR          Data directory");
                 println!("  --max N            Max volumes");
                 println!("  --mserver ADDR     Master address");
             }
             _ => {
-                println!("SeaweedFS v3.71 (OurOS) — Distributed file & object store");
+                println!("SeaweedFS v3.71 (SlateOS) — Distributed file & object store");
                 println!();
                 println!("Commands:");
                 println!("  master             Start master server");
@@ -42,8 +42,8 @@ fn run_weed(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("SeaweedFS v3.71.0 (OurOS)"); return 0; }
-    println!("SeaweedFS v3.71.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("SeaweedFS v3.71.0 (SlateOS)"); return 0; }
+    println!("SeaweedFS v3.71.0 (SlateOS)");
     println!("  Master: http://0.0.0.0:9333");
     println!("  Volume servers: 4");
     println!("  Volumes: 23 (replication: 001)");

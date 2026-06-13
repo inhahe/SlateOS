@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dm-cli — OurOS device-mapper tools
+//! dm-cli — SlateOS device-mapper tools
 //!
 //! Multi-personality: `dmsetup`, `dmstats`
 
@@ -15,7 +15,7 @@ fn run_dm(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} COMMAND [OPTIONS]", prog);
         match prog {
             "dmstats" => {
-                println!("dmstats (OurOS) — Device-mapper statistics");
+                println!("dmstats (SlateOS) — Device-mapper statistics");
                 println!("  create     Create statistics region");
                 println!("  delete     Delete statistics region");
                 println!("  list       List statistics regions");
@@ -23,7 +23,7 @@ fn run_dm(args: &[String], prog: &str) -> i32 {
                 println!("  report     Report statistics");
             }
             _ => {
-                println!("dmsetup (OurOS) — Device-mapper management");
+                println!("dmsetup (SlateOS) — Device-mapper management");
                 println!("  create NAME TABLE  Create device");
                 println!("  remove NAME        Remove device");
                 println!("  table NAME         Show table");
@@ -37,16 +37,16 @@ fn run_dm(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("dmsetup v1.02.196 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("dmsetup v1.02.196 (SlateOS)"); return 0; }
     match prog {
         "dmstats" => {
-            println!("dmstats (OurOS)");
+            println!("dmstats (SlateOS)");
             println!("  Region  Start        Length       Step       Read/s    Write/s");
             println!("  0       0            1048576      65536      1234.5    567.8");
             println!("  1       1048576      2097152      65536      890.1     234.5");
         }
         _ => {
-            println!("dmsetup (OurOS) — Device-Mapper");
+            println!("dmsetup (SlateOS) — Device-Mapper");
             println!("  Devices:");
             println!("    vg_root-root (253:0)");
             println!("    vg_root-home (253:1)");

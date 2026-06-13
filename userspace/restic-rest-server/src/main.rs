@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! restic-rest-server — OurOS REST backend for restic
+//! restic-rest-server — SlateOS REST backend for restic
 //!
 //! Single personality: `rest-server`
 
@@ -28,7 +28,7 @@ fn run_rest_server(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("rest-server 0.12.1 (OurOS)");
+        println!("rest-server 0.12.1 (SlateOS)");
         return 0;
     }
 
@@ -46,7 +46,7 @@ fn run_rest_server(args: Vec<String>) -> i32 {
     let prometheus = args.iter().any(|a| a == "--prometheus");
 
     let proto = if tls { "https" } else { "http" };
-    println!("rest-server 0.12.1 (OurOS)");
+    println!("rest-server 0.12.1 (SlateOS)");
     println!("Data directory: {}", path);
     println!("Authentication: {}", if no_auth { "disabled" } else { "enabled" });
     println!("Append only: {}", if append_only { "enabled" } else { "disabled" });

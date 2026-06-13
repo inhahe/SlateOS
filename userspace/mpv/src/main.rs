@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mpv — OurOS media player
+//! mpv — SlateOS media player
 //!
 //! Single personality: `mpv`
 
@@ -38,7 +38,7 @@ fn run_mpv(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("mpv 0.38.0 (OurOS)");
+        println!("mpv 0.38.0 (SlateOS)");
         println!("Copyright (C) 2000-2025 mpv/MPlayer/mplayer2 projects");
         println!(" built with gcc 13.2.0");
         println!("libplacebo version: v6.338.2");

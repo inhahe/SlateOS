@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bcachefs-cli — OurOS bcachefs filesystem tools
+//! bcachefs-cli — SlateOS bcachefs filesystem tools
 //!
 //! Single personality: `bcachefs`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_bcachefs(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: bcachefs COMMAND [OPTIONS]");
-        println!("bcachefs v1.7 (OurOS) — Copy-on-write filesystem tools");
+        println!("bcachefs v1.7 (SlateOS) — Copy-on-write filesystem tools");
         println!();
         println!("Commands:");
         println!("  format         Format filesystem");
@@ -30,8 +30,8 @@ fn run_bcachefs(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("bcachefs v1.7.0 (OurOS)"); return 0; }
-    println!("bcachefs v1.7.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("bcachefs v1.7.0 (SlateOS)"); return 0; }
+    println!("bcachefs v1.7.0 (SlateOS)");
     println!("  Filesystem: /dev/sda1");
     println!("  UUID: 12345678-abcd-ef01-2345-6789abcdef01");
     println!("  Label: data");

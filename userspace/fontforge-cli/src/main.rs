@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fontforge-cli — OurOS FontForge font editor CLI
+//! fontforge-cli — SlateOS FontForge font editor CLI
 //!
 //! Single personality: `fontforge`
 
@@ -11,7 +11,7 @@ fn run_fontforge(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: fontforge [OPTIONS] [FILE ...]");
         println!();
-        println!("FontForge — font editor (OurOS).");
+        println!("FontForge — font editor (SlateOS).");
         println!();
         println!("Options:");
         println!("  -lang py|ff       Scripting language");
@@ -24,7 +24,7 @@ fn run_fontforge(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("FontForge 20230101 (OurOS)");
+        println!("FontForge 20230101 (SlateOS)");
         return 0;
     }
 
@@ -39,7 +39,7 @@ fn run_fontforge(args: Vec<String>) -> i32 {
     } else {
         let files: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).map(|s| s.as_str()).collect();
         if files.is_empty() {
-            println!("FontForge 20230101 (OurOS)");
+            println!("FontForge 20230101 (SlateOS)");
             println!("Starting FontForge GUI...");
         } else {
             for f in &files {

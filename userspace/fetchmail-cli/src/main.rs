@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fetchmail-cli — OurOS fetchmail/getmail CLI
+//! fetchmail-cli — SlateOS fetchmail/getmail CLI
 //!
 //! Multi-personality: `fetchmail`, `getmail`
 
@@ -19,7 +19,7 @@ fn run_fetchmail(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: fetchmail [OPTIONS] [SERVER ...]");
         println!();
-        println!("fetchmail — remote mail retrieval (OurOS).");
+        println!("fetchmail — remote mail retrieval (SlateOS).");
         println!();
         println!("Options:");
         println!("  -p, --protocol PROTO   Protocol (auto/pop3/imap/apop)");
@@ -37,7 +37,7 @@ fn run_fetchmail(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("fetchmail 6.4.37 (OurOS)");
+        println!("fetchmail 6.4.37 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "-q" || a == "--quit") {
@@ -75,7 +75,7 @@ fn run_getmail(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: getmail [OPTIONS]");
         println!();
-        println!("getmail — mail retriever (OurOS).");
+        println!("getmail — mail retriever (SlateOS).");
         println!();
         println!("Options:");
         println!("  -r, --rcfile FILE  Config file");
@@ -87,7 +87,7 @@ fn run_getmail(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("getmail 6.19 (OurOS)");
+        println!("getmail 6.19 (SlateOS)");
         return 0;
     }
 

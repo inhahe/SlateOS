@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nginx-cli — OurOS Nginx web server
+//! nginx-cli — SlateOS Nginx web server
 //!
 //! Single personality: `nginx`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_nginx(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: nginx [OPTIONS]");
-        println!("nginx v1.26 (OurOS) — High-performance HTTP and reverse proxy server");
+        println!("nginx v1.26 (SlateOS) — High-performance HTTP and reverse proxy server");
         println!();
         println!("Options:");
         println!("  -c FILE            Config file (default: /etc/nginx/nginx.conf)");
@@ -28,12 +28,12 @@ fn run_nginx(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-v" || a == "-V" || a == "--version") {
-        println!("nginx/1.26.1 (OurOS)");
+        println!("nginx/1.26.1 (SlateOS)");
         println!("  TLS: OpenSSL 3.2");
         println!("  Modules: http_ssl, http_v2, http_realip, http_gzip_static");
         return 0;
     }
-    println!("nginx/1.26.1 (OurOS)");
+    println!("nginx/1.26.1 (SlateOS)");
     println!("  Workers: 4");
     println!("  Listening: 0.0.0.0:80, 0.0.0.0:443 (SSL)");
     println!("  Server names: 12 virtual hosts");

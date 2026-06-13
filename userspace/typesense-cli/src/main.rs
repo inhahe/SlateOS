@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! typesense-cli — OurOS Typesense search engine
+//! typesense-cli — SlateOS Typesense search engine
 //!
 //! Single personality: `typesense-server`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_typesense(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: typesense-server [OPTIONS]");
-        println!("Typesense v0.25 (OurOS) — Open-source search engine");
+        println!("Typesense v0.25 (SlateOS) — Open-source search engine");
         println!();
         println!("Options:");
         println!("  --data-dir DIR     Data directory");
@@ -26,8 +26,8 @@ fn run_typesense(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Typesense v0.25.2 (OurOS)"); return 0; }
-    println!("Typesense v0.25.2 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Typesense v0.25.2 (SlateOS)"); return 0; }
+    println!("Typesense v0.25.2 (SlateOS)");
     println!("  API: http://0.0.0.0:8108");
     println!("  Collections: 8");
     println!("  Documents: 567,890 total");

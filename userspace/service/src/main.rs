@@ -1,4 +1,4 @@
-//! OurOS Service Management CLI
+//! SlateOS Service Management CLI
 //!
 //! Start, stop, restart, and query system services. Communicates with the
 //! init/service manager daemon via IPC or reads status from /run/services/.
@@ -58,8 +58,8 @@ fn send_service_command(command: &str, service_name: &str) -> Result<String, Str
     // Build the IPC message: "COMMAND service_name\n"
     let msg = format!("{command} {service_name}\0");
 
-    // Open a channel to the service manager (well-known name: "org.ouros.ServiceManager").
-    let svc_name = b"org.ouros.ServiceManager\0";
+    // Open a channel to the service manager (well-known name: "org.slateos.ServiceManager").
+    let svc_name = b"org.slateos.ServiceManager\0";
     let channel = unsafe {
         syscall3(
             SYS_CHANNEL_OPEN,
@@ -110,7 +110,7 @@ fn send_service_command(command: &str, service_name: &str) -> Result<String, Str
 /// Create a filesystem symlink (`target` is the existing file, `link` is the
 /// new symlink path).
 ///
-/// On the shipping `x86_64-ouros` target (which is unix) this uses the real
+/// On the shipping `x86_64-slateos` target (which is unix) this uses the real
 /// `std::os::unix::fs::symlink`.  The `#[cfg(not(unix))]` arm exists only so
 /// the crate compiles for `cargo test`/clippy on the Windows dev host; it is
 /// never the runtime path.
@@ -123,7 +123,7 @@ fn make_symlink(target: &str, link: &str) -> std::io::Result<()> {
 fn make_symlink(_target: &str, _link: &str) -> std::io::Result<()> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
-        "symlink creation is only supported on the unix (ouros) target",
+        "symlink creation is only supported on the unix (slateos) target",
     ))
 }
 
@@ -570,7 +570,7 @@ fn print_dep_tree(services: &[ServiceInfo], parent: &str, prefix: &str, visited:
 // ============================================================================
 
 fn print_usage() {
-    println!("OurOS Service Manager v0.1.0");
+    println!("SlateOS Service Manager v0.1.0");
     println!();
     println!("Start, stop, and manage system services.");
     println!();
@@ -724,7 +724,7 @@ mod tests {
     #[test]
     fn make_symlink_unsupported_on_host() {
         // On the non-unix dev host the helper must report Unsupported (it is
-        // never the runtime path; the shipping ouros target uses the real
+        // never the runtime path; the shipping slateos target uses the real
         // symlink call).  On a unix host the call will attempt a real symlink
         // into a path that does not exist and fail with a different error — so
         // we only assert the error kind on non-unix.

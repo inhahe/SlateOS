@@ -2,6 +2,6 @@
 name = "diskcleanup"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS Disk Cleanup — find and remove temporary files, caches, and other reclaimable space"
+description = "SlateOS Disk Cleanup — find and remove temporary files, caches, and other reclaimable space"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }

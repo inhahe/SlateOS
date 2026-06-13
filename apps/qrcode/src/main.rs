@@ -1,4 +1,4 @@
-//! `OurOS` QR Code Generator
+//! `SlateOS` QR Code Generator
 //!
 //! A QR code and barcode generation tool with:
 //! - QR code generation from scratch (byte mode, Reed-Solomon EC, versions 1-10)
@@ -2547,7 +2547,7 @@ fn main() {
     let mut app = QrApp::new();
 
     // Generate a sample QR code
-    app.set_input("Hello, OurOS!");
+    app.set_input("Hello, SlateOS!");
     app.generate();
 
     // Generate a URL example
@@ -2564,7 +2564,7 @@ fn main() {
     // Back to QR
     app.code_type = CodeType::QrCode;
     app.input_mode = InputMode::Text;
-    app.set_input("QR Code Generator for OurOS");
+    app.set_input("QR Code Generator for SlateOS");
     app.generate();
 
     let cmds = app.render(1100.0, 700.0);

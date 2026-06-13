@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! veeam-cli — OurOS Veeam Data Platform (enterprise backup/recovery)
+//! veeam-cli — SlateOS Veeam Data Platform (enterprise backup/recovery)
 //!
 //! Single personality: `veeam`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_vm(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: veeam [OPTIONS]");
-        println!("Veeam Data Platform 12.2 (OurOS) — Enterprise backup, recovery, replication");
+        println!("Veeam Data Platform 12.2 (SlateOS) — Enterprise backup, recovery, replication");
         println!();
         println!("Options:");
         println!("  --backup TARGET        vmware/hyperv/agent/microsoft365/cloud-connect");
@@ -24,8 +24,8 @@ fn run_vm(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Veeam Backup & Replication 12.2.0.334 (OurOS)"); return 0; }
-    println!("Veeam Backup & Replication 12.2.0.334 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Veeam Backup & Replication 12.2.0.334 (SlateOS)"); return 0; }
+    println!("Veeam Backup & Replication 12.2.0.334 (SlateOS)");
     println!("  Vendor: Veeam Software (HQ Kirkland WA + Prague, founded 2006)");
     println!("  Founders: Ratmir Timashev, Andrei Baronov (Russian-American)");
     println!("  Sold to: Insight Partners Jan 2020 ($5B)");

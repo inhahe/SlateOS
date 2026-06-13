@@ -1,4 +1,4 @@
-//! Mandelbrot set explorer for OurOS.
+//! Mandelbrot set explorer for SlateOS.
 //!
 //! Features:
 //! - Real-time Mandelbrot set rendering

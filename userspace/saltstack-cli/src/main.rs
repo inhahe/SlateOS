@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! saltstack-cli — OurOS SaltStack configuration management
+//! saltstack-cli — SlateOS SaltStack configuration management
 //!
 //! Multi-personality: `salt`, `salt-key`, `salt-call`, `salt-run`
 
@@ -14,7 +14,7 @@ fn run_salt(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: salt [OPTIONS] <target> <function> [arguments]");
         println!();
-        println!("salt — SaltStack remote execution (OurOS).");
+        println!("salt — SaltStack remote execution (SlateOS).");
         println!();
         println!("Options:");
         println!("  -G    Match by grain");
@@ -25,7 +25,7 @@ fn run_salt(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("salt 3007.0 (Potassium) (OurOS)");
+        println!("salt 3007.0 (Potassium) (SlateOS)");
         return 0;
     }
 
@@ -33,30 +33,30 @@ fn run_salt(args: &[String]) -> i32 {
     let func = args.get(1).map(|s| s.as_str()).unwrap_or("test.ping");
     match func {
         "test.ping" => {
-            println!("ouros-node-1:");
+            println!("slateos-node-1:");
             println!("    True");
-            println!("ouros-node-2:");
+            println!("slateos-node-2:");
             println!("    True");
         }
         "cmd.run" => {
             let cmd = args.get(2).map(|s| s.as_str()).unwrap_or("uname -a");
             println!("{}:", target);
-            println!("    OurOS ouros-desktop 1.0 x86_64 ({})", cmd);
+            println!("    SlateOS slateos-desktop 1.0 x86_64 ({})", cmd);
         }
         "grains.items" | "grains.item" => {
-            println!("ouros-node-1:");
+            println!("slateos-node-1:");
             println!("    ----------");
             println!("    os:");
-            println!("        OurOS");
+            println!("        SlateOS");
             println!("    osrelease:");
             println!("        1.0");
             println!("    kernel:");
-            println!("        ouros");
+            println!("        slateos");
             println!("    cpuarch:");
             println!("        x86_64");
         }
         "state.apply" | "state.highstate" => {
-            println!("ouros-node-1:");
+            println!("slateos-node-1:");
             println!("----------");
             println!("          ID: nginx");
             println!("    Function: pkg.installed");
@@ -66,7 +66,7 @@ fn run_salt(args: &[String]) -> i32 {
             println!("    Duration: 456.789 ms");
             println!("     Changes:");
             println!();
-            println!("Summary for ouros-node-1");
+            println!("Summary for slateos-node-1");
             println!("------------");
             println!("Succeeded: 5 (changed=1)");
             println!("Failed:    0");
@@ -100,17 +100,17 @@ fn run_salt_key(args: &[String]) -> i32 {
 
     if args.iter().any(|a| a == "-L") {
         println!("Accepted Keys:");
-        println!("ouros-node-1");
-        println!("ouros-node-2");
+        println!("slateos-node-1");
+        println!("slateos-node-2");
         println!("Denied Keys:");
         println!("Unaccepted Keys:");
-        println!("ouros-node-3");
+        println!("slateos-node-3");
         println!("Rejected Keys:");
     } else if args.iter().any(|a| a == "-A") {
         println!("The following keys are going to be accepted:");
         println!("Unaccepted Keys:");
-        println!("ouros-node-3");
-        println!("Key for minion ouros-node-3 accepted.");
+        println!("slateos-node-3");
+        println!("Key for minion slateos-node-3 accepted.");
     } else {
         println!("salt-key: operation completed");
     }

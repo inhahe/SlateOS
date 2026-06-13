@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mparticle-cli — OurOS mParticle (enterprise CDP, NYC, acquired by Rokt 2024)
+//! mparticle-cli — SlateOS mParticle (enterprise CDP, NYC, acquired by Rokt 2024)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mp(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mparticle [OPTIONS]");
-        println!("mParticle (OurOS) — enterprise CDP (acquired by Rokt Jul 2024)");
+        println!("mParticle (SlateOS) — enterprise CDP (acquired by Rokt Jul 2024)");
         println!();
         println!("Options:");
         println!("  --inputs               300+ inputs (mobile/web SDKs + server + feeds)");
@@ -21,8 +21,8 @@ fn run_mp(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("mParticle 2024 (OurOS)"); return 0; }
-    println!("mParticle 2024 (OurOS) — Enterprise CDP");
+    if args.iter().any(|a| a == "--version") { println!("mParticle 2024 (SlateOS)"); return 0; }
+    println!("mParticle 2024 (SlateOS) — Enterprise CDP");
     println!("  Vendor: mParticle, Inc. (NYC) — ACQUIRED by Rokt Jul 2024 for ~$300-400M");
     println!("  Founders: Michael Katz (CEO) + Andy Katz + Dave Myers, 2013");
     println!("          Michael: ex-AOL/HuffPost mobile exec");

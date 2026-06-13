@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mediainfo-cli — OurOS MediaInfo CLI
+//! mediainfo-cli — SlateOS MediaInfo CLI
 //!
 //! Single personality: `mediainfo`
 
@@ -11,7 +11,7 @@ fn run_mediainfo(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mediainfo [OPTIONS] FILE...");
         println!();
-        println!("MediaInfo — media file information (OurOS).");
+        println!("MediaInfo — media file information (SlateOS).");
         println!();
         println!("Options:");
         println!("  --Full, -f             Full information display");
@@ -22,7 +22,7 @@ fn run_mediainfo(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--Version" || a == "--version") {
-        println!("MediaInfo Command line, MediaInfoLib - v24.01 (OurOS)");
+        println!("MediaInfo Command line, MediaInfoLib - v24.01 (SlateOS)");
         return 0;
     }
 

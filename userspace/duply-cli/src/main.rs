@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! duply-cli — OurOS Duply (Duplicity wrapper) CLI
+//! duply-cli — SlateOS Duply (Duplicity wrapper) CLI
 //!
 //! Single personality: `duply`
 
@@ -11,7 +11,7 @@ fn run_duply(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: duply PROFILE COMMAND [OPTIONS]");
         println!();
-        println!("duply — Duplicity backup wrapper (OurOS).");
+        println!("duply — Duplicity backup wrapper (SlateOS).");
         println!();
         println!("Commands:");
         println!("  create          Create new profile");
@@ -38,7 +38,7 @@ fn run_duply(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("duply 2.5.2 (OurOS)");
+        println!("duply 2.5.2 (SlateOS)");
         return 0;
     }
 

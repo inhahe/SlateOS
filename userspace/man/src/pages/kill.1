@@ -1,4 +1,4 @@
-.TH KILL 1 "2026-05-18" "OurOS" "User Commands"
+.TH KILL 1 "2026-05-18" "SlateOS" "User Commands"
 .SH NAME
 kill \- send a signal to a process
 .SH SYNOPSIS
@@ -8,7 +8,7 @@ kill \- send a signal to a process
 Send a signal to the specified process(es).  The default signal is
 SIGTERM (15), which requests graceful termination.
 .PP
-On OurOS, process lifecycle is primarily managed through IPC messages
+On SlateOS, process lifecycle is primarily managed through IPC messages
 rather than Unix signals.  The \fBkill\fR command translates signal
 numbers into the appropriate IPC shutdown/terminate messages.
 .SH OPTIONS
@@ -39,4 +39,4 @@ kill -l                List all signals
 .BR killall (1),
 .BR signal (7)
 .SH AUTHOR
-OurOS Contributors.
+SlateOS Contributors.

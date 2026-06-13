@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! stanza-cli — OurOS Stanza log agent
+//! stanza-cli — SlateOS Stanza log agent
 //!
 //! Single personality: `stanza`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_stanza(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: stanza [COMMAND] [OPTIONS]");
-        println!("Stanza v0.34 (OurOS) — High-performance log agent");
+        println!("Stanza v0.34 (SlateOS) — High-performance log agent");
         println!();
         println!("Commands:");
         println!("  run                Start agent");
@@ -30,8 +30,8 @@ fn run_stanza(args: &[String], _prog: &str) -> i32 {
         println!("  --debug            Enable debug logging");
         return 0;
     }
-    if args.iter().any(|a| a == "--version" || a == "version") { println!("stanza v0.34.2 (OurOS)"); return 0; }
-    println!("Stanza v0.34.2 (OurOS)");
+    if args.iter().any(|a| a == "--version" || a == "version") { println!("stanza v0.34.2 (SlateOS)"); return 0; }
+    println!("Stanza v0.34.2 (SlateOS)");
     println!("  Operators: 8 active");
     println!("  File inputs: 15 monitored");
     println!("  Journald inputs: 1");

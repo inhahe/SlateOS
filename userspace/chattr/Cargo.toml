@@ -2,5 +2,5 @@
 name = "chattr"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS file attribute tools"
+description = "SlateOS file attribute tools"
 [dependencies]

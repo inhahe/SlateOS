@@ -1,4 +1,4 @@
-//! Multi-personality capability management utility for OurOS.
+//! Multi-personality capability management utility for SlateOS.
 //!
 //! This binary detects the tool personality from `argv[0]`:
 //!   - `capsh`    — capability-aware shell wrapper and inspection tool
@@ -7,7 +7,7 @@
 //!   - `getpcaps` — get process capabilities from /proc
 //!   - `captest`  — test capability support on the running system
 //!
-//! OurOS uses capability-based security; this toolset provides the POSIX/Linux
+//! SlateOS uses capability-based security; this toolset provides the POSIX/Linux
 //! compatibility layer for inspecting and manipulating capabilities.
 
 #![deny(clippy::all)]
@@ -724,8 +724,8 @@ fn apply_cap_specs_to_process(specs: &[CapSpec], pcaps: &mut ProcessCaps) {
 
 /// Path to the xattr sidecar directory for simulating `security.capability`.
 fn xattr_dir() -> PathBuf {
-    let base = env::var("OUROS_XATTR_DIR")
-        .unwrap_or_else(|_| String::from("/var/lib/ouros/xattrs"));
+    let base = env::var("SLATEOS_XATTR_DIR")
+        .unwrap_or_else(|_| String::from("/var/lib/slateos/xattrs"));
     PathBuf::from(base)
 }
 
@@ -1359,7 +1359,7 @@ fn run_captest(args: &[String]) -> i32 {
     println!("=== Capability Support Test ===");
     println!();
 
-    // On OurOS, we test against the simulated process capability state.
+    // On SlateOS, we test against the simulated process capability state.
     // In a real deployment this would use actual syscalls.
     let caps = ProcessCaps::new_full();
 

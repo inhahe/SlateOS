@@ -1,4 +1,4 @@
-// OurOS modprobe - kernel module management tools
+// SlateOS modprobe - kernel module management tools
 //
 // Multi-personality binary:
 //   modprobe  - load/unload kernel modules with dependency resolution
@@ -756,7 +756,7 @@ fn tool_name(tool: Tool) -> &'static [u8] {
 
 fn show_version(tool: Tool) {
     print_out(tool_name(tool));
-    print_out(b" version 0.1.0 (OurOS)\n");
+    print_out(b" version 0.1.0 (SlateOS)\n");
 }
 
 fn show_modprobe_help() {
@@ -895,7 +895,7 @@ fn get_module_info(name: &[u8]) -> ModuleInfo {
     let normalized = info.name.as_bytes();
     if starts_with(normalized, b"ext4") {
         set_field(&mut info.license, &mut info.license_len, b"GPL");
-        set_field(&mut info.author, &mut info.author_len, b"OurOS Project");
+        set_field(&mut info.author, &mut info.author_len, b"SlateOS Project");
         set_field(
             &mut info.description,
             &mut info.desc_len,
@@ -908,7 +908,7 @@ fn get_module_info(name: &[u8]) -> ModuleInfo {
         info.dep_count = 3;
     } else if starts_with(normalized, b"virtio_net") {
         set_field(&mut info.license, &mut info.license_len, b"GPL");
-        set_field(&mut info.author, &mut info.author_len, b"OurOS Project");
+        set_field(&mut info.author, &mut info.author_len, b"SlateOS Project");
         set_field(
             &mut info.description,
             &mut info.desc_len,
@@ -930,7 +930,7 @@ fn get_module_info(name: &[u8]) -> ModuleInfo {
         );
     } else if starts_with(normalized, b"virtio_blk") {
         set_field(&mut info.license, &mut info.license_len, b"GPL");
-        set_field(&mut info.author, &mut info.author_len, b"OurOS Project");
+        set_field(&mut info.author, &mut info.author_len, b"SlateOS Project");
         set_field(
             &mut info.description,
             &mut info.desc_len,
@@ -941,7 +941,7 @@ fn get_module_info(name: &[u8]) -> ModuleInfo {
         info.dep_count = 1;
     } else if starts_with(normalized, b"virtio_pci") {
         set_field(&mut info.license, &mut info.license_len, b"GPL");
-        set_field(&mut info.author, &mut info.author_len, b"OurOS Project");
+        set_field(&mut info.author, &mut info.author_len, b"SlateOS Project");
         set_field(
             &mut info.description,
             &mut info.desc_len,
@@ -954,7 +954,7 @@ fn get_module_info(name: &[u8]) -> ModuleInfo {
         info.dep_count = 1;
     } else if starts_with(normalized, b"virtio_ring") {
         set_field(&mut info.license, &mut info.license_len, b"GPL");
-        set_field(&mut info.author, &mut info.author_len, b"OurOS Project");
+        set_field(&mut info.author, &mut info.author_len, b"SlateOS Project");
         set_field(
             &mut info.description,
             &mut info.desc_len,
@@ -965,7 +965,7 @@ fn get_module_info(name: &[u8]) -> ModuleInfo {
         info.dep_count = 1;
     } else if starts_with(normalized, b"e1000") {
         set_field(&mut info.license, &mut info.license_len, b"GPL");
-        set_field(&mut info.author, &mut info.author_len, b"OurOS Project");
+        set_field(&mut info.author, &mut info.author_len, b"SlateOS Project");
         set_field(
             &mut info.description,
             &mut info.desc_len,
@@ -996,7 +996,7 @@ fn get_module_info(name: &[u8]) -> ModuleInfo {
     } else {
         // Generic module info
         set_field(&mut info.license, &mut info.license_len, b"GPL");
-        set_field(&mut info.author, &mut info.author_len, b"OurOS Project");
+        set_field(&mut info.author, &mut info.author_len, b"SlateOS Project");
         set_field(&mut info.description, &mut info.desc_len, b"Kernel module");
         set_field(&mut info.version, &mut info.version_len, b"0.1.0");
     }

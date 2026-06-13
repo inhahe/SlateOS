@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wlrctl-cli — OurOS wlrctl wlroots compositor control
+//! wlrctl-cli — SlateOS wlrctl wlroots compositor control
 //!
 //! Single personality: `wlrctl`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wlrctl(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: wlrctl COMMAND [ARGS]");
-        println!("wlrctl v0.2 (OurOS) — wlroots compositor control utility");
+        println!("wlrctl v0.2 (SlateOS) — wlroots compositor control utility");
         println!();
         println!("Commands:");
         println!("  keyboard type TEXT        Type text via virtual keyboard");

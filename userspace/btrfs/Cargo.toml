@@ -2,5 +2,5 @@
 name = "btrfs"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS btrfs utility"
+description = "SlateOS btrfs utility"
 [dependencies]

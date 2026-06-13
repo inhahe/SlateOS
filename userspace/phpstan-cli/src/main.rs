@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! phpstan-cli — OurOS PHPStan static analysis tool
+//! phpstan-cli — SlateOS PHPStan static analysis tool
 //!
 //! Multi-personality: `phpstan`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_phpstan(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: phpstan COMMAND [OPTIONS]");
-        println!("PHPStan 1.11.7 (OurOS)");
+        println!("PHPStan 1.11.7 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  analyse      Analyse source code");

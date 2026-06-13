@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fivetran-cli — OurOS Fivetran CLI
+//! fivetran-cli — SlateOS Fivetran CLI
 //!
 //! Multi-personality: `fivetran`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_fivetran(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: fivetran COMMAND [OPTIONS]");
-        println!("Fivetran CLI 1.2.0 (OurOS)");
+        println!("Fivetran CLI 1.2.0 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  connector      Manage connectors");

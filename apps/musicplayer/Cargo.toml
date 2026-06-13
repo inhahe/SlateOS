@@ -2,6 +2,6 @@
 name = "musicplayer"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS Music Player — audio playback with playlist management"
+description = "SlateOS Music Player — audio playback with playlist management"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! square-cli — OurOS Square CLI
+//! square-cli — SlateOS Square CLI
 //!
 //! Single personality: `square`
 
@@ -11,7 +11,7 @@ fn run_square(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: square <COMMAND> [OPTIONS]");
         println!();
-        println!("Square developer CLI (OurOS).");
+        println!("Square developer CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  payments     Manage payments");

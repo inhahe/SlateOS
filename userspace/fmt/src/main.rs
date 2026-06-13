@@ -1,4 +1,4 @@
-//! OurOS `fmt` Utility -- Simple Text Formatter
+//! SlateOS `fmt` Utility -- Simple Text Formatter
 //!
 //! Reformats paragraphs of text to fit within a specified width. Modeled
 //! after the traditional Unix `fmt` command.
@@ -607,7 +607,7 @@ fn run(config: &Config) -> io::Result<i32> {
 // ============================================================================
 
 fn print_help() {
-    println!("OurOS fmt v{VERSION}");
+    println!("SlateOS fmt v{VERSION}");
     println!();
     println!("Reformat each paragraph in FILE(s), writing to standard output.");
     println!("With no FILE, or when FILE is -, read standard input.");
@@ -651,7 +651,7 @@ fn main() {
             process::exit(0);
         }
         ParseResult::Version => {
-            println!("fmt (OurOS) {VERSION}");
+            println!("fmt (SlateOS) {VERSION}");
             process::exit(0);
         }
         ParseResult::Run(config) => match run(&config) {

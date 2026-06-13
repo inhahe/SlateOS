@@ -1,4 +1,4 @@
-//! OurOS Screen Recorder
+//! SlateOS Screen Recorder
 //!
 //! A screen recording/capture application providing:
 //! - Capture modes: full screen, selected window, custom region (drag to select)

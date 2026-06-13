@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mimir-cli — OurOS Grafana Mimir CLI tools
+//! mimir-cli — SlateOS Grafana Mimir CLI tools
 //!
 //! Multi-personality: `mimirtool`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mimirtool(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: mimirtool COMMAND [OPTIONS]");
-        println!("mimirtool (Grafana Mimir 2.13.0, OurOS)");
+        println!("mimirtool (Grafana Mimir 2.13.0, SlateOS)");
         println!();
         println!("Commands:");
         println!("  rules        Manage recording/alerting rules");

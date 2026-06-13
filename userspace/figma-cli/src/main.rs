@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! figma-cli — OurOS Figma collaborative design tool
+//! figma-cli — SlateOS Figma collaborative design tool
 //!
 //! Single personality: `figma`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_fig(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: figma [OPTIONS]");
-        println!("Figma (OurOS) — Browser-first collaborative interface design");
+        println!("Figma (SlateOS) — Browser-first collaborative interface design");
         println!();
         println!("Options:");
         println!("  --design               Figma Design (vector UI design)");
@@ -25,8 +25,8 @@ fn run_fig(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Figma 124.13.0 Desktop (OurOS)"); return 0; }
-    println!("Figma 124.13.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Figma 124.13.0 Desktop (SlateOS)"); return 0; }
+    println!("Figma 124.13.0 (SlateOS)");
     println!("  Vendor: Figma, Inc. (San Francisco, founded 2012)");
     println!("  Founders: Dylan Field (CEO), Evan Wallace (CTO)");
     println!("  Adobe acquisition: $20B agreed Sep 2022 → BLOCKED Dec 2023 by EU/UK antitrust");

@@ -2,7 +2,7 @@
 name = "objdump"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS ELF object file analysis tools"
+description = "SlateOS ELF object file analysis tools"
 [dependencies]
 
 [lints]

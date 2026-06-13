@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zincsearch-cli — OurOS ZincSearch lightweight search engine
+//! zincsearch-cli — SlateOS ZincSearch lightweight search engine
 //!
 //! Single personality: `zincsearch`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_zincsearch(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: zincsearch [OPTIONS]");
-        println!("ZincSearch v0.4 (OurOS) — Lightweight Elasticsearch alternative");
+        println!("ZincSearch v0.4 (SlateOS) — Lightweight Elasticsearch alternative");
         println!();
         println!("Options:");
         println!("  --data-dir DIR     Data directory");
@@ -23,8 +23,8 @@ fn run_zincsearch(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("ZincSearch v0.4.10 (OurOS)"); return 0; }
-    println!("ZincSearch v0.4.10 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("ZincSearch v0.4.10 (SlateOS)"); return 0; }
+    println!("ZincSearch v0.4.10 (SlateOS)");
     println!("  Web UI: http://0.0.0.0:4080");
     println!("  API: http://0.0.0.0:4080/api");
     println!("  Indexes: 6");

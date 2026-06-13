@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sqs-cli — OurOS AWS SQS (the original cloud queue — Amazon's first-ever AWS service, 2004)
+//! sqs-cli — SlateOS AWS SQS (the original cloud queue — Amazon's first-ever AWS service, 2004)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sqs(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sqs [OPTIONS]");
-        println!("AWS SQS (OurOS) — Simple Queue Service, Amazon's first-ever cloud service (2004)");
+        println!("AWS SQS (SlateOS) — Simple Queue Service, Amazon's first-ever cloud service (2004)");
         println!();
         println!("Options:");
         println!("  --standard             Standard queue (at-least-once, best-effort ordering)");
@@ -21,8 +21,8 @@ fn run_sqs(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("AWS SQS 2024 (OurOS) — sqs CLI (aws-cli v2)"); return 0; }
-    println!("AWS SQS 2024 (OurOS) — Simple Queue Service (the original cloud queue)");
+    if args.iter().any(|a| a == "--version") { println!("AWS SQS 2024 (SlateOS) — sqs CLI (aws-cli v2)"); return 0; }
+    println!("AWS SQS 2024 (SlateOS) — Simple Queue Service (the original cloud queue)");
     println!("  Vendor: Amazon Web Services (Seattle, WA — NASDAQ: AMZN)");
     println!("  History (the AWS origin story):");
     println!("    - Launched 9 Nov 2004 — Amazon's FIRST-EVER cloud service");

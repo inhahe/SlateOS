@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! freeipa-cli — OurOS FreeIPA identity management
+//! freeipa-cli — SlateOS FreeIPA identity management
 //!
 //! Multi-personality: `ipa`, `ipa-server-install`
 
@@ -15,7 +15,7 @@ fn run_freeipa(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [COMMAND] [OPTIONS]", prog);
         match prog {
             "ipa-server-install" => {
-                println!("ipa-server-install (OurOS) — FreeIPA server installer");
+                println!("ipa-server-install (SlateOS) — FreeIPA server installer");
                 println!("  --realm REALM      Kerberos realm");
                 println!("  --domain DOMAIN    Domain name");
                 println!("  --ds-password PASS Directory manager password");
@@ -25,7 +25,7 @@ fn run_freeipa(args: &[String], prog: &str) -> i32 {
                 println!("  --unattended       Unattended install");
             }
             _ => {
-                println!("ipa (OurOS) — FreeIPA administration tool");
+                println!("ipa (SlateOS) — FreeIPA administration tool");
                 println!("  user-add USER      Add user");
                 println!("  user-find          Find users");
                 println!("  user-show USER     Show user details");
@@ -40,7 +40,7 @@ fn run_freeipa(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("FreeIPA v4.11.2 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("FreeIPA v4.11.2 (SlateOS)"); return 0; }
     match prog {
         "ipa-server-install" => {
             println!("FreeIPA Server Installer v4.11.2");
@@ -48,7 +48,7 @@ fn run_freeipa(args: &[String], prog: &str) -> i32 {
             println!("  Required: realm, domain, passwords");
         }
         _ => {
-            println!("FreeIPA v4.11.2 (OurOS)");
+            println!("FreeIPA v4.11.2 (SlateOS)");
             println!("  Server: ipa.example.com");
             println!("  Realm: EXAMPLE.COM");
             println!("  Domain: example.com");

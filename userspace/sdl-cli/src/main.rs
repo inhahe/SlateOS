@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sdl-cli — OurOS SDL2 config tool
+//! sdl-cli — SlateOS SDL2 config tool
 //!
 //! Multi-personality: `sdl2-config`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sdl2_config(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: sdl2-config [OPTIONS]");
-        println!("SDL2 config 2.30.0 (OurOS)");
+        println!("SDL2 config 2.30.0 (SlateOS)");
         println!();
         println!("Options:");
         println!("  --version        Print SDL version");

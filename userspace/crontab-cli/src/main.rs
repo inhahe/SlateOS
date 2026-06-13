@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! crontab-cli — OurOS crontab CLI
+//! crontab-cli — SlateOS crontab CLI
 //!
 //! Single personality: `crontab`
 
@@ -11,7 +11,7 @@ fn run_crontab(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: crontab [OPTIONS] [FILE]");
         println!();
-        println!("crontab — maintain crontab files (OurOS).");
+        println!("crontab — maintain crontab files (SlateOS).");
         println!();
         println!("Options:");
         println!("  -l               List crontab entries");

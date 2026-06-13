@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wikijs-cli — OurOS Wiki.js wiki engine
+//! wikijs-cli — SlateOS Wiki.js wiki engine
 //!
 //! Single personality: `wikijs`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wikijs(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wikijs [COMMAND] [OPTIONS]");
-        println!("Wiki.js v2.5 (OurOS) — Modern wiki engine");
+        println!("Wiki.js v2.5 (SlateOS) — Modern wiki engine");
         println!();
         println!("Commands:");
         println!("  serve              Start Wiki.js server");
@@ -32,8 +32,8 @@ fn run_wikijs(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Wiki.js v2.5.303 (OurOS)"); return 0; }
-    println!("Wiki.js v2.5.303 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Wiki.js v2.5.303 (SlateOS)"); return 0; }
+    println!("Wiki.js v2.5.303 (SlateOS)");
     println!("  Pages: 678");
     println!("  Users: 45");
     println!("  Groups: 8");

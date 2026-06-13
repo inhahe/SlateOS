@@ -2,5 +2,5 @@
 name = "dmidecode"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS SMBIOS/DMI system information"
+description = "SlateOS SMBIOS/DMI system information"
 [dependencies]

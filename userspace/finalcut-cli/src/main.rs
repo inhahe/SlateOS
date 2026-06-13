@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! finalcut-cli — OurOS Final Cut Pro (Apple pro video editor)
+//! finalcut-cli — SlateOS Final Cut Pro (Apple pro video editor)
 //!
 //! Single personality: `finalcut`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_fcp(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: finalcut [OPTIONS]");
-        println!("Final Cut Pro 11 (OurOS) — Apple pro non-linear video editor");
+        println!("Final Cut Pro 11 (SlateOS) — Apple pro non-linear video editor");
         println!();
         println!("Options:");
         println!("  --new                  New library");
@@ -24,8 +24,8 @@ fn run_fcp(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Final Cut Pro 11.0.1 (OurOS)"); return 0; }
-    println!("Final Cut Pro 11.0.1 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Final Cut Pro 11.0.1 (SlateOS)"); return 0; }
+    println!("Final Cut Pro 11.0.1 (SlateOS)");
     println!("  Vendor: Apple Inc. (Cupertino, CA)");
     println!("  History: Final Cut Pro 1.0 (1999) → Final Cut Pro 7 (Studio era) →");
     println!("           controversial Final Cut Pro X (2011) rewrite → matured into FCP 11");

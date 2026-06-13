@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! packer — OurOS machine image builder
+//! packer — SlateOS machine image builder
 //!
 //! Single personality: `packer`
 
@@ -28,7 +28,7 @@ fn run_packer(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match cmd {
         "version" => {
-            println!("Packer v1.11.0 (OurOS)");
+            println!("Packer v1.11.0 (SlateOS)");
         }
         "build" => {
             let template = args.get(1).map(|s| s.as_str()).unwrap_or(".");

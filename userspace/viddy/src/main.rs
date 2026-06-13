@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! viddy — OurOS modern watch command with diff and history
+//! viddy — SlateOS modern watch command with diff and history
 //!
 //! Single personality: `viddy`
 
@@ -29,7 +29,7 @@ fn run_viddy(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("viddy 0.4.0 (OurOS)");
+        println!("viddy 0.4.0 (SlateOS)");
         return 0;
     }
 

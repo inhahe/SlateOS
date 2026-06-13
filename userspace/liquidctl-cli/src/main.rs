@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! liquidctl-cli — OurOS liquid cooler control
+//! liquidctl-cli — SlateOS liquid cooler control
 //!
 //! Single personality: `liquidctl`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_liquidctl(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: liquidctl COMMAND [OPTIONS]");
-        println!("liquidctl v1.13 (OurOS) — Liquid cooler and RGB control");
+        println!("liquidctl v1.13 (SlateOS) — Liquid cooler and RGB control");
         println!();
         println!("Commands:");
         println!("  list              List connected devices");
@@ -23,7 +23,7 @@ fn run_liquidctl(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("liquidctl v1.13 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("liquidctl v1.13 (SlateOS)"); return 0; }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("status");
     match cmd {
         "list" => {

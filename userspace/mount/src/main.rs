@@ -1,4 +1,4 @@
-//! OurOS Mount/Umount Utility
+//! SlateOS Mount/Umount Utility
 //!
 //! Manages filesystem mount points. Lists current mounts, mounts new
 //! filesystems, and unmounts existing ones.
@@ -25,12 +25,12 @@ use std::process;
 // DESIGN GAP -- mount/umount have no kernel ABI yet
 // ============================================================================
 //
-// The OurOS kernel does **not** expose mount(2) or umount(2) syscalls. There
+// The SlateOS kernel does **not** expose mount(2) or umount(2) syscalls. There
 // is no SYS_MOUNT or SYS_UMOUNT in kernel/src/syscall/number.rs.
 //
 // An earlier version of this file hardcoded SYS_MOUNT=620 and SYS_UMOUNT=621
 // and fired them via a raw `syscall` instruction. Both numbers map to
-// **DESTRUCTIVE** unrelated filesystem syscalls on OurOS:
+// **DESTRUCTIVE** unrelated filesystem syscalls on SlateOS:
 //
 //   * 620 = SYS_FS_TRASH_RESTORE — "mount /dev/sda1 /mnt" would call
 //     fs::trash::restore(low_bits_of_src_ptr_as_filename_ptr, ...) and
@@ -248,7 +248,7 @@ fn mount_all() {
 // ============================================================================
 
 fn print_usage() {
-    println!("OurOS Mount Utility v0.1.0");
+    println!("SlateOS Mount Utility v0.1.0");
     println!();
     println!("List, mount, and unmount filesystems.");
     println!();

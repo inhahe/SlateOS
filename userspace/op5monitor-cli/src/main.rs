@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! op5monitor-cli — OurOS OP5 Monitor
+//! op5monitor-cli — SlateOS OP5 Monitor
 //!
 //! Single personality: `op5`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_op5(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: op5 [COMMAND] [OPTIONS]");
-        println!("OP5 Monitor v9.3 (OurOS) — Network monitoring solution");
+        println!("OP5 Monitor v9.3 (SlateOS) — Network monitoring solution");
         println!();
         println!("Commands:");
         println!("  host list|add|del    Manage hosts");
@@ -32,8 +32,8 @@ fn run_op5(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("OP5 Monitor v9.3.1 (OurOS)"); return 0; }
-    println!("OP5 Monitor v9.3.1 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("OP5 Monitor v9.3.1 (SlateOS)"); return 0; }
+    println!("OP5 Monitor v9.3.1 (SlateOS)");
     println!("  Hosts: 234 (220 up, 14 unreachable)");
     println!("  Services: 4,567 (4,123 ok, 234 warning, 210 critical)");
     println!("  Host groups: 15");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! atuin — OurOS magical shell history with sync and search
+//! atuin — SlateOS magical shell history with sync and search
 //!
 //! Single personality: `atuin`
 
@@ -37,7 +37,7 @@ fn run_atuin(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("atuin 18.3.0 (OurOS)");
+            println!("atuin 18.3.0 (SlateOS)");
             0
         }
         "init" => {

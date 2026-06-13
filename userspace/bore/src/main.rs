@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bore — OurOS simple TCP tunnel exposing local ports to the internet
+//! bore — SlateOS simple TCP tunnel exposing local ports to the internet
 //!
 //! Single personality: `bore`
 
@@ -24,7 +24,7 @@ fn run_bore(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("bore 0.5.1 (OurOS)");
+            println!("bore 0.5.1 (SlateOS)");
             0
         }
         "local" => {

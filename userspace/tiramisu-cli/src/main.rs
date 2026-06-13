@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tiramisu-cli — OurOS tiramisu notification daemon
+//! tiramisu-cli — SlateOS tiramisu notification daemon
 //!
 //! Single personality: `tiramisu`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_tiramisu(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: tiramisu [OPTIONS]");
-        println!("tiramisu v2.0 (OurOS) — Desktop notification daemon");
+        println!("tiramisu v2.0 (SlateOS) — Desktop notification daemon");
         println!();
         println!("Options:");
         println!("  -o FORMAT      Output format (JSON, default, custom)");
@@ -24,7 +24,7 @@ fn run_tiramisu(args: &[String], _prog: &str) -> i32 {
         println!("as structured text for piping to scripts.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("tiramisu v2.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("tiramisu v2.0 (SlateOS)"); return 0; }
     println!("tiramisu: notification daemon (stdout mode)");
     println!("  Waiting for notifications...");
     0

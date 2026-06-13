@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sensors — OurOS hardware sensor monitoring (lm-sensors)
+//! sensors — SlateOS hardware sensor monitoring (lm-sensors)
 //!
 //! Multi-personality binary detected via argv[0]:
 //!
@@ -86,7 +86,7 @@ fn run_sensors(args: Vec<String>) -> i32 {
     }
 
     if args.iter().any(|a| a == "--version") {
-        println!("sensors version 0.1.0 (OurOS) with libsensors version 3.6.0");
+        println!("sensors version 0.1.0 (SlateOS) with libsensors version 3.6.0");
         return 0;
     }
 
@@ -175,8 +175,8 @@ fn run_sensors_detect(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    println!("# sensors-detect (OurOS)");
-    println!("# System: OurOS Desktop");
+    println!("# sensors-detect (SlateOS)");
+    println!("# System: SlateOS Desktop");
     println!();
     println!("Probing for PCI bus adapters...");
     println!("  Found Intel SMBUS at 0x0600");

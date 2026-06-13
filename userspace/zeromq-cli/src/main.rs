@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zeromq-cli — OurOS ZeroMQ tools
+//! zeromq-cli — SlateOS ZeroMQ tools
 //!
 //! Multi-personality: `zmq-send`, `zmq-recv`, `zmq-proxy`
 
@@ -31,7 +31,7 @@ fn run_zmq(args: &[String], prog_name: &str) -> i32 {
                 println!("  --type TYPE           Proxy type (forwarder, streamer, queue)");
             }
         }
-        println!("ZeroMQ CLI tools (libzmq 4.3.5, OurOS)");
+        println!("ZeroMQ CLI tools (libzmq 4.3.5, SlateOS)");
         return 0;
     }
     match prog_name {

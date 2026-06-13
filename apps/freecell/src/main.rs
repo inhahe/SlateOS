@@ -11,7 +11,7 @@
 #![allow(clippy::needless_range_loop)]
 #![allow(unused_imports)]
 
-//! OurOS FreeCell -- classic FreeCell card game.
+//! SlateOS FreeCell -- classic FreeCell card game.
 //!
 //! Standard 52-card deck dealt across 8 tableau columns (7,7,7,7,6,6,6,6).
 //! Four free cells for temporary single-card storage, four foundation piles

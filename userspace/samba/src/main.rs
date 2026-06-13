@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! samba — OurOS SMB/CIFS file server
+//! samba — SlateOS SMB/CIFS file server
 //!
 //! Multi-personality: `smbd` (file server), `nmbd` (NetBIOS), `smbclient`, `smbstatus`, `testparm`
 
@@ -21,7 +21,7 @@ fn run_smbd(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("Version 4.20.0 (OurOS)");
+        println!("Version 4.20.0 (SlateOS)");
         return 0;
     }
     println!("smbd version 4.20.0 started.");
@@ -41,7 +41,7 @@ fn run_nmbd(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Version 4.20.0 (OurOS)");
+        println!("Version 4.20.0 (SlateOS)");
         return 0;
     }
     println!("nmbd version 4.20.0 started.");
@@ -63,7 +63,7 @@ fn run_smbclient(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Version 4.20.0 (OurOS)");
+        println!("Version 4.20.0 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "-L") {
@@ -92,7 +92,7 @@ fn run_smbclient(args: Vec<String>) -> i32 {
 }
 
 fn run_smbstatus(_args: Vec<String>) -> i32 {
-    println!("Samba version 4.20.0 (OurOS)");
+    println!("Samba version 4.20.0 (SlateOS)");
     println!("PID     Username     Group        Machine                     Protocol Version  Encryption  Signing");
     println!("----------------------------------------------------------------------------------------------------------------------------------------");
     println!("12345   alice        users        192.168.1.100 (ipv4:192.168.1.100:49876)  SMB3_11    -           AES-128-CMAC");
@@ -121,7 +121,7 @@ fn run_testparm(args: Vec<String>) -> i32 {
     println!();
     println!("[global]");
     println!("   workgroup = WORKGROUP");
-    println!("   server string = Samba Server (OurOS)");
+    println!("   server string = Samba Server (SlateOS)");
     println!("   security = USER");
     println!("   map to guest = Bad User");
     println!();

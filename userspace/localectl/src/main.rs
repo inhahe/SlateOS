@@ -1,4 +1,4 @@
-//! OurOS locale and keyboard configuration.
+//! SlateOS locale and keyboard configuration.
 //!
 //! Multi-personality binary providing:
 //! - **localectl** — control system locale and keyboard settings
@@ -493,7 +493,7 @@ fn main() {
             0
         }
         "--version" => {
-            println!("localectl (OurOS) {VERSION}");
+            println!("localectl (SlateOS) {VERSION}");
             0
         }
         other => {

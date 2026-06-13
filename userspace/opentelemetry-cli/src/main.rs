@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! opentelemetry-cli — OurOS OpenTelemetry Collector CLI (otelcol)
+//! opentelemetry-cli — SlateOS OpenTelemetry Collector CLI (otelcol)
 //!
 //! Single personality: `otelcol`
 
@@ -34,7 +34,7 @@ fn run_otelcol(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
         "version" => {
-            println!("otelcol version 0.93.0 (OurOS)");
+            println!("otelcol version 0.93.0 (SlateOS)");
             0
         }
         "validate" => {

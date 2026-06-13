@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! modem-cli — OurOS modem/mobile broadband tools
+//! modem-cli — SlateOS modem/mobile broadband tools
 //!
 //! Multi-personality: `mmcli`, `nmcli` (ModemManager / NetworkManager)
 
@@ -14,7 +14,7 @@ fn run_mmcli(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: mmcli [OPTIONS]");
         println!();
-        println!("mmcli — ModemManager CLI (OurOS).");
+        println!("mmcli — ModemManager CLI (SlateOS).");
         println!();
         println!("Options:");
         println!("  -L, --list-modems     List available modems");
@@ -27,7 +27,7 @@ fn run_mmcli(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("mmcli 1.22 (OurOS)");
+        println!("mmcli 1.22 (SlateOS)");
         return 0;
     }
 
@@ -44,7 +44,7 @@ fn run_mmcli(args: &[String]) -> i32 {
         println!("         |   signal quality: 78% (recent)");
         println!("         |   access tech: lte");
         println!("  ----------------------------");
-        println!("  3GPP   |   operator name: OurOS Mobile");
+        println!("  3GPP   |   operator name: SlateOS Mobile");
         println!("         |   registration: home");
         return 0;
     }
@@ -101,7 +101,7 @@ fn run_nmcli(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: nmcli [OPTIONS] OBJECT COMMAND");
         println!();
-        println!("nmcli — NetworkManager CLI (OurOS).");
+        println!("nmcli — NetworkManager CLI (SlateOS).");
         println!();
         println!("Objects:");
         println!("  general      NetworkManager status");
@@ -113,7 +113,7 @@ fn run_nmcli(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("nmcli tool, version 1.44.0 (OurOS)");
+        println!("nmcli tool, version 1.44.0 (SlateOS)");
         return 0;
     }
 
@@ -126,7 +126,7 @@ fn run_nmcli(args: &[String]) -> i32 {
                     println!("STATE      CONNECTIVITY  WIFI-HW  WIFI     WWAN-HW  WWAN");
                     println!("connected  full          enabled  enabled  enabled  enabled");
                 }
-                "hostname" => println!("ouros-desktop"),
+                "hostname" => println!("slateos-desktop"),
                 _ => println!("nmcli: general command '{}' completed", cmd),
             }
         }

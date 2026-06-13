@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gdal-cli — OurOS GDAL/OGR geospatial tools
+//! gdal-cli — SlateOS GDAL/OGR geospatial tools
 //!
 //! Multi-personality: `gdalinfo`, `gdal_translate`, `gdalwarp`, `ogr2ogr`, `ogrinfo`, `gdalsrsinfo`
 

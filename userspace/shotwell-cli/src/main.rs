@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! shotwell-cli — OurOS Shotwell photo manager
+//! shotwell-cli — SlateOS Shotwell photo manager
 //!
 //! Single personality: `shotwell`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_shotwell(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: shotwell [OPTIONS] [FILES...]");
-        println!("shotwell v0.32 (OurOS) — Photo manager and viewer");
+        println!("shotwell v0.32 (SlateOS) — Photo manager and viewer");
         println!();
         println!("Options:");
         println!("  --datadir DIR     Data directory");
@@ -24,7 +24,7 @@ fn run_shotwell(args: &[String], _prog: &str) -> i32 {
         println!("  face detection, RAW support, slideshows");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("shotwell v0.32 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("shotwell v0.32 (SlateOS)"); return 0; }
     println!("shotwell: photo manager started");
     println!("  Library: 0 photos (import to get started)");
     println!("  Formats: JPEG, PNG, TIFF, BMP, GIF, RAW");

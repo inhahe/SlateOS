@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! h2o-cli — OurOS H2O HTTP/2 web server
+//! h2o-cli — SlateOS H2O HTTP/2 web server
 //!
 //! Single personality: `h2o`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_h2o(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: h2o [OPTIONS]");
-        println!("H2O v2.3 (OurOS) — Optimized HTTP/1.x, HTTP/2, HTTP/3 server");
+        println!("H2O v2.3 (SlateOS) — Optimized HTTP/1.x, HTTP/2, HTTP/3 server");
         println!();
         println!("Options:");
         println!("  -c FILE            Config file (YAML)");
@@ -22,8 +22,8 @@ fn run_h2o(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("H2O v2.3.0 (OurOS)"); return 0; }
-    println!("H2O v2.3.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("H2O v2.3.0 (SlateOS)"); return 0; }
+    println!("H2O v2.3.0 (SlateOS)");
     println!("  Listening: 0.0.0.0:80 (HTTP/1.1, HTTP/2)");
     println!("  Listening: 0.0.0.0:443 (HTTPS, HTTP/2, HTTP/3)");
     println!("  Workers: 4");

@@ -2,5 +2,5 @@
 name = "gzip"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS gzip/gunzip/zcat compression utility"
+description = "SlateOS gzip/gunzip/zcat compression utility"
 [dependencies]

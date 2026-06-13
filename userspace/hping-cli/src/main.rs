@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hping-cli — OurOS hping3 network tool
+//! hping-cli — SlateOS hping3 network tool
 //!
 //! Single personality: `hping3`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_hping3(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: hping3 [OPTIONS] HOST");
-        println!("hping3 v3.0 (OurOS) — Active network smashing tool");
+        println!("hping3 v3.0 (SlateOS) — Active network smashing tool");
         println!();
         println!("Mode:");
         println!("  -0 / --rawip      RAW IP mode");

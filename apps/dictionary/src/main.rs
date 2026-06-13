@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-//! Dictionary & Thesaurus — word lookup tool for OurOS.
+//! Dictionary & Thesaurus — word lookup tool for SlateOS.
 //!
 //! Features:
 //! - Word definitions with parts of speech, pronunciation, usage examples

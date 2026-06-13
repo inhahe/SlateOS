@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! netdata-cli — OurOS Netdata real-time monitoring
+//! netdata-cli — SlateOS Netdata real-time monitoring
 //!
 //! Multi-personality: `netdata`, `netdatacli`, `netdata-claim`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_netdata(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: netdata [OPTIONS]");
-        println!("netdata v1.44 (OurOS) — Real-time performance monitoring");
+        println!("netdata v1.44 (SlateOS) — Real-time performance monitoring");
         println!();
         println!("Options:");
         println!("  -D              Run in foreground (don't fork)");
@@ -25,9 +25,9 @@ fn run_netdata(args: &[String], _prog: &str) -> i32 {
         println!("Dashboard: http://localhost:19999");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("netdata v1.44 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("netdata v1.44 (SlateOS)"); return 0; }
     if args.windows(2).any(|w| w[0] == "-W" && w[1] == "buildinfo") {
-        println!("netdata v1.44 (OurOS)");
+        println!("netdata v1.44 (SlateOS)");
         println!("  Configure: default");
         println!("  Features: dbengine cloud");
         println!("  Plugins: proc diskspace cgroups apps");
@@ -44,7 +44,7 @@ fn run_netdata(args: &[String], _prog: &str) -> i32 {
 fn run_netdatacli(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: netdatacli <command>");
-        println!("netdatacli v1.44 (OurOS) — Netdata CLI control");
+        println!("netdatacli v1.44 (SlateOS) — Netdata CLI control");
         println!("  reload-health     Reload health configuration");
         println!("  reload-claiming   Reload claiming config");
         println!("  aclk-state        Show ACLK connection state");
@@ -57,7 +57,7 @@ fn run_netdatacli(args: &[String], _prog: &str) -> i32 {
         }
         Some("dumpconfig") => {
             println!("[global]");
-            println!("  hostname = ouros-host");
+            println!("  hostname = slateos-host");
             println!("  update every = 1");
             println!("  memory mode = dbengine");
         }
@@ -71,7 +71,7 @@ fn run_netdatacli(args: &[String], _prog: &str) -> i32 {
 fn run_netdata_claim(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: netdata-claim --token TOKEN --rooms ROOM_ID");
-        println!("netdata-claim v1.44 (OurOS) — Claim node to Netdata Cloud");
+        println!("netdata-claim v1.44 (SlateOS) — Claim node to Netdata Cloud");
         return 0;
     }
     let _ = args;

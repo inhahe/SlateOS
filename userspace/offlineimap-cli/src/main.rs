@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! offlineimap-cli — OurOS OfflineIMAP mail synchronizer
+//! offlineimap-cli — SlateOS OfflineIMAP mail synchronizer
 //!
 //! Single personality: `offlineimap`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_offlineimap(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: offlineimap [OPTIONS]");
-        println!("offlineimap v8.0 (OurOS) — Bidirectional IMAP/Maildir sync");
+        println!("offlineimap v8.0 (SlateOS) — Bidirectional IMAP/Maildir sync");
         println!();
         println!("Options:");
         println!("  -a ACCOUNT        Sync specific account");
@@ -25,7 +25,7 @@ fn run_offlineimap(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("offlineimap v8.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("offlineimap v8.0 (SlateOS)"); return 0; }
     let account = args.iter().skip_while(|a| a.as_str() != "-a").nth(1).map(|s| s.as_str()).unwrap_or("default");
     println!("OfflineIMAP — syncing account: {}", account);
     println!("  Remote: imap.example.com");

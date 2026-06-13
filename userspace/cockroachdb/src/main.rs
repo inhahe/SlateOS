@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cockroachdb — OurOS distributed SQL database
+//! cockroachdb — SlateOS distributed SQL database
 //!
 //! Single personality: `cockroach`
 
@@ -30,10 +30,10 @@ fn run_cockroach(args: Vec<String>) -> i32 {
             0
         }
         "version" | "--version" => {
-            println!("Build Tag:        v23.2.5 (OurOS)");
+            println!("Build Tag:        v23.2.5 (SlateOS)");
             println!("Build Time:       2025/05/22 00:00:00");
-            println!("Distribution:     OurOS");
-            println!("Platform:         ouros amd64");
+            println!("Distribution:     SlateOS");
+            println!("Platform:         slateos amd64");
             println!("Go Version:       go1.22.2");
             0
         }
@@ -51,7 +51,7 @@ fn run_cockroach(args: Vec<String>) -> i32 {
             println!("* WARNING: Running in insecure mode (--insecure flag detected).");
             println!("*");
             println!("CockroachDB node starting at 2025-05-22 10:00:00.000 (took 1.0s)");
-            println!("build:               OurOS v23.2.5");
+            println!("build:               SlateOS v23.2.5");
             println!("webui:               http://{}", http);
             println!("sql:                 postgresql://root@{}?sslmode=disable", listen);
             if is_single {
@@ -120,7 +120,7 @@ fn run_cockroach(args: Vec<String>) -> i32 {
             println!("root@localhost:26257/defaultdb> SELECT version();");
             println!("                      version");
             println!("-------------------------------------------------");
-            println!("  CockroachDB OurOS v23.2.5 (x86_64)");
+            println!("  CockroachDB SlateOS v23.2.5 (x86_64)");
             println!("(1 row)");
             println!();
             println!("Time: 1ms total");

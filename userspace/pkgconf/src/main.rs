@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pkgconf — OurOS package configuration tool
+//! pkgconf — SlateOS package configuration tool
 //!
 //! Multi-personality binary detected via argv[0]:
 //!
@@ -90,7 +90,7 @@ fn run_pkgconf(args: Vec<String>) -> i32 {
     }
 
     if args.iter().any(|a| a == "--version") {
-        println!("2.1.0 (OurOS)");
+        println!("2.1.0 (SlateOS)");
         return 0;
     }
 

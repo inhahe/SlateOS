@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sogo-cli — OurOS SOGo groupware
+//! sogo-cli — SlateOS SOGo groupware
 //!
 //! Multi-personality: `sogo`, `sogo-tool`
 
@@ -15,7 +15,7 @@ fn run_sogo(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "sogo-tool" => {
-                println!("sogo-tool (OurOS) — SOGo admin utility");
+                println!("sogo-tool (SlateOS) — SOGo admin utility");
                 println!("  backup USER DIR    Backup user data");
                 println!("  restore USER DIR   Restore user data");
                 println!("  expire-sessions    Expire old sessions");
@@ -24,7 +24,7 @@ fn run_sogo(args: &[String], prog: &str) -> i32 {
                 println!("  dump-defaults      Dump default config");
             }
             _ => {
-                println!("SOGo v5.9 (OurOS) — Groupware server");
+                println!("SOGo v5.9 (SlateOS) — Groupware server");
                 println!("  -WOPort PORT       HTTP port (default: 20000)");
                 println!("  -WOWorkersCount N  Worker processes");
                 println!("  -WOPidFile FILE    PID file");
@@ -33,7 +33,7 @@ fn run_sogo(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("SOGo v5.9.1 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("SOGo v5.9.1 (SlateOS)"); return 0; }
     match prog {
         "sogo-tool" => {
             println!("SOGo Tool v5.9.1");
@@ -43,7 +43,7 @@ fn run_sogo(args: &[String], prog: &str) -> i32 {
             println!("  Operation completed successfully.");
         }
         _ => {
-            println!("SOGo v5.9.1 (OurOS)");
+            println!("SOGo v5.9.1 (SlateOS)");
             println!("  Web: http://0.0.0.0:20000/SOGo");
             println!("  DAV: CalDAV, CardDAV");
             println!("  ActiveSync: EAS 16.0");

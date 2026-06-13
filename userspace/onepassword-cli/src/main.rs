@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! onepassword-cli — OurOS 1Password (AgileBits) password manager
+//! onepassword-cli — SlateOS 1Password (AgileBits) password manager
 //!
 //! Personalities: `onepassword`, `1password`, `op`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_op(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: 1password [OPTIONS]");
-        println!("1Password 8 (OurOS) — AgileBits password manager");
+        println!("1Password 8 (SlateOS) — AgileBits password manager");
         println!();
         println!("Options:");
         println!("  --vault NAME           Open vault");
@@ -24,8 +24,8 @@ fn run_op(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("1Password 8.10.50 (OurOS)"); return 0; }
-    println!("1Password 8.10.50 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("1Password 8.10.50 (SlateOS)"); return 0; }
+    println!("1Password 8.10.50 (SlateOS)");
     println!("  Vendor: AgileBits Inc. (Toronto, Canada, founded 2005)");
     println!("  Founders: Roustem Karimov, Dave Teare");
     println!("  Crypto: AES-256-GCM, PBKDF2-HMAC-SHA256 (100K iter), Secret Key + master pw");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! systemd-cli — OurOS systemd-like service manager tools
+//! systemd-cli — SlateOS systemd-like service manager tools
 //!
 //! Multi-personality: `systemctl`, `journalctl`, `hostnamectl`, `timedatectl`,
 //! `loginctl`, `localectl`
@@ -20,7 +20,7 @@ fn run_systemctl(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: systemctl [OPTIONS] COMMAND [UNIT...]");
         println!();
-        println!("systemctl — service manager control (OurOS).");
+        println!("systemctl — service manager control (SlateOS).");
         println!();
         println!("Commands:");
         println!("  start UNIT         Start a unit");
@@ -53,7 +53,7 @@ fn run_systemctl(args: &[String]) -> i32 {
         }
         "status" => {
             if unit.is_empty() {
-                println!("● ouros");
+                println!("● slateos");
                 println!("    State: running");
                 println!("    Units: 142 loaded (incl. loaded: 142; masked: 0)");
                 println!("     Jobs: 0 queued");
@@ -96,7 +96,7 @@ fn run_journalctl(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: journalctl [OPTIONS]");
         println!();
-        println!("journalctl — query the systemd journal (OurOS).");
+        println!("journalctl — query the systemd journal (SlateOS).");
         println!();
         println!("Options:");
         println!("  -f, --follow     Follow new entries");
@@ -120,13 +120,13 @@ fn run_journalctl(args: &[String]) -> i32 {
     }
 
     println!("-- Journal begins at Thu 2025-01-01 00:00:00 UTC, ends at Thu 2025-01-01 12:00:00 UTC. --");
-    println!("Jan 01 00:00:00 ouros kernel: OurOS version 1.0.0 booting");
-    println!("Jan 01 00:00:01 ouros systemd[1]: Starting system initialization...");
-    println!("Jan 01 00:00:02 ouros systemd[1]: Started udev Kernel Device Manager.");
-    println!("Jan 01 00:00:03 ouros systemd[1]: Started D-Bus System Message Bus.");
-    println!("Jan 01 00:00:04 ouros systemd[1]: Started Network Configuration.");
-    println!("Jan 01 00:00:05 ouros sshd[456]: Server listening on 0.0.0.0 port 22.");
-    println!("Jan 01 00:00:06 ouros systemd[1]: Reached target Multi-User System.");
+    println!("Jan 01 00:00:00 slateos kernel: SlateOS version 1.0.0 booting");
+    println!("Jan 01 00:00:01 slateos systemd[1]: Starting system initialization...");
+    println!("Jan 01 00:00:02 slateos systemd[1]: Started udev Kernel Device Manager.");
+    println!("Jan 01 00:00:03 slateos systemd[1]: Started D-Bus System Message Bus.");
+    println!("Jan 01 00:00:04 slateos systemd[1]: Started Network Configuration.");
+    println!("Jan 01 00:00:05 slateos sshd[456]: Server listening on 0.0.0.0 port 22.");
+    println!("Jan 01 00:00:06 slateos systemd[1]: Reached target Multi-User System.");
     0
 }
 
@@ -140,13 +140,13 @@ fn run_hostnamectl(args: &[String]) -> i32 {
     match subcmd {
         "hostname" if args.len() > 1 => println!("Hostname set to '{}'", args[1]),
         _ => {
-            println!("   Static hostname: ouros");
+            println!("   Static hostname: slateos");
             println!("         Icon name: computer-desktop");
             println!("           Chassis: desktop");
             println!("        Machine ID: 12345678901234567890123456789012");
             println!("           Boot ID: abcdefabcdefabcdefabcdefabcdefab");
-            println!("  Operating System: OurOS 1.0");
-            println!("            Kernel: OurOS 1.0.0");
+            println!("  Operating System: SlateOS 1.0");
+            println!("            Kernel: SlateOS 1.0.0");
             println!("      Architecture: x86-64");
         }
     }

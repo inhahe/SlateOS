@@ -2,5 +2,5 @@
 name = "fsck"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS filesystem check and repair utility"
+description = "SlateOS filesystem check and repair utility"
 [dependencies]

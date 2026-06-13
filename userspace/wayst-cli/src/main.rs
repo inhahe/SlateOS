@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wayst-cli — OurOS Wayst GPU-accelerated terminal
+//! wayst-cli — SlateOS Wayst GPU-accelerated terminal
 //!
 //! Single personality: `wayst`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wayst(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wayst [OPTIONS] [CMD...]");
-        println!("wayst v0.1 (OurOS) — GPU-accelerated Wayland terminal");
+        println!("wayst v0.1 (SlateOS) — GPU-accelerated Wayland terminal");
         println!();
         println!("Options:");
         println!("  CMD               Command to run");
@@ -23,7 +23,7 @@ fn run_wayst(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("wayst v0.1 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("wayst v0.1 (SlateOS)"); return 0; }
     println!("wayst: GPU-accelerated terminal");
     println!("  Renderer: OpenGL ES 3.0");
     println!("  Font rasterizer: FreeType");

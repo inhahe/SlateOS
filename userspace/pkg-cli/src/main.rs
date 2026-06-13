@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pkg-cli — OurOS FreeBSD pkg package manager
+//! pkg-cli — SlateOS FreeBSD pkg package manager
 //!
 //! Multi-personality: `pkg`
 
@@ -10,7 +10,7 @@ use std::process;
 fn run_pkg(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: pkg COMMAND [OPTIONS]");
-        println!("pkg 1.21.0 (OurOS)");
+        println!("pkg 1.21.0 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  install       Install packages");

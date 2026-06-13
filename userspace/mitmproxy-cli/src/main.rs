@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mitmproxy-cli — OurOS mitmproxy HTTP/HTTPS proxy
+//! mitmproxy-cli — SlateOS mitmproxy HTTP/HTTPS proxy
 //!
 //! Three personalities: `mitmproxy`, `mitmdump`, `mitmweb`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mitmproxy(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: mitmproxy [OPTIONS]");
-        println!("mitmproxy v10.3.0 (OurOS) — Interactive HTTPS proxy");
+        println!("mitmproxy v10.3.0 (SlateOS) — Interactive HTTPS proxy");
         println!();
         println!("Options:");
         println!("  -p, --listen-port PORT   Listen port (default: 8080)");
@@ -26,7 +26,7 @@ fn run_mitmproxy(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("mitmproxy 10.3.0 (OurOS)");
+        println!("mitmproxy 10.3.0 (SlateOS)");
         return 0;
     }
     println!("mitmproxy v10.3.0 starting...");

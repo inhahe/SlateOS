@@ -1,4 +1,4 @@
-//! OurOS `xargs` Utility -- Build and Execute Command Lines from Standard Input
+//! SlateOS `xargs` Utility -- Build and Execute Command Lines from Standard Input
 //!
 //! Reads items from standard input (delimited by whitespace, newlines, NUL
 //! bytes, or a custom delimiter) and appends them as arguments to a specified
@@ -156,7 +156,7 @@ fn parse_args(args: &[String]) -> Result<Config, i32> {
                     return Err(EXIT_SUCCESS);
                 }
                 "--version" => {
-                    println!("xargs (OurOS) {VERSION}");
+                    println!("xargs (SlateOS) {VERSION}");
                     return Err(EXIT_SUCCESS);
                 }
                 "--null" => config.null_delimited = true,
@@ -873,7 +873,7 @@ fn json_escape(s: &str) -> String {
 // ============================================================================
 
 fn print_help() {
-    println!("OurOS xargs v{VERSION}");
+    println!("SlateOS xargs v{VERSION}");
     println!();
     println!("Build and execute command lines from standard input.");
     println!();

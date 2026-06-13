@@ -10,7 +10,7 @@
 #![allow(clippy::fn_params_excessive_bools)]
 #![allow(unused_imports)]
 
-//! OurOS Reversi (Othello) — a full Reversi game with AI opponent.
+//! SlateOS Reversi (Othello) — a full Reversi game with AI opponent.
 //!
 //! Features an 8x8 board with standard rules, legal move validation,
 //! piece flipping in all 8 directions, pass detection, game end detection,

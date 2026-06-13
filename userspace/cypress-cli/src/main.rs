@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cypress-cli — OurOS Cypress testing CLI
+//! cypress-cli — SlateOS Cypress testing CLI
 //!
 //! Single personality: `cypress`
 
@@ -11,7 +11,7 @@ fn run_cypress(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: cypress <COMMAND> [OPTIONS]");
         println!();
-        println!("Cypress end-to-end testing CLI (OurOS).");
+        println!("Cypress end-to-end testing CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  run          Run tests headless");
@@ -23,7 +23,7 @@ fn run_cypress(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Cypress package version: 13.6.3 (OurOS)");
+        println!("Cypress package version: 13.6.3 (SlateOS)");
         return 0;
     }
 
@@ -72,7 +72,7 @@ fn run_cypress(args: Vec<String>) -> i32 {
         "info" => {
             println!("Cypress Info:");
             println!("  Installed version: 13.6.3");
-            println!("  OS Platform:       ouros (x64)");
+            println!("  OS Platform:       slateos (x64)");
             println!("  Node version:      v20.11.0");
             println!("  Browsers:          Chromium 120, Firefox 121");
             0

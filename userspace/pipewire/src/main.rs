@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pipewire — OurOS PipeWire multimedia framework
+//! pipewire — SlateOS PipeWire multimedia framework
 //!
 //! Multi-personality binary for PipeWire audio/video management.
 //! Detected via argv[0] basename (strip path separators and `.exe` suffix):
@@ -631,7 +631,7 @@ fn build_simulated_state() -> PwState {
     let core_info = PwCoreInfo {
         _cookie: 0xDEAD_BEEF,
         _user_name: String::from("user"),
-        _host_name: String::from("ouros"),
+        _host_name: String::from("slateos"),
         _version: String::from(PW_VERSION),
         _name: String::from("pipewire-0"),
     };

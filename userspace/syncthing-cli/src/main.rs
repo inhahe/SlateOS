@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! syncthing-cli — OurOS Syncthing CLI
+//! syncthing-cli — SlateOS Syncthing CLI
 //!
 //! Multi-personality: `syncthing`, `stcli`
 
@@ -19,7 +19,7 @@ fn run_syncthing(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: syncthing [OPTIONS] [COMMAND]");
         println!();
-        println!("Syncthing — continuous file synchronization (OurOS).");
+        println!("Syncthing — continuous file synchronization (SlateOS).");
         println!();
         println!("Commands:");
         println!("  serve          Start syncthing (default)");
@@ -37,7 +37,7 @@ fn run_syncthing(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("syncthing v1.27.3 (OurOS)");
+        println!("syncthing v1.27.3 (SlateOS)");
         return 0;
     }
 
@@ -45,7 +45,7 @@ fn run_syncthing(args: &[String]) -> i32 {
 
     match cmd {
         "serve" | "" => {
-            println!("[start] syncthing v1.27.3 (OurOS)");
+            println!("[start] syncthing v1.27.3 (SlateOS)");
             println!("[start] My ID: ABCDEFG-HIJKLMN-OPQRSTU-VWXYZ01-2345678-9ABCDEF-GHIJKLM-NOPQRS0");
             println!("[start] GUI available at http://127.0.0.1:8384");
             println!("[start] Listening on :22000");
@@ -87,7 +87,7 @@ fn run_stcli(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: stcli [OPTIONS] COMMAND");
         println!();
-        println!("stcli — Syncthing command-line interface (OurOS).");
+        println!("stcli — Syncthing command-line interface (SlateOS).");
         println!();
         println!("Commands:");
         println!("  show system    Show system status");

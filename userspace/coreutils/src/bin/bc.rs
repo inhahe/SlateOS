@@ -1991,7 +1991,7 @@ fn main() {
     };
 
     if !quiet {
-        eprintln!("bc 1.0 (ouros coreutils)");
+        eprintln!("bc 1.0 (slateos coreutils)");
         eprintln!("Type \"quit\" to exit.");
     }
 

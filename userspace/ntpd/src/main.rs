@@ -1,4 +1,4 @@
-//! ntpd / ntpdate / sntp -- NTP time synchronization for OurOS.
+//! ntpd / ntpdate / sntp -- NTP time synchronization for SlateOS.
 //!
 //! Multi-personality binary: behaves as `ntpdate` or `sntp` when invoked under
 //! those names (one-shot query + set), or as `ntpd` (continuous daemon) when
@@ -525,7 +525,7 @@ fn format_human(unix_secs: u64) -> String {
 // System time helpers
 // ---------------------------------------------------------------------------
 
-// Native OurOS clock syscalls (kernel syscall/number.rs is the ABI source of
+// Native SlateOS clock syscalls (kernel syscall/number.rs is the ABI source of
 // truth).  There is NO combined clock_gettime(clock_id, *ts): SYS_CLOCK_REALTIME
 // takes no arguments and returns wall-clock nanoseconds-since-epoch in rax;
 // SYS_CLOCK_SETTIME takes the absolute target ns as its only argument;
@@ -651,7 +651,7 @@ fn ntp_query_one(
     // SERVICE on Linux and forces single-instance ownership of the NTP
     // listening port, neither of which is useful for a one-shot query.
     // Keep `use_unpriv_port` as a no-op for now — it documents the
-    // -u flag's eventual behaviour once the OurOS net layer supports
+    // -u flag's eventual behaviour once the SlateOS net layer supports
     // capability-checked privileged binds.
     let _ = use_unpriv_port;
     let bind_addr = "0.0.0.0:0";

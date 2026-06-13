@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mbutil-cli — OurOS MBTiles utility
+//! mbutil-cli — SlateOS MBTiles utility
 //!
 //! Single personality: `mbutil`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mbutil(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: mbutil COMMAND [OPTIONS]");
-        println!("mbutil v0.3 (OurOS) — MBTiles import/export utility");
+        println!("mbutil v0.3 (SlateOS) — MBTiles import/export utility");
         println!();
         println!("Commands:");
         println!("  export FILE DIR   Export MBTiles to tile directory");
@@ -25,7 +25,7 @@ fn run_mbutil(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("mbutil v0.3 (OurOS)");
+        println!("mbutil v0.3 (SlateOS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("info");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sentry-cli — OurOS Sentry error tracking CLI
+//! sentry-cli — SlateOS Sentry error tracking CLI
 //!
 //! Single personality: `sentry-cli`
 
@@ -38,7 +38,7 @@ fn run_sentry_cli(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("sentry-cli 2.28.0 (OurOS)");
+        println!("sentry-cli 2.28.0 (SlateOS)");
         return 0;
     }
 

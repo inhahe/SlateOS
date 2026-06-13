@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! cdn77-cli — OurOS CDN77 Czech CDN personality CLI.
+//! cdn77-cli — SlateOS CDN77 Czech CDN personality CLI.
 
 use std::env;
 use std::process;
@@ -28,7 +28,7 @@ fn print_help(prog: &str) {
 }
 
 fn print_version() {
-    println!("cdn77-cli 0.1.0 — OurOS personality binary");
+    println!("cdn77-cli 0.1.0 — SlateOS personality binary");
     println!("DataCamp Limited / CDN77 — Prague, Czech Republic + London, UK");
 }
 

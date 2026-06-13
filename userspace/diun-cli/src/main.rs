@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! diun-cli — OurOS Docker Image Update Notifier
+//! diun-cli — SlateOS Docker Image Update Notifier
 //!
 //! Single personality: `diun`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_diun(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: diun COMMAND [OPTIONS]");
-        println!("diun v4.28 (OurOS) — Docker Image Update Notifier");
+        println!("diun v4.28 (SlateOS) — Docker Image Update Notifier");
         println!();
         println!("Commands:");
         println!("  serve             Start watching for updates");
@@ -50,7 +50,7 @@ fn run_diun(args: &[String], _prog: &str) -> i32 {
             println!("  email: sent OK");
             println!("  webhook: sent OK");
         }
-        "version" | "--version" => println!("diun v4.28 (OurOS)"),
+        "version" | "--version" => println!("diun v4.28 (SlateOS)"),
         _ => println!("diun {}: completed", cmd),
     }
     0

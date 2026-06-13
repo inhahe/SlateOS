@@ -2,5 +2,5 @@
 name = "xargs"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS build and execute command lines from stdin"
+description = "SlateOS build and execute command lines from stdin"
 [dependencies]

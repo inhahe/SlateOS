@@ -2,5 +2,5 @@
 name = "sed"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS stream editor"
+description = "SlateOS stream editor"
 [dependencies]

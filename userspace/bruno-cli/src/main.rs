@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bruno-cli — OurOS Bruno API client CLI
+//! bruno-cli — SlateOS Bruno API client CLI
 //!
 //! Multi-personality: `bru`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_bru(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: bru COMMAND [OPTIONS]");
-        println!("Bruno CLI 1.21.0 (OurOS)");
+        println!("Bruno CLI 1.21.0 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  run          Run a collection or request");

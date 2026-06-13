@@ -1,4 +1,4 @@
-//! OurOS btrfs filesystem management utility.
+//! SlateOS btrfs filesystem management utility.
 //!
 //! Multi-personality binary providing:
 //! - **btrfs** — btrfs filesystem management (subcommands: filesystem, subvolume,
@@ -371,7 +371,7 @@ fn validate_sector_size(size: u32) -> bool {
 }
 
 // ============================================================================
-// Filesystem operations (simulated for OurOS userspace)
+// Filesystem operations (simulated for SlateOS userspace)
 // ============================================================================
 
 /// Probe a device path and return simulated filesystem info.
@@ -2473,7 +2473,7 @@ fn parse_mkfs_options(args: &[String]) -> Result<MkfsOptions> {
                 opts.force = true;
             }
             "-V" | "--version" => {
-                println!("mkfs.btrfs, part of btrfs-progs v{VERSION} (OurOS)");
+                println!("mkfs.btrfs, part of btrfs-progs v{VERSION} (SlateOS)");
                 process::exit(0);
             }
             "-h" | "--help" => {
@@ -2537,7 +2537,7 @@ fn cmd_mkfs(args: &[String]) -> Result<()> {
     let opts = parse_mkfs_options(args)?;
     let uuid = generate_uuid(0xB7BF5);
 
-    println!("btrfs-progs v{VERSION} (OurOS)");
+    println!("btrfs-progs v{VERSION} (SlateOS)");
     println!("See https://btrfs.readthedocs.io for more information.");
     println!();
 
@@ -2618,7 +2618,7 @@ fn parse_convert_options(args: &[String]) -> Result<ConvertOptions> {
             }
             "--no-progress" => opts.progress = false,
             "-V" | "--version" => {
-                println!("btrfs-convert, part of btrfs-progs v{VERSION} (OurOS)");
+                println!("btrfs-convert, part of btrfs-progs v{VERSION} (SlateOS)");
                 process::exit(0);
             }
             "-h" | "--help" => {
@@ -2681,7 +2681,7 @@ fn cmd_convert(args: &[String]) -> Result<()> {
         return Ok(());
     }
 
-    println!("btrfs-convert v{VERSION} (OurOS)");
+    println!("btrfs-convert v{VERSION} (SlateOS)");
     println!("Converting '{}' from ext2/3/4 to btrfs...", opts.device);
     println!();
 
@@ -2744,7 +2744,7 @@ fn print_convert_help() {
 fn print_btrfs_help() {
     println!("Usage: btrfs <command> [<args>]");
     println!();
-    println!("btrfs filesystem management tool v{VERSION} (OurOS)");
+    println!("btrfs filesystem management tool v{VERSION} (SlateOS)");
     println!();
     println!("Commands:");
     println!("  filesystem    Show/manage filesystem properties");
@@ -2777,7 +2777,7 @@ fn cmd_btrfs(args: &[String]) -> Result<()> {
             Ok(())
         }
         "-V" | "--version" | "version" => {
-            println!("btrfs-progs v{VERSION} (OurOS)");
+            println!("btrfs-progs v{VERSION} (SlateOS)");
             Ok(())
         }
         "filesystem" | "fi" => cmd_filesystem(&args[1..]),

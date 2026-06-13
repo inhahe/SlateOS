@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! x2go-cli — OurOS X2Go remote desktop
+//! x2go-cli — SlateOS X2Go remote desktop
 //!
 //! Multi-personality: `x2goclient`, `x2goserver`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_client(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: x2goclient [OPTIONS]");
-        println!("x2goclient v4.1 (OurOS) — X2Go remote desktop client");
+        println!("x2goclient v4.1 (SlateOS) — X2Go remote desktop client");
         println!();
         println!("Options:");
         println!("  --session NAME    Connect to named session");
@@ -24,7 +24,7 @@ fn run_client(args: &[String], _prog: &str) -> i32 {
         println!("  sound forwarding, file sharing, printing");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("x2goclient v4.1 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("x2goclient v4.1 (SlateOS)"); return 0; }
     println!("x2goclient: X2Go client started");
     println!("  Sessions: 0 configured");
     println!("  Transport: SSH + NX compression");
@@ -34,10 +34,10 @@ fn run_client(args: &[String], _prog: &str) -> i32 {
 fn run_server(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: x2goserver [OPTIONS]");
-        println!("x2goserver v4.1 (OurOS) — X2Go server daemon");
+        println!("x2goserver v4.1 (SlateOS) — X2Go server daemon");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("x2goserver v4.1 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("x2goserver v4.1 (SlateOS)"); return 0; }
     println!("x2goserver: X2Go server started");
     println!("  Active sessions: 0");
     0

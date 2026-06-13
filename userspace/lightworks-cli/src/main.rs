@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lightworks-cli — OurOS Lightworks professional NLE
+//! lightworks-cli — SlateOS Lightworks professional NLE
 //!
 //! Single personality: `lightworks`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_lw(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lightworks [OPTIONS] [PROJECT]");
-        println!("Lightworks 2024 (OurOS) — Award-winning NLE (Pulp Fiction, LOTR, etc.)");
+        println!("Lightworks 2024 (SlateOS) — Award-winning NLE (Pulp Fiction, LOTR, etc.)");
         println!();
         println!("Options:");
         println!("  --open FILE            Open .lwks project");
@@ -22,8 +22,8 @@ fn run_lw(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Lightworks 2024.1 (OurOS)"); return 0; }
-    println!("Lightworks 2024.1 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Lightworks 2024.1 (SlateOS)"); return 0; }
+    println!("Lightworks 2024.1 (SlateOS)");
     println!("  Editions: Free, Create, Pro");
     println!("  Used by: Hollywood (Pulp Fiction, Departed, LOTR, Wolf of Wall Street)");
     println!("  Hardware: Optional Console controller, color panel");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! iotop-cli — OurOS iotop CLI
+//! iotop-cli — SlateOS iotop CLI
 //!
 //! Single personality: `iotop`
 
@@ -11,7 +11,7 @@ fn run_iotop(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: iotop [OPTIONS]");
         println!();
-        println!("iotop — I/O monitoring tool (OurOS).");
+        println!("iotop — I/O monitoring tool (SlateOS).");
         println!();
         println!("Options:");
         println!("  -o             Only show processes doing I/O");
@@ -23,7 +23,7 @@ fn run_iotop(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("iotop 0.6 (OurOS)");
+        println!("iotop 0.6 (SlateOS)");
         return 0;
     }
 

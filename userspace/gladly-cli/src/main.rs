@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gladly-cli — OurOS Gladly (radically personal customer service for consumer brands)
+//! gladly-cli — SlateOS Gladly (radically personal customer service for consumer brands)
 //!
 //! Single personality: `gladly`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gladly(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gladly [OPTIONS]");
-        println!("Gladly (OurOS) — radically personal customer service for consumer brands");
+        println!("Gladly (SlateOS) — radically personal customer service for consumer brands");
         println!();
         println!("Options:");
         println!("  --hero                 Hero pricing (concurrent agent licenses, $150/agent/mo)");
@@ -23,8 +23,8 @@ fn run_gladly(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Gladly 2024 (OurOS)"); return 0; }
-    println!("Gladly 2024 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Gladly 2024 (SlateOS)"); return 0; }
+    println!("Gladly 2024 (SlateOS)");
     println!("  Vendor: Gladly Software, Inc. (San Francisco, CA — private)");
     println!("  Founders: Joseph Ansanelli (CEO), Michael Wolfe, others; 2014");
     println!("          Ansanelli: serial entrepreneur, previously co-founded Connectify (Microsoft acq)");

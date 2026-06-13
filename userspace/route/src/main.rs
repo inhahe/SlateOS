@@ -1,4 +1,4 @@
-//! OurOS Routing Table Management
+//! SlateOS Routing Table Management
 //!
 //! Display and manage the kernel IP routing table.
 //! Similar to the classic `route` command on Linux/BSD.
@@ -484,7 +484,7 @@ fn flush_routes() {
 // ============================================================================
 
 fn print_usage() {
-    println!("OurOS Route Management v0.1.0");
+    println!("SlateOS Route Management v0.1.0");
     println!();
     println!("Display and manage the kernel IP routing table.");
     println!();
@@ -550,7 +550,7 @@ fn main() {
                 return;
             }
             "--version" => {
-                println!("route (OurOS) 0.1.0");
+                println!("route (SlateOS) 0.1.0");
                 return;
             }
             "add" | "del" | "delete" | "flush" => {

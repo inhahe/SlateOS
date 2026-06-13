@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lazygit — OurOS terminal UI for git commands
+//! lazygit — SlateOS terminal UI for git commands
 //!
 //! Single personality: `lazygit`
 
@@ -23,7 +23,7 @@ fn run_lazygit(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-v" || a == "--version") {
-        println!("commit=abc123, build date=2025-05-22, build source=OurOS, version=0.42.0, os=ouros, arch=amd64");
+        println!("commit=abc123, build date=2025-05-22, build source=SlateOS, version=0.42.0, os=slateos, arch=amd64");
         return 0;
     }
 
@@ -31,7 +31,7 @@ fn run_lazygit(args: Vec<String>) -> i32 {
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or(".");
-    println!("lazygit 0.42.0 (OurOS)");
+    println!("lazygit 0.42.0 (SlateOS)");
     println!("Opening repository at: {}", path);
     println!("(TUI launched — simulated)");
     0

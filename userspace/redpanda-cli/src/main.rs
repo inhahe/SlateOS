@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! redpanda-cli — OurOS Redpanda streaming tools
+//! redpanda-cli — SlateOS Redpanda streaming tools
 //!
 //! Multi-personality: `rpk`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rpk(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: rpk COMMAND [OPTIONS]");
-        println!("rpk — Redpanda CLI 24.1.7 (OurOS)");
+        println!("rpk — Redpanda CLI 24.1.7 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  topic        Manage topics");

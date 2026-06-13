@@ -1,4 +1,4 @@
-//! OurOS `cmp` Utility -- Byte-by-Byte File Comparison
+//! SlateOS `cmp` Utility -- Byte-by-Byte File Comparison
 //!
 //! Compares two files byte by byte and reports the first difference, or all
 //! differences with `-l`. Supports reading from stdin via `-`, skip offsets,
@@ -564,7 +564,7 @@ fn print_json_output(
 // ============================================================================
 
 fn print_help() {
-    println!("OurOS cmp v{VERSION}");
+    println!("SlateOS cmp v{VERSION}");
     println!();
     println!("Compare two files byte by byte.");
     println!();
@@ -603,7 +603,7 @@ fn main() {
             process::exit(0);
         }
         ParseResult::Version => {
-            println!("cmp (OurOS) {VERSION}");
+            println!("cmp (SlateOS) {VERSION}");
             process::exit(0);
         }
         ParseResult::Run(config) => {

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! weave-cli — OurOS Weave Net container networking
+//! weave-cli — SlateOS Weave Net container networking
 //!
 //! Multi-personality: `weave`, `weaveutil`
 
@@ -15,13 +15,13 @@ fn run_weave(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS] COMMAND", prog);
         match prog {
             "weaveutil" => {
-                println!("weaveutil (OurOS) — Weave Net utility commands");
+                println!("weaveutil (SlateOS) — Weave Net utility commands");
                 println!("  bridge-ip      Show bridge IP");
                 println!("  container-addrs Show container addresses");
                 println!("  cni-net        CNI network config");
             }
             _ => {
-                println!("Weave Net v2.8 (OurOS) — Container network overlay");
+                println!("Weave Net v2.8 (SlateOS) — Container network overlay");
                 println!("  launch         Launch Weave Net");
                 println!("  connect HOST   Connect to peer");
                 println!("  forget HOST    Forget peer");
@@ -35,8 +35,8 @@ fn run_weave(args: &[String], prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Weave Net v2.8.7 (OurOS)"); return 0; }
-    println!("Weave Net v2.8.7 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Weave Net v2.8.7 (SlateOS)"); return 0; }
+    println!("Weave Net v2.8.7 (SlateOS)");
     println!("  Status: ready");
     println!("  Network: 10.32.0.0/12");
     println!("  Range: 10.32.0.1 - 10.47.255.254");

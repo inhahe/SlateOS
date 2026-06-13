@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lf — OurOS terminal file manager (list files)
+//! lf — SlateOS terminal file manager (list files)
 //!
 //! Single personality: `lf`
 
@@ -30,7 +30,7 @@ fn run_lf(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-version") {
-        println!("lf r32 (OurOS)");
+        println!("lf r32 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "-doc") {
@@ -68,7 +68,7 @@ fn run_lf(args: Vec<String>) -> i32 {
         .map(|s| s.as_str())
         .unwrap_or(".");
 
-    println!("lf r32 (OurOS) — {}", path);
+    println!("lf r32 (SlateOS) — {}", path);
     println!();
 
     if single {

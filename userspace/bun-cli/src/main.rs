@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bun-cli — OurOS Bun JavaScript runtime and toolkit
+//! bun-cli — SlateOS Bun JavaScript runtime and toolkit
 //!
 //! Multi-personality: `bun`, `bunx`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_bun(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: bun COMMAND [OPTIONS]");
-        println!("Bun 1.1.18 (OurOS)");
+        println!("Bun 1.1.18 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  run         Run a file, script, or package.json script");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bluez — OurOS Bluetooth management
+//! bluez — SlateOS Bluetooth management
 //!
 //! Multi-personality binary for Bluetooth device management.
 //! Detected via argv[0]:
@@ -243,7 +243,7 @@ fn run_bluetoothctl(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "version" => {
-            println!("bluetoothctl 0.1.0 (OurOS)");
+            println!("bluetoothctl 0.1.0 (SlateOS)");
             0
         }
         "show" => bt_show(&cmd_args),
@@ -280,8 +280,8 @@ fn run_bluetoothctl(args: Vec<String>) -> i32 {
 fn bt_show(_args: &[String]) -> i32 {
     let hci = &read_hci_devices()[0];
     println!("Controller {} [default]", hci.address);
-    println!("  Name: OurOS-Desktop");
-    println!("  Alias: OurOS-Desktop");
+    println!("  Name: SlateOS-Desktop");
+    println!("  Alias: SlateOS-Desktop");
     println!("  Class: 0x000000");
     println!("  Powered: yes");
     println!("  Discoverable: no");
@@ -299,7 +299,7 @@ fn bt_show(_args: &[String]) -> i32 {
 fn bt_list_controllers() -> i32 {
     let hcis = read_hci_devices();
     for hci in &hcis {
-        println!("Controller {} OurOS-Desktop [default]", hci.address);
+        println!("Controller {} SlateOS-Desktop [default]", hci.address);
     }
     0
 }
@@ -471,7 +471,7 @@ fn run_hciconfig(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("hciconfig 0.1.0 (OurOS)");
+            println!("hciconfig 0.1.0 (SlateOS)");
             0
         }
         s if s.starts_with("hci") => {
@@ -508,7 +508,7 @@ fn hci_device_cmd(dev: &str, cmd: &str) -> i32 {
         "up" => { println!("{}: UP", dev); 0 }
         "down" => { println!("{}: DOWN", dev); 0 }
         "reset" => { println!("{}: Reset", dev); 0 }
-        "name" => { println!("{}: Name: 'OurOS-Desktop'", dev); 0 }
+        "name" => { println!("{}: Name: 'SlateOS-Desktop'", dev); 0 }
         "class" => { println!("{}: Class: 0x000000", dev); 0 }
         "features" => {
             let hcis = read_hci_devices();
@@ -631,12 +631,12 @@ fn run_btmon(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("btmon 0.1.0 (OurOS)");
+            println!("btmon 0.1.0 (SlateOS)");
             0
         }
         _ => {
             println!("Bluetooth monitor ver 0.1.0");
-            println!("= Note: Linux version 6.1.0-ouros (x86_64)");
+            println!("= Note: Linux version 6.1.0-slateos (x86_64)");
             println!("= Note: Bluetooth subsystem version 2.22");
             println!();
             println!("@ MGMT Open: bluetoothd (privileged)  {:#06x}", 0x0001);
@@ -648,7 +648,7 @@ fn run_btmon(args: Vec<String>) -> i32 {
             println!("      HCI Revision: 0x0100");
             println!("      LMP Version: 5.3 (0x0c)");
             println!("      LMP Subversion: 0x0100");
-            println!("      Manufacturer: OurOS Virtual (65535)");
+            println!("      Manufacturer: SlateOS Virtual (65535)");
             println!();
             println!("(Press Ctrl+C to stop monitoring)");
             0

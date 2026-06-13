@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! acceldata-cli — OurOS Acceldata (multi-layered data observability, Campbell CA + Bangalore)
+//! acceldata-cli — SlateOS Acceldata (multi-layered data observability, Campbell CA + Bangalore)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_accel(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: acceldata [OPTIONS]");
-        println!("Acceldata (OurOS) — multi-layered data observability (data + pipeline + cost)");
+        println!("Acceldata (SlateOS) — multi-layered data observability (data + pipeline + cost)");
         println!();
         println!("Options:");
         println!("  --torch                Torch — data reliability + quality monitoring");
@@ -21,8 +21,8 @@ fn run_accel(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Acceldata 2024 (OurOS)"); return 0; }
-    println!("Acceldata 2024 (OurOS) — Multi-layered Data Observability");
+    if args.iter().any(|a| a == "--version") { println!("Acceldata 2024 (SlateOS)"); return 0; }
+    println!("Acceldata 2024 (SlateOS) — Multi-layered Data Observability");
     println!("  Vendor: Acceldata Inc. (Campbell, CA + Bangalore, India)");
     println!("  Founders: Rohit Choudhary (CEO) + Ashwin Rajeeva (CTO), 2018");
     println!("          Rohit: ex-Hortonworks (Hadoop distribution co, sold to Cloudera 2019)");

@@ -1,4 +1,4 @@
-//! OurOS Service Bus Daemon
+//! SlateOS Service Bus Daemon
 //!
 //! A D-Bus-like named service registry and message routing daemon. Programs use
 //! this to discover system services by well-known name, introspect their typed
@@ -169,11 +169,11 @@ pub struct MethodDesc {
 /// Describes a versioned interface provided by a service.
 ///
 /// Interfaces group related methods under a dotted name (e.g.,
-/// "org.ouros.compositor.Surface"). Clients use introspection to discover
+/// "org.slateos.compositor.Surface"). Clients use introspection to discover
 /// available interfaces before making calls.
 #[derive(Debug, Clone)]
 pub struct InterfaceDesc {
-    /// Interface name (dot-separated, e.g., "org.ouros.audio.Playback").
+    /// Interface name (dot-separated, e.g., "org.slateos.audio.Playback").
     pub name: String,
     /// Interface version (monotonically increasing).
     pub version: u32,
@@ -188,7 +188,7 @@ pub struct InterfaceDesc {
 /// A registered service entry in the bus.
 #[derive(Debug, Clone)]
 pub struct ServiceEntry {
-    /// The well-known name (e.g., "org.ouros.compositor").
+    /// The well-known name (e.g., "org.slateos.compositor").
     pub name: String,
     /// PID of the process currently owning this name.
     pub owner_pid: u64,
@@ -1497,12 +1497,12 @@ impl ServiceBus {
     fn notify_name_acquired(&mut self, name: &str, new_owner: &str) {
         let signal = Message {
             header: MessageHeader {
-                sender: "org.ouros.ServiceBus".to_owned(),
+                sender: "org.slateos.ServiceBus".to_owned(),
                 destination: String::new(),
                 serial: 0,
                 reply_serial: None,
                 msg_type: MessageType::Signal,
-                interface: Some("org.ouros.ServiceBus".to_owned()),
+                interface: Some("org.slateos.ServiceBus".to_owned()),
                 member: Some("NameAcquired".to_owned()),
             },
             body: vec![
@@ -1529,12 +1529,12 @@ impl ServiceBus {
     fn notify_name_lost(&mut self, name: &str, old_owner: &str) {
         let signal = Message {
             header: MessageHeader {
-                sender: "org.ouros.ServiceBus".to_owned(),
+                sender: "org.slateos.ServiceBus".to_owned(),
                 destination: String::new(),
                 serial: 0,
                 reply_serial: None,
                 msg_type: MessageType::Signal,
-                interface: Some("org.ouros.ServiceBus".to_owned()),
+                interface: Some("org.slateos.ServiceBus".to_owned()),
                 member: Some("NameLost".to_owned()),
             },
             body: vec![
@@ -1980,33 +1980,33 @@ impl Default for ServiceBus {
 
 /// Runs the service bus daemon.
 ///
-/// In a full OurOS system, this listens on a well-known IPC endpoint for client
+/// In a full SlateOS system, this listens on a well-known IPC endpoint for client
 /// connections and processes messages in a loop. For now, this sets up the bus
 /// with default configuration and reports readiness.
 fn main() {
-    eprintln!("[servicebus] OurOS Service Bus Daemon starting...");
+    eprintln!("[servicebus] SlateOS Service Bus Daemon starting...");
 
     let mut bus = ServiceBus::new();
 
     // Register built-in activation entries (system services)
     bus.register_activation(ActivationEntry {
-        name: "org.ouros.compositor".to_owned(),
-        exec_path: "/usr/lib/ouros/compositor".to_owned(),
+        name: "org.slateos.compositor".to_owned(),
+        exec_path: "/usr/lib/slateos/compositor".to_owned(),
         timeout_secs: 10,
     });
     bus.register_activation(ActivationEntry {
-        name: "org.ouros.audio.mixer".to_owned(),
-        exec_path: "/usr/lib/ouros/audio-mixer".to_owned(),
+        name: "org.slateos.audio.mixer".to_owned(),
+        exec_path: "/usr/lib/slateos/audio-mixer".to_owned(),
         timeout_secs: 10,
     });
     bus.register_activation(ActivationEntry {
-        name: "org.ouros.network.manager".to_owned(),
-        exec_path: "/usr/lib/ouros/network-manager".to_owned(),
+        name: "org.slateos.network.manager".to_owned(),
+        exec_path: "/usr/lib/slateos/network-manager".to_owned(),
         timeout_secs: 10,
     });
     bus.register_activation(ActivationEntry {
-        name: "org.ouros.power.manager".to_owned(),
-        exec_path: "/usr/lib/ouros/power-manager".to_owned(),
+        name: "org.slateos.power.manager".to_owned(),
+        exec_path: "/usr/lib/slateos/power-manager".to_owned(),
         timeout_secs: 10,
     });
 
@@ -2059,7 +2059,7 @@ fn run_self_test(bus: &mut ServiceBus) {
 
     // Client A registers a service
     let interfaces = vec![InterfaceDesc {
-        name: "org.ouros.test.Calculator".to_owned(),
+        name: "org.slateos.test.Calculator".to_owned(),
         version: 1,
         methods: vec![
             MethodDesc {
@@ -2075,14 +2075,14 @@ fn run_self_test(bus: &mut ServiceBus) {
         ],
     }];
 
-    if let Err(e) = bus.register_service(&client_a, "org.ouros.test.calc", interfaces) {
+    if let Err(e) = bus.register_service(&client_a, "org.slateos.test.calc", interfaces) {
         eprintln!("[selftest] register failed: {e}");
         return;
     }
-    eprintln!("[selftest] registered org.ouros.test.calc");
+    eprintln!("[selftest] registered org.slateos.test.calc");
 
     // Client B looks up the service
-    match bus.lookup("org.ouros.test.calc") {
+    match bus.lookup("org.slateos.test.calc") {
         Ok(entry) => {
             eprintln!(
                 "[selftest] lookup OK: owner_pid={}, interfaces={}",
@@ -2097,7 +2097,7 @@ fn run_self_test(bus: &mut ServiceBus) {
     }
 
     // Introspection
-    match bus.introspect("org.ouros.test.calc") {
+    match bus.introspect("org.slateos.test.calc") {
         Ok(ifaces) => {
             for iface in ifaces {
                 eprintln!(
@@ -2120,7 +2120,7 @@ fn run_self_test(bus: &mut ServiceBus) {
     }
 
     // Client B watches for name changes
-    if let Err(e) = bus.watch_name(&client_b, "org.ouros.test.calc") {
+    if let Err(e) = bus.watch_name(&client_b, "org.slateos.test.calc") {
         eprintln!("[selftest] watch failed: {e}");
     }
 
@@ -2129,7 +2129,7 @@ fn run_self_test(bus: &mut ServiceBus) {
         &client_b,
         MatchRule {
             sender: None,
-            interface: Some("org.ouros.test.Calculator".to_owned()),
+            interface: Some("org.slateos.test.Calculator".to_owned()),
             member: None,
             destination: None,
         },
@@ -2141,11 +2141,11 @@ fn run_self_test(bus: &mut ServiceBus) {
     let call = Message {
         header: MessageHeader {
             sender: client_b.clone(),
-            destination: "org.ouros.test.calc".to_owned(),
+            destination: "org.slateos.test.calc".to_owned(),
             serial: 1,
             reply_serial: None,
             msg_type: MessageType::MethodCall,
-            interface: Some("org.ouros.test.Calculator".to_owned()),
+            interface: Some("org.slateos.test.Calculator".to_owned()),
             member: Some("Add".to_owned()),
         },
         body: vec![Value::I32(7), Value::I32(35)],
@@ -2193,7 +2193,7 @@ fn run_self_test(bus: &mut ServiceBus) {
             serial: 42,
             reply_serial: None,
             msg_type: MessageType::Signal,
-            interface: Some("org.ouros.test.Events".to_owned()),
+            interface: Some("org.slateos.test.Events".to_owned()),
             member: Some("ValueChanged".to_owned()),
         },
         body: vec![
@@ -2218,17 +2218,17 @@ fn run_self_test(bus: &mut ServiceBus) {
     }
 
     // Client C requests the same name (should be queued)
-    if let Err(e) = bus.register_service(&client_c, "org.ouros.test.calc", vec![]) {
+    if let Err(e) = bus.register_service(&client_c, "org.slateos.test.calc", vec![]) {
         eprintln!("[selftest] C register failed: {e}");
     } else {
-        eprintln!("[selftest] client C queued for org.ouros.test.calc");
+        eprintln!("[selftest] client C queued for org.slateos.test.calc");
     }
 
     // Disconnect client A — ownership should transfer to C
     bus.disconnect(&client_a);
     eprintln!("[selftest] client A disconnected");
 
-    match bus.lookup("org.ouros.test.calc") {
+    match bus.lookup("org.slateos.test.calc") {
         Ok(entry) => eprintln!("[selftest] new owner: pid={}", entry.owner_pid),
         Err(e) => eprintln!("[selftest] lookup after transfer: {e}"),
     }
@@ -2265,11 +2265,11 @@ mod tests {
 
     #[test]
     fn test_name_validation() {
-        assert!(ServiceBus::validate_name("org.ouros.test").is_ok());
+        assert!(ServiceBus::validate_name("org.slateos.test").is_ok());
         assert!(ServiceBus::validate_name("com.example.service").is_ok());
         assert!(ServiceBus::validate_name("a.b").is_ok());
-        assert!(ServiceBus::validate_name("org.ouros.audio-mixer").is_ok());
-        assert!(ServiceBus::validate_name("org.ouros._private").is_ok());
+        assert!(ServiceBus::validate_name("org.slateos.audio-mixer").is_ok());
+        assert!(ServiceBus::validate_name("org.slateos._private").is_ok());
 
         // Invalid names
         assert!(ServiceBus::validate_name("").is_err());
@@ -2302,7 +2302,7 @@ mod tests {
         bus.handle_hello(&conn).unwrap();
 
         let ifaces = vec![InterfaceDesc {
-            name: "org.ouros.test.Api".to_owned(),
+            name: "org.slateos.test.Api".to_owned(),
             version: 1,
             methods: vec![MethodDesc {
                 name: "DoThing".to_owned(),
@@ -2311,11 +2311,11 @@ mod tests {
             }],
         }];
 
-        bus.register_service(&conn, "org.ouros.test.svc", ifaces)
+        bus.register_service(&conn, "org.slateos.test.svc", ifaces)
             .unwrap();
 
         assert_eq!(bus.registered_services(), 1);
-        let entry = bus.lookup("org.ouros.test.svc").unwrap();
+        let entry = bus.lookup("org.slateos.test.svc").unwrap();
         assert_eq!(entry.owner_pid, 1);
         assert_eq!(entry.interfaces.len(), 1);
     }
@@ -2330,19 +2330,19 @@ mod tests {
         bus.handle_hello(&b).unwrap();
 
         // A registers first
-        bus.register_service(&a, "org.ouros.shared.name", vec![])
+        bus.register_service(&a, "org.slateos.shared.name", vec![])
             .unwrap();
-        assert_eq!(bus.lookup("org.ouros.shared.name").unwrap().owner_pid, 10);
+        assert_eq!(bus.lookup("org.slateos.shared.name").unwrap().owner_pid, 10);
 
         // B requests same name — gets queued
-        bus.register_service(&b, "org.ouros.shared.name", vec![])
+        bus.register_service(&b, "org.slateos.shared.name", vec![])
             .unwrap();
         // A still owns it
-        assert_eq!(bus.lookup("org.ouros.shared.name").unwrap().owner_pid, 10);
+        assert_eq!(bus.lookup("org.slateos.shared.name").unwrap().owner_pid, 10);
 
         // A disconnects — B takes over
         bus.disconnect(&a);
-        assert_eq!(bus.lookup("org.ouros.shared.name").unwrap().owner_pid, 20);
+        assert_eq!(bus.lookup("org.slateos.shared.name").unwrap().owner_pid, 20);
     }
 
     #[test]
@@ -2354,18 +2354,18 @@ mod tests {
         bus.handle_hello(&server).unwrap();
         bus.handle_hello(&client).unwrap();
 
-        bus.register_service(&server, "org.ouros.echo", vec![])
+        bus.register_service(&server, "org.slateos.echo", vec![])
             .unwrap();
 
         // Client calls server
         let call = Message {
             header: MessageHeader {
                 sender: client.clone(),
-                destination: "org.ouros.echo".to_owned(),
+                destination: "org.slateos.echo".to_owned(),
                 serial: 1,
                 reply_serial: None,
                 msg_type: MessageType::MethodCall,
-                interface: Some("org.ouros.echo.Api".to_owned()),
+                interface: Some("org.slateos.echo.Api".to_owned()),
                 member: Some("Echo".to_owned()),
             },
             body: vec![Value::String("hello".to_owned())],
@@ -2406,7 +2406,7 @@ mod tests {
             &sub2,
             MatchRule {
                 sender: None,
-                interface: Some("org.ouros.events".to_owned()),
+                interface: Some("org.slateos.events".to_owned()),
                 member: None,
                 destination: None,
             },
@@ -2421,7 +2421,7 @@ mod tests {
                 serial: 1,
                 reply_serial: None,
                 msg_type: MessageType::Signal,
-                interface: Some("org.ouros.events".to_owned()),
+                interface: Some("org.slateos.events".to_owned()),
                 member: Some("SomethingHappened".to_owned()),
             },
             body: vec![Value::U32(99)],
@@ -2534,7 +2534,7 @@ mod tests {
 
         let conn = bus.accept_connection(1);
         bus.handle_hello(&conn).unwrap();
-        bus.register_service(&conn, "org.ouros.target", vec![])
+        bus.register_service(&conn, "org.slateos.target", vec![])
             .unwrap();
 
         let other = bus.accept_connection(2);
@@ -2545,7 +2545,7 @@ mod tests {
             let msg = Message {
                 header: MessageHeader {
                     sender: other.clone(),
-                    destination: "org.ouros.target".to_owned(),
+                    destination: "org.slateos.target".to_owned(),
                     serial: i + 1,
                     reply_serial: None,
                     msg_type: MessageType::MethodCall,
@@ -2561,7 +2561,7 @@ mod tests {
         let msg = Message {
             header: MessageHeader {
                 sender: other.clone(),
-                destination: "org.ouros.target".to_owned(),
+                destination: "org.slateos.target".to_owned(),
                 serial: 4,
                 reply_serial: None,
                 msg_type: MessageType::MethodCall,
@@ -2579,7 +2579,7 @@ mod tests {
 
         let conn = bus.accept_connection(1);
         bus.handle_hello(&conn).unwrap();
-        bus.register_service(&conn, "org.ouros.secure", vec![])
+        bus.register_service(&conn, "org.slateos.secure", vec![])
             .unwrap();
 
         let attacker = bus.accept_connection(2);
@@ -2589,7 +2589,7 @@ mod tests {
         bus.add_policy_rule(PolicyRule {
             allow: false,
             sender: Some(attacker.clone()),
-            destination: Some("org.ouros.secure".to_owned()),
+            destination: Some("org.slateos.secure".to_owned()),
             interface: None,
             member: None,
         });
@@ -2597,7 +2597,7 @@ mod tests {
         let msg = Message {
             header: MessageHeader {
                 sender: attacker.clone(),
-                destination: "org.ouros.secure".to_owned(),
+                destination: "org.slateos.secure".to_owned(),
                 serial: 1,
                 reply_serial: None,
                 msg_type: MessageType::MethodCall,
@@ -2618,7 +2618,7 @@ mod tests {
         let conn = bus.accept_connection(1);
         // Do NOT call handle_hello
 
-        let result = bus.register_service(&conn, "org.ouros.sneaky", vec![]);
+        let result = bus.register_service(&conn, "org.slateos.sneaky", vec![]);
         assert_eq!(result, Err(BusError::NotAuthenticated));
     }
 
@@ -2632,10 +2632,10 @@ mod tests {
         bus.handle_hello(&watcher).unwrap();
 
         // Watch before the name exists
-        bus.watch_name(&watcher, "org.ouros.watched").unwrap();
+        bus.watch_name(&watcher, "org.slateos.watched").unwrap();
 
         // Register triggers NameAcquired
-        bus.register_service(&owner, "org.ouros.watched", vec![])
+        bus.register_service(&owner, "org.slateos.watched", vec![])
             .unwrap();
 
         let msgs = bus.drain_outbox(&watcher);
@@ -2646,7 +2646,7 @@ mod tests {
         );
 
         // Unregister triggers NameLost
-        bus.unregister_service(&owner, "org.ouros.watched").unwrap();
+        bus.unregister_service(&owner, "org.slateos.watched").unwrap();
 
         let msgs = bus.drain_outbox(&watcher);
         assert_eq!(msgs.len(), 1);
@@ -2661,7 +2661,7 @@ mod tests {
         bus.handle_hello(&conn).unwrap();
 
         let ifaces = vec![InterfaceDesc {
-            name: "org.ouros.math.Basic".to_owned(),
+            name: "org.slateos.math.Basic".to_owned(),
             version: 2,
             methods: vec![
                 MethodDesc {
@@ -2677,22 +2677,22 @@ mod tests {
             ],
         }];
 
-        bus.register_service(&conn, "org.ouros.math", ifaces)
+        bus.register_service(&conn, "org.slateos.math", ifaces)
             .unwrap();
 
         // Successful lookup
         let method = bus
-            .lookup_method("org.ouros.math", "org.ouros.math.Basic", "Add")
+            .lookup_method("org.slateos.math", "org.slateos.math.Basic", "Add")
             .unwrap();
         assert_eq!(method.name, "Add");
         assert_eq!(method.params.len(), 2);
 
         // Interface not found
-        let result = bus.lookup_method("org.ouros.math", "org.ouros.math.Advanced", "Foo");
+        let result = bus.lookup_method("org.slateos.math", "org.slateos.math.Advanced", "Foo");
         assert!(matches!(result, Err(BusError::InterfaceNotFound(_))));
 
         // Method not found
-        let result = bus.lookup_method("org.ouros.math", "org.ouros.math.Basic", "Divide");
+        let result = bus.lookup_method("org.slateos.math", "org.slateos.math.Basic", "Divide");
         assert!(matches!(result, Err(BusError::MethodNotFound(_))));
     }
 
@@ -2702,7 +2702,7 @@ mod tests {
 
         // Register activation with 0-second timeout for testing
         bus.register_activation(ActivationEntry {
-            name: "org.ouros.lazy".to_owned(),
+            name: "org.slateos.lazy".to_owned(),
             exec_path: "/bin/lazy".to_owned(),
             timeout_secs: 0,
         });
@@ -2714,7 +2714,7 @@ mod tests {
         let msg = Message {
             header: MessageHeader {
                 sender: client.clone(),
-                destination: "org.ouros.lazy".to_owned(),
+                destination: "org.slateos.lazy".to_owned(),
                 serial: 1,
                 reply_serial: None,
                 msg_type: MessageType::MethodCall,
@@ -2730,7 +2730,7 @@ mod tests {
 
         // Check timeouts — should immediately time out with 0s timeout
         let timed_out = bus.check_activation_timeouts();
-        assert_eq!(timed_out, vec!["org.ouros.lazy"]);
+        assert_eq!(timed_out, vec!["org.slateos.lazy"]);
         assert_eq!(bus.pending_activations.len(), 0);
         assert_eq!(bus.stats().activations_timed_out, 1);
     }
@@ -2744,14 +2744,14 @@ mod tests {
         bus.handle_hello(&c1).unwrap();
         bus.handle_hello(&c2).unwrap();
 
-        bus.register_service(&c1, "org.ouros.alpha", vec![])
+        bus.register_service(&c1, "org.slateos.alpha", vec![])
             .unwrap();
-        bus.register_service(&c2, "org.ouros.beta", vec![]).unwrap();
+        bus.register_service(&c2, "org.slateos.beta", vec![]).unwrap();
 
         let names = bus.list_names();
         assert_eq!(names.len(), 2);
-        assert!(names.contains(&"org.ouros.alpha"));
-        assert!(names.contains(&"org.ouros.beta"));
+        assert!(names.contains(&"org.slateos.alpha"));
+        assert!(names.contains(&"org.slateos.beta"));
     }
 
     #[test]
@@ -2763,13 +2763,13 @@ mod tests {
         bus.handle_hello(&a).unwrap();
         bus.handle_hello(&b).unwrap();
 
-        bus.register_service(&a, "org.ouros.target", vec![])
+        bus.register_service(&a, "org.slateos.target", vec![])
             .unwrap();
 
         let msg = Message {
             header: MessageHeader {
                 sender: b.clone(),
-                destination: "org.ouros.target".to_owned(),
+                destination: "org.slateos.target".to_owned(),
                 serial: 1,
                 reply_serial: None,
                 msg_type: MessageType::MethodCall,
@@ -2795,7 +2795,7 @@ mod tests {
                 serial: 1,
                 reply_serial: None,
                 msg_type: MessageType::Signal,
-                interface: Some("org.ouros.events".to_owned()),
+                interface: Some("org.slateos.events".to_owned()),
                 member: Some("Click".to_owned()),
             },
             body: vec![],
@@ -2831,7 +2831,7 @@ mod tests {
         // Match interface + member
         let rule_iface_member = MatchRule {
             sender: None,
-            interface: Some("org.ouros.events".to_owned()),
+            interface: Some("org.slateos.events".to_owned()),
             member: Some("Click".to_owned()),
             destination: None,
         };
@@ -2840,7 +2840,7 @@ mod tests {
         // Wrong member
         let rule_wrong_member = MatchRule {
             sender: None,
-            interface: Some("org.ouros.events".to_owned()),
+            interface: Some("org.slateos.events".to_owned()),
             member: Some("KeyPress".to_owned()),
             destination: None,
         };
@@ -2873,9 +2873,9 @@ mod tests {
         let conn = bus.accept_connection(1);
         bus.handle_hello(&conn).unwrap();
 
-        bus.register_service(&conn, "org.ouros.ephemeral", vec![])
+        bus.register_service(&conn, "org.slateos.ephemeral", vec![])
             .unwrap();
-        bus.watch_name(&conn, "org.ouros.something").unwrap();
+        bus.watch_name(&conn, "org.slateos.something").unwrap();
         bus.add_match_rule(
             &conn,
             MatchRule {

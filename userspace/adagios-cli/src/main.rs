@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! adagios-cli — OurOS Adagios Nagios configuration
+//! adagios-cli — SlateOS Adagios Nagios configuration
 //!
 //! Single personality: `adagios`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_adagios(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: adagios [COMMAND] [OPTIONS]");
-        println!("Adagios v1.6 (OurOS) — Nagios configuration & status");
+        println!("Adagios v1.6 (SlateOS) — Nagios configuration & status");
         println!();
         println!("Commands:");
         println!("  host list|add|edit     Manage hosts");
@@ -32,8 +32,8 @@ fn run_adagios(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Adagios v1.6.8 (OurOS)"); return 0; }
-    println!("Adagios v1.6.8 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Adagios v1.6.8 (SlateOS)"); return 0; }
+    println!("Adagios v1.6.8 (SlateOS)");
     println!("  Nagios config: /etc/nagios/nagios.cfg");
     println!("  Hosts: 89 defined");
     println!("  Services: 456 defined");

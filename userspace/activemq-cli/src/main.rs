@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! activemq-cli — OurOS Apache ActiveMQ message broker
+//! activemq-cli — SlateOS Apache ActiveMQ message broker
 //!
 //! Single personality: `activemq`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_activemq(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: activemq [COMMAND] [OPTIONS]");
-        println!("Apache ActiveMQ v5.18 (OurOS) — Message broker");
+        println!("Apache ActiveMQ v5.18 (SlateOS) — Message broker");
         println!();
         println!("Commands:");
         println!("  start              Start broker");
@@ -31,8 +31,8 @@ fn run_activemq(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Apache ActiveMQ v5.18.4 (OurOS)"); return 0; }
-    println!("Apache ActiveMQ v5.18.4 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Apache ActiveMQ v5.18.4 (SlateOS)"); return 0; }
+    println!("Apache ActiveMQ v5.18.4 (SlateOS)");
     println!("  OpenWire: 0.0.0.0:61616");
     println!("  AMQP: 0.0.0.0:5672");
     println!("  STOMP: 0.0.0.0:61613");

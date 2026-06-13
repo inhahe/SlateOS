@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! chroot-cli — OurOS chroot CLI
+//! chroot-cli — SlateOS chroot CLI
 //!
 //! Multi-personality: `chroot`, `unshare`, `pivot_root`
 
@@ -19,7 +19,7 @@ fn run_chroot(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: chroot [OPTIONS] NEWROOT [COMMAND [ARGS...]]");
         println!();
-        println!("chroot — run command with special root directory (OurOS).");
+        println!("chroot — run command with special root directory (SlateOS).");
         println!();
         println!("Options:");
         println!("  --userspec USER:GROUP   Set user and group");
@@ -45,7 +45,7 @@ fn run_unshare(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: unshare [OPTIONS] [COMMAND [ARGS...]]");
         println!();
-        println!("unshare — run in new namespaces (OurOS).");
+        println!("unshare — run in new namespaces (SlateOS).");
         println!();
         println!("Options:");
         println!("  -m, --mount            Unshare mount namespace");
@@ -90,7 +90,7 @@ fn run_pivot_root(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pivot_root NEW_ROOT PUT_OLD");
         println!();
-        println!("pivot_root — change the root filesystem (OurOS).");
+        println!("pivot_root — change the root filesystem (SlateOS).");
         return 0;
     }
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! homeassistant-cli — OurOS Home Assistant CLI
+//! homeassistant-cli — SlateOS Home Assistant CLI
 //!
 //! Multi-personality: `ha`, `hass-cli`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ha(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: ha COMMAND [OPTIONS]");
-        println!("Home Assistant CLI (OurOS)");
+        println!("Home Assistant CLI (SlateOS)");
         println!();
         println!("Commands:");
         println!("  core         Core management");
@@ -31,7 +31,7 @@ fn run_ha(args: &[String]) -> i32 {
         "info" | "--version" => {
             println!("Home Assistant 2024.1.5");
             println!("  Supervisor: 2024.01.2");
-            println!("  Operating System: OurOS");
+            println!("  Operating System: SlateOS");
             println!("  Architecture: x86_64");
         }
         "core" => {
@@ -81,8 +81,8 @@ fn run_ha(args: &[String]) -> i32 {
         "host" => {
             println!("Host info:");
             println!("  Hostname: homeassistant");
-            println!("  OS: OurOS");
-            println!("  Kernel: 6.6.0-ouros");
+            println!("  OS: SlateOS");
+            println!("  Kernel: 6.6.0-slateos");
         }
         _ => println!("ha: '{}' completed", subcmd),
     }

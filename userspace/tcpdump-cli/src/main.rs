@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tcpdump-cli — OurOS tcpdump CLI
+//! tcpdump-cli — SlateOS tcpdump CLI
 //!
 //! Single personality: `tcpdump`
 
@@ -11,7 +11,7 @@ fn run_tcpdump(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: tcpdump [OPTIONS] [EXPRESSION]");
         println!();
-        println!("tcpdump — network packet analyzer (OurOS).");
+        println!("tcpdump — network packet analyzer (SlateOS).");
         println!();
         println!("Options:");
         println!("  -i IFACE       Listen on interface");
@@ -27,7 +27,7 @@ fn run_tcpdump(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("tcpdump version 4.99.4 (OurOS)");
+        println!("tcpdump version 4.99.4 (SlateOS)");
         return 0;
     }
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! barrier — OurOS software KVM (keyboard/video/mouse sharing)
+//! barrier — SlateOS software KVM (keyboard/video/mouse sharing)
 //!
 //! Multi-personality: `barriers`, `barrierc`
 
@@ -23,7 +23,7 @@ fn run_barriers(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("barriers 2.4.0 (OurOS)");
+        println!("barriers 2.4.0 (SlateOS)");
         return 0;
     }
 

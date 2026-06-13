@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gog-cli — OurOS GOG Galaxy 2.0 (DRM-free game store by CD Projekt)
+//! gog-cli — SlateOS GOG Galaxy 2.0 (DRM-free game store by CD Projekt)
 //!
 //! Single personality: `gog`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gog(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gog [OPTIONS]");
-        println!("GOG Galaxy 2.0.78 (OurOS) — DRM-FREE game store + universal launcher");
+        println!("GOG Galaxy 2.0.78 (SlateOS) — DRM-FREE game store + universal launcher");
         println!();
         println!("Options:");
         println!("  --library              Unified library (GOG + Steam + Epic + Xbox + PSN + Origin etc.)");
@@ -23,8 +23,8 @@ fn run_gog(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("GOG Galaxy 2.0.78.10 (OurOS)"); return 0; }
-    println!("GOG Galaxy 2.0.78.10 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("GOG Galaxy 2.0.78.10 (SlateOS)"); return 0; }
+    println!("GOG Galaxy 2.0.78.10 (SlateOS)");
     println!("  Vendor: GOG Sp. z o.o. — subsidiary of CD Projekt SA (Warsaw, Poland)");
     println!("  CD Projekt: founded 1994 — also made The Witcher 1/2/3 + Cyberpunk 2077");
     println!("  Launched: GOG.com 2008 (originally 'Good Old Games', dropped name for broader scope)");

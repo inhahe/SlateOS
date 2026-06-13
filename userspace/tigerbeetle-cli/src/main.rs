@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tigerbeetle-cli — OurOS TigerBeetle financial transactions database
+//! tigerbeetle-cli — SlateOS TigerBeetle financial transactions database
 //!
 //! Single personality: `tigerbeetle`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_tigerbeetle(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: tigerbeetle [COMMAND] [OPTIONS]");
-        println!("TigerBeetle v0.15 (OurOS) — Financial transactions database");
+        println!("TigerBeetle v0.15 (SlateOS) — Financial transactions database");
         println!();
         println!("Commands:");
         println!("  format             Format data file");
@@ -30,8 +30,8 @@ fn run_tigerbeetle(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("TigerBeetle v0.15.6 (OurOS)"); return 0; }
-    println!("TigerBeetle v0.15.6 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("TigerBeetle v0.15.6 (SlateOS)"); return 0; }
+    println!("TigerBeetle v0.15.6 (SlateOS)");
     println!("  Cluster: 0");
     println!("  Replica: 0 of 3");
     println!("  Status: ready");

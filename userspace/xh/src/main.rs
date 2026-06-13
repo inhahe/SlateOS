@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xh — OurOS friendly and fast HTTP client (HTTPie-compatible)
+//! xh — SlateOS friendly and fast HTTP client (HTTPie-compatible)
 //!
 //! Multi-personality: `xh`, `xhs` (HTTPS default)
 
@@ -65,7 +65,7 @@ fn run_xh(args: Vec<String>, https_default: bool) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("xh 0.22.2 (OurOS)");
+        println!("xh 0.22.2 (SlateOS)");
         return 0;
     }
 

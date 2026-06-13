@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! flux — OurOS Flux CD GitOps toolkit
+//! flux — SlateOS Flux CD GitOps toolkit
 //!
 //! Single personality: `flux`
 
@@ -35,7 +35,7 @@ fn run_flux(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match cmd {
         "version" => {
-            println!("flux: v2.3.0 (OurOS)");
+            println!("flux: v2.3.0 (SlateOS)");
             println!("distribution: flux-v2.3.0");
         }
         "check" => {

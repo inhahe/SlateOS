@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! harness-cli — OurOS Harness CI/CD CLI
+//! harness-cli — SlateOS Harness CI/CD CLI
 //!
 //! Multi-personality: `harness`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_harness(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: harness COMMAND [OPTIONS]");
-        println!("Harness CLI 0.6.0 (OurOS)");
+        println!("Harness CLI 0.6.0 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  login          Authenticate");

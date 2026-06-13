@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! chromaprint — OurOS audio fingerprinting
+//! chromaprint — SlateOS audio fingerprinting
 //!
 //! Single personality: `fpcalc`
 
@@ -22,7 +22,7 @@ fn run_fpcalc(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-version") {
-        println!("fpcalc version 1.5.1 (OurOS)");
+        println!("fpcalc version 1.5.1 (SlateOS)");
         println!("(Chromaprint library 1.5.1)");
         return 0;
     }

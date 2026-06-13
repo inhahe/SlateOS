@@ -1,4 +1,4 @@
-//! OurOS Sticky Notes
+//! SlateOS Sticky Notes
 //!
 //! Desktop sticky notes application with:
 //! - Create, delete, edit, archive, and pin notes

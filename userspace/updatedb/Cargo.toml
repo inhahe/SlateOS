@@ -2,7 +2,7 @@
 name = "updatedb"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS updatedb utility"
+description = "SlateOS updatedb utility"
 [dependencies]
 
 [build-dependencies]

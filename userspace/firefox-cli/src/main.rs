@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! firefox-cli — OurOS Mozilla Firefox browser
+//! firefox-cli — SlateOS Mozilla Firefox browser
 //!
 //! Single personality: `firefox`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ff(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: firefox [URL] [OPTIONS]");
-        println!("Mozilla Firefox (OurOS) — Open-source browser with Gecko engine");
+        println!("Mozilla Firefox (SlateOS) — Open-source browser with Gecko engine");
         println!();
         println!("Options:");
         println!("  --private-window       Open Private Browsing window");
@@ -25,8 +25,8 @@ fn run_ff(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Mozilla Firefox 133.0 (OurOS)"); return 0; }
-    println!("Mozilla Firefox 133.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Mozilla Firefox 133.0 (SlateOS)"); return 0; }
+    println!("Mozilla Firefox 133.0 (SlateOS)");
     println!("  Vendor: Mozilla Corporation (subsidiary of Mozilla Foundation 501(c)(3))");
     println!("  Engine: Gecko (HTML/CSS), SpiderMonkey (JS), Servo components (Stylo, WebRender)");
     println!("  Lineage: Netscape Navigator → Mozilla Suite → Phoenix → Firebird → Firefox (2004)");

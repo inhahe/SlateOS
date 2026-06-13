@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! irssi-cli — OurOS Irssi IRC client CLI
+//! irssi-cli — SlateOS Irssi IRC client CLI
 //!
 //! Single personality: `irssi`
 
@@ -11,7 +11,7 @@ fn run_irssi(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: irssi [OPTIONS]");
         println!();
-        println!("Irssi — terminal IRC client (OurOS).");
+        println!("Irssi — terminal IRC client (SlateOS).");
         println!();
         println!("Options:");
         println!("  -c, --connect SERVER   Connect to server");
@@ -25,7 +25,7 @@ fn run_irssi(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("irssi 1.4.5 (OurOS)");
+        println!("irssi 1.4.5 (SlateOS)");
         return 0;
     }
 
@@ -40,7 +40,7 @@ fn run_irssi(args: Vec<String>) -> i32 {
 
     let noconnect = args.iter().any(|a| a == "--noconnect");
 
-    println!("Irssi v1.4.5 (OurOS) - https://irssi.org");
+    println!("Irssi v1.4.5 (SlateOS) - https://irssi.org");
     println!();
 
     if noconnect {

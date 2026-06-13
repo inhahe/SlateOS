@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! paw-cli — OurOS Paw API client tool
+//! paw-cli — SlateOS Paw API client tool
 //!
 //! Single personality: `paw`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_paw(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: paw [OPTIONS] COMMAND");
-        println!("Paw v4.0.0 (OurOS) — API development tool");
+        println!("Paw v4.0.0 (SlateOS) — API development tool");
         println!();
         println!("Commands:");
         println!("  run FILE         Execute API request file");
@@ -32,7 +32,7 @@ fn run_paw(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("Paw v4.0.0 (OurOS)");
+        println!("Paw v4.0.0 (SlateOS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("collection");

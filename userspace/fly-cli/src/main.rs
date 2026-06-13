@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fly-cli — OurOS Fly.io (edge PaaS for Docker apps, Chicago, private)
+//! fly-cli — SlateOS Fly.io (edge PaaS for Docker apps, Chicago, private)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_fly(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: fly [OPTIONS]");
-        println!("Fly.io (OurOS) — global app platform for Docker (formerly Fly Edge)");
+        println!("Fly.io (SlateOS) — global app platform for Docker (formerly Fly Edge)");
         println!();
         println!("Options:");
         println!("  --apps                 Apps (the deployed Docker images)");
@@ -22,8 +22,8 @@ fn run_fly(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Fly.io 2024 (OurOS) — flyctl"); return 0; }
-    println!("Fly.io 2024 (OurOS) — Global App Platform");
+    if args.iter().any(|a| a == "--version") { println!("Fly.io 2024 (SlateOS) — flyctl"); return 0; }
+    println!("Fly.io 2024 (SlateOS) — Global App Platform");
     println!("  Vendor: Fly.io, Inc. (Chicago, IL — private)");
     println!("  Founders: Kurt Mackey + Thomas Ptacek + Steve Berryman, 2017");
     println!("          founded as 'Fly Edge' for serverless edge compute, pivoted to general PaaS 2020");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! topgrade — OurOS upgrade everything at once
+//! topgrade — SlateOS upgrade everything at once
 //!
 //! Single personality: `topgrade`
 
@@ -29,7 +29,7 @@ fn run_topgrade(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("topgrade 15.0.0 (OurOS)");
+        println!("topgrade 15.0.0 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "--show-config") {
@@ -46,7 +46,7 @@ fn run_topgrade(args: Vec<String>) -> i32 {
     }
 
     println!("╔══════════════════════════════════════════╗");
-    println!("║          topgrade — OurOS                ║");
+    println!("║          topgrade — SlateOS                ║");
     println!("╚══════════════════════════════════════════╝");
     println!();
     println!("── System package manager ─────────────────");

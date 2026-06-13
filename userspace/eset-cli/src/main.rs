@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! eset-cli — OurOS ESET HOME / NOD32 security
+//! eset-cli — SlateOS ESET HOME / NOD32 security
 //!
 //! Single personality: `eset`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_eset(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: eset [OPTIONS]");
-        println!("ESET HOME Security Premium 17.2 / NOD32 (OurOS)");
+        println!("ESET HOME Security Premium 17.2 / NOD32 (SlateOS)");
         println!();
         println!("Options:");
         println!("  --scan TYPE            smart/full/custom/computer/removable");
@@ -23,8 +23,8 @@ fn run_eset(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("ESET HOME Security Premium 17.2.7.0 (OurOS)"); return 0; }
-    println!("ESET HOME Security Premium 17.2.7.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("ESET HOME Security Premium 17.2.7.0 (SlateOS)"); return 0; }
+    println!("ESET HOME Security Premium 17.2.7.0 (SlateOS)");
     println!("  Origin: Slovakia, founded 1992; NOD32 antivirus engine since 1998");
     println!("  Consumer line (rebranded 2023 from 'ESET Smart Security'):");
     println!("    HOME Security Essential / Premium / Ultimate");

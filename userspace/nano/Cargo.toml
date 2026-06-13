@@ -2,5 +2,5 @@
 name = "nano"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS simple text editor"
+description = "SlateOS simple text editor"
 [dependencies]

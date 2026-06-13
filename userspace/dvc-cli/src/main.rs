@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dvc-cli — OurOS DVC (Data Version Control) CLI
+//! dvc-cli — SlateOS DVC (Data Version Control) CLI
 //!
 //! Single personality: `dvc`
 
@@ -11,7 +11,7 @@ fn run_dvc(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: dvc <COMMAND> [OPTIONS]");
         println!();
-        println!("DVC: Data Version Control (OurOS).");
+        println!("DVC: Data Version Control (SlateOS).");
         println!();
         println!("Commands:");
         println!("  init         Initialize DVC");
@@ -29,7 +29,7 @@ fn run_dvc(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("3.42.0 (OurOS)");
+        println!("3.42.0 (SlateOS)");
         return 0;
     }
 

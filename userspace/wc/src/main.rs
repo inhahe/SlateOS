@@ -1,4 +1,4 @@
-//! OurOS `wc` Utility -- Word, Line, Character, and Byte Count
+//! SlateOS `wc` Utility -- Word, Line, Character, and Byte Count
 //!
 //! Counts lines, words, characters, and bytes in files or standard input.
 //! Modeled after GNU coreutils `wc` with the same flag set.
@@ -596,7 +596,7 @@ fn run(config: &Config) -> i32 {
 // ============================================================================
 
 fn print_help() {
-    println!("OurOS wc v{VERSION}");
+    println!("SlateOS wc v{VERSION}");
     println!();
     println!("Print newline, word, and byte counts for each FILE, and a total");
     println!("line if more than one FILE is specified.");
@@ -633,7 +633,7 @@ fn main() {
             process::exit(0);
         }
         ParseResult::Version => {
-            println!("wc (OurOS) {VERSION}");
+            println!("wc (SlateOS) {VERSION}");
             process::exit(0);
         }
         ParseResult::Run(config) => {

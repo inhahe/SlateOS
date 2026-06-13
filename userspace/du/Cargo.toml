@@ -2,5 +2,5 @@
 name = "du"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS disk usage utility"
+description = "SlateOS disk usage utility"
 [dependencies]

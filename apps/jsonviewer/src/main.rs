@@ -1,4 +1,4 @@
-//! `OurOS` JSON Viewer & Editor
+//! `SlateOS` JSON Viewer & Editor
 //!
 //! A full-featured JSON data viewer and editor with:
 //! - Custom JSON parser supporting full JSON spec (RFC 8259)
@@ -3883,7 +3883,7 @@ fn char_to_byte_pos(s: &str, char_idx: usize) -> usize {
 // ============================================================================
 
 const SAMPLE_JSON: &str = r#"{
-  "name": "OurOS JSON Viewer",
+  "name": "SlateOS JSON Viewer",
   "version": "0.1.0",
   "description": "A full-featured JSON viewer and editor",
   "features": [

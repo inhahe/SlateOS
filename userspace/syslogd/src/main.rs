@@ -1,4 +1,4 @@
-//! OurOS System Log Daemon (`syslogd`)
+//! SlateOS System Log Daemon (`syslogd`)
 //!
 //! A JSON-lines log aggregation service that collects structured log messages
 //! from all system services, stores them in rotating log files, and provides
@@ -704,7 +704,7 @@ fn format_size(bytes: u64) -> String {
 // ============================================================================
 
 fn print_usage() {
-    println!("OurOS System Log Daemon v0.1.0");
+    println!("SlateOS System Log Daemon v0.1.0");
     println!();
     println!("JSON-lines structured log aggregation and query service.");
     println!("Logs are stored at {LOG_DIR}/{MAIN_LOG}.");

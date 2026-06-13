@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nheko-cli — OurOS Nheko Matrix client
+//! nheko-cli — SlateOS Nheko Matrix client
 //!
 //! Single personality: `nheko`
 
@@ -13,13 +13,13 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_nheko(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: nheko [OPTIONS]");
-        println!("nheko v0.11 (OurOS) — Desktop Matrix client (Qt)");
+        println!("nheko v0.11 (SlateOS) — Desktop Matrix client (Qt)");
         println!();
         println!("Options:");
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("nheko v0.11 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("nheko v0.11 (SlateOS)"); return 0; }
     println!("nheko: Matrix client started");
     println!("  Homeserver: matrix.org");
     println!("  Rooms: 8 joined");

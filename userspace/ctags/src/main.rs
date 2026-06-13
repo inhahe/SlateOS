@@ -1,4 +1,4 @@
-//! OurOS `ctags` -- Code Tag Generator
+//! SlateOS `ctags` -- Code Tag Generator
 //!
 //! A multi-personality tag generator compatible with Exuberant Ctags and
 //! Emacs etags.  When invoked as `ctags` (the default) it produces a sorted
@@ -1740,7 +1740,7 @@ fn write_ctags<W: Write>(
     )?;
     writeln!(
         out,
-        "!_TAG_PROGRAM_NAME\tctags\t/OurOS ctags/"
+        "!_TAG_PROGRAM_NAME\tctags\t/SlateOS ctags/"
     )?;
     writeln!(
         out,
@@ -1940,7 +1940,7 @@ fn run_main() -> i32 {
             0
         }
         ParseResult::Version => {
-            println!("ctags (OurOS) {VERSION}");
+            println!("ctags (SlateOS) {VERSION}");
             0
         }
         ParseResult::Run(config) => run(&config),

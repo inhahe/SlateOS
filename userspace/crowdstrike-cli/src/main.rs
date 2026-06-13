@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! crowdstrike-cli — OurOS CrowdStrike Falcon EDR/XDR
+//! crowdstrike-cli — SlateOS CrowdStrike Falcon EDR/XDR
 //!
 //! Single personality: `crowdstrike`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_cs(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: crowdstrike [OPTIONS] [SUBCMD]");
-        println!("CrowdStrike Falcon (OurOS) — Cloud-native EDR/XDR/Identity/Cloud security");
+        println!("CrowdStrike Falcon (SlateOS) — Cloud-native EDR/XDR/Identity/Cloud security");
         println!();
         println!("Options:");
         println!("  --cid CUSTOMER_ID      Customer ID (CID)");
@@ -24,8 +24,8 @@ fn run_cs(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("CrowdStrike Falcon Sensor 7.20 (OurOS)"); return 0; }
-    println!("CrowdStrike Falcon (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("CrowdStrike Falcon Sensor 7.20 (SlateOS)"); return 0; }
+    println!("CrowdStrike Falcon (SlateOS)");
     println!("  Platform: cloud-native single sensor for Win/Mac/Linux/iOS/Android");
     println!("  Modules: Insight (EDR), Prevent (NGAV), Discover (asset/IT hygiene),");
     println!("           Overwatch (managed threat hunting), Spotlight (vuln mgmt),");

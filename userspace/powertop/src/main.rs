@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! powertop — OurOS power consumption analysis tool
+//! powertop — SlateOS power consumption analysis tool
 //!
 //! Single personality: `powertop`
 
@@ -150,7 +150,7 @@ fn run_powertop(args: Vec<String>) -> i32 {
                 println!("  --version         Show version");
                 return 0;
             }
-            "--version" | "-V" => { println!("powertop 0.1.0 (OurOS)"); return 0; }
+            "--version" | "-V" => { println!("powertop 0.1.0 (SlateOS)"); return 0; }
             "--auto-tune" => auto_tune = true,
             "--csv" => csv_output = true,
             "--html" => html_output = true,

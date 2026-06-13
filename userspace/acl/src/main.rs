@@ -1,4 +1,4 @@
-//! OurOS POSIX access control list utility.
+//! SlateOS POSIX access control list utility.
 //!
 //! Multi-personality binary providing:
 //! - **getfacl** — get file access control lists

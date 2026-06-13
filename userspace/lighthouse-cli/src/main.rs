@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lighthouse-cli — OurOS Lighthouse web auditing CLI
+//! lighthouse-cli — SlateOS Lighthouse web auditing CLI
 //!
 //! Single personality: `lighthouse`
 
@@ -11,7 +11,7 @@ fn run_lighthouse(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lighthouse <URL> [OPTIONS]");
         println!();
-        println!("Lighthouse web performance auditing CLI (OurOS).");
+        println!("Lighthouse web performance auditing CLI (SlateOS).");
         println!();
         println!("Options:");
         println!("  --output <FMT>       Output format (html/json/csv)");

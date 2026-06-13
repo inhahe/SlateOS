@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pastel-cli — OurOS pastel color tool
+//! pastel-cli — SlateOS pastel color tool
 //!
 //! Single personality: `pastel`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pastel(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: pastel [OPTIONS] COMMAND [ARGS...]");
-        println!("pastel 0.9.0 (OurOS) — Generate, analyze, convert, and manipulate colors");
+        println!("pastel 0.9.0 (SlateOS) — Generate, analyze, convert, and manipulate colors");
         println!();
         println!("Commands:");
         println!("  color COLOR         Display color information");
@@ -40,7 +40,7 @@ fn run_pastel(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("pastel 0.9.0 (OurOS)");
+        println!("pastel 0.9.0 (SlateOS)");
         return 0;
     }
     let cmd = args.iter().find(|a| !a.starts_with('-'))

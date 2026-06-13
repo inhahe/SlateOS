@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zendesk-cli — OurOS Zendesk Support (the original SaaS helpdesk)
+//! zendesk-cli — SlateOS Zendesk Support (the original SaaS helpdesk)
 //!
 //! Single personality: `zendesk`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_zendesk(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: zendesk [OPTIONS]");
-        println!("Zendesk (OurOS) — customer service / helpdesk platform");
+        println!("Zendesk (SlateOS) — customer service / helpdesk platform");
         println!();
         println!("Options:");
         println!("  --support              Zendesk Support (ticketing core)");
@@ -26,8 +26,8 @@ fn run_zendesk(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Zendesk 2024 (OurOS)"); return 0; }
-    println!("Zendesk 2024 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Zendesk 2024 (SlateOS)"); return 0; }
+    println!("Zendesk 2024 (SlateOS)");
     println!("  Vendor: Zendesk, Inc. (San Francisco, CA — private since June 2022)");
     println!("  Founders: Mikkel Svane (CEO), Alexander Aghassipour, Morten Primdahl");
     println!("          three Danes — built v1 in a Copenhagen loft 2007");

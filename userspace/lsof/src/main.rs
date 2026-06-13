@@ -1,4 +1,4 @@
-//! OurOS `lsof` — list open files utility.
+//! SlateOS `lsof` — list open files utility.
 //!
 //! Reads `/proc/<pid>/fd/`, `/proc/<pid>/fdinfo/`, `/proc/<pid>/stat`,
 //! and `/proc/<pid>/status` to enumerate open file descriptors across
@@ -993,7 +993,7 @@ fn parse_net_filter(arg: &str) -> NetFilter {
 }
 
 fn print_usage() {
-    println!("OurOS List Open Files Utility v{VERSION}");
+    println!("SlateOS List Open Files Utility v{VERSION}");
     println!();
     println!("USAGE:");
     println!("  lsof [options]");

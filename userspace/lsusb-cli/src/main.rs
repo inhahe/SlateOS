@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lsusb-cli — OurOS USB device lister
+//! lsusb-cli — SlateOS USB device lister
 //!
 //! Multi-personality: `lsusb`, `usb-devices`
 
@@ -19,7 +19,7 @@ fn run_lsusb(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lsusb [OPTIONS]");
         println!();
-        println!("lsusb — list USB devices (OurOS).");
+        println!("lsusb — list USB devices (SlateOS).");
         println!();
         println!("Options:");
         println!("  -v              Verbose");
@@ -30,7 +30,7 @@ fn run_lsusb(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("lsusb (usbutils) 017 (OurOS)");
+        println!("lsusb (usbutils) 017 (SlateOS)");
         return 0;
     }
 

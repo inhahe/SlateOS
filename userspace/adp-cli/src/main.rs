@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! adp-cli — OurOS ADP (Automatic Data Processing — the largest US payroll provider)
+//! adp-cli — SlateOS ADP (Automatic Data Processing — the largest US payroll provider)
 //!
 //! Single personality: `adp`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_adp(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: adp [OPTIONS]");
-        println!("ADP Workforce Now (OurOS) — Payroll + HR + benefits + time + talent");
+        println!("ADP Workforce Now (SlateOS) — Payroll + HR + benefits + time + talent");
         println!();
         println!("Options:");
         println!("  --run                  ADP RUN (small business payroll)");
@@ -23,8 +23,8 @@ fn run_adp(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("ADP Workforce Now 2024 (OurOS)"); return 0; }
-    println!("ADP Workforce Now 2024 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("ADP Workforce Now 2024 (SlateOS)"); return 0; }
+    println!("ADP Workforce Now 2024 (SlateOS)");
     println!("  Vendor: Automatic Data Processing, Inc. (Roseland, NJ — NASDAQ:ADP)");
     println!("  Founded: 1949 by Henry Taub as 'Automatic Payrolls, Inc.'");
     println!("          one of the OLDEST surviving SaaS-adjacent businesses (pre-computer payroll service bureau)");

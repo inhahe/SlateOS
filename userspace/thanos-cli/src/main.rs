@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! thanos-cli — OurOS Thanos HA Prometheus tools
+//! thanos-cli — SlateOS Thanos HA Prometheus tools
 //!
 //! Multi-personality: `thanos`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_thanos(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: thanos COMMAND [OPTIONS]");
-        println!("Thanos 0.35.1 (OurOS)");
+        println!("Thanos 0.35.1 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  sidecar      Run sidecar for Prometheus");

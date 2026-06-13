@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hwinfo-cli — OurOS hardware information tool
+//! hwinfo-cli — SlateOS hardware information tool
 //!
 //! Multi-personality: `hwinfo`, `lshw`
 
@@ -19,7 +19,7 @@ fn run_hwinfo(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: hwinfo [OPTIONS]");
         println!();
-        println!("hwinfo — probe for hardware (OurOS).");
+        println!("hwinfo — probe for hardware (SlateOS).");
         println!();
         println!("Options:");
         println!("  --short        Short listing");
@@ -34,7 +34,7 @@ fn run_hwinfo(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("hwinfo version 21.82 (OurOS)");
+        println!("hwinfo version 21.82 (SlateOS)");
         return 0;
     }
 
@@ -109,7 +109,7 @@ fn run_lshw(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lshw [OPTIONS]");
         println!();
-        println!("lshw — list hardware (OurOS).");
+        println!("lshw — list hardware (SlateOS).");
         println!();
         println!("Options:");
         println!("  -short         Short listing");
@@ -122,7 +122,7 @@ fn run_lshw(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-version") {
-        println!("lshw B.02.19.2 (OurOS)");
+        println!("lshw B.02.19.2 (SlateOS)");
         return 0;
     }
 

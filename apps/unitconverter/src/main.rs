@@ -1,4 +1,4 @@
-//! OurOS Unit Converter
+//! SlateOS Unit Converter
 //!
 //! Comprehensive unit conversion application with:
 //! - 12 unit categories (length, weight, temperature, volume, area, speed,

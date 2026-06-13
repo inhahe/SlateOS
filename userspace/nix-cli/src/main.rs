@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nix-cli — OurOS Nix package manager
+//! nix-cli — SlateOS Nix package manager
 //!
 //! Multi-personality: `nix`, `nix-build`, `nix-shell`, `nix-env`, `nix-store`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_nix(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: nix COMMAND [OPTIONS]");
-        println!("Nix 2.20.0 (OurOS)");
+        println!("Nix 2.20.0 (SlateOS)");
         println!();
         println!("Common commands:");
         println!("  build        Build a derivation");
@@ -137,7 +137,7 @@ fn run_nix(args: &[String]) -> i32 {
 fn run_nix_build(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: nix-build [OPTIONS] [PATH]");
-        println!("Build a Nix expression. (OurOS)");
+        println!("Build a Nix expression. (SlateOS)");
         return 0;
     }
     let path = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("default.nix");
@@ -152,7 +152,7 @@ fn run_nix_build(args: &[String]) -> i32 {
 fn run_nix_shell(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: nix-shell [OPTIONS] [PATH]");
-        println!("Start a shell with build inputs. (OurOS)");
+        println!("Start a shell with build inputs. (SlateOS)");
         println!("  -p PACKAGES   Packages to make available");
         println!("  --pure        Clear environment");
         println!("  --run CMD     Run command instead of shell");

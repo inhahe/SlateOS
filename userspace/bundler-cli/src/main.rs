@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bundler-cli — OurOS Ruby Bundler dependency manager
+//! bundler-cli — SlateOS Ruby Bundler dependency manager
 //!
 //! Multi-personality: `bundle`, `bundler`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_bundler(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: bundle COMMAND [OPTIONS]");
-        println!("Bundler 2.5.14 (OurOS)");
+        println!("Bundler 2.5.14 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  install    Install gems from Gemfile");

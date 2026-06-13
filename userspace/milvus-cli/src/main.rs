@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! milvus-cli — OurOS Milvus (open-source cloud-native vector DB, Zilliz commercial, Shanghai/Redwood City)
+//! milvus-cli — SlateOS Milvus (open-source cloud-native vector DB, Zilliz commercial, Shanghai/Redwood City)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_milvus(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: milvus [OPTIONS]");
-        println!("Milvus (OurOS) — open-source cloud-native vector DB (LF AI), Zilliz commercial");
+        println!("Milvus (SlateOS) — open-source cloud-native vector DB (LF AI), Zilliz commercial");
         println!();
         println!("Options:");
         println!("  --lite                 Milvus Lite (embedded in Python)");
@@ -21,8 +21,8 @@ fn run_milvus(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Milvus 2024 (OurOS) — milvus_cli 2.x"); return 0; }
-    println!("Milvus 2024 (OurOS) — Open-Source Cloud-Native Vector Database (LF AI)");
+    if args.iter().any(|a| a == "--version") { println!("Milvus 2024 (SlateOS) — milvus_cli 2.x"); return 0; }
+    println!("Milvus 2024 (SlateOS) — Open-Source Cloud-Native Vector Database (LF AI)");
     println!("  Vendor: Zilliz, Inc. (Redwood City + Shanghai — private, commercial backer)");
     println!("          Project: Milvus (LF AI Foundation graduated project, since 2020)");
     println!("  Founders: Charles Xie (CEO of Zilliz), Milvus founded 2019 inside Zilliz");

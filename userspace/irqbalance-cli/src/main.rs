@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! irqbalance-cli — OurOS IRQ balancing daemon
+//! irqbalance-cli — SlateOS IRQ balancing daemon
 //!
 //! Single personality: `irqbalance`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_irqbalance(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: irqbalance [OPTIONS]");
-        println!("irqbalance v1.9 (OurOS) — Distribute IRQs across CPUs");
+        println!("irqbalance v1.9 (SlateOS) — Distribute IRQs across CPUs");
         println!();
         println!("Options:");
         println!("  --foreground     Run in foreground");
@@ -25,7 +25,7 @@ fn run_irqbalance(args: &[String], _prog: &str) -> i32 {
         println!("  --version        Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("irqbalance v1.9 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("irqbalance v1.9 (SlateOS)"); return 0; }
     if args.iter().any(|a| a == "--oneshot") {
         println!("irqbalance: one-shot mode");
         println!("  Balanced 24 IRQs across 8 CPUs");

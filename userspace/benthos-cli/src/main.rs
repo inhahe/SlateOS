@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! benthos-cli — OurOS Benthos/Redpanda Connect stream processor
+//! benthos-cli — SlateOS Benthos/Redpanda Connect stream processor
 //!
 //! Multi-personality: `benthos`, `rpk-connect`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_benthos(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: benthos COMMAND [OPTIONS]");
-        println!("Benthos / Redpanda Connect 4.31.0 (OurOS)");
+        println!("Benthos / Redpanda Connect 4.31.0 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  run          Run a pipeline");

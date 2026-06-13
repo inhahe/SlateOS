@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kraken2-cli — OurOS Kraken2 taxonomic classifier
+//! kraken2-cli — SlateOS Kraken2 taxonomic classifier
 //!
 //! Multi-personality: `kraken2`, `kraken2-build`, `kraken2-inspect`
 
@@ -15,18 +15,18 @@ fn run_kraken2(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "kraken2-build" => {
-                println!("Kraken2-build v2.1 (OurOS) — Database builder");
+                println!("Kraken2-build v2.1 (SlateOS) — Database builder");
                 println!("  --download-taxonomy   Download NCBI taxonomy");
                 println!("  --download-library LIB  Download library (bacteria, viral, etc.)");
                 println!("  --build               Build database");
                 println!("  --db DIR              Database directory");
             }
             "kraken2-inspect" => {
-                println!("Kraken2-inspect v2.1 (OurOS) — Database inspector");
+                println!("Kraken2-inspect v2.1 (SlateOS) — Database inspector");
                 println!("  --db DIR    Database directory");
             }
             _ => {
-                println!("Kraken2 v2.1 (OurOS) — Taxonomic sequence classifier");
+                println!("Kraken2 v2.1 (SlateOS) — Taxonomic sequence classifier");
                 println!("  --db DIR          Database directory");
                 println!("  --threads N       Number of threads");
                 println!("  --output FILE     Classification output");
@@ -39,7 +39,7 @@ fn run_kraken2(args: &[String], prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Kraken2 v2.1.3 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("Kraken2 v2.1.3 (SlateOS)"); return 0; }
     match prog {
         "kraken2-build" => {
             println!("Kraken2-build: building database...");

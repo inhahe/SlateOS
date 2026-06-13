@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pgloader-cli — OurOS pgloader CLI
+//! pgloader-cli — SlateOS pgloader CLI
 //!
 //! Single personality: `pgloader`
 
@@ -11,7 +11,7 @@ fn run_pgloader(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pgloader [OPTIONS] [SOURCE] [TARGET]");
         println!();
-        println!("pgloader — load data into PostgreSQL (OurOS).");
+        println!("pgloader — load data into PostgreSQL (SlateOS).");
         println!();
         println!("Options:");
         println!("  --with OPTION          Set option (workers, batch size, etc.)");
@@ -29,7 +29,7 @@ fn run_pgloader(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("pgloader version 3.6.10 (OurOS)");
+        println!("pgloader version 3.6.10 (SlateOS)");
         return 0;
     }
 
@@ -38,7 +38,7 @@ fn run_pgloader(args: Vec<String>) -> i32 {
     let target = args.iter().filter(|a| !a.starts_with('-'))
         .nth(1).map(|s| s.as_str()).unwrap_or("postgresql://localhost/mydb");
 
-    println!("LOG pgloader version 3.6.10 (OurOS)");
+    println!("LOG pgloader version 3.6.10 (SlateOS)");
     println!("LOG Parsing commands from {}", source);
     println!("LOG Loading data from {}", source);
     println!("LOG Into {}", target);

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gluster-cli — OurOS GlusterFS distributed filesystem tools
+//! gluster-cli — SlateOS GlusterFS distributed filesystem tools
 //!
 //! Multi-personality: `gluster`, `glusterd`, `glusterfsd`
 
@@ -14,7 +14,7 @@ fn run_gluster(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: gluster [OPTIONS] COMMAND");
         println!();
-        println!("gluster — GlusterFS CLI (OurOS).");
+        println!("gluster — GlusterFS CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  peer status          Show peer status");
@@ -29,7 +29,7 @@ fn run_gluster(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("glusterfs 11.1 (OurOS)");
+        println!("glusterfs 11.1 (SlateOS)");
         return 0;
     }
 
@@ -95,7 +95,7 @@ fn main() {
     let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "gluster".to_string());
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = match prog.as_str() {
-        "glusterd" => { println!("glusterd: started (OurOS)"); 0 }
+        "glusterd" => { println!("glusterd: started (SlateOS)"); 0 }
         "glusterfsd" => { println!("glusterfsd: brick process started"); 0 }
         _ => run_gluster(&rest),
     };

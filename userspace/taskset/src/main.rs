@@ -1,4 +1,4 @@
-// OurOS taskset - CPU affinity and scheduling tools
+// SlateOS taskset - CPU affinity and scheduling tools
 //
 // Multi-personality binary:
 //   taskset  - set/get process CPU affinity
@@ -358,7 +358,7 @@ fn cmd_taskset(args: &TasksetArgs) -> i32 {
     }
 
     if args.show_version {
-        print_out(b"taskset (OurOS util-linux) 1.0.0\n");
+        print_out(b"taskset (SlateOS util-linux) 1.0.0\n");
         return 0;
     }
 
@@ -568,7 +568,7 @@ fn cmd_chrt(args: &ChrtArgs) -> i32 {
     }
 
     if args.show_version {
-        print_out(b"chrt (OurOS util-linux) 1.0.0\n");
+        print_out(b"chrt (SlateOS util-linux) 1.0.0\n");
         return 0;
     }
 
@@ -792,7 +792,7 @@ fn cmd_ionice(args: &IonicArgs) -> i32 {
     }
 
     if args.show_version {
-        print_out(b"ionice (OurOS util-linux) 1.0.0\n");
+        print_out(b"ionice (SlateOS util-linux) 1.0.0\n");
         return 0;
     }
 
@@ -958,7 +958,7 @@ fn cmd_renice(args: &ReniceArgs) -> i32 {
     }
 
     if args.show_version {
-        print_out(b"renice (OurOS util-linux) 1.0.0\n");
+        print_out(b"renice (SlateOS util-linux) 1.0.0\n");
         return 0;
     }
 

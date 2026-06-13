@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! reduce-cli — OurOS REDUCE computer algebra system
+//! reduce-cli — SlateOS REDUCE computer algebra system
 //!
 //! Single personality: `reduce`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_reduce(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: reduce [OPTIONS] [FILE]");
-        println!("REDUCE v20240101 (OurOS) — Computer Algebra System");
+        println!("REDUCE v20240101 (SlateOS) — Computer Algebra System");
         println!();
         println!("Options:");
         println!("  -w              Suppress startup banner");
@@ -25,7 +25,7 @@ fn run_reduce(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("REDUCE (Free CSL version), revision 20240101 (OurOS)");
+        println!("REDUCE (Free CSL version), revision 20240101 (SlateOS)");
         return 0;
     }
     let quiet = args.iter().any(|a| a == "-w");

@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! dnsmadeeasy-cli — OurOS personality CLI for DNS Made Easy, the long-running enterprise DNS.
+//! dnsmadeeasy-cli — SlateOS personality CLI for DNS Made Easy, the long-running enterprise DNS.
 
 use std::env;
 use std::process;

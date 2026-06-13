@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pdfgrep-cli — OurOS pdfgrep PDF text search
+//! pdfgrep-cli — SlateOS pdfgrep PDF text search
 //!
 //! Single personality: `pdfgrep`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pdfgrep(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: pdfgrep [OPTIONS] PATTERN [FILE...]");
-        println!("pdfgrep v2.2 (OurOS) — Search text in PDF files");
+        println!("pdfgrep v2.2 (SlateOS) — Search text in PDF files");
         println!();
         println!("Options:");
         println!("  PATTERN           Search pattern (regex)");

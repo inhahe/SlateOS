@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! amber — OurOS code search and replace tool
+//! amber — SlateOS code search and replace tool
 //!
 //! Single personality: `amber` (ambr for replace mode)
 
@@ -30,7 +30,7 @@ fn run_amber(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("amber 1.0.0 (OurOS)");
+        println!("amber 1.0.0 (SlateOS)");
         return 0;
     }
 

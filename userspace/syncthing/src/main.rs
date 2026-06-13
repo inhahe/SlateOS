@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! syncthing — OurOS continuous file synchronization
+//! syncthing — SlateOS continuous file synchronization
 //!
 //! Single personality: `syncthing`
 
@@ -29,7 +29,7 @@ fn run_syncthing(args: Vec<String>) -> i32 {
     }
 
     if cmd == Some("version") || args.iter().any(|a| a == "--version") {
-        println!("syncthing v1.27.7 \"Fermium Flea\" (OurOS amd64) 2025-05-22");
+        println!("syncthing v1.27.7 \"Fermium Flea\" (SlateOS amd64) 2025-05-22");
         return 0;
     }
 
@@ -82,7 +82,7 @@ fn run_syncthing(args: Vec<String>) -> i32 {
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
         .unwrap_or("127.0.0.1:8384");
-    println!("[start] 10:00:00 INFO: syncthing v1.27.7 \"Fermium Flea\" (OurOS amd64)");
+    println!("[start] 10:00:00 INFO: syncthing v1.27.7 \"Fermium Flea\" (SlateOS amd64)");
     println!("[start] 10:00:00 INFO: My ID: ABCDEFG-HIJKLMN-OPQRSTU-VWXYZ12-3456789-0ABCDEF-GHIJKLM-NOPQRS1");
     println!("[start] 10:00:00 INFO: Single thread SHA256 performance is 250 MB/s using minio/sha256-simd");
     println!("[start] 10:00:01 INFO: Ready to synchronize \"Default Folder\" (default)");

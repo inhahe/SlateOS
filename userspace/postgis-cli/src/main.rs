@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! postgis-cli — OurOS PostGIS spatial database utilities
+//! postgis-cli — SlateOS PostGIS spatial database utilities
 //!
 //! Multi-personality: `shp2pgsql`, `pgsql2shp`, `raster2pgsql`
 

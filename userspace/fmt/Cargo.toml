@@ -2,5 +2,5 @@
 name = "fmt"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS simple text formatter"
+description = "SlateOS simple text formatter"
 [dependencies]

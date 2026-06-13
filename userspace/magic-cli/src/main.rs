@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! magic-cli — OurOS Magic VLSI layout tool
+//! magic-cli — SlateOS Magic VLSI layout tool
 //!
 //! Single personality: `magic`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_magic(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: magic [OPTIONS] [CELLNAME]");
-        println!("Magic v8.3 (OurOS) — Interactive VLSI layout editor");
+        println!("Magic v8.3 (SlateOS) — Interactive VLSI layout editor");
         println!();
         println!("Options:");
         println!("  -T TECH       Technology file");
@@ -26,8 +26,8 @@ fn run_magic(args: &[String], _prog: &str) -> i32 {
         println!("  --version     Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Magic v8.3.460 (OurOS)"); return 0; }
-    println!("Magic v8.3.460 (OurOS) — VLSI Layout Editor");
+    if args.iter().any(|a| a == "--version") { println!("Magic v8.3.460 (SlateOS)"); return 0; }
+    println!("Magic v8.3.460 (SlateOS) — VLSI Layout Editor");
     println!("  Technology: scmos");
     println!("  Loading cell library...");
     println!("  DRC: running design rule check...");

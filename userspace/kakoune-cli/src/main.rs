@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kakoune-cli — OurOS Kakoune editor
+//! kakoune-cli — SlateOS Kakoune editor
 //!
 //! Multi-personality: `kak`, `kak-lsp`
 
@@ -26,7 +26,7 @@ fn run_kakoune(args: &[String], prog: &str) -> i32 {
             return 0;
         }
         if args.iter().any(|a| a == "-V" || a == "--version") {
-            println!("kak-lsp 17.1.0 (OurOS)");
+            println!("kak-lsp 17.1.0 (SlateOS)");
             return 0;
         }
         println!("kak-lsp: Starting LSP server...");
@@ -35,7 +35,7 @@ fn run_kakoune(args: &[String], prog: &str) -> i32 {
     // kak
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: kak [OPTIONS] [FILE...]");
-        println!("Kakoune 2024.05.18 (OurOS) — Modal code editor");
+        println!("Kakoune 2024.05.18 (SlateOS) — Modal code editor");
         println!();
         println!("Options:");
         println!("  -c NAME        Connect to session NAME");
@@ -55,7 +55,7 @@ fn run_kakoune(args: &[String], prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("Kakoune 2024.05.18 (OurOS)");
+        println!("Kakoune 2024.05.18 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "-l") {

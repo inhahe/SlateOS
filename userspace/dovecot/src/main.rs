@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dovecot — OurOS IMAP/POP3 mail server
+//! dovecot — SlateOS IMAP/POP3 mail server
 //!
 //! Multi-personality: `dovecot` (server), `doveconf` (config dumper), `doveadm` (admin)
 
@@ -18,7 +18,7 @@ fn run_dovecot(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("dovecot (OurOS) 2.3.21");
+        println!("dovecot (SlateOS) 2.3.21");
         return 0;
     }
     if args.iter().any(|a| a == "stop") {
@@ -29,7 +29,7 @@ fn run_dovecot(args: Vec<String>) -> i32 {
         println!("dovecot: configuration reloaded");
         return 0;
     }
-    println!("May 22 10:00:00 dovecot: master: Dovecot v2.3.21 (OurOS) starting up");
+    println!("May 22 10:00:00 dovecot: master: Dovecot v2.3.21 (SlateOS) starting up");
     println!("May 22 10:00:00 dovecot: master: Listening: imap(0.0.0.0:143), imaps(0.0.0.0:993)");
     println!("May 22 10:00:00 dovecot: master: Listening: pop3(0.0.0.0:110), pop3s(0.0.0.0:995)");
     println!("May 22 10:00:00 dovecot: master: Listening: lmtp(/var/run/dovecot/lmtp)");
@@ -62,14 +62,14 @@ fn run_doveconf(args: Vec<String>) -> i32 {
     }
 
     if nondefault {
-        println!("# 2.3.21 (OurOS): /etc/dovecot/dovecot.conf");
+        println!("# 2.3.21 (SlateOS): /etc/dovecot/dovecot.conf");
         println!("protocols = imap pop3 lmtp");
         println!("mail_location = maildir:~/Maildir");
         println!("ssl = required");
         println!("ssl_cert = </etc/letsencrypt/live/mail.example.com/fullchain.pem");
         println!("ssl_key = </etc/letsencrypt/live/mail.example.com/privkey.pem");
     } else {
-        println!("# 2.3.21 (OurOS): /etc/dovecot/dovecot.conf");
+        println!("# 2.3.21 (SlateOS): /etc/dovecot/dovecot.conf");
         println!("protocols = imap pop3 lmtp");
         println!("listen = *, ::");
         println!("base_dir = /var/run/dovecot/");

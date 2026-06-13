@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sd — OurOS intuitive find & replace CLI (sed alternative)
+//! sd — SlateOS intuitive find & replace CLI (sed alternative)
 //!
 //! Single personality: `sd`
 
@@ -23,7 +23,7 @@ fn run_sd(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("sd 1.0.0 (OurOS)");
+        println!("sd 1.0.0 (SlateOS)");
         return 0;
     }
 

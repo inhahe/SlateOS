@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ibus-cli — OurOS IBus input method framework CLI
+//! ibus-cli — SlateOS IBus input method framework CLI
 //!
 //! Multi-personality: `ibus`, `ibus-daemon`, `ibus-setup`
 
@@ -19,7 +19,7 @@ fn run_ibus(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: ibus COMMAND [OPTIONS]");
         println!();
-        println!("IBus — intelligent input bus (OurOS).");
+        println!("IBus — intelligent input bus (SlateOS).");
         println!();
         println!("Commands:");
         println!("  engine [NAME]    Get/set input method engine");
@@ -34,14 +34,14 @@ fn run_ibus(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("IBus 1.5.29 (OurOS)");
+        println!("IBus 1.5.29 (SlateOS)");
         return 0;
     }
 
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
 
     match cmd {
-        "version" => println!("IBus 1.5.29 (OurOS)"),
+        "version" => println!("IBus 1.5.29 (SlateOS)"),
         "list-engine" => {
             println!("language: en");
             println!("  xkb:us::eng  - English (US)");
@@ -83,7 +83,7 @@ fn run_ibus_daemon(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ibus-daemon [OPTIONS]");
         println!();
-        println!("IBus daemon (OurOS).");
+        println!("IBus daemon (SlateOS).");
         println!();
         println!("Options:");
         println!("  -d, --daemonize    Run as daemon");

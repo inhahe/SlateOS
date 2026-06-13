@@ -2,5 +2,5 @@
 name = "pulseaudio"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS PulseAudio sound system utilities"
+description = "SlateOS PulseAudio sound system utilities"
 [dependencies]

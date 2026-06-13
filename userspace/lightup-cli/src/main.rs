@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lightup-cli — OurOS Lightup Data (no-code data quality, SF, acquired by Acceldata 2024)
+//! lightup-cli — SlateOS Lightup Data (no-code data quality, SF, acquired by Acceldata 2024)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_lightup(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lightup [OPTIONS]");
-        println!("Lightup (OurOS) — no-code AI data quality (acquired by Acceldata Apr 2024)");
+        println!("Lightup (SlateOS) — no-code AI data quality (acquired by Acceldata Apr 2024)");
         println!();
         println!("Options:");
         println!("  --pulse                Pulse — quality monitor (proactive)");
@@ -20,8 +20,8 @@ fn run_lightup(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Lightup 2024 (OurOS)"); return 0; }
-    println!("Lightup 2024 (OurOS) — No-Code AI Data Quality");
+    if args.iter().any(|a| a == "--version") { println!("Lightup 2024 (SlateOS)"); return 0; }
+    println!("Lightup 2024 (SlateOS) — No-Code AI Data Quality");
     println!("  Vendor: Lightup Data, Inc. (Mountain View) — ACQUIRED by Acceldata Apr 2024");
     println!("  Founders: Manu Bansal (CEO) + Vasudev Vikram + others, 2019");
     println!("          Manu: Stanford PhD (EE), ex-Uhana (ML for telco, sold to VMware)");

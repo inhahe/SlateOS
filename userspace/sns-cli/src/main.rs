@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sns-cli — OurOS AWS SNS (Simple Notification Service — pub/sub + SMS + email + push, 2010)
+//! sns-cli — SlateOS AWS SNS (Simple Notification Service — pub/sub + SMS + email + push, 2010)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sns(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sns [OPTIONS]");
-        println!("AWS SNS (OurOS) — Simple Notification Service (pub/sub + SMS + email + mobile push)");
+        println!("AWS SNS (SlateOS) — Simple Notification Service (pub/sub + SMS + email + mobile push)");
         println!();
         println!("Options:");
         println!("  --topic                Standard or FIFO topic (pub/sub)");
@@ -22,8 +22,8 @@ fn run_sns(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("AWS SNS 2024 (OurOS) — sns CLI (aws-cli v2)"); return 0; }
-    println!("AWS SNS 2024 (OurOS) — Simple Notification Service (pub/sub + multi-protocol delivery)");
+    if args.iter().any(|a| a == "--version") { println!("AWS SNS 2024 (SlateOS) — sns CLI (aws-cli v2)"); return 0; }
+    println!("AWS SNS 2024 (SlateOS) — Simple Notification Service (pub/sub + multi-protocol delivery)");
     println!("  Vendor: Amazon Web Services (Seattle, WA — NASDAQ: AMZN)");
     println!("  History:");
     println!("    - Launched Apr 2010 — fifth core AWS service");

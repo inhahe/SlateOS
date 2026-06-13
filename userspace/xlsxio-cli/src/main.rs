@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xlsxio-cli — OurOS XLSX spreadsheet reader/writer
+//! xlsxio-cli — SlateOS XLSX spreadsheet reader/writer
 //!
 //! Multi-personality: `xlsxio_read`, `xlsxio_write`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_xlsxio_read(args: &[String], prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: {} [OPTIONS] <file.xlsx>", prog);
-        println!("{} v0.2 (OurOS) — XLSX spreadsheet reader", prog);
+        println!("{} v0.2 (SlateOS) — XLSX spreadsheet reader", prog);
         println!();
         println!("Options:");
         println!("  -s SHEET       Sheet name or index");
@@ -25,7 +25,7 @@ fn run_xlsxio_read(args: &[String], prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("{} v0.2 (OurOS)", prog); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("{} v0.2 (SlateOS)", prog); return 0; }
     if args.iter().any(|a| a == "-l") {
         println!("Sheets:");
         println!("  1: Sheet1 (150 rows x 8 cols)");
@@ -49,7 +49,7 @@ fn run_xlsxio_read(args: &[String], prog: &str) -> i32 {
 fn run_xlsxio_write(args: &[String], prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: {} [OPTIONS] -o <output.xlsx>", prog);
-        println!("{} v0.2 (OurOS) — XLSX spreadsheet writer", prog);
+        println!("{} v0.2 (SlateOS) — XLSX spreadsheet writer", prog);
         println!();
         println!("Options:");
         println!("  -o FILE        Output filename");
@@ -60,7 +60,7 @@ fn run_xlsxio_write(args: &[String], prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("{} v0.2 (OurOS)", prog); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("{} v0.2 (SlateOS)", prog); return 0; }
     let output = args.windows(2).find(|w| w[0] == "-o").map(|w| w[1].as_str());
     if output.is_none() {
         eprintln!("{}: error: no output file specified (-o)", prog);

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! at-spi-cli — OurOS AT-SPI2 accessibility tools CLI
+//! at-spi-cli — SlateOS AT-SPI2 accessibility tools CLI
 //!
 //! Multi-personality: `at-spi2-registryd`, `at-spi-bus-launcher`, `accerciser`
 
@@ -19,7 +19,7 @@ fn run_registryd(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: at-spi2-registryd [OPTIONS]");
         println!();
-        println!("AT-SPI2 registry daemon (OurOS).");
+        println!("AT-SPI2 registry daemon (SlateOS).");
         println!();
         println!("Options:");
         println!("  --dbus-name NAME    DBus bus name");
@@ -27,7 +27,7 @@ fn run_registryd(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("at-spi2-registryd 2.52.0 (OurOS)");
+        println!("at-spi2-registryd 2.52.0 (SlateOS)");
         return 0;
     }
     println!("AT-SPI2 registry daemon starting...");
@@ -40,14 +40,14 @@ fn run_bus_launcher(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: at-spi-bus-launcher [OPTIONS]");
         println!();
-        println!("AT-SPI accessibility bus launcher (OurOS).");
+        println!("AT-SPI accessibility bus launcher (SlateOS).");
         println!();
         println!("Options:");
         println!("  --launch-immediately  Launch without waiting");
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("at-spi-bus-launcher 2.52.0 (OurOS)");
+        println!("at-spi-bus-launcher 2.52.0 (SlateOS)");
         return 0;
     }
     println!("Launching AT-SPI accessibility bus...");
@@ -60,14 +60,14 @@ fn run_accerciser(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: accerciser [OPTIONS]");
         println!();
-        println!("Accerciser — interactive accessibility explorer (OurOS).");
+        println!("Accerciser — interactive accessibility explorer (SlateOS).");
         println!();
         println!("Options:");
         println!("  --version          Show version");
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Accerciser 3.42.0 (OurOS)");
+        println!("Accerciser 3.42.0 (SlateOS)");
         return 0;
     }
     println!("Accerciser: accessibility explorer starting...");

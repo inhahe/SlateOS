@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! flyway-cli — OurOS Flyway CLI
+//! flyway-cli — SlateOS Flyway CLI
 //!
 //! Single personality: `flyway`
 
@@ -11,7 +11,7 @@ fn run_flyway(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: flyway <COMMAND> [OPTIONS]");
         println!();
-        println!("Flyway database migration tool (OurOS).");
+        println!("Flyway database migration tool (SlateOS).");
         println!();
         println!("Commands:");
         println!("  migrate      Apply pending migrations");
@@ -24,7 +24,7 @@ fn run_flyway(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("Flyway Community Edition 10.6.0 (OurOS)");
+        println!("Flyway Community Edition 10.6.0 (SlateOS)");
         return 0;
     }
 

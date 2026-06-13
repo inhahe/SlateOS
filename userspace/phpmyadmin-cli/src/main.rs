@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! phpmyadmin-cli — OurOS phpMyAdmin database management
+//! phpmyadmin-cli — SlateOS phpMyAdmin database management
 //!
 //! Single personality: `phpmyadmin`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_phpmyadmin(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: phpmyadmin [COMMAND] [OPTIONS]");
-        println!("phpMyAdmin v5.2 (OurOS) — MySQL/MariaDB web administration");
+        println!("phpMyAdmin v5.2 (SlateOS) — MySQL/MariaDB web administration");
         println!();
         println!("Commands:");
         println!("  serve              Start web server");
@@ -31,8 +31,8 @@ fn run_phpmyadmin(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("phpMyAdmin v5.2.1 (OurOS)"); return 0; }
-    println!("phpMyAdmin v5.2.1 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("phpMyAdmin v5.2.1 (SlateOS)"); return 0; }
+    println!("phpMyAdmin v5.2.1 (SlateOS)");
     println!("  MySQL: localhost:3306 (v8.0)");
     println!("  Databases: 12");
     println!("  Tables: 234");

@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! jsdelivr-cli — OurOS jsDelivr free public CDN personality CLI.
+//! jsdelivr-cli — SlateOS jsDelivr free public CDN personality CLI.
 
 use std::env;
 use std::process;
@@ -28,7 +28,7 @@ fn print_help(prog: &str) {
 }
 
 fn print_version() {
-    println!("jsdelivr-cli 0.1.0 — OurOS personality binary");
+    println!("jsdelivr-cli 0.1.0 — SlateOS personality binary");
     println!("jsDelivr — Free, fast, reliable open-source CDN");
 }
 

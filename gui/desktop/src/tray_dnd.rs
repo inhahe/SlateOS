@@ -22,10 +22,10 @@ use std::collections::HashMap;
 const DRAG_THRESHOLD: f32 = 5.0;
 
 /// Custom data format for tray icon drag data (icon ID + app name).
-const TRAY_ICON_FORMAT: &str = "application/x-ouros-tray-icon";
+const TRAY_ICON_FORMAT: &str = "application/x-slateos-tray-icon";
 
 /// Custom data format for taskbar app data (app ID being dragged in).
-const TASKBAR_APP_FORMAT: &str = "application/x-ouros-taskbar-app";
+const TASKBAR_APP_FORMAT: &str = "application/x-slateos-taskbar-app";
 
 /// Maximum number of visible icons before overflow kicks in.
 const DEFAULT_MAX_VISIBLE: usize = 12;
@@ -816,10 +816,10 @@ mod tests {
         let mut data = DataObject::new();
         data.set_data(
             DataFormat::Custom(TASKBAR_APP_FORMAT.to_string()),
-            b"org.ouros.settings".to_vec(),
+            b"org.slateos.settings".to_vec(),
         );
         let result = TrayDropTarget::parse_taskbar_app_data(&data);
-        assert_eq!(result, Some("org.ouros.settings".to_string()));
+        assert_eq!(result, Some("org.slateos.settings".to_string()));
     }
 
     #[test]

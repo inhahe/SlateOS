@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cloud-hypervisor-cli — OurOS Cloud Hypervisor VMM
+//! cloud-hypervisor-cli — SlateOS Cloud Hypervisor VMM
 //!
 //! Single personality: `cloud-hypervisor`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_cloud_hypervisor(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: cloud-hypervisor [OPTIONS]");
-        println!("cloud-hypervisor v39.0 (OurOS) — Rust-based VMM");
+        println!("cloud-hypervisor v39.0 (SlateOS) — Rust-based VMM");
         println!();
         println!("Options:");
         println!("  --kernel PATH     Kernel image");
@@ -29,7 +29,7 @@ fn run_cloud_hypervisor(args: &[String], _prog: &str) -> i32 {
         println!("  -V / --version    Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "-V" || a == "--version") { println!("cloud-hypervisor v39.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "-V" || a == "--version") { println!("cloud-hypervisor v39.0 (SlateOS)"); return 0; }
     println!("Cloud Hypervisor v39.0");
     println!("  vCPUs: 2");
     println!("  Memory: 2048 MiB");

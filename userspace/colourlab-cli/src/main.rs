@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! colourlab-cli — OurOS FilmLight ColourLab Ai look management
+//! colourlab-cli — SlateOS FilmLight ColourLab Ai look management
 //!
 //! Single personality: `colourlab`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_cl(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: colourlab [OPTIONS] [SHOT]");
-        println!("ColourLab Ai 3 (OurOS) — AI-assisted shot matching & look transfer");
+        println!("ColourLab Ai 3 (SlateOS) — AI-assisted shot matching & look transfer");
         println!();
         println!("Options:");
         println!("  --shot-match REFERENCE Match shot to reference");
@@ -23,8 +23,8 @@ fn run_cl(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("ColourLab Ai 3.5.0 (OurOS)"); return 0; }
-    println!("ColourLab Ai 3.5.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("ColourLab Ai 3.5.0 (SlateOS)"); return 0; }
+    println!("ColourLab Ai 3.5.0 (SlateOS)");
     println!("  AI engine: Trained on Hollywood-grade reference content");
     println!("  Workflow: Match every shot to a reference, transfer look across project");
     println!("  Integration: BLG export to Baselight, CDL/LUT to any system");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! netcat-cli — OurOS netcat (nc) CLI
+//! netcat-cli — SlateOS netcat (nc) CLI
 //!
 //! Multi-personality: `nc`, `ncat`, `netcat`
 
@@ -19,7 +19,7 @@ fn run_nc(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: nc [OPTIONS] [HOST] [PORT]");
         println!();
-        println!("netcat — networking Swiss Army knife (OurOS).");
+        println!("netcat — networking Swiss Army knife (SlateOS).");
         println!();
         println!("Options:");
         println!("  -l                     Listen mode");
@@ -38,7 +38,7 @@ fn run_nc(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Ncat 7.94 (OurOS)");
+        println!("Ncat 7.94 (SlateOS)");
         return 0;
     }
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gdu-cli — OurOS gdu disk usage analyzer
+//! gdu-cli — SlateOS gdu disk usage analyzer
 //!
 //! Single personality: `gdu`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gdu(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gdu [OPTIONS] [PATH]");
-        println!("gdu 5.29.0 (OurOS) — Fast disk usage analyzer");
+        println!("gdu 5.29.0 (SlateOS) — Fast disk usage analyzer");
         println!();
         println!("Options:");
         println!("  -d, --show-disks         Show all mounted disks");
@@ -31,7 +31,7 @@ fn run_gdu(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("gdu 5.29.0 (OurOS)");
+        println!("gdu 5.29.0 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "-d" || a == "--show-disks") {

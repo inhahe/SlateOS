@@ -1,4 +1,4 @@
-//! Calendar and scheduling application for OurOS.
+//! Calendar and scheduling application for SlateOS.
 //!
 //! Provides month/week/day/year views, event creation with recurrence,
 //! categories, reminders, ICS import/export, and a mini-calendar sidebar.
@@ -708,7 +708,7 @@ impl CalendarEvent {
     pub fn to_ics(&self) -> String {
         let mut lines = Vec::new();
         lines.push("BEGIN:VEVENT".to_string());
-        lines.push(format!("UID:{}-ouros@calendar", self.id));
+        lines.push(format!("UID:{}-slateos@calendar", self.id));
         lines.push(format!("DTSTART:{}", self.start.format_ics()));
         lines.push(format!("DTEND:{}", self.end.format_ics()));
         lines.push(format!("SUMMARY:{}", ics_escape(&self.title)));
@@ -889,7 +889,7 @@ pub fn generate_ics(events: &[CalendarEvent], calendar_name: &str) -> String {
     let mut lines = Vec::new();
     lines.push("BEGIN:VCALENDAR".to_string());
     lines.push("VERSION:2.0".to_string());
-    lines.push("PRODID:-//OurOS//Calendar//EN".to_string());
+    lines.push("PRODID:-//SlateOS//Calendar//EN".to_string());
     lines.push(format!("X-WR-CALNAME:{calendar_name}"));
 
     for event in events {

@@ -2,5 +2,5 @@
 name = "nmcli"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS NetworkManager - network management (NetworkManager/nmcli/nmtui)"
+description = "SlateOS NetworkManager - network management (NetworkManager/nmcli/nmtui)"
 [dependencies]

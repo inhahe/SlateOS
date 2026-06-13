@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cni-plugins — OurOS Container Networking Interface plugins
+//! cni-plugins — SlateOS Container Networking Interface plugins
 //!
 //! Multi-personality: `bridge`, `host-local`, `loopback`, `portmap`, `firewall`, `tuning`, `bandwidth`
 
@@ -24,7 +24,7 @@ fn run_cni_plugin(args: Vec<String>, plugin: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("{}: CNI plugin v1.4.1 (OurOS)", plugin);
+        println!("{}: CNI plugin v1.4.1 (SlateOS)", plugin);
         return 0;
     }
 

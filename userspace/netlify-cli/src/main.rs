@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! netlify-cli — OurOS Netlify CLI
+//! netlify-cli — SlateOS Netlify CLI
 //!
 //! Single personality: `netlify`
 
@@ -11,7 +11,7 @@ fn run_netlify(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: netlify <COMMAND> [OPTIONS]");
         println!();
-        println!("Netlify command-line interface (OurOS).");
+        println!("Netlify command-line interface (SlateOS).");
         println!();
         println!("Commands:");
         println!("  deploy       Deploy to Netlify");

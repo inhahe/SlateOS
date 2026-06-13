@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mcafee-cli — OurOS McAfee+ consumer security
+//! mcafee-cli — SlateOS McAfee+ consumer security
 //!
 //! Single personality: `mcafee`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mcafee(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mcafee [OPTIONS]");
-        println!("McAfee+ Advanced 16.0 (OurOS) — Consumer security suite");
+        println!("McAfee+ Advanced 16.0 (SlateOS) — Consumer security suite");
         println!();
         println!("Options:");
         println!("  --scan TYPE            quick/full/custom");
@@ -24,8 +24,8 @@ fn run_mcafee(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("McAfee+ Advanced 16.0.55 R32 (OurOS)"); return 0; }
-    println!("McAfee+ Advanced 16.0.55 R32 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("McAfee+ Advanced 16.0.55 R32 (SlateOS)"); return 0; }
+    println!("McAfee+ Advanced 16.0.55 R32 (SlateOS)");
     println!("  Brand history: McAfee Inc (1987) → Intel Security (2014) → McAfee (2017) →");
     println!("                 split 2022: McAfee (consumer) + Trellix (enterprise, w/ FireEye)");
     println!("  McAfee+ tiers: Basic, Essential, Premium, Advanced, Ultimate, Family");

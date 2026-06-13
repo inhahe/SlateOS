@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! scaleway-cli — OurOS Scaleway cloud CLI
+//! scaleway-cli — SlateOS Scaleway cloud CLI
 //!
 //! Multi-personality: `scw`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_scw(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: scw COMMAND [OPTIONS]");
-        println!("Scaleway CLI 2.30.0 (OurOS)");
+        println!("Scaleway CLI 2.30.0 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  instance     Manage compute instances");

@@ -2,5 +2,5 @@
 name = "hdparm"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS hdparm - disk parameter tool (hdparm/sdparm)"
+description = "SlateOS hdparm - disk parameter tool (hdparm/sdparm)"
 [dependencies]

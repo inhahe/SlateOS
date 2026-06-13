@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pdftotext-cli — OurOS pdftotext PDF text extractor
+//! pdftotext-cli — SlateOS pdftotext PDF text extractor
 //!
 //! Single personality: `pdftotext`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pdftotext(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: pdftotext [OPTIONS] PDF [TEXT]");
-        println!("pdftotext (poppler 24.02.0, OurOS) — PDF to text converter");
+        println!("pdftotext (poppler 24.02.0, SlateOS) — PDF to text converter");
         println!();
         println!("Options:");
         println!("  -f N           First page");

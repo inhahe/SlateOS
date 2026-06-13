@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kestra-cli — OurOS Kestra orchestration platform
+//! kestra-cli — SlateOS Kestra orchestration platform
 //!
 //! Single personality: `kestra`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_kestra(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: kestra [COMMAND] [OPTIONS]");
-        println!("Kestra v0.18 (OurOS) — Declarative data orchestration");
+        println!("Kestra v0.18 (SlateOS) — Declarative data orchestration");
         println!();
         println!("Commands:");
         println!("  server standalone  Start standalone server");
@@ -31,8 +31,8 @@ fn run_kestra(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Kestra v0.18.3 (OurOS)"); return 0; }
-    println!("Kestra v0.18.3 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Kestra v0.18.3 (SlateOS)"); return 0; }
+    println!("Kestra v0.18.3 (SlateOS)");
     println!("  Server: http://0.0.0.0:8080");
     println!("  Namespaces: 5");
     println!("  Flows: 67 (45 active, 22 disabled)");

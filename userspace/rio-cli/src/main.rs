@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rio-cli — OurOS Rio terminal emulator
+//! rio-cli — SlateOS Rio terminal emulator
 //!
 //! Single personality: `rio`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rio(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: rio [OPTIONS] [COMMAND...]");
-        println!("Rio 0.1.10 (OurOS) — Hardware-accelerated GPU terminal");
+        println!("Rio 0.1.10 (SlateOS) — Hardware-accelerated GPU terminal");
         println!();
         println!("Options:");
         println!("  -e, --command CMD       Command to run");
@@ -24,7 +24,7 @@ fn run_rio(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("rio 0.1.10 (OurOS)");
+        println!("rio 0.1.10 (SlateOS)");
         return 0;
     }
     let title = args.windows(2).find(|w| w[0] == "--window-title")

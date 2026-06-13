@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! twilio-cli — OurOS Twilio CLI
+//! twilio-cli — SlateOS Twilio CLI
 //!
 //! Single personality: `twilio`
 
@@ -11,7 +11,7 @@ fn run_twilio(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: twilio <COMMAND> [OPTIONS]");
         println!();
-        println!("Twilio CLI for communications APIs (OurOS).");
+        println!("Twilio CLI for communications APIs (SlateOS).");
         println!();
         println!("Commands:");
         println!("  login        Log in to Twilio");
@@ -27,7 +27,7 @@ fn run_twilio(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("twilio-cli/5.18.0 ouros-x64");
+        println!("twilio-cli/5.18.0 slateos-x64");
         return 0;
     }
 

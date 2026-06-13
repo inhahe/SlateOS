@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! remmina-cli — OurOS Remmina remote desktop client
+//! remmina-cli — SlateOS Remmina remote desktop client
 //!
 //! Single personality: `remmina`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_remmina(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: remmina [OPTIONS] [FILE.remmina]");
-        println!("remmina v1.4 (OurOS) — Remote desktop client");
+        println!("remmina v1.4 (SlateOS) — Remote desktop client");
         println!();
         println!("Options:");
         println!("  -c FILE           Connect using connection file");
@@ -24,7 +24,7 @@ fn run_remmina(args: &[String], _prog: &str) -> i32 {
         println!("Protocols: RDP, VNC, SSH, SPICE, NX, XDMCP, HTTP(S)");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("remmina v1.4 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("remmina v1.4 (SlateOS)"); return 0; }
     println!("remmina: remote desktop client started");
     println!("  Saved connections: 0");
     println!("  Protocols: RDP, VNC, SSH, SPICE");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! upcloud-cli — OurOS UpCloud CLI
+//! upcloud-cli — SlateOS UpCloud CLI
 //!
 //! Multi-personality: `upctl`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_upctl(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: upctl COMMAND [OPTIONS]");
-        println!("UpCloud CLI 3.9.0 (OurOS)");
+        println!("UpCloud CLI 3.9.0 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  server       Manage cloud servers");

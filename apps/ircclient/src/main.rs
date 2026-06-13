@@ -1,4 +1,4 @@
-//! IRC chat client application for OurOS.
+//! IRC chat client application for SlateOS.
 //!
 //! Implements IRC protocol message parsing, channel management,
 //! user tracking, message history, and a multi-panel chat UI.
@@ -684,11 +684,11 @@ impl Default for ServerConfig {
             address: "irc.libera.chat".to_string(),
             port: 6697,
             tls: true,
-            nick: "OurOSUser".to_string(),
-            username: "ouros".to_string(),
-            realname: "OurOS IRC Client".to_string(),
+            nick: "SlateOSUser".to_string(),
+            username: "slateos".to_string(),
+            realname: "SlateOS IRC Client".to_string(),
             password: None,
-            auto_join: vec!["#ouros".to_string()],
+            auto_join: vec!["#slateos".to_string()],
             nickserv_pass: None,
         }
     }
@@ -784,9 +784,9 @@ impl IrcClientApp {
                         address: "irc.oftc.net".to_string(),
                         port: 6697,
                         tls: true,
-                        nick: "OurOSUser".to_string(),
-                        username: "ouros".to_string(),
-                        realname: "OurOS IRC Client".to_string(),
+                        nick: "SlateOSUser".to_string(),
+                        username: "slateos".to_string(),
+                        realname: "SlateOS IRC Client".to_string(),
                         password: None,
                         auto_join: vec![],
                         nickserv_pass: None,
@@ -794,7 +794,7 @@ impl IrcClientApp {
                     auto_connect: false,
                 },
             ],
-            my_nick: "OurOSUser".to_string(),
+            my_nick: "SlateOSUser".to_string(),
             server_name: String::new(),
             motd: Vec::new(),
             channels: Vec::new(),
@@ -1667,20 +1667,20 @@ fn main() {
     let mut app = IrcClientApp::new(1280.0, 720.0);
     app.connection = ConnectionState::Connected;
     app.server_name = "irc.libera.chat".to_string();
-    app.my_nick = "OurOSUser".to_string();
+    app.my_nick = "SlateOSUser".to_string();
 
     // Create channels with sample data
-    app.join_channel("#ouros");
+    app.join_channel("#slateos");
     app.join_channel("#rust");
 
-    if let Some(ch) = app.find_channel_mut("#ouros") {
-        ch.topic = "OurOS Development | https://ouros.dev".to_string();
-        ch.add_user(ChannelUser { nick: "OurOSUser".to_string(), prefix: UserPrefix::Op, away: false });
+    if let Some(ch) = app.find_channel_mut("#slateos") {
+        ch.topic = "SlateOS Development | https://slateos.dev".to_string();
+        ch.add_user(ChannelUser { nick: "SlateOSUser".to_string(), prefix: UserPrefix::Op, away: false });
         ch.add_user(ChannelUser { nick: "alice".to_string(), prefix: UserPrefix::Voice, away: false });
         ch.add_user(ChannelUser { nick: "bob".to_string(), prefix: UserPrefix::None, away: false });
         ch.add_user(ChannelUser { nick: "charlie".to_string(), prefix: UserPrefix::None, away: true });
 
-        ch.add_message(ChatMessage::system("12:00", "Welcome to #ouros!"));
+        ch.add_message(ChatMessage::system("12:00", "Welcome to #slateos!"));
         ch.add_message(ChatMessage::normal("12:01", "alice", "Hey everyone!"));
         ch.add_message(ChatMessage::normal("12:02", "bob", "Working on the new kernel module"));
         ch.add_message(ChatMessage::action("12:03", "alice", "is reviewing PRs"));
@@ -1696,7 +1696,7 @@ fn main() {
     }
 
     // Test message parsing
-    let raw = ":alice!user@host PRIVMSG #ouros :Hello world!";
+    let raw = ":alice!user@host PRIVMSG #slateos :Hello world!";
     if let Some(msg) = IrcMessage::parse(raw) {
         app.handle_message(&msg);
     }
@@ -2027,7 +2027,7 @@ mod tests {
     #[test]
     fn test_private_chat() {
         let mut app = IrcClientApp::new(800.0, 600.0);
-        let msg = IrcMessage::parse(":alice!user@host PRIVMSG OurOSUser :secret message").unwrap();
+        let msg = IrcMessage::parse(":alice!user@host PRIVMSG SlateOSUser :secret message").unwrap();
         app.handle_message(&msg);
 
         assert_eq!(app.private_chats.len(), 1);

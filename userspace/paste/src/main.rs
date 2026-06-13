@@ -1,4 +1,4 @@
-//! OurOS `paste` Utility -- Merge Lines of Files Side by Side
+//! SlateOS `paste` Utility -- Merge Lines of Files Side by Side
 //!
 //! Reads corresponding lines from each input file and joins them with a
 //! delimiter, writing the merged result to standard output. Modeled after
@@ -547,7 +547,7 @@ fn paste_serial(config: &Config) -> io::Result<i32> {
 // ============================================================================
 
 fn print_help() {
-    println!("OurOS paste v{VERSION}");
+    println!("SlateOS paste v{VERSION}");
     println!();
     println!("Merge corresponding lines from each FILE, separated by TABs.");
     println!("With no FILE, or when FILE is -, read standard input.");
@@ -585,7 +585,7 @@ fn main() {
             process::exit(0);
         }
         ParseResult::Version => {
-            println!("paste (OurOS) {VERSION}");
+            println!("paste (SlateOS) {VERSION}");
             process::exit(0);
         }
         ParseResult::Run(config) => {

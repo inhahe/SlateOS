@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zed-cli — OurOS Zed code editor
+//! zed-cli — SlateOS Zed code editor
 //!
 //! Single personality: `zed`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_zed(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: zed [OPTIONS] [PATH...]");
-        println!("Zed 0.145.1 (OurOS) — High-performance, multiplayer code editor");
+        println!("Zed 0.145.1 (SlateOS) — High-performance, multiplayer code editor");
         println!();
         println!("Options:");
         println!("  -n, --new              New window");
@@ -28,7 +28,7 @@ fn run_zed(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("Zed 0.145.1 (OurOS)");
+        println!("Zed 0.145.1 (SlateOS)");
         return 0;
     }
     let paths: Vec<&str> = args.iter()

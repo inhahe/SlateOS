@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nats-cli — OurOS NATS CLI
+//! nats-cli — SlateOS NATS CLI
 //!
 //! Single personality: `nats`
 
@@ -11,7 +11,7 @@ fn run_nats(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: nats <COMMAND> [OPTIONS]");
         println!();
-        println!("NATS messaging system CLI (OurOS).");
+        println!("NATS messaging system CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  pub          Publish a message");
@@ -27,7 +27,7 @@ fn run_nats(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("nats 0.1.1 (OurOS)");
+        println!("nats 0.1.1 (SlateOS)");
         return 0;
     }
 

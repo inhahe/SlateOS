@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gcov-cli — OurOS code coverage tools
+//! gcov-cli — SlateOS code coverage tools
 //!
 //! Multi-personality: `gcovr`, `lcov`, `genhtml`, `geninfo`
 
@@ -19,7 +19,7 @@ fn run_gcovr(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gcovr [OPTIONS]");
         println!();
-        println!("gcovr — generate GCC code coverage reports (OurOS).");
+        println!("gcovr — generate GCC code coverage reports (SlateOS).");
         println!();
         println!("Options:");
         println!("  -r ROOT, --root ROOT     Root directory");
@@ -37,7 +37,7 @@ fn run_gcovr(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("gcovr 7.0 (OurOS)");
+        println!("gcovr 7.0 (SlateOS)");
         return 0;
     }
 
@@ -84,7 +84,7 @@ fn run_lcov(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lcov [OPTIONS]");
         println!();
-        println!("lcov — graphical GCOV front-end (OurOS).");
+        println!("lcov — graphical GCOV front-end (SlateOS).");
         println!();
         println!("Options:");
         println!("  -c, --capture         Capture coverage data");
@@ -100,7 +100,7 @@ fn run_lcov(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("lcov: LCOV version 2.0-1 (OurOS)");
+        println!("lcov: LCOV version 2.0-1 (SlateOS)");
         return 0;
     }
 
@@ -138,7 +138,7 @@ fn run_genhtml(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: genhtml [OPTIONS] TRACEFILE");
         println!();
-        println!("genhtml — generate HTML coverage reports from LCOV data (OurOS).");
+        println!("genhtml — generate HTML coverage reports from LCOV data (SlateOS).");
         println!();
         println!("Options:");
         println!("  -o DIR, --output-directory DIR  Output directory");
@@ -151,7 +151,7 @@ fn run_genhtml(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("genhtml: LCOV version 2.0-1 (OurOS)");
+        println!("genhtml: LCOV version 2.0-1 (SlateOS)");
         return 0;
     }
 
@@ -176,7 +176,7 @@ fn run_geninfo(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: geninfo [OPTIONS] DIRECTORY");
         println!();
-        println!("geninfo — generate tracefile from .gcda files (OurOS).");
+        println!("geninfo — generate tracefile from .gcda files (SlateOS).");
         return 0;
     }
 

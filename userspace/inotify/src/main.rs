@@ -1,4 +1,4 @@
-//! OurOS filesystem event monitoring utility.
+//! SlateOS filesystem event monitoring utility.
 //!
 //! Multi-personality binary providing:
 //! - **inotifywait** — wait for filesystem events on files/directories
@@ -152,7 +152,7 @@ fn parse_event_list(list: &str) -> u32 {
 // ============================================================================
 
 /// Generate simulated inotify events for demonstration.
-/// On a real OurOS system, this would use the kernel inotify API.
+/// On a real SlateOS system, this would use the kernel inotify API.
 fn generate_simulated_events(paths: &[String], mask: u32) -> Vec<InotifyEvent> {
     let mut events = Vec::new();
 

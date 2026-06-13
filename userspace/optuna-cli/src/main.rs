@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! optuna-cli — OurOS Optuna hyperparameter optimization
+//! optuna-cli — SlateOS Optuna hyperparameter optimization
 //!
 //! Single personality: `optuna`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_optuna(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: optuna COMMAND [OPTIONS]");
-        println!("Optuna v3.6 (OurOS) — Hyperparameter optimization framework");
+        println!("Optuna v3.6 (SlateOS) — Hyperparameter optimization framework");
         println!();
         println!("Commands:");
         println!("  create-study    Create a new study");
@@ -30,8 +30,8 @@ fn run_optuna(args: &[String], _prog: &str) -> i32 {
         println!("  --version       Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Optuna v3.6.1 (OurOS)"); return 0; }
-    println!("Optuna v3.6.1 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Optuna v3.6.1 (SlateOS)"); return 0; }
+    println!("Optuna v3.6.1 (SlateOS)");
     println!("  Study: rf_optimization");
     println!("  Sampler: TPE");
     println!("  Pruner: MedianPruner");

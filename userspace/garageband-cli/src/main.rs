@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! garageband-cli — OurOS GarageBand (Apple consumer DAW)
+//! garageband-cli — SlateOS GarageBand (Apple consumer DAW)
 //!
 //! Single personality: `garageband`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gb(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: garageband [OPTIONS]");
-        println!("GarageBand 10.4 (OurOS) — Apple consumer music studio");
+        println!("GarageBand 10.4 (SlateOS) — Apple consumer music studio");
         println!();
         println!("Options:");
         println!("  --new                  New project");
@@ -24,8 +24,8 @@ fn run_gb(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("GarageBand 10.4.11 (OurOS)"); return 0; }
-    println!("GarageBand 10.4.11 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("GarageBand 10.4.11 (SlateOS)"); return 0; }
+    println!("GarageBand 10.4.11 (SlateOS)");
     println!("  Vendor: Apple Inc. (bundled free with every Mac since 2004)");
     println!("  Origin: based on the Emagic Logic codebase (Apple acquired Emagic 2002), then");
     println!("          stripped down + made friendly for consumers — introduced at MWSF 2004");

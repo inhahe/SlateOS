@@ -1,4 +1,4 @@
-//! `OurOS` File Diff/Compare Tool
+//! `SlateOS` File Diff/Compare Tool
 //!
 //! A desktop application for comparing files and directories with:
 //! - Myers diff algorithm for optimal edit scripts
@@ -2866,7 +2866,7 @@ fn main() {
     // Demo: load sample files for testing
     let left = "fn main() {\n    println!(\"Hello, world!\");\n    let x = 42;\n}\n";
     let right =
-        "fn main() {\n    println!(\"Hello, OurOS!\");\n    let x = 42;\n    let y = 100;\n}\n";
+        "fn main() {\n    println!(\"Hello, SlateOS!\");\n    let x = 42;\n    let y = 100;\n}\n";
     app.load_files("left.rs", left, "right.rs", right);
 
     let _tree = app.render();

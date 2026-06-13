@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mupen64plus-cli — OurOS Mupen64Plus N64 emulator
+//! mupen64plus-cli — SlateOS Mupen64Plus N64 emulator
 //!
 //! Single personality: `mupen64plus`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mupen64plus(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mupen64plus [OPTIONS] ROM");
-        println!("mupen64plus v2.5 (OurOS) — Nintendo 64 emulator");
+        println!("mupen64plus v2.5 (SlateOS) — Nintendo 64 emulator");
         println!();
         println!("Options:");
         println!("  --resolution WxH   Display resolution");
@@ -32,7 +32,7 @@ fn run_mupen64plus(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Mupen64Plus v2.5.9 (OurOS)");
+        println!("Mupen64Plus v2.5.9 (SlateOS)");
         println!("  Core: v2.5.9");
         println!("  GFX: GLideN64 v4.0");
         println!("  Audio: SDL Audio v2.5");

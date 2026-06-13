@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nushell — OurOS modern shell with structured data
+//! nushell — SlateOS modern shell with structured data
 //!
 //! Single personality: `nu`
 
@@ -36,7 +36,7 @@ fn run_nu(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("nu 0.94.0 (OurOS)");
+        println!("nu 0.94.0 (SlateOS)");
         return 0;
     }
 
@@ -98,7 +98,7 @@ fn run_nu(args: Vec<String>) -> i32 {
     }
 
     // Interactive mode
-    println!("Welcome to Nushell 0.94.0 (OurOS)");
+    println!("Welcome to Nushell 0.94.0 (SlateOS)");
     println!("Type 'help' for help, 'help commands' for command list");
     println!();
     println!("〉");

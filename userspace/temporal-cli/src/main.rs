@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! temporal-cli — OurOS Temporal CLI
+//! temporal-cli — SlateOS Temporal CLI
 //!
 //! Single personality: `temporal`
 
@@ -11,7 +11,7 @@ fn run_temporal(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: temporal <COMMAND> [OPTIONS]");
         println!();
-        println!("Temporal workflow orchestration CLI (OurOS).");
+        println!("Temporal workflow orchestration CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  server       Start dev server");
@@ -25,7 +25,7 @@ fn run_temporal(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("temporal version 0.13.0 (OurOS)");
+        println!("temporal version 0.13.0 (SlateOS)");
         return 0;
     }
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pgcli-cli — OurOS pgcli enhanced PostgreSQL client
+//! pgcli-cli — SlateOS pgcli enhanced PostgreSQL client
 //!
 //! Multi-personality: `pgcli`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pgcli(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pgcli [OPTIONS] [DBNAME [USERNAME]]");
-        println!("pgcli 4.1.0 — Enhanced PostgreSQL client (OurOS)");
+        println!("pgcli 4.1.0 — Enhanced PostgreSQL client (SlateOS)");
         println!();
         println!("Options:");
         println!("  -h HOST       Server hostname");

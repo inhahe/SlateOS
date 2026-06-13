@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! consul-cli — OurOS HashiCorp Consul service mesh CLI
+//! consul-cli — SlateOS HashiCorp Consul service mesh CLI
 //!
 //! Single personality: `consul`
 
@@ -38,7 +38,7 @@ fn run_consul(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
         "version" => {
-            println!("Consul v1.18.0 (OurOS)");
+            println!("Consul v1.18.0 (SlateOS)");
             println!("Protocol 2 spoken, understands 2 to 3");
             0
         }

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! logisim-cli — OurOS Logisim digital logic simulator
+//! logisim-cli — SlateOS Logisim digital logic simulator
 //!
 //! Single personality: `logisim`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_logisim(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: logisim [OPTIONS] [FILE.circ]");
-        println!("logisim v3.8 (OurOS) — Digital logic designer and simulator");
+        println!("logisim v3.8 (SlateOS) — Digital logic designer and simulator");
         println!();
         println!("Options:");
         println!("  --tty TABLE       Run circuit headless with truth table output");
@@ -25,7 +25,7 @@ fn run_logisim(args: &[String], _prog: &str) -> i32 {
         println!("  ALU, comparator, I/O (LED, button, 7-segment, keyboard)");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("logisim v3.8 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("logisim v3.8 (SlateOS)"); return 0; }
     println!("logisim: digital logic simulator started");
     println!("  Simulation: tick-based, interactive poke tool");
     println!("  Sub-circuits: hierarchical design");

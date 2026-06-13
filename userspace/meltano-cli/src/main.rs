@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! meltano-cli — OurOS Meltano ELT CLI
+//! meltano-cli — SlateOS Meltano ELT CLI
 //!
 //! Multi-personality: `meltano`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_meltano(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: meltano COMMAND [OPTIONS]");
-        println!("Meltano 3.4.0 (OurOS)");
+        println!("Meltano 3.4.0 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  init           Initialize project");

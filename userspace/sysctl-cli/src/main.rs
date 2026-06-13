@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sysctl-cli — OurOS kernel parameter tool
+//! sysctl-cli — SlateOS kernel parameter tool
 //!
 //! Multi-personality: `sysctl`
 
@@ -19,7 +19,7 @@ fn run_sysctl(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sysctl [OPTIONS] [VARIABLE[=VALUE]...]");
         println!();
-        println!("sysctl — configure kernel parameters at runtime (OurOS).");
+        println!("sysctl — configure kernel parameters at runtime (SlateOS).");
         println!();
         println!("Options:");
         println!("  -a, --all         Display all values");
@@ -33,7 +33,7 @@ fn run_sysctl(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("sysctl from procps-ng 4.0.4 (OurOS)");
+        println!("sysctl from procps-ng 4.0.4 (SlateOS)");
         return 0;
     }
 
@@ -49,8 +49,8 @@ fn run_sysctl(args: &[String]) -> i32 {
     }
 
     let params = [
-        ("kernel.hostname", "ouros"),
-        ("kernel.ostype", "OurOS"),
+        ("kernel.hostname", "slateos"),
+        ("kernel.ostype", "SlateOS"),
         ("kernel.osrelease", "1.0.0"),
         ("kernel.version", "#1 SMP PREEMPT_DYNAMIC"),
         ("kernel.pid_max", "4194304"),

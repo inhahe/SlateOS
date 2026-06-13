@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pingidentity-cli — OurOS Ping Identity (federated enterprise IAM, ForgeRock merged in)
+//! pingidentity-cli — SlateOS Ping Identity (federated enterprise IAM, ForgeRock merged in)
 //!
 //! Single personality: `pingidentity`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ping(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pingidentity [OPTIONS]");
-        println!("Ping Identity (OurOS) — Enterprise IAM, PingOne + PingFederate + ForgeRock");
+        println!("Ping Identity (SlateOS) — Enterprise IAM, PingOne + PingFederate + ForgeRock");
         println!();
         println!("Options:");
         println!("  --pingone              PingOne (cloud IAM)");
@@ -24,8 +24,8 @@ fn run_ping(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Ping Identity 2024 (OurOS)"); return 0; }
-    println!("Ping Identity 2024 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Ping Identity 2024 (SlateOS)"); return 0; }
+    println!("Ping Identity 2024 (SlateOS)");
     println!("  Vendor: Ping Identity Corporation (Denver, CO)");
     println!("          taken private by Thoma Bravo Oct 2022 for $2.8B");
     println!("          acquired ForgeRock Aug 2023 for $2.3B (Thoma Bravo also owned that)");

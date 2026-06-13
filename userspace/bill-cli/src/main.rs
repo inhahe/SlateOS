@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bill-cli — OurOS BILL (formerly Bill.com — accounts payable/receivable automation)
+//! bill-cli — SlateOS BILL (formerly Bill.com — accounts payable/receivable automation)
 //!
 //! Single personality: `bill`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_bill(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: bill [OPTIONS]");
-        println!("BILL (formerly Bill.com) (OurOS) — AP + AR automation");
+        println!("BILL (formerly Bill.com) (SlateOS) — AP + AR automation");
         println!();
         println!("Options:");
         println!("  --ap                   Accounts Payable (Bill Pay automation)");
@@ -26,8 +26,8 @@ fn run_bill(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("BILL 2024 (OurOS)"); return 0; }
-    println!("BILL 2024 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("BILL 2024 (SlateOS)"); return 0; }
+    println!("BILL 2024 (SlateOS)");
     println!("  Vendor: BILL Holdings, Inc. (San Jose, CA — NYSE:BILL)");
     println!("  Founder: René Lacerte (also founded PayCycle, sold to Intuit 2009)");
     println!("          Lacerte family name = Lacerte Software, which became Intuit's tax product");

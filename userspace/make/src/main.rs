@@ -1,4 +1,4 @@
-//! OurOS `make` — build automation tool
+//! SlateOS `make` — build automation tool
 //!
 //! A POSIX-compatible make(1) implementation that reads Makefiles, resolves
 //! dependency DAGs, and executes recipes to bring targets up to date.  Supports

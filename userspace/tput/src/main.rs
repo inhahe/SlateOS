@@ -1,4 +1,4 @@
-//! OurOS tput/reset/clear — terminal capability tools
+//! SlateOS tput/reset/clear — terminal capability tools
 //!
 //! Multi-personality binary detected via argv[0]:
 //! - `tput`: Query and set terminal capabilities
@@ -37,7 +37,7 @@ fn detect_mode(argv0: &str) -> Mode {
 // ── Terminal capability database ───────────────────────────────────
 
 /// Built-in terminfo-like capability database for common terminals.
-/// We support xterm, vt100, linux, dumb, and ouros terminal types.
+/// We support xterm, vt100, linux, dumb, and slateos terminal types.
 struct TermCaps {
     term_type: String,
 }
@@ -68,7 +68,7 @@ impl TermCaps {
             };
         }
 
-        // xterm/vt100/linux/ouros all share most ANSI capabilities
+        // xterm/vt100/linux/slateos all share most ANSI capabilities
         match cap {
             // Cursor movement
             "clear" | "cl" => Some("\x1B[H\x1B[2J".to_string()),
@@ -208,8 +208,8 @@ fn get_terminal_cols() -> i32 {
             return n;
         }
 
-    // Try ioctl on OurOS
-    #[cfg(target_os = "ouros")]
+    // Try ioctl on SlateOS
+    #[cfg(target_os = "slateos")]
     {
         if let Some(size) = get_terminal_size_ioctl() {
             return size.0;
@@ -226,7 +226,7 @@ fn get_terminal_lines() -> i32 {
             return n;
         }
 
-    #[cfg(target_os = "ouros")]
+    #[cfg(target_os = "slateos")]
     {
         if let Some(size) = get_terminal_size_ioctl() {
             return size.1;
@@ -236,10 +236,10 @@ fn get_terminal_lines() -> i32 {
     24 // Default
 }
 
-#[cfg(target_os = "ouros")]
+#[cfg(target_os = "slateos")]
 #[allow(dead_code)]
 fn get_terminal_size_ctl() -> Option<(i32, i32)> {
-    // OurOS ioctl to get terminal size
+    // SlateOS ioctl to get terminal size
     // Returns (cols, lines) or None
     let mut cols: u16 = 0;
     let mut lines: u16 = 0;
@@ -469,7 +469,7 @@ fn run_tput() -> Result<(), String> {
                 process::exit(0);
             }
             "-V" | "--version" => {
-                println!("tput (OurOS) 0.1.0");
+                println!("tput (SlateOS) 0.1.0");
                 process::exit(0);
             }
             "-T" => {
@@ -546,7 +546,7 @@ fn run_tput() -> Result<(), String> {
                     "vt100" => "DEC VT100",
                     "linux" => "Linux console",
                     "dumb" => "dumb terminal",
-                    "ouros" => "OurOS terminal",
+                    "slateos" => "SlateOS terminal",
                     other => other,
                 };
                 println!("{name}");

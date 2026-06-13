@@ -2,5 +2,5 @@
 name = "crontab"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS crontab — manage per-user cron job schedules"
+description = "SlateOS crontab — manage per-user cron job schedules"
 [dependencies]

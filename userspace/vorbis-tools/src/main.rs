@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vorbis-tools — OurOS Ogg Vorbis audio tools
+//! vorbis-tools — SlateOS Ogg Vorbis audio tools
 //!
 //! Multi-personality: `oggenc`, `oggdec`, `ogginfo`, `vorbiscomment`
 
@@ -203,7 +203,7 @@ fn main() {
     let rest: Vec<String> = args.into_iter().skip(1).collect();
 
     if rest.iter().any(|a| a == "-V" || a == "--version") {
-        println!("vorbis-tools 1.4.2 (OurOS)");
+        println!("vorbis-tools 1.4.2 (SlateOS)");
         process::exit(0);
     }
 

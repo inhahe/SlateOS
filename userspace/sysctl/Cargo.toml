@@ -2,5 +2,5 @@
 name = "sysctl"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS sysctl — view and modify kernel parameters"
+description = "SlateOS sysctl — view and modify kernel parameters"
 [dependencies]

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! strace-cli — OurOS system call tracer
+//! strace-cli — SlateOS system call tracer
 //!
 //! Multi-personality: `strace`
 
@@ -19,7 +19,7 @@ fn run_strace(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: strace [OPTIONS] COMMAND [ARGS]");
         println!();
-        println!("strace — trace system calls and signals (OurOS).");
+        println!("strace — trace system calls and signals (SlateOS).");
         println!();
         println!("Output:");
         println!("  -o FILE         Write trace to FILE");
@@ -48,7 +48,7 @@ fn run_strace(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("strace -- version 6.7 (OurOS)");
+        println!("strace -- version 6.7 (SlateOS)");
         return 0;
     }
 

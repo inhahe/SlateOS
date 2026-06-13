@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ninja — OurOS Ninja build system
+//! ninja — SlateOS Ninja build system
 //!
 //! Multi-personality binary detected via argv[0]:
 //!
@@ -64,7 +64,7 @@ fn run_ninja(args: Vec<String>) -> i32 {
     }
 
     if args.iter().any(|a| a == "--version") {
-        println!("0.1.0 (OurOS)");
+        println!("0.1.0 (SlateOS)");
         return 0;
     }
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fusion360-cli — OurOS Autodesk Fusion 360 cloud CAD/CAM/CAE
+//! fusion360-cli — SlateOS Autodesk Fusion 360 cloud CAD/CAM/CAE
 //!
 //! Single personality: `fusion360`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_f360(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: fusion360 [OPTIONS] [FILE]");
-        println!("Autodesk Fusion 360 (OurOS) — Integrated cloud CAD/CAM/CAE/PCB");
+        println!("Autodesk Fusion 360 (SlateOS) — Integrated cloud CAD/CAM/CAE/PCB");
         println!();
         println!("Options:");
         println!("  --open FILE            Open design or project URL");
@@ -23,8 +23,8 @@ fn run_f360(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Autodesk Fusion 360 v2.0.20294 (OurOS)"); return 0; }
-    println!("Autodesk Fusion 360 v2.0.20294 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Autodesk Fusion 360 v2.0.20294 (SlateOS)"); return 0; }
+    println!("Autodesk Fusion 360 v2.0.20294 (SlateOS)");
     println!("  Workspaces: Design, Render, Animation, Simulation, Manufacture, Drawing");
     println!("  Cloud: Auto-saves to Autodesk cloud, version history, sharing");
     println!("  Scripting: Python (asyncio), C++ Add-in SDK");

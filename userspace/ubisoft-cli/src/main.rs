@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ubisoft-cli — OurOS Ubisoft Connect (replaced Uplay)
+//! ubisoft-cli — SlateOS Ubisoft Connect (replaced Uplay)
 //!
 //! Single personality: `ubisoft`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ubi(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ubisoft [OPTIONS]");
-        println!("Ubisoft Connect 153.0 (OurOS) — Ubisoft game launcher + service (renamed Uplay 2020)");
+        println!("Ubisoft Connect 153.0 (SlateOS) — Ubisoft game launcher + service (renamed Uplay 2020)");
         println!();
         println!("Options:");
         println!("  --library              Game library");
@@ -24,8 +24,8 @@ fn run_ubi(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Ubisoft Connect 153.0.13252 (OurOS)"); return 0; }
-    println!("Ubisoft Connect 153.0.13252 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Ubisoft Connect 153.0.13252 (SlateOS)"); return 0; }
+    println!("Ubisoft Connect 153.0.13252 (SlateOS)");
     println!("  Vendor: Ubisoft Entertainment SA (HQ Saint-Mandé / Montreuil, France — founded 1986)");
     println!("  Founders: Five Guillemot brothers (Christian, Claude, Gérard, Michel, Yves)");
     println!("  Renamed: Uplay → Ubisoft Connect (Oct 2020) — new launcher rewrite");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bamboohr-cli — OurOS BambooHR (people-data HRIS focused on SMB, Utah-based)
+//! bamboohr-cli — SlateOS BambooHR (people-data HRIS focused on SMB, Utah-based)
 //!
 //! Single personality: `bamboohr`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_bhr(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: bamboohr [OPTIONS]");
-        println!("BambooHR (OurOS) — HRIS for small/medium business");
+        println!("BambooHR (SlateOS) — HRIS for small/medium business");
         println!();
         println!("Options:");
         println!("  --essentials           Essentials tier (per-employee/mo)");
@@ -22,8 +22,8 @@ fn run_bhr(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("BambooHR 2024 (OurOS)"); return 0; }
-    println!("BambooHR 2024 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("BambooHR 2024 (SlateOS)"); return 0; }
+    println!("BambooHR 2024 (SlateOS)");
     println!("  Vendor: Bamboo HR LLC (Lindon, Utah — founded 2008)");
     println!("  Founders: Ben Peterson + Ryan Sanders (in Ben's basement)");
     println!("           bootstrapped — no VC funding for first decade");

@@ -1,4 +1,4 @@
-//! OurOS Archive Manager
+//! SlateOS Archive Manager
 //!
 //! Graphical archive/compressed file manager supporting multiple formats:
 //! - ZIP, TAR, TAR.GZ, TAR.BZ2, 7Z
@@ -2329,7 +2329,7 @@ pub fn create_sample_archive() -> ArchiveModel {
 // ============================================================================
 
 fn main() {
-    // The archive manager is launched by the OurOS desktop environment.
+    // The archive manager is launched by the SlateOS desktop environment.
     // Actual event loop integration happens through the compositor IPC.
     // This placeholder demonstrates that the application compiles and
     // can construct its state and render an initial frame.

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! inkscape-cli — OurOS Inkscape SVG editor CLI
+//! inkscape-cli — SlateOS Inkscape SVG editor CLI
 //!
 //! Single personality: `inkscape`
 
@@ -11,7 +11,7 @@ fn run_inkscape(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: inkscape [OPTIONS] [FILE ...]");
         println!();
-        println!("Inkscape — SVG editor (OurOS).");
+        println!("Inkscape — SVG editor (SlateOS).");
         println!();
         println!("Options:");
         println!("  -o, --export-filename F   Output file");
@@ -37,7 +37,7 @@ fn run_inkscape(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("Inkscape 1.3.2 (OurOS)");
+        println!("Inkscape 1.3.2 (SlateOS)");
         println!("    Pango version: 1.50.14");
         return 0;
     }
@@ -88,7 +88,7 @@ fn run_inkscape(args: Vec<String>) -> i32 {
             println!("Exporting '{}' → '{}'", f, output.unwrap_or("output"));
         }
     } else if files.is_empty() {
-        println!("Inkscape 1.3.2 (OurOS)");
+        println!("Inkscape 1.3.2 (SlateOS)");
         println!("Starting Inkscape GUI...");
     } else {
         for f in &files {

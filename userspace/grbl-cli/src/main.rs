@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! grbl-cli — OurOS GRBL CNC controller
+//! grbl-cli — SlateOS GRBL CNC controller
 //!
 //! Multi-personality: `grbl`, `grbl-send`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_grbl(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: grbl COMMAND [OPTIONS]");
-        println!("GRBL 1.1h CNC Controller (OurOS)");
+        println!("GRBL 1.1h CNC Controller (SlateOS)");
         println!();
         println!("Commands:");
         println!("  status       Show machine status");
@@ -29,7 +29,7 @@ fn run_grbl(args: &[String]) -> i32 {
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match subcmd {
         "version" | "--version" => {
-            println!("GRBL 1.1h (OurOS)");
+            println!("GRBL 1.1h (SlateOS)");
             println!("Build: 2024.01.15");
         }
         "status" => {

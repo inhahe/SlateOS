@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sailpoint-cli — OurOS SailPoint (IGA market leader, Austin TX, Thoma Bravo round-trip, IPO'd twice)
+//! sailpoint-cli — SlateOS SailPoint (IGA market leader, Austin TX, Thoma Bravo round-trip, IPO'd twice)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sailpoint(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sailpoint [OPTIONS]");
-        println!("SailPoint (OurOS) — Identity Governance & Administration (IGA) market leader");
+        println!("SailPoint (SlateOS) — Identity Governance & Administration (IGA) market leader");
         println!();
         println!("Options:");
         println!("  --identitynow          IdentityNow (cloud IGA SaaS, now 'Identity Security Cloud')");
@@ -22,8 +22,8 @@ fn run_sailpoint(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("SailPoint 2024 (OurOS) — sailpoint-cli (Identity Security Cloud admin)"); return 0; }
-    println!("SailPoint 2024 (OurOS) — Identity Governance & Administration Market Leader");
+    if args.iter().any(|a| a == "--version") { println!("SailPoint 2024 (SlateOS) — sailpoint-cli (Identity Security Cloud admin)"); return 0; }
+    println!("SailPoint 2024 (SlateOS) — Identity Governance & Administration Market Leader");
     println!("  Vendor: SailPoint Technologies Holdings (Austin, TX — NYSE: SAIL again, re-IPO'd Feb 2025)");
     println!("  Founders: Mark McClain + Kevin Cunningham + Jackie Gilbert, 2005");
     println!("          Mark McClain: CEO 2005-present (20 years!), founder-led for two decades");

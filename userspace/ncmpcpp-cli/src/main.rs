@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ncmpcpp-cli — OurOS ncmpcpp MPD client
+//! ncmpcpp-cli — SlateOS ncmpcpp MPD client
 //!
 //! Single personality: `ncmpcpp`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ncmpcpp(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ncmpcpp [OPTIONS]");
-        println!("ncmpcpp 0.9.2 (OurOS) — NCurses Music Player Client Plus Plus");
+        println!("ncmpcpp 0.9.2 (SlateOS) — NCurses Music Player Client Plus Plus");
         println!();
         println!("Options:");
         println!("  -h HOST          MPD host (default localhost)");
@@ -28,7 +28,7 @@ fn run_ncmpcpp(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("ncmpcpp 0.9.2 (OurOS)");
+        println!("ncmpcpp 0.9.2 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "--current-song") {

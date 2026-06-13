@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sundials-cli — OurOS SUNDIALS ODE/DAE solver info
+//! sundials-cli — SlateOS SUNDIALS ODE/DAE solver info
 //!
 //! Single personality: `sundials-info`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sundials(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: sundials-info COMMAND [OPTIONS]");
-        println!("SUNDIALS v7.0 (OurOS) — Suite of nonlinear and differential/algebraic solvers");
+        println!("SUNDIALS v7.0 (SlateOS) — Suite of nonlinear and differential/algebraic solvers");
         println!();
         println!("Commands:");
         println!("  info              Show configuration");
@@ -23,7 +23,7 @@ fn run_sundials(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("SUNDIALS v7.0 (OurOS)");
+        println!("SUNDIALS v7.0 (SlateOS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("info");

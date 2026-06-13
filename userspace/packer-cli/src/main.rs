@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! packer-cli — OurOS HashiCorp Packer image builder CLI
+//! packer-cli — SlateOS HashiCorp Packer image builder CLI
 //!
 //! Single personality: `packer`
 
@@ -36,7 +36,7 @@ fn run_packer(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
         "version" => {
-            println!("Packer v1.10.1 (OurOS)");
+            println!("Packer v1.10.1 (SlateOS)");
             0
         }
         "build" => {

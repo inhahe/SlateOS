@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dnsmasq-cli — OurOS dnsmasq DNS/DHCP server
+//! dnsmasq-cli — SlateOS dnsmasq DNS/DHCP server
 //!
 //! Single personality: `dnsmasq`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_dnsmasq(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: dnsmasq [OPTIONS]");
-        println!("dnsmasq v2.90 (OurOS) — Lightweight DNS forwarder and DHCP server");
+        println!("dnsmasq v2.90 (SlateOS) — Lightweight DNS forwarder and DHCP server");
         println!();
         println!("Options:");
         println!("  -C FILE        Config file");
@@ -28,8 +28,8 @@ fn run_dnsmasq(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("dnsmasq v2.90 (OurOS)"); return 0; }
-    println!("dnsmasq v2.90 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("dnsmasq v2.90 (SlateOS)"); return 0; }
+    println!("dnsmasq v2.90 (SlateOS)");
     println!("  DNS: listening on 0.0.0.0:53");
     println!("  Upstream: 1.1.1.1, 9.9.9.9");
     println!("  Cache: 1000 entries");

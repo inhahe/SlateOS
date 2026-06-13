@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! teamcity-cli — OurOS JetBrains TeamCity CI/CD
+//! teamcity-cli — SlateOS JetBrains TeamCity CI/CD
 //!
 //! Single personality: `teamcity`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_tc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: teamcity [OPTIONS]");
-        println!("JetBrains TeamCity 2024.07 (OurOS) — CI/CD build management server");
+        println!("JetBrains TeamCity 2024.07 (SlateOS) — CI/CD build management server");
         println!();
         println!("Options:");
         println!("  --server URL           TeamCity server URL");
@@ -24,8 +24,8 @@ fn run_tc(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("JetBrains TeamCity 2024.07.3 (build 147512) (OurOS)"); return 0; }
-    println!("JetBrains TeamCity 2024.07.3 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("JetBrains TeamCity 2024.07.3 (build 147512) (SlateOS)"); return 0; }
+    println!("JetBrains TeamCity 2024.07.3 (SlateOS)");
     println!("  Editions: Professional (free, 3 agents), Enterprise (unlimited), Cloud (SaaS)");
     println!("  Build runners: Maven, Gradle, MSBuild, .NET, Ant, npm, Python, Docker, ...");
     println!("  Configuration: Web UI + Kotlin DSL (versioned in repo)");

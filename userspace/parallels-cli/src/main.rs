@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! parallels-cli — OurOS Parallels Desktop for Mac
+//! parallels-cli — SlateOS Parallels Desktop for Mac
 //!
 //! Single personality: `parallels`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pl(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: parallels [OPTIONS]");
-        println!("Parallels Desktop 20 for Mac (OurOS) — macOS-host virtualization");
+        println!("Parallels Desktop 20 for Mac (SlateOS) — macOS-host virtualization");
         println!();
         println!("Options:");
         println!("  --new                  Create new VM");
@@ -25,8 +25,8 @@ fn run_pl(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Parallels Desktop 20.1.2 (55742) (OurOS)"); return 0; }
-    println!("Parallels Desktop 20.1.2 (55742) (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Parallels Desktop 20.1.2 (55742) (SlateOS)"); return 0; }
+    println!("Parallels Desktop 20.1.2 (55742) (SlateOS)");
     println!("  Vendor: Alludo (acquired Corel parent of Parallels Dec 2022)");
     println!("  Founded: 1999 by Serguei Beloussov (also Acronis founder) in Singapore");
     println!("  Sold to: Corel 2018, then Alludo (formerly Corel rebrand) 2022");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gamemode-cli — OurOS Feral GameMode performance optimizer
+//! gamemode-cli — SlateOS Feral GameMode performance optimizer
 //!
 //! Multi-personality: `gamemoded`, `gamemoderun`, `gamemodelist`
 
@@ -14,7 +14,7 @@ fn run_gamemoderun(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: gamemoderun COMMAND [ARGS]");
         println!();
-        println!("gamemoderun — run a program with GameMode optimizations (OurOS).");
+        println!("gamemoderun — run a program with GameMode optimizations (SlateOS).");
         println!("Sets LD_PRELOAD to enable GameMode for the given process.");
         return 0;
     }
@@ -43,7 +43,7 @@ fn run_gamemoded(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-v") {
-        println!("gamemode daemon version 1.8.1 (OurOS)");
+        println!("gamemode daemon version 1.8.1 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "-s") {
@@ -64,7 +64,7 @@ fn run_gamemoded(args: &[String]) -> i32 {
         return 0;
     }
 
-    println!("gamemoded: starting daemon (OurOS)");
+    println!("gamemoded: starting daemon (SlateOS)");
     println!("gamemoded: listening for game mode requests");
     0
 }

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ada-cli — OurOS GNAT Ada compiler
+//! ada-cli — SlateOS GNAT Ada compiler
 //!
 //! Multi-personality: `gnat`, `gnatmake`, `gprbuild`, `gnatls`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gnat(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: gnat COMMAND [OPTIONS]");
-        println!("GNAT 14.0.0 (OurOS)");
+        println!("GNAT 14.0.0 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  make          Build project");
@@ -70,7 +70,7 @@ fn run_gnat(args: &[String]) -> i32 {
 fn run_gprbuild(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: gprbuild [OPTIONS] [-P PROJECT.gpr]");
-        println!("GPRbuild 24.0.0 (OurOS)");
+        println!("GPRbuild 24.0.0 (SlateOS)");
         println!("  -P FILE       Project file");
         println!("  -j N          Parallel jobs");
         println!("  -p            Create missing dirs");
@@ -104,10 +104,10 @@ fn run_gnatls(args: &[String]) -> i32 {
         println!("GNATLS 14.0.0");
         println!("Source Search Path:");
         println!("  .");
-        println!("  /usr/lib/gcc/x86_64-ouros/14/adainclude/");
+        println!("  /usr/lib/gcc/x86_64-slateos/14/adainclude/");
         println!("Object Search Path:");
         println!("  .");
-        println!("  /usr/lib/gcc/x86_64-ouros/14/adalib/");
+        println!("  /usr/lib/gcc/x86_64-slateos/14/adalib/");
         return 0;
     }
     let unit = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("main");

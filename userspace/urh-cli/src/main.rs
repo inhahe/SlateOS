@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! urh-cli — OurOS Universal Radio Hacker
+//! urh-cli — SlateOS Universal Radio Hacker
 //!
 //! Single personality: `urh`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_urh(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: urh [OPTIONS] [FILE]");
-        println!("urh v2.9 (OurOS) — Universal Radio Hacker");
+        println!("urh v2.9 (SlateOS) — Universal Radio Hacker");
         println!();
         println!("Options:");
         println!("  -f FILE        Open signal file");
@@ -28,8 +28,8 @@ fn run_urh(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Universal Radio Hacker v2.9.6 (OurOS)"); return 0; }
-    println!("Universal Radio Hacker v2.9.6 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Universal Radio Hacker v2.9.6 (SlateOS)"); return 0; }
+    println!("Universal Radio Hacker v2.9.6 (SlateOS)");
     println!("  Features:");
     println!("    Signal analysis & demodulation");
     println!("    Protocol analysis");

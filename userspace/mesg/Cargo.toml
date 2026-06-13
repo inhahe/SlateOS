@@ -2,5 +2,5 @@
 name = "mesg"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS mesg - control/send terminal messages (mesg/write/talk)"
+description = "SlateOS mesg - control/send terminal messages (mesg/write/talk)"
 [dependencies]

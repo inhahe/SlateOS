@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vultr-cli — OurOS Vultr CLI
+//! vultr-cli — SlateOS Vultr CLI
 //!
 //! Single personality: `vultr-cli`
 
@@ -11,7 +11,7 @@ fn run_vultr(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "help") {
         println!("Usage: vultr-cli <COMMAND> [OPTIONS]");
         println!();
-        println!("vultr-cli — Vultr cloud CLI (OurOS).");
+        println!("vultr-cli — Vultr cloud CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  instance       Manage cloud instances");
@@ -30,7 +30,7 @@ fn run_vultr(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "version") {
-        println!("vultr-cli v3.0.3 (OurOS)");
+        println!("vultr-cli v3.0.3 (SlateOS)");
         return 0;
     }
 

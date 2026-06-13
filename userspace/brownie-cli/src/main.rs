@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! brownie-cli — OurOS Brownie Python Ethereum framework
+//! brownie-cli — SlateOS Brownie Python Ethereum framework
 //!
 //! Single personality: `brownie`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_brownie(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: brownie COMMAND [OPTIONS]");
-        println!("Brownie v1.20.6 (OurOS) — Python-based Ethereum dev framework");
+        println!("Brownie v1.20.6 (SlateOS) — Python-based Ethereum dev framework");
         println!();
         println!("Commands:");
         println!("  init            Initialize project");

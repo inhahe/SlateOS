@@ -1,4 +1,4 @@
-//! OurOS `tee` Utility -- Read Stdin, Write to Stdout and Files
+//! SlateOS `tee` Utility -- Read Stdin, Write to Stdout and Files
 //!
 //! Reads standard input and writes it to both standard output and zero or more
 //! files simultaneously. Modeled after GNU coreutils `tee` with the same flag
@@ -345,7 +345,7 @@ fn run(config: &Config) -> i32 {
 // ============================================================================
 
 fn print_help() {
-    println!("OurOS tee v{VERSION}");
+    println!("SlateOS tee v{VERSION}");
     println!();
     println!("Copy standard input to each FILE, and also to standard output.");
     println!();
@@ -380,16 +380,16 @@ fn main() {
             process::exit(0);
         }
         ParseResult::Version => {
-            println!("tee (OurOS) {VERSION}");
+            println!("tee (SlateOS) {VERSION}");
             process::exit(0);
         }
         ParseResult::Run(config) => {
             // Note: `config.ignore_interrupts` is parsed and stored for
-            // completeness. On OurOS, signal handling uses IPC messages rather
-            // than Unix signals, so SIGINT masking is a no-op until the OurOS
+            // completeness. On SlateOS, signal handling uses IPC messages rather
+            // than Unix signals, so SIGINT masking is a no-op until the SlateOS
             // signal-compatibility layer is wired up. The flag is accepted to
             // maintain CLI compatibility with GNU tee.
-            let _ = config.ignore_interrupts; // acknowledged, no-op on OurOS currently
+            let _ = config.ignore_interrupts; // acknowledged, no-op on SlateOS currently
             let code = run(&config);
             process::exit(code);
         }

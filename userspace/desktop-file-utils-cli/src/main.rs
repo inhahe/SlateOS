@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! desktop-file-utils-cli — OurOS desktop file utilities
+//! desktop-file-utils-cli — SlateOS desktop file utilities
 //!
 //! Multi-personality: `desktop-file-validate`, `desktop-file-install`, `update-desktop-database`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_validate(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: desktop-file-validate [OPTIONS] FILE...");
-        println!("desktop-file-validate v0.27 (OurOS) — Validate .desktop files");
+        println!("desktop-file-validate v0.27 (SlateOS) — Validate .desktop files");
         println!();
         println!("Options:");
         println!("  --no-hints        Don't show hints");
@@ -29,7 +29,7 @@ fn run_validate(args: &[String], _prog: &str) -> i32 {
 fn run_install(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: desktop-file-install [OPTIONS] FILE...");
-        println!("desktop-file-install v0.27 (OurOS) — Install .desktop files");
+        println!("desktop-file-install v0.27 (SlateOS) — Install .desktop files");
         println!();
         println!("Options:");
         println!("  --dir DIR         Target directory");
@@ -45,7 +45,7 @@ fn run_install(args: &[String], _prog: &str) -> i32 {
 fn run_update_db(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: update-desktop-database [DIR]");
-        println!("update-desktop-database v0.27 (OurOS) — Update MIME type cache");
+        println!("update-desktop-database v0.27 (SlateOS) — Update MIME type cache");
         return 0;
     }
     let dir = args.first().map(|s| s.as_str()).unwrap_or("/usr/share/applications");

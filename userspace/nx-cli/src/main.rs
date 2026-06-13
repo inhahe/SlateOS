@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nx-cli — OurOS Siemens NX integrated CAD/CAM/CAE
+//! nx-cli — SlateOS Siemens NX integrated CAD/CAM/CAE
 //!
 //! Single personality: `nx`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_nx(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: nx [OPTIONS] [FILE]");
-        println!("Siemens NX 2406 (OurOS) — Integrated CAD/CAM/CAE (Unigraphics successor)");
+        println!("Siemens NX 2406 (SlateOS) — Integrated CAD/CAM/CAE (Unigraphics successor)");
         println!();
         println!("Options:");
         println!("  -part FILE             Open .prt part file");
@@ -23,8 +23,8 @@ fn run_nx(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Siemens NX 2406 (OurOS)"); return 0; }
-    println!("Siemens NX 2406 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Siemens NX 2406 (SlateOS)"); return 0; }
+    println!("Siemens NX 2406 (SlateOS)");
     println!("  Industries: Automotive, aerospace, machinery, electronics");
     println!("  Modeling: Synchronous Technology (direct + parametric hybrid)");
     println!("  CAM: 2.5-5 axis milling, turning, multi-axis, additive");

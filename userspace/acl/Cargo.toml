@@ -2,5 +2,5 @@
 name = "acl"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS acl utility"
+description = "SlateOS acl utility"
 [dependencies]

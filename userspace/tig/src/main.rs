@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tig — OurOS text-mode interface for git
+//! tig — SlateOS text-mode interface for git
 //!
 //! Single personality: `tig`
 
@@ -25,7 +25,7 @@ fn run_tig(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-v" || a == "--version") {
-        println!("tig version 2.5.8 (OurOS)");
+        println!("tig version 2.5.8 (SlateOS)");
         return 0;
     }
 

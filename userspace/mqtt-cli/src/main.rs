@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mqtt-cli — OurOS MQTT messaging tools
+//! mqtt-cli — SlateOS MQTT messaging tools
 //!
 //! Multi-personality: `mosquitto_pub`, `mosquitto_sub`, `mosquitto`, `mqtt`
 
@@ -66,7 +66,7 @@ fn run_mosquitto(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v" && args.len() == 1) {
-        println!("mosquitto version 2.0.18 (OurOS)");
+        println!("mosquitto version 2.0.18 (SlateOS)");
         return 0;
     }
     let port = args.windows(2).find(|w| w[0] == "-p").map(|w| w[1].as_str()).unwrap_or("1883");
@@ -88,7 +88,7 @@ fn run_mqtt(args: &[String]) -> i32 {
     }
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match subcmd {
-        "version" | "--version" => println!("MQTT CLI 4.21.0 (OurOS)"),
+        "version" | "--version" => println!("MQTT CLI 4.21.0 (SlateOS)"),
         "test" => {
             let host = args.windows(2).find(|w| w[0] == "-h").map(|w| w[1].as_str()).unwrap_or("localhost");
             println!("Testing connection to {}:1883...", host);

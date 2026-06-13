@@ -1,4 +1,4 @@
-//! OurOS Desktop Shell
+//! SlateOS Desktop Shell
 //!
 //! Window manager and desktop environment providing:
 //! - Window management (move, resize, minimize, maximize, close)

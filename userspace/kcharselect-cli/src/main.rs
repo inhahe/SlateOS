@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kcharselect-cli — OurOS KDE Character Selector
+//! kcharselect-cli — SlateOS KDE Character Selector
 //!
 //! Single personality: `kcharselect`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_kcharselect(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: kcharselect [OPTIONS]");
-        println!("kcharselect v23.08 (OurOS) — KDE character selector");
+        println!("kcharselect v23.08 (SlateOS) — KDE character selector");
         println!();
         println!("Options:");
         println!("  --version         Show version");
@@ -22,7 +22,7 @@ fn run_kcharselect(args: &[String], _prog: &str) -> i32 {
         println!("Search by name, category, or recently used.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("kcharselect v23.08 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("kcharselect v23.08 (SlateOS)"); return 0; }
     println!("kcharselect: character selector started");
     println!("  Unicode: 15.1 character database");
     println!("  Categories: European, African, Middle Eastern, South Asian, ...");

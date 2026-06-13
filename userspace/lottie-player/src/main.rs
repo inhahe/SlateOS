@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lottie-player — OurOS Lottie animation renderer/converter
+//! lottie-player — SlateOS Lottie animation renderer/converter
 //!
 //! Single personality: `lottie-player`
 
@@ -27,7 +27,7 @@ fn run_lottie(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("lottie-player 1.0.0 (OurOS)");
+        println!("lottie-player 1.0.0 (SlateOS)");
         return 0;
     }
 

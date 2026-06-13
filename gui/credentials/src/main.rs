@@ -1,4 +1,4 @@
-//! OurOS Credential Manager Service
+//! SlateOS Credential Manager Service
 //!
 //! A system-wide password and credential storage service analogous to Windows
 //! Credential Manager or GNOME Keyring. Credentials are encrypted at rest using
@@ -64,7 +64,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 // ---------------------------------------------------------------------------
 
 /// Salt appended to master password before hashing to derive the session key.
-const KEY_DERIVATION_SALT: &str = "ouros_credential_salt";
+const KEY_DERIVATION_SALT: &str = "slateos_credential_salt";
 
 /// Default auto-lock timeout in seconds (5 minutes).
 const DEFAULT_LOCK_TIMEOUT_SECS: u64 = 300;
@@ -1557,7 +1557,7 @@ fn main() {
         return;
     }
 
-    println!("OurOS Credential Manager v0.1.0");
+    println!("SlateOS Credential Manager v0.1.0");
     println!("Store initialized for uid={}", store.uid);
     println!("Storage path: {}", store.storage_path());
     println!("Auto-lock timeout: {}s", store.lock_timeout_secs);

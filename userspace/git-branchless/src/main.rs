@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! git-branchless — OurOS suite of tools for high-velocity git workflows
+//! git-branchless — SlateOS suite of tools for high-velocity git workflows
 //!
 //! Single personality: `git-branchless`
 
@@ -43,7 +43,7 @@ fn run_git_branchless(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("git-branchless 0.8.0 (OurOS)");
+            println!("git-branchless 0.8.0 (SlateOS)");
             0
         }
         "init" => {

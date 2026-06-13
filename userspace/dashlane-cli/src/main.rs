@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dashlane-cli — OurOS Dashlane password manager
+//! dashlane-cli — SlateOS Dashlane password manager
 //!
 //! Single personality: `dashlane`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_dl(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: dashlane [OPTIONS]");
-        println!("Dashlane (OurOS) — Web-first password manager");
+        println!("Dashlane (SlateOS) — Web-first password manager");
         println!();
         println!("Options:");
         println!("  --vault                Open vault");
@@ -24,8 +24,8 @@ fn run_dl(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Dashlane 6.2459.0 (OurOS)"); return 0; }
-    println!("Dashlane 6.2459.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Dashlane 6.2459.0 (SlateOS)"); return 0; }
+    println!("Dashlane 6.2459.0 (SlateOS)");
     println!("  Vendor: Dashlane SAS (Paris/New York, founded 2009)");
     println!("  Crypto: AES-256, Argon2id (modern KDF), zero-knowledge architecture");
     println!("  Architecture pivot: 2022 sunset native apps, web-only");

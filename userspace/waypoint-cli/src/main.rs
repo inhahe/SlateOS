@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! waypoint-cli — OurOS HashiCorp Waypoint application deployment
+//! waypoint-cli — SlateOS HashiCorp Waypoint application deployment
 //!
 //! Multi-personality: `waypoint`
 
@@ -10,7 +10,7 @@ use std::process;
 fn run_waypoint(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: waypoint COMMAND [OPTIONS]");
-        println!("HashiCorp Waypoint 0.11.4 (OurOS)");
+        println!("HashiCorp Waypoint 0.11.4 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  init         Initialize a new project");

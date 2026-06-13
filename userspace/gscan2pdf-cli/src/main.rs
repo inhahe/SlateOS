@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gscan2pdf-cli — OurOS gscan2pdf scan-to-PDF tool
+//! gscan2pdf-cli — SlateOS gscan2pdf scan-to-PDF tool
 //!
 //! Single personality: `gscan2pdf`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gscan2pdf(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gscan2pdf [OPTIONS] [FILE...]");
-        println!("gscan2pdf v2.13 (OurOS) — Scan to PDF/DjVu/TIFF");
+        println!("gscan2pdf v2.13 (SlateOS) — Scan to PDF/DjVu/TIFF");
         println!();
         println!("Options:");
         println!("  -d DEVICE         Use specific scanner");
@@ -24,7 +24,7 @@ fn run_gscan2pdf(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("gscan2pdf v2.13 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("gscan2pdf v2.13 (SlateOS)"); return 0; }
     println!("gscan2pdf: scan-to-PDF application started");
     println!("  Scanner: Epson Perfection V39");
     println!("  OCR engine: tesseract 5.x");

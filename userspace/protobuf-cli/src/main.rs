@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! protobuf-cli — OurOS Protocol Buffers / serialization tools
+//! protobuf-cli — SlateOS Protocol Buffers / serialization tools
 //!
 //! Multi-personality: `protoc`, `protoc-gen-go`, `buf`
 
@@ -14,7 +14,7 @@ fn run_protoc(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: protoc [OPTIONS] PROTO_FILES");
         println!();
-        println!("protoc — Protocol Buffer compiler (OurOS).");
+        println!("protoc — Protocol Buffer compiler (SlateOS).");
         println!();
         println!("Options:");
         println!("  --proto_path=PATH, -I PATH   Import path");
@@ -32,7 +32,7 @@ fn run_protoc(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("libprotoc 25.2 (OurOS)");
+        println!("libprotoc 25.2 (SlateOS)");
         return 0;
     }
 
@@ -62,7 +62,7 @@ fn run_buf(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: buf [FLAGS] COMMAND [ARGS]");
         println!();
-        println!("buf — Protobuf build tool (OurOS).");
+        println!("buf — Protobuf build tool (SlateOS).");
         println!();
         println!("Commands:");
         println!("  lint          Lint proto files");
@@ -76,7 +76,7 @@ fn run_buf(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("1.29.0 (OurOS)");
+        println!("1.29.0 (SlateOS)");
         return 0;
     }
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! basecamp-cli — OurOS Basecamp (37signals' opinionated PM, also where Rails was born)
+//! basecamp-cli — SlateOS Basecamp (37signals' opinionated PM, also where Rails was born)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_bc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: basecamp [OPTIONS]");
-        println!("Basecamp (OurOS) — 37signals opinionated project management + team comms");
+        println!("Basecamp (SlateOS) — 37signals opinionated project management + team comms");
         println!();
         println!("Options:");
         println!("  --plus                 Basecamp Plus — $15/user/mo (per-user pricing)");
@@ -23,8 +23,8 @@ fn run_bc(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Basecamp 4 (OurOS)"); return 0; }
-    println!("Basecamp 4 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Basecamp 4 (SlateOS)"); return 0; }
+    println!("Basecamp 4 (SlateOS)");
     println!("  Vendor: 37signals LLC (Chicago, IL — private, founder-owned)");
     println!("  Founders: Jason Fried (CEO), David Heinemeier Hansson (CTO, 'DHH'), Ernest Kim, 2003");
     println!("          37signals started 1999 as a web design consultancy");

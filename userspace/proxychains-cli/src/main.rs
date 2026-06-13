@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! proxychains-cli — OurOS proxy chain/SOCKS tools
+//! proxychains-cli — SlateOS proxy chain/SOCKS tools
 //!
 //! Multi-personality: `proxychains`, `tsocks`, `redsocks`
 
@@ -14,7 +14,7 @@ fn run_proxychains(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: proxychains [OPTIONS] <program> [args...]");
         println!();
-        println!("proxychains-ng — proxy chains (OurOS).");
+        println!("proxychains-ng — proxy chains (SlateOS).");
         println!();
         println!("Options:");
         println!("  -q             Quiet mode");
@@ -31,7 +31,7 @@ fn run_proxychains(args: &[String]) -> i32 {
     if !quiet {
         println!("[proxychains] config file found: /etc/proxychains.conf");
         println!("[proxychains] preloading /usr/lib/libproxychains4.so");
-        println!("[proxychains] DLL init: proxychains-ng 4.17 (OurOS)");
+        println!("[proxychains] DLL init: proxychains-ng 4.17 (SlateOS)");
         println!("[proxychains] Dynamic chain  ...  127.0.0.1:9050  ...  OK");
     }
     println!("[proxychains] launching: {}", prog);
@@ -42,7 +42,7 @@ fn run_tsocks(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: tsocks [OPTIONS] <command> [args...]");
         println!();
-        println!("tsocks — transparent SOCKS proxy wrapper (OurOS).");
+        println!("tsocks — transparent SOCKS proxy wrapper (SlateOS).");
         println!();
         println!("Options:");
         println!("  -on            Enable tsocks");
@@ -69,7 +69,7 @@ fn run_redsocks(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: redsocks [OPTIONS]");
         println!();
-        println!("redsocks — transparent TCP-to-SOCKS/HTTPS proxy redirector (OurOS).");
+        println!("redsocks — transparent TCP-to-SOCKS/HTTPS proxy redirector (SlateOS).");
         println!();
         println!("Options:");
         println!("  -c <file>      Config file (default: /etc/redsocks.conf)");
@@ -78,7 +78,7 @@ fn run_redsocks(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("redsocks 0.5 (OurOS)");
+        println!("redsocks 0.5 (SlateOS)");
         return 0;
     }
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wireshark-cli — OurOS Wireshark CLI tools (tshark/editcap/mergecap)
+//! wireshark-cli — SlateOS Wireshark CLI tools (tshark/editcap/mergecap)
 //!
 //! Multi-personality: `tshark`, `editcap`, `mergecap`, `capinfos`
 
@@ -98,7 +98,7 @@ fn main() {
     let rest: Vec<String> = args.into_iter().skip(1).collect();
 
     if rest.iter().any(|a| a == "-V" || a == "--version") {
-        println!("TShark (Wireshark) 4.2.2 (OurOS)");
+        println!("TShark (Wireshark) 4.2.2 (SlateOS)");
         process::exit(0);
     }
 

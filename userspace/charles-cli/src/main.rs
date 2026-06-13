@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! charles-cli — OurOS Charles Proxy web debugging tool
+//! charles-cli — SlateOS Charles Proxy web debugging tool
 //!
 //! Single personality: `charles`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_charles(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: charles [OPTIONS]");
-        println!("Charles Proxy v4.6.5 (OurOS) — Web debugging proxy");
+        println!("Charles Proxy v4.6.5 (SlateOS) — Web debugging proxy");
         println!();
         println!("Options:");
         println!("  --port PORT         HTTP proxy port (default: 8888)");
@@ -26,7 +26,7 @@ fn run_charles(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("Charles Proxy v4.6.5 (OurOS)");
+        println!("Charles Proxy v4.6.5 (SlateOS)");
         return 0;
     }
     println!("Charles Proxy v4.6.5 starting...");

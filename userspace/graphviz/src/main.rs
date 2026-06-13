@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! graphviz — OurOS graph visualization tools
+//! graphviz — SlateOS graph visualization tools
 //!
 //! Multi-personality: `dot`, `neato`, `fdp`, `sfdp`, `circo`, `twopi`
 
@@ -56,7 +56,7 @@ fn run_graphviz(layout: &str, args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V") {
-        println!("{} - graphviz version 10.0.1 (OurOS)", layout);
+        println!("{} - graphviz version 10.0.1 (SlateOS)", layout);
         return 0;
     }
 

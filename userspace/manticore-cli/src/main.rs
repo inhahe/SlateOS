@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! manticore-cli — OurOS Manticore Search
+//! manticore-cli — SlateOS Manticore Search
 //!
 //! Multi-personality: `searchd`, `indexer`, `indextool`
 
@@ -15,19 +15,19 @@ fn run_manticore(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "indexer" => {
-                println!("indexer (OurOS) — Manticore index builder");
+                println!("indexer (SlateOS) — Manticore index builder");
                 println!("  --all              Index all configured sources");
                 println!("  --rotate           Rotate indexes after building");
                 println!("  INDEX [INDEX ...]  Specific indexes to build");
             }
             "indextool" => {
-                println!("indextool (OurOS) — Manticore index diagnostics");
+                println!("indextool (SlateOS) — Manticore index diagnostics");
                 println!("  --check INDEX      Check index integrity");
                 println!("  --dumpheader FILE  Dump index header");
                 println!("  --dumphitlist INDEX KEYWORD  Dump hits");
             }
             _ => {
-                println!("searchd (OurOS) — Manticore Search daemon");
+                println!("searchd (SlateOS) — Manticore Search daemon");
                 println!("  --config FILE      Config file");
                 println!("  --stop             Stop daemon");
                 println!("  --status           Show status");
@@ -38,12 +38,12 @@ fn run_manticore(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version" || a == "-v") { println!("Manticore Search v6.2.12 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version" || a == "-v") { println!("Manticore Search v6.2.12 (SlateOS)"); return 0; }
     match prog {
         "indexer" => println!("Manticore indexer: all indexes rebuilt successfully"),
         "indextool" => println!("Manticore indextool: index check passed"),
         _ => {
-            println!("Manticore Search v6.2.12 (OurOS)");
+            println!("Manticore Search v6.2.12 (SlateOS)");
             println!("  MySQL protocol: 0.0.0.0:9306");
             println!("  HTTP API: 0.0.0.0:9308");
             println!("  Binary: 0.0.0.0:9312");

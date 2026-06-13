@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xen-cli — OurOS Xen Project hypervisor
+//! xen-cli — SlateOS Xen Project hypervisor
 //!
 //! Single personality: `xen`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_xen(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: xen [OPTIONS]");
-        println!("Xen Project 4.19 (OurOS) — Open-source type-1 hypervisor");
+        println!("Xen Project 4.19 (SlateOS) — Open-source type-1 hypervisor");
         println!();
         println!("Options:");
         println!("  --xl                   xl toolstack (default since Xen 4.1)");
@@ -25,8 +25,8 @@ fn run_xen(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Xen 4.19.0 (OurOS)"); return 0; }
-    println!("Xen Project 4.19.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Xen 4.19.0 (SlateOS)"); return 0; }
+    println!("Xen Project 4.19.0 (SlateOS)");
     println!("  Vendor: Xen Project (under Linux Foundation since 2013)");
     println!("  Originated: 2003 at Cambridge University (Ian Pratt + students)");
     println!("  XenSource → Citrix 2007 (XenServer) → Citrix Hypervisor → XCP-ng fork");

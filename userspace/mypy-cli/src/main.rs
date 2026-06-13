@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mypy-cli — OurOS mypy CLI
+//! mypy-cli — SlateOS mypy CLI
 //!
 //! Single personality: `mypy`
 
@@ -11,7 +11,7 @@ fn run_mypy(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mypy [OPTIONS] [FILES/DIRS...]");
         println!();
-        println!("mypy — static type checker for Python (OurOS).");
+        println!("mypy — static type checker for Python (SlateOS).");
         println!();
         println!("Options:");
         println!("  --strict             Enable all strict checks");
@@ -25,7 +25,7 @@ fn run_mypy(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("mypy 1.8.0 (OurOS)");
+        println!("mypy 1.8.0 (SlateOS)");
         return 0;
     }
 

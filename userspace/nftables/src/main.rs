@@ -1,4 +1,4 @@
-//! Multi-personality nftables firewall rule management utility for OurOS.
+//! Multi-personality nftables firewall rule management utility for SlateOS.
 //!
 //! Personalities detected via `argv[0]` basename (stripping path and `.exe`):
 //!   - `nft`      -- nftables rule management (default)

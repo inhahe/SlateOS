@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pam-cli — OurOS PAM authentication tools
+//! pam-cli — SlateOS PAM authentication tools
 //!
 //! Multi-personality: `pam_tally2`, `faillock`, `pam-auth-update`, `pwscore`
 
@@ -19,7 +19,7 @@ fn run_faillock(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: faillock [OPTIONS]");
         println!();
-        println!("faillock — display/reset login failure records (OurOS).");
+        println!("faillock — display/reset login failure records (SlateOS).");
         println!();
         println!("Options:");
         println!("  --user USER    Show/reset for USER");
@@ -53,7 +53,7 @@ fn run_pam_tally2(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pam_tally2 [OPTIONS]");
         println!();
-        println!("pam_tally2 — login counter (OurOS).");
+        println!("pam_tally2 — login counter (SlateOS).");
         println!();
         println!("Options:");
         println!("  --user USER    Show count for USER");
@@ -75,7 +75,7 @@ fn run_pam_auth_update(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pam-auth-update [OPTIONS]");
         println!();
-        println!("pam-auth-update — manage PAM configuration (OurOS).");
+        println!("pam-auth-update — manage PAM configuration (SlateOS).");
         println!();
         println!("Options:");
         println!("  --package       Package mode");
@@ -97,7 +97,7 @@ fn run_pwscore(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pwscore [USER]");
         println!();
-        println!("pwscore — check password quality score (OurOS).");
+        println!("pwscore — check password quality score (SlateOS).");
         println!("Reads password from stdin and prints score 0-100.");
         return 0;
     }

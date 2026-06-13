@@ -2,5 +2,5 @@
 name = "wc"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS word, line, character count utility"
+description = "SlateOS word, line, character count utility"
 [dependencies]

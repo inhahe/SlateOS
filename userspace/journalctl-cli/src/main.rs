@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! journalctl-cli — OurOS journalctl CLI
+//! journalctl-cli — SlateOS journalctl CLI
 //!
 //! Single personality: `journalctl`
 
@@ -11,7 +11,7 @@ fn run_journalctl(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: journalctl [OPTIONS]");
         println!();
-        println!("journalctl — query the systemd journal (OurOS).");
+        println!("journalctl — query the systemd journal (SlateOS).");
         println!();
         println!("Options:");
         println!("  -u, --unit UNIT        Show logs for unit");
@@ -31,7 +31,7 @@ fn run_journalctl(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("systemd 255 (OurOS)");
+        println!("systemd 255 (SlateOS)");
         return 0;
     }
 
@@ -55,11 +55,11 @@ fn run_journalctl(args: Vec<String>) -> i32 {
     let kernel = args.iter().any(|a| a == "-k" || a == "--dmesg");
 
     if kernel {
-        println!("Jan 15 08:00:00 ouros kernel: Linux version 6.7.0-ouros");
-        println!("Jan 15 08:00:00 ouros kernel: Command line: root=/dev/sda2 ro");
-        println!("Jan 15 08:00:00 ouros kernel: Memory: 16384MB available");
-        println!("Jan 15 08:00:00 ouros kernel: CPU: 4 cores detected");
-        println!("Jan 15 08:00:01 ouros kernel: ACPI: RSDP found");
+        println!("Jan 15 08:00:00 slateos kernel: Linux version 6.7.0-slateos");
+        println!("Jan 15 08:00:00 slateos kernel: Command line: root=/dev/sda2 ro");
+        println!("Jan 15 08:00:00 slateos kernel: Memory: 16384MB available");
+        println!("Jan 15 08:00:00 slateos kernel: CPU: 4 cores detected");
+        println!("Jan 15 08:00:01 slateos kernel: ACPI: RSDP found");
         return 0;
     }
 
@@ -68,7 +68,7 @@ fn run_journalctl(args: Vec<String>) -> i32 {
 
     if json {
         for i in 0..max {
-            println!("{{\"__REALTIME_TIMESTAMP\":\"170523600{}000000\",\"_HOSTNAME\":\"ouros\",\"SYSLOG_IDENTIFIER\":\"{}\",\"MESSAGE\":\"Log entry {}\"}}", i, svc, i + 1);
+            println!("{{\"__REALTIME_TIMESTAMP\":\"170523600{}000000\",\"_HOSTNAME\":\"slateos\",\"SYSLOG_IDENTIFIER\":\"{}\",\"MESSAGE\":\"Log entry {}\"}}", i, svc, i + 1);
         }
     } else {
         let messages = [
@@ -83,7 +83,7 @@ fn run_journalctl(args: Vec<String>) -> i32 {
         ];
         for i in 0..max {
             let msg = messages.get(i).copied().unwrap_or("Log entry");
-            println!("Jan 15 12:{:02}:{:02} ouros {}[1234]: {}", i, i * 5, svc, msg);
+            println!("Jan 15 12:{:02}:{:02} slateos {}[1234]: {}", i, i * 5, svc, msg);
         }
     }
     0

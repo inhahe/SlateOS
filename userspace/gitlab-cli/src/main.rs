@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gitlab-cli — OurOS GitLab CLI tools
+//! gitlab-cli — SlateOS GitLab CLI tools
 //!
 //! Multi-personality: `glab`, `gitlab-runner`
 
@@ -14,7 +14,7 @@ fn run_glab(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: glab <command> [flags]");
         println!();
-        println!("glab — GitLab CLI (OurOS).");
+        println!("glab — GitLab CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  mr          Manage merge requests");
@@ -30,7 +30,7 @@ fn run_glab(args: &[String]) -> i32 {
 
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match subcmd {
-        "version" | "--version" => println!("glab version 1.36.0 (OurOS)"),
+        "version" | "--version" => println!("glab version 1.36.0 (SlateOS)"),
         "mr" => {
             let cmd = args.get(1).map(|s| s.as_str()).unwrap_or("list");
             match cmd {
@@ -85,7 +85,7 @@ fn run_gitlab_runner(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Version:      16.8.0 (OurOS)");
+        println!("Version:      16.8.0 (SlateOS)");
         println!("Git revision: abcdef12");
         return 0;
     }
@@ -94,8 +94,8 @@ fn run_gitlab_runner(args: &[String]) -> i32 {
     match subcmd {
         "list" => {
             println!("Listing configured runners                          ConfigFile=/etc/gitlab-runner/config.toml");
-            println!("ouros-runner-1                                      Executor=docker   Token=abcdef12   URL=https://gitlab.com");
-            println!("ouros-runner-2                                      Executor=shell    Token=34567890   URL=https://gitlab.com");
+            println!("slateos-runner-1                                      Executor=docker   Token=abcdef12   URL=https://gitlab.com");
+            println!("slateos-runner-2                                      Executor=shell    Token=34567890   URL=https://gitlab.com");
         }
         "status" => println!("gitlab-runner: Service is running"),
         "verify" => println!("Verifying runner... is valid                         runner=abcdef12"),

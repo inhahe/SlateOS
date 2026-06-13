@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gitea — OurOS self-hosted Git service
+//! gitea — SlateOS self-hosted Git service
 //!
 //! Single personality: `gitea`
 
@@ -32,7 +32,7 @@ fn run_gitea(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "version" => {
-            println!("Gitea version 1.22.0 built with Go 1.22.2 (OurOS)");
+            println!("Gitea version 1.22.0 built with Go 1.22.2 (SlateOS)");
             println!("Git Version: 2.45.0");
             0
         }

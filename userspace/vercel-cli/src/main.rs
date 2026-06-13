@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vercel-cli — OurOS Vercel CLI
+//! vercel-cli — SlateOS Vercel CLI
 //!
 //! Single personality: `vercel`
 
@@ -11,7 +11,7 @@ fn run_vercel(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: vercel <COMMAND> [OPTIONS]");
         println!();
-        println!("Vercel command-line interface (OurOS).");
+        println!("Vercel command-line interface (SlateOS).");
         println!();
         println!("Commands:");
         println!("  deploy       Deploy a project");
@@ -34,7 +34,7 @@ fn run_vercel(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("Vercel CLI 33.3.0 (OurOS)");
+        println!("Vercel CLI 33.3.0 (SlateOS)");
         return 0;
     }
 

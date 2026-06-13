@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wf-recorder-cli — OurOS wf-recorder screen recorder
+//! wf-recorder-cli — SlateOS wf-recorder screen recorder
 //!
 //! Single personality: `wf-recorder`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wf_recorder(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wf-recorder [OPTIONS]");
-        println!("wf-recorder v0.4 (OurOS) — Screen recording for Wayland");
+        println!("wf-recorder v0.4 (SlateOS) — Screen recording for Wayland");
         println!();
         println!("Options:");
         println!("  -f FILE           Output file");
@@ -27,7 +27,7 @@ fn run_wf_recorder(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("wf-recorder v0.4 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("wf-recorder v0.4 (SlateOS)"); return 0; }
     let file = args.iter().skip_while(|a| a.as_str() != "-f").nth(1).map(|s| s.as_str()).unwrap_or("recording.mp4");
     println!("Recording to: {}", file);
     println!("  Codec: h264 (vaapi)");

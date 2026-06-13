@@ -2,5 +2,5 @@
 name = "upower"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS upower utility"
+description = "SlateOS upower utility"
 [dependencies]

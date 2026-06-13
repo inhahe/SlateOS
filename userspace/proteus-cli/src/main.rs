@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! proteus-cli — OurOS Labcenter Proteus schematic/PCB/simulation
+//! proteus-cli — SlateOS Labcenter Proteus schematic/PCB/simulation
 //!
 //! Single personality: `proteus`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_proteus(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: proteus [OPTIONS] [FILE]");
-        println!("Labcenter Proteus 8.17 (OurOS) — Schematic + PCB + microcontroller sim");
+        println!("Labcenter Proteus 8.17 (SlateOS) — Schematic + PCB + microcontroller sim");
         println!();
         println!("Options:");
         println!("  --isis FILE            ISIS Schematic Capture (.DSN)");
@@ -23,8 +23,8 @@ fn run_proteus(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Labcenter Proteus 8.17 SP3 (OurOS)"); return 0; }
-    println!("Labcenter Proteus 8.17 SP3 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Labcenter Proteus 8.17 SP3 (SlateOS)"); return 0; }
+    println!("Labcenter Proteus 8.17 SP3 (SlateOS)");
     println!("  Tools: ISIS Schematic, ARES PCB, VSM (Virtual System Modelling)");
     println!("  Strength: MCU co-simulation — PIC/AVR/Arduino/ARM/8051 with peripherals");
     println!("  Simulation: SPICE engine + MCU instruction set + virtual instruments");

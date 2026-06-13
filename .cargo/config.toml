@@ -3,7 +3,7 @@
 # Defaults are tuned for the kernel (bare-metal x86_64-unknown-none with
 # no build-std, no userspace sysroot). Userspace+apps live in their own
 # zones (apps/, userspace/, gui/, init/, net/) and each has a
-# .cargo/config.toml that overrides target to x86_64-ouros and turns on
+# .cargo/config.toml that overrides target to x86_64-slateos and turns on
 # build-std. Cargo's config search walks up from the invocation cwd, so
 # building from inside a zone picks up the zone config and then this
 # root config — scalar settings (like target) are overridden by the
@@ -39,9 +39,9 @@ rustflags = [
 ]
 
 # Shared userspace linker flags. Each zone config still has to set
-# `target = "toolchain/x86_64-ouros.json"` to actually activate this
+# `target = "toolchain/x86_64-slateos.json"` to actually activate this
 # block; we keep the rustflags here so the zone configs stay minimal.
-[target.x86_64-ouros]
+[target.x86_64-slateos]
 linker = "rust-lld"
 rustflags = [
     "-C", "link-arg=-Ltoolchain/sysroot/lib",
@@ -55,11 +55,11 @@ runner = "scripts/boot-test.sh"
 json-target-spec = true
 
 [alias]
-# Convenience: build any ouros crate from the workspace root without
+# Convenience: build any slateos crate from the workspace root without
 # `cd`-ing into a zone. Wraps `cargo build` with the userspace target
 # spec and build-std settings.
 #
-# Example: `cargo +nightly build-ouros -p paloalto-cli --release`
-build-ouros = ["build", "--target=toolchain/x86_64-ouros.json", "-Zbuild-std=core,alloc,std,panic_abort"]
-check-ouros = ["check", "--target=toolchain/x86_64-ouros.json", "-Zbuild-std=core,alloc,std,panic_abort"]
-test-ouros  = ["test",  "--target=toolchain/x86_64-ouros.json", "-Zbuild-std=core,alloc,std,panic_abort"]
+# Example: `cargo +nightly build-slateos -p paloalto-cli --release`
+build-slateos = ["build", "--target=toolchain/x86_64-slateos.json", "-Zbuild-std=core,alloc,std,panic_abort"]
+check-slateos = ["check", "--target=toolchain/x86_64-slateos.json", "-Zbuild-std=core,alloc,std,panic_abort"]
+test-slateos  = ["test",  "--target=toolchain/x86_64-slateos.json", "-Zbuild-std=core,alloc,std,panic_abort"]

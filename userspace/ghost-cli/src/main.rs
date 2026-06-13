@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! ghost-cli — OurOS personality CLI for Ghost, the open-source publishing platform.
+//! ghost-cli — SlateOS personality CLI for Ghost, the open-source publishing platform.
 
 use std::env;
 use std::process;
@@ -187,7 +187,7 @@ fn cmd_foundation() {
     println!("  - 11+ years profitable, no layoffs");
     println!();
     println!("This is the OS-foundation model (Mozilla, Apache, Linux) applied");
-    println!("to publishing software. It is the model OurOS most aligns with.");
+    println!("to publishing software. It is the model SlateOS most aligns with.");
 }
 
 fn cmd_customers() {

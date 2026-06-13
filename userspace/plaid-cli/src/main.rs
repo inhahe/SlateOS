@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! plaid-cli — OurOS Plaid financial CLI
+//! plaid-cli — SlateOS Plaid financial CLI
 //!
 //! Single personality: `plaid`
 
@@ -11,7 +11,7 @@ fn run_plaid(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: plaid <COMMAND> [OPTIONS]");
         println!();
-        println!("Plaid financial data CLI (OurOS).");
+        println!("Plaid financial data CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  accounts     List linked accounts");

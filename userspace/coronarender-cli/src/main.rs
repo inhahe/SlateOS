@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! coronarender-cli — OurOS Corona Renderer (Chaos Group, ArchViz favorite)
+//! coronarender-cli — SlateOS Corona Renderer (Chaos Group, ArchViz favorite)
 //!
 //! Single personality: `corona`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_corona(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: corona [OPTIONS]");
-        println!("Corona Renderer 12 (OurOS) — Unbiased path tracer for ArchViz");
+        println!("Corona Renderer 12 (SlateOS) — Unbiased path tracer for ArchViz");
         println!();
         println!("Options:");
         println!("  --render SCENE         Render scene");
@@ -24,8 +24,8 @@ fn run_corona(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Corona Renderer 12 (Hotfix 1) (OurOS)"); return 0; }
-    println!("Corona Renderer 12 (Hotfix 1) (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Corona Renderer 12 (Hotfix 1) (SlateOS)"); return 0; }
+    println!("Corona Renderer 12 (Hotfix 1) (SlateOS)");
     println!("  Vendor: Chaos Czech a.s. (Prague, CZ) — owned by Chaos Group since Aug 2017");
     println!("  Founders: Ondřej Karlík, Adam Hotový, Jaroslav Křivánek (Prague Charles Univ.)");
     println!("  Origin: started as Karlík's bachelor's thesis (2009), commercial 2014");

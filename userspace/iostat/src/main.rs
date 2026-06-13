@@ -1,4 +1,4 @@
-//! OurOS I/O Statistics Utility
+//! SlateOS I/O Statistics Utility
 //!
 //! Reports CPU utilization and I/O device statistics, similar to Linux `iostat`.
 //! Reads from `/proc/stat`, `/proc/diskstats`, and `/sys/block/` for live data.
@@ -903,7 +903,7 @@ fn run(config: &Config) {
 // ============================================================================
 
 fn print_usage() {
-    println!("OurOS I/O Statistics Utility v0.1.0");
+    println!("SlateOS I/O Statistics Utility v0.1.0");
     println!();
     println!("Report CPU utilization and I/O device statistics.");
     println!();

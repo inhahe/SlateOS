@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sveltekit-cli — OurOS SvelteKit web framework CLI
+//! sveltekit-cli — SlateOS SvelteKit web framework CLI
 //!
 //! Single personality: `sveltekit`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sveltekit(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: sveltekit COMMAND [OPTIONS]");
-        println!("SvelteKit v2.5.0 (OurOS) — Svelte web application framework");
+        println!("SvelteKit v2.5.0 (SlateOS) — Svelte web application framework");
         println!();
         println!("Commands:");
         println!("  dev             Start dev server");

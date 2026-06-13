@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ocrmypdf-cli — OurOS OCRmyPDF CLI
+//! ocrmypdf-cli — SlateOS OCRmyPDF CLI
 //!
 //! Single personality: `ocrmypdf`
 
@@ -11,7 +11,7 @@ fn run_ocrmypdf(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ocrmypdf [OPTIONS] INPUT OUTPUT");
         println!();
-        println!("OCRmyPDF — add OCR text layer to PDFs (OurOS).");
+        println!("OCRmyPDF — add OCR text layer to PDFs (SlateOS).");
         println!();
         println!("Options:");
         println!("  -l, --language LANG    Language(s) (default eng)");
@@ -37,7 +37,7 @@ fn run_ocrmypdf(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("ocrmypdf 16.0.4 (OurOS)");
+        println!("ocrmypdf 16.0.4 (SlateOS)");
         println!("  tesseract 5.3.4");
         println!("  ghostscript 10.03.0");
         println!("  unpaper 7.0.0");

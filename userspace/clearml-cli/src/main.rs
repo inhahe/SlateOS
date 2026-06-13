@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! clearml-cli — OurOS ClearML CLI
+//! clearml-cli — SlateOS ClearML CLI
 //!
 //! Multi-personality: `clearml-init`, `clearml-task`, `clearml-data`
 
@@ -53,7 +53,7 @@ fn run_clearml(args: &[String], prog: &str) -> i32 {
 
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: clearml-task [OPTIONS]");
-        println!("ClearML Task CLI 1.14.0 (OurOS)");
+        println!("ClearML Task CLI 1.14.0 (SlateOS)");
         println!();
         println!("Options:");
         println!("  --name NAME        Task name");

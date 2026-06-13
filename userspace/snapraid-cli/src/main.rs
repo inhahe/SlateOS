@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! snapraid-cli — OurOS SnapRAID parity-based backup
+//! snapraid-cli — SlateOS SnapRAID parity-based backup
 //!
 //! Single personality: `snapraid`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_snapraid(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: snapraid COMMAND [OPTIONS]");
-        println!("SnapRAID v12.3 (OurOS) — Parity-based backup for disk arrays");
+        println!("SnapRAID v12.3 (SlateOS) — Parity-based backup for disk arrays");
         println!();
         println!("Commands:");
         println!("  sync           Sync parity data");
@@ -32,8 +32,8 @@ fn run_snapraid(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("SnapRAID v12.3 (OurOS)"); return 0; }
-    println!("SnapRAID v12.3 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("SnapRAID v12.3 (SlateOS)"); return 0; }
+    println!("SnapRAID v12.3 (SlateOS)");
     println!("  Array status:");
     println!("    Data disks: 4");
     println!("    Parity disks: 2 (dual parity)");

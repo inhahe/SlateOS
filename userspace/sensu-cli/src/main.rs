@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sensu-cli — OurOS Sensu monitoring
+//! sensu-cli — SlateOS Sensu monitoring
 //!
 //! Multi-personality: `sensuctl`, `sensu-agent`, `sensu-backend`
 
@@ -15,21 +15,21 @@ fn run_sensu(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "sensu-agent" => {
-                println!("sensu-agent v6.10 (OurOS) — Sensu monitoring agent");
+                println!("sensu-agent v6.10 (SlateOS) — Sensu monitoring agent");
                 println!("  start           Start agent");
                 println!("  --backend-url URL  Backend WebSocket URL");
                 println!("  --name NAME     Agent name");
                 println!("  --subscriptions S  Subscriptions (comma-sep)");
             }
             "sensu-backend" => {
-                println!("sensu-backend v6.10 (OurOS) — Sensu monitoring backend");
+                println!("sensu-backend v6.10 (SlateOS) — Sensu monitoring backend");
                 println!("  start           Start backend");
                 println!("  init            Initialize backend");
                 println!("  --api-listen-address ADDR  API listen address");
                 println!("  --state-dir DIR  State directory");
             }
             _ => {
-                println!("sensuctl v6.10 (OurOS) — Sensu monitoring CLI");
+                println!("sensuctl v6.10 (SlateOS) — Sensu monitoring CLI");
                 println!("  check list      List checks");
                 println!("  event list      List events");
                 println!("  entity list     List entities");
@@ -40,8 +40,8 @@ fn run_sensu(args: &[String], prog: &str) -> i32 {
         println!("  --version       Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Sensu Go v6.10.0 (OurOS)"); return 0; }
-    println!("Sensu Go v6.10.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Sensu Go v6.10.0 (SlateOS)"); return 0; }
+    println!("Sensu Go v6.10.0 (SlateOS)");
     println!("  Entities: 25 (15 agents, 10 proxy)");
     println!("  Checks: 45");
     println!("  Events: 12 warning, 3 critical, 180 passing");

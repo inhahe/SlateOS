@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! oxipng-cli — OurOS oxipng PNG optimizer
+//! oxipng-cli — SlateOS oxipng PNG optimizer
 //!
 //! Single personality: `oxipng`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_oxipng(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: oxipng [OPTIONS] FILES...");
-        println!("oxipng 9.1.2 (OurOS) — Lossless PNG optimizer");
+        println!("oxipng 9.1.2 (SlateOS) — Lossless PNG optimizer");
         println!();
         println!("Options:");
         println!("  -o, --opt N           Optimization level (0-6, default 2)");
@@ -31,7 +31,7 @@ fn run_oxipng(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("oxipng 9.1.2 (OurOS)");
+        println!("oxipng 9.1.2 (SlateOS)");
         return 0;
     }
     let files: Vec<&str> = args.iter()

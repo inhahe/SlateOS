@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! latex-cli — OurOS LaTeX CLI
+//! latex-cli — SlateOS LaTeX CLI
 //!
 //! Multi-personality: `pdflatex`, `xelatex`, `lualatex`, `latex`
 
@@ -19,7 +19,7 @@ fn run_latex(prog: &str, args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-help" || a == "-h") {
         println!("Usage: {} [OPTIONS] FILE.tex", prog);
         println!();
-        println!("{} — TeX/LaTeX typesetter (OurOS).", prog);
+        println!("{} — TeX/LaTeX typesetter (SlateOS).", prog);
         println!();
         println!("Options:");
         println!("  -output-directory DIR  Output directory");
@@ -34,10 +34,10 @@ fn run_latex(prog: &str, args: &[String]) -> i32 {
     }
     if args.iter().any(|a| a == "--version" || a == "-version") {
         match prog {
-            "pdflatex" => println!("pdfTeX 3.141592653-2.6-1.40.25 (TeX Live 2024/OurOS)"),
-            "xelatex" => println!("XeTeX 3.141592653-2.6-0.999996 (TeX Live 2024/OurOS)"),
-            "lualatex" => println!("LuaHBTeX 1.17.0 (TeX Live 2024/OurOS)"),
-            _ => println!("TeX 3.141592653 (TeX Live 2024/OurOS)"),
+            "pdflatex" => println!("pdfTeX 3.141592653-2.6-1.40.25 (TeX Live 2024/SlateOS)"),
+            "xelatex" => println!("XeTeX 3.141592653-2.6-0.999996 (TeX Live 2024/SlateOS)"),
+            "lualatex" => println!("LuaHBTeX 1.17.0 (TeX Live 2024/SlateOS)"),
+            _ => println!("TeX 3.141592653 (TeX Live 2024/SlateOS)"),
         }
         return 0;
     }
@@ -50,7 +50,7 @@ fn run_latex(prog: &str, args: &[String]) -> i32 {
     let base = strip_ext(file);
     let halt = args.iter().any(|a| a == "-halt-on-error");
 
-    println!("This is {} (OurOS)", prog);
+    println!("This is {} (SlateOS)", prog);
     println!("entering extended mode");
     println!(" restricted \\write18 enabled.");
     println!("({}",  file);

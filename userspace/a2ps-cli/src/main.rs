@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! a2ps-cli — OurOS a2ps/enscript text-to-PostScript CLI
+//! a2ps-cli — SlateOS a2ps/enscript text-to-PostScript CLI
 //!
 //! Single personality: `a2ps`
 
@@ -11,7 +11,7 @@ fn run_a2ps(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: a2ps [OPTIONS] [FILE ...]");
         println!();
-        println!("a2ps — any to PostScript filter (OurOS).");
+        println!("a2ps — any to PostScript filter (SlateOS).");
         println!();
         println!("Options:");
         println!("  -o, --output FILE     Output file (default stdout)");
@@ -34,7 +34,7 @@ fn run_a2ps(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("a2ps 4.15.4 (OurOS)");
+        println!("a2ps 4.15.4 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "--list=features") {

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! burp-cli — OurOS BURP backup and restore program
+//! burp-cli — SlateOS BURP backup and restore program
 //!
 //! Multi-personality: `burp`, `burp-server`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_burp(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: burp [OPTIONS]");
-        println!("burp v2.5 (OurOS) — Backup and Restore Program");
+        println!("burp v2.5 (SlateOS) — Backup and Restore Program");
         println!();
         println!("Options:");
         println!("  -a ACTION    Action: backup, restore, list, verify, estimate");
@@ -24,7 +24,7 @@ fn run_burp(args: &[String], _prog: &str) -> i32 {
         println!("  --version    Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("burp v2.5 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("burp v2.5 (SlateOS)"); return 0; }
     // Find action flag
     let action = args.windows(2).find(|w| w[0] == "-a").map(|w| w[1].as_str());
     match action {
@@ -52,12 +52,12 @@ fn run_burp(args: &[String], _prog: &str) -> i32 {
 fn run_burp_server(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: burp-server [OPTIONS]");
-        println!("burp-server v2.5 (OurOS) — BURP server daemon");
+        println!("burp-server v2.5 (SlateOS) — BURP server daemon");
         println!("  -c FILE    Configuration file");
         println!("  -F         Run in foreground");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("burp-server v2.5 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("burp-server v2.5 (SlateOS)"); return 0; }
     println!("burp-server: listening on port 4971");
     println!("  Clients configured: 4");
     println!("  Storage: /var/spool/burp");

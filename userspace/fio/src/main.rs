@@ -1,4 +1,4 @@
-//! Multi-personality flexible I/O tester for OurOS.
+//! Multi-personality flexible I/O tester for SlateOS.
 //!
 //! This binary detects the personality from `argv[0]`:
 //!   - `fio`        -> flexible I/O tester (main personality)
@@ -1293,7 +1293,7 @@ fn json_escape(s: &str) -> String {
 /// Format JSON output for a list of job stats.
 fn format_json(all_stats: &[JobStats], include_percentiles: bool) -> String {
     let mut out = String::new();
-    out.push_str("{\n  \"fio version\": \"fio-ouros-0.1.0\",\n");
+    out.push_str("{\n  \"fio version\": \"fio-slateos-0.1.0\",\n");
     out.push_str("  \"jobs\": [\n");
 
     for (idx, stats) in all_stats.iter().enumerate() {
@@ -1629,7 +1629,7 @@ fn run_verify(args: &[String]) -> i32 {
 // ---------------------------------------------------------------------------
 
 fn print_help() {
-    println!("fio - flexible I/O tester for OurOS");
+    println!("fio - flexible I/O tester for SlateOS");
     println!();
     println!("Usage: fio [OPTIONS] [JOBFILE]");
     println!();
@@ -1712,7 +1712,7 @@ fn run_fio(args: &[String]) -> i32 {
         return 0;
     }
     if cli.show_version {
-        println!("fio-ouros-0.1.0");
+        println!("fio-slateos-0.1.0");
         return 0;
     }
 
@@ -3310,7 +3310,7 @@ mod tests {
 
     #[test]
     fn test_personality_forward_slash() {
-        let s = "/opt/ouros/bin/fio-verify.exe";
+        let s = "/opt/slateos/bin/fio-verify.exe";
         let bytes = s.as_bytes();
         let mut last_sep = 0;
         for (i, &b) in bytes.iter().enumerate() {

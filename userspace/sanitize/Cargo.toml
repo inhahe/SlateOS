@@ -2,5 +2,5 @@
 name = "sanitize"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS filename sanitizer — clean up problematic filenames"
+description = "SlateOS filename sanitizer — clean up problematic filenames"
 [dependencies]

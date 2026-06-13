@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kerberos-cli — OurOS Kerberos authentication tools
+//! kerberos-cli — SlateOS Kerberos authentication tools
 //!
 //! Multi-personality: `kinit`, `klist`, `kdestroy`, `kpasswd`, `kadmin`, `ktutil`
 
@@ -14,7 +14,7 @@ fn run_kinit(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: kinit [OPTIONS] [principal]");
         println!();
-        println!("kinit — Kerberos initial authentication (OurOS, MIT Kerberos 1.21).");
+        println!("kinit — Kerberos initial authentication (SlateOS, MIT Kerberos 1.21).");
         println!();
         println!("Options:");
         println!("  -l <lifetime>    Ticket lifetime");
@@ -26,7 +26,7 @@ fn run_kinit(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("kinit (MIT Kerberos 1.21 OurOS)");
+        println!("kinit (MIT Kerberos 1.21 SlateOS)");
         return 0;
     }
 
@@ -53,8 +53,8 @@ fn run_klist(args: &[String]) -> i32 {
         println!("Keytab name: FILE:/etc/krb5.keytab");
         println!("KVNO Principal");
         println!("---- --------------------------------------------------------------------------");
-        println!("   2 host/ouros-desktop.example.com@EXAMPLE.COM");
-        println!("   2 host/ouros-desktop.example.com@EXAMPLE.COM");
+        println!("   2 host/slateos-desktop.example.com@EXAMPLE.COM");
+        println!("   2 host/slateos-desktop.example.com@EXAMPLE.COM");
         return 0;
     }
 
@@ -99,7 +99,7 @@ fn run_kadmin(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: kadmin [OPTIONS] [-q query]");
         println!();
-        println!("kadmin — Kerberos administration (OurOS).");
+        println!("kadmin — Kerberos administration (SlateOS).");
         println!();
         println!("Options:");
         println!("  -p <principal>    Admin principal");
@@ -116,7 +116,7 @@ fn run_kadmin(args: &[String]) -> i32 {
         if q == "listprincs" || q.starts_with("list") {
             println!("K/M@EXAMPLE.COM");
             println!("admin/admin@EXAMPLE.COM");
-            println!("host/ouros-desktop.example.com@EXAMPLE.COM");
+            println!("host/slateos-desktop.example.com@EXAMPLE.COM");
             println!("krbtgt/EXAMPLE.COM@EXAMPLE.COM");
             println!("user@EXAMPLE.COM");
         } else {
@@ -134,7 +134,7 @@ fn run_ktutil(_args: &[String]) -> i32 {
     println!("ktutil: list");
     println!("slot KVNO Principal");
     println!("---- ---- ---------------------------------------------------------------------");
-    println!("   1    2 host/ouros-desktop.example.com@EXAMPLE.COM");
+    println!("   1    2 host/slateos-desktop.example.com@EXAMPLE.COM");
     0
 }
 

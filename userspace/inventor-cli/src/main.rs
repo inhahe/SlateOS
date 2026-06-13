@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! inventor-cli — OurOS Autodesk Inventor 3D mechanical CAD
+//! inventor-cli — SlateOS Autodesk Inventor 3D mechanical CAD
 //!
 //! Single personality: `inventor`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_inv(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: inventor [OPTIONS] [FILE]");
-        println!("Autodesk Inventor Professional 2025 (OurOS) — 3D mechanical CAD");
+        println!("Autodesk Inventor Professional 2025 (SlateOS) — 3D mechanical CAD");
         println!();
         println!("Options:");
         println!("  /b SCRIPT              Batch with script");
@@ -23,8 +23,8 @@ fn run_inv(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Autodesk Inventor Pro 2025.1 (OurOS)"); return 0; }
-    println!("Autodesk Inventor Pro 2025.1 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Autodesk Inventor Pro 2025.1 (SlateOS)"); return 0; }
+    println!("Autodesk Inventor Pro 2025.1 (SlateOS)");
     println!("  Modules: Stress Analysis (FEA), Dynamic Simulation, Tube & Pipe, Cable & Harness");
     println!("  Format: IPT/IAM/IDW/IPN native + STEP/IGES/Parasolid/JT");
     println!("  Automation: iLogic, VBA, Inventor API (.NET)");

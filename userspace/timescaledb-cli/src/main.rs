@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! timescaledb-cli — OurOS TimescaleDB time-series tools
+//! timescaledb-cli — SlateOS TimescaleDB time-series tools
 //!
 //! Multi-personality: `timescaledb-tune`, `tsdb`
 
@@ -15,7 +15,7 @@ fn run_timescaledb(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "timescaledb-tune" => {
-                println!("timescaledb-tune (OurOS) — PostgreSQL config tuner for TimescaleDB");
+                println!("timescaledb-tune (SlateOS) — PostgreSQL config tuner for TimescaleDB");
                 println!("  --pg-config FILE   PostgreSQL config file");
                 println!("  --memory SIZE      Available memory");
                 println!("  --cpus N           Available CPUs");
@@ -24,7 +24,7 @@ fn run_timescaledb(args: &[String], prog: &str) -> i32 {
                 println!("  --yes              Apply without confirmation");
             }
             _ => {
-                println!("tsdb (OurOS) — TimescaleDB CLI");
+                println!("tsdb (SlateOS) — TimescaleDB CLI");
                 println!("  hypertable create  Create hypertable");
                 println!("  hypertable list    List hypertables");
                 println!("  chunk list         List chunks");
@@ -37,7 +37,7 @@ fn run_timescaledb(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("TimescaleDB v2.14.2 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("TimescaleDB v2.14.2 (SlateOS)"); return 0; }
     match prog {
         "timescaledb-tune" => {
             println!("TimescaleDB Tune v0.15.0");
@@ -47,7 +47,7 @@ fn run_timescaledb(args: &[String], prog: &str) -> i32 {
             println!("  TimescaleDB: max_background_workers=16");
         }
         _ => {
-            println!("TimescaleDB v2.14.2 (OurOS)");
+            println!("TimescaleDB v2.14.2 (SlateOS)");
             println!("  Hypertables: 12");
             println!("  Chunks: 4,567");
             println!("  Compressed chunks: 3,890 (78% ratio)");

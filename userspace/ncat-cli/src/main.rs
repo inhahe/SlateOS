@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ncat-cli — OurOS Ncat networking utility
+//! ncat-cli — SlateOS Ncat networking utility
 //!
 //! Single personality: `ncat`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ncat(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: ncat [OPTIONS] [HOST] [PORT]");
-        println!("ncat v7.95 (OurOS) — Concatenate and redirect sockets");
+        println!("ncat v7.95 (SlateOS) — Concatenate and redirect sockets");
         println!();
         println!("Connect mode:");
         println!("  HOST PORT         Connect to host:port");
@@ -33,7 +33,7 @@ fn run_ncat(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("ncat v7.95 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("ncat v7.95 (SlateOS)"); return 0; }
     if args.iter().any(|a| a == "-l") {
         let port = args.iter().skip_while(|a| a.as_str() != "-p").nth(1).map(|s| s.as_str()).unwrap_or("4444");
         println!("Ncat: Listening on 0.0.0.0:{}", port);

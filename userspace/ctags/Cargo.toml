@@ -2,5 +2,5 @@
 name = "ctags"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS ctags - code tag generator (ctags/etags)"
+description = "SlateOS ctags - code tag generator (ctags/etags)"
 [dependencies]

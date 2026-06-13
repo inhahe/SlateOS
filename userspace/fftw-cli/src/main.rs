@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fftw-cli — OurOS FFTW benchmark/info tool
+//! fftw-cli — SlateOS FFTW benchmark/info tool
 //!
 //! Multi-personality: `fftw-wisdom`, `fftw-bench`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_fftw_wisdom(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: fftw-wisdom [OPTIONS] SIZES...");
-        println!("fftw-wisdom v3.3.10 (OurOS) — Generate FFTW wisdom files");
+        println!("fftw-wisdom v3.3.10 (SlateOS) — Generate FFTW wisdom files");
         println!();
         println!("Options:");
         println!("  SIZES             Transform sizes (e.g. 1024 2048 4096)");
@@ -38,7 +38,7 @@ fn run_fftw_wisdom(args: &[String], _prog: &str) -> i32 {
 fn run_fftw_bench(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: fftw-bench [OPTIONS] SIZE");
-        println!("fftw-bench v3.3.10 (OurOS) — Benchmark FFT performance");
+        println!("fftw-bench v3.3.10 (SlateOS) — Benchmark FFT performance");
         return 0;
     }
     let size = args.iter()

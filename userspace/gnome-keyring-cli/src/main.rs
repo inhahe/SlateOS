@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gnome-keyring-cli — OurOS GNOME Keyring daemon
+//! gnome-keyring-cli — SlateOS GNOME Keyring daemon
 //!
 //! Multi-personality: `gnome-keyring-daemon`, `gnome-keyring-3`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_daemon(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gnome-keyring-daemon [OPTIONS]");
-        println!("gnome-keyring-daemon v46.0 (OurOS) — Keyring daemon");
+        println!("gnome-keyring-daemon v46.0 (SlateOS) — Keyring daemon");
         println!();
         println!("Options:");
         println!("  --start           Start the daemon");
@@ -23,7 +23,7 @@ fn run_daemon(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("gnome-keyring-daemon v46.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("gnome-keyring-daemon v46.0 (SlateOS)"); return 0; }
     println!("gnome-keyring-daemon: keyring service started");
     println!("  Components: secrets, ssh, pkcs11");
     println!("  Socket: /run/user/1000/keyring/control");
@@ -33,7 +33,7 @@ fn run_daemon(args: &[String], _prog: &str) -> i32 {
 fn run_keyring(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gnome-keyring-3 [OPTIONS]");
-        println!("gnome-keyring-3 v46.0 (OurOS) — Keyring PAM module");
+        println!("gnome-keyring-3 v46.0 (SlateOS) — Keyring PAM module");
         return 0;
     }
     let _ = args;

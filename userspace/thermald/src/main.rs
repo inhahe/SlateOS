@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! thermald — OurOS thermal management daemon
+//! thermald — SlateOS thermal management daemon
 //!
 //! Multi-personality binary for thermal zone monitoring and cooling control.
 //! Detected via argv[0]:

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! valkey-cli — OurOS Valkey (Redis fork) CLI
+//! valkey-cli — SlateOS Valkey (Redis fork) CLI
 //!
 //! Multi-personality: `valkey-cli`, `valkey-server`, `valkey-benchmark`
 
@@ -19,7 +19,7 @@ fn run_valkey_cli(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: valkey-cli [OPTIONS] [CMD [ARG...]]");
         println!();
-        println!("valkey-cli — Valkey command line interface (OurOS).");
+        println!("valkey-cli — Valkey command line interface (SlateOS).");
         println!();
         println!("Options:");
         println!("  -h HOST               Server hostname");
@@ -35,7 +35,7 @@ fn run_valkey_cli(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("valkey-cli 8.0.0 (OurOS)");
+        println!("valkey-cli 8.0.0 (SlateOS)");
         return 0;
     }
 
@@ -70,7 +70,7 @@ fn run_valkey_cli(args: &[String]) -> i32 {
             "INFO" => {
                 println!("# Server");
                 println!("valkey_version:8.0.0");
-                println!("os:OurOS x86_64");
+                println!("os:SlateOS x86_64");
                 println!("tcp_port:6379");
                 println!("uptime_in_seconds:86400");
                 println!("# Memory");
@@ -93,7 +93,7 @@ fn run_valkey_server(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("Valkey server v=8.0.0 (OurOS)");
+        println!("Valkey server v=8.0.0 (SlateOS)");
         return 0;
     }
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rfkill — OurOS wireless device control
+//! rfkill — SlateOS wireless device control
 //!
 //! Multi-personality binary for enabling/disabling wireless devices.
 //! Detected via argv[0]:

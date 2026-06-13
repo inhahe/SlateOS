@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! traefik-cli — OurOS Traefik reverse proxy/load balancer
+//! traefik-cli — SlateOS Traefik reverse proxy/load balancer
 //!
 //! Multi-personality: `traefik`
 
@@ -14,7 +14,7 @@ fn run_traefik(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: traefik [OPTIONS] [COMMAND]");
         println!();
-        println!("traefik — cloud-native edge router (OurOS).");
+        println!("traefik — cloud-native edge router (SlateOS).");
         println!();
         println!("Commands:");
         println!("  version          Show version");
@@ -37,7 +37,7 @@ fn run_traefik(args: &[String]) -> i32 {
             println!("Codename:     beaufort");
             println!("Go version:   go1.22.0");
             println!("Built:        2024-01-15_09:00:00AM");
-            println!("OS/Arch:      ouros/amd64");
+            println!("OS/Arch:      slateos/amd64");
         }
         "healthcheck" => {
             println!("OK");

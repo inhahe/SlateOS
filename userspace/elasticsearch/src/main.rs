@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! elasticsearch — OurOS distributed search and analytics engine
+//! elasticsearch — SlateOS distributed search and analytics engine
 //!
 //! Multi-personality: `elasticsearch` (server), `elasticsearch-plugin` (plugin manager)
 
@@ -19,16 +19,16 @@ fn run_elasticsearch(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("Version: 8.13.0 (OurOS), Build: abc1234/2025-05-22");
+        println!("Version: 8.13.0 (SlateOS), Build: abc1234/2025-05-22");
         return 0;
     }
-    println!("[2025-05-22T10:00:00,000][INFO ][o.e.n.Node               ] [ouros-node-1] version[8.13.0], pid[12345]");
-    println!("[2025-05-22T10:00:00,500][INFO ][o.e.n.Node               ] [ouros-node-1] JVM: 21.0.2 (OurOS)");
-    println!("[2025-05-22T10:00:01,000][INFO ][o.e.e.NodeEnvironment    ] [ouros-node-1] using [1] data paths, mounts [[/ (/)]]");
-    println!("[2025-05-22T10:00:02,000][INFO ][o.e.g.GatewayService     ] [ouros-node-1] recovered [0] indices");
-    println!("[2025-05-22T10:00:02,500][INFO ][o.e.c.s.MasterService    ] [ouros-node-1] elected-as-master");
-    println!("[2025-05-22T10:00:03,000][INFO ][o.e.h.AbstractHttpServerTransport] [ouros-node-1] publish_address {{127.0.0.1:9200}}");
-    println!("[2025-05-22T10:00:03,000][INFO ][o.e.n.Node               ] [ouros-node-1] started");
+    println!("[2025-05-22T10:00:00,000][INFO ][o.e.n.Node               ] [slateos-node-1] version[8.13.0], pid[12345]");
+    println!("[2025-05-22T10:00:00,500][INFO ][o.e.n.Node               ] [slateos-node-1] JVM: 21.0.2 (SlateOS)");
+    println!("[2025-05-22T10:00:01,000][INFO ][o.e.e.NodeEnvironment    ] [slateos-node-1] using [1] data paths, mounts [[/ (/)]]");
+    println!("[2025-05-22T10:00:02,000][INFO ][o.e.g.GatewayService     ] [slateos-node-1] recovered [0] indices");
+    println!("[2025-05-22T10:00:02,500][INFO ][o.e.c.s.MasterService    ] [slateos-node-1] elected-as-master");
+    println!("[2025-05-22T10:00:03,000][INFO ][o.e.h.AbstractHttpServerTransport] [slateos-node-1] publish_address {{127.0.0.1:9200}}");
+    println!("[2025-05-22T10:00:03,000][INFO ][o.e.n.Node               ] [slateos-node-1] started");
     0
 }
 

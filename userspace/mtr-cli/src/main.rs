@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mtr-cli — OurOS mtr CLI
+//! mtr-cli — SlateOS mtr CLI
 //!
 //! Single personality: `mtr`
 
@@ -11,7 +11,7 @@ fn run_mtr(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mtr [OPTIONS] HOST");
         println!();
-        println!("mtr — network diagnostic tool (traceroute + ping) (OurOS).");
+        println!("mtr — network diagnostic tool (traceroute + ping) (SlateOS).");
         println!();
         println!("Options:");
         println!("  -r, --report       Report mode");
@@ -27,7 +27,7 @@ fn run_mtr(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("mtr 0.95 (OurOS)");
+        println!("mtr 0.95 (SlateOS)");
         return 0;
     }
 

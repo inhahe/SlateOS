@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! macroquad-cli — OurOS Macroquad game framework helper
+//! macroquad-cli — SlateOS Macroquad game framework helper
 //!
 //! Single personality: `macroquad`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_macroquad(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: macroquad COMMAND [OPTIONS]");
-        println!("Macroquad v0.4.7 (OurOS) — Simple game framework");
+        println!("Macroquad v0.4.7 (SlateOS) — Simple game framework");
         println!();
         println!("Commands:");
         println!("  new NAME        Create new project");
@@ -25,7 +25,7 @@ fn run_macroquad(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("macroquad v0.4.7 (OurOS)");
+        println!("macroquad v0.4.7 (SlateOS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("info");

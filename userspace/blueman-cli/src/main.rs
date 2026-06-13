@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! blueman-cli — OurOS Blueman Bluetooth manager
+//! blueman-cli — SlateOS Blueman Bluetooth manager
 //!
 //! Multi-personality: `blueman-manager`, `blueman-applet`, `blueman-sendto`, `blueman-adapters`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_manager(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: blueman-manager");
-        println!("blueman-manager v2.4 (OurOS) — Bluetooth device manager");
+        println!("blueman-manager v2.4 (SlateOS) — Bluetooth device manager");
         return 0;
     }
     let _ = args;
@@ -26,7 +26,7 @@ fn run_manager(args: &[String], _prog: &str) -> i32 {
 fn run_applet(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: blueman-applet");
-        println!("blueman-applet v2.4 (OurOS) — Bluetooth system tray applet");
+        println!("blueman-applet v2.4 (SlateOS) — Bluetooth system tray applet");
         return 0;
     }
     let _ = args;
@@ -37,7 +37,7 @@ fn run_applet(args: &[String], _prog: &str) -> i32 {
 fn run_sendto(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: blueman-sendto FILE...");
-        println!("blueman-sendto v2.4 (OurOS) — Send files via Bluetooth");
+        println!("blueman-sendto v2.4 (SlateOS) — Send files via Bluetooth");
         return 0;
     }
     for f in args.iter().filter(|a| !a.starts_with('-')) {
@@ -49,12 +49,12 @@ fn run_sendto(args: &[String], _prog: &str) -> i32 {
 fn run_adapters(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: blueman-adapters");
-        println!("blueman-adapters v2.4 (OurOS) — Bluetooth adapter settings");
+        println!("blueman-adapters v2.4 (SlateOS) — Bluetooth adapter settings");
         return 0;
     }
     let _ = args;
     println!("blueman-adapters: adapter configuration");
-    println!("  hci0: Intel AX210 — Discoverable, Name='OurOS PC'");
+    println!("  hci0: Intel AX210 — Discoverable, Name='SlateOS PC'");
     0
 }
 

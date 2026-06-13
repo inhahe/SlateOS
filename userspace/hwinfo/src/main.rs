@@ -1,4 +1,4 @@
-//! OurOS hardware information utility.
+//! SlateOS hardware information utility.
 //!
 //! Multi-personality binary providing:
 //! - **hwinfo** — comprehensive hardware inventory
@@ -617,7 +617,7 @@ fn hwinfo_main(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("hwinfo (OurOS) {VERSION}");
+                println!("hwinfo (SlateOS) {VERSION}");
                 return 0;
             }
             _ => {}
@@ -690,7 +690,7 @@ fn lshw_main(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("lshw (OurOS) {VERSION}");
+                println!("lshw (SlateOS) {VERSION}");
                 return 0;
             }
             s if !s.starts_with('-') => {

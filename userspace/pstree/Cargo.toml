@@ -2,5 +2,5 @@
 name = "pstree"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS pstree utility"
+description = "SlateOS pstree utility"
 [dependencies]

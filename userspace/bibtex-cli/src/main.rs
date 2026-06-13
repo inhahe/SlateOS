@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bibtex-cli — OurOS BibTeX CLI
+//! bibtex-cli — SlateOS BibTeX CLI
 //!
 //! Multi-personality: `bibtex`, `biber`
 
@@ -19,7 +19,7 @@ fn run_bibtex(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-help" || a == "-h") {
         println!("Usage: bibtex [OPTIONS] AUX-FILE");
         println!();
-        println!("BibTeX — bibliography processor (OurOS).");
+        println!("BibTeX — bibliography processor (SlateOS).");
         println!();
         println!("Options:");
         println!("  -terse             Terse mode");
@@ -27,7 +27,7 @@ fn run_bibtex(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("BibTeX 0.99d (TeX Live 2024/OurOS)");
+        println!("BibTeX 0.99d (TeX Live 2024/SlateOS)");
         return 0;
     }
 
@@ -38,7 +38,7 @@ fn run_bibtex(args: &[String]) -> i32 {
 
     let base = strip_ext(file);
 
-    println!("This is BibTeX, Version 0.99d (OurOS)");
+    println!("This is BibTeX, Version 0.99d (SlateOS)");
     println!("The top-level auxiliary file: {}.aux", base);
     println!("The style file: plain.bst");
     println!("Database file #1: references.bib");
@@ -53,7 +53,7 @@ fn run_biber(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: biber [OPTIONS] FILE");
         println!();
-        println!("Biber — BibLaTeX backend processor (OurOS).");
+        println!("Biber — BibLaTeX backend processor (SlateOS).");
         println!();
         println!("Options:");
         println!("  --output-file FILE     Output file");
@@ -65,7 +65,7 @@ fn run_biber(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("biber version: 2.19 (OurOS)");
+        println!("biber version: 2.19 (SlateOS)");
         return 0;
     }
 
@@ -76,7 +76,7 @@ fn run_biber(args: &[String]) -> i32 {
 
     let base = strip_ext(file);
 
-    println!("INFO - This is Biber 2.19 (OurOS)");
+    println!("INFO - This is Biber 2.19 (SlateOS)");
     println!("INFO - Logfile is '{}.blg'", base);
     println!("INFO - Reading '{}.bcf'", base);
     println!("INFO - Found 5 citekeys in bib section 0");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! redcine-cli — OurOS RED REDCINE-X PRO raw workflow
+//! redcine-cli — SlateOS RED REDCINE-X PRO raw workflow
 //!
 //! Single personality: `redcine`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_redcine(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: redcine [OPTIONS] [CLIP]");
-        println!("RED REDCINE-X PRO 65 (OurOS) — Free RED RAW workflow & color tool");
+        println!("RED REDCINE-X PRO 65 (SlateOS) — Free RED RAW workflow & color tool");
         println!();
         println!("Options:");
         println!("  --open FILE            Open .R3D file");
@@ -23,8 +23,8 @@ fn run_redcine(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("RED REDCINE-X PRO 65.0.0 (OurOS)"); return 0; }
-    println!("RED REDCINE-X PRO 65.0.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("RED REDCINE-X PRO 65.0.0 (SlateOS)"); return 0; }
+    println!("RED REDCINE-X PRO 65.0.0 (SlateOS)");
     println!("  Format: REDCODE RAW (.R3D) — all RED cameras supported");
     println!("  Color: IPP2 image processing pipeline (current standard)");
     println!("  Hardware: GPU (CUDA/OpenCL/Metal) and RED ROCKET cards");

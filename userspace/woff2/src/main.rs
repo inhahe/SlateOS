@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! woff2 — OurOS WOFF2 font compression/decompression
+//! woff2 — SlateOS WOFF2 font compression/decompression
 //!
 //! Multi-personality: `woff2_compress`, `woff2_decompress`, `woff2_info`
 
@@ -134,7 +134,7 @@ fn main() {
     let rest: Vec<String> = args.into_iter().skip(1).collect();
 
     if rest.iter().any(|a| a == "-V" || a == "--version") {
-        println!("woff2 1.0.2 (OurOS)");
+        println!("woff2 1.0.2 (SlateOS)");
         process::exit(0);
     }
 

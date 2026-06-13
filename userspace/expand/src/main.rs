@@ -1,4 +1,4 @@
-//! OurOS `expand` / `unexpand` Utility -- Tab/Space Conversion
+//! SlateOS `expand` / `unexpand` Utility -- Tab/Space Conversion
 //!
 //! Converts tabs to spaces (`expand`) or spaces to tabs (`unexpand`),
 //! depending on the name used to invoke the program (argv[0]).
@@ -501,7 +501,7 @@ fn run_unexpand(config: &Config) -> io::Result<i32> {
 // ============================================================================
 
 fn print_expand_help() {
-    println!("OurOS expand v{VERSION}");
+    println!("SlateOS expand v{VERSION}");
     println!();
     println!("Convert tabs in each FILE to spaces, writing to standard output.");
     println!("With no FILE, or when FILE is -, read standard input.");
@@ -523,7 +523,7 @@ fn print_expand_help() {
 }
 
 fn print_unexpand_help() {
-    println!("OurOS unexpand v{VERSION}");
+    println!("SlateOS unexpand v{VERSION}");
     println!();
     println!("Convert spaces in each FILE to tabs, writing to standard output.");
     println!("With no FILE, or when FILE is -, read standard input.");
@@ -564,7 +564,7 @@ fn main() {
                 Mode::Expand => "expand",
                 Mode::Unexpand => "unexpand",
             };
-            println!("{name} (OurOS) {VERSION}");
+            println!("{name} (SlateOS) {VERSION}");
             process::exit(0);
         }
         ParseResult::Run(config) => {

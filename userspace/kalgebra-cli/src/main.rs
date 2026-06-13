@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kalgebra-cli — OurOS KAlgebra math expression evaluator
+//! kalgebra-cli — SlateOS KAlgebra math expression evaluator
 //!
 //! Single personality: `kalgebra`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_kalgebra(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: kalgebra [OPTIONS]");
-        println!("kalgebra v23.08 (OurOS) — Math expression graph calculator");
+        println!("kalgebra v23.08 (SlateOS) — Math expression graph calculator");
         println!();
         println!("Options:");
         println!("  --version         Show version");
@@ -25,7 +25,7 @@ fn run_kalgebra(args: &[String], _prog: &str) -> i32 {
         println!("  Dictionary        Math function reference");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("kalgebra v23.08 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("kalgebra v23.08 (SlateOS)"); return 0; }
     println!("kalgebra: math expression evaluator started");
     println!("  Functions: sin, cos, tan, log, exp, sqrt, abs, ...");
     println!("  Variables: x, y, z, t, user-defined");

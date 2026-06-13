@@ -1745,8 +1745,8 @@ fn test_spawn_linux_sysv_stack() -> KernelResult<()> {
 /// Must be called **after** filesystem initialization (see `main.rs`); it
 /// is intentionally *not* part of `self_test()` for that reason.
 pub fn self_test_linux_dynamic_interp() -> KernelResult<()> {
-    const INTERP_PATH: &str = "/ouros-test-ld.so";
-    const INTERP_PATH_NUL: &[u8] = b"/ouros-test-ld.so\0";
+    const INTERP_PATH: &str = "/slateos-test-ld.so";
+    const INTERP_PATH_NUL: &[u8] = b"/slateos-test-ld.so\0";
     const INTERP_EXIT: u8 = 42;
     const EXE_EXIT: u8 = 7;
 

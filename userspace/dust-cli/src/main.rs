@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dust-cli — OurOS dust disk usage tool
+//! dust-cli — SlateOS dust disk usage tool
 //!
 //! Single personality: `dust`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_dust(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: dust [OPTIONS] [PATH...]");
-        println!("dust 1.1.1 (OurOS) — Like du but more intuitive");
+        println!("dust 1.1.1 (SlateOS) — Like du but more intuitive");
         println!();
         println!("Options:");
         println!("  -d, --depth N        Max depth");
@@ -36,7 +36,7 @@ fn run_dust(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("dust 1.1.1 (OurOS)");
+        println!("dust 1.1.1 (SlateOS)");
         return 0;
     }
     let path = args.iter().rfind(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or(".");

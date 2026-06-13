@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! betteruptime-cli — OurOS Better Uptime monitoring
+//! betteruptime-cli — SlateOS Better Uptime monitoring
 //!
 //! Single personality: `betteruptime`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_betteruptime(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: betteruptime [COMMAND] [OPTIONS]");
-        println!("Better Uptime v2.0 (OurOS) — Uptime monitoring & status pages");
+        println!("Better Uptime v2.0 (SlateOS) — Uptime monitoring & status pages");
         println!();
         println!("Commands:");
         println!("  monitor list|create|pause  Manage monitors");
@@ -30,8 +30,8 @@ fn run_betteruptime(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Better Uptime v2.0.0 (OurOS)"); return 0; }
-    println!("Better Uptime v2.0.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Better Uptime v2.0.0 (SlateOS)"); return 0; }
+    println!("Better Uptime v2.0.0 (SlateOS)");
     println!("  Monitors: 25 (23 up, 2 down)");
     println!("  Heartbeats: 8 (all healthy)");
     println!("  Incidents: 1 open");

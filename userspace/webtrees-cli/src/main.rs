@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! webtrees-cli — OurOS webtrees genealogy web application
+//! webtrees-cli — SlateOS webtrees genealogy web application
 //!
 //! Single personality: `webtrees`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_webtrees(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: webtrees [COMMAND] [OPTIONS]");
-        println!("webtrees v2.1 (OurOS) — Online genealogy application");
+        println!("webtrees v2.1 (SlateOS) — Online genealogy application");
         println!();
         println!("Commands:");
         println!("  serve             Start web server");
@@ -29,7 +29,7 @@ fn run_webtrees(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("webtrees v2.1.18 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("webtrees v2.1.18 (SlateOS)"); return 0; }
     match args.first().map(|s| s.as_str()) {
         Some("serve") => {
             let port = args.windows(2).find(|w| w[0] == "--port").map(|w| w[1].as_str()).unwrap_or("8080");
@@ -41,7 +41,7 @@ fn run_webtrees(args: &[String], _prog: &str) -> i32 {
             println!("  2. Johnson Research (567 individuals)");
         }
         _ => {
-            println!("webtrees v2.1.18 (OurOS)");
+            println!("webtrees v2.1.18 (SlateOS)");
             println!("  Use 'webtrees serve' to start the web interface");
         }
     }

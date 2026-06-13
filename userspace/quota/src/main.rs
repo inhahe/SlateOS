@@ -1,4 +1,4 @@
-// OurOS quota - disk quota management
+// SlateOS quota - disk quota management
 //
 // Multi-personality binary:
 //   quota     - display disk usage and limits
@@ -224,7 +224,7 @@ fn cmd_quota(args: &QuotaArgs) -> i32 {
     }
 
     if args.show_version {
-        print_out(b"quota (OurOS) 1.0.0\n");
+        print_out(b"quota (SlateOS) 1.0.0\n");
         return 0;
     }
 
@@ -275,7 +275,7 @@ fn cmd_edquota(args: &QuotaArgs) -> i32 {
     }
 
     if args.show_version {
-        print_out(b"edquota (OurOS) 1.0.0\n");
+        print_out(b"edquota (SlateOS) 1.0.0\n");
         return 0;
     }
 
@@ -328,7 +328,7 @@ fn cmd_repquota(args: &QuotaArgs) -> i32 {
     }
 
     if args.show_version {
-        print_out(b"repquota (OurOS) 1.0.0\n");
+        print_out(b"repquota (SlateOS) 1.0.0\n");
         return 0;
     }
 
@@ -388,7 +388,7 @@ fn cmd_quotaon(args: &QuotaArgs) -> i32 {
     }
 
     if args.show_version {
-        print_out(b"quotaon (OurOS) 1.0.0\n");
+        print_out(b"quotaon (SlateOS) 1.0.0\n");
         return 0;
     }
 
@@ -459,7 +459,7 @@ fn cmd_quotaoff(args: &QuotaArgs) -> i32 {
     }
 
     if args.show_version {
-        print_out(b"quotaoff (OurOS) 1.0.0\n");
+        print_out(b"quotaoff (SlateOS) 1.0.0\n");
         return 0;
     }
 

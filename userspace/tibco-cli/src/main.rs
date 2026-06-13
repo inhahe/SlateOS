@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tibco-cli — OurOS TIBCO Software (the integration giant, Rendezvous + EMS heritage, Palo Alto CA)
+//! tibco-cli — SlateOS TIBCO Software (the integration giant, Rendezvous + EMS heritage, Palo Alto CA)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_tibco(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: tibco [OPTIONS]");
-        println!("TIBCO Software (OurOS) — the original ESB/integration giant + EMS messaging");
+        println!("TIBCO Software (SlateOS) — the original ESB/integration giant + EMS messaging");
         println!();
         println!("Options:");
         println!("  --ems                  TIBCO Enterprise Message Service (JMS-compliant broker)");
@@ -22,8 +22,8 @@ fn run_tibco(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("TIBCO 2024 (OurOS) — tibco CLI (multi-product)"); return 0; }
-    println!("TIBCO Software 2024 (OurOS) — Enterprise Integration + Messaging + Analytics (40 years)");
+    if args.iter().any(|a| a == "--version") { println!("TIBCO 2024 (SlateOS) — tibco CLI (multi-product)"); return 0; }
+    println!("TIBCO Software 2024 (SlateOS) — Enterprise Integration + Messaging + Analytics (40 years)");
     println!("  Vendor: TIBCO Software, a Cloud Software Group company (Palo Alto, CA + Fort Lauderdale FL)");
     println!("  History (one of Silicon Valley's oldest integration companies):");
     println!("    - Founded 1985 as Teknekron Software Systems by Vivek Ranadive");

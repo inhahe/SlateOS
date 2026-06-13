@@ -2,5 +2,5 @@
 name = "htop"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS interactive process viewer"
+description = "SlateOS interactive process viewer"
 [dependencies]

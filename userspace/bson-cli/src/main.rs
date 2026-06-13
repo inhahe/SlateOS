@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bson-cli — OurOS BSON inspection tool
+//! bson-cli — SlateOS BSON inspection tool
 //!
 //! Single personality: `bsondump`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_bson(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: bsondump [OPTIONS] FILE.bson");
-        println!("bsondump v1.0 (OurOS) — BSON to JSON converter");
+        println!("bsondump v1.0 (SlateOS) — BSON to JSON converter");
         println!();
         println!("Options:");
         println!("  FILE.bson         BSON file to dump");

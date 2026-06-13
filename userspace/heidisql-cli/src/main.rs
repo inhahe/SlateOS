@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! heidisql-cli — OurOS HeidiSQL database client
+//! heidisql-cli — SlateOS HeidiSQL database client
 //!
 //! Single personality: `heidisql`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_heidisql(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: heidisql [OPTIONS]");
-        println!("HeidiSQL v12.8 (OurOS) — Lightweight database client");
+        println!("HeidiSQL v12.8 (SlateOS) — Lightweight database client");
         println!();
         println!("Options:");
         println!("  --host HOST        Server hostname");
@@ -27,8 +27,8 @@ fn run_heidisql(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("HeidiSQL v12.8.0 (OurOS)"); return 0; }
-    println!("HeidiSQL v12.8.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("HeidiSQL v12.8.0 (SlateOS)"); return 0; }
+    println!("HeidiSQL v12.8.0 (SlateOS)");
     println!("  Sessions: 6 saved");
     println!("  Supported: MySQL, MariaDB, PostgreSQL, MSSQL, SQLite, Interbase");
     println!("  Query tabs: 3 open");

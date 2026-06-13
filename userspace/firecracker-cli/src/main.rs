@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! firecracker-cli — OurOS Firecracker microVM CLI
+//! firecracker-cli — SlateOS Firecracker microVM CLI
 //!
 //! Multi-personality: `firecracker`, `jailer`
 
@@ -19,7 +19,7 @@ fn run_firecracker(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: firecracker [OPTIONS]");
         println!();
-        println!("Firecracker — lightweight microVM (OurOS).");
+        println!("Firecracker — lightweight microVM (SlateOS).");
         println!();
         println!("Options:");
         println!("  --api-sock PATH    API socket path");
@@ -33,7 +33,7 @@ fn run_firecracker(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("Firecracker v1.7.0 (OurOS)");
+        println!("Firecracker v1.7.0 (SlateOS)");
         return 0;
     }
 
@@ -66,7 +66,7 @@ fn run_jailer(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: jailer [OPTIONS]");
         println!();
-        println!("jailer — Firecracker jailer (OurOS).");
+        println!("jailer — Firecracker jailer (SlateOS).");
         println!();
         println!("Options:");
         println!("  --id ID            Jail identifier");
@@ -80,7 +80,7 @@ fn run_jailer(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("Firecracker jailer v1.7.0 (OurOS)");
+        println!("Firecracker jailer v1.7.0 (SlateOS)");
         return 0;
     }
 

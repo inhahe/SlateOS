@@ -2,5 +2,5 @@
 name = "screen"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS terminal multiplexer"
+description = "SlateOS terminal multiplexer"
 [dependencies]

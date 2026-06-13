@@ -1,4 +1,4 @@
-// OurOS iw - wireless network tools
+// SlateOS iw - wireless network tools
 //
 // Multi-personality binary:
 //   iw       - nl80211-based wireless config tool
@@ -320,7 +320,7 @@ fn parse_args(argc: i32, argv: *const *const u8) -> Result<Options, i32> {
         let arg = unsafe { cstr_to_slice(args[i]) };
         if arg == b"--help" || arg == b"-h" || arg == b"help" { show_help(tool); return Err(0); }
         else if arg == b"--version" || arg == b"-V" {
-            print_out(tool_name(tool)); print_out(b" 0.1.0 (OurOS)\n"); return Err(0);
+            print_out(tool_name(tool)); print_out(b" 0.1.0 (SlateOS)\n"); return Err(0);
         }
 
         match tool {

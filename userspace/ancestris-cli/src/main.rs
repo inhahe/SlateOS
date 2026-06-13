@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ancestris-cli — OurOS Ancestris genealogy tool
+//! ancestris-cli — SlateOS Ancestris genealogy tool
 //!
 //! Single personality: `ancestris`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ancestris(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ancestris [OPTIONS] [FILE.ged]");
-        println!("Ancestris v11 (OurOS) — Genealogy research tool");
+        println!("Ancestris v11 (SlateOS) — Genealogy research tool");
         println!();
         println!("Options:");
         println!("  --open FILE     Open GEDCOM file");
@@ -24,8 +24,8 @@ fn run_ancestris(args: &[String], _prog: &str) -> i32 {
         println!("  --version       Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Ancestris v11.0 (OurOS)"); return 0; }
-    println!("Ancestris v11.0 (OurOS) — Genealogy Tool");
+    if args.iter().any(|a| a == "--version") { println!("Ancestris v11.0 (SlateOS)"); return 0; }
+    println!("Ancestris v11.0 (SlateOS) — Genealogy Tool");
     println!("  GEDCOM 5.5.1 compliant");
     println!("  Views: tree, table, map, timeline");
     println!("  Reports: pedigree, descendants, statistics");

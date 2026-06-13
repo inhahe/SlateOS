@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! django-cli — OurOS Django management tools
+//! django-cli — SlateOS Django management tools
 //!
 //! Multi-personality: `django-admin`, `manage.py`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_django(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: django-admin COMMAND [OPTIONS]");
-        println!("Django 5.0.7 (OurOS)");
+        println!("Django 5.0.7 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  startproject   Create a new project");

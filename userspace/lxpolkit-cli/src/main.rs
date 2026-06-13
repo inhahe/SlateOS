@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lxpolkit-cli — OurOS LXPolkit lightweight PolicyKit agent
+//! lxpolkit-cli — SlateOS LXPolkit lightweight PolicyKit agent
 //!
 //! Single personality: `lxpolkit`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_lxpolkit(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lxpolkit");
-        println!("lxpolkit v0.1 (OurOS) — Lightweight PolicyKit agent");
+        println!("lxpolkit v0.1 (SlateOS) — Lightweight PolicyKit agent");
         println!();
         println!("Minimal GTK+ PolicyKit authentication agent for LXDE.");
         return 0;

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! argo-workflows-cli — OurOS Argo Workflows
+//! argo-workflows-cli — SlateOS Argo Workflows
 //!
 //! Single personality: `argo`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_argo(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: argo [COMMAND] [OPTIONS]");
-        println!("Argo Workflows v3.5 (OurOS) — Kubernetes workflow engine");
+        println!("Argo Workflows v3.5 (SlateOS) — Kubernetes workflow engine");
         println!();
         println!("Commands:");
         println!("  submit FILE        Submit workflow");
@@ -32,8 +32,8 @@ fn run_argo(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Argo Workflows v3.5.8 (OurOS)"); return 0; }
-    println!("Argo Workflows v3.5.8 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Argo Workflows v3.5.8 (SlateOS)"); return 0; }
+    println!("Argo Workflows v3.5.8 (SlateOS)");
     println!("  Workflows: 45 (12 running, 33 completed)");
     println!("  Templates: 8");
     println!("  Cron workflows: 3");

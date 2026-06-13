@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! forth-cli — OurOS Forth language tools
+//! forth-cli — SlateOS Forth language tools
 //!
 //! Multi-personality: `gforth`, `forth`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gforth(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gforth [OPTIONS] [FILE [FILE ...]]");
-        println!("Gforth 0.7.3 (OurOS)");
+        println!("Gforth 0.7.3 (SlateOS)");
         println!();
         println!("Options:");
         println!("  -e CODE       Evaluate Forth code");
@@ -30,7 +30,7 @@ fn run_gforth(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("gforth 0.7.3 (OurOS)");
+        println!("gforth 0.7.3 (SlateOS)");
         println!("Authors: Anton Ertl, Bernd Paysan, et al.");
         return 0;
     }

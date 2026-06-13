@@ -87,7 +87,7 @@ const SYS_GETRANDOM: i64 = 318;
 const SYS_FUTEX: i64 = 202;
 
 // Our OS syscall numbers
-const OUROS_SYS_TASK_ID: u64 = 2;
+const SLATEOS_SYS_TASK_ID: u64 = 2;
 
 /// Issue a raw syscall with up to 3 arguments using our OS's ABI.
 ///
@@ -127,7 +127,7 @@ unsafe fn raw_syscall3(nr: u64, a0: u64, a1: u64, a2: u64) -> i64 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn syscall(num: i64, arg0: u64, arg1: u64, arg2: u64) -> i64 {
     match num {
-        SYS_GETTID => unsafe { raw_syscall3(OUROS_SYS_TASK_ID, 0, 0, 0) },
+        SYS_GETTID => unsafe { raw_syscall3(SLATEOS_SYS_TASK_ID, 0, 0, 0) },
         SYS_GETRANDOM => {
             // std calls getrandom(buf, len, flags) — delegate to our
             // POSIX getrandom() which is already linked.

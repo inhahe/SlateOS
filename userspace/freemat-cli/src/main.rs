@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! freemat-cli — OurOS FreeMat numerical computing environment
+//! freemat-cli — SlateOS FreeMat numerical computing environment
 //!
 //! Single personality: `freemat`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_freemat(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: freemat [OPTIONS] [SCRIPT.m]");
-        println!("freemat v4.2 (OurOS) — Numerical computing environment");
+        println!("freemat v4.2 (SlateOS) — Numerical computing environment");
         println!();
         println!("Options:");
         println!("  -e EXPR        Evaluate expression");
@@ -25,7 +25,7 @@ fn run_freemat(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("FreeMat v4.2 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("FreeMat v4.2 (SlateOS)"); return 0; }
     if let Some(expr) = args.windows(2).find(|w| w[0] == "-e").map(|w| w[1].as_str()) {
         println!("--> {}", expr);
         println!("ans =");
@@ -42,7 +42,7 @@ fn run_freemat(args: &[String], _prog: &str) -> i32 {
         println!("  Plotting:       plot, surf, mesh, contour, bar, hist, title");
         return 0;
     }
-    println!("FreeMat v4.2 (OurOS) — Numerical Computing Environment");
+    println!("FreeMat v4.2 (SlateOS) — Numerical Computing Environment");
     println!("Type 'help' for help, 'quit' to exit.");
     println!("--> ");
     0

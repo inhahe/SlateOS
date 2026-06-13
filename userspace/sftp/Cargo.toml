@@ -2,7 +2,7 @@
 name = "sftp"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS SFTP file transfer client"
+description = "SlateOS SFTP file transfer client"
 [dependencies]
 
 [lints]

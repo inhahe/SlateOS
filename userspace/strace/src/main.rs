@@ -1,4 +1,4 @@
-//! OurOS Syscall Trace Utility
+//! SlateOS Syscall Trace Utility
 //!
 //! Traces system calls made by a target process.  Uses kernel trace
 //! syscalls (`SYS_TRACE_ENABLE` / `SYS_TRACE_READ`) to enable per-PID
@@ -160,7 +160,7 @@ enum ArgFormat {
     Handle,
 }
 
-/// Build the syscall name table covering all OurOS syscall ranges.
+/// Build the syscall name table covering all SlateOS syscall ranges.
 ///
 /// Ranges:
 ///   0-199:   kernel-core (memory, scheduler, time, misc)
@@ -1079,7 +1079,7 @@ fn spawn_and_trace(command: &[String]) -> Option<u32> {
 
 fn print_usage() {
     let usage = "\
-OurOS Syscall Trace Utility v0.1.0
+SlateOS Syscall Trace Utility v0.1.0
 
 USAGE:
   strace [options] -p <pid>

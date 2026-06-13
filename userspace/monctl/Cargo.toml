@@ -2,5 +2,5 @@
 name = "monctl"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS monitor/display control — power off, brightness, DPMS"
+description = "SlateOS monitor/display control — power off, brightness, DPMS"
 [dependencies]

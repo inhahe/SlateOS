@@ -11,7 +11,7 @@
 #![allow(clippy::needless_range_loop)]
 #![allow(unused_imports)]
 
-//! OurOS Gomoku (Five-in-a-Row) — a full Gomoku game with AI opponent.
+//! SlateOS Gomoku (Five-in-a-Row) — a full Gomoku game with AI opponent.
 //!
 //! Features a 15x15 Go-style board with grid lines and star points,
 //! alternating Black/White stones, a minimax AI with alpha-beta pruning

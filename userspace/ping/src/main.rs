@@ -1,4 +1,4 @@
-//! OurOS ICMP Ping Utility
+//! SlateOS ICMP Ping Utility
 //!
 //! Sends ICMP echo requests to a host and displays round-trip times.
 //! Supports hostname resolution via `SYS_DNS_RESOLVE`, configurable

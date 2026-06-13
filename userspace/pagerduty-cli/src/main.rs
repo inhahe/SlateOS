@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pagerduty-cli — OurOS PagerDuty CLI
+//! pagerduty-cli — SlateOS PagerDuty CLI
 //!
 //! Single personality: `pd`
 
@@ -11,7 +11,7 @@ fn run_pd(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pd <COMMAND> [OPTIONS]");
         println!();
-        println!("PagerDuty incident management CLI (OurOS).");
+        println!("PagerDuty incident management CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  incident     Manage incidents");
@@ -24,7 +24,7 @@ fn run_pd(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("pd 0.8.0 (OurOS)");
+        println!("pd 0.8.0 (SlateOS)");
         return 0;
     }
 

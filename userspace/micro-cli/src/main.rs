@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! micro-cli — OurOS Micro editor
+//! micro-cli — SlateOS Micro editor
 //!
 //! Single personality: `micro`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_micro(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: micro [OPTIONS] [FILE...]");
-        println!("micro 2.0.14 (OurOS) — A modern and intuitive terminal text editor");
+        println!("micro 2.0.14 (SlateOS) — A modern and intuitive terminal text editor");
         println!();
         println!("Options:");
         println!("  -config-dir DIR   Config directory");
@@ -33,7 +33,7 @@ fn run_micro(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-version") {
-        println!("Version: 2.0.14 (OurOS)");
+        println!("Version: 2.0.14 (SlateOS)");
         println!("Commit hash: main");
         println!("Compiled on: 2024-01-15");
         return 0;

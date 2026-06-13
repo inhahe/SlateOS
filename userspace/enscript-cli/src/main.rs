@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! enscript-cli — OurOS GNU Enscript CLI
+//! enscript-cli — SlateOS GNU Enscript CLI
 //!
 //! Single personality: `enscript`
 
@@ -11,7 +11,7 @@ fn run_enscript(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: enscript [OPTIONS] [FILE...]");
         println!();
-        println!("GNU Enscript — convert text to PostScript/PDF/HTML (OurOS).");
+        println!("GNU Enscript — convert text to PostScript/PDF/HTML (SlateOS).");
         println!();
         println!("Options:");
         println!("  -o, --output FILE      Output file (- for stdout)");
@@ -31,7 +31,7 @@ fn run_enscript(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("GNU Enscript 1.6.6 (OurOS)");
+        println!("GNU Enscript 1.6.6 (SlateOS)");
         return 0;
     }
 

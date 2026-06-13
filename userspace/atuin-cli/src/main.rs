@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! atuin-cli — OurOS Atuin shell history manager
+//! atuin-cli — SlateOS Atuin shell history manager
 //!
 //! Single personality: `atuin`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_atuin(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: atuin [COMMAND]");
-        println!("Atuin 18.3.0 (OurOS) — Magical shell history");
+        println!("Atuin 18.3.0 (SlateOS) — Magical shell history");
         println!();
         println!("Commands:");
         println!("  history            Manage shell history");
@@ -41,7 +41,7 @@ fn run_atuin(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("atuin 18.3.0 (OurOS)");
+        println!("atuin 18.3.0 (SlateOS)");
         return 0;
     }
     let cmd = args.iter().find(|a| !a.starts_with('-'))

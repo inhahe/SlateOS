@@ -1,4 +1,4 @@
-//! OurOS file/socket process identification utility.
+//! SlateOS file/socket process identification utility.
 //!
 //! Multi-personality binary providing:
 //! - **fuser** — identify processes using files or sockets
@@ -487,7 +487,7 @@ fn lsof_main(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("lsof (OurOS) {VERSION}");
+                println!("lsof (SlateOS) {VERSION}");
                 return 0;
             }
             s if !s.starts_with('-') => {
@@ -597,7 +597,7 @@ fn fuser_main(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("fuser (OurOS) {VERSION}");
+                println!("fuser (SlateOS) {VERSION}");
                 return 0;
             }
             s if !s.starts_with('-') => {

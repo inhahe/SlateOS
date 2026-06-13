@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! astro-cli — OurOS Astro web framework CLI
+//! astro-cli — SlateOS Astro web framework CLI
 //!
 //! Single personality: `astro`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_astro(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: astro COMMAND [OPTIONS]");
-        println!("Astro v4.8.0 (OurOS) — The web framework for content-driven sites");
+        println!("Astro v4.8.0 (SlateOS) — The web framework for content-driven sites");
         println!();
         println!("Commands:");
         println!("  dev             Start dev server");

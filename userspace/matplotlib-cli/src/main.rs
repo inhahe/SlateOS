@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! matplotlib-cli — OurOS Matplotlib plotting library
+//! matplotlib-cli — SlateOS Matplotlib plotting library
 //!
 //! Multi-personality: `matplotlib`
 
@@ -16,11 +16,11 @@ fn run_matplotlib(args: &[String]) -> i32 {
     }
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match subcmd {
-        "version" | "--version" => println!("matplotlib 3.8.2 (OurOS)"),
+        "version" | "--version" => println!("matplotlib 3.8.2 (SlateOS)"),
         "info" => {
-            println!("matplotlib 3.8.2 (OurOS)");
+            println!("matplotlib 3.8.2 (SlateOS)");
             println!("  Backend: agg");
-            println!("  Platform: OurOS x86_64");
+            println!("  Platform: SlateOS x86_64");
             println!("  Python: 3.12.0");
             println!("  NumPy: 1.26.4");
             println!("  Freetype: 2.13.2");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xdg-dbus-proxy-cli — OurOS xdg-dbus-proxy D-Bus filtering proxy
+//! xdg-dbus-proxy-cli — SlateOS xdg-dbus-proxy D-Bus filtering proxy
 //!
 //! Single personality: `xdg-dbus-proxy`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_proxy(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.len() < 2 {
         println!("Usage: xdg-dbus-proxy ADDRESS SOCKET [OPTIONS]");
-        println!("xdg-dbus-proxy v0.1 (OurOS) — D-Bus filtering proxy");
+        println!("xdg-dbus-proxy v0.1 (SlateOS) — D-Bus filtering proxy");
         println!();
         println!("Arguments:");
         println!("  ADDRESS           D-Bus bus address");

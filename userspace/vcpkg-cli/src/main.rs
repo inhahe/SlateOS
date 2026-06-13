@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vcpkg-cli — OurOS vcpkg CLI
+//! vcpkg-cli — SlateOS vcpkg CLI
 //!
 //! Single personality: `vcpkg`
 
@@ -11,7 +11,7 @@ fn run_vcpkg(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "help") {
         println!("Usage: vcpkg <COMMAND> [OPTIONS]");
         println!();
-        println!("vcpkg — C/C++ package manager (OurOS).");
+        println!("vcpkg — C/C++ package manager (SlateOS).");
         println!();
         println!("Commands:");
         println!("  install      Install packages");
@@ -24,7 +24,7 @@ fn run_vcpkg(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("vcpkg package management program version 2024.01.12 (OurOS)");
+        println!("vcpkg package management program version 2024.01.12 (SlateOS)");
         return 0;
     }
 
@@ -37,24 +37,24 @@ fn run_vcpkg(args: Vec<String>) -> i32 {
             let pkg = if pkgs.is_empty() { "zlib" } else { pkgs[0] };
             println!("Computing installation plan...");
             println!("The following packages will be built and installed:");
-            println!("    {}:x64-ouros", pkg);
+            println!("    {}:x64-slateos", pkg);
             println!();
-            println!("Starting package 1/1: {}:x64-ouros", pkg);
-            println!("Building {}:x64-ouros...", pkg);
+            println!("Starting package 1/1: {}:x64-slateos", pkg);
+            println!("Building {}:x64-slateos...", pkg);
             println!("-- Downloading source...");
             println!("-- Extracting source...");
             println!("-- Configuring...");
             println!("-- Building...");
             println!("-- Installing...");
             println!("-- Performing post-build validation...");
-            println!("Elapsed time to handle {}:x64-ouros: 12.3s", pkg);
+            println!("Elapsed time to handle {}:x64-slateos: 12.3s", pkg);
             println!();
             println!("Total install time: 12.3s");
             0
         }
         "remove" => {
             let pkg = args.get(1).map(|s| s.as_str()).unwrap_or("zlib");
-            println!("Removing {}:x64-ouros...", pkg);
+            println!("Removing {}:x64-slateos...", pkg);
             println!("  Package {} removed.", pkg);
             0
         }
@@ -71,9 +71,9 @@ fn run_vcpkg(args: Vec<String>) -> i32 {
             0
         }
         "list" => {
-            println!("boost:x64-ouros              1.84.0       Boost C++ Libraries");
-            println!("openssl:x64-ouros            3.2.0        TLS/SSL library");
-            println!("zlib:x64-ouros               1.3.1        Compression library");
+            println!("boost:x64-slateos              1.84.0       Boost C++ Libraries");
+            println!("openssl:x64-slateos            3.2.0        TLS/SSL library");
+            println!("zlib:x64-slateos               1.3.1        Compression library");
             0
         }
         "update" => {

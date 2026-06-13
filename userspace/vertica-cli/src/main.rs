@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vertica-cli — OurOS Vertica (Stonebraker C-Store-derived columnar MPP, OpenText/HPE heritage)
+//! vertica-cli — SlateOS Vertica (Stonebraker C-Store-derived columnar MPP, OpenText/HPE heritage)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_vsql(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: vertica [OPTIONS]");
-        println!("Vertica (OurOS) — columnar MPP analytics database (OpenText, since 2005)");
+        println!("Vertica (SlateOS) — columnar MPP analytics database (OpenText, since 2005)");
         println!();
         println!("Options:");
         println!("  --eon                  Eon Mode (separation of storage + compute on S3/HDFS/Azure)");
@@ -20,8 +20,8 @@ fn run_vsql(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Vertica 2024 (OurOS) — vsql 24.x"); return 0; }
-    println!("Vertica 2024 (OurOS) — Columnar MPP Analytics Database");
+    if args.iter().any(|a| a == "--version") { println!("Vertica 2024 (SlateOS) — vsql 24.x"); return 0; }
+    println!("Vertica 2024 (SlateOS) — Columnar MPP Analytics Database");
     println!("  Vendor: Vertica (part of OpenText Corp. — NASDAQ:OTEX, TSX:OTEX since 1996)");
     println!("  Origins: Spun out of Michael Stonebraker's MIT C-Store research (2005)");
     println!("          Michael Stonebraker: Turing Award 2014, founder of Ingres, Postgres, Vertica, VoltDB, SciDB, Tamr");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nutshell-cli — OurOS Nutshell (small-team CRM from Ann Arbor)
+//! nutshell-cli — SlateOS Nutshell (small-team CRM from Ann Arbor)
 //!
 //! Single personality: `nutshell`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_nutshell(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: nutshell [OPTIONS]");
-        println!("Nutshell (OurOS) — easy CRM for small teams");
+        println!("Nutshell (SlateOS) — easy CRM for small teams");
         println!();
         println!("Options:");
         println!("  --foundation           Foundation $16/user/mo");
@@ -25,8 +25,8 @@ fn run_nutshell(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Nutshell 2024 (OurOS)"); return 0; }
-    println!("Nutshell 2024 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Nutshell 2024 (SlateOS)"); return 0; }
+    println!("Nutshell 2024 (SlateOS)");
     println!("  Vendor: Nutshell, Inc. (Ann Arbor, MI — private)");
     println!("  Founders: Guy Suter, Andy Fowler, Ian Berry (2010)");
     println!("          all U-Michigan grads / Ann Arbor startup community");

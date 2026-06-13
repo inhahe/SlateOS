@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wsk-cli — OurOS Apache OpenWhisk serverless CLI
+//! wsk-cli — SlateOS Apache OpenWhisk serverless CLI
 //!
 //! Single personality: `wsk`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wsk(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: wsk COMMAND [OPTIONS]");
-        println!("wsk v1.2.0 (OurOS) — Apache OpenWhisk CLI");
+        println!("wsk v1.2.0 (SlateOS) — Apache OpenWhisk CLI");
         println!();
         println!("Commands:");
         println!("  action          Manage actions");
@@ -29,7 +29,7 @@ fn run_wsk(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("wsk CLI version: 1.2.0 (OurOS)");
+        println!("wsk CLI version: 1.2.0 (SlateOS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("list");

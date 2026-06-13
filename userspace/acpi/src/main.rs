@@ -1,4 +1,4 @@
-// OurOS acpi — power management information
+// SlateOS acpi — power management information
 //
 // Multi-personality binary:
 //   acpi    — show battery/AC/thermal/cooling status
@@ -676,7 +676,7 @@ fn print_version(personality: Personality) {
         Personality::Acpi => "acpi",
         Personality::Acpid => "acpid",
     };
-    println!("{name} (OurOS) 0.1.0");
+    println!("{name} (SlateOS) 0.1.0");
 }
 
 // ---------------------------------------------------------------------------

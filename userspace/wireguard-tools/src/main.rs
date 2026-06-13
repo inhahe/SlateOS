@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wireguard-tools — OurOS WireGuard VPN utilities
+//! wireguard-tools — SlateOS WireGuard VPN utilities
 //!
 //! Multi-personality: `wg` (WireGuard tool), `wg-quick` (quick setup)
 
@@ -29,7 +29,7 @@ fn run_wg(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "version" => {
-            println!("wireguard-tools v1.0.20210914 (OurOS)");
+            println!("wireguard-tools v1.0.20210914 (SlateOS)");
             0
         }
         "show" => {

@@ -2,5 +2,5 @@
 name = "pv"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS pv/truncate/shred/fuser - pipe/file management tools"
+description = "SlateOS pv/truncate/shred/fuser - pipe/file management tools"
 [dependencies]

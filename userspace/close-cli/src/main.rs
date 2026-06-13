@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! close-cli — OurOS Close (inside-sales CRM with built-in calling/SMS/email)
+//! close-cli — SlateOS Close (inside-sales CRM with built-in calling/SMS/email)
 //!
 //! Single personality: `close`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_close(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: close [OPTIONS]");
-        println!("Close (OurOS) — inside-sales CRM with native dialer/SMS/email");
+        println!("Close (SlateOS) — inside-sales CRM with native dialer/SMS/email");
         println!();
         println!("Options:");
         println!("  --startup              Startup $59/user/mo (3 users included)");
@@ -25,8 +25,8 @@ fn run_close(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Close 2024 (OurOS)"); return 0; }
-    println!("Close 2024 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Close 2024 (SlateOS)"); return 0; }
+    println!("Close 2024 (SlateOS)");
     println!("  Vendor: Close.io / Elastic Inc. dba Close (San Francisco — fully remote)");
     println!("  Founders: Steli Efti + Anthony Nemitz + Phil Freo + Thomas Steinacher (2013)");
     println!("          Steli: famous sales evangelist, blog 'Close Blog', podcast 'The Startup Chat'");

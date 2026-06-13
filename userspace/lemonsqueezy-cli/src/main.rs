@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! lemonsqueezy-cli — OurOS Lemon Squeezy indie-MoR personality CLI.
+//! lemonsqueezy-cli — SlateOS Lemon Squeezy indie-MoR personality CLI.
 
 use std::env;
 use std::process;
@@ -30,7 +30,7 @@ fn print_help(prog: &str) {
 }
 
 fn print_version() {
-    println!("lemonsqueezy-cli 0.1.0 — OurOS personality binary");
+    println!("lemonsqueezy-cli 0.1.0 — SlateOS personality binary");
     println!("Lemon Squeezy (acquired by Stripe, Jul 2024)");
 }
 

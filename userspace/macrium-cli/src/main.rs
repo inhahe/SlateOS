@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! macrium-cli — OurOS Macrium Reflect disk imaging
+//! macrium-cli — SlateOS Macrium Reflect disk imaging
 //!
 //! Single personality: `macrium`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: macrium [OPTIONS]");
-        println!("Macrium Reflect X (OurOS) — Disk imaging, cloning, backup");
+        println!("Macrium Reflect X (SlateOS) — Disk imaging, cloning, backup");
         println!();
         println!("Options:");
         println!("  --image SRC DST        Create image (whole disk/partition)");
@@ -25,8 +25,8 @@ fn run_mc(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Macrium Reflect X 10.0.8323 (OurOS)"); return 0; }
-    println!("Macrium Reflect X 10.0.8323 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Macrium Reflect X 10.0.8323 (SlateOS)"); return 0; }
+    println!("Macrium Reflect X 10.0.8323 (SlateOS)");
     println!("  Vendor: Paramount Software UK Ltd (Manchester, UK; founded 1992)");
     println!("  Sold to: Insight Partners Apr 2022 (same owner as Veeam)");
     println!("  Origin: started as 'StoreItForeverPlus' (cassette tape backup) — pivoted to disk imaging");

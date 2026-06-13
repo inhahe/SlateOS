@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fleet-cli — OurOS Fleet device management
+//! fleet-cli — SlateOS Fleet device management
 //!
 //! Single personality: `fleetctl`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_fleetctl(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: fleetctl COMMAND [OPTIONS]");
-        println!("fleetctl v4.40 (OurOS) — Fleet device management CLI");
+        println!("fleetctl v4.40 (SlateOS) — Fleet device management CLI");
         println!();
         println!("Commands:");
         println!("  hosts list        List enrolled hosts");
@@ -29,9 +29,9 @@ fn run_fleetctl(args: &[String], _prog: &str) -> i32 {
     match cmd {
         "hosts" => {
             println!("ID    Hostname        Platform     Status");
-            println!("1     web-01          ouros        online");
-            println!("2     db-01           ouros        online");
-            println!("3     dev-laptop      ouros        offline");
+            println!("1     web-01          slateos        online");
+            println!("2     db-01           slateos        online");
+            println!("3     dev-laptop      slateos        offline");
         }
         "query" => {
             println!("Running live query...");
@@ -49,7 +49,7 @@ fn run_fleetctl(args: &[String], _prog: &str) -> i32 {
             let file = args.get(1).map(|s| s.as_str()).unwrap_or("config.yml");
             println!("Applied: {}", file);
         }
-        "version" | "--version" => println!("fleetctl v4.40 (OurOS)"),
+        "version" | "--version" => println!("fleetctl v4.40 (SlateOS)"),
         _ => println!("fleetctl {}: completed", cmd),
     }
     0

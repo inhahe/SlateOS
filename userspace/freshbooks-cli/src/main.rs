@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! freshbooks-cli — OurOS FreshBooks (Toronto-founded invoicing & accounting for freelancers/agencies)
+//! freshbooks-cli — SlateOS FreshBooks (Toronto-founded invoicing & accounting for freelancers/agencies)
 //!
 //! Single personality: `freshbooks`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_fb(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: freshbooks [OPTIONS]");
-        println!("FreshBooks (OurOS) — Cloud accounting for freelancers, agencies, service businesses");
+        println!("FreshBooks (SlateOS) — Cloud accounting for freelancers, agencies, service businesses");
         println!();
         println!("Options:");
         println!("  --lite                 Lite ($21/mo — 5 clients)");
@@ -23,8 +23,8 @@ fn run_fb(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("FreshBooks 2024 (OurOS)"); return 0; }
-    println!("FreshBooks 2024 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("FreshBooks 2024 (SlateOS)"); return 0; }
+    println!("FreshBooks 2024 (SlateOS)");
     println!("  Vendor: 2ndSite Inc. dba FreshBooks (Toronto, Canada — founded 2003)");
     println!("  Founder: Mike McDerment (Toronto agency founder)");
     println!("          built FreshBooks because he accidentally invoiced a client over old QuickBooks → wanted simpler tool");

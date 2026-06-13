@@ -1,4 +1,4 @@
-//! Multi-personality device mapper control utility for OurOS.
+//! Multi-personality device mapper control utility for SlateOS.
 //!
 //! This binary detects the tool from `argv[0]`:
 //!   - `dmsetup`  — device mapper management (create, remove, suspend, etc.)
@@ -6,7 +6,7 @@
 //!   - `kpartx`   — create device maps from partition tables
 //!
 //! Provides simulated device mapper state for userspace testing and
-//! integration with OurOS's block-device subsystem.
+//! integration with SlateOS's block-device subsystem.
 
 #![deny(clippy::all)]
 // Many items (partition parsers, kpartx data-path functions, MBR/GPT constants)
@@ -25,7 +25,7 @@ use std::process;
 // Constants
 // ---------------------------------------------------------------------------
 
-const VERSION: &str = "1.02.197-ouros";
+const VERSION: &str = "1.02.197-slateos";
 const DM_VERSION: &str = "4.48.0";
 
 const KNOWN_TARGETS: &[(&str, &str)] = &[
@@ -156,7 +156,7 @@ impl MappedDevice {
     fn new(name: &str, minor: u32, table: Vec<TableEntry>) -> Self {
         Self {
             name: name.to_string(),
-            uuid: format!("OUROS-{name}"),
+            uuid: format!("SLATEOS-{name}"),
             major: 253,
             minor,
             state: DeviceState::Active,
@@ -1907,7 +1907,7 @@ mod tests {
     fn mapped_device_new() {
         let dev = MappedDevice::new("test", 0, vec![]);
         assert_eq!(dev.name, "test");
-        assert_eq!(dev.uuid, "OUROS-test");
+        assert_eq!(dev.uuid, "SLATEOS-test");
         assert_eq!(dev.major, 253);
         assert_eq!(dev.minor, 0);
         assert_eq!(dev.state, DeviceState::Active);
@@ -2144,7 +2144,7 @@ mod tests {
         assert!(out.contains("mydev"));
         assert!(out.contains("ACTIVE"));
         assert!(out.contains("253"));
-        assert!(out.contains("OUROS-mydev"));
+        assert!(out.contains("SLATEOS-mydev"));
     }
 
     #[test]

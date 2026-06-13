@@ -1,4 +1,4 @@
-//! OurOS `awk` — pattern-action text processor
+//! SlateOS `awk` — pattern-action text processor
 //!
 //! A core-subset AWK implementation: lexer, recursive-descent parser, and
 //! tree-walk interpreter.  Handles `BEGIN`/`END` rules, regex and expression

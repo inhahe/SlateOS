@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wine-staging-cli — OurOS Wine Staging patched Wine build
+//! wine-staging-cli — SlateOS Wine Staging patched Wine build
 //!
 //! Single personality: `wine-staging`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wine_staging(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wine-staging [OPTIONS] PROGRAM [ARGS...]");
-        println!("wine-staging v9.0 (OurOS) — Wine with staging patches");
+        println!("wine-staging v9.0 (SlateOS) — Wine with staging patches");
         println!();
         println!("Options:");
         println!("  --patches         List applied staging patches");
@@ -23,7 +23,7 @@ fn run_wine_staging(args: &[String], _prog: &str) -> i32 {
         println!("  CSMT, PBA, DXVA2 hardware decoding, etc.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("wine-staging v9.0 (OurOS, staging patches applied)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("wine-staging v9.0 (SlateOS, staging patches applied)"); return 0; }
     if args.iter().any(|a| a == "--patches") {
         println!("Applied staging patches:");
         println!("  eventfd_synchronization  (esync)");

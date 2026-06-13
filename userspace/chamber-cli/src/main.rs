@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! chamber-cli — OurOS Chamber secrets manager
+//! chamber-cli — SlateOS Chamber secrets manager
 //!
 //! Single personality: `chamber`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_chamber(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: chamber COMMAND [OPTIONS]");
-        println!("chamber v2.14.0 (OurOS) — AWS SSM Parameter Store secrets");
+        println!("chamber v2.14.0 (SlateOS) — AWS SSM Parameter Store secrets");
         println!();
         println!("Commands:");
         println!("  write SERVICE KEY VALUE    Write a secret");
@@ -30,7 +30,7 @@ fn run_chamber(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("chamber v2.14.0 (OurOS)");
+        println!("chamber v2.14.0 (SlateOS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("list");

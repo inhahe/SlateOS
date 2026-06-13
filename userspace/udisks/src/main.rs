@@ -1,4 +1,4 @@
-//! OurOS disk management service.
+//! SlateOS disk management service.
 //!
 //! Multi-personality binary providing:
 //! - **udisksctl** — command-line client for disk management
@@ -134,7 +134,7 @@ fn discover_block_devices() -> Vec<BlockDevice> {
             removable: false,
             read_only: false,
             model: "Virtual Disk".to_string(),
-            vendor: "OurOS".to_string(),
+            vendor: "SlateOS".to_string(),
             serial: String::new(),
             _revision: String::new(),
             mountpoints: vec!["/".to_string()],
@@ -298,7 +298,7 @@ fn udisksctl_main(args: &[String]) -> i32 {
             0
         }
         "--version" => {
-            println!("udisksctl (OurOS) {VERSION}");
+            println!("udisksctl (SlateOS) {VERSION}");
             0
         }
         other => {
@@ -638,7 +638,7 @@ fn udisksd_main(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("udisksd (OurOS) {VERSION}");
+                println!("udisksd (SlateOS) {VERSION}");
                 return 0;
             }
             other => {
@@ -686,7 +686,7 @@ fn umount_main(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("umount (OurOS) {VERSION}");
+                println!("umount (SlateOS) {VERSION}");
                 return 0;
             }
             s if !s.starts_with('-') => {

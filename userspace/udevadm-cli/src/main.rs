@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! udevadm-cli — OurOS udev device manager admin tool
+//! udevadm-cli — SlateOS udev device manager admin tool
 //!
 //! Multi-personality: `udevadm`
 
@@ -19,7 +19,7 @@ fn run_udevadm(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: udevadm COMMAND [OPTIONS]");
         println!();
-        println!("udevadm — udev device management tool (OurOS).");
+        println!("udevadm — udev device management tool (SlateOS).");
         println!();
         println!("Commands:");
         println!("  info         Query device information");
@@ -33,7 +33,7 @@ fn run_udevadm(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("udevadm 255 (OurOS)");
+        println!("udevadm 255 (SlateOS)");
         return 0;
     }
 

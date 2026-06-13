@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! confluent-cli — OurOS Confluent (commercial Apache Kafka, NASDAQ:CFLT)
+//! confluent-cli — SlateOS Confluent (commercial Apache Kafka, NASDAQ:CFLT)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_cflt(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: confluent [OPTIONS]");
-        println!("Confluent (OurOS) — Apache Kafka cloud + enterprise platform (NASDAQ:CFLT)");
+        println!("Confluent (SlateOS) — Apache Kafka cloud + enterprise platform (NASDAQ:CFLT)");
         println!();
         println!("Options:");
         println!("  --cloud                Confluent Cloud (managed Kafka SaaS)");
@@ -24,8 +24,8 @@ fn run_cflt(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Confluent 2024 (OurOS)"); return 0; }
-    println!("Confluent 2024 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Confluent 2024 (SlateOS)"); return 0; }
+    println!("Confluent 2024 (SlateOS)");
     println!("  Vendor: Confluent, Inc. (Mountain View, CA — NASDAQ:CFLT)");
     println!("  Founders: Jay Kreps (CEO), Jun Rao, Neha Narkhede, 2014");
     println!("          all three co-created Apache Kafka at LinkedIn (2010-2014)");

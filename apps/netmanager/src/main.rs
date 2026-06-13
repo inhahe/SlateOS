@@ -1,4 +1,4 @@
-//! OurOS Network Connections Manager
+//! SlateOS Network Connections Manager
 //!
 //! GUI application for managing network interfaces, connections, and
 //! configuration. Provides:
@@ -13,7 +13,7 @@
 //! - Adapter enable/disable
 //!
 //! Uses the guitk library for UI rendering with Catppuccin Mocha dark theme.
-//! Network I/O is performed through OurOS syscalls; simulated with
+//! Network I/O is performed through SlateOS syscalls; simulated with
 //! representative data for initial development.
 
 #[allow(unused_imports)]
@@ -675,7 +675,7 @@ impl NetManagerApp {
             DiagnosticResult {
                 name: "DNS Resolution".into(),
                 status: DiagnosticStatus::Passed,
-                details: "Resolved ouros.local in 5ms".into(),
+                details: "Resolved slateos.local in 5ms".into(),
             },
             DiagnosticResult {
                 name: "Internet Connectivity".into(),

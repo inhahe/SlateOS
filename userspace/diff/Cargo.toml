@@ -2,5 +2,5 @@
 name = "diff"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS file comparison utility"
+description = "SlateOS file comparison utility"
 [dependencies]

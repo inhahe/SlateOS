@@ -1,4 +1,4 @@
-//! look — display lines beginning with a given string for OurOS
+//! look — display lines beginning with a given string for SlateOS
 //!
 //! Searches for lines in a sorted file that begin with the given
 //! prefix string. Uses binary search for efficiency.
@@ -64,7 +64,7 @@ fn parse_args(args: &[String]) -> Options {
                 process::exit(0);
             }
             "--version" => {
-                println!("look (OurOS coreutils) 0.1.0");
+                println!("look (SlateOS coreutils) 0.1.0");
                 process::exit(0);
             }
             _ if arg.starts_with('-') && arg.len() > 1 && !arg.starts_with("--") => {

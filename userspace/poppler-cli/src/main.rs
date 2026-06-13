@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! poppler-cli — OurOS Poppler PDF utilities
+//! poppler-cli — SlateOS Poppler PDF utilities
 //!
 //! Multi-personality: `pdfinfo`, `pdfimages`, `pdfseparate`, `pdfunite`, `pdfattach`
 
@@ -15,7 +15,7 @@ fn run_poppler(args: &[String], prog: &str) -> i32 {
         "pdfinfo" => {
             if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
                 println!("Usage: pdfinfo [OPTIONS] PDF");
-                println!("pdfinfo (poppler 24.02.0, OurOS) — PDF document info");
+                println!("pdfinfo (poppler 24.02.0, SlateOS) — PDF document info");
                 return 0;
             }
             let file = args.iter().rfind(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("doc.pdf");

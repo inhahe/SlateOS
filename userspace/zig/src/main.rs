@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zig — OurOS Zig programming language
+//! zig — SlateOS Zig programming language
 //!
 //! Single personality: `zig`
 
@@ -34,7 +34,7 @@ fn run_zig(args: Vec<String>) -> i32 {
 
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match cmd {
-        "version" => println!("0.13.0 (OurOS)"),
+        "version" => println!("0.13.0 (SlateOS)"),
         "env" => {
             println!("{{");
             println!("  \"zig_exe\": \"/usr/bin/zig\",");
@@ -72,7 +72,7 @@ fn run_zig(args: Vec<String>) -> i32 {
         }
         "targets" => {
             println!("Architectures: aarch64, arm, x86, x86_64, riscv64, mips, powerpc, sparc, wasm32");
-            println!("OS: linux, macos, windows, freebsd, ouros, freestanding");
+            println!("OS: linux, macos, windows, freebsd, slateos, freestanding");
             println!("(partial list — simulated)");
         }
         "cc" | "c++" => {

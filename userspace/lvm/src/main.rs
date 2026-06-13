@@ -1,4 +1,4 @@
-// OurOS lvm - Logical Volume Manager utilities
+// SlateOS lvm - Logical Volume Manager utilities
 //
 // Multi-personality binary:
 //   pvcreate  - initialize physical volume
@@ -807,9 +807,9 @@ fn cmd_lvresize(args: &LvmArgs) -> i32 {
 // ── Utility Functions ──────────────────────────────────────────────────
 
 fn show_version() -> i32 {
-    print_out(b"  LVM version:     2.03.22(2)-OurOS (2025-01-01)\n");
-    print_out(b"  Library version: 1.02.196-OurOS (2025-01-01)\n");
-    print_out(b"  Driver version:  4.48.0-OurOS\n");
+    print_out(b"  LVM version:     2.03.22(2)-SlateOS (2025-01-01)\n");
+    print_out(b"  Library version: 1.02.196-SlateOS (2025-01-01)\n");
+    print_out(b"  Driver version:  4.48.0-SlateOS\n");
     0
 }
 

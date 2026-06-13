@@ -1,4 +1,4 @@
-//! OurOS `uniq` Utility -- Filter Adjacent Duplicate Lines
+//! SlateOS `uniq` Utility -- Filter Adjacent Duplicate Lines
 //!
 //! Reads lines from input (file or stdin) and filters adjacent matching lines,
 //! writing the result to output (file or stdout). Typically used with sorted
@@ -759,7 +759,7 @@ fn process(
 // ============================================================================
 
 fn print_help() {
-    println!("OurOS uniq v{VERSION}");
+    println!("SlateOS uniq v{VERSION}");
     println!();
     println!("Filter adjacent matching lines from INPUT (or standard input),");
     println!("writing to OUTPUT (or standard output).");
@@ -811,7 +811,7 @@ fn main() {
             process::exit(0);
         }
         ParseResult::Version => {
-            println!("uniq (OurOS) {VERSION}");
+            println!("uniq (SlateOS) {VERSION}");
             process::exit(0);
         }
         ParseResult::Run(config) => {

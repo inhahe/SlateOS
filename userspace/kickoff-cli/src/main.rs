@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kickoff-cli — OurOS Kickoff minimalist launcher
+//! kickoff-cli — SlateOS Kickoff minimalist launcher
 //!
 //! Single personality: `kickoff`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_kickoff(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: kickoff [OPTIONS]");
-        println!("kickoff v0.6 (OurOS) — Minimalist Wayland program launcher");
+        println!("kickoff v0.6 (SlateOS) — Minimalist Wayland program launcher");
         println!();
         println!("Options:");
         println!("  --from-path       Search $PATH for executables");
@@ -26,7 +26,7 @@ fn run_kickoff(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("kickoff v0.6 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("kickoff v0.6 (SlateOS)"); return 0; }
     println!("kickoff: program launcher");
     println!("  > ");
     0

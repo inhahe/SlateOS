@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! obexctl-cli — OurOS obexctl OBEX Bluetooth file transfer
+//! obexctl-cli — SlateOS obexctl OBEX Bluetooth file transfer
 //!
 //! Single personality: `obexctl`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_obexctl(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: obexctl COMMAND [OPTIONS]");
-        println!("obexctl v5.72 (OurOS) — OBEX Bluetooth file transfer");
+        println!("obexctl v5.72 (SlateOS) — OBEX Bluetooth file transfer");
         println!();
         println!("Commands:");
         println!("  connect MAC       Connect to device");

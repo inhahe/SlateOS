@@ -2,5 +2,5 @@
 name = "wall"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS wall/write/mesg terminal messaging"
+description = "SlateOS wall/write/mesg terminal messaging"
 [dependencies]

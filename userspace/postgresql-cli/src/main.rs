@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! postgresql-cli — OurOS PostgreSQL client tools
+//! postgresql-cli — SlateOS PostgreSQL client tools
 //!
 //! Multi-personality: `psql`, `pg_dump`, `pg_restore`, `createdb`, `dropdb`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_psql(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: psql [OPTIONS] [DBNAME [USERNAME]]");
-        println!("psql v16.1 (OurOS) — PostgreSQL interactive terminal");
+        println!("psql v16.1 (SlateOS) — PostgreSQL interactive terminal");
         println!();
         println!("Options:");
         println!("  -h HOST       Database server host");
@@ -26,7 +26,7 @@ fn run_psql(args: &[String], _prog: &str) -> i32 {
         println!("  --version     Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("psql v16.1 (OurOS, PostgreSQL)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("psql v16.1 (SlateOS, PostgreSQL)"); return 0; }
     if args.iter().any(|a| a == "-l") {
         println!("                List of databases");
         println!("   Name    | Owner  | Encoding | Collation");
@@ -44,10 +44,10 @@ fn run_psql(args: &[String], _prog: &str) -> i32 {
 fn run_pg_dump(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pg_dump [OPTIONS] [DBNAME]");
-        println!("pg_dump v16.1 (OurOS) — Dump a PostgreSQL database");
+        println!("pg_dump v16.1 (SlateOS) — Dump a PostgreSQL database");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("pg_dump v16.1 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("pg_dump v16.1 (SlateOS)"); return 0; }
     println!("pg_dump: dumping database...");
     println!("  Tables: 24");
     println!("  Rows: 15,432");
@@ -57,10 +57,10 @@ fn run_pg_dump(args: &[String], _prog: &str) -> i32 {
 fn run_pg_restore(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pg_restore [OPTIONS] [FILE]");
-        println!("pg_restore v16.1 (OurOS) — Restore a PostgreSQL database");
+        println!("pg_restore v16.1 (SlateOS) — Restore a PostgreSQL database");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("pg_restore v16.1 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("pg_restore v16.1 (SlateOS)"); return 0; }
     println!("pg_restore: restoring database...");
     0
 }
@@ -68,10 +68,10 @@ fn run_pg_restore(args: &[String], _prog: &str) -> i32 {
 fn run_createdb(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: createdb [OPTIONS] [DBNAME]");
-        println!("createdb v16.1 (OurOS) — Create a new PostgreSQL database");
+        println!("createdb v16.1 (SlateOS) — Create a new PostgreSQL database");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("createdb v16.1 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("createdb v16.1 (SlateOS)"); return 0; }
     if let Some(name) = args.iter().find(|a| !a.starts_with('-')) {
         println!("createdb: database '{}' created", name);
     } else {
@@ -83,10 +83,10 @@ fn run_createdb(args: &[String], _prog: &str) -> i32 {
 fn run_dropdb(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: dropdb [OPTIONS] DBNAME");
-        println!("dropdb v16.1 (OurOS) — Remove a PostgreSQL database");
+        println!("dropdb v16.1 (SlateOS) — Remove a PostgreSQL database");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("dropdb v16.1 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("dropdb v16.1 (SlateOS)"); return 0; }
     if let Some(name) = args.iter().find(|a| !a.starts_with('-')) {
         println!("dropdb: database '{}' dropped", name);
     } else {

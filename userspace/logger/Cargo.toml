@@ -2,5 +2,5 @@
 name = "logger"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS syslog message logger"
+description = "SlateOS syslog message logger"
 [dependencies]

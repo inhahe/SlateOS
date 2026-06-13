@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! doppler-cli — OurOS Doppler secrets manager
+//! doppler-cli — SlateOS Doppler secrets manager
 //!
 //! Single personality: `doppler`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_doppler(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: doppler COMMAND [OPTIONS]");
-        println!("Doppler CLI v3.68.0 (OurOS) — Secrets manager");
+        println!("Doppler CLI v3.68.0 (SlateOS) — Secrets manager");
         println!();
         println!("Commands:");
         println!("  setup           Configure project");
@@ -29,7 +29,7 @@ fn run_doppler(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("v3.68.0 (OurOS)");
+        println!("v3.68.0 (SlateOS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("secrets");

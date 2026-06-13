@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! act-cli — OurOS local GitHub Actions runner
+//! act-cli — SlateOS local GitHub Actions runner
 //!
 //! Single personality: `act`
 
@@ -39,7 +39,7 @@ fn run_act(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("act version 0.2.60 (OurOS)");
+        println!("act version 0.2.60 (SlateOS)");
         return 0;
     }
 

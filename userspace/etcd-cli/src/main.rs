@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! etcd-cli — OurOS etcd CLI
+//! etcd-cli — SlateOS etcd CLI
 //!
 //! Single personality: `etcdctl`
 
@@ -11,7 +11,7 @@ fn run_etcdctl(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: etcdctl <COMMAND> [OPTIONS]");
         println!();
-        println!("etcd distributed key-value store CLI (OurOS).");
+        println!("etcd distributed key-value store CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  get          Get key value");
@@ -29,7 +29,7 @@ fn run_etcdctl(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("etcdctl version: 3.5.12 (OurOS)");
+        println!("etcdctl version: 3.5.12 (SlateOS)");
         println!("API version: 3.5");
         return 0;
     }

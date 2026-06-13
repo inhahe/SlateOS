@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! go — OurOS Go programming language toolchain
+//! go — SlateOS Go programming language toolchain
 //!
 //! Multi-personality binary detected via argv[0]:
 //!
@@ -43,11 +43,11 @@ fn run_go(args: Vec<String>) -> i32 {
             println!("  vet         Report likely mistakes in packages");
             0
         }
-        "version" => { println!("go version go1.22.0 ouros/amd64"); 0 }
+        "version" => { println!("go version go1.22.0 slateos/amd64"); 0 }
         "env" => {
             println!("GO111MODULE=\"\"");
             println!("GOARCH=\"amd64\"");
-            println!("GOOS=\"ouros\"");
+            println!("GOOS=\"slateos\"");
             println!("GOPATH=\"/home/user/go\"");
             println!("GOROOT=\"/usr/local/go\"");
             println!("GOVERSION=\"go1.22.0\"");

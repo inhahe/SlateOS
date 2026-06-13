@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! civo-cli — OurOS Civo cloud CLI
+//! civo-cli — SlateOS Civo cloud CLI
 //!
 //! Multi-personality: `civo`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_civo(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: civo COMMAND [OPTIONS]");
-        println!("Civo CLI 1.1.76 (OurOS)");
+        println!("Civo CLI 1.1.76 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  instance     Manage compute instances");

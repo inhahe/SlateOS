@@ -2,5 +2,5 @@
 name = "top"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS interactive process monitor — real-time CPU, memory, and process info"
+description = "SlateOS interactive process monitor — real-time CPU, memory, and process info"
 [dependencies]

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! seahorse-cli — OurOS GNOME Seahorse key/password manager
+//! seahorse-cli — SlateOS GNOME Seahorse key/password manager
 //!
 //! Single personality: `seahorse`
 
@@ -13,13 +13,13 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_seahorse(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: seahorse [OPTIONS]");
-        println!("seahorse v43.0 (OurOS) — GNOME Passwords & Keys");
+        println!("seahorse v43.0 (SlateOS) — GNOME Passwords & Keys");
         println!();
         println!("Options:");
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("seahorse v43.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("seahorse v43.0 (SlateOS)"); return 0; }
     println!("seahorse: Passwords & Keys started");
     println!("  Login keyring: 15 passwords");
     println!("  GPG keys: 2");

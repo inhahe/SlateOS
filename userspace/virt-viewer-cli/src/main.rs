@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! virt-viewer-cli — OurOS virt-viewer VM display client
+//! virt-viewer-cli — SlateOS virt-viewer VM display client
 //!
 //! Multi-personality: `virt-viewer`, `remote-viewer`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_virt_viewer(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: virt-viewer [OPTIONS] [DOMAIN-NAME|ID|UUID]");
-        println!("virt-viewer v11.0 (OurOS) — Virtual machine viewer");
+        println!("virt-viewer v11.0 (SlateOS) — Virtual machine viewer");
         println!();
         println!("Options:");
         println!("  -c URI           Hypervisor connection URI");
@@ -23,7 +23,7 @@ fn run_virt_viewer(args: &[String], _prog: &str) -> i32 {
         println!("  --version        Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("virt-viewer v11.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("virt-viewer v11.0 (SlateOS)"); return 0; }
     println!("virt-viewer: connecting to VM display");
     println!("  Protocol: SPICE");
     println!("  Display: 1024x768");
@@ -33,13 +33,13 @@ fn run_virt_viewer(args: &[String], _prog: &str) -> i32 {
 fn run_remote_viewer(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: remote-viewer [OPTIONS] URI");
-        println!("remote-viewer v11.0 (OurOS) — Remote desktop viewer");
+        println!("remote-viewer v11.0 (SlateOS) — Remote desktop viewer");
         println!("  Supports: spice://, vnc://, .vv files");
         println!("  -f               Fullscreen");
         println!("  --version        Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("remote-viewer v11.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("remote-viewer v11.0 (SlateOS)"); return 0; }
     if let Some(uri) = args.iter().find(|a| !a.starts_with('-')) {
         println!("remote-viewer: connecting to {}", uri);
     } else {

@@ -2,5 +2,5 @@
 name = "quota"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS quota - disk quota management (quota/edquota/repquota/quotaon/quotaoff)"
+description = "SlateOS quota - disk quota management (quota/edquota/repquota/quotaon/quotaoff)"
 [dependencies]

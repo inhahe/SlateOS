@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dynatrace-cli — OurOS Dynatrace (AI-driven full-stack observability, Davis AI)
+//! dynatrace-cli — SlateOS Dynatrace (AI-driven full-stack observability, Davis AI)
 //!
 //! Single personality: `dynatrace`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_dt(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: dynatrace [OPTIONS]");
-        println!("Dynatrace SaaS (OurOS) — Full-stack observability + Davis AI");
+        println!("Dynatrace SaaS (SlateOS) — Full-stack observability + Davis AI");
         println!();
         println!("Options:");
         println!("  --oneagent             Deploy OneAgent (single binary for all monitoring)");
@@ -22,8 +22,8 @@ fn run_dt(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Dynatrace SaaS 2024.11 (OurOS)"); return 0; }
-    println!("Dynatrace SaaS 2024.11 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Dynatrace SaaS 2024.11 (SlateOS)"); return 0; }
+    println!("Dynatrace SaaS 2024.11 (SlateOS)");
     println!("  Vendor: Dynatrace Inc. (Waltham, MA + Linz, Austria — NYSE:DT)");
     println!("  Founders: Bernd Greifeneder + team (Linz, Austria, 2005)");
     println!("           originally 'dynaTrace Software' — Java APM");

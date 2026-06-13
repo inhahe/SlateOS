@@ -1,4 +1,4 @@
-//! OurOS character translation utility (`tr`)
+//! SlateOS character translation utility (`tr`)
 //!
 //! Translates, squeezes, or deletes characters read from stdin, writing the
 //! result to stdout. Operates on raw bytes, so it handles binary data and

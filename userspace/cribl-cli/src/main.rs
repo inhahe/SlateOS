@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cribl-cli — OurOS Cribl Stream data pipeline
+//! cribl-cli — SlateOS Cribl Stream data pipeline
 //!
 //! Single personality: `cribl`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_cribl(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: cribl [COMMAND] [OPTIONS]");
-        println!("Cribl Stream v4.7 (OurOS) — Observability data pipeline");
+        println!("Cribl Stream v4.7 (SlateOS) — Observability data pipeline");
         println!();
         println!("Commands:");
         println!("  start              Start Cribl Stream");
@@ -29,8 +29,8 @@ fn run_cribl(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Cribl Stream v4.7.2 (OurOS)"); return 0; }
-    println!("Cribl Stream v4.7.2 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Cribl Stream v4.7.2 (SlateOS)"); return 0; }
+    println!("Cribl Stream v4.7.2 (SlateOS)");
     println!("  Mode: leader");
     println!("  Workers: 4 connected");
     println!("  Sources: 8 active");

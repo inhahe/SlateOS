@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! soda-cli — OurOS Soda (open-source data quality, Belgium)
+//! soda-cli — SlateOS Soda (open-source data quality, Belgium)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_soda(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: soda [OPTIONS]");
-        println!("Soda (OurOS) — open-source data quality (SodaCL + Soda Cloud)");
+        println!("Soda (SlateOS) — open-source data quality (SodaCL + Soda Cloud)");
         println!();
         println!("Options:");
         println!("  scan                   Run quality scan (Soda Core)");
@@ -22,8 +22,8 @@ fn run_soda(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Soda 3.3 (OurOS)"); return 0; }
-    println!("Soda 3.3 (OurOS) — Open-Source Data Quality");
+    if args.iter().any(|a| a == "--version") { println!("Soda 3.3 (SlateOS)"); return 0; }
+    println!("Soda 3.3 (SlateOS) — Open-Source Data Quality");
     println!("  Vendor: Soda Data NV (Brussels, Belgium + Amsterdam)");
     println!("  Founders: Tom Baeyens (CTO) + Maarten Masschelein (CEO), 2019");
     println!("          Tom: former founder of Process Engine (jBPM/Activiti, Camunda predecessor) — JBoss veteran");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! scipy-cli — OurOS SciPy scientific computing
+//! scipy-cli — SlateOS SciPy scientific computing
 //!
 //! Multi-personality: `scipy`
 
@@ -16,7 +16,7 @@ fn run_scipy(args: &[String]) -> i32 {
     }
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match subcmd {
-        "version" | "--version" => println!("SciPy 1.12.0 (OurOS) with NumPy 1.26.4"),
+        "version" | "--version" => println!("SciPy 1.12.0 (SlateOS) with NumPy 1.26.4"),
         "info" => {
             println!("SciPy 1.12.0 submodules:");
             println!("  scipy.cluster       — Vector quantization / Kmeans");

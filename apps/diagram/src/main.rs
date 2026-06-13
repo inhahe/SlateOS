@@ -1,4 +1,4 @@
-//! `OurOS` Diagram Editor
+//! `SlateOS` Diagram Editor
 //!
 //! A full-featured diagram and flowchart editor with:
 //! - Node types: rectangle, rounded rectangle, diamond (decision), circle,

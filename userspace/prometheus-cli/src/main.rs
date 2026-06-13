@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! prometheus-cli — OurOS Prometheus monitoring CLI (promtool)
+//! prometheus-cli — SlateOS Prometheus monitoring CLI (promtool)
 //!
 //! Single personality: `promtool`
 
@@ -32,7 +32,7 @@ fn run_promtool(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("promtool, version 2.49.1 (OurOS)");
+        println!("promtool, version 2.49.1 (SlateOS)");
         return 0;
     }
 

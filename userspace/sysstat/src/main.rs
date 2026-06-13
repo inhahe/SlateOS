@@ -1,4 +1,4 @@
-// OurOS sysstat -- system performance monitoring
+// SlateOS sysstat -- system performance monitoring
 //
 // Multi-personality binary:
 //   sar        -- system activity reporter (default)
@@ -823,13 +823,13 @@ fn fallback_tape_stats() -> Vec<TapeStat> {
 fn print_system_header(out: &mut impl Write, tool: &str) {
     let hostname = read_file_lines("/proc/sys/kernel/hostname")
         .and_then(|l| l.first().cloned())
-        .unwrap_or_else(|| "ouros".to_string());
+        .unwrap_or_else(|| "slateos".to_string());
     let release = read_file_lines("/proc/sys/kernel/osrelease")
         .and_then(|l| l.first().cloned())
         .unwrap_or_else(|| "0.1.0".to_string());
     let _ = writeln!(
         out,
-        "OurOS {} ({}) \t{}\t\t_x86_64_",
+        "SlateOS {} ({}) \t{}\t\t_x86_64_",
         release, hostname, tool
     );
 }
@@ -2826,7 +2826,7 @@ mod tests {
         let mut buf = Vec::new();
         print_system_header(&mut buf, "sar");
         let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("OurOS"));
+        assert!(output.contains("SlateOS"));
         assert!(output.contains("sar"));
     }
 
@@ -3233,7 +3233,7 @@ mod tests {
         let args = vec!["-u".to_string(), "1".to_string(), "1".to_string()];
         run_sar(&args, &mut buf);
         let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("OurOS"));
+        assert!(output.contains("SlateOS"));
         assert!(output.contains("%usr"));
     }
 
@@ -3341,7 +3341,7 @@ mod tests {
         let args = vec!["1".to_string(), "1".to_string()];
         run_mpstat(&args, &mut buf);
         let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("OurOS"));
+        assert!(output.contains("SlateOS"));
         assert!(output.contains("%usr"));
         assert!(output.contains("all"));
     }
@@ -3380,7 +3380,7 @@ mod tests {
         let args = vec!["1".to_string(), "1".to_string()];
         run_pidstat(&args, &mut buf);
         let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("OurOS"));
+        assert!(output.contains("SlateOS"));
         assert!(output.contains("%usr"));
     }
 
@@ -3408,7 +3408,7 @@ mod tests {
         let args = vec!["1".to_string(), "1".to_string()];
         run_cifsiostat(&args, &mut buf);
         let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("OurOS"));
+        assert!(output.contains("SlateOS"));
         assert!(output.contains("Filesystem"));
     }
 
@@ -3418,7 +3418,7 @@ mod tests {
         let args = vec!["1".to_string(), "1".to_string()];
         run_tapestat(&args, &mut buf);
         let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("OurOS"));
+        assert!(output.contains("SlateOS"));
         assert!(output.contains("Tape"));
     }
 

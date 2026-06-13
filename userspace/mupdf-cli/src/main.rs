@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mupdf-cli — OurOS MuPDF tools
+//! mupdf-cli — SlateOS MuPDF tools
 //!
 //! Multi-personality: `mutool`, `mupdf`
 
@@ -14,7 +14,7 @@ fn run_mupdf(args: &[String], prog: &str) -> i32 {
     if prog == "mupdf" {
         if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
             println!("Usage: mupdf [OPTIONS] FILE [PAGE]");
-            println!("MuPDF 1.24.2 (OurOS) — Lightweight PDF viewer");
+            println!("MuPDF 1.24.2 (SlateOS) — Lightweight PDF viewer");
             return 0;
         }
         let file = args.iter().rfind(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("doc.pdf");
@@ -24,7 +24,7 @@ fn run_mupdf(args: &[String], prog: &str) -> i32 {
     // mutool
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: mutool COMMAND [OPTIONS]");
-        println!("mutool (MuPDF 1.24.2, OurOS)");
+        println!("mutool (MuPDF 1.24.2, SlateOS)");
         println!();
         println!("Commands:");
         println!("  draw       Render pages to images");

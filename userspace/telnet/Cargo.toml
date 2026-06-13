@@ -2,7 +2,7 @@
 name = "telnet"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS telnet client"
+description = "SlateOS telnet client"
 [dependencies]
 
 [lints]

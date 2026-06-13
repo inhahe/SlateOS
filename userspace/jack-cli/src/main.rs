@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! jack-cli — OurOS JACK Audio Connection Kit
+//! jack-cli — SlateOS JACK Audio Connection Kit
 //!
 //! Multi-personality: `jackd`, `jack_connect`, `jack_disconnect`, `jack_lsp`, `jack_control`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_jackd(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: jackd [OPTIONS] -d DRIVER [DRIVER-OPTIONS]");
-        println!("JACK Audio Connection Kit 1.9.22 (OurOS)");
+        println!("JACK Audio Connection Kit 1.9.22 (SlateOS)");
         println!("  -d DRIVER      Audio driver (alsa, dummy, net)");
         println!("  -r RATE        Sample rate");
         println!("  -p FRAMES      Frames per period");
@@ -23,7 +23,7 @@ fn run_jackd(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("jackd version 1.9.22 (OurOS)");
+        println!("jackd version 1.9.22 (SlateOS)");
         return 0;
     }
     let driver = args.windows(2).find(|w| w[0] == "-d").map(|w| w[1].as_str()).unwrap_or("alsa");

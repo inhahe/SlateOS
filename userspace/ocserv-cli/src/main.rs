@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ocserv-cli — OurOS OpenConnect VPN server
+//! ocserv-cli — SlateOS OpenConnect VPN server
 //!
 //! Multi-personality: `ocserv`, `occtl`
 
@@ -15,7 +15,7 @@ fn run_ocserv(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "occtl" => {
-                println!("occtl (OurOS) — OpenConnect server control");
+                println!("occtl (SlateOS) — OpenConnect server control");
                 println!("  show status        Server status");
                 println!("  show users         Connected users");
                 println!("  show sessions      Active sessions");
@@ -26,7 +26,7 @@ fn run_ocserv(args: &[String], prog: &str) -> i32 {
                 println!("  stop               Stop server");
             }
             _ => {
-                println!("ocserv (OurOS) — OpenConnect VPN server");
+                println!("ocserv (SlateOS) — OpenConnect VPN server");
                 println!("  -c FILE            Config file");
                 println!("  -f                 Foreground mode");
                 println!("  -d LEVEL           Debug level (1-9)");
@@ -37,7 +37,7 @@ fn run_ocserv(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("ocserv v1.3.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("ocserv v1.3.0 (SlateOS)"); return 0; }
     match prog {
         "occtl" => {
             println!("OpenConnect Server Status:");
@@ -49,7 +49,7 @@ fn run_ocserv(args: &[String], prog: &str) -> i32 {
             println!("  IP bans: 2");
         }
         _ => {
-            println!("ocserv v1.3.0 (OurOS)");
+            println!("ocserv v1.3.0 (SlateOS)");
             println!("  Listening: 0.0.0.0:443 (TCP+UDP)");
             println!("  TLS: enabled (certificate from /etc/ocserv/)");
             println!("  Auth: PAM + RADIUS");

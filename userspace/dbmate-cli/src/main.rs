@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dbmate-cli — OurOS dbmate database migration tool
+//! dbmate-cli — SlateOS dbmate database migration tool
 //!
 //! Single personality: `dbmate`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_dbmate(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: dbmate COMMAND [OPTIONS]");
-        println!("dbmate v2.14.0 (OurOS) — Database migration tool");
+        println!("dbmate v2.14.0 (SlateOS) — Database migration tool");
         println!();
         println!("Commands:");
         println!("  new NAME        Create new migration");

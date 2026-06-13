@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tippecanoe-cli — OurOS Tippecanoe vector tile builder
+//! tippecanoe-cli — SlateOS Tippecanoe vector tile builder
 //!
 //! Single personality: `tippecanoe`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_tippecanoe(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: tippecanoe [OPTIONS] -o OUTPUT.mbtiles INPUT.geojson...");
-        println!("Tippecanoe v2.53 (OurOS) — Build vector tilesets from GeoJSON");
+        println!("Tippecanoe v2.53 (SlateOS) — Build vector tilesets from GeoJSON");
         println!();
         println!("Options:");
         println!("  -o FILE           Output MBTiles file");
@@ -27,7 +27,7 @@ fn run_tippecanoe(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("tippecanoe v2.53 (OurOS)");
+        println!("tippecanoe v2.53 (SlateOS)");
         return 0;
     }
     let input = args.iter()

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bazel-cli — OurOS Bazel build system CLI
+//! bazel-cli — SlateOS Bazel build system CLI
 //!
 //! Single personality: `bazel`
 
@@ -11,7 +11,7 @@ fn run_bazel(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "help") {
         println!("Usage: bazel <COMMAND> [OPTIONS] [TARGETS...]");
         println!();
-        println!("Bazel build system (OurOS).");
+        println!("Bazel build system (SlateOS).");
         println!();
         println!("Commands:");
         println!("  build        Build targets");
@@ -25,7 +25,7 @@ fn run_bazel(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version") {
-        println!("bazel 7.0.1 (OurOS)");
+        println!("bazel 7.0.1 (SlateOS)");
         return 0;
     }
 

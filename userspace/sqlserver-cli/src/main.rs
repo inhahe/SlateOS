@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sqlserver-cli — OurOS Microsoft SQL Server (sqlcmd + SSMS)
+//! sqlserver-cli — SlateOS Microsoft SQL Server (sqlcmd + SSMS)
 //!
 //! Single personality: `sqlserver`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sqlserver(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sqlserver [OPTIONS] [-S SERVER]");
-        println!("Microsoft SQL Server 2022 (OurOS) — sqlcmd / SSMS / Azure Data Studio");
+        println!("Microsoft SQL Server 2022 (SlateOS) — sqlcmd / SSMS / Azure Data Studio");
         println!();
         println!("Options:");
         println!("  -S SERVER              Server name or address");
@@ -25,8 +25,8 @@ fn run_sqlserver(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Microsoft SQL Server 2022 (16.0.4135.4) (OurOS)"); return 0; }
-    println!("Microsoft SQL Server 2022 (16.0.4135.4) (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Microsoft SQL Server 2022 (16.0.4135.4) (SlateOS)"); return 0; }
+    println!("Microsoft SQL Server 2022 (16.0.4135.4) (SlateOS)");
     println!("  Editions: Express (free), Standard, Enterprise, Web, Developer");
     println!("  Cloud: Azure SQL Database, Azure SQL Managed Instance, SQL on Azure VMs");
     println!("  Language: T-SQL (Transact-SQL), SQLCLR (managed CLR procs)");

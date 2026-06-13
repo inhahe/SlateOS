@@ -1,4 +1,4 @@
-//! diskanalyzer -- OurOS Disk Usage Analyzer
+//! diskanalyzer -- SlateOS Disk Usage Analyzer
 //!
 //! A visual disk space analyzer similar to WinDirStat / Baobab / SpaceSniffer.
 //! Scans a directory tree, presents a squarified treemap, a sortable file list,

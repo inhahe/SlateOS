@@ -1,4 +1,4 @@
-//! OurOS Bridge, Traffic Control, and Ethernet Bridge Filtering Utility
+//! SlateOS Bridge, Traffic Control, and Ethernet Bridge Filtering Utility
 //!
 //! Multi-personality binary providing:
 //! - **bridge** -- bridge management (link, fdb, mdb, vlan, monitor)
@@ -906,7 +906,7 @@ fn run_bridge(args: &[String]) -> i32 {
             "-s" | "--statistics" => ctx.stats = true,
             "-d" | "--details" => ctx.details = true,
             "--version" | "-V" => {
-                write_out(&format!("bridge utility, OurOS v{VERSION}\n"));
+                write_out(&format!("bridge utility, SlateOS v{VERSION}\n"));
                 return 0;
             }
             "--help" | "-h" => {
@@ -1923,7 +1923,7 @@ fn run_tc(args: &[String]) -> i32 {
             "-j" | "--json" => ctx.json = true,
             "-p" | "--pretty" => ctx.pretty = true,
             "--version" | "-V" => {
-                write_out(&format!("tc utility, OurOS v{VERSION}\n"));
+                write_out(&format!("tc utility, SlateOS v{VERSION}\n"));
                 return 0;
             }
             "--help" | "-h" => {
@@ -2430,7 +2430,7 @@ fn run_ebtables(args: &[String]) -> i32 {
             0
         }
         "--version" | "-V" => {
-            write_out(&format!("ebtables v{VERSION} (OurOS)\n"));
+            write_out(&format!("ebtables v{VERSION} (SlateOS)\n"));
             0
         }
         "-L" | "--list" => {

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kustomize-cli — OurOS Kustomize CLI
+//! kustomize-cli — SlateOS Kustomize CLI
 //!
 //! Multi-personality: `kustomize`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_kustomize(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: kustomize COMMAND [OPTIONS]");
-        println!("kustomize 5.4.0 (OurOS)");
+        println!("kustomize 5.4.0 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  build         Build kustomization target");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nessus-cli — OurOS Tenable Nessus vulnerability scanner
+//! nessus-cli — SlateOS Tenable Nessus vulnerability scanner
 //!
 //! Single personality: `nessus`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_nessus(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: nessus [OPTIONS] [SUBCMD]");
-        println!("Tenable Nessus 10.8 (OurOS) — Vulnerability scanner");
+        println!("Tenable Nessus 10.8 (SlateOS) — Vulnerability scanner");
         println!();
         println!("Options:");
         println!("  --scan-new TEMPLATE    Create new scan");
@@ -23,8 +23,8 @@ fn run_nessus(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Tenable Nessus 10.8.2 (OurOS)"); return 0; }
-    println!("Tenable Nessus 10.8.2 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Tenable Nessus 10.8.2 (SlateOS)"); return 0; }
+    println!("Tenable Nessus 10.8.2 (SlateOS)");
     println!("  Editions: Essentials (free, 16 IPs), Professional, Expert, Manager");
     println!("  Plugins: 200,000+ vulnerability checks updated daily");
     println!("  Coverage: OS, network devices, web apps, databases, IoT, OT/ICS");

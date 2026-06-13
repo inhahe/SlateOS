@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mixbus-cli — OurOS Harrison Mixbus analog-modeling DAW
+//! mixbus-cli — SlateOS Harrison Mixbus analog-modeling DAW
 //!
 //! Single personality: `mixbus`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mb(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mixbus [OPTIONS] [SESSION]");
-        println!("Harrison Mixbus 10 (OurOS) — Console-style DAW modeling Harrison 32C analog desk");
+        println!("Harrison Mixbus 10 (SlateOS) — Console-style DAW modeling Harrison 32C analog desk");
         println!();
         println!("Options:");
         println!("  --open FILE            Open .ardour-style session");
@@ -23,8 +23,8 @@ fn run_mb(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Harrison Mixbus 10.0.5 (OurOS)"); return 0; }
-    println!("Harrison Mixbus 10.0.5 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Harrison Mixbus 10.0.5 (SlateOS)"); return 0; }
+    println!("Harrison Mixbus 10.0.5 (SlateOS)");
     println!("  Editions: Mixbus (8-bus), Mixbus 32C (12-bus + EQ)");
     println!("  Engine: Built on Ardour (open source DAW)");
     println!("  Channel strip: True analog-modeled Harrison EQ, comp, leveler, saturator");

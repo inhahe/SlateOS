@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! higan-cli — OurOS higan multi-system emulator
+//! higan-cli — SlateOS higan multi-system emulator
 //!
 //! Single personality: `higan`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_higan(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: higan [OPTIONS] [ROM]");
-        println!("higan v115 (OurOS) — Cycle-accurate multi-system emulator");
+        println!("higan v115 (SlateOS) — Cycle-accurate multi-system emulator");
         println!();
         println!("Options:");
         println!("  --system SYS      Target system");
@@ -27,7 +27,7 @@ fn run_higan(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("higan v115 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("higan v115 (SlateOS)"); return 0; }
     if args.iter().any(|a| a == "--list-systems") {
         println!("Supported systems:");
         println!("  Famicom (NES)");
@@ -44,7 +44,7 @@ fn run_higan(args: &[String], _prog: &str) -> i32 {
     }
     let files: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
     if files.is_empty() {
-        println!("higan v115 (OurOS) — Cycle-Accurate Emulator");
+        println!("higan v115 (SlateOS) — Cycle-Accurate Emulator");
         println!("  Accuracy: cycle-accurate CPU, scanline PPU");
         println!("  Systems: 10+ supported");
         println!("  Status: waiting for ROM");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! svgcleaner — OurOS SVG optimizer/cleaner
+//! svgcleaner — SlateOS SVG optimizer/cleaner
 //!
 //! Single personality: `svgcleaner`
 
@@ -45,7 +45,7 @@ fn run_svgcleaner(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("svgcleaner 0.9.5 (OurOS)");
+        println!("svgcleaner 0.9.5 (SlateOS)");
         return 0;
     }
 

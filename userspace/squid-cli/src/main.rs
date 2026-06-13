@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! squid-cli — OurOS web proxy/caching tools
+//! squid-cli — SlateOS web proxy/caching tools
 //!
 //! Multi-personality: `squid`, `squidclient`, `purge`
 
@@ -14,7 +14,7 @@ fn run_squid(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: squid [OPTIONS]");
         println!();
-        println!("squid — web proxy cache (OurOS).");
+        println!("squid — web proxy cache (SlateOS).");
         println!();
         println!("Options:");
         println!("  -f <file>    Config file");
@@ -29,7 +29,7 @@ fn run_squid(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-v") {
-        println!("Squid Cache: Version 6.6 (OurOS)");
+        println!("Squid Cache: Version 6.6 (SlateOS)");
         println!("Service Name: squid");
         println!("configure options: '--enable-ssl-crtd' '--with-openssl'");
         return 0;
@@ -63,7 +63,7 @@ fn run_squid(args: &[String]) -> i32 {
         return 0;
     }
 
-    println!("Squid Cache: Version 6.6 (OurOS)");
+    println!("Squid Cache: Version 6.6 (SlateOS)");
     println!("Process ID 1234");
     println!("Process Roles: worker");
     println!();
@@ -86,7 +86,7 @@ fn run_squidclient(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: squidclient [OPTIONS] <url>");
         println!();
-        println!("squidclient — Squid HTTP client (OurOS).");
+        println!("squidclient — Squid HTTP client (SlateOS).");
         println!();
         println!("Options:");
         println!("  -h <host>    Proxy host (default: localhost)");

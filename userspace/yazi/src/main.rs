@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! yazi — OurOS blazing fast terminal file manager
+//! yazi — SlateOS blazing fast terminal file manager
 //!
 //! Single personality: `yazi`
 
@@ -24,7 +24,7 @@ fn run_yazi(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("yazi 0.2.5 (OurOS)");
+        println!("yazi 0.2.5 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "--clear-cache") {
@@ -35,8 +35,8 @@ fn run_yazi(args: Vec<String>) -> i32 {
     }
     if args.iter().any(|a| a == "--debug") {
         println!("Yazi debug info:");
-        println!("  Version: 0.2.5 (OurOS)");
-        println!("  OS: OurOS x86_64");
+        println!("  Version: 0.2.5 (SlateOS)");
+        println!("  OS: SlateOS x86_64");
         println!("  Config dir: ~/.config/yazi/");
         println!("  Data dir: ~/.local/share/yazi/");
         println!("  Cache dir: ~/.cache/yazi/");
@@ -53,7 +53,7 @@ fn run_yazi(args: Vec<String>) -> i32 {
         .map(|s| s.as_str())
         .unwrap_or(".");
 
-    println!("yazi 0.2.5 (OurOS) — {}", entry);
+    println!("yazi 0.2.5 (SlateOS) — {}", entry);
     println!();
     println!("┌─ Parent ──────┬─ Current ─────────┬─ Preview ──────────────┐");
     println!("│  home/        │  Cargo.toml       │ [package]              │");

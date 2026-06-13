@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! goxel-cli — OurOS Goxel voxel editor
+//! goxel-cli — SlateOS Goxel voxel editor
 //!
 //! Single personality: `goxel`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_goxel(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: goxel [OPTIONS] [FILE.gox]");
-        println!("goxel v0.14 (OurOS) — Open source voxel editor");
+        println!("goxel v0.14 (SlateOS) — Open source voxel editor");
         println!();
         println!("Options:");
         println!("  --version         Show version");
@@ -24,7 +24,7 @@ fn run_goxel(args: &[String], _prog: &str) -> i32 {
         println!("Export: OBJ, PLY, STL, glTF, VOX, PNG");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("goxel v0.14 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("goxel v0.14 (SlateOS)"); return 0; }
     println!("goxel: voxel editor started");
     println!("  Canvas: 256x256x256 voxels");
     println!("  Layers: unlimited");

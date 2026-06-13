@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! laminar-cli — OurOS Laminar CI
+//! laminar-cli — SlateOS Laminar CI
 //!
 //! Multi-personality: `laminard`, `laminarc`
 
@@ -15,7 +15,7 @@ fn run_laminar(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "laminarc" => {
-                println!("laminarc (OurOS) — Laminar CI client");
+                println!("laminarc (SlateOS) — Laminar CI client");
                 println!();
                 println!("Commands:");
                 println!("  queue JOB          Queue a job run");
@@ -28,7 +28,7 @@ fn run_laminar(args: &[String], prog: &str) -> i32 {
                 println!("  --host HOST:PORT   Laminar daemon address");
             }
             _ => {
-                println!("laminard (OurOS) — Laminar CI daemon");
+                println!("laminard (SlateOS) — Laminar CI daemon");
                 println!();
                 println!("Options:");
                 println!("  --bind-http ADDR   HTTP listen address");
@@ -39,15 +39,15 @@ fn run_laminar(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Laminar v1.4.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("Laminar v1.4.0 (SlateOS)"); return 0; }
     match prog {
         "laminarc" => {
-            println!("Laminar Client v1.4.0 (OurOS)");
+            println!("Laminar Client v1.4.0 (SlateOS)");
             println!("  Server: localhost:8881");
             println!("  Status: connected");
         }
         _ => {
-            println!("Laminar CI v1.4.0 (OurOS)");
+            println!("Laminar CI v1.4.0 (SlateOS)");
             println!("  HTTP: http://0.0.0.0:8080");
             println!("  RPC: 0.0.0.0:8881");
             println!("  Jobs: 15 configured");

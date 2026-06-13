@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! prusaslicer-cli — OurOS PrusaSlicer 3D printing slicer
+//! prusaslicer-cli — SlateOS PrusaSlicer 3D printing slicer
 //!
 //! Multi-personality: `prusa-slicer`, `prusaslicer`
 
@@ -23,7 +23,7 @@ fn run_prusaslicer(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("PrusaSlicer 2.7.1 (OurOS)");
+        println!("PrusaSlicer 2.7.1 (SlateOS)");
         println!("Based on Slic3r");
         return 0;
     }

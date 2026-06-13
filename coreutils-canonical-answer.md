@@ -8,7 +8,7 @@ and a recommendation that don't lean on those two concerns.
 design for *this* OS** — not by a small margin, and not because of where the
 maintenance has gone, but because a single multi-call binary is fundamentally
 **incompatible with capability-based least privilege**, which is a core,
-non-negotiable design principle of OuRoS. The one genuine advantage a multi-call
+non-negotiable design principle of SlateOS. The one genuine advantage a multi-call
 binary has *that isn't about disk space* — shared code — is fully obtainable
 **without** a multi-call binary by factoring the common logic into a shared
 **library crate**. So you can have the code reuse and keep per-binary identity.
@@ -20,7 +20,7 @@ deliberately excluded).
 
 ## The decisive axis: capability-based security / least privilege
 
-OuRoS is "capability-based security from day one… no ambient authority." That
+SlateOS is "capability-based security from day one… no ambient authority." That
 principle is what makes this not a close call.
 
 - **Per-tool binaries → per-tool capability sets.** Each tool is a distinct
@@ -66,7 +66,7 @@ corruption of that single artifact — degrades *every* tool at once. Smaller
 blast radius favors separate binaries.
 
 ### 3. Fit with the content-addressed package store + generations
-OuRoS ships a content-addressed store with generational updates (`pkg/`).
+SlateOS ships a content-addressed store with generational updates (`pkg/`).
 Per-tool artifacts are the natural granularity for it:
 - A fix to `wc` republishes only `wc`'s content hash; every other tool keeps its
   existing hash and is **deduplicated across generations** untouched.

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! augeas-cli — OurOS Augeas configuration editing tool
+//! augeas-cli — SlateOS Augeas configuration editing tool
 //!
 //! Multi-personality: `augtool`, `augparse`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_augtool(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: augtool [OPTIONS] [COMMAND]");
-        println!("augtool v1.14 (OurOS) — Configuration file editor via tree API");
+        println!("augtool v1.14 (SlateOS) — Configuration file editor via tree API");
         println!();
         println!("Options:");
         println!("  -r ROOT       Use ROOT as filesystem root");
@@ -30,7 +30,7 @@ fn run_augtool(args: &[String], _prog: &str) -> i32 {
         println!("  save          Write changes to disk");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("augtool v1.14 (OurOS, Augeas)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("augtool v1.14 (SlateOS, Augeas)"); return 0; }
     println!("augtool: Augeas shell (interactive mode)");
     println!("  Root: /");
     println!("  Lenses loaded: 215");
@@ -41,10 +41,10 @@ fn run_augtool(args: &[String], _prog: &str) -> i32 {
 fn run_augparse(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: augparse [OPTIONS] <lens-file>");
-        println!("augparse v1.14 (OurOS) — Test Augeas lens files");
+        println!("augparse v1.14 (SlateOS) — Test Augeas lens files");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("augparse v1.14 (OurOS, Augeas)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("augparse v1.14 (SlateOS, Augeas)"); return 0; }
     if let Some(lens) = args.iter().find(|a| !a.starts_with('-')) {
         println!("augparse: lens '{}' parsed successfully", lens);
         println!("  Tests: all passed");

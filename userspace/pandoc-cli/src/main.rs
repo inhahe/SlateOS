@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pandoc-cli — OurOS Pandoc document converter CLI
+//! pandoc-cli — SlateOS Pandoc document converter CLI
 //!
 //! Single personality: `pandoc`
 
@@ -11,7 +11,7 @@ fn run_pandoc(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pandoc [OPTIONS] [INPUT...]");
         println!();
-        println!("Pandoc — universal document converter (OurOS).");
+        println!("Pandoc — universal document converter (SlateOS).");
         println!();
         println!("Options:");
         println!("  -f, --from FORMAT      Input format");
@@ -34,7 +34,7 @@ fn run_pandoc(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("pandoc 3.1.11 (OurOS)");
+        println!("pandoc 3.1.11 (SlateOS)");
         println!("Features: +server +lua");
         return 0;
     }

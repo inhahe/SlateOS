@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! promql-cli — OurOS PromQL CLI tool
+//! promql-cli — SlateOS PromQL CLI tool
 //!
 //! Single personality: `promql`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_promql(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: promql [OPTIONS] QUERY");
-        println!("promql v0.5.0 (OurOS) — PromQL command-line tool");
+        println!("promql v0.5.0 (SlateOS) — PromQL command-line tool");
         println!();
         println!("Options:");
         println!("  QUERY                 PromQL query to execute");
@@ -31,7 +31,7 @@ fn run_promql(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("promql v0.5.0 (OurOS)");
+        println!("promql v0.5.0 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "--parse") {

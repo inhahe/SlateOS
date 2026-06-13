@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cachet-cli — OurOS Cachet status page
+//! cachet-cli — SlateOS Cachet status page
 //!
 //! Single personality: `cachet`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_cachet(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: cachet [COMMAND] [OPTIONS]");
-        println!("Cachet v3.0 (OurOS) — Open-source status page system");
+        println!("Cachet v3.0 (SlateOS) — Open-source status page system");
         println!();
         println!("Commands:");
         println!("  component list|create|update  Manage components");
@@ -30,8 +30,8 @@ fn run_cachet(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Cachet v3.0.0 (OurOS)"); return 0; }
-    println!("Cachet v3.0.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Cachet v3.0.0 (SlateOS)"); return 0; }
+    println!("Cachet v3.0.0 (SlateOS)");
     println!("  Components: 8 (7 operational, 1 major outage)");
     println!("  Component groups: 3");
     println!("  Incidents: 2 unresolved");

@@ -2,7 +2,7 @@
 name = "install"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS install - copy files and set attributes"
+description = "SlateOS install - copy files and set attributes"
 [dependencies]
 
 [build-dependencies]

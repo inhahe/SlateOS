@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! entraid-cli — OurOS Microsoft Entra ID (formerly Azure AD — the M365 identity backbone)
+//! entraid-cli — SlateOS Microsoft Entra ID (formerly Azure AD — the M365 identity backbone)
 //!
 //! Single personality: `entraid`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_eid(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: entraid [OPTIONS]");
-        println!("Microsoft Entra ID (OurOS) — Cloud identity & access management");
+        println!("Microsoft Entra ID (SlateOS) — Cloud identity & access management");
         println!();
         println!("Options:");
         println!("  --p1                    Entra ID P1 (Conditional Access, included with M365 E3)");
@@ -24,8 +24,8 @@ fn run_eid(args: &[String], _prog: &str) -> i32 {
         println!("  --version               Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Microsoft Entra ID 2024 (OurOS)"); return 0; }
-    println!("Microsoft Entra ID 2024 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Microsoft Entra ID 2024 (SlateOS)"); return 0; }
+    println!("Microsoft Entra ID 2024 (SlateOS)");
     println!("  Vendor: Microsoft Corporation (Redmond, WA — NASDAQ:MSFT)");
     println!("  History: started as 'Windows Azure Active Directory' 2010 (auth for Azure cloud)");
     println!("          renamed 'Azure Active Directory' 2014");

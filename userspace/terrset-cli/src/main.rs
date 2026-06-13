@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! terrset-cli — OurOS TerrSet geospatial monitoring
+//! terrset-cli — SlateOS TerrSet geospatial monitoring
 //!
 //! Single personality: `terrset`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_terrset(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: terrset [OPTIONS] COMMAND");
-        println!("TerrSet v19 (OurOS) — Geospatial monitoring and modeling");
+        println!("TerrSet v19 (SlateOS) — Geospatial monitoring and modeling");
         println!();
         println!("Commands:");
         println!("  classify       Land cover classification");
@@ -30,8 +30,8 @@ fn run_terrset(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("TerrSet v19.0 (OurOS)"); return 0; }
-    println!("TerrSet v19.0 (OurOS) — Geospatial Monitoring");
+    if args.iter().any(|a| a == "--version") { println!("TerrSet v19.0 (SlateOS)"); return 0; }
+    println!("TerrSet v19.0 (SlateOS) — Geospatial Monitoring");
     println!("  Module: Land Cover Change Analysis");
     println!("  Input: landsat_2020.tif, landsat_2023.tif");
     println!("  Classification: Maximum Likelihood");

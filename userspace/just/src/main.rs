@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! just — OurOS command runner (make alternative)
+//! just — SlateOS command runner (make alternative)
 //!
 //! Single personality: `just`
 
@@ -43,7 +43,7 @@ fn run_just(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("just 1.25.2 (OurOS)");
+        println!("just 1.25.2 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "--init") {

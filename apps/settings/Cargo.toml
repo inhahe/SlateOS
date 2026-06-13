@@ -2,6 +2,6 @@
 name = "settings"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS Settings — centralized system configuration UI"
+description = "SlateOS Settings — centralized system configuration UI"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }

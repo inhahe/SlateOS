@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! snap-cli — OurOS Snap package manager
+//! snap-cli — SlateOS Snap package manager
 //!
 //! Multi-personality: `snap`
 
@@ -10,7 +10,7 @@ use std::process;
 fn run_snap(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: snap COMMAND [OPTIONS]");
-        println!("snap 2.63 (OurOS)");
+        println!("snap 2.63 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  install       Install a snap");
@@ -36,8 +36,8 @@ fn run_snap(args: &[String]) -> i32 {
             println!("snap    2.63");
             println!("snapd   2.63");
             println!("series  16");
-            println!("ouros   1.0");
-            println!("kernel  6.7.4-ouros");
+            println!("slateos   1.0");
+            println!("kernel  6.7.4-slateos");
         }
         "install" => {
             let snap = args.get(1).map(|s| s.as_str()).unwrap_or("hello");

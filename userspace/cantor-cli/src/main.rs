@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cantor-cli — OurOS Cantor math notebook
+//! cantor-cli — SlateOS Cantor math notebook
 //!
 //! Single personality: `cantor`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_cantor(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: cantor [OPTIONS] [FILE.cws]");
-        println!("cantor v23.08 (OurOS) — KDE math worksheet application");
+        println!("cantor v23.08 (SlateOS) — KDE math worksheet application");
         println!();
         println!("Options:");
         println!("  --backend NAME    Select math backend");
@@ -24,7 +24,7 @@ fn run_cantor(args: &[String], _prog: &str) -> i32 {
         println!("  kalgebra, scilab, qalculate, lua");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("cantor v23.08 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("cantor v23.08 (SlateOS)"); return 0; }
     println!("cantor: math worksheet started");
     println!("  Available backends:");
     println!("    Maxima:   installed");

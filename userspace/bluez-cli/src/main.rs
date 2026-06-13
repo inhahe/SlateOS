@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bluez-cli — OurOS BlueZ Bluetooth tools
+//! bluez-cli — SlateOS BlueZ Bluetooth tools
 //!
 //! Multi-personality: `bluetoothctl`, `hcitool`, `hciconfig`, `btmon`, `sdptool`
 
@@ -19,7 +19,7 @@ fn run_bluetoothctl(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: bluetoothctl [OPTIONS] [COMMAND]");
         println!();
-        println!("bluetoothctl — BlueZ Bluetooth control (OurOS).");
+        println!("bluetoothctl — BlueZ Bluetooth control (SlateOS).");
         println!();
         println!("Commands: list, show, power on|off, scan on|off, devices,");
         println!("  pair ADDR, connect ADDR, disconnect ADDR, trust ADDR,");
@@ -27,17 +27,17 @@ fn run_bluetoothctl(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("bluetoothctl: 5.72 (OurOS)");
+        println!("bluetoothctl: 5.72 (SlateOS)");
         return 0;
     }
 
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("show");
     match subcmd {
-        "list" => println!("Controller AA:BB:CC:DD:EE:FF OurOS-BT [default]"),
+        "list" => println!("Controller AA:BB:CC:DD:EE:FF SlateOS-BT [default]"),
         "show" => {
             println!("Controller AA:BB:CC:DD:EE:FF (public)");
-            println!("\tName: OurOS-BT");
-            println!("\tAlias: OurOS-BT");
+            println!("\tName: SlateOS-BT");
+            println!("\tAlias: SlateOS-BT");
             println!("\tClass: 0x001c010c");
             println!("\tPowered: yes");
             println!("\tDiscoverable: no");
@@ -121,7 +121,7 @@ fn main() {
     let code = match prog.as_str() {
         "hcitool" => run_hcitool(&rest),
         "hciconfig" => run_hciconfig(&rest),
-        "btmon" => { println!("Bluetooth monitor ver 5.72 (OurOS)"); println!("= Open Index: AA:BB:CC:DD:EE:FF"); 0 }
+        "btmon" => { println!("Bluetooth monitor ver 5.72 (SlateOS)"); println!("= Open Index: AA:BB:CC:DD:EE:FF"); 0 }
         "sdptool" => { println!("Inquiring..."); println!("Service Name: Audio Sink"); 0 }
         _ => run_bluetoothctl(&rest),
     };

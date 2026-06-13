@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rofi-cli — OurOS Rofi application launcher
+//! rofi-cli — SlateOS Rofi application launcher
 //!
 //! Multi-personality: `rofi`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rofi(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: rofi [OPTIONS]");
-        println!("rofi 1.7.5 (OurOS) — Window switcher, app launcher, dmenu replacement");
+        println!("rofi 1.7.5 (SlateOS) — Window switcher, app launcher, dmenu replacement");
         println!();
         println!("Options:");
         println!("  -show MODE     Show mode (drun, run, window, ssh, combi, keys)");

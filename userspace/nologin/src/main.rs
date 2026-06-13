@@ -1,4 +1,4 @@
-//! OurOS nologin shell.
+//! SlateOS nologin shell.
 //!
 //! Multi-personality binary providing:
 //! - **nologin** — politely refuse a login

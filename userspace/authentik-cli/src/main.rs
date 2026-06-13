@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! authentik-cli — OurOS authentik identity provider
+//! authentik-cli — SlateOS authentik identity provider
 //!
 //! Single personality: `authentik`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_authentik(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: authentik [COMMAND] [OPTIONS]");
-        println!("authentik v2024.2 (OurOS) — Identity provider and SSO");
+        println!("authentik v2024.2 (SlateOS) — Identity provider and SSO");
         println!();
         println!("Commands:");
         println!("  server             Start web server");
@@ -29,8 +29,8 @@ fn run_authentik(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("authentik v2024.2.3 (OurOS)"); return 0; }
-    println!("authentik v2024.2.3 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("authentik v2024.2.3 (SlateOS)"); return 0; }
+    println!("authentik v2024.2.3 (SlateOS)");
     println!("  Web: https://0.0.0.0:9443");
     println!("  Users: 567");
     println!("  Groups: 12");

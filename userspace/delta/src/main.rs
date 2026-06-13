@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! delta — OurOS syntax-highlighting pager for git, diff, and grep output
+//! delta — SlateOS syntax-highlighting pager for git, diff, and grep output
 //!
 //! Single personality: `delta`
 
@@ -55,7 +55,7 @@ fn run_delta(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("delta 0.17.0 (OurOS)");
+        println!("delta 0.17.0 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "--list-syntax-themes") {

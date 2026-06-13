@@ -1,4 +1,4 @@
-//! Multi-personality cryptographic checksum utility for OurOS.
+//! Multi-personality cryptographic checksum utility for SlateOS.
 //!
 //! This binary detects the algorithm from `argv[0]`:
 //!   - `md5sum`    -> MD5    (RFC 1321, 128-bit)
@@ -166,7 +166,7 @@ fn parse_args(algo: Algorithm) -> Options {
                 process::exit(0);
             }
             "--version" => {
-                println!("{} (OurOS) 0.1.0", algo.command());
+                println!("{} (SlateOS) 0.1.0", algo.command());
                 process::exit(0);
             }
             other => {

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xgboost-cli — OurOS XGBoost gradient boosting
+//! xgboost-cli — SlateOS XGBoost gradient boosting
 //!
 //! Single personality: `xgboost`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_xgboost(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: xgboost CONFIG_FILE");
-        println!("XGBoost v2.0 (OurOS) — Scalable gradient boosting");
+        println!("XGBoost v2.0 (SlateOS) — Scalable gradient boosting");
         println!();
         println!("Config file options:");
         println!("  task = train|predict|dump");
@@ -29,8 +29,8 @@ fn run_xgboost(args: &[String], _prog: &str) -> i32 {
         println!("  --version                Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("XGBoost v2.0.3 (OurOS)"); return 0; }
-    println!("XGBoost v2.0.3 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("XGBoost v2.0.3 (SlateOS)"); return 0; }
+    println!("XGBoost v2.0.3 (SlateOS)");
     println!("  Task: train");
     println!("  Objective: binary:logistic");
     println!("  Data: train.libsvm (50,000 samples)");

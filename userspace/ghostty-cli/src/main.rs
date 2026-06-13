@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ghostty-cli — OurOS Ghostty terminal emulator
+//! ghostty-cli — SlateOS Ghostty terminal emulator
 //!
 //! Single personality: `ghostty`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ghostty(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ghostty [OPTIONS]");
-        println!("Ghostty 1.0.0 (OurOS) — Fast, feature-rich terminal emulator");
+        println!("Ghostty 1.0.0 (SlateOS) — Fast, feature-rich terminal emulator");
         println!();
         println!("Options:");
         println!("  --config-file FILE       Config file path");
@@ -36,7 +36,7 @@ fn run_ghostty(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("ghostty 1.0.0 (OurOS)");
+        println!("ghostty 1.0.0 (SlateOS)");
         return 0;
     }
     // Handle + actions

@@ -2,4 +2,4 @@
 name = "coreutils"
 version = "0.1.0"
 edition = "2024"
-description = "Coreutils for OurOS (85 total)"
+description = "Coreutils for SlateOS (85 total)"

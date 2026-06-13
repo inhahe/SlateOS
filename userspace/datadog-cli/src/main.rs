@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! datadog-cli — OurOS Datadog CLI (dogstatsd/ddog)
+//! datadog-cli — SlateOS Datadog CLI (dogstatsd/ddog)
 //!
 //! Single personality: `ddog`
 
@@ -35,7 +35,7 @@ fn run_ddog(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("ddog 1.0.0 (OurOS)");
+        println!("ddog 1.0.0 (SlateOS)");
         return 0;
     }
 

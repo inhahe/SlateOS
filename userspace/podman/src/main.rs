@@ -1,4 +1,4 @@
-//! OurOS Container Management Tools (podman/buildah/skopeo)
+//! SlateOS Container Management Tools (podman/buildah/skopeo)
 //!
 //! Multi-personality binary providing:
 //! - **podman** (default) — container lifecycle management, pod orchestration,
@@ -1717,7 +1717,7 @@ fn cmd_podman_system(args: &[String]) -> i32 {
         "info" => {
             println!("host:");
             println!("  arch: x86_64");
-            println!("  os: ouros");
+            println!("  os: slateos");
             println!("  kernel: 0.1.0");
             println!("  memTotal: 8589934592");
             println!("store:");

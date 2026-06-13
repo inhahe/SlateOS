@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dog — OurOS command-line DNS client (like dig but friendlier)
+//! dog — SlateOS command-line DNS client (like dig but friendlier)
 //!
 //! Single personality: `dog`
 
@@ -41,7 +41,7 @@ fn run_dog(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("dog 0.1.0 (OurOS)");
+        println!("dog 0.1.0 (SlateOS)");
         return 0;
     }
 

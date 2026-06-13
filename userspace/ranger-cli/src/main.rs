@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ranger-cli — OurOS Ranger file manager
+//! ranger-cli — SlateOS Ranger file manager
 //!
 //! Multi-personality: `ranger`, `rifle`
 
@@ -38,7 +38,7 @@ fn run_ranger(args: &[String], prog: &str) -> i32 {
     // ranger
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ranger [OPTIONS] [PATH]");
-        println!("ranger 1.9.3 (OurOS) — Console file manager with VI keybindings");
+        println!("ranger 1.9.3 (SlateOS) — Console file manager with VI keybindings");
         println!();
         println!("Options:");
         println!("  --version               Show version");
@@ -53,7 +53,7 @@ fn run_ranger(args: &[String], prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("ranger 1.9.3 (OurOS)");
+        println!("ranger 1.9.3 (SlateOS)");
         return 0;
     }
     if let Some(pos) = args.iter().position(|a| a == "--copy-config") {

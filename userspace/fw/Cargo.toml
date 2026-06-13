@@ -2,5 +2,5 @@
 name = "fw"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS firewall management CLI"
+description = "SlateOS firewall management CLI"
 [dependencies]

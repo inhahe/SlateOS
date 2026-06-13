@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! godoc-cli — OurOS Go documentation tools
+//! godoc-cli — SlateOS Go documentation tools
 //!
 //! Multi-personality: `godoc`, `go doc`
 
@@ -10,7 +10,7 @@ use std::process;
 fn run_godoc(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: godoc [OPTIONS] [PACKAGE] [SYMBOL]");
-        println!("godoc — Go Documentation Server (OurOS)");
+        println!("godoc — Go Documentation Server (SlateOS)");
         println!();
         println!("Options:");
         println!("  -http ADDR     HTTP server address (default :6060)");
@@ -24,7 +24,7 @@ fn run_godoc(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("godoc (OurOS, go1.22.0)");
+        println!("godoc (SlateOS, go1.22.0)");
         return 0;
     }
     if args.iter().any(|a| a == "-http") {

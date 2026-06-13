@@ -2,6 +2,6 @@
 name = "emojipicker"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS Emoji Picker — taskbar popup for emoji input"
+description = "SlateOS Emoji Picker — taskbar popup for emoji input"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }

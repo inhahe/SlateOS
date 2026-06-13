@@ -1,4 +1,4 @@
-//! Maze generator and solver for OurOS.
+//! Maze generator and solver for SlateOS.
 //!
 //! Features:
 //! - Recursive backtracker maze generation (perfect mazes)

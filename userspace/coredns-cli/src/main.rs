@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! coredns-cli — OurOS CoreDNS server
+//! coredns-cli — SlateOS CoreDNS server
 //!
 //! Single personality: `coredns`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_coredns(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: coredns [OPTIONS]");
-        println!("CoreDNS v1.11 (OurOS) — DNS and service discovery");
+        println!("CoreDNS v1.11 (SlateOS) — DNS and service discovery");
         println!();
         println!("Options:");
         println!("  -conf FILE     Corefile configuration");
@@ -24,8 +24,8 @@ fn run_coredns(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("CoreDNS v1.11.3 (OurOS)"); return 0; }
-    println!("CoreDNS v1.11.3 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("CoreDNS v1.11.3 (SlateOS)"); return 0; }
+    println!("CoreDNS v1.11.3 (SlateOS)");
     println!("  Corefile: /etc/coredns/Corefile");
     println!("  Zones:");
     println!("    .:53 -> forward to 1.1.1.1, 8.8.8.8");

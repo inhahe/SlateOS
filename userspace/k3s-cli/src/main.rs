@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! k3s-cli — OurOS K3s lightweight Kubernetes
+//! k3s-cli — SlateOS K3s lightweight Kubernetes
 //!
 //! Single personality: `k3s`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_k3s(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: k3s COMMAND [OPTIONS]");
-        println!("k3s v1.30.0+k3s1 (OurOS) — Lightweight Kubernetes");
+        println!("k3s v1.30.0+k3s1 (SlateOS) — Lightweight Kubernetes");
         println!();
         println!("Commands:");
         println!("  server          Run management server");
@@ -30,7 +30,7 @@ fn run_k3s(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("k3s version v1.30.0+k3s1 (OurOS)");
+        println!("k3s version v1.30.0+k3s1 (SlateOS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("server");

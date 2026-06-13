@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zerotier-cli — OurOS ZeroTier virtual network
+//! zerotier-cli — SlateOS ZeroTier virtual network
 //!
 //! Multi-personality: `zerotier-one`, `zerotier-cli`
 
@@ -15,13 +15,13 @@ fn run_zerotier(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [COMMAND] [OPTIONS]", prog);
         match prog {
             "zerotier-one" => {
-                println!("zerotier-one (OurOS) — ZeroTier network daemon");
+                println!("zerotier-one (SlateOS) — ZeroTier network daemon");
                 println!("  -d                 Daemonize");
                 println!("  -p PORT            Primary port (default: 9993)");
                 println!("  -U                 Run from user home dir");
             }
             _ => {
-                println!("zerotier-cli (OurOS) — ZeroTier client control");
+                println!("zerotier-cli (SlateOS) — ZeroTier client control");
                 println!("  info               Show node info");
                 println!("  listnetworks       List joined networks");
                 println!("  listpeers          List peers");
@@ -33,10 +33,10 @@ fn run_zerotier(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("ZeroTier One v1.14.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("ZeroTier One v1.14.0 (SlateOS)"); return 0; }
     match prog {
         "zerotier-one" => {
-            println!("ZeroTier One v1.14.0 (OurOS)");
+            println!("ZeroTier One v1.14.0 (SlateOS)");
             println!("  Node ID: a1b2c3d4e5");
             println!("  Port: 9993/udp");
             println!("  Networks: 2 joined");

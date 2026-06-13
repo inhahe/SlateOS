@@ -8,7 +8,7 @@
 #![allow(clippy::similar_names)]
 #![allow(clippy::needless_pass_by_value)]
 
-//! OurOS Habit Tracker --- track daily and weekly habits with streaks,
+//! SlateOS Habit Tracker --- track daily and weekly habits with streaks,
 //! categories, contribution graphs, and completion statistics.
 //!
 //! Features:

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! paypal-cli — OurOS PayPal CLI
+//! paypal-cli — SlateOS PayPal CLI
 //!
 //! Single personality: `paypal`
 
@@ -11,7 +11,7 @@ fn run_paypal(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: paypal <COMMAND> [OPTIONS]");
         println!();
-        println!("PayPal CLI for payment management (OurOS).");
+        println!("PayPal CLI for payment management (SlateOS).");
         println!();
         println!("Commands:");
         println!("  auth         Authenticate");

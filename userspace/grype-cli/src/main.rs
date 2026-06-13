@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! grype-cli — OurOS Grype vulnerability scanner
+//! grype-cli — SlateOS Grype vulnerability scanner
 //!
 //! Multi-personality: `grype`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_grype(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: grype [SOURCE] [OPTIONS]");
-        println!("Grype 0.79.0 (OurOS) — Vulnerability scanner");
+        println!("Grype 0.79.0 (SlateOS) — Vulnerability scanner");
         println!();
         println!("Sources:");
         println!("  IMAGE           Container image");

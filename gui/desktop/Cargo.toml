@@ -2,6 +2,6 @@
 name = "desktop"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS desktop shell — window manager, taskbar, system tray"
+description = "SlateOS desktop shell — window manager, taskbar, system tray"
 [dependencies]
 guitk = { path = "../toolkit" }

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lualatex-cli — OurOS LuaLaTeX/LuaTeX engine
+//! lualatex-cli — SlateOS LuaLaTeX/LuaTeX engine
 //!
 //! Multi-personality: `lualatex`, `luatex`, `luahbtex`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_lualatex(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: lualatex [OPTIONS] FILE.tex");
-        println!("LuaHBTeX 1.18.0 (TeX Live 2024/OurOS)");
+        println!("LuaHBTeX 1.18.0 (TeX Live 2024/SlateOS)");
         println!();
         println!("Options:");
         println!("  --interaction=MODE    Set interaction mode");
@@ -29,7 +29,7 @@ fn run_lualatex(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("This is LuaHBTeX, Version 1.18.0 (TeX Live 2024/OurOS)");
+        println!("This is LuaHBTeX, Version 1.18.0 (TeX Live 2024/SlateOS)");
         println!("Lua version: Lua 5.4, HarfBuzz version: 8.3.0");
         println!("Development id: 7610");
         return 0;
@@ -39,7 +39,7 @@ fn run_lualatex(args: &[String]) -> i32 {
         .map(|s| s.as_str())
         .unwrap_or("document.tex");
     let base = file.rsplit_once('.').map_or(file, |(b, _)| b);
-    println!("This is LuaHBTeX, Version 1.18.0 (TeX Live 2024/OurOS)");
+    println!("This is LuaHBTeX, Version 1.18.0 (TeX Live 2024/SlateOS)");
     println!(" restricted \\write18 enabled.");
     println!("({})", file);
     println!("LaTeX2e <2024-02-01> patch level 2");

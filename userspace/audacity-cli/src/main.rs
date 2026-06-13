@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! audacity-cli — OurOS Audacity-style audio editor CLI
+//! audacity-cli — SlateOS Audacity-style audio editor CLI
 //!
 //! Single personality: `audacity-cli`
 
@@ -42,7 +42,7 @@ fn run_audacity(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("audacity-cli 3.5.0 (OurOS)");
+        println!("audacity-cli 3.5.0 (SlateOS)");
         return 0;
     }
 

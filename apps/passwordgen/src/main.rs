@@ -1,4 +1,4 @@
-//! `OurOS` Password Generator & Strength Analyzer
+//! `SlateOS` Password Generator & Strength Analyzer
 //!
 //! A password utility tool with:
 //! - Configurable password generation (length, character classes)

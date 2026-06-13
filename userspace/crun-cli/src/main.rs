@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! crun-cli — OurOS crun OCI container runtime
+//! crun-cli — SlateOS crun OCI container runtime
 //!
 //! Single personality: `crun`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_crun(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: crun COMMAND [OPTIONS]");
-        println!("crun v1.14 (OurOS) — OCI container runtime");
+        println!("crun v1.14 (SlateOS) — OCI container runtime");
         println!();
         println!("Commands:");
         println!("  create            Create a container");

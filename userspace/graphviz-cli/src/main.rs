@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! graphviz-cli — OurOS Graphviz graph visualization
+//! graphviz-cli — SlateOS Graphviz graph visualization
 //!
 //! Multi-personality: `dot`, `neato`, `fdp`, `sfdp`, `circo`, `twopi`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_graphviz(args: &[String], prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: {} [OPTIONS] [FILE...]", prog);
-        println!("{} v10.0 (OurOS) — Graph visualization", prog);
+        println!("{} v10.0 (SlateOS) — Graph visualization", prog);
         println!();
         println!("Options:");
         println!("  -T FORMAT      Output format (png, svg, pdf, ps, dot, json)");
@@ -27,7 +27,7 @@ fn run_graphviz(args: &[String], prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("{} - graphviz version 10.0.1 (OurOS)", prog);
+        println!("{} - graphviz version 10.0.1 (SlateOS)", prog);
         return 0;
     }
     let format = args.windows(2).find(|w| w[0] == "-T").map(|w| w[1].as_str()).unwrap_or("svg");

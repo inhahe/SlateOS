@@ -1,4 +1,4 @@
-//! OurOS Emoji Picker
+//! SlateOS Emoji Picker
 //!
 //! A taskbar popup that provides a searchable, categorized grid of emoji.
 //! The picker presents emoji organized by category with:

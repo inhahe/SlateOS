@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! istioctl-cli — OurOS Istio service mesh CLI
+//! istioctl-cli — SlateOS Istio service mesh CLI
 //!
 //! Single personality: `istioctl`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_istioctl(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: istioctl COMMAND [OPTIONS]");
-        println!("istioctl 1.21.0 (OurOS) — Istio service mesh CLI");
+        println!("istioctl 1.21.0 (SlateOS) — Istio service mesh CLI");
         println!();
         println!("Commands:");
         println!("  install          Install Istio");

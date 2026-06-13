@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hyprpaper-cli — OurOS hyprpaper wallpaper utility
+//! hyprpaper-cli — SlateOS hyprpaper wallpaper utility
 //!
 //! Multi-personality: `hyprpaper`, `hyprctl-paper`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_hyprpaper(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: hyprpaper [OPTIONS]");
-        println!("hyprpaper v0.7 (OurOS) — Wayland wallpaper utility");
+        println!("hyprpaper v0.7 (SlateOS) — Wayland wallpaper utility");
         println!();
         println!("Options:");
         println!("  -c CONFIG         Config file path");
@@ -25,7 +25,7 @@ fn run_hyprpaper(args: &[String], _prog: &str) -> i32 {
         println!("  wallpaper = ,~/Pictures/wallpaper.png");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("hyprpaper v0.7 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("hyprpaper v0.7 (SlateOS)"); return 0; }
     println!("hyprpaper: wallpaper daemon running");
     println!("  Preloaded: 1 image");
     0
@@ -34,7 +34,7 @@ fn run_hyprpaper(args: &[String], _prog: &str) -> i32 {
 fn run_hyprctl_paper(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: hyprctl-paper COMMAND [ARGS]");
-        println!("hyprctl-paper v0.7 (OurOS) — Control hyprpaper");
+        println!("hyprctl-paper v0.7 (SlateOS) — Control hyprpaper");
         println!();
         println!("Commands:");
         println!("  preload PATH      Preload wallpaper");

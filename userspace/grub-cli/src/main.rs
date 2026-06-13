@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! grub-cli — OurOS GRUB bootloader tools
+//! grub-cli — SlateOS GRUB bootloader tools
 //!
 //! Multi-personality: `grub-install`, `grub-mkconfig`, `update-grub`,
 //! `grub-set-default`, `grub-editenv`
@@ -20,7 +20,7 @@ fn run_grub_install(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: grub-install [OPTIONS] DEVICE");
         println!();
-        println!("grub-install — install GRUB bootloader (OurOS).");
+        println!("grub-install — install GRUB bootloader (SlateOS).");
         println!();
         println!("Options:");
         println!("  --target=TARGET        Installation target");

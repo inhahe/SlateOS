@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! newrelic-cli — OurOS New Relic CLI
+//! newrelic-cli — SlateOS New Relic CLI
 //!
 //! Multi-personality: `newrelic`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_newrelic(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: newrelic COMMAND [OPTIONS]");
-        println!("New Relic CLI 0.81.0 (OurOS)");
+        println!("New Relic CLI 0.81.0 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  entity       Manage entities (apps, hosts, etc.)");

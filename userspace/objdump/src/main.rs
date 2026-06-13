@@ -1,4 +1,4 @@
-//! OurOS ELF Object File Analysis Tools
+//! SlateOS ELF Object File Analysis Tools
 //!
 //! Multi-personality binary that acts as `objdump`, `nm`, or `size` depending
 //! on the name used to invoke it (detected via `argv[0]`).
@@ -858,7 +858,7 @@ fn osabi_str(o: u8) -> &'static str {
         ELFOSABI_NONE => "UNIX - System V",
         ELFOSABI_LINUX => "UNIX - Linux",
         ELFOSABI_FREEBSD => "UNIX - FreeBSD",
-        255 => "OurOS",
+        255 => "SlateOS",
         _ => "Unknown",
     }
 }
@@ -3168,7 +3168,7 @@ mod tests {
     fn test_osabi_str() {
         assert_eq!(osabi_str(ELFOSABI_NONE), "UNIX - System V");
         assert_eq!(osabi_str(ELFOSABI_LINUX), "UNIX - Linux");
-        assert_eq!(osabi_str(255), "OurOS");
+        assert_eq!(osabi_str(255), "SlateOS");
     }
 
     #[test]

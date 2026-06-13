@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pubsub-cli — OurOS Google Cloud Pub/Sub (Google's planet-scale messaging, built on Borg)
+//! pubsub-cli — SlateOS Google Cloud Pub/Sub (Google's planet-scale messaging, built on Borg)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pubsub(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pubsub [OPTIONS]");
-        println!("Google Cloud Pub/Sub (OurOS) — planet-scale managed pub/sub (built on Google Borg)");
+        println!("Google Cloud Pub/Sub (SlateOS) — planet-scale managed pub/sub (built on Google Borg)");
         println!();
         println!("Options:");
         println!("  --topic                Topic management (publisher side)");
@@ -22,8 +22,8 @@ fn run_pubsub(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Google Cloud Pub/Sub 2024 (OurOS) — gcloud pubsub CLI"); return 0; }
-    println!("Google Cloud Pub/Sub 2024 (OurOS) — Planet-Scale Managed Messaging (Google heritage)");
+    if args.iter().any(|a| a == "--version") { println!("Google Cloud Pub/Sub 2024 (SlateOS) — gcloud pubsub CLI"); return 0; }
+    println!("Google Cloud Pub/Sub 2024 (SlateOS) — Planet-Scale Managed Messaging (Google heritage)");
     println!("  Vendor: Google LLC, a subsidiary of Alphabet (Mountain View, CA — NASDAQ: GOOG)");
     println!("  History (the Google internal heritage):");
     println!("    - Internal predecessor: Google's PubSub2 (PubSub v2) — used internally for years");

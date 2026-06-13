@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pgcli — OurOS PostgreSQL CLI with autocomplete and syntax highlighting
+//! pgcli — SlateOS PostgreSQL CLI with autocomplete and syntax highlighting
 //!
 //! Single personality: `pgcli`
 
@@ -31,7 +31,7 @@ fn run_pgcli(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("pgcli 4.0.1 (OurOS)");
+        println!("pgcli 4.0.1 (SlateOS)");
         return 0;
     }
 

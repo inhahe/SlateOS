@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! poetry-cli — OurOS Poetry Python dependency manager
+//! poetry-cli — SlateOS Poetry Python dependency manager
 //!
 //! Multi-personality: `poetry`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_poetry(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: poetry COMMAND [OPTIONS]");
-        println!("Poetry 1.8.3 (OurOS)");
+        println!("Poetry 1.8.3 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  new          Create a new project");

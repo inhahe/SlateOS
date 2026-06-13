@@ -1,4 +1,4 @@
-//! OurOS HTTP File Download Utility
+//! SlateOS HTTP File Download Utility
 //!
 //! Downloads files from HTTP URLs using the kernel's TCP syscall interface.
 //! Supports chunked transfer encoding, redirect following, resume, and
@@ -717,7 +717,7 @@ fn parse_args() -> Result<Options, WgetError> {
     let mut max_redirects: u32 = 10;
     let mut timeout_secs: u64 = 30;
     let mut tries: u32 = 3;
-    let mut user_agent = String::from("OurOS-wget/0.1");
+    let mut user_agent = String::from("SlateOS-wget/0.1");
 
     let mut i = 1;
     while i < argv.len() {
@@ -1738,7 +1738,7 @@ mod tests {
             max_redirects: 10,
             timeout_secs: 30,
             tries: 3,
-            user_agent: "OurOS-wget/0.1".to_string(),
+            user_agent: "SlateOS-wget/0.1".to_string(),
         };
         let req = build_request(&url, &opts, 1024);
         assert!(req.contains("Range: bytes=1024-\r\n"));
@@ -1760,7 +1760,7 @@ mod tests {
             max_redirects: 10,
             timeout_secs: 30,
             tries: 3,
-            user_agent: "OurOS-wget/0.1".to_string(),
+            user_agent: "SlateOS-wget/0.1".to_string(),
         };
         let req = build_request(&url, &opts, 0);
         assert!(req.contains("Authorization: Bearer token123\r\n"));

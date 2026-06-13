@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sonarqube-cli — OurOS SonarQube Scanner CLI
+//! sonarqube-cli — SlateOS SonarQube Scanner CLI
 //!
 //! Multi-personality: `sonar-scanner`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sonar(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: sonar-scanner [OPTIONS]");
-        println!("SonarScanner 5.0.1 (OurOS)");
+        println!("SonarScanner 5.0.1 (SlateOS)");
         println!();
         println!("Options:");
         println!("  -Dsonar.projectKey=KEY     Project key");
@@ -44,7 +44,7 @@ fn run_sonar(args: &[String]) -> i32 {
     println!("INFO: Project root configuration file: sonar-project.properties");
     println!("INFO: SonarScanner 5.0.1");
     println!("INFO: Java 17.0.9");
-    println!("INFO: OurOS amd64");
+    println!("INFO: SlateOS amd64");
     println!("INFO: User cache: ~/.sonar/cache");
     println!("INFO: Communicating with SonarQube Server {}", host);
     println!("INFO: Project key: {}", project_key);

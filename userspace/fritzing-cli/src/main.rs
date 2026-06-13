@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fritzing-cli — OurOS Fritzing electronics prototyping
+//! fritzing-cli — SlateOS Fritzing electronics prototyping
 //!
 //! Single personality: `fritzing`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_fritzing(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: fritzing [OPTIONS] [FILE.fzz]");
-        println!("fritzing v1.0.2 (OurOS) — Electronics design automation");
+        println!("fritzing v1.0.2 (SlateOS) — Electronics design automation");
         println!();
         println!("Options:");
         println!("  --version         Show version");
@@ -25,7 +25,7 @@ fn run_fritzing(args: &[String], _prog: &str) -> i32 {
         println!("  Code              Arduino sketch editor");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("fritzing v1.0.2 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("fritzing v1.0.2 (SlateOS)"); return 0; }
     println!("fritzing: electronics prototyping started");
     println!("  Parts library: 12000+ components");
     println!("  Auto-router: enabled");

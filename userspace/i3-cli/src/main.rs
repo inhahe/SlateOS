@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! i3-cli — OurOS i3 window manager tools
+//! i3-cli — SlateOS i3 window manager tools
 //!
 //! Multi-personality: `i3-msg`, `i3-nagbar`, `i3-input`
 
@@ -40,7 +40,7 @@ fn run_i3(args: &[String], prog: &str) -> i32 {
     }
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: i3-msg [OPTIONS] MESSAGE");
-        println!("i3-msg (i3 4.23) (OurOS)");
+        println!("i3-msg (i3 4.23) (SlateOS)");
         println!();
         println!("Options:");
         println!("  -t TYPE      Message type (command, get_workspaces, get_outputs,");
@@ -64,7 +64,7 @@ fn run_i3(args: &[String], prog: &str) -> i32 {
             println!("[{{\"name\":\"DP-1\",\"active\":true,\"primary\":true,\"rect\":{{\"x\":0,\"y\":0,\"width\":2560,\"height\":1440}}}}]");
         }
         Some("get_version") => {
-            println!("{{\"major\":4,\"minor\":23,\"patch\":0,\"human_readable\":\"4.23 (OurOS)\"}}");
+            println!("{{\"major\":4,\"minor\":23,\"patch\":0,\"human_readable\":\"4.23 (SlateOS)\"}}");
         }
         _ => {
             if let Some(cmd) = message {

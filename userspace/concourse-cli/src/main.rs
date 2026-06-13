@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! concourse-cli — OurOS Concourse CI CLI (fly)
+//! concourse-cli — SlateOS Concourse CI CLI (fly)
 //!
 //! Multi-personality: `fly`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_fly(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: fly [OPTIONS] COMMAND");
-        println!("Concourse CLI (fly) 7.11.0 (OurOS)");
+        println!("Concourse CLI (fly) 7.11.0 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  login, -t      Login to a target");

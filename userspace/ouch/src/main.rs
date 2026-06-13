@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ouch — OurOS painless compression/decompression tool
+//! ouch — SlateOS painless compression/decompression tool
 //!
 //! Single personality: `ouch`
 
@@ -38,7 +38,7 @@ fn run_ouch(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("ouch 0.5.1 (OurOS)");
+            println!("ouch 0.5.1 (SlateOS)");
             0
         }
         "compress" | "c" => {

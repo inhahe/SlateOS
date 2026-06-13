@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! stytch-cli — OurOS Stytch developer-first auth platform personality CLI.
+//! stytch-cli — SlateOS Stytch developer-first auth platform personality CLI.
 
 use std::env;
 use std::process;
@@ -358,7 +358,7 @@ fn run_stytch(args: &[String], prog: &str) -> i32 {
     match args[0].as_str() {
         "help" | "--help" | "-h" => { print_help(prog); 0 }
         "version" | "--version" | "-V" => {
-            println!("{prog} 0.1.0 (OurOS personality CLI)");
+            println!("{prog} 0.1.0 (SlateOS personality CLI)");
             0
         }
         "about" => { print_about(); 0 }

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mezmo-cli — OurOS Mezmo (was LogDNA, telemetry pipeline + log management, Mountain View CA)
+//! mezmo-cli — SlateOS Mezmo (was LogDNA, telemetry pipeline + log management, Mountain View CA)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mezmo(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mezmo [OPTIONS]");
-        println!("Mezmo (OurOS) — Telemetry Pipeline + log mgmt (was LogDNA, private)");
+        println!("Mezmo (SlateOS) — Telemetry Pipeline + log mgmt (was LogDNA, private)");
         println!();
         println!("Options:");
         println!("  --log-analysis         Log Analysis (the original LogDNA product)");
@@ -21,8 +21,8 @@ fn run_mezmo(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Mezmo 2024 (OurOS)"); return 0; }
-    println!("Mezmo 2024 (OurOS) — Telemetry Pipeline + Log Analysis");
+    if args.iter().any(|a| a == "--version") { println!("Mezmo 2024 (SlateOS)"); return 0; }
+    println!("Mezmo 2024 (SlateOS) — Telemetry Pipeline + Log Analysis");
     println!("  Vendor: Mezmo, Inc. (Mountain View, CA + Vancouver — private)");
     println!("  History: Founded as LogDNA in 2015 by Chris Nguyen + Lee Liu");
     println!("          'LogDNA' = 'DNA of logs' branding for log management");

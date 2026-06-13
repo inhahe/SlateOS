@@ -201,7 +201,7 @@ impl AppInfo {
 pub fn builtin_apps() -> Vec<AppInfo> {
     vec![
         AppInfo {
-            id: "org.ouros.terminal".to_string(),
+            id: "org.slateos.terminal".to_string(),
             name: "Terminal".to_string(),
             description: "Terminal emulator".to_string(),
             executable: "/usr/bin/terminal".to_string(),
@@ -212,7 +212,7 @@ pub fn builtin_apps() -> Vec<AppInfo> {
             is_system: true,
         },
         AppInfo {
-            id: "org.ouros.explorer".to_string(),
+            id: "org.slateos.explorer".to_string(),
             name: "File Explorer".to_string(),
             description: "File manager".to_string(),
             executable: "/usr/bin/explorer".to_string(),
@@ -223,7 +223,7 @@ pub fn builtin_apps() -> Vec<AppInfo> {
             is_system: true,
         },
         AppInfo {
-            id: "org.ouros.editor".to_string(),
+            id: "org.slateos.editor".to_string(),
             name: "Text Editor".to_string(),
             description: "Plain text and code editor".to_string(),
             executable: "/usr/bin/editor".to_string(),
@@ -243,7 +243,7 @@ pub fn builtin_apps() -> Vec<AppInfo> {
             is_system: true,
         },
         AppInfo {
-            id: "org.ouros.viewer".to_string(),
+            id: "org.slateos.viewer".to_string(),
             name: "Photo Viewer".to_string(),
             description: "Image and photo viewer".to_string(),
             executable: "/usr/bin/viewer".to_string(),
@@ -260,7 +260,7 @@ pub fn builtin_apps() -> Vec<AppInfo> {
             is_system: true,
         },
         AppInfo {
-            id: "org.ouros.musicplayer".to_string(),
+            id: "org.slateos.musicplayer".to_string(),
             name: "Music Player".to_string(),
             description: "Audio player and library manager".to_string(),
             executable: "/usr/bin/musicplayer".to_string(),
@@ -277,7 +277,7 @@ pub fn builtin_apps() -> Vec<AppInfo> {
             is_system: true,
         },
         AppInfo {
-            id: "org.ouros.videoplayer".to_string(),
+            id: "org.slateos.videoplayer".to_string(),
             name: "Video Player".to_string(),
             description: "Video and media player".to_string(),
             executable: "/usr/bin/videoplayer".to_string(),
@@ -294,7 +294,7 @@ pub fn builtin_apps() -> Vec<AppInfo> {
             is_system: true,
         },
         AppInfo {
-            id: "org.ouros.pdfviewer".to_string(),
+            id: "org.slateos.pdfviewer".to_string(),
             name: "PDF Viewer".to_string(),
             description: "Document reader".to_string(),
             executable: "/usr/bin/pdfviewer".to_string(),
@@ -308,7 +308,7 @@ pub fn builtin_apps() -> Vec<AppInfo> {
             is_system: true,
         },
         AppInfo {
-            id: "org.ouros.archivemanager".to_string(),
+            id: "org.slateos.archivemanager".to_string(),
             name: "Archive Manager".to_string(),
             description: "Open and create archives".to_string(),
             executable: "/usr/bin/archivemanager".to_string(),
@@ -326,7 +326,7 @@ pub fn builtin_apps() -> Vec<AppInfo> {
             is_system: true,
         },
         AppInfo {
-            id: "org.ouros.calculator".to_string(),
+            id: "org.slateos.calculator".to_string(),
             name: "Calculator".to_string(),
             description: "Standard and scientific calculator".to_string(),
             executable: "/usr/bin/calculator".to_string(),
@@ -337,7 +337,7 @@ pub fn builtin_apps() -> Vec<AppInfo> {
             is_system: true,
         },
         AppInfo {
-            id: "org.ouros.calendar".to_string(),
+            id: "org.slateos.calendar".to_string(),
             name: "Calendar".to_string(),
             description: "Calendar and event management".to_string(),
             executable: "/usr/bin/calendar".to_string(),
@@ -1202,7 +1202,7 @@ mod tests {
     #[test]
     fn test_app_handles_category() {
         let apps = builtin_apps();
-        let editor = apps.iter().find(|a| a.id == "org.ouros.editor").unwrap();
+        let editor = apps.iter().find(|a| a.id == "org.slateos.editor").unwrap();
         assert!(editor.handles_category(ContentCategory::TextEditor));
         assert!(!editor.handles_category(ContentCategory::VideoPlayer));
     }
@@ -1210,7 +1210,7 @@ mod tests {
     #[test]
     fn test_app_handles_extension() {
         let apps = builtin_apps();
-        let viewer = apps.iter().find(|a| a.id == "org.ouros.viewer").unwrap();
+        let viewer = apps.iter().find(|a| a.id == "org.slateos.viewer").unwrap();
         assert!(viewer.handles_extension("png"));
         assert!(viewer.handles_extension("PNG"));
         assert!(!viewer.handles_extension("mp3"));
@@ -1238,7 +1238,7 @@ mod tests {
         // Can't set an app that doesn't handle the category
         assert!(!settings.set_default(
             ContentCategory::WebBrowser,
-            "org.ouros.calculator"
+            "org.slateos.calculator"
         ));
     }
 
@@ -1249,7 +1249,7 @@ mod tests {
         let terminal = settings
             .default_for_category(ContentCategory::Terminal)
             .unwrap();
-        assert_eq!(terminal.id, "org.ouros.terminal");
+        assert_eq!(terminal.id, "org.slateos.terminal");
     }
 
     #[test]
@@ -1277,7 +1277,7 @@ mod tests {
     #[test]
     fn test_custom_association() {
         let mut settings = DefaultAppsSettings::default();
-        settings.set_extension_handler("txt", "org.ouros.viewer");
+        settings.set_extension_handler("txt", "org.slateos.viewer");
         let app = settings.app_for_extension("txt").unwrap();
         // Custom association overrides category default
         assert_eq!(app.name, "Photo Viewer");
@@ -1291,11 +1291,11 @@ mod tests {
     #[test]
     fn test_custom_association_case_insensitive() {
         let mut settings = DefaultAppsSettings::default();
-        settings.set_extension_handler("TXT", "org.ouros.viewer");
+        settings.set_extension_handler("TXT", "org.slateos.viewer");
         assert_eq!(settings.custom_association_count(), 1);
 
         // Second set with different case replaces
-        settings.set_extension_handler("txt", "org.ouros.editor");
+        settings.set_extension_handler("txt", "org.slateos.editor");
         assert_eq!(settings.custom_association_count(), 1);
     }
 
@@ -1424,7 +1424,7 @@ mod tests {
         let apps = builtin_apps();
         let music = apps
             .iter()
-            .find(|a| a.id == "org.ouros.musicplayer")
+            .find(|a| a.id == "org.slateos.musicplayer")
             .unwrap();
         assert!(music.handles_mime("audio/mpeg"));
         assert!(!music.handles_mime("video/mp4"));

@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-//! Pomodoro Focus Timer — productivity timer for OurOS.
+//! Pomodoro Focus Timer — productivity timer for SlateOS.
 //!
 //! Features:
 //! - Classic Pomodoro technique: 25-min work / 5-min short break / 15-min long break

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! jira-cli — OurOS Jira CLI
+//! jira-cli — SlateOS Jira CLI
 //!
 //! Single personality: `jira`
 
@@ -11,7 +11,7 @@ fn run_jira(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: jira <COMMAND> [OPTIONS]");
         println!();
-        println!("Jira project management CLI (OurOS).");
+        println!("Jira project management CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  issue        Manage issues");

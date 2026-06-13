@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bevy-cli — OurOS Bevy game engine CLI
+//! bevy-cli — SlateOS Bevy game engine CLI
 //!
 //! Multi-personality: `bevy`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_bevy(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: bevy COMMAND [OPTIONS]");
-        println!("Bevy CLI 0.1.0 (OurOS)");
+        println!("Bevy CLI 0.1.0 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  new            Create a new Bevy project");

@@ -1,4 +1,4 @@
-//! OurOS Process Listing Utility
+//! SlateOS Process Listing Utility
 //!
 //! Lists running processes by reading the `/proc` virtual filesystem.
 //! Supports multiple output formats (default, full, long, user-oriented),
@@ -28,7 +28,7 @@ use std::process;
 // Constants
 // ============================================================================
 
-/// OurOS uses 16 KiB pages.
+/// SlateOS uses 16 KiB pages.
 const PAGE_SIZE_KB: u64 = 16;
 
 /// Assumed tick rate (ticks per second).
@@ -841,7 +841,7 @@ fn parse_sort_field(name: &str) -> Option<SortField> {
 }
 
 fn print_usage() {
-    println!("OurOS Process Listing Utility v0.1.0");
+    println!("SlateOS Process Listing Utility v0.1.0");
     println!();
     println!("USAGE:");
     println!("  ps [options]");

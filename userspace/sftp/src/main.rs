@@ -1,4 +1,4 @@
-//! `OurOS` SFTP Client
+//! `SlateOS` SFTP Client
 //!
 //! An interactive and batch-mode SFTP client that implements SFTP protocol v3
 //! (SSH File Transfer Protocol, draft-ietf-secsh-filexfer-02).
@@ -11,7 +11,7 @@
 //! **Remote mode** — connect to an SFTP server via TCP on port 22 (or custom
 //! port). The client speaks the SFTP subsystem wire protocol directly over a
 //! raw TCP connection (a real deployment would layer this over SSH; here the
-//! transport is the `OurOS` TCP syscall layer).
+//! transport is the `SlateOS` TCP syscall layer).
 //!
 //! # Usage
 //!
@@ -59,9 +59,9 @@ use std::io::{self, BufRead, Read, Write};
 // Syscall numbers
 // ============================================================================
 
-// Native OurOS TCP syscall numbers (see kernel/src/syscall/number.rs).
+// Native SlateOS TCP syscall numbers (see kernel/src/syscall/number.rs).
 // Local-filesystem operations are performed via `std::fs`/`std::env`, which the
-// userspace `posix` crate routes to the native OurOS syscalls — there are no
+// userspace `posix` crate routes to the native SlateOS syscalls — there are no
 // generic Linux read/write/open/stat syscall numbers on this OS.
 const SYS_TCP_CONNECT: u64 = 800;
 const SYS_TCP_SEND: u64 = 801;
@@ -136,8 +136,8 @@ unsafe fn syscall3(_nr: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
 // ============================================================================
 //
 // Local-mode file operations go through `std::fs`/`std::env`, which the
-// userspace `posix` crate routes to the native OurOS syscalls. We deliberately
-// avoid raw Linux file syscalls — OurOS does not expose generic read/write/open
+// userspace `posix` crate routes to the native SlateOS syscalls. We deliberately
+// avoid raw Linux file syscalls — SlateOS does not expose generic read/write/open
 // numbers, and `std` already provides correct, error-checked wrappers.
 
 /// A subset of file metadata used by the SFTP client's local-mode commands.
@@ -152,7 +152,7 @@ struct FileStat {
 
 /// Extract `FileStat` from `std::fs::Metadata`.
 ///
-/// On unix (the real OurOS target) this reads the full POSIX stat fields. On a
+/// On unix (the real SlateOS target) this reads the full POSIX stat fields. On a
 /// non-unix host (where `cargo test` runs) it synthesises a plausible mode from
 /// the file type so listings still render; the unix path is what actually ships.
 #[cfg(unix)]
@@ -1672,7 +1672,7 @@ fn print_attrs(path: &str, attrs: &FileAttrs) {
 // ---- shell ----
 
 fn cmd_shell(cmd_str: &str) -> Result<(), SftpError> {
-    // On OurOS there's no exec/fork path; print a notice. In a full
+    // On SlateOS there's no exec/fork path; print a notice. In a full
     // implementation this would spawn a process via the process manager IPC.
     println!("Shell command (local): {cmd_str}");
     println!("  (Local shell execution is not available in this environment)");

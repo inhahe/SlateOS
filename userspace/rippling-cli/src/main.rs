@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rippling-cli — OurOS Rippling (Parker Conrad's HR+IT+Finance super-platform)
+//! rippling-cli — SlateOS Rippling (Parker Conrad's HR+IT+Finance super-platform)
 //!
 //! Single personality: `rippling`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rip(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: rippling [OPTIONS]");
-        println!("Rippling (OurOS) — HR + IT + Finance employee-graph platform");
+        println!("Rippling (SlateOS) — HR + IT + Finance employee-graph platform");
         println!();
         println!("Options:");
         println!("  --hr-cloud             HR Cloud (payroll, benefits, talent, time)");
@@ -23,8 +23,8 @@ fn run_rip(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Rippling 2024 (OurOS)"); return 0; }
-    println!("Rippling 2024 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Rippling 2024 (SlateOS)"); return 0; }
+    println!("Rippling 2024 (SlateOS)");
     println!("  Vendor: People Center, Inc. dba Rippling (San Francisco, founded 2016)");
     println!("  Founder: Parker Conrad (previously Zenefits CEO — ousted 2016 over licensing scandal)");
     println!("  Funding: Founders Fund, Kleiner Perkins, Sequoia, Coatue + others");

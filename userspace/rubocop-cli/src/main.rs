@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rubocop-cli — OurOS RuboCop CLI
+//! rubocop-cli — SlateOS RuboCop CLI
 //!
 //! Single personality: `rubocop`
 
@@ -11,7 +11,7 @@ fn run_rubocop(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: rubocop [OPTIONS] [FILES/DIRS...]");
         println!();
-        println!("RuboCop — Ruby static code analyzer and formatter (OurOS).");
+        println!("RuboCop — Ruby static code analyzer and formatter (SlateOS).");
         println!();
         println!("Options:");
         println!("  -a, --auto-correct     Auto-correct offenses (safe)");
@@ -25,7 +25,7 @@ fn run_rubocop(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("1.60.2 (OurOS)");
+        println!("1.60.2 (SlateOS)");
         return 0;
     }
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! flyctl-cli — OurOS Fly.io CLI
+//! flyctl-cli — SlateOS Fly.io CLI
 //!
 //! Multi-personality: `flyctl`, `fly`
 
@@ -19,7 +19,7 @@ fn run_fly(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "help") {
         println!("Usage: fly <COMMAND> [OPTIONS]");
         println!();
-        println!("flyctl — Fly.io CLI (OurOS).");
+        println!("flyctl — Fly.io CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  launch          Create and configure a new app");
@@ -41,7 +41,7 @@ fn run_fly(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "version") {
-        println!("flyctl v0.2.15 (OurOS)");
+        println!("flyctl v0.2.15 (SlateOS)");
         return 0;
     }
 

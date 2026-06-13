@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sylenth-cli — OurOS LennarDigital Sylenth1 synthesizer
+//! sylenth-cli — SlateOS LennarDigital Sylenth1 synthesizer
 //!
 //! Single personality: `sylenth`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sylenth(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sylenth [OPTIONS] [PRESET]");
-        println!("LennarDigital Sylenth1 v3.0 (OurOS) — Virtual analog VSTi synthesizer");
+        println!("LennarDigital Sylenth1 v3.0 (SlateOS) — Virtual analog VSTi synthesizer");
         println!();
         println!("Options:");
         println!("  --load FILE            Load .fxp/.fxb preset/bank");
@@ -21,8 +21,8 @@ fn run_sylenth(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("LennarDigital Sylenth1 v3.0.7 (OurOS)"); return 0; }
-    println!("LennarDigital Sylenth1 v3.0.7 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("LennarDigital Sylenth1 v3.0.7 (SlateOS)"); return 0; }
+    println!("LennarDigital Sylenth1 v3.0.7 (SlateOS)");
     println!("  Architecture: 4 unison oscillator engines (16 voices total)");
     println!("  Filters: 2 with 4 filter modes each, drive, warm-mode");
     println!("  Modulation: 2 ADSR + 2 LFO + 2 X/Y mod-mats, master ENV");

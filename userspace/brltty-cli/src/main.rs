@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! brltty-cli — OurOS BRLTTY braille display driver CLI
+//! brltty-cli — SlateOS BRLTTY braille display driver CLI
 //!
 //! Multi-personality: `brltty`, `brltty-setup`, `brltty-lsinc`
 
@@ -19,7 +19,7 @@ fn run_brltty(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: brltty [OPTIONS]");
         println!();
-        println!("BRLTTY — braille display driver (OurOS).");
+        println!("BRLTTY — braille display driver (SlateOS).");
         println!();
         println!("Options:");
         println!("  -b DRIVER      Braille driver");
@@ -37,7 +37,7 @@ fn run_brltty(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("BRLTTY 6.6 (OurOS)");
+        println!("BRLTTY 6.6 (SlateOS)");
         return 0;
     }
 

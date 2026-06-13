@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gcloud-cli — OurOS Google Cloud SDK CLI
+//! gcloud-cli — SlateOS Google Cloud SDK CLI
 //!
 //! Single personality: `gcloud`
 
@@ -11,7 +11,7 @@ fn run_gcloud(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gcloud [OPTIONS] <GROUP> <COMMAND> [ARGS]");
         println!();
-        println!("The Google Cloud CLI (OurOS).");
+        println!("The Google Cloud CLI (SlateOS).");
         println!();
         println!("Groups:");
         println!("  compute      Compute Engine");
@@ -39,7 +39,7 @@ fn run_gcloud(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "version") {
-        println!("Google Cloud SDK 460.0.0 (OurOS)");
+        println!("Google Cloud SDK 460.0.0 (SlateOS)");
         println!("bq 2.0.100");
         println!("core 2024.01.15");
         println!("gsutil 5.27");

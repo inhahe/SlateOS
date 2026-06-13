@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xfce-polkit-cli — OurOS Xfce PolicyKit authentication agent
+//! xfce-polkit-cli — SlateOS Xfce PolicyKit authentication agent
 //!
 //! Single personality: `xfce-polkit`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_agent(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: xfce-polkit");
-        println!("xfce-polkit v0.3 (OurOS) — Xfce PolicyKit agent");
+        println!("xfce-polkit v0.3 (SlateOS) — Xfce PolicyKit agent");
         println!();
         println!("GTK+ PolicyKit authentication agent for Xfce desktop.");
         return 0;

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! msmtp-cli — OurOS msmtp SMTP client
+//! msmtp-cli — SlateOS msmtp SMTP client
 //!
 //! Single personality: `msmtp`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_msmtp(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: msmtp [OPTIONS] RECIPIENT...");
-        println!("msmtp v1.8 (OurOS) — SMTP client for sending mail");
+        println!("msmtp v1.8 (SlateOS) — SMTP client for sending mail");
         println!();
         println!("Options:");
         println!("  RECIPIENT...      Email recipients");
@@ -27,7 +27,7 @@ fn run_msmtp(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("msmtp v1.8 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("msmtp v1.8 (SlateOS)"); return 0; }
     if args.iter().any(|a| a == "--serverinfo") {
         println!("SMTP server: smtp.example.com:587");
         println!("  TLS: yes (TLS 1.3)");

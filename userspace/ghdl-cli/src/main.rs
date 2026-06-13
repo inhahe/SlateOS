@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ghdl-cli — OurOS GHDL VHDL simulator/synthesizer
+//! ghdl-cli — SlateOS GHDL VHDL simulator/synthesizer
 //!
 //! Multi-personality: `ghdl`
 
@@ -10,7 +10,7 @@ use std::process;
 fn run_ghdl(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: ghdl COMMAND [OPTIONS]");
-        println!("GHDL 4.0.0 (OurOS) [mcode backend]");
+        println!("GHDL 4.0.0 (SlateOS) [mcode backend]");
         println!();
         println!("Commands:");
         println!("  -a, --analyze FILE.vhd    Analyze VHDL source");
@@ -27,7 +27,7 @@ fn run_ghdl(args: &[String]) -> i32 {
     match subcmd {
         "--version" => {
             println!("GHDL 4.0.0 (4.0.0-dev) [Dunoon edition]");
-            println!(" Compiled with Rust for OurOS");
+            println!(" Compiled with Rust for SlateOS");
             println!(" mcode code generator");
             println!(" Written by Tristan Gingold.");
         }

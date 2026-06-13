@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fonttools — OurOS font inspection and manipulation toolkit
+//! fonttools — SlateOS font inspection and manipulation toolkit
 //!
 //! Single personality: `fonttools`
 
@@ -30,7 +30,7 @@ fn run_fonttools(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("fonttools 4.47.0 (OurOS)");
+        println!("fonttools 4.47.0 (SlateOS)");
         return 0;
     }
 

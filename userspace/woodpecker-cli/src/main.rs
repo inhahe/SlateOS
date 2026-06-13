@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! woodpecker-cli — OurOS Woodpecker CI CLI
+//! woodpecker-cli — SlateOS Woodpecker CI CLI
 //!
 //! Multi-personality: `woodpecker-cli`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_woodpecker(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: woodpecker-cli COMMAND [OPTIONS]");
-        println!("Woodpecker CLI 2.7.0 (OurOS)");
+        println!("Woodpecker CLI 2.7.0 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  pipeline       Manage pipelines");

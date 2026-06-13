@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! checkmk-cli — OurOS Checkmk monitoring
+//! checkmk-cli — SlateOS Checkmk monitoring
 //!
 //! Multi-personality: `cmk`, `check_mk_agent`
 
@@ -15,11 +15,11 @@ fn run_checkmk(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "check_mk_agent" => {
-                println!("check_mk_agent (OurOS) — Checkmk monitoring agent");
+                println!("check_mk_agent (SlateOS) — Checkmk monitoring agent");
                 println!("  Outputs system data in Checkmk agent format");
             }
             _ => {
-                println!("cmk v2.3 (OurOS) — Checkmk monitoring CLI");
+                println!("cmk v2.3 (SlateOS) — Checkmk monitoring CLI");
                 println!("  -I HOST        Inventory scan");
                 println!("  -II HOST       Full re-inventory");
                 println!("  -D HOST        Dump agent output");
@@ -33,12 +33,12 @@ fn run_checkmk(args: &[String], prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Checkmk v2.3.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("Checkmk v2.3.0 (SlateOS)"); return 0; }
     match prog {
         "check_mk_agent" => {
             println!("<<<check_mk>>>");
             println!("Version: 2.3.0");
-            println!("AgentOS: OurOS");
+            println!("AgentOS: SlateOS");
             println!("<<<cpu>>>");
             println!("0.45 0.32 0.28 4/234 12345");
             println!("<<<mem>>>");
@@ -46,7 +46,7 @@ fn run_checkmk(args: &[String], prog: &str) -> i32 {
             println!("MemFree: 8192000 kB");
         }
         _ => {
-            println!("Checkmk v2.3.0 (OurOS)");
+            println!("Checkmk v2.3.0 (SlateOS)");
             println!("  Hosts: 50 monitored");
             println!("  Services: 1,234 total");
             println!("    OK: 1,190 (96.4%)");

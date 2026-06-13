@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! buildkite-cli — OurOS Buildkite CLI
+//! buildkite-cli — SlateOS Buildkite CLI
 //!
 //! Multi-personality: `bk`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_bk(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: bk COMMAND [OPTIONS]");
-        println!("Buildkite CLI 3.0.0 (OurOS)");
+        println!("Buildkite CLI 3.0.0 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  build          Manage builds");

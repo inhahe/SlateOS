@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! linuxcnc-cli — OurOS LinuxCNC machine control
+//! linuxcnc-cli — SlateOS LinuxCNC machine control
 //!
 //! Multi-personality: `linuxcnc`, `halcmd`, `halrun`
 
@@ -13,14 +13,14 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_linuxcnc(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: linuxcnc [OPTIONS] [CONFIG.ini]");
-        println!("LinuxCNC 2.9.2 (OurOS)");
+        println!("LinuxCNC 2.9.2 (SlateOS)");
         println!("  --version      Show version");
         println!("  -d             Debug mode");
         println!("  -v             Verbose");
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("LinuxCNC 2.9.2 (OurOS)");
+        println!("LinuxCNC 2.9.2 (SlateOS)");
         println!("EMC2 - Enhanced Machine Controller");
         return 0;
     }

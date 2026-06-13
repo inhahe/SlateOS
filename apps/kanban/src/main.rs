@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 //! Kanban Board / Project Management Application
 //!
-//! A feature-rich Kanban board for OurOS with multiple boards, customizable
+//! A feature-rich Kanban board for SlateOS with multiple boards, customizable
 //! columns, rich cards (labels, priority, due dates, checklists, comments),
 //! filtering, sorting, WIP limits, swimlanes, archiving, and JSON export/import.
 

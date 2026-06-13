@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! houdini-cli — OurOS SideFX Houdini procedural 3D
+//! houdini-cli — SlateOS SideFX Houdini procedural 3D
 //!
 //! Single personality: `houdini`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_houdini(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: houdini [OPTIONS] [FILE]");
-        println!("SideFX Houdini 20 (OurOS) — Procedural 3D animation & VFX");
+        println!("SideFX Houdini 20 (SlateOS) — Procedural 3D animation & VFX");
         println!();
         println!("Options:");
         println!("  -batch                Batch (no GUI) mode");
@@ -25,8 +25,8 @@ fn run_houdini(args: &[String], _prog: &str) -> i32 {
         println!("  --version             Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("SideFX Houdini 20.0.625 (OurOS)"); return 0; }
-    println!("SideFX Houdini 20.0.625 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("SideFX Houdini 20.0.625 (SlateOS)"); return 0; }
+    println!("SideFX Houdini 20.0.625 (SlateOS)");
     println!("  Renderers: Mantra, Karma XPU, Redshift, RenderMan");
     println!("  Solvers: Pyro, FLIP, Vellum, Bullet, RBD");
     println!("  Scripting: HScript, Python, VEX");

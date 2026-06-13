@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ast-grep — OurOS structural search/replace tool based on AST
+//! ast-grep — SlateOS structural search/replace tool based on AST
 //!
 //! Single personality: `sg` (ast-grep)
 
@@ -28,7 +28,7 @@ fn run_sg(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("ast-grep 0.25.0 (OurOS)");
+            println!("ast-grep 0.25.0 (SlateOS)");
             0
         }
         "run" => {

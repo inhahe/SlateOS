@@ -2,5 +2,5 @@
 name = "split"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS file-splitting utility"
+description = "SlateOS file-splitting utility"
 [dependencies]

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fwupd — OurOS firmware update daemon
+//! fwupd — SlateOS firmware update daemon
 //!
 //! Multi-personality binary for firmware update management.
 //! Detected via argv[0]:
@@ -161,7 +161,7 @@ fn simulated_devices() -> Vec<Device> {
         Device {
             id: "a]system-firmware-0001".to_string(),
             name: "System Firmware".to_string(),
-            vendor: "OurOS Project".to_string(),
+            vendor: "SlateOS Project".to_string(),
             version: "1.0.0".to_string(),
             _version_lowest: "0.9.0".to_string(),
             guid: vec!["230c8b18-8d9b-53ec-838b-6cfc0571051b".to_string()],
@@ -520,7 +520,7 @@ fn run_fwupdtool(args: Vec<String>) -> i32 {
         "smbios-dump" => {
             println!("SMBIOS table dump:");
             println!("  Type 0 (BIOS Information):");
-            println!("    Vendor: OurOS Firmware");
+            println!("    Vendor: SlateOS Firmware");
             println!("    Version: 1.0.0");
         }
         "firmware-dump" => {

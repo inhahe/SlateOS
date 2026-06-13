@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! webex-cli — OurOS Cisco Webex collaboration suite
+//! webex-cli — SlateOS Cisco Webex collaboration suite
 //!
 //! Single personality: `webex`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wx(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: webex [OPTIONS]");
-        println!("Cisco Webex (OurOS) — Enterprise meetings, messaging, calling");
+        println!("Cisco Webex (SlateOS) — Enterprise meetings, messaging, calling");
         println!();
         println!("Options:");
         println!("  --meeting              Webex Meetings (video conference)");
@@ -24,8 +24,8 @@ fn run_wx(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Cisco Webex App 44.11.0 (OurOS)"); return 0; }
-    println!("Cisco Webex App 44.11.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Cisco Webex App 44.11.0 (SlateOS)"); return 0; }
+    println!("Cisco Webex App 44.11.0 (SlateOS)");
     println!("  Vendor: Cisco Systems (acquired Webex from founder Subrah Iyar 2007 for $3.2B)");
     println!("  Brand rebrand: Cisco Spark → Webex Teams → Webex App (2020 unified)");
     println!("  Meetings: up to 1,000 participants standard, 100K via Webex Events");

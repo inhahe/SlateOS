@@ -1,4 +1,4 @@
-//! OurOS Clipboard Manager — a full-featured clipboard history and snippet manager.
+//! SlateOS Clipboard Manager — a full-featured clipboard history and snippet manager.
 //!
 //! Provides clipboard history tracking (up to 500 entries), search, filtering by
 //! content type, tagging, pinning, template management with placeholder substitution,

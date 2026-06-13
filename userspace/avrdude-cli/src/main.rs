@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! avrdude-cli — OurOS AVR/MCU programmer
+//! avrdude-cli — SlateOS AVR/MCU programmer
 //!
 //! Multi-personality: `avrdude`, `esptool`
 
@@ -19,7 +19,7 @@ fn run_avrdude(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "-?") {
         println!("Usage: avrdude [OPTIONS]");
         println!();
-        println!("avrdude — AVR microcontroller programmer (OurOS).");
+        println!("avrdude — AVR microcontroller programmer (SlateOS).");
         println!();
         println!("Options:");
         println!("  -p PARTNO    Target AVR device");
@@ -35,7 +35,7 @@ fn run_avrdude(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v" && args.len() == 1) {
-        println!("avrdude version 7.3 (OurOS)");
+        println!("avrdude version 7.3 (SlateOS)");
         return 0;
     }
 
@@ -68,7 +68,7 @@ fn run_esptool(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: esptool [OPTIONS] COMMAND");
         println!();
-        println!("esptool — Espressif SoC serial bootloader tool (OurOS).");
+        println!("esptool — Espressif SoC serial bootloader tool (SlateOS).");
         println!();
         println!("Commands:");
         println!("  write_flash    Write binary to flash");
@@ -86,7 +86,7 @@ fn run_esptool(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("esptool.py v4.7.0 (OurOS)");
+        println!("esptool.py v4.7.0 (SlateOS)");
         return 0;
     }
 

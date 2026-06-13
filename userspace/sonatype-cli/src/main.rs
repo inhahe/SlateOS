@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sonatype-cli — OurOS Sonatype (Nexus + Lifecycle, SCA + supply chain, Fulton MD)
+//! sonatype-cli — SlateOS Sonatype (Nexus + Lifecycle, SCA + supply chain, Fulton MD)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_son(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sonatype [OPTIONS]");
-        println!("Sonatype (OurOS) — Software Composition Analysis + Supply Chain Security");
+        println!("Sonatype (SlateOS) — Software Composition Analysis + Supply Chain Security");
         println!();
         println!("Options:");
         println!("  --nexus                Nexus Repository (Maven Central operator)");
@@ -22,8 +22,8 @@ fn run_son(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Sonatype Nexus 3.69 (OurOS)"); return 0; }
-    println!("Sonatype 2024 (OurOS) — Supply Chain Security");
+    if args.iter().any(|a| a == "--version") { println!("Sonatype Nexus 3.69 (SlateOS)"); return 0; }
+    println!("Sonatype 2024 (SlateOS) — Supply Chain Security");
     println!("  Vendor: Sonatype, Inc. (Fulton, MD)");
     println!("  Founders: Jason van Zyl (Apache Maven creator) + others, 2008");
     println!("          Jason van Zyl: created Apache Maven build tool (2002) — foundation of Java ecosystem");

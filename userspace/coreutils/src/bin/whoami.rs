@@ -4,7 +4,7 @@
 //!   Prints the name of the current user.
 //!   Falls back to the numeric UID if no name database is available.
 //!
-//! Portability: on POSIX-y targets (Linux, and our `x86_64-ouros`
+//! Portability: on POSIX-y targets (Linux, and our `x86_64-slateos`
 //! custom target which reports `target_os = "linux"`) we look up the
 //! effective UID via the `geteuid()` extern from the C runtime.  On
 //! Windows hosts the symbol does not exist in mingw-w64; we use the
@@ -178,7 +178,7 @@ mod tests {
     #[test]
     fn current_uid_returns_zero_on_non_posix_hosts() {
         // On Windows hosts (the common dev environment) current_uid()
-        // is the fallback path returning 0.  On Linux/ouros the cfg
+        // is the fallback path returning 0.  On Linux/slateos the cfg
         // gate compiles the geteuid() path, which we cannot easily
         // assert a value for — so this assertion is only run on the
         // platforms where the fallback compiles.

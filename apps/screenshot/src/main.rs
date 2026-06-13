@@ -1,4 +1,4 @@
-//! OurOS Screenshot Utility
+//! SlateOS Screenshot Utility
 //!
 //! Screen capture application with:
 //! - Full screen, active window, region selection, and delayed captures

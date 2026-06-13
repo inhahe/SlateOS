@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gh-actions-cli — OurOS GitHub Actions workflow management
+//! gh-actions-cli — SlateOS GitHub Actions workflow management
 //!
 //! Single personality: `gh-actions`
 
@@ -32,7 +32,7 @@ fn run_gh_actions(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("gh-actions 1.0.0 (OurOS)");
+        println!("gh-actions 1.0.0 (SlateOS)");
         return 0;
     }
 

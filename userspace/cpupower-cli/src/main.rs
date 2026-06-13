@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cpupower-cli — OurOS CPU frequency/power tools
+//! cpupower-cli — SlateOS CPU frequency/power tools
 //!
 //! Multi-personality: `cpupower`, `cpufreq-info`, `cpufreq-set`, `turbostat`
 
@@ -19,7 +19,7 @@ fn run_cpupower(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: cpupower COMMAND [OPTIONS]");
         println!();
-        println!("cpupower — CPU power management (OurOS).");
+        println!("cpupower — CPU power management (SlateOS).");
         println!();
         println!("Commands:");
         println!("  frequency-info    Show CPU frequency info");
@@ -79,7 +79,7 @@ fn run_turbostat(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("turbostat version 2024.01.01 (OurOS)");
+        println!("turbostat version 2024.01.01 (SlateOS)");
         return 0;
     }
 

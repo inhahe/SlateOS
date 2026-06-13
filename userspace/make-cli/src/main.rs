@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! make-cli — OurOS Make.com (visual automation, Prague + global, Notion Capital backed)
+//! make-cli — SlateOS Make.com (visual automation, Prague + global, Notion Capital backed)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_make(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: make [OPTIONS]");
-        println!("Make.com (OurOS) — visual workflow automation (was Integromat)");
+        println!("Make.com (SlateOS) — visual workflow automation (was Integromat)");
         println!();
         println!("Options:");
         println!("  --scenarios            Scenarios (the visual workflows)");
@@ -22,8 +22,8 @@ fn run_make(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Make 2024 (OurOS)"); return 0; }
-    println!("Make.com 2024 (OurOS) — Visual Automation Platform");
+    if args.iter().any(|a| a == "--version") { println!("Make 2024 (SlateOS)"); return 0; }
+    println!("Make.com 2024 (SlateOS) — Visual Automation Platform");
     println!("  Vendor: Make.com (Celonis subsidiary since 2020 — Prague, Czech Republic + global)");
     println!("  Founder: Patrik Šimek + Adam Tilton + Ondrej Andrlik, 2012 (as 'Integromat')");
     println!("          founded in Brno, Czech Republic");

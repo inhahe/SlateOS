@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! jmeter-cli — OurOS Apache JMeter CLI
+//! jmeter-cli — SlateOS Apache JMeter CLI
 //!
 //! Multi-personality: `jmeter`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_jmeter(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "-?") || args.is_empty() {
         println!("Usage: jmeter [OPTIONS]");
-        println!("Apache JMeter 5.6.3 (OurOS)");
+        println!("Apache JMeter 5.6.3 (SlateOS)");
         println!();
         println!("Options:");
         println!("  -n              Non-GUI mode");

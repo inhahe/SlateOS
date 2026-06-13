@@ -2,5 +2,5 @@
 name = "vi"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS vi text editor"
+description = "SlateOS vi text editor"
 [dependencies]

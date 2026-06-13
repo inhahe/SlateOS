@@ -2,5 +2,5 @@
 name = "env"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS environment variable utility"
+description = "SlateOS environment variable utility"
 [dependencies]

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! expensify-cli — OurOS Expensify (SmartScan receipts, NewDot New Expensify, politically loud)
+//! expensify-cli — SlateOS Expensify (SmartScan receipts, NewDot New Expensify, politically loud)
 //!
 //! Single personality: `expensify`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_exp(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: expensify [OPTIONS]");
-        println!("Expensify (OurOS) — Expense management with SmartScan");
+        println!("Expensify (SlateOS) — Expense management with SmartScan");
         println!();
         println!("Options:");
         println!("  --smartscan            SmartScan receipt OCR (10 free/mo)");
@@ -23,8 +23,8 @@ fn run_exp(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Expensify (OurOS)"); return 0; }
-    println!("Expensify (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Expensify (SlateOS)"); return 0; }
+    println!("Expensify (SlateOS)");
     println!("  Vendor: Expensify, Inc. (San Francisco — NASDAQ:EXFY)");
     println!("  Founder: David Barrett (BitTorrent veteran, CTO Red Swoosh acquired by Akamai)");
     println!("  Founded: 2008 — kicked off at TechCrunch50");

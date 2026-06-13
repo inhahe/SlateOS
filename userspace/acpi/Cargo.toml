@@ -2,5 +2,5 @@
 name = "acpi"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS acpi - power management info (acpi/acpid)"
+description = "SlateOS acpi - power management info (acpi/acpid)"
 [dependencies]

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! navi — OurOS interactive cheatsheet tool
+//! navi — SlateOS interactive cheatsheet tool
 //!
 //! Single personality: `navi`
 
@@ -55,7 +55,7 @@ fn run_navi(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("navi 2.23.0 (OurOS)");
+            println!("navi 2.23.0 (SlateOS)");
             0
         }
         "repo" => {

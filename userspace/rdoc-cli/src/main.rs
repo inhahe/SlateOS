@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rdoc-cli — OurOS Ruby documentation tools
+//! rdoc-cli — SlateOS Ruby documentation tools
 //!
 //! Multi-personality: `rdoc`, `ri`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rdoc(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: rdoc [OPTIONS] [FILES...]");
-        println!("RDoc 6.6.2 (OurOS)");
+        println!("RDoc 6.6.2 (SlateOS)");
         println!();
         println!("Options:");
         println!("  -o DIR         Output directory (default: doc)");
@@ -31,7 +31,7 @@ fn run_rdoc(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("rdoc 6.6.2 (OurOS)");
+        println!("rdoc 6.6.2 (SlateOS)");
         return 0;
     }
     let fmt = args.windows(2)
@@ -69,7 +69,7 @@ fn run_rdoc(args: &[String]) -> i32 {
 fn run_ri(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: ri [OPTIONS] NAME [NAME ...]");
-        println!("ri 6.6.2 — Ruby Interactive Reference (OurOS)");
+        println!("ri 6.6.2 — Ruby Interactive Reference (SlateOS)");
         println!();
         println!("Options:");
         println!("  -f FORMAT      Output format (ansi, bs, html, rdoc, markdown)");
@@ -81,7 +81,7 @@ fn run_ri(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("ri 6.6.2 (OurOS)");
+        println!("ri 6.6.2 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "-l") {

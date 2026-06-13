@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cargo-audit — OurOS audit Cargo.lock for security vulnerabilities
+//! cargo-audit — SlateOS audit Cargo.lock for security vulnerabilities
 //!
 //! Single personality: `cargo-audit`
 
@@ -65,7 +65,7 @@ fn run_cargo_audit(args: Vec<String>) -> i32 {
             0
         }
         "--version" | "-V" => {
-            println!("cargo-audit 0.20.0 (OurOS)");
+            println!("cargo-audit 0.20.0 (SlateOS)");
             0
         }
         "fix" => {

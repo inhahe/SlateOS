@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! powerdns-cli — OurOS PowerDNS server
+//! powerdns-cli — SlateOS PowerDNS server
 //!
 //! Multi-personality: `pdns_server`, `pdnsutil`, `pdns_control`
 
@@ -15,7 +15,7 @@ fn run_powerdns(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "pdnsutil" => {
-                println!("pdnsutil (OurOS) — PowerDNS zone management");
+                println!("pdnsutil (SlateOS) — PowerDNS zone management");
                 println!("  create-zone ZONE   Create zone");
                 println!("  add-record ZONE NAME TYPE CONTENT  Add record");
                 println!("  list-zone ZONE     List records");
@@ -24,7 +24,7 @@ fn run_powerdns(args: &[String], prog: &str) -> i32 {
                 println!("  rectify-zone ZONE  Fix metadata");
             }
             "pdns_control" => {
-                println!("pdns_control (OurOS) — PowerDNS runtime control");
+                println!("pdns_control (SlateOS) — PowerDNS runtime control");
                 println!("  status      Show status");
                 println!("  ping        Ping server");
                 println!("  quit        Shut down");
@@ -32,7 +32,7 @@ fn run_powerdns(args: &[String], prog: &str) -> i32 {
                 println!("  list-zones  List all zones");
             }
             _ => {
-                println!("pdns_server v4.9 (OurOS) — PowerDNS authoritative server");
+                println!("pdns_server v4.9 (SlateOS) — PowerDNS authoritative server");
                 println!("  --config-dir DIR   Config directory");
                 println!("  --daemon           Daemonize");
                 println!("  --local-address IP Listen address");
@@ -42,8 +42,8 @@ fn run_powerdns(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("PowerDNS v4.9.0 (OurOS)"); return 0; }
-    println!("PowerDNS v4.9.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("PowerDNS v4.9.0 (SlateOS)"); return 0; }
+    println!("PowerDNS v4.9.0 (SlateOS)");
     println!("  Backend: gsqlite3");
     println!("  Zones: 123");
     println!("  Records: 45,678");

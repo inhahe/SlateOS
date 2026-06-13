@@ -2,6 +2,6 @@
 name = "fontmanager"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS Font Manager — graphical font management and preview"
+description = "SlateOS Font Manager — graphical font management and preview"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }

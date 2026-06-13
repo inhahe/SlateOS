@@ -1,4 +1,4 @@
-//! OurOS Hostname Utility — Display and Set the System Hostname
+//! SlateOS Hostname Utility — Display and Set the System Hostname
 //!
 //! Reads or writes the system hostname via `/proc/sys/kernel/hostname` and
 //! `/etc/hostname`. Supports FQDN resolution via `/etc/resolv.conf`, IP
@@ -529,7 +529,7 @@ fn parse_args(args: &[String], domainname_mode: bool) -> Result<Action, String> 
 
 fn print_usage(domainname_mode: bool) {
     if domainname_mode {
-        println!("OurOS Domain Name Utility v{VERSION}");
+        println!("SlateOS Domain Name Utility v{VERSION}");
         println!();
         println!("Display or set the NIS/YP domain name.");
         println!();
@@ -540,7 +540,7 @@ fn print_usage(domainname_mode: bool) {
         return;
     }
 
-    println!("OurOS Hostname Utility v{VERSION}");
+    println!("SlateOS Hostname Utility v{VERSION}");
     println!();
     println!("Display or set the system hostname.");
     println!();
@@ -615,7 +615,7 @@ fn run(action: Action, domainname_mode: bool) -> i32 {
 
         Action::Version => {
             let name = if domainname_mode { "domainname" } else { "hostname" };
-            println!("{name} (OurOS) {VERSION}");
+            println!("{name} (SlateOS) {VERSION}");
             0
         }
 

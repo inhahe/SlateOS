@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! confd-cli — OurOS confd template-based config management
+//! confd-cli — SlateOS confd template-based config management
 //!
 //! Single personality: `confd`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_confd(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: confd [OPTIONS]");
-        println!("confd v0.16 (OurOS) — Manage configs from etcd/consul/env");
+        println!("confd v0.16 (SlateOS) — Manage configs from etcd/consul/env");
         println!();
         println!("Options:");
         println!("  -onetime          Run once and exit");
@@ -25,7 +25,7 @@ fn run_confd(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("confd v0.16 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("confd v0.16 (SlateOS)"); return 0; }
     let backend = args.iter().skip_while(|a| a.as_str() != "-backend").nth(1).map(|s| s.as_str()).unwrap_or("etcd");
     let onetime = args.iter().any(|a| a == "-onetime");
     println!("confd: starting (backend: {})", backend);

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! snmp-cli — OurOS SNMP management tools
+//! snmp-cli — SlateOS SNMP management tools
 //!
 //! Multi-personality: `snmpget`, `snmpwalk`, `snmpset`, `snmptrap`, `snmpbulkwalk`, `snmptranslate`
 
@@ -18,16 +18,16 @@ fn run_snmpget(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("NET-SNMP version: 5.9.4 (OurOS)");
+        println!("NET-SNMP version: 5.9.4 (SlateOS)");
         return 0;
     }
 
     let oid = args.last().map(|s| s.as_str()).unwrap_or("sysDescr.0");
     match oid {
-        "sysDescr.0" | ".1.3.6.1.2.1.1.1.0" => println!("SNMPv2-MIB::sysDescr.0 = STRING: OurOS Desktop 1.0 (x86_64)"),
+        "sysDescr.0" | ".1.3.6.1.2.1.1.1.0" => println!("SNMPv2-MIB::sysDescr.0 = STRING: SlateOS Desktop 1.0 (x86_64)"),
         "sysUpTime.0" | ".1.3.6.1.2.1.1.3.0" => println!("DISMAN-EVENT-MIB::sysUpTimeInstance = Timeticks: (1440000) 4:00:00.00"),
-        "sysName.0" | ".1.3.6.1.2.1.1.5.0" => println!("SNMPv2-MIB::sysName.0 = STRING: ouros-desktop"),
-        "sysContact.0" | ".1.3.6.1.2.1.1.4.0" => println!("SNMPv2-MIB::sysContact.0 = STRING: admin@ouros.local"),
+        "sysName.0" | ".1.3.6.1.2.1.1.5.0" => println!("SNMPv2-MIB::sysName.0 = STRING: slateos-desktop"),
+        "sysContact.0" | ".1.3.6.1.2.1.1.4.0" => println!("SNMPv2-MIB::sysContact.0 = STRING: admin@slateos.local"),
         _ => println!("SNMPv2-MIB::{} = STRING: (value)", oid),
     }
     0
@@ -39,11 +39,11 @@ fn run_snmpwalk(args: &[String]) -> i32 {
         return 0;
     }
 
-    println!("SNMPv2-MIB::sysDescr.0 = STRING: OurOS Desktop 1.0 (x86_64)");
+    println!("SNMPv2-MIB::sysDescr.0 = STRING: SlateOS Desktop 1.0 (x86_64)");
     println!("SNMPv2-MIB::sysObjectID.0 = OID: NET-SNMP-MIB::netSnmpAgentOIDs.10");
     println!("DISMAN-EVENT-MIB::sysUpTimeInstance = Timeticks: (1440000) 4:00:00.00");
-    println!("SNMPv2-MIB::sysContact.0 = STRING: admin@ouros.local");
-    println!("SNMPv2-MIB::sysName.0 = STRING: ouros-desktop");
+    println!("SNMPv2-MIB::sysContact.0 = STRING: admin@slateos.local");
+    println!("SNMPv2-MIB::sysName.0 = STRING: slateos-desktop");
     println!("SNMPv2-MIB::sysLocation.0 = STRING: Home Office");
     println!("SNMPv2-MIB::sysServices.0 = INTEGER: 72");
     println!("IF-MIB::ifNumber.0 = INTEGER: 3");

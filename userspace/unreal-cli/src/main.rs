@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! unreal-cli — OurOS Unreal Engine CLI tools
+//! unreal-cli — SlateOS Unreal Engine CLI tools
 //!
 //! Multi-personality: `uat`, `unreal-build`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_uat(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: uat COMMAND [OPTIONS]");
-        println!("Unreal Automation Tool (OurOS)");
+        println!("Unreal Automation Tool (SlateOS)");
         println!();
         println!("Commands:");
         println!("  BuildCookRun          Build, cook, and run project");

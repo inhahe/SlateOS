@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! powertop-cli — OurOS power consumption monitor
+//! powertop-cli — SlateOS power consumption monitor
 //!
 //! Multi-personality: `powertop`
 
@@ -19,7 +19,7 @@ fn run_powertop(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: powertop [OPTIONS]");
         println!();
-        println!("powertop — power consumption analysis tool (OurOS).");
+        println!("powertop — power consumption analysis tool (SlateOS).");
         println!();
         println!("Options:");
         println!("  --auto-tune       Automatically set optimal settings");
@@ -32,7 +32,7 @@ fn run_powertop(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("PowerTOP version 2.15 (OurOS)");
+        println!("PowerTOP version 2.15 (SlateOS)");
         return 0;
     }
 
@@ -55,7 +55,7 @@ fn run_powertop(args: &[String]) -> i32 {
         return 0;
     }
 
-    println!("PowerTOP 2.15 (OurOS)     Overview   Idle stats   Frequency stats   Device stats   Tunables");
+    println!("PowerTOP 2.15 (SlateOS)     Overview   Idle stats   Frequency stats   Device stats   Tunables");
     println!();
     println!("Summary: 120.0 wakeups/second, 0 GPU ops/second, 0 VFS ops/second");
     println!();

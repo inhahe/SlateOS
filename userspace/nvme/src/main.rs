@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nvme — OurOS NVMe drive management CLI
+//! nvme — SlateOS NVMe drive management CLI
 //!
 //! Multi-personality binary for managing NVMe solid-state drives.
 //! Detected via argv[0]:
@@ -237,7 +237,7 @@ fn run_nvme(args: Vec<String>) -> i32 {
         "--help" | "help" | "-h" => {
             println!("Usage: nvme <command> [<device>] [OPTIONS]");
             println!();
-            println!("NVMe management tool for OurOS.");
+            println!("NVMe management tool for SlateOS.");
             println!();
             println!("Commands:");
             println!("  list              List all NVMe devices (default)");
@@ -262,7 +262,7 @@ fn run_nvme(args: Vec<String>) -> i32 {
             0
         }
         "version" | "--version" | "-V" => {
-            println!("nvme-cli 0.1.0 (OurOS)");
+            println!("nvme-cli 0.1.0 (SlateOS)");
             0
         }
         "list" => cmd_list(),

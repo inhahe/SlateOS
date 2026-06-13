@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! retdec-cli — OurOS RetDec decompiler
+//! retdec-cli — SlateOS RetDec decompiler
 //!
 //! Multi-personality: `retdec-decompiler`, `retdec-fileinfo`, `retdec-unpacker`
 
@@ -15,18 +15,18 @@ fn run_retdec(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS] FILE", prog);
         match prog {
             "retdec-fileinfo" => {
-                println!("retdec-fileinfo (OurOS) — File format detector");
+                println!("retdec-fileinfo (SlateOS) — File format detector");
                 println!("  -j           JSON output");
                 println!("  -p           Plain text output");
                 println!("  --verbose    Detailed output");
             }
             "retdec-unpacker" => {
-                println!("retdec-unpacker (OurOS) — Executable unpacker");
+                println!("retdec-unpacker (SlateOS) — Executable unpacker");
                 println!("  -o FILE      Output file");
                 println!("  --max-memory N  Max memory (MB)");
             }
             _ => {
-                println!("retdec-decompiler v5.0 (OurOS) — Retargetable decompiler");
+                println!("retdec-decompiler v5.0 (SlateOS) — Retargetable decompiler");
                 println!("  -o FILE      Output C file");
                 println!("  --select-ranges RANGE  Decompile address range");
                 println!("  --select-functions NAME  Decompile specific function");
@@ -38,7 +38,7 @@ fn run_retdec(args: &[String], prog: &str) -> i32 {
         println!("  --version    Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("RetDec v5.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("RetDec v5.0 (SlateOS)"); return 0; }
     match prog {
         "retdec-fileinfo" => {
             println!("retdec-fileinfo:");
@@ -57,7 +57,7 @@ fn run_retdec(args: &[String], prog: &str) -> i32 {
             println!("  Output: unpacked.exe (2.3 MB)");
         }
         _ => {
-            println!("RetDec v5.0 (OurOS) — Decompilation");
+            println!("RetDec v5.0 (SlateOS) — Decompilation");
             println!("  Input: target.exe (x86_64 PE)");
             println!("  Phase 1: Binary analysis");
             println!("  Phase 2: LLVM IR generation");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ansible-cli — OurOS Ansible automation CLI
+//! ansible-cli — SlateOS Ansible automation CLI
 //!
 //! Multi-personality: `ansible`, `ansible-playbook`, `ansible-galaxy`, `ansible-vault`
 
@@ -181,7 +181,7 @@ fn main() {
     let rest: Vec<String> = args.into_iter().skip(1).collect();
 
     if rest.iter().any(|a| a == "-V" || a == "--version") {
-        println!("ansible [core 2.16.3] (OurOS)");
+        println!("ansible [core 2.16.3] (SlateOS)");
         process::exit(0);
     }
 

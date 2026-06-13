@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hardinfo-cli — OurOS HardInfo system profiler
+//! hardinfo-cli — SlateOS HardInfo system profiler
 //!
 //! Single personality: `hardinfo`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_hardinfo(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: hardinfo [OPTIONS]");
-        println!("hardinfo v0.6 (OurOS) — System Profiler and Benchmark");
+        println!("hardinfo v0.6 (SlateOS) — System Profiler and Benchmark");
         println!();
         println!("Options:");
         println!("  -r             Generate report");
@@ -23,7 +23,7 @@ fn run_hardinfo(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("hardinfo v0.6 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("hardinfo v0.6 (SlateOS)"); return 0; }
     if args.iter().any(|a| a == "-l") {
         println!("Modules: computer, devices, network, benchmarks");
         return 0;

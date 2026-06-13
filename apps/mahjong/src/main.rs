@@ -11,7 +11,7 @@
 #![allow(clippy::needless_range_loop)]
 #![allow(unused_imports)]
 
-//! OurOS Mahjong Solitaire — a classic tile-matching puzzle game.
+//! SlateOS Mahjong Solitaire — a classic tile-matching puzzle game.
 //!
 //! Features a 144-tile "Turtle" pyramid layout across multiple layers. Tiles
 //! are free when they have no tile on top and at least one open side (left or

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wasabi-cli — OurOS Wasabi privacy Bitcoin wallet
+//! wasabi-cli — SlateOS Wasabi privacy Bitcoin wallet
 //!
 //! Single personality: `wasabi`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wasabi(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: wasabi [OPTIONS]");
-        println!("Wasabi Wallet v2.1 (OurOS) — Privacy-focused Bitcoin wallet");
+        println!("Wasabi Wallet v2.1 (SlateOS) — Privacy-focused Bitcoin wallet");
         println!();
         println!("Options:");
         println!("  --wallet FILE     Open wallet file");
@@ -25,7 +25,7 @@ fn run_wasabi(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Wasabi Wallet v2.1 (OurOS)");
+        println!("Wasabi Wallet v2.1 (SlateOS)");
         return 0;
     }
     println!("Wasabi Wallet v2.1");

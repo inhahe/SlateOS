@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! picard-cli — OurOS Picard genomics tools
+//! picard-cli — SlateOS Picard genomics tools
 //!
 //! Multi-personality: `picard`
 
@@ -10,7 +10,7 @@ use std::process;
 fn run_picard(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("USAGE: picard <tool> [options]");
-        println!("Version: 3.1.1 (OurOS)");
+        println!("Version: 3.1.1 (SlateOS)");
         println!();
         println!("Tools:");
         println!("  MarkDuplicates          Mark/remove duplicate reads");
@@ -27,7 +27,7 @@ fn run_picard(args: &[String]) -> i32 {
     }
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     match subcmd {
-        "--version" => println!("picard 3.1.1 (OurOS)"),
+        "--version" => println!("picard 3.1.1 (SlateOS)"),
         "MarkDuplicates" => {
             let input = args.windows(2).find(|w| w[0] == "I=" || w[0] == "-I").map(|w| w[1].as_str()).unwrap_or("input.bam");
             println!("picard MarkDuplicates");

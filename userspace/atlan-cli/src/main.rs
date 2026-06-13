@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! atlan-cli — OurOS Atlan (modern active metadata + data catalog, Bangalore)
+//! atlan-cli — SlateOS Atlan (modern active metadata + data catalog, Bangalore)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_atlan(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: atlan [OPTIONS]");
-        println!("Atlan (OurOS) — modern data catalog + active metadata platform");
+        println!("Atlan (SlateOS) — modern data catalog + active metadata platform");
         println!();
         println!("Options:");
         println!("  --catalog              Browse data catalog (tables, dashboards, ML models)");
@@ -23,8 +23,8 @@ fn run_atlan(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Atlan 2024 (OurOS)"); return 0; }
-    println!("Atlan 2024 (OurOS) — Modern Data Catalog");
+    if args.iter().any(|a| a == "--version") { println!("Atlan 2024 (SlateOS)"); return 0; }
+    println!("Atlan 2024 (SlateOS) — Modern Data Catalog");
     println!("  Vendor: Atlan, Inc. (Delaware HQ, engineering Bangalore + remote-first)");
     println!("  Founders: Prukalpa Sankar + Varun Banka, 2018-2020");
     println!("          previously ran SocialCops (data-for-good consultancy, 2012)");

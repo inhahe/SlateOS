@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mbrola-cli — OurOS MBROLA speech synthesizer
+//! mbrola-cli — SlateOS MBROLA speech synthesizer
 //!
 //! Single personality: `mbrola`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mbrola(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mbrola [OPTIONS] DATABASE PHOFILE WAVFILE");
-        println!("mbrola v3.3 (OurOS) — MBROLA diphone speech synthesizer");
+        println!("mbrola v3.3 (SlateOS) — MBROLA diphone speech synthesizer");
         println!();
         println!("Options:");
         println!("  -e              Ignore fatal errors on phonemes");
@@ -26,7 +26,7 @@ fn run_mbrola(args: &[String], _prog: &str) -> i32 {
         println!("  --version       Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("MBROLA v3.3 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("MBROLA v3.3 (SlateOS)"); return 0; }
     if args.iter().any(|a| a == "-i") {
         println!("MBROLA Database Information:");
         println!("  Installed voices:");
@@ -42,7 +42,7 @@ fn run_mbrola(args: &[String], _prog: &str) -> i32 {
         eprintln!("mbrola: error: expected DATABASE PHOFILE WAVFILE");
         return 1;
     }
-    println!("MBROLA v3.3 (OurOS)");
+    println!("MBROLA v3.3 (SlateOS)");
     println!("  Database: {}", files[0]);
     println!("  Input: {}", files[1]);
     println!("  Output: {}", files[2]);

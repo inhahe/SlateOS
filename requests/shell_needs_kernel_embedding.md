@@ -12,7 +12,7 @@ In `kernel/src/main.rs`, near line 1805:
 
 ```rust
 static SHELL_ELF: &[u8] = include_bytes!(
-    "../../userspace/shell/target/x86_64-ouros/release/shell"
+    "../../userspace/shell/target/x86_64-slateos/release/shell"
 );
 ```
 
@@ -29,7 +29,7 @@ if let Err(e) = fs::Vfs::write_file("/bin/shell", SHELL_ELF) {
 ## Why
 
 The shell binary is a userspace program built with full Rust std support
-(using the new custom target spec in toolchain/x86_64-ouros.json).  It
+(using the new custom target spec in toolchain/x86_64-slateos.json).  It
 needs to be on the VFS so init can spawn it.
 
 Current size: ~1.3 MiB (stripped).  This may increase the kernel image

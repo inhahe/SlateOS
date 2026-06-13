@@ -2,5 +2,5 @@
 name = "resolvectl"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS DNS resolution management"
+description = "SlateOS DNS resolution management"
 [dependencies]

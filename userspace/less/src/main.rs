@@ -1,4 +1,4 @@
-//! OurOS `less` -- Terminal Pager
+//! SlateOS `less` -- Terminal Pager
 //!
 //! A terminal pager inspired by the classic Unix `less` utility.  Reads a file
 //! (or standard input) and presents it in a scrollable, searchable display.
@@ -184,10 +184,10 @@ static mut ORIG_TERMIOS: Option<libc::termios> = None;
 /// Enable raw terminal mode: disable echo and line buffering so we receive
 /// each keypress individually.
 ///
-/// On OurOS this writes to `/proc/self/tty_raw` if available, otherwise we
+/// On SlateOS this writes to `/proc/self/tty_raw` if available, otherwise we
 /// use the POSIX termios interface through the POSIX compatibility layer.
 fn enable_raw_mode() {
-    // Try the OurOS-specific procfs toggle first.
+    // Try the SlateOS-specific procfs toggle first.
     if std::fs::write("/proc/self/tty_raw", "1").is_ok() {
     }
     // Fallback: use libc termios interface.
@@ -390,7 +390,7 @@ impl Config {
                     process::exit(0);
                 }
                 "--version" => {
-                    println!("less (OurOS) {VERSION}");
+                    println!("less (SlateOS) {VERSION}");
                     process::exit(0);
                 }
                 other => {
@@ -1267,7 +1267,7 @@ impl Pager {
         write_str(ESC_CURSOR_HOME);
 
         let help = "\
-\x1b[1mless - OurOS Terminal Pager - Help\x1b[0m
+\x1b[1mless - SlateOS Terminal Pager - Help\x1b[0m
 
   NAVIGATION
     j, Down          Scroll down one line
@@ -1549,7 +1549,7 @@ fn read_stdin_fully() -> io::Result<Vec<u8>> {
 }
 
 /// Check if a key is available on stdin without blocking.
-/// Uses the OurOS `/proc/self/tty_avail` interface or returns false.
+/// Uses the SlateOS `/proc/self/tty_avail` interface or returns false.
 fn check_key_available() -> bool {
     if let Ok(val) = std::fs::read_to_string("/proc/self/tty_avail")
         && let Ok(n) = val.trim().parse::<usize>() {

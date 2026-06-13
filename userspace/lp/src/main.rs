@@ -1,4 +1,4 @@
-// OurOS lp — printing utilities
+// SlateOS lp — printing utilities
 //
 // Multi-personality binary:
 //   lp      — submit print job
@@ -722,7 +722,7 @@ fn print_version(personality: Personality) {
         Personality::Lpr => "lpr",
         Personality::Lpq => "lpq",
     };
-    println!("{name} (OurOS) 0.1.0");
+    println!("{name} (SlateOS) 0.1.0");
 }
 
 // ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-//! OurOS process tree display utilities.
+//! SlateOS process tree display utilities.
 //!
 //! Multi-personality binary providing:
 //! - **pstree** — display process tree

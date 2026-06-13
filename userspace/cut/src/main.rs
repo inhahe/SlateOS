@@ -1,4 +1,4 @@
-//! OurOS `cut` Utility -- Remove Sections From Lines of Files
+//! SlateOS `cut` Utility -- Remove Sections From Lines of Files
 //!
 //! Removes sections from each line of input, keeping only selected fields,
 //! characters, or bytes. Modeled after POSIX/GNU coreutils `cut`.
@@ -703,7 +703,7 @@ fn process_input(
 // ============================================================================
 
 fn print_help() {
-    println!("OurOS cut v{VERSION}");
+    println!("SlateOS cut v{VERSION}");
     println!();
     println!("Remove sections from each line of files.");
     println!();
@@ -745,7 +745,7 @@ fn main() {
             process::exit(0);
         }
         ParseResult::Version => {
-            println!("cut (OurOS) {VERSION}");
+            println!("cut (SlateOS) {VERSION}");
             process::exit(0);
         }
         ParseResult::Run(config) => {

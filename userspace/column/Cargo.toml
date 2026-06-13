@@ -2,5 +2,5 @@
 name = "column"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS columnate text formatter"
+description = "SlateOS columnate text formatter"
 [dependencies]

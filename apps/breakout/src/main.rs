@@ -12,7 +12,7 @@
 #![allow(unused_imports)]
 #![allow(unused_assignments)]
 
-//! OurOS Breakout — classic brick-breaker arcade game.
+//! SlateOS Breakout — classic brick-breaker arcade game.
 //!
 //! Features a paddle controlled by arrow keys, a bouncing ball,
 //! multiple rows of colored bricks with different point values,

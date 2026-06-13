@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-//! Screen Magnifier — accessibility zoom tool for OurOS.
+//! Screen Magnifier — accessibility zoom tool for SlateOS.
 //!
 //! Features:
 //! - Multiple magnification modes: fullscreen, lens, docked

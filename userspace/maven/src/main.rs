@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! maven — OurOS Apache Maven build tool
+//! maven — SlateOS Apache Maven build tool
 //!
 //! Multi-personality: `mvn` (default), `mvnw`
 
@@ -25,10 +25,10 @@ fn run_maven(args: Vec<String>) -> i32 {
     }
 
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("Apache Maven 3.9.6 (OurOS)");
+        println!("Apache Maven 3.9.6 (SlateOS)");
         println!("Maven home: /usr/share/maven");
         println!("Java version: 21.0.2");
-        println!("OS name: \"ouros\", version: \"0.1\", arch: \"amd64\"");
+        println!("OS name: \"slateos\", version: \"0.1\", arch: \"amd64\"");
         return 0;
     }
 

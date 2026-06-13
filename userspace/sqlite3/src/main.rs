@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sqlite3 — OurOS SQLite command-line shell
+//! sqlite3 — SlateOS SQLite command-line shell
 //!
 //! Single personality: `sqlite3`
 
@@ -78,7 +78,7 @@ fn run_sqlite3(args: Vec<String>) -> i32 {
                 return 0;
             }
             "-version" | "--version" => {
-                println!("3.45.0 2025-05-22 (OurOS)");
+                println!("3.45.0 2025-05-22 (SlateOS)");
                 return 0;
             }
             "-cmd" => {
@@ -100,7 +100,7 @@ fn run_sqlite3(args: Vec<String>) -> i32 {
 
     if commands.is_empty() {
         // Interactive mode
-        println!("SQLite version 3.45.0 (OurOS)");
+        println!("SQLite version 3.45.0 (SlateOS)");
         println!("Enter \".help\" for usage hints.");
         if db == ":memory:" {
             println!("Connected to a transient in-memory database.");

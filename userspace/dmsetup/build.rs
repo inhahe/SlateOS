@@ -17,7 +17,7 @@
 //! `cargo:rustc-link-arg-bins`. The unit-test harness compiled from a binary's
 //! `src/main.rs` is part of that same bin target, so the `-bins` link arg
 //! covers it — which is exactly what lets `cargo test` launch the harness. The
-//! ouros target is left untouched: its TARGET triple matches neither Windows
+//! slateos target is left untouched: its TARGET triple matches neither Windows
 //! ABI below, so no manifest is linked (the userspace ELF needs none).
 
 fn main() {
@@ -34,6 +34,6 @@ fn main() {
     // new_manifest defaults to an asInvoker execution level, which is exactly
     // what disables Windows' installer-detection heuristic. embed-manifest
     // generates the COFF resource object in pure Rust (no windres needed).
-    embed_manifest::embed_manifest(embed_manifest::new_manifest("OurOS.dmsetup"))
+    embed_manifest::embed_manifest(embed_manifest::new_manifest("SlateOS.dmsetup"))
         .expect("failed to embed Windows manifest");
 }

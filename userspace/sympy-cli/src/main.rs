@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sympy-cli — OurOS SymPy symbolic mathematics
+//! sympy-cli — SlateOS SymPy symbolic mathematics
 //!
 //! Multi-personality: `sympy`, `isympy`
 
@@ -20,7 +20,7 @@ fn run_sympy(args: &[String]) -> i32 {
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match subcmd {
         "version" | "--version" => {
-            println!("SymPy 1.12 (OurOS)");
+            println!("SymPy 1.12 (SlateOS)");
             println!("Python 3.12.0");
         }
         "info" => {
@@ -74,12 +74,12 @@ fn run_isympy(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("isympy 1.12 (SymPy, OurOS)");
+        println!("isympy 1.12 (SymPy, SlateOS)");
         return 0;
     }
     let quiet = args.iter().any(|a| a == "-q");
     if !quiet {
-        println!("IPython console for SymPy 1.12 (Python 3.12.0, OurOS)");
+        println!("IPython console for SymPy 1.12 (Python 3.12.0, SlateOS)");
         println!();
         println!("These commands were executed:");
         println!(">>> from sympy import *");

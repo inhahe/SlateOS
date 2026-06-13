@@ -1,4 +1,4 @@
-//! OurOS gzip/gunzip/zcat compression utility.
+//! SlateOS gzip/gunzip/zcat compression utility.
 //!
 //! Multi-personality binary: detects operating mode from `argv[0]`.
 //!
@@ -1214,7 +1214,7 @@ fn parse_args() -> Result<Options, String> {
                 process::exit(0);
             }
             "--version" => {
-                println!("gzip (OurOS) 1.0");
+                println!("gzip (SlateOS) 1.0");
                 process::exit(0);
             }
             "-c" | "--stdout" | "--to-stdout" => stdout = true,

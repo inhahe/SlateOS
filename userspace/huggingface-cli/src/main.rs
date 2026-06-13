@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! huggingface-cli — OurOS Hugging Face CLI
+//! huggingface-cli — SlateOS Hugging Face CLI
 //!
 //! Single personality: `huggingface-cli`
 
@@ -11,7 +11,7 @@ fn run_hf(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: huggingface-cli <COMMAND> [OPTIONS]");
         println!();
-        println!("Hugging Face Hub CLI (OurOS).");
+        println!("Hugging Face Hub CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  login        Login to Hugging Face");
@@ -25,7 +25,7 @@ fn run_hf(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("huggingface-cli 0.21.0 (OurOS)");
+        println!("huggingface-cli 0.21.0 (SlateOS)");
         return 0;
     }
 
@@ -108,7 +108,7 @@ fn run_hf(args: Vec<String>) -> i32 {
         }
         "env" => {
             println!("huggingface-cli version: 0.21.0");
-            println!("Platform: OurOS x86_64");
+            println!("Platform: SlateOS x86_64");
             println!("Python: 3.12.0 (compiled via fastpy)");
             println!("Cache dir: /home/user/.cache/huggingface");
             println!("Token: Set (hf_****)");

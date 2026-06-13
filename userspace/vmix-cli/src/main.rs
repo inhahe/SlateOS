@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vmix-cli — OurOS vMix professional video switcher
+//! vmix-cli — SlateOS vMix professional video switcher
 //!
 //! Single personality: `vmix`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_vmix(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: vmix [OPTIONS] [PRESET]");
-        println!("vMix Pro 27 (OurOS) — Live video mixing & production");
+        println!("vMix Pro 27 (SlateOS) — Live video mixing & production");
         println!();
         println!("Options:");
         println!("  --load FILE            Load preset");
@@ -24,8 +24,8 @@ fn run_vmix(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("vMix Pro 27.0.0.74 (OurOS)"); return 0; }
-    println!("vMix Pro 27.0.0.74 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("vMix Pro 27.0.0.74 (SlateOS)"); return 0; }
+    println!("vMix Pro 27.0.0.74 (SlateOS)");
     println!("  Editions: Basic HD, HD, 4K, Pro, Max (4K Pro features + more)");
     println!("  Inputs: 4K/HD, NDI, SRT, NewBlue FX, virtual sets, instant replay");
     println!("  Outputs: Up to 8 simultaneous streams, 4K recording");

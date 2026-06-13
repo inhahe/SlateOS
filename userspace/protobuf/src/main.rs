@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! protobuf — OurOS Protocol Buffers compiler and tools
+//! protobuf — SlateOS Protocol Buffers compiler and tools
 //!
 //! Multi-personality: `protoc`, `protoc-gen-rust`, `protoc-gen-go`
 
@@ -30,7 +30,7 @@ fn run_protoc(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("libprotoc 26.1 (OurOS)");
+        println!("libprotoc 26.1 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "--decode_raw") {
@@ -75,7 +75,7 @@ fn run_protoc_gen(args: Vec<String>, lang: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("protoc-gen-{} 1.0.0 (OurOS)", lang);
+        println!("protoc-gen-{} 1.0.0 (SlateOS)", lang);
         return 0;
     }
     println!("protoc-gen-{}: reading CodeGeneratorRequest from stdin...", lang);

@@ -1,4 +1,4 @@
-//! OurOS EFI boot manager control.
+//! SlateOS EFI boot manager control.
 //!
 //! Multi-personality binary providing:
 //! - **bootctl** — control the boot loader (systemd-boot)
@@ -141,22 +141,22 @@ fn discover_entries(esp: &Path) -> Vec<BootEntry> {
     // Fallback: generate simulated entries.
     if entries.is_empty() {
         entries.push(BootEntry {
-            id: "ouros.conf".to_string(),
-            title: "OurOS".to_string(),
-            _source: "loader/entries/ouros.conf".to_string(),
-            linux: "/vmlinuz-ouros".to_string(),
-            initrd: vec!["/initramfs-ouros.img".to_string()],
+            id: "slateos.conf".to_string(),
+            title: "SlateOS".to_string(),
+            _source: "loader/entries/slateos.conf".to_string(),
+            linux: "/vmlinuz-slateos".to_string(),
+            initrd: vec!["/initramfs-slateos.img".to_string()],
             options: "root=/dev/sda2 rw quiet".to_string(),
             _machine_id: String::new(),
             _version: "0.1.0".to_string(),
             _sort_key: String::new(),
         });
         entries.push(BootEntry {
-            id: "ouros-fallback.conf".to_string(),
-            title: "OurOS (fallback)".to_string(),
-            _source: "loader/entries/ouros-fallback.conf".to_string(),
-            linux: "/vmlinuz-ouros".to_string(),
-            initrd: vec!["/initramfs-ouros-fallback.img".to_string()],
+            id: "slateos-fallback.conf".to_string(),
+            title: "SlateOS (fallback)".to_string(),
+            _source: "loader/entries/slateos-fallback.conf".to_string(),
+            linux: "/vmlinuz-slateos".to_string(),
+            initrd: vec!["/initramfs-slateos-fallback.img".to_string()],
             options: "root=/dev/sda2 rw".to_string(),
             _machine_id: String::new(),
             _version: "0.1.0".to_string(),
@@ -253,7 +253,7 @@ fn cmd_status(esp: &Path) -> i32 {
     }
     println!();
     println!("Current Boot Loader:");
-    println!("      Product: systemd-boot (OurOS {VERSION})");
+    println!("      Product: systemd-boot (SlateOS {VERSION})");
     println!("          ESP: {}", esp.display());
     println!();
     println!("Boot Loader Configuration:");
@@ -465,7 +465,7 @@ fn main() {
                 process::exit(0);
             }
             "--version" => {
-                println!("bootctl (OurOS) {VERSION}");
+                println!("bootctl (SlateOS) {VERSION}");
                 process::exit(0);
             }
             s if !s.starts_with('-') => {

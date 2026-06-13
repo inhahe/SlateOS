@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zoom-cli — OurOS Zoom video conferencing
+//! zoom-cli — SlateOS Zoom video conferencing
 //!
 //! Single personality: `zoom`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_zoom(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: zoom [OPTIONS]");
-        println!("zoom v5.17 (OurOS) — Video conferencing client");
+        println!("zoom v5.17 (SlateOS) — Video conferencing client");
         println!();
         println!("Options:");
         println!("  --url=URL         Join meeting by URL");
@@ -21,7 +21,7 @@ fn run_zoom(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("zoom v5.17 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("zoom v5.17 (SlateOS)"); return 0; }
     println!("zoom: video conferencing client started");
     println!("  Account: signed in");
     println!("  Virtual background: available");

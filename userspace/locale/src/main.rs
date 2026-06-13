@@ -1,4 +1,4 @@
-//! OurOS `locale` / `localedef` / `getconf` -- locale and system configuration.
+//! SlateOS `locale` / `localedef` / `getconf` -- locale and system configuration.
 //!
 //! Multi-personality binary that behaves as one of three POSIX utilities
 //! depending on `argv[0]`:
@@ -1223,8 +1223,8 @@ fn build_conf_table() -> Vec<ConfVar> {
         ConfVar { name: "NPROCESSORS_CONF", value: ConfValue::Int(ncpus) },
         ConfVar { name: "NPROCESSORS_ONLN", value: ConfValue::Int(ncpus) },
         // GNU
-        ConfVar { name: "GNU_LIBC_VERSION", value: ConfValue::Str("ouros-libc 0.1") },
-        ConfVar { name: "GNU_LIBPTHREAD_VERSION", value: ConfValue::Str("ouros-pthread 0.1") },
+        ConfVar { name: "GNU_LIBC_VERSION", value: ConfValue::Str("slateos-libc 0.1") },
+        ConfVar { name: "GNU_LIBPTHREAD_VERSION", value: ConfValue::Str("slateos-pthread 0.1") },
         // Limits
         ConfVar { name: "LONG_BIT", value: ConfValue::Int(64) },
         ConfVar { name: "WORD_BIT", value: ConfValue::Int(32) },
@@ -1688,7 +1688,7 @@ mod tests {
     fn test_getconf_page_size() {
         let table = build_conf_table();
         let entry = table.iter().find(|v| v.name == "PAGE_SIZE").unwrap();
-        // OurOS uses 16 KiB pages.
+        // SlateOS uses 16 KiB pages.
         assert_eq!(entry.value.display(), "16384");
     }
 
@@ -1829,14 +1829,14 @@ mod tests {
     fn test_getconf_gnu_libc_version() {
         let table = build_conf_table();
         let entry = table.iter().find(|v| v.name == "GNU_LIBC_VERSION").unwrap();
-        assert_eq!(entry.value.display(), "ouros-libc 0.1");
+        assert_eq!(entry.value.display(), "slateos-libc 0.1");
     }
 
     #[test]
     fn test_getconf_gnu_libpthread_version() {
         let table = build_conf_table();
         let entry = table.iter().find(|v| v.name == "GNU_LIBPTHREAD_VERSION").unwrap();
-        assert_eq!(entry.value.display(), "ouros-pthread 0.1");
+        assert_eq!(entry.value.display(), "slateos-pthread 0.1");
     }
 
     #[test]

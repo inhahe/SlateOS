@@ -1,4 +1,4 @@
-//! Multi-personality disk encryption management utility for OurOS.
+//! Multi-personality disk encryption management utility for SlateOS.
 //!
 //! This binary detects the tool from `argv[0]`:
 //!   - `cryptsetup`      -- LUKS disk encryption management
@@ -18,7 +18,7 @@ use std::process;
 // Constants
 // ---------------------------------------------------------------------------
 
-const VERSION: &str = "2.7.0-ouros";
+const VERSION: &str = "2.7.0-slateos";
 const LUKS_MAGIC: [u8; 6] = [0x4c, 0x55, 0x4b, 0x53, 0xba, 0xbe]; // "LUKS\xba\xbe"
 const LUKS_KEY_SLOTS: usize = 8;
 const LUKS_SALT_SIZE: usize = 32;

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pybullet-cli — OurOS PyBullet Python physics tool
+//! pybullet-cli — SlateOS PyBullet Python physics tool
 //!
 //! Single personality: `pybullet`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pybullet(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: pybullet COMMAND [OPTIONS]");
-        println!("PyBullet v3.2.6 (OurOS) — Python physics simulation");
+        println!("PyBullet v3.2.6 (SlateOS) — Python physics simulation");
         println!();
         println!("Commands:");
         println!("  run SCRIPT        Run PyBullet script");
@@ -24,7 +24,7 @@ fn run_pybullet(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("PyBullet v3.2.6 (OurOS)");
+        println!("PyBullet v3.2.6 (SlateOS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("info");

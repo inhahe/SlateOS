@@ -2,5 +2,5 @@
 name = "netstat"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS network connection and socket statistics"
+description = "SlateOS network connection and socket statistics"
 [dependencies]

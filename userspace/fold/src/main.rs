@@ -1,4 +1,4 @@
-//! OurOS `fold` Utility -- Wrap Input Lines to Fit a Specified Width
+//! SlateOS `fold` Utility -- Wrap Input Lines to Fit a Specified Width
 //!
 //! Reads input and wraps long lines so they fit within a column width,
 //! writing the result to standard output. Modeled after POSIX/GNU `fold`.
@@ -431,7 +431,7 @@ fn run(config: &Config) -> io::Result<i32> {
 // ============================================================================
 
 fn print_help() {
-    println!("OurOS fold v{VERSION}");
+    println!("SlateOS fold v{VERSION}");
     println!();
     println!("Wrap input lines in each FILE, writing to standard output.");
     println!("With no FILE, or when FILE is -, read standard input.");
@@ -469,7 +469,7 @@ fn main() {
             process::exit(0);
         }
         ParseResult::Version => {
-            println!("fold (OurOS) {VERSION}");
+            println!("fold (SlateOS) {VERSION}");
             process::exit(0);
         }
         ParseResult::Run(config) => match run(&config) {

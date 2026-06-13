@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! petsc-cli — OurOS PETSc scientific computing toolkit
+//! petsc-cli — SlateOS PETSc scientific computing toolkit
 //!
 //! Single personality: `petsc-info`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_petsc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: petsc-info COMMAND [OPTIONS]");
-        println!("PETSc v3.21 (OurOS) — Portable Extensible Toolkit for Scientific Computation");
+        println!("PETSc v3.21 (SlateOS) — Portable Extensible Toolkit for Scientific Computation");
         println!();
         println!("Commands:");
         println!("  info              Show PETSc configuration");
@@ -24,7 +24,7 @@ fn run_petsc(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("PETSc v3.21 (OurOS)");
+        println!("PETSc v3.21 (SlateOS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("info");

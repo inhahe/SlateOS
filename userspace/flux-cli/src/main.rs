@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! flux-cli — OurOS Flux GitOps toolkit
+//! flux-cli — SlateOS Flux GitOps toolkit
 //!
 //! Multi-personality: `flux`
 
@@ -11,7 +11,7 @@ fn run_flux(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: flux [FLAGS] COMMAND [ARGS]");
         println!();
-        println!("flux — Flux GitOps toolkit CLI (OurOS).");
+        println!("flux — Flux GitOps toolkit CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  bootstrap      Bootstrap Flux");
@@ -30,7 +30,7 @@ fn run_flux(args: &[String]) -> i32 {
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match subcmd {
         "version" | "--version" => {
-            println!("flux version 2.2.3 (OurOS)");
+            println!("flux version 2.2.3 (SlateOS)");
             println!("build date: 2024-01-15T00:00:00Z");
         }
         "check" => {
@@ -55,7 +55,7 @@ fn run_flux(args: &[String]) -> i32 {
                 }
                 "sources" | "source" => {
                     println!("NAME       AGE   READY  STATUS");
-                    println!("ouros-repo 4d    True   stored artifact for revision 'main@sha1:abcdef1'");
+                    println!("slateos-repo 4d    True   stored artifact for revision 'main@sha1:abcdef1'");
                 }
                 "helmreleases" | "hr" => {
                     println!("NAME         AGE   READY  STATUS");

@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-//! Character Map — Unicode character browser and picker for OurOS.
+//! Character Map — Unicode character browser and picker for SlateOS.
 //!
 //! Features:
 //! - Browse Unicode blocks (Basic Latin, Latin Extended, Greek, Cyrillic, CJK, Arrows,

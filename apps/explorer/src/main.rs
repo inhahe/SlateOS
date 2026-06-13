@@ -1,4 +1,4 @@
-//! OurOS File Explorer
+//! SlateOS File Explorer
 //!
 //! Graphical file manager with:
 //! - Directory tree sidebar

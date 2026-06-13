@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! step3d-cli — OurOS STEP file viewer
+//! step3d-cli — SlateOS STEP file viewer
 //!
 //! Single personality: `step3d`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_step3d(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: step3d [OPTIONS] FILE.step");
-        println!("step3d v1.0 (OurOS) — STEP/IGES 3D file viewer");
+        println!("step3d v1.0 (SlateOS) — STEP/IGES 3D file viewer");
         println!();
         println!("Options:");
         println!("  --info            Show file information");
@@ -23,7 +23,7 @@ fn run_step3d(args: &[String], _prog: &str) -> i32 {
         println!("Supported formats: STEP (.step, .stp), IGES (.iges, .igs)");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("step3d v1.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("step3d v1.0 (SlateOS)"); return 0; }
     if args.iter().any(|a| a == "--info") {
         let file = args.last().map(|s| s.as_str()).unwrap_or("model.step");
         println!("File: {}", file);

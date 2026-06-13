@@ -1,4 +1,4 @@
-// OurOS blkid — block device identification
+// SlateOS blkid — block device identification
 //
 // Multi-personality binary:
 //   blkid   — locate/print block device attributes
@@ -592,7 +592,7 @@ fn print_version(personality: Personality) {
         Personality::Blkid => "blkid",
         Personality::Findfs => "findfs",
     };
-    println!("{name} (OurOS) 0.1.0");
+    println!("{name} (SlateOS) 0.1.0");
 }
 
 // ---------------------------------------------------------------------------

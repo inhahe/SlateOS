@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! trezor-cli — OurOS Trezor hardware wallet tool
+//! trezor-cli — SlateOS Trezor hardware wallet tool
 //!
 //! Single personality: `trezorctl`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_trezor(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: trezorctl COMMAND [OPTIONS]");
-        println!("trezorctl v0.14 (OurOS) — Trezor hardware wallet CLI");
+        println!("trezorctl v0.14 (SlateOS) — Trezor hardware wallet CLI");
         println!();
         println!("Commands:");
         println!("  list              List connected Trezor devices");
@@ -27,7 +27,7 @@ fn run_trezor(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("trezorctl v0.14 (OurOS)");
+        println!("trezorctl v0.14 (SlateOS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("list");

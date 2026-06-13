@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bricscad-cli — OurOS Bricsys BricsCAD DWG-compatible CAD
+//! bricscad-cli — SlateOS Bricsys BricsCAD DWG-compatible CAD
 //!
 //! Single personality: `bricscad`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_brics(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: bricscad [OPTIONS] [FILE]");
-        println!("Bricsys BricsCAD V25 (OurOS) — DWG-native CAD platform");
+        println!("Bricsys BricsCAD V25 (SlateOS) — DWG-native CAD platform");
         println!();
         println!("Options:");
         println!("  /b SCRIPT              Run script (.scr)");
@@ -23,8 +23,8 @@ fn run_brics(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Bricsys BricsCAD V25.1 (OurOS)"); return 0; }
-    println!("Bricsys BricsCAD V25.1 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Bricsys BricsCAD V25.1 (SlateOS)"); return 0; }
+    println!("Bricsys BricsCAD V25.1 (SlateOS)");
     println!("  Editions: Lite (2D), Pro (3D), Mechanical, BIM, Ultimate");
     println!("  Format: DWG (native, no conversion), DXF, DGN, IFC");
     println!("  AI: AI-powered tools (auto-classify, copy guided, BIMify)");

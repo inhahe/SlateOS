@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nox-cli — OurOS Nox test automation tool
+//! nox-cli — SlateOS Nox test automation tool
 //!
 //! Multi-personality: `nox`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_nox(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: nox [OPTIONS]");
-        println!("nox 2024.4.15 (OurOS)");
+        println!("nox 2024.4.15 (SlateOS)");
         println!();
         println!("Options:");
         println!("  -s, --sessions SESSIONS  Sessions to run");

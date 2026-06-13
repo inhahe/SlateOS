@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sqlmap-cli — OurOS sqlmap CLI
+//! sqlmap-cli — SlateOS sqlmap CLI
 //!
 //! Single personality: `sqlmap`
 
@@ -11,7 +11,7 @@ fn run_sqlmap(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "-hh") {
         println!("Usage: sqlmap [OPTIONS]");
         println!();
-        println!("sqlmap — SQL injection detection and exploitation (OurOS).");
+        println!("sqlmap — SQL injection detection and exploitation (SlateOS).");
         println!();
         println!("Target:");
         println!("  -u URL, --url=URL      Target URL");
@@ -44,7 +44,7 @@ fn run_sqlmap(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("sqlmap/1.8#stable (OurOS)");
+        println!("sqlmap/1.8#stable (SlateOS)");
         return 0;
     }
 
@@ -59,7 +59,7 @@ fn run_sqlmap(args: Vec<String>) -> i32 {
     println!(" ___ ___[.]_____ ___ ___  {{1.8#stable}}");
     println!("|_ -| . [.]     | .'| . |");
     println!("|___|_  [']_|_|_|__,|  _|");
-    println!("      |_|V...       |_|  https://sqlmap.org (OurOS)");
+    println!("      |_|V...       |_|  https://sqlmap.org (SlateOS)");
     println!();
     println!("[*] starting @ 12:00:00");
     println!();

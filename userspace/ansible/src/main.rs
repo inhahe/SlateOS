@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ansible — OurOS IT automation tool
+//! ansible — SlateOS IT automation tool
 //!
 //! Multi-personality binary detected via argv[0]:
 //!
@@ -37,7 +37,7 @@ fn run_ansible(args: Vec<String>) -> i32 {
     }
 
     if args.iter().any(|a| a == "--version") {
-        println!("ansible [core 2.16.0] (OurOS)");
+        println!("ansible [core 2.16.0] (SlateOS)");
         println!("  python version = 3.13.0");
         return 0;
     }

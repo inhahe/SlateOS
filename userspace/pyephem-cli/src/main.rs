@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pyephem-cli — OurOS PyEphem astronomical computations
+//! pyephem-cli — SlateOS PyEphem astronomical computations
 //!
 //! Single personality: `ephem`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ephem(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ephem [COMMAND] [OPTIONS]");
-        println!("ephem v4.1 (OurOS) — Astronomical ephemeris calculator");
+        println!("ephem v4.1 (SlateOS) — Astronomical ephemeris calculator");
         println!();
         println!("Commands:");
         println!("  planets          Show current planet positions");
@@ -29,7 +29,7 @@ fn run_ephem(args: &[String], _prog: &str) -> i32 {
         println!("  --version        Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("PyEphem v4.1.5 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("PyEphem v4.1.5 (SlateOS)"); return 0; }
     match args.first().map(|s| s.as_str()) {
         Some("moon") => {
             println!("Moon:");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! valgrind — OurOS memory debugging and profiling toolkit
+//! valgrind — SlateOS memory debugging and profiling toolkit
 //!
 //! Multi-personality binary detected via argv[0]:
 //!
@@ -38,7 +38,7 @@ fn run_valgrind(args: Vec<String>) -> i32 {
     }
 
     if args.iter().any(|a| a == "--version") {
-        println!("valgrind-0.1.0 (OurOS)");
+        println!("valgrind-0.1.0 (SlateOS)");
         return 0;
     }
 
@@ -49,7 +49,7 @@ fn run_valgrind(args: Vec<String>) -> i32 {
     let program = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("./a.out");
 
     println!("=={pid}== {tool}, a memory error detector", pid = 12345, tool = tool_name(tool));
-    println!("=={pid}== Copyright (C) OurOS. Using Valgrind-0.1.0.", pid = 12345);
+    println!("=={pid}== Copyright (C) SlateOS. Using Valgrind-0.1.0.", pid = 12345);
     println!("=={pid}== Command: {program}", pid = 12345, program = program);
     println!("=={pid}==", pid = 12345);
 

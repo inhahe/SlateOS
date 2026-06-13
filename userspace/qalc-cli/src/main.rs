@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! qalc-cli — OurOS Qalculate CLI
+//! qalc-cli — SlateOS Qalculate CLI
 //!
 //! Single personality: `qalc`
 
@@ -11,7 +11,7 @@ fn run_qalc(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: qalc [OPTIONS] [EXPRESSION]");
         println!();
-        println!("Qalculate! — powerful calculator (OurOS).");
+        println!("Qalculate! — powerful calculator (SlateOS).");
         println!();
         println!("Options:");
         println!("  -s, --set OPTION       Set option");
@@ -24,7 +24,7 @@ fn run_qalc(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("Qalculate! 4.9.0 (OurOS)");
+        println!("Qalculate! 4.9.0 (SlateOS)");
         return 0;
     }
 

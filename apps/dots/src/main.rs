@@ -11,7 +11,7 @@
 #![allow(clippy::needless_range_loop)]
 #![allow(unused_imports)]
 
-//! OurOS Dots and Boxes — classic pencil-and-paper strategy game.
+//! SlateOS Dots and Boxes — classic pencil-and-paper strategy game.
 //!
 //! Two players take turns drawing lines between adjacent dots on a grid.
 //! When a player completes the fourth side of a box, that box is claimed and

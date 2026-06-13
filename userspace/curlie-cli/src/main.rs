@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! curlie-cli — OurOS curlie (curl + HTTPie friendliness)
+//! curlie-cli — SlateOS curlie (curl + HTTPie friendliness)
 //!
 //! Single personality: `curlie`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_curlie(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: curlie [OPTIONS] METHOD URL [BODY...]");
-        println!("curlie v1.7.2 (OurOS) — curl with HTTPie-style output");
+        println!("curlie v1.7.2 (SlateOS) — curl with HTTPie-style output");
         println!();
         println!("Curlie wraps curl with colored output and HTTPie syntax.");
         println!("All curl options are supported and passed through.");
@@ -33,7 +33,7 @@ fn run_curlie(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("curlie 1.7.2 (OurOS)");
+        println!("curlie 1.7.2 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "--curl") {

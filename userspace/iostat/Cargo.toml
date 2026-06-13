@@ -2,5 +2,5 @@
 name = "iostat"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS I/O statistics utility"
+description = "SlateOS I/O statistics utility"
 [dependencies]

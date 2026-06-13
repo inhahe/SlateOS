@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! stylix-cli — OurOS Stylix system-wide color scheme manager
+//! stylix-cli — SlateOS Stylix system-wide color scheme manager
 //!
 //! Single personality: `stylix`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_stylix(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: stylix COMMAND [OPTIONS]");
-        println!("stylix v0.1 (OurOS) — System-wide color scheme manager");
+        println!("stylix v0.1 (SlateOS) — System-wide color scheme manager");
         println!();
         println!("Commands:");
         println!("  generate IMAGE    Generate palette from wallpaper");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mysql — OurOS MySQL relational database
+//! mysql — SlateOS MySQL relational database
 //!
 //! Multi-personality: `mysqld` (server), `mysql` (client), `mysqladmin`, `mysqldump`
 
@@ -24,7 +24,7 @@ fn run_mysqld(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("mysqld  Ver 8.4.0 for OurOS on x86_64 (OurOS Community Server - GPL)");
+        println!("mysqld  Ver 8.4.0 for SlateOS on x86_64 (SlateOS Community Server - GPL)");
         return 0;
     }
     let port = args.iter().find_map(|a| {
@@ -34,7 +34,7 @@ fn run_mysqld(args: Vec<String>) -> i32 {
     println!("2025-05-22T10:00:00.100000Z 0 [System] [MY-013576] [InnoDB] InnoDB initialization has started.");
     println!("2025-05-22T10:00:01.000000Z 0 [System] [MY-013577] [InnoDB] InnoDB initialization has ended.");
     println!("2025-05-22T10:00:01.500000Z 0 [System] [MY-011323] [Server] X Plugin ready for connections. Bind-address: '::' port: 33060");
-    println!("2025-05-22T10:00:02.000000Z 0 [System] [MY-010931] [Server] mysqld: ready for connections. Version: '8.4.0'  socket: '/tmp/mysql.sock'  port: {}  OurOS Community Server - GPL.", port);
+    println!("2025-05-22T10:00:02.000000Z 0 [System] [MY-010931] [Server] mysqld: ready for connections. Version: '8.4.0'  socket: '/tmp/mysql.sock'  port: {}  SlateOS Community Server - GPL.", port);
     0
 }
 
@@ -53,7 +53,7 @@ fn run_mysql_client(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("mysql  Ver 8.4.0 for OurOS on x86_64 (OurOS Community Server - GPL)");
+        println!("mysql  Ver 8.4.0 for SlateOS on x86_64 (SlateOS Community Server - GPL)");
         return 0;
     }
 
@@ -99,12 +99,12 @@ fn run_mysql_client(args: Vec<String>) -> i32 {
             println!("3 rows in set (0.00 sec)");
         } else if upper.contains("STATUS") {
             println!("--------------");
-            println!("mysql  Ver 8.4.0 for OurOS on x86_64");
+            println!("mysql  Ver 8.4.0 for SlateOS on x86_64");
             println!();
             println!("Connection id:          8");
             println!("Current database:       myapp");
             println!("Current user:           root@localhost");
-            println!("Server version:         8.4.0 OurOS Community Server - GPL");
+            println!("Server version:         8.4.0 SlateOS Community Server - GPL");
             println!("Protocol version:       10");
             println!("Uptime:                 1 day 0 hours 0 min 0 sec");
             println!("Threads: 2  Questions: 42  Slow queries: 0  Opens: 150  Open tables: 120  Queries per second avg: 0.048");
@@ -119,7 +119,7 @@ fn run_mysql_client(args: Vec<String>) -> i32 {
     let host = args.iter().find_map(|a| a.strip_prefix("-h")).unwrap_or("localhost");
     println!("Welcome to the MySQL monitor.  Commands end with ; or \\g.");
     println!("Your MySQL connection id is 8");
-    println!("Server version: 8.4.0 OurOS Community Server - GPL");
+    println!("Server version: 8.4.0 SlateOS Community Server - GPL");
     println!();
     println!("Type 'help;' or '\\h' for help. Type '\\c' to clear the current input statement.");
     println!();
@@ -158,7 +158,7 @@ fn run_mysqladmin(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("status");
     match cmd {
         "version" | "--version" => {
-            println!("mysqladmin  Ver 8.4.0 for OurOS on x86_64 (OurOS Community Server - GPL)");
+            println!("mysqladmin  Ver 8.4.0 for SlateOS on x86_64 (SlateOS Community Server - GPL)");
             println!("Server version          8.4.0");
             println!("Protocol version        10");
             println!("Connection              Localhost via UNIX socket");
@@ -207,11 +207,11 @@ fn run_mysqldump(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("mysqldump  Ver 8.4.0 for OurOS on x86_64 (OurOS Community Server - GPL)");
+        println!("mysqldump  Ver 8.4.0 for SlateOS on x86_64 (SlateOS Community Server - GPL)");
         return 0;
     }
     let db = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("myapp");
-    println!("-- MySQL dump 10.13  Distrib 8.4.0, for OurOS (x86_64)");
+    println!("-- MySQL dump 10.13  Distrib 8.4.0, for SlateOS (x86_64)");
     println!("--");
     println!("-- Host: localhost    Database: {}", db);
     println!("-- ------------------------------------------------------");

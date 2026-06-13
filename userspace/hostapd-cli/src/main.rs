@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hostapd-cli — OurOS wireless access point daemon
+//! hostapd-cli — SlateOS wireless access point daemon
 //!
 //! Multi-personality: `hostapd`, `hostapd_cli`
 
@@ -14,7 +14,7 @@ fn run_hostapd(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: hostapd [OPTIONS] <config-file>");
         println!();
-        println!("hostapd — IEEE 802.11 AP, IEEE 802.1X/WPA authenticator (OurOS).");
+        println!("hostapd — IEEE 802.11 AP, IEEE 802.1X/WPA authenticator (SlateOS).");
         println!();
         println!("Options:");
         println!("  -d            Debug output");
@@ -26,13 +26,13 @@ fn run_hostapd(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-v") {
-        println!("hostapd v2.10 (OurOS)");
+        println!("hostapd v2.10 (SlateOS)");
         return 0;
     }
 
     let config = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("/etc/hostapd/hostapd.conf");
     println!("Configuration file: {}", config);
-    println!("Using interface wlan0 with hwaddr 00:11:22:33:44:55 and ssid \"OurOS-AP\"");
+    println!("Using interface wlan0 with hwaddr 00:11:22:33:44:55 and ssid \"SlateOS-AP\"");
     println!("wlan0: interface state UNINITIALIZED->ENABLED");
     println!("wlan0: AP-ENABLED");
     0
@@ -57,7 +57,7 @@ fn run_hostapd_cli(args: &[String]) -> i32 {
             println!("num_sta[0]=3");
             println!("num_sta[1]=0");
             println!("bssid[0]=00:11:22:33:44:55");
-            println!("ssid[0]=OurOS-AP");
+            println!("ssid[0]=SlateOS-AP");
             println!("channel=36");
             println!("ieee80211n=1");
             println!("ieee80211ac=1");

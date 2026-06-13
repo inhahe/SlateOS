@@ -1,4 +1,4 @@
-//! OurOS `diff` Utility -- Compare Files Line by Line
+//! SlateOS `diff` Utility -- Compare Files Line by Line
 //!
 //! Compares two files (or directories with `-r`) and reports differences.
 //! Supports normal (ed-style), unified, context, and side-by-side output
@@ -331,7 +331,7 @@ fn parse_args(args: &[String]) -> ParseResult {
         process::exit(2);
     }
 
-    // Default color: false (OurOS does not have reliable isatty yet).
+    // Default color: false (SlateOS does not have reliable isatty yet).
     let use_color = color.unwrap_or(false);
     let ctx = context_lines.unwrap_or(3);
 
@@ -1434,7 +1434,7 @@ fn diff_files(path1_str: &str, path2_str: &str, config: &Config) -> i32 {
 // ============================================================================
 
 fn print_help() {
-    println!("OurOS diff v{VERSION}");
+    println!("SlateOS diff v{VERSION}");
     println!();
     println!("Compare files line by line.");
     println!();
@@ -1488,7 +1488,7 @@ fn main() {
             process::exit(0);
         }
         ParseResult::Version => {
-            println!("diff (OurOS) {VERSION}");
+            println!("diff (SlateOS) {VERSION}");
             process::exit(0);
         }
         ParseResult::Run(config) => {

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ghostscript-cli — OurOS Ghostscript CLI
+//! ghostscript-cli — SlateOS Ghostscript CLI
 //!
 //! Multi-personality: `gs`, `ghostscript`, `ps2pdf`, `pdf2ps`
 
@@ -20,7 +20,7 @@ fn run_gs(prog: &str, args: &[String]) -> i32 {
         "ps2pdf" => {
             if args.iter().any(|a| a == "--help" || a == "-h") {
                 println!("Usage: ps2pdf [OPTIONS] INPUT.ps [OUTPUT.pdf]");
-                println!("Convert PostScript to PDF (OurOS).");
+                println!("Convert PostScript to PDF (SlateOS).");
                 return 0;
             }
             let input = args.iter().find(|a| !a.starts_with('-'))
@@ -35,7 +35,7 @@ fn run_gs(prog: &str, args: &[String]) -> i32 {
         "pdf2ps" => {
             if args.iter().any(|a| a == "--help" || a == "-h") {
                 println!("Usage: pdf2ps [OPTIONS] INPUT.pdf [OUTPUT.ps]");
-                println!("Convert PDF to PostScript (OurOS).");
+                println!("Convert PDF to PostScript (SlateOS).");
                 return 0;
             }
             let input = args.iter().find(|a| !a.starts_with('-'))
@@ -54,7 +54,7 @@ fn run_gs(prog: &str, args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gs [OPTIONS] [FILE...]");
         println!();
-        println!("Ghostscript — PostScript/PDF interpreter (OurOS).");
+        println!("Ghostscript — PostScript/PDF interpreter (SlateOS).");
         println!();
         println!("Options:");
         println!("  -dBATCH              Exit after processing");
@@ -71,7 +71,7 @@ fn run_gs(prog: &str, args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("GPL Ghostscript 10.02.1 (OurOS)");
+        println!("GPL Ghostscript 10.02.1 (SlateOS)");
         return 0;
     }
 
@@ -88,7 +88,7 @@ fn run_gs(prog: &str, args: &[String]) -> i32 {
         .collect();
 
     if !quiet {
-        println!("GPL Ghostscript 10.02.1 (OurOS)");
+        println!("GPL Ghostscript 10.02.1 (SlateOS)");
         println!("Copyright (C) 2023 Artifex Software, Inc.  All rights reserved.");
     }
 

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! chrome-cli — OurOS Google Chrome browser
+//! chrome-cli — SlateOS Google Chrome browser
 //!
 //! Single personality: `chrome`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_chr(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: chrome [URL] [OPTIONS]");
-        println!("Google Chrome (OurOS) — Chromium-based browser");
+        println!("Google Chrome (SlateOS) — Chromium-based browser");
         println!();
         println!("Options:");
         println!("  --incognito            Incognito (private browsing) window");
@@ -24,8 +24,8 @@ fn run_chr(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Google Chrome 131.0.6778.86 (OurOS, 64-bit)"); return 0; }
-    println!("Google Chrome 131.0.6778.86 (Official Build) (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Google Chrome 131.0.6778.86 (SlateOS, 64-bit)"); return 0; }
+    println!("Google Chrome 131.0.6778.86 (Official Build) (SlateOS)");
     println!("  Vendor: Google LLC (Mountain View, California)");
     println!("  Engine: Blink (forked from WebKit Apr 2013), V8 JavaScript engine");
     println!("  Launched: Sep 2008 (Windows first), now Win/macOS/Linux/Android/iOS/ChromeOS");

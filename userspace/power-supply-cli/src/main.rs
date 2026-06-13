@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! power-supply-cli — OurOS power supply information
+//! power-supply-cli — SlateOS power supply information
 //!
 //! Single personality: `power-supply`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_power_supply(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: power-supply COMMAND [OPTIONS]");
-        println!("power-supply v1.0 (OurOS) — Power supply information tool");
+        println!("power-supply v1.0 (SlateOS) — Power supply information tool");
         println!();
         println!("Commands:");
         println!("  status            Show all power supply status");

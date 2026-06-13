@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tailscale-cli — OurOS Tailscale mesh VPN tools
+//! tailscale-cli — SlateOS Tailscale mesh VPN tools
 //!
 //! Multi-personality: `tailscale`, `tailscaled`
 
@@ -14,7 +14,7 @@ fn run_tailscale(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: tailscale [FLAGS] COMMAND [ARGS]");
         println!();
-        println!("tailscale — Tailscale mesh VPN client (OurOS).");
+        println!("tailscale — Tailscale mesh VPN client (SlateOS).");
         println!();
         println!("Commands:");
         println!("  up               Connect to Tailscale");
@@ -43,9 +43,9 @@ fn run_tailscale(args: &[String]) -> i32 {
             println!("# Health check:");
             println!("#     - not connected to home DERP region");
             println!();
-            println!("100.64.0.1   ouros-desktop  user@  linux   idle; offers exit node");
-            println!("100.64.0.2   ouros-laptop   user@  linux   active; direct 192.168.1.50:41641");
-            println!("100.64.0.3   ouros-server   user@  linux   idle; relay \"nyc\"");
+            println!("100.64.0.1   slateos-desktop  user@  linux   idle; offers exit node");
+            println!("100.64.0.2   slateos-laptop   user@  linux   active; direct 192.168.1.50:41641");
+            println!("100.64.0.3   slateos-server   user@  linux   idle; relay \"nyc\"");
             println!("100.64.0.4   phone          user@  android active; direct 10.0.0.5:41641");
         }
         "ip" => {
@@ -63,7 +63,7 @@ fn run_tailscale(args: &[String]) -> i32 {
         }
         "down" => println!("Tailscale stopped."),
         "ping" => {
-            let peer = args.get(1).map(|s| s.as_str()).unwrap_or("ouros-laptop");
+            let peer = args.get(1).map(|s| s.as_str()).unwrap_or("slateos-laptop");
             println!("pong from {} (100.64.0.2) via 192.168.1.50:41641 in 2ms", peer);
             println!("pong from {} (100.64.0.2) via 192.168.1.50:41641 in 1ms", peer);
             println!("pong from {} (100.64.0.2) via 192.168.1.50:41641 in 1ms", peer);
@@ -85,20 +85,20 @@ fn run_tailscale(args: &[String]) -> i32 {
             println!("\t\t- sin: 210.4ms (Singapore)");
         }
         "cert" => {
-            let domain = args.get(1).map(|s| s.as_str()).unwrap_or("ouros-desktop.example.ts.net");
+            let domain = args.get(1).map(|s| s.as_str()).unwrap_or("slateos-desktop.example.ts.net");
             println!("Wrote public cert to {}.crt", domain);
             println!("Wrote private key to {}.key", domain);
         }
         "serve" => {
             println!("Available within your tailnet:");
             println!();
-            println!("https://ouros-desktop.example.ts.net/");
+            println!("https://slateos-desktop.example.ts.net/");
             println!("|-- proxy http://127.0.0.1:3000");
         }
         "funnel" => {
             println!("Available on the internet:");
             println!();
-            println!("https://ouros-desktop.example.ts.net/");
+            println!("https://slateos-desktop.example.ts.net/");
             println!("|-- proxy http://127.0.0.1:3000");
         }
         _ => println!("tailscale: command '{}' completed", subcmd),

@@ -1,4 +1,4 @@
-//! OurOS Performance Monitoring and Analysis Tool
+//! SlateOS Performance Monitoring and Analysis Tool
 //!
 //! Multi-personality binary providing Linux-perf-compatible performance
 //! analysis.  Personality is detected from `argv[0]`:
@@ -473,7 +473,7 @@ fn cmd_list() {
 // ============================================================================
 
 fn cmd_version() {
-    println!("perf version {VERSION} (OurOS)");
+    println!("perf version {VERSION} (SlateOS)");
 }
 
 // ============================================================================
@@ -487,7 +487,7 @@ struct StatOpts {
     system_wide: bool,
     pid: Option<u32>,
     repeat: u32,
-    /// Command to execute and measure (used on OurOS with process spawning).
+    /// Command to execute and measure (used on SlateOS with process spawning).
     #[allow(dead_code)]
     command: Vec<String>,
 }
@@ -682,7 +682,7 @@ struct RecordOpts {
     pid: Option<u32>,
     system_wide: bool,
     output: String,
-    /// Command to execute and record (used on OurOS with process spawning).
+    /// Command to execute and record (used on SlateOS with process spawning).
     #[allow(dead_code)]
     command: Vec<String>,
 }

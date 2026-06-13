@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! apache-cli — OurOS Apache HTTP Server
+//! apache-cli — SlateOS Apache HTTP Server
 //!
 //! Multi-personality: `httpd`, `apachectl`, `ab`
 
@@ -15,7 +15,7 @@ fn run_apache(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "apachectl" => {
-                println!("apachectl (OurOS) — Apache HTTP Server control");
+                println!("apachectl (SlateOS) — Apache HTTP Server control");
                 println!("  start              Start httpd");
                 println!("  stop               Stop httpd");
                 println!("  restart            Restart httpd");
@@ -25,7 +25,7 @@ fn run_apache(args: &[String], prog: &str) -> i32 {
                 println!("  status             Server status");
             }
             "ab" => {
-                println!("ab (OurOS) — Apache HTTP benchmarking tool");
+                println!("ab (SlateOS) — Apache HTTP benchmarking tool");
                 println!("  -n REQUESTS        Number of requests");
                 println!("  -c CONCURRENCY     Concurrent connections");
                 println!("  -t TIMELIMIT       Seconds to max. wait");
@@ -34,7 +34,7 @@ fn run_apache(args: &[String], prog: &str) -> i32 {
                 println!("  URL                Target URL");
             }
             _ => {
-                println!("httpd v2.4 (OurOS) — Apache HTTP Server");
+                println!("httpd v2.4 (SlateOS) — Apache HTTP Server");
                 println!("  -f FILE            Config file");
                 println!("  -c DIRECTIVE       Process directive");
                 println!("  -d DIR             ServerRoot");
@@ -48,19 +48,19 @@ fn run_apache(args: &[String], prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("Apache/2.4.59 (OurOS)");
+        println!("Apache/2.4.59 (SlateOS)");
         return 0;
     }
     match prog {
         "ab" => {
-            println!("Apache Bench v2.3 (OurOS)");
+            println!("Apache Bench v2.3 (SlateOS)");
             println!("  Benchmarking localhost...");
             println!("  Requests per second: 12,345.67");
             println!("  Time per request: 0.081 ms");
             println!("  Transfer rate: 45.6 MB/sec");
         }
         _ => {
-            println!("Apache/2.4.59 (OurOS)");
+            println!("Apache/2.4.59 (SlateOS)");
             println!("  MPM: event (workers: 4, threads: 25)");
             println!("  Listening: *:80, *:443");
             println!("  Virtual hosts: 8");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sumologic-cli — OurOS Sumo Logic collector
+//! sumologic-cli — SlateOS Sumo Logic collector
 //!
 //! Single personality: `sumo`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sumo(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: sumo COMMAND [OPTIONS]");
-        println!("sumo v1.0 (OurOS) — Sumo Logic collector/client");
+        println!("sumo v1.0 (SlateOS) — Sumo Logic collector/client");
         println!();
         println!("Commands:");
         println!("  start             Start collector");
@@ -35,7 +35,7 @@ fn run_sumo(args: &[String], _prog: &str) -> i32 {
         "stop" => println!("Sumo Logic collector stopped."),
         "status" => {
             println!("Collector status:");
-            println!("  Name: ouros-collector");
+            println!("  Name: slateos-collector");
             println!("  Status: running");
             println!("  Sources: 3 active");
             println!("  Events/sec: 1,247");
@@ -58,7 +58,7 @@ fn run_sumo(args: &[String], _prog: &str) -> i32 {
             println!("  Time range: last 15m");
             println!("  Results: 342 messages");
         }
-        "version" | "--version" => println!("sumo v1.0 (OurOS)"),
+        "version" | "--version" => println!("sumo v1.0 (SlateOS)"),
         _ => println!("sumo {}: completed", cmd),
     }
     0

@@ -1,4 +1,4 @@
-//! OurOS Cron Daemon (`crond`)
+//! SlateOS Cron Daemon (`crond`)
 //!
 //! A time-based task scheduler that runs commands at specified times and
 //! intervals. Supports standard crontab syntax plus extensions.
@@ -412,7 +412,7 @@ impl Crontab {
 
     fn save(&self) -> Result<(), String> {
         let mut out = String::new();
-        out.push_str("# OurOS crontab — managed by crond\n");
+        out.push_str("# SlateOS crontab — managed by crond\n");
         out.push_str("# min hour day month weekday command\n\n");
 
         for job in &self.jobs {
@@ -798,7 +798,7 @@ fn cmd_status() {
 // ============================================================================
 
 fn print_usage() {
-    println!("OurOS Cron Daemon v0.1.0");
+    println!("SlateOS Cron Daemon v0.1.0");
     println!();
     println!("Time-based task scheduler. Runs commands at specified times.");
     println!();

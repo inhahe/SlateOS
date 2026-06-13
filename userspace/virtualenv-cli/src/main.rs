@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! virtualenv-cli — OurOS Python virtual environment creator
+//! virtualenv-cli — SlateOS Python virtual environment creator
 //!
 //! Multi-personality: `virtualenv`, `venv`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_virtualenv(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: virtualenv [OPTIONS] DEST");
-        println!("virtualenv 20.26.3 (OurOS)");
+        println!("virtualenv 20.26.3 (SlateOS)");
         println!();
         println!("Options:");
         println!("  -p, --python PATH    Python interpreter to use");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! teradata-cli — OurOS Teradata (Vantage data warehouse, the OG MPP DW, San Diego, NYSE:TDC)
+//! teradata-cli — SlateOS Teradata (Vantage data warehouse, the OG MPP DW, San Diego, NYSE:TDC)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_td(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: teradata [OPTIONS]");
-        println!("Teradata (OurOS) — Vantage MPP data warehouse (the original 1979 MPP DW, NYSE:TDC)");
+        println!("Teradata (SlateOS) — Vantage MPP data warehouse (the original 1979 MPP DW, NYSE:TDC)");
         println!();
         println!("Options:");
         println!("  --vantage              VantageCloud (cloud-native managed Teradata)");
@@ -21,8 +21,8 @@ fn run_td(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Teradata 2024 (OurOS) — bteq / tdload / Studio CLI"); return 0; }
-    println!("Teradata 2024 (OurOS) — The Original MPP Data Warehouse (since 1979)");
+    if args.iter().any(|a| a == "--version") { println!("Teradata 2024 (SlateOS) — bteq / tdload / Studio CLI"); return 0; }
+    println!("Teradata 2024 (SlateOS) — The Original MPP Data Warehouse (since 1979)");
     println!("  Vendor: Teradata Corporation (San Diego, CA — NYSE:TDC since 2007)");
     println!("  Founders: Jack Shemer + Walter Muir + Carroll Reed + Jerold Modes + Phil Neches + others, 1979");
     println!("          Founded at Caltech research initiative — 'tera' = 10^12 = trillion (bytes)");

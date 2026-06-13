@@ -1,7 +1,7 @@
-//! OurOS Disk Usage Utility
+//! SlateOS Disk Usage Utility
 //!
 //! Estimates file and directory space usage by recursively walking directory
-//! trees. Reports either disk usage (size rounded up to the OurOS 16 KiB block
+//! trees. Reports either disk usage (size rounded up to the SlateOS 16 KiB block
 //! size) or apparent size (actual file bytes).
 //!
 //! # Usage
@@ -38,7 +38,7 @@ use std::time::SystemTime;
 // Constants
 // ============================================================================
 
-/// OurOS uses 16 KiB pages, so disk usage rounds up to this block size.
+/// SlateOS uses 16 KiB pages, so disk usage rounds up to this block size.
 const BLOCK_SIZE: u64 = 16_384;
 
 // ============================================================================
@@ -159,7 +159,7 @@ Options:
 }
 
 fn print_version() {
-    println!("du (OurOS coreutils) 0.1.0");
+    println!("du (SlateOS coreutils) 0.1.0");
 }
 
 /// Parse a human-readable size string like "1M", "500K", "2G", "4096" into
@@ -639,7 +639,7 @@ fn json_escape(s: &str) -> String {
 // Metadata helpers
 // ============================================================================
 
-/// Portable inode/device extraction. On Unix-like systems (including OurOS) we
+/// Portable inode/device extraction. On Unix-like systems (including SlateOS) we
 /// use `std::os::unix::fs::MetadataExt`. On non-Unix build hosts we fall back
 /// to stubs so the code still compiles for testing.
 #[cfg(unix)]

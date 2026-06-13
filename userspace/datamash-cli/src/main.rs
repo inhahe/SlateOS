@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! datamash-cli — OurOS GNU datamash CLI
+//! datamash-cli — SlateOS GNU datamash CLI
 //!
 //! Single personality: `datamash`
 
@@ -11,7 +11,7 @@ fn run_datamash(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: datamash [OPTIONS] OPERATION [COLUMN] ...");
         println!();
-        println!("GNU datamash — textual data statistics (OurOS).");
+        println!("GNU datamash — textual data statistics (SlateOS).");
         println!();
         println!("Operations:");
         println!("  count                  Count lines");
@@ -37,7 +37,7 @@ fn run_datamash(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("datamash (GNU datamash) 1.8 (OurOS)");
+        println!("datamash (GNU datamash) 1.8 (SlateOS)");
         return 0;
     }
 

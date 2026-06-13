@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nxlog-cli — OurOS NXLog log collection
+//! nxlog-cli — SlateOS NXLog log collection
 //!
 //! Single personality: `nxlog`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_nxlog(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: nxlog [OPTIONS]");
-        println!("NXLog v5.7 (OurOS) — Multi-platform log collection");
+        println!("NXLog v5.7 (SlateOS) — Multi-platform log collection");
         println!();
         println!("Options:");
         println!("  -c, --conf FILE    Config file");
@@ -25,8 +25,8 @@ fn run_nxlog(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("NXLog v5.7.0 (OurOS)"); return 0; }
-    println!("NXLog v5.7.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("NXLog v5.7.0 (SlateOS)"); return 0; }
+    println!("NXLog v5.7.0 (SlateOS)");
     println!("  Inputs: im_file (3), im_udp (1), im_tcp (1)");
     println!("  Outputs: om_file (2), om_tcp (1), om_elasticsearch (1)");
     println!("  Processors: pm_transformer (2), pm_filter (1)");

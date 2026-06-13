@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! obs-wlrobs-cli — OurOS wlrobs OBS screen capture for wlroots
+//! obs-wlrobs-cli — SlateOS wlrobs OBS screen capture for wlroots
 //!
 //! Single personality: `wlrobs`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wlrobs(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wlrobs [OPTIONS]");
-        println!("wlrobs v2.0 (OurOS) — OBS screen capture for wlroots compositors");
+        println!("wlrobs v2.0 (SlateOS) — OBS screen capture for wlroots compositors");
         println!();
         println!("Options:");
         println!("  --output OUTPUT   Capture specific output");
@@ -25,7 +25,7 @@ fn run_wlrobs(args: &[String], _prog: &str) -> i32 {
         println!("Install as OBS plugin or use as standalone capture tool.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("wlrobs v2.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("wlrobs v2.0 (SlateOS)"); return 0; }
     let method = if args.iter().any(|a| a == "--dmabuf") { "DMA-BUF" } else { "screencopy" };
     let output = args.iter().skip_while(|a| a.as_str() != "--output").nth(1)
         .map(|s| s.as_str()).unwrap_or("all");

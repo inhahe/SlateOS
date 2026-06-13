@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sphinx-cli — OurOS Sphinx documentation generator
+//! sphinx-cli — SlateOS Sphinx documentation generator
 //!
 //! Multi-personality: `sphinx-build`, `sphinx-quickstart`, `sphinx-apidoc`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sphinx_build(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: sphinx-build [OPTIONS] SOURCEDIR OUTPUTDIR");
-        println!("Sphinx 7.2.6 (OurOS)");
+        println!("Sphinx 7.2.6 (SlateOS)");
         println!("  -b BUILDER    Builder (html, latex, epub, man, text)");
         println!("  -j N          Parallel jobs");
         println!("  -W           Turn warnings into errors");
@@ -21,7 +21,7 @@ fn run_sphinx_build(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("sphinx-build 7.2.6 (OurOS)");
+        println!("sphinx-build 7.2.6 (SlateOS)");
         return 0;
     }
     let builder = args.windows(2).find(|w| w[0] == "-b").map(|w| w[1].as_str()).unwrap_or("html");

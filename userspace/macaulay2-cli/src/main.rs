@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! macaulay2-cli — OurOS Macaulay2 algebraic geometry system
+//! macaulay2-cli — SlateOS Macaulay2 algebraic geometry system
 //!
 //! Single personality: `M2`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_m2(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: M2 [OPTIONS] [FILE...]");
-        println!("Macaulay2 v1.22 (OurOS) — Algebraic Geometry & Commutative Algebra");
+        println!("Macaulay2 v1.22 (SlateOS) — Algebraic Geometry & Commutative Algebra");
         println!();
         println!("Options:");
         println!("  -q               Quiet mode");
@@ -28,7 +28,7 @@ fn run_m2(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Macaulay2, version 1.22 (OurOS)");
+        println!("Macaulay2, version 1.22 (SlateOS)");
         return 0;
     }
     if let Some(expr) = args.windows(2).find(|w| w[0] == "-e").map(|w| w[1].as_str()) {
@@ -38,7 +38,7 @@ fn run_m2(args: &[String], _prog: &str) -> i32 {
     }
     let quiet = args.iter().any(|a| a == "-q");
     if !quiet {
-        println!("Macaulay2, version 1.22 (OurOS)");
+        println!("Macaulay2, version 1.22 (SlateOS)");
         println!("with packages: Core, Elimination, LLLBases, PrimaryDecomposition");
     }
     println!("i1 : R = QQ[x,y,z]");

@@ -2,5 +2,5 @@
 name = "chpasswd"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS chpasswd - batch password change (chpasswd/passwd)"
+description = "SlateOS chpasswd - batch password change (chpasswd/passwd)"
 [dependencies]

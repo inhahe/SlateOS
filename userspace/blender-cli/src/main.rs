@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! blender-cli — OurOS Blender 3D CLI
+//! blender-cli — SlateOS Blender 3D CLI
 //!
 //! Single personality: `blender`
 
@@ -11,7 +11,7 @@ fn run_blender(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: blender [OPTIONS] [FILE]");
         println!();
-        println!("Blender — 3D creation suite (OurOS).");
+        println!("Blender — 3D creation suite (SlateOS).");
         println!();
         println!("Render options:");
         println!("  -b, --background     Background mode (no GUI)");
@@ -33,7 +33,7 @@ fn run_blender(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("Blender 4.0.2 (OurOS)");
+        println!("Blender 4.0.2 (SlateOS)");
         println!("  build date: 2024-01-15");
         println!("  build hash: abc123def");
         return 0;
@@ -72,7 +72,7 @@ fn run_blender(args: Vec<String>) -> i32 {
     } else if let Some(f) = file {
         println!("Blender 4.0.2 — opening '{}'", f);
     } else {
-        println!("Blender 4.0.2 (OurOS)");
+        println!("Blender 4.0.2 (SlateOS)");
         println!("Starting Blender GUI...");
     }
     0

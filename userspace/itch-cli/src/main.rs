@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! itch-cli — OurOS itch.io desktop app (indie game store)
+//! itch-cli — SlateOS itch.io desktop app (indie game store)
 //!
 //! Single personality: `itch`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_itch(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: itch [OPTIONS]");
-        println!("itch app 25.6 (OurOS) — itch.io desktop client (indie game store)");
+        println!("itch app 25.6 (SlateOS) — itch.io desktop client (indie game store)");
         println!();
         println!("Options:");
         println!("  --library              Owned games library");
@@ -24,8 +24,8 @@ fn run_itch(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("itch 25.6.2 (OurOS)"); return 0; }
-    println!("itch 25.6.2 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("itch 25.6.2 (SlateOS)"); return 0; }
+    println!("itch 25.6.2 (SlateOS)");
     println!("  Vendor: itch corp (Toronto, Canada) — wholly owned by founder, no VC");
     println!("  Founder: Leaf Corcoran (solo dev) — itch.io launched March 3 2013");
     println!("  Platform: Windows, macOS, Linux (made with Electron + Node.js + Go)");

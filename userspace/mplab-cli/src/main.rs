@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mplab-cli — OurOS Microchip MPLAB X IDE for PIC/AVR/SAM/dsPIC
+//! mplab-cli — SlateOS Microchip MPLAB X IDE for PIC/AVR/SAM/dsPIC
 //!
 //! Single personality: `mplab`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_mplab(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mplab [OPTIONS] [PROJECT]");
-        println!("Microchip MPLAB X IDE 6.20 (OurOS) — PIC/AVR/SAM/dsPIC IDE");
+        println!("Microchip MPLAB X IDE 6.20 (SlateOS) — PIC/AVR/SAM/dsPIC IDE");
         println!();
         println!("Options:");
         println!("  --open FILE            Open project (.X)");
@@ -24,8 +24,8 @@ fn run_mplab(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Microchip MPLAB X IDE v6.20 (OurOS)"); return 0; }
-    println!("Microchip MPLAB X IDE v6.20 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Microchip MPLAB X IDE v6.20 (SlateOS)"); return 0; }
+    println!("Microchip MPLAB X IDE v6.20 (SlateOS)");
     println!("  Targets: PIC10/12/16/18/24, dsPIC30/33, PIC32 MIPS/RISC-V, SAM Cortex-M, AVR");
     println!("  Compilers: XC8 (PIC10-18/AVR), XC16 (PIC24/dsPIC), XC32 (PIC32/SAM)");
     println!("  Debuggers: ICD 5, Snap, PICkit 5, Real ICE, J-32");

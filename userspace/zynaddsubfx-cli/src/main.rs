@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zynaddsubfx-cli — OurOS ZynAddSubFX synthesizer
+//! zynaddsubfx-cli — SlateOS ZynAddSubFX synthesizer
 //!
 //! Single personality: `zynaddsubfx`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_zynaddsubfx(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: zynaddsubfx [OPTIONS]");
-        println!("ZynAddSubFX v3.0 (OurOS) — Real-time software synthesizer");
+        println!("ZynAddSubFX v3.0 (SlateOS) — Real-time software synthesizer");
         println!();
         println!("Options:");
         println!("  -r RATE        Sample rate (default: 48000)");
@@ -28,8 +28,8 @@ fn run_zynaddsubfx(args: &[String], _prog: &str) -> i32 {
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("ZynAddSubFX v3.0.6 (OurOS)"); return 0; }
-    println!("ZynAddSubFX v3.0.6 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("ZynAddSubFX v3.0.6 (SlateOS)"); return 0; }
+    println!("ZynAddSubFX v3.0.6 (SlateOS)");
     println!("  Audio: JACK, 48000 Hz, buffer 256");
     println!("  MIDI: JACK");
     println!("  Engines:");

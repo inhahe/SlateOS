@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ollama-cli — OurOS Ollama CLI
+//! ollama-cli — SlateOS Ollama CLI
 //!
 //! Single personality: `ollama`
 
@@ -11,7 +11,7 @@ fn run_ollama(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ollama <COMMAND> [OPTIONS]");
         println!();
-        println!("Ollama local LLM runner (OurOS).");
+        println!("Ollama local LLM runner (SlateOS).");
         println!();
         println!("Commands:");
         println!("  serve        Start ollama server");
@@ -27,7 +27,7 @@ fn run_ollama(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("ollama 0.3.0 (OurOS)");
+        println!("ollama 0.3.0 (SlateOS)");
         return 0;
     }
 

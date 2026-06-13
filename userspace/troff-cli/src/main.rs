@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! troff-cli — OurOS troff/nroff text formatter
+//! troff-cli — SlateOS troff/nroff text formatter
 //!
 //! Multi-personality: `troff`, `nroff`, `tbl`, `eqn`, `pic`, `refer`
 
@@ -15,17 +15,17 @@ fn run_troff(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS] [FILE...]", prog);
         match prog {
             "nroff" => {
-                println!("nroff (OurOS) — Format for terminal/TTY output");
+                println!("nroff (SlateOS) — Format for terminal/TTY output");
                 println!("  -man       Use man macros");
                 println!("  -ms        Use ms macros");
                 println!("  -T DEVICE  Output device (ascii, utf8, latin1)");
             }
-            "tbl" => println!("tbl (OurOS) — Table preprocessor for troff"),
-            "eqn" => println!("eqn (OurOS) — Equation preprocessor for troff"),
-            "pic" => println!("pic (OurOS) — Picture preprocessor for troff"),
-            "refer" => println!("refer (OurOS) — Bibliography preprocessor"),
+            "tbl" => println!("tbl (SlateOS) — Table preprocessor for troff"),
+            "eqn" => println!("eqn (SlateOS) — Equation preprocessor for troff"),
+            "pic" => println!("pic (SlateOS) — Picture preprocessor for troff"),
+            "refer" => println!("refer (SlateOS) — Bibliography preprocessor"),
             _ => {
-                println!("troff (OurOS) — Text formatter");
+                println!("troff (SlateOS) — Text formatter");
                 println!("  -man       Use man macros");
                 println!("  -ms        Use ms macros");
                 println!("  -mm        Use mm macros");
@@ -35,7 +35,7 @@ fn run_troff(args: &[String], prog: &str) -> i32 {
         println!("  --version  Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("troff (Heirloom) v2.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("troff (Heirloom) v2.0 (SlateOS)"); return 0; }
     match prog {
         "nroff" => {
             println!("nroff: formatting for terminal...");
@@ -48,7 +48,7 @@ fn run_troff(args: &[String], prog: &str) -> i32 {
             println!("  Input processed, passing to troff");
         }
         _ => {
-            println!("troff (OurOS)");
+            println!("troff (SlateOS)");
             println!("  Macros: ms");
             println!("  Device: ps (PostScript)");
             println!("  Input: paper.ms");

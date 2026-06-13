@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mkfs-cli — OurOS mkfs filesystem creation CLIs
+//! mkfs-cli — SlateOS mkfs filesystem creation CLIs
 //!
 //! Multi-personality: `mkfs`, `mkfs.ext4`, `mkfs.xfs`, `mkfs.btrfs`, `mkfs.fat`, `mkswap`
 
@@ -69,7 +69,7 @@ fn run_mkfs(prog: &str, args: &[String]) -> i32 {
         "mkfs.ext4" | "mke2fs" => {
             let block_size = args.windows(2).find(|w| w[0] == "-b")
                 .map(|w| w[1].as_str()).unwrap_or("4096");
-            println!("mke2fs 1.47.0 (OurOS)");
+            println!("mke2fs 1.47.0 (SlateOS)");
             println!("Creating filesystem with 13107200 {}k blocks and 3276800 inodes", block_size);
             println!("Filesystem UUID: abcdef12-3456-7890-abcd-ef1234567890");
             if let Some(l) = label {
@@ -91,7 +91,7 @@ fn run_mkfs(prog: &str, args: &[String]) -> i32 {
             println!("realtime =none                   extsz=4096   blocks=0, rtextents=0");
         }
         "mkfs.btrfs" => {
-            println!("btrfs-progs v6.6.3 (OurOS)");
+            println!("btrfs-progs v6.6.3 (SlateOS)");
             if let Some(l) = label {
                 println!("Label: {}", l);
             }
@@ -107,7 +107,7 @@ fn run_mkfs(prog: &str, args: &[String]) -> i32 {
         "mkfs.fat" | "mkfs.vfat" => {
             let fat_size = args.windows(2).find(|w| w[0] == "-F")
                 .map(|w| w[1].as_str()).unwrap_or("32");
-            println!("mkfs.fat 4.2 (OurOS)");
+            println!("mkfs.fat 4.2 (SlateOS)");
             println!("{}: FAT{}", device, fat_size);
         }
         "mkswap" => {

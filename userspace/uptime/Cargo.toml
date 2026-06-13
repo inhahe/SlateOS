@@ -2,5 +2,5 @@
 name = "uptime"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS system uptime display"
+description = "SlateOS system uptime display"
 [dependencies]

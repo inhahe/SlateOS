@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! drone-cli — OurOS Drone CI CLI
+//! drone-cli — SlateOS Drone CI CLI
 //!
 //! Multi-personality: `drone`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_drone(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: drone COMMAND [OPTIONS]");
-        println!("Drone CLI 1.7.0 (OurOS)");
+        println!("Drone CLI 1.7.0 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  build          Manage builds");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zotero-cli — OurOS Zotero reference manager
+//! zotero-cli — SlateOS Zotero reference manager
 //!
 //! Single personality: `zotero`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_zotero(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: zotero [OPTIONS]");
-        println!("Zotero v6.0 (OurOS) — Reference management and research organizer");
+        println!("Zotero v6.0 (SlateOS) — Reference management and research organizer");
         println!();
         println!("Options:");
         println!("  --import FILE      Import references (BibTeX/RIS/CSL)");
@@ -27,8 +27,8 @@ fn run_zotero(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Zotero v6.0.30 (OurOS)"); return 0; }
-    println!("Zotero v6.0.30 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Zotero v6.0.30 (SlateOS)"); return 0; }
+    println!("Zotero v6.0.30 (SlateOS)");
     println!("  Library: ~/Zotero");
     println!("  Items: 2,456 references");
     println!("  Collections: 34");

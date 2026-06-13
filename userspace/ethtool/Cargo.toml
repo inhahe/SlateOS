@@ -2,5 +2,5 @@
 name = "ethtool"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS ethtool - ethernet device configuration"
+description = "SlateOS ethtool - ethernet device configuration"
 [dependencies]

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! vorta-cli — OurOS Vorta BorgBackup GUI frontend
+//! vorta-cli — SlateOS Vorta BorgBackup GUI frontend
 //!
 //! Single personality: `vorta`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_vorta(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: vorta [OPTIONS]");
-        println!("vorta v0.9 (OurOS) — Desktop backup GUI for BorgBackup");
+        println!("vorta v0.9 (SlateOS) — Desktop backup GUI for BorgBackup");
         println!();
         println!("Options:");
         println!("  --daemonize       Start in system tray");
@@ -22,7 +22,7 @@ fn run_vorta(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("vorta v0.9 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("vorta v0.9 (SlateOS)"); return 0; }
     if args.iter().any(|a| a == "--list") {
         println!("Vorta profiles:");
         println!("  default   → /mnt/backup/borg  (daily, last: 2h ago)");

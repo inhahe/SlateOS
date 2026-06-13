@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! retroarch-cli — OurOS RetroArch multi-system emulator
+//! retroarch-cli — SlateOS RetroArch multi-system emulator
 //!
 //! Multi-personality: `retroarch`
 
@@ -11,7 +11,7 @@ fn run_retroarch(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: retroarch [OPTIONS] [ROM]");
         println!();
-        println!("retroarch — multi-system emulator frontend (OurOS).");
+        println!("retroarch — multi-system emulator frontend (SlateOS).");
         println!();
         println!("Options:");
         println!("  -L, --libretro <core>  Libretro core to load");
@@ -27,7 +27,7 @@ fn run_retroarch(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("RetroArch 1.17.0 (OurOS)");
+        println!("RetroArch 1.17.0 (SlateOS)");
         println!("Git: abcdef1234567890");
         println!("Compiler: rustc");
         return 0;
@@ -60,7 +60,7 @@ fn run_retroarch(args: &[String]) -> i32 {
     if let Some(r) = rom {
         println!("[INFO] Loading ROM: {}", r);
     }
-    println!("[INFO] RetroArch 1.17.0 (OurOS)");
+    println!("[INFO] RetroArch 1.17.0 (SlateOS)");
     println!("[INFO] Initializing video driver: vulkan");
     println!("[INFO] Initializing audio driver: pulseaudio");
     println!("[INFO] Initializing input driver: udev");

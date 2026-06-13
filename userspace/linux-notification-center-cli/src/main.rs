@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! linux-notification-center-cli — OurOS Linux Notification Center
+//! linux-notification-center-cli — SlateOS Linux Notification Center
 //!
 //! Multi-personality: `deadd-notification-center`, `notification-center`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_notification_center(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: notification-center [OPTIONS]");
-        println!("notification-center v2.2 (OurOS) — Notification center");
+        println!("notification-center v2.2 (SlateOS) — Notification center");
         println!();
         println!("Options:");
         println!("  -s             Start daemon");
@@ -25,7 +25,7 @@ fn run_notification_center(args: &[String], _prog: &str) -> i32 {
         println!("Notification center with history, grouping, and DND.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("notification-center v2.2 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("notification-center v2.2 (SlateOS)"); return 0; }
     if args.iter().any(|a| a == "--count") {
         println!("3");
         return 0;

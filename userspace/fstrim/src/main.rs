@@ -1,4 +1,4 @@
-// OurOS fstrim - filesystem trim/discard utilities
+// SlateOS fstrim - filesystem trim/discard utilities
 //
 // Multi-personality binary:
 //   fstrim     - trim (discard) unused blocks on a mounted filesystem
@@ -642,7 +642,7 @@ fn tool_name(tool: Tool) -> &'static [u8] {
 
 fn show_version(tool: Tool) {
     print_out(tool_name(tool));
-    print_out(b" version 0.1.0 (OurOS)\n");
+    print_out(b" version 0.1.0 (SlateOS)\n");
 }
 
 fn show_fstrim_help() {

@@ -1,4 +1,4 @@
-//! OurOS Watch Utility -- Execute a Command Periodically
+//! SlateOS Watch Utility -- Execute a Command Periodically
 //!
 //! Runs a command repeatedly at a configurable interval, displaying its output
 //! in a full-screen terminal view. Modeled after the Linux `watch(1)` utility.
@@ -49,7 +49,7 @@ const RESET: &str = "\x1b[0m";
 /// BEL character for terminal beep.
 const BEL: &str = "\x07";
 
-/// Shell used to run commands (matching OurOS convention).
+/// Shell used to run commands (matching SlateOS convention).
 const SHELL: &str = "/bin/sh";
 
 /// Hostname file path.
@@ -92,7 +92,7 @@ struct Config {
 
 /// Print usage information.
 fn print_usage() {
-    println!("OurOS Watch Utility v{VERSION}");
+    println!("SlateOS Watch Utility v{VERSION}");
     println!();
     println!("Execute a command periodically, displaying its output.");
     println!();
@@ -141,7 +141,7 @@ fn parse_args(args: &[String]) -> Option<Config> {
                 return None;
             }
             "-v" | "--version" => {
-                println!("watch (OurOS) {VERSION}");
+                println!("watch (SlateOS) {VERSION}");
                 return None;
             }
             "-n" | "--interval" => {

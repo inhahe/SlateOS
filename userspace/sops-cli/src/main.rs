@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sops-cli — OurOS SOPS (Secrets OPerationS) CLI
+//! sops-cli — SlateOS SOPS (Secrets OPerationS) CLI
 //!
 //! Single personality: `sops`
 
@@ -11,7 +11,7 @@ fn run_sops(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sops <COMMAND> [OPTIONS] [FILE]");
         println!();
-        println!("SOPS: Secrets OPerationS — encrypted file editor (OurOS).");
+        println!("SOPS: Secrets OPerationS — encrypted file editor (SlateOS).");
         println!();
         println!("Commands:");
         println!("  encrypt      Encrypt a file");
@@ -25,7 +25,7 @@ fn run_sops(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("sops 3.8.1 (OurOS)");
+        println!("sops 3.8.1 (SlateOS)");
         return 0;
     }
 

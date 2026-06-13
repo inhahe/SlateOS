@@ -1,4 +1,4 @@
-//! OurOS getopt/cksum/sync/printenv — shell scripting helpers
+//! SlateOS getopt/cksum/sync/printenv — shell scripting helpers
 //!
 //! Multi-personality binary detected via argv[0]:
 //! - `getopt`: Parse command-line options for shell scripts
@@ -471,7 +471,7 @@ fn run_sync() -> Result<(), String> {
 
     if files.is_empty() {
         // Sync everything
-        #[cfg(target_os = "ouros")]
+        #[cfg(target_os = "slateos")]
         {
             let ret: i64;
             unsafe {
@@ -487,10 +487,10 @@ fn run_sync() -> Result<(), String> {
                 return Err(format!("sync failed: error {}", -ret));
             }
         }
-        #[cfg(not(target_os = "ouros"))]
+        #[cfg(not(target_os = "slateos"))]
         {
             let _ = (data_only, filesystem_only);
-            // No-op on non-OurOS
+            // No-op on non-SlateOS
         }
     } else {
         // Sync specific files

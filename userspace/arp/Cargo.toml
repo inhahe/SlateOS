@@ -2,5 +2,5 @@
 name = "arp"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS ARP table management"
+description = "SlateOS ARP table management"
 [dependencies]

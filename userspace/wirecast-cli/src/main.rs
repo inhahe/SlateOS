@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wirecast-cli — OurOS Telestream Wirecast live production
+//! wirecast-cli — SlateOS Telestream Wirecast live production
 //!
 //! Single personality: `wirecast`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: wirecast [OPTIONS] [DOCUMENT]");
-        println!("Telestream Wirecast 16 Pro (OurOS) — Cross-platform live video production");
+        println!("Telestream Wirecast 16 Pro (SlateOS) — Cross-platform live video production");
         println!();
         println!("Options:");
         println!("  --open FILE            Open .wcst document");
@@ -23,8 +23,8 @@ fn run_wc(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Telestream Wirecast 16.2.0 Pro (OurOS)"); return 0; }
-    println!("Telestream Wirecast 16.2.0 Pro (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Telestream Wirecast 16.2.0 Pro (SlateOS)"); return 0; }
+    println!("Telestream Wirecast 16.2.0 Pro (SlateOS)");
     println!("  Editions: Studio, Pro");
     println!("  Inputs: Camera, NDI, SRT, screen, IP camera, Rendezvous (browser)");
     println!("  Outputs: YouTube/Facebook/Twitch/Vimeo/Custom, multi-streaming");

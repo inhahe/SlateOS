@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zigbee-cli — OurOS Zigbee/Thread mesh networking
+//! zigbee-cli — SlateOS Zigbee/Thread mesh networking
 //!
 //! Multi-personality: `zigbee2mqtt`, `zbcli`
 
@@ -13,13 +13,13 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_zigbee2mqtt(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: zigbee2mqtt [OPTIONS]");
-        println!("Zigbee2MQTT 1.35.1 (OurOS)");
+        println!("Zigbee2MQTT 1.35.1 (SlateOS)");
         println!("  --version     Show version");
         println!("  --config DIR  Config directory");
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Zigbee2MQTT 1.35.1 (OurOS)");
+        println!("Zigbee2MQTT 1.35.1 (SlateOS)");
         return 0;
     }
     println!("Zigbee2MQTT 1.35.1 starting...");
@@ -46,7 +46,7 @@ fn run_zbcli(args: &[String]) -> i32 {
     }
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match subcmd {
-        "version" | "--version" => println!("zbcli 1.35.1 (Zigbee2MQTT, OurOS)"),
+        "version" | "--version" => println!("zbcli 1.35.1 (Zigbee2MQTT, SlateOS)"),
         "devices" => {
             println!("Paired devices:");
             println!("  0x00158d0001234567  IKEA TRADFRI bulb      router   online");

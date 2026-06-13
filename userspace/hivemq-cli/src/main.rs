@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! hivemq-cli — OurOS HiveMQ MQTT tools
+//! hivemq-cli — SlateOS HiveMQ MQTT tools
 //!
 //! Multi-personality: `hivemq`, `mqtt-cli`
 
@@ -15,7 +15,7 @@ fn run_hivemq(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [COMMAND] [OPTIONS]", prog);
         match prog {
             "mqtt-cli" => {
-                println!("mqtt-cli (OurOS) — MQTT 5.0 / 3.1.1 command-line client");
+                println!("mqtt-cli (SlateOS) — MQTT 5.0 / 3.1.1 command-line client");
                 println!("  pub -t TOPIC -m MSG   Publish message");
                 println!("  sub -t TOPIC          Subscribe to topic");
                 println!("  shell                 Interactive shell");
@@ -26,7 +26,7 @@ fn run_hivemq(args: &[String], prog: &str) -> i32 {
                 println!("  --tls                 Use TLS");
             }
             _ => {
-                println!("HiveMQ CE (OurOS) — Enterprise MQTT broker");
+                println!("HiveMQ CE (SlateOS) — Enterprise MQTT broker");
                 println!("  start              Start broker");
                 println!("  --config DIR       Config directory");
                 println!("  --bind-address IP  Bind address");
@@ -35,7 +35,7 @@ fn run_hivemq(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("HiveMQ CE v2024.3 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("HiveMQ CE v2024.3 (SlateOS)"); return 0; }
     match prog {
         "mqtt-cli" => {
             println!("MQTT CLI v4.28.0");
@@ -44,7 +44,7 @@ fn run_hivemq(args: &[String], prog: &str) -> i32 {
             println!("  Client ID: mqtt-cli-abc123");
         }
         _ => {
-            println!("HiveMQ CE v2024.3 (OurOS)");
+            println!("HiveMQ CE v2024.3 (SlateOS)");
             println!("  MQTT: 0.0.0.0:1883");
             println!("  WebSocket: 0.0.0.0:8000");
             println!("  Clients connected: 567");

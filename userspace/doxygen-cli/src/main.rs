@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! doxygen-cli — OurOS Doxygen documentation generator
+//! doxygen-cli — SlateOS Doxygen documentation generator
 //!
 //! Multi-personality: `doxygen`, `doxyindexer`, `doxysearch.cgi`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_doxygen(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: doxygen [OPTIONS] [CONFIG_FILE]");
-        println!("Doxygen 1.10.0 (OurOS)");
+        println!("Doxygen 1.10.0 (SlateOS)");
         println!();
         println!("Options:");
         println!("  -g [FILE]     Generate template configuration file");

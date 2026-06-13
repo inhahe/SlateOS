@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! git-interactive-rebase-tool — OurOS TUI for interactive git rebase
+//! git-interactive-rebase-tool — SlateOS TUI for interactive git rebase
 //!
 //! Single personality: `git-interactive-rebase-tool`
 
@@ -20,7 +20,7 @@ fn run_rebase_tool(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("interactive-rebase-tool 2.4.1 (OurOS)");
+        println!("interactive-rebase-tool 2.4.1 (SlateOS)");
         return 0;
     }
 

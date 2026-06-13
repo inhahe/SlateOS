@@ -1,4 +1,4 @@
-//! OurOS Network Packet Analyzer
+//! SlateOS Network Packet Analyzer
 //!
 //! Capture and analyze network packets. Similar to tcpdump on Linux.
 //!
@@ -36,7 +36,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 // Syscall interface
 // ============================================================================
 
-// Native OurOS monotonic clock (kernel syscall/number.rs); no-arg, returns
+// Native SlateOS monotonic clock (kernel syscall/number.rs); no-arg, returns
 // boot-relative nanoseconds in rax.  (Syscall 30 is SYS_IRQ_REGISTER.)
 const SYS_CLOCK_MONOTONIC: u64 = 10;
 
@@ -1191,7 +1191,7 @@ fn parse_filter(args: &[String]) -> Filter {
 // ============================================================================
 
 fn print_usage() {
-    println!("OurOS Network Packet Analyzer v0.1.0");
+    println!("SlateOS Network Packet Analyzer v0.1.0");
     println!();
     println!("Capture and analyze network packets.");
     println!();
@@ -1248,7 +1248,7 @@ fn main() {
                 return;
             }
             "--version" => {
-                println!("tcpdump (OurOS) 0.1.0");
+                println!("tcpdump (SlateOS) 0.1.0");
                 return;
             }
             "-i" => {

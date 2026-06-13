@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ffmpeg — OurOS multimedia framework
+//! ffmpeg — SlateOS multimedia framework
 //!
 //! Multi-personality binary detected via argv[0]:
 //!
@@ -15,7 +15,7 @@ use std::process;
 
 fn run_ffmpeg(args: Vec<String>) -> i32 {
     if args.is_empty() || args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("ffmpeg version 7.0 (OurOS) — Hyper fast Audio and Video encoder");
+        println!("ffmpeg version 7.0 (SlateOS) — Hyper fast Audio and Video encoder");
         println!("usage: ffmpeg [options] [[infile options] -i infile]... {{[outfile options] outfile}}...");
         println!();
         println!("Common options:");
@@ -42,7 +42,7 @@ fn run_ffmpeg(args: Vec<String>) -> i32 {
     }
 
     if args.iter().any(|a| a == "-version") {
-        println!("ffmpeg version 7.0 (OurOS)");
+        println!("ffmpeg version 7.0 (SlateOS)");
         println!("built with gcc 13.2.0");
         println!("configuration: --enable-gpl --enable-nonfree --enable-libx264 --enable-libx265 --enable-libvpx --enable-libopus");
         println!("libavutil      59. 2.100");
@@ -120,7 +120,7 @@ fn run_ffmpeg(args: Vec<String>) -> i32 {
 
 fn run_ffprobe(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("ffprobe version 7.0 (OurOS) — Multimedia stream analyzer");
+        println!("ffprobe version 7.0 (SlateOS) — Multimedia stream analyzer");
         println!("usage: ffprobe [OPTIONS] INPUT_FILE");
         println!();
         println!("Options:");
@@ -163,7 +163,7 @@ fn run_ffprobe(args: Vec<String>) -> i32 {
 
 fn run_ffplay(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("ffplay version 7.0 (OurOS) — Simple media player");
+        println!("ffplay version 7.0 (SlateOS) — Simple media player");
         println!("usage: ffplay [options] input_file");
         println!();
         println!("Options:");

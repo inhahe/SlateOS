@@ -1,4 +1,4 @@
-//! OurOS alternatives management system.
+//! SlateOS alternatives management system.
 //!
 //! Multi-personality binary providing:
 //! - **update-alternatives** — maintain symlinks for default commands
@@ -709,7 +709,7 @@ fn update_alternatives_main(args: &[String]) -> i32 {
             0
         }
         "--version" => {
-            println!("update-alternatives (OurOS) {VERSION}");
+            println!("update-alternatives (SlateOS) {VERSION}");
             0
         }
         other => {

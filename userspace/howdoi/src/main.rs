@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! howdoi — OurOS instant coding answers from the command line
+//! howdoi — SlateOS instant coding answers from the command line
 //!
 //! Single personality: `howdoi`
 
@@ -27,7 +27,7 @@ fn run_howdoi(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("howdoi 2.0.20 (OurOS)");
+        println!("howdoi 2.0.20 (SlateOS)");
         return 0;
     }
 

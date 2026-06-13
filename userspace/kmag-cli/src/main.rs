@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kmag-cli — OurOS KMag screen magnifier
+//! kmag-cli — SlateOS KMag screen magnifier
 //!
 //! Single personality: `kmag`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_kmag(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: kmag [OPTIONS]");
-        println!("kmag v24.05 (OurOS) — KDE screen magnifier");
+        println!("kmag v24.05 (SlateOS) — KDE screen magnifier");
         println!();
         println!("Options:");
         println!("  --zoom LEVEL      Zoom level (default 2)");
@@ -24,7 +24,7 @@ fn run_kmag(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("kmag v24.05 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("kmag v24.05 (SlateOS)"); return 0; }
     let mode = args.iter().skip_while(|a| a.as_str() != "--mode").nth(1)
         .map(|s| s.as_str()).unwrap_or("follow-mouse");
     let zoom = args.iter().skip_while(|a| a.as_str() != "--zoom").nth(1)

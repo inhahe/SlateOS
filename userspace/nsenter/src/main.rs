@@ -1,4 +1,4 @@
-//! OurOS namespace manipulation utilities.
+//! SlateOS namespace manipulation utilities.
 //!
 //! Multi-personality binary providing:
 //! - **nsenter** — run program in namespaces of another process

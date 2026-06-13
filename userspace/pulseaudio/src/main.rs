@@ -1,4 +1,4 @@
-//! Multi-personality PulseAudio sound system for OurOS.
+//! Multi-personality PulseAudio sound system for SlateOS.
 //!
 //! This binary detects the personality from `argv[0]`:
 //!   - `pactl`       -> PulseAudio control tool (default)
@@ -913,7 +913,7 @@ impl PulseState {
                 default_source_name: "alsa_input.pci-0000_00_1f.3.analog-stereo".to_string(),
                 default_sample_spec: default_spec,
                 default_channel_map: default_map.clone(),
-                _host_name: "ouros".to_string(),
+                _host_name: "slateos".to_string(),
                 _user_name: "user".to_string(),
                 _cookie: 0xdeadbeef,
             },
@@ -1964,7 +1964,7 @@ fn run_pacmd(args: &[String]) -> i32 {
 
     if args.is_empty() {
         println!("Welcome to PulseAudio {VERSION}! Use \"help\" for usage information.");
-        println!(">>> (interactive mode not supported in OurOS simulation)");
+        println!(">>> (interactive mode not supported in SlateOS simulation)");
         return 0;
     }
 

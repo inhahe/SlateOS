@@ -1,4 +1,4 @@
-//! OurOS Network Utility (netcat)
+//! SlateOS Network Utility (netcat)
 //!
 //! A TCP/UDP networking tool for connecting, listening, port scanning,
 //! and data transfer. Supports both client and server modes with options

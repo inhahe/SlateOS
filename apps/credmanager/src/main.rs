@@ -1,6 +1,6 @@
-//! OurOS Credential Manager
+//! SlateOS Credential Manager
 //!
-//! A secure password and credential management application for OurOS.
+//! A secure password and credential management application for SlateOS.
 //! Stores and organizes passwords, secure notes, credit cards, identities,
 //! and SSH keys in an encrypted vault. Features include:
 //!

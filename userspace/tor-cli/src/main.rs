@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tor-cli — OurOS Tor anonymity network tools
+//! tor-cli — SlateOS Tor anonymity network tools
 //!
 //! Multi-personality: `tor`, `torify`, `torsocks`, `tor-resolve`
 
@@ -14,7 +14,7 @@ fn run_tor(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: tor [OPTIONS]");
         println!();
-        println!("tor — The Tor anonymity network daemon (OurOS).");
+        println!("tor — The Tor anonymity network daemon (SlateOS).");
         println!();
         println!("Options:");
         println!("  -f <file>       Config file (default: /etc/tor/torrc)");
@@ -27,8 +27,8 @@ fn run_tor(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Tor version 0.4.8.10 (OurOS).");
-        println!("Tor is running on OurOS with Libevent 2.1.12-stable, OpenSSL 3.2.1,");
+        println!("Tor version 0.4.8.10 (SlateOS).");
+        println!("Tor is running on SlateOS with Libevent 2.1.12-stable, OpenSSL 3.2.1,");
         println!("Zlib 1.3.1, Liblzma 5.4.5, Libzstd 1.5.5, and Unknown N/A as libc.");
         return 0;
     }
@@ -44,11 +44,11 @@ fn run_tor(args: &[String]) -> i32 {
     }
 
     if args.iter().any(|a| a == "--list-fingerprint") {
-        println!("OurOS-Relay AABBCCDD11223344556677889900AABBCCDDEEFF");
+        println!("SlateOS-Relay AABBCCDD11223344556677889900AABBCCDDEEFF");
         return 0;
     }
 
-    println!("May 22 12:00:00.000 [notice] Tor 0.4.8.10 running on OurOS.");
+    println!("May 22 12:00:00.000 [notice] Tor 0.4.8.10 running on SlateOS.");
     println!("May 22 12:00:00.001 [notice] Read configuration file \"/etc/tor/torrc\".");
     println!("May 22 12:00:00.010 [notice] Opening Socks listener on 127.0.0.1:9050");
     println!("May 22 12:00:00.011 [notice] Opened Socks listener connection (ready) on 127.0.0.1:9050");
@@ -70,7 +70,7 @@ fn run_torsocks(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: torsocks [OPTIONS] <command> [args...]");
         println!();
-        println!("torsocks — wrapper to transparently route through Tor (OurOS).");
+        println!("torsocks — wrapper to transparently route through Tor (SlateOS).");
         println!();
         println!("Options:");
         println!("  --shell        Spawn a shell with torsocks enabled");

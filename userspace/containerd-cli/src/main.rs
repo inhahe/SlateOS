@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! containerd-cli — OurOS containerd container runtime
+//! containerd-cli — SlateOS containerd container runtime
 //!
 //! Multi-personality: `ctr`, `containerd`, `containerd-shim`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ctr(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("NAME:");
-        println!("   ctr — containerd CLI (OurOS)");
+        println!("   ctr — containerd CLI (SlateOS)");
         println!();
         println!("USAGE:");
         println!("   ctr [global options] command [command options] [arguments...]");
@@ -100,11 +100,11 @@ fn run_containerd(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("containerd 1.7.13 (OurOS)");
+        println!("containerd 1.7.13 (SlateOS)");
         return 0;
     }
 
-    println!("containerd: starting containerd 1.7.13 (OurOS)");
+    println!("containerd: starting containerd 1.7.13 (SlateOS)");
     println!("containerd: loading plugin io.containerd.content.v1.content...");
     println!("containerd: loading plugin io.containerd.snapshotter.v1.overlayfs...");
     println!("containerd: loading plugin io.containerd.runtime.v2.task...");

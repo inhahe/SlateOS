@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bigquery-cli — OurOS Google BigQuery (serverless petabyte-scale data warehouse, part of GCP, NASDAQ:GOOGL)
+//! bigquery-cli — SlateOS Google BigQuery (serverless petabyte-scale data warehouse, part of GCP, NASDAQ:GOOGL)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_bq(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: bigquery [OPTIONS]");
-        println!("BigQuery (OurOS) — serverless petabyte-scale data warehouse (part of GCP)");
+        println!("BigQuery (SlateOS) — serverless petabyte-scale data warehouse (part of GCP)");
         println!();
         println!("Options:");
         println!("  --omni                 BigQuery Omni (run queries on AWS S3 + Azure Blob)");
@@ -21,8 +21,8 @@ fn run_bq(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("BigQuery 2024 (OurOS) — bq CLI 2.x (gcloud bigquery)"); return 0; }
-    println!("BigQuery 2024 (OurOS) — Serverless Petabyte-Scale Data Warehouse");
+    if args.iter().any(|a| a == "--version") { println!("BigQuery 2024 (SlateOS) — bq CLI 2.x (gcloud bigquery)"); return 0; }
+    println!("BigQuery 2024 (SlateOS) — Serverless Petabyte-Scale Data Warehouse");
     println!("  Vendor: Google Cloud (part of Alphabet/Google — NASDAQ:GOOGL/GOOG since 2004)");
     println!("  Origins: Dremel internal paper (Google 2010) → BigQuery launched 2010 → GA 2012");
     println!("          Dremel paper: 'Dremel: Interactive Analysis of Web-Scale Datasets' (Sergey Melnik et al, 2010)");

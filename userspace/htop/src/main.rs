@@ -1,4 +1,4 @@
-//! OurOS Interactive Process Viewer
+//! SlateOS Interactive Process Viewer
 //!
 //! A full-screen interactive process viewer inspired by htop.  Provides
 //! per-core CPU bars, memory/swap bars, a sortable/filterable process list,
@@ -27,7 +27,7 @@ use std::process;
 
 const VERSION: &str = "0.1.0";
 
-/// OurOS uses 16 KiB pages.
+/// SlateOS uses 16 KiB pages.
 const PAGE_SIZE_KB: u64 = 16;
 
 /// Assumed tick rate (ticks per second).
@@ -69,7 +69,7 @@ const PRIO_PROCESS: i32 = 0;
 
 /// Issue a three-argument syscall using the x86-64 `syscall` instruction.
 ///
-/// Register mapping follows the OurOS syscall ABI:
+/// Register mapping follows the SlateOS syscall ABI:
 ///   rax = syscall number, rdi = arg1, rsi = arg2, rdx = arg3
 ///   Return value in rax. rcx and r11 are clobbered by the CPU.
 #[cfg(target_arch = "x86_64")]
@@ -1683,7 +1683,7 @@ impl App {
         let _ = write!(buf, "\x1b[2J\x1b[H");
         let _ = write!(
             buf,
-            "{BOLD}{REVERSE} htop {VERSION} -- OurOS Interactive Process Viewer "
+            "{BOLD}{REVERSE} htop {VERSION} -- SlateOS Interactive Process Viewer "
         );
         // Pad to full width.
         let title_len = 47;
@@ -2102,7 +2102,7 @@ fn parse_sort_field(s: &str) -> Option<SortField> {
 }
 
 fn print_usage() {
-    println!("htop {VERSION} -- OurOS Interactive Process Viewer");
+    println!("htop {VERSION} -- SlateOS Interactive Process Viewer");
     println!();
     println!("Usage: htop [OPTIONS]");
     println!();

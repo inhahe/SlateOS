@@ -2,5 +2,5 @@
 name = "bridge"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS bridge utility"
+description = "SlateOS bridge utility"
 [dependencies]

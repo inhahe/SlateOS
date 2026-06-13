@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! electrum-cli — OurOS Electrum Bitcoin wallet
+//! electrum-cli — SlateOS Electrum Bitcoin wallet
 //!
 //! Single personality: `electrum`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_electrum(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: electrum COMMAND [OPTIONS]");
-        println!("Electrum v4.5 (OurOS) — Lightweight Bitcoin wallet");
+        println!("Electrum v4.5 (SlateOS) — Lightweight Bitcoin wallet");
         println!();
         println!("Commands:");
         println!("  create            Create new wallet");
@@ -28,7 +28,7 @@ fn run_electrum(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("Electrum v4.5 (OurOS)");
+        println!("Electrum v4.5 (SlateOS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("getbalance");

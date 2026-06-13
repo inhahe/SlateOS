@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xdg-desktop-portal-cli — OurOS xdg-desktop-portal service
+//! xdg-desktop-portal-cli — SlateOS xdg-desktop-portal service
 //!
 //! Single personality: `xdg-desktop-portal`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_portal(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: xdg-desktop-portal [OPTIONS]");
-        println!("xdg-desktop-portal v1.18 (OurOS) — Desktop integration portal");
+        println!("xdg-desktop-portal v1.18 (SlateOS) — Desktop integration portal");
         println!();
         println!("Options:");
         println!("  --replace         Replace running instance");
@@ -25,7 +25,7 @@ fn run_portal(args: &[String], _prog: &str) -> i32 {
         println!("  Clipboard, Settings, Screenshot, Print, etc.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("xdg-desktop-portal v1.18 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("xdg-desktop-portal v1.18 (SlateOS)"); return 0; }
     println!("xdg-desktop-portal: started");
     println!("  D-Bus: org.freedesktop.portal.Desktop");
     println!("  Backends: wlr, gtk");

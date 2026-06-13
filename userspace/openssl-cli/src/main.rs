@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! openssl-cli — OurOS OpenSSL-compatible cryptography CLI
+//! openssl-cli — SlateOS OpenSSL-compatible cryptography CLI
 //!
 //! Single personality: `openssl`
 
@@ -37,10 +37,10 @@ fn run_openssl(args: Vec<String>) -> i32 {
     match cmd {
         "version" => {
             let full = args.iter().any(|a| a == "-a");
-            println!("OpenSSL 3.2.0 14 Nov 2023 (OurOS)");
+            println!("OpenSSL 3.2.0 14 Nov 2023 (SlateOS)");
             if full {
                 println!("built on: Thu Jan 1 00:00:00 2024");
-                println!("platform: ouros-x86_64");
+                println!("platform: slateos-x86_64");
                 println!("compiler: rustc 1.76.0");
                 println!("OPENSSLDIR: /etc/ssl");
             }

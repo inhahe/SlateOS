@@ -1,4 +1,4 @@
-//! OurOS User Switching Utility (`su` / `sudo`)
+//! SlateOS User Switching Utility (`su` / `sudo`)
 //!
 //! Switch to another user's identity and optionally run a command.
 //! When invoked as `sudo` (detected via `argv[0]`), runs a single command
@@ -303,7 +303,7 @@ fn get_caller_uid(users: &[User]) -> u32 {
 
 /// Read a password from the terminal without echoing.
 ///
-/// On OurOS the terminal may not yet support disabling echo, so we
+/// On SlateOS the terminal may not yet support disabling echo, so we
 /// read a line from stdin. The prompt is written to stderr so that it
 /// appears even when stdout is redirected.
 fn read_password(prompt: &str) -> Result<String, String> {
@@ -340,14 +340,14 @@ fn current_epoch_secs() -> u64 {
 
 /// Record a login session so that `who` and `w` can see it.
 ///
-/// Writes to both `/run/sessions/<pid>` (OurOS native) and
+/// Writes to both `/run/sessions/<pid>` (SlateOS native) and
 /// `/tmp/.users/<username>` (fallback). Errors are non-fatal since
 /// the switch itself should still proceed.
 fn record_session(username: &str, tty: &str) {
     let now = current_epoch_secs();
     let pid = process::id();
 
-    // OurOS native session file.
+    // SlateOS native session file.
     let session_dir = "/run/sessions";
     let _ = fs::create_dir_all(session_dir);
     let session_content = format!("user={username}\ntty={tty}\nhost=\ntime={now}\npid={pid}\n");
@@ -563,7 +563,7 @@ fn parse_su_args(args: &[String]) -> Result<SuOptions, i32> {
                 return Err(0);
             }
             "-V" | "--version" => {
-                println!("su (OurOS) 0.1.0");
+                println!("su (SlateOS) 0.1.0");
                 return Err(0);
             }
             other => {
@@ -587,7 +587,7 @@ fn parse_su_args(args: &[String]) -> Result<SuOptions, i32> {
 }
 
 fn print_su_help() {
-    println!("OurOS User Switch (su) v0.1.0");
+    println!("SlateOS User Switch (su) v0.1.0");
     println!();
     println!("Switch to another user account.");
     println!();
@@ -727,7 +727,7 @@ fn parse_sudo_args(args: &[String]) -> Result<SudoOptions, i32> {
                 return Err(0);
             }
             "-V" | "--version" => {
-                println!("sudo (OurOS) 0.1.0");
+                println!("sudo (SlateOS) 0.1.0");
                 return Err(0);
             }
             _ => {
@@ -749,7 +749,7 @@ fn parse_sudo_args(args: &[String]) -> Result<SudoOptions, i32> {
 }
 
 fn print_sudo_help() {
-    println!("OurOS Sudo v0.1.0");
+    println!("SlateOS Sudo v0.1.0");
     println!();
     println!("Run a command as another user (default: root).");
     println!();
@@ -1010,7 +1010,7 @@ mod tests {
     // --- User database parsing ---
 
     fn sample_users_yaml() -> &'static str {
-        r#"# OurOS user database
+        r#"# SlateOS user database
 users:
   - uid: 0
     username: "root"

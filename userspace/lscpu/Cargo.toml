@@ -2,5 +2,5 @@
 name = "lscpu"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS CPU information display"
+description = "SlateOS CPU information display"
 [dependencies]

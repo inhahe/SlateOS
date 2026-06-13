@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! caddy-cli — OurOS Caddy web server
+//! caddy-cli — SlateOS Caddy web server
 //!
 //! Multi-personality: `caddy`
 
@@ -14,7 +14,7 @@ fn run_caddy(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: caddy <command> [<args...>]");
         println!();
-        println!("caddy — fast, multi-platform web server with auto HTTPS (OurOS).");
+        println!("caddy — fast, multi-platform web server with auto HTTPS (SlateOS).");
         println!();
         println!("Commands:");
         println!("  adapt           Adapt config to JSON");
@@ -37,13 +37,13 @@ fn run_caddy(args: &[String]) -> i32 {
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match subcmd {
         "version" => {
-            println!("v2.7.6 h1:OurOS (OurOS)");
+            println!("v2.7.6 h1:SlateOS (SlateOS)");
         }
         "build-info" => {
             println!("path: github.com/caddyserver/caddy/v2");
             println!("version: v2.7.6");
             println!("go: go1.22.0");
-            println!("os: ouros");
+            println!("os: slateos");
             println!("arch: amd64");
         }
         "list-modules" => {

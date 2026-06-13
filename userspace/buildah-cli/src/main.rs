@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! buildah-cli — OurOS Buildah OCI image builder CLI
+//! buildah-cli — SlateOS Buildah OCI image builder CLI
 //!
 //! Single personality: `buildah`
 
@@ -38,7 +38,7 @@ fn run_buildah(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
         "version" => {
-            println!("Version:         1.34.0 (OurOS)");
+            println!("Version:         1.34.0 (SlateOS)");
             println!("Go Version:      go1.21.6");
             println!("Image Spec:      1.1.0");
             println!("Runtime Spec:    1.1.0");

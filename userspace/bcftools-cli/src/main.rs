@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bcftools-cli — OurOS BCFtools variant calling tools
+//! bcftools-cli — SlateOS BCFtools variant calling tools
 //!
 //! Multi-personality: `bcftools`
 
@@ -10,7 +10,7 @@ use std::process;
 fn run_bcftools(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Program: bcftools (Tools for variant calling and manipulating VCFs and BCFs)");
-        println!("Version: 1.19 (OurOS, using htslib 1.19)");
+        println!("Version: 1.19 (SlateOS, using htslib 1.19)");
         println!();
         println!("Usage:   bcftools <command> <arguments>");
         println!();

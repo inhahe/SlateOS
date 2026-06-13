@@ -1,4 +1,4 @@
-//! OurOS Image Viewer
+//! SlateOS Image Viewer
 //!
 //! Graphical photo/image viewer with:
 //! - Image display with zoom, pan, rotation, and flip transforms

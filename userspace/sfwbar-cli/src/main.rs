@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sfwbar-cli — OurOS sfwbar flexible Wayland taskbar
+//! sfwbar-cli — SlateOS sfwbar flexible Wayland taskbar
 //!
 //! Single personality: `sfwbar`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sfwbar(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sfwbar [OPTIONS]");
-        println!("sfwbar v1.0 (OurOS) — Flexible Wayland taskbar");
+        println!("sfwbar v1.0 (SlateOS) — Flexible Wayland taskbar");
         println!();
         println!("Options:");
         println!("  -f FILE           Config file");
@@ -21,7 +21,7 @@ fn run_sfwbar(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("sfwbar v1.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("sfwbar v1.0 (SlateOS)"); return 0; }
     println!("sfwbar: taskbar running");
     println!("  Config: ~/.config/sfwbar/sfwbar.config");
     println!("  Modules: taskbar, pager, tray, clock, battery");

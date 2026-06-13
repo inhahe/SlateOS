@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! twitchstudio-cli — OurOS Twitch Studio streaming app
+//! twitchstudio-cli — SlateOS Twitch Studio streaming app
 //!
 //! Single personality: `twitchstudio`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ts(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: twitchstudio [OPTIONS]");
-        println!("Twitch Studio (OurOS) — Built-for-beginner streaming app from Twitch");
+        println!("Twitch Studio (SlateOS) — Built-for-beginner streaming app from Twitch");
         println!();
         println!("Options:");
         println!("  --setup                Run setup wizard");
@@ -23,8 +23,8 @@ fn run_ts(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Twitch Studio 0.40.0 (OurOS)"); return 0; }
-    println!("Twitch Studio 0.40.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Twitch Studio 0.40.0 (SlateOS)"); return 0; }
+    println!("Twitch Studio 0.40.0 (SlateOS)");
     println!("  Features: Guided setup, alerts, chat overlay, scenes, layouts");
     println!("  Encoders: x264 (CPU), NVENC (NVIDIA), AMF (AMD), QuickSync (Intel)");
     println!("  Quality presets: auto-adjust based on bandwidth + hardware");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! masscan-cli — OurOS masscan CLI
+//! masscan-cli — SlateOS masscan CLI
 //!
 //! Single personality: `masscan`
 
@@ -11,7 +11,7 @@ fn run_masscan(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: masscan [OPTIONS] IP_RANGE");
         println!();
-        println!("masscan — mass IP port scanner (OurOS).");
+        println!("masscan — mass IP port scanner (SlateOS).");
         println!();
         println!("Options:");
         println!("  -p PORTS               Port range (e.g., 80, 1-1000)");
@@ -32,7 +32,7 @@ fn run_masscan(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("Masscan version 1.3.2 (OurOS)");
+        println!("Masscan version 1.3.2 (SlateOS)");
         return 0;
     }
 
@@ -45,7 +45,7 @@ fn run_masscan(args: Vec<String>) -> i32 {
         .map(|s| s.as_str())
         .unwrap_or("10.0.0.0/24");
 
-    println!("Starting masscan 1.3.2 (OurOS)");
+    println!("Starting masscan 1.3.2 (SlateOS)");
     println!("Initiating SYN Stealth Scan");
     println!("Scanning {} ports on {} -- rate: {} pps", ports, target, rate);
     println!();

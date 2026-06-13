@@ -366,49 +366,49 @@ impl AssociationManager {
     /// Create default stub entries pre-populated with realistic data.
     fn default_entries() -> Vec<AssociationEntry> {
         let text_editor = AppInfo {
-            id: "com.ouros.texteditor".into(),
+            id: "com.slateos.texteditor".into(),
             name: "Text Editor".into(),
             icon: Some("text-editor".into()),
             exec_path: "/usr/bin/texteditor".into(),
             installed: true,
         };
         let image_viewer = AppInfo {
-            id: "com.ouros.imageviewer".into(),
+            id: "com.slateos.imageviewer".into(),
             name: "Image Viewer".into(),
             icon: Some("image-viewer".into()),
             exec_path: "/usr/bin/imageviewer".into(),
             installed: true,
         };
         let music_player = AppInfo {
-            id: "com.ouros.musicplayer".into(),
+            id: "com.slateos.musicplayer".into(),
             name: "Music Player".into(),
             icon: Some("music-player".into()),
             exec_path: "/usr/bin/musicplayer".into(),
             installed: true,
         };
         let video_player = AppInfo {
-            id: "com.ouros.videoplayer".into(),
+            id: "com.slateos.videoplayer".into(),
             name: "Video Player".into(),
             icon: Some("video-player".into()),
             exec_path: "/usr/bin/videoplayer".into(),
             installed: true,
         };
         let file_manager = AppInfo {
-            id: "com.ouros.filemanager".into(),
+            id: "com.slateos.filemanager".into(),
             name: "File Manager".into(),
             icon: Some("file-manager".into()),
             exec_path: "/usr/bin/filemanager".into(),
             installed: true,
         };
         let archive_tool = AppInfo {
-            id: "com.ouros.archiver".into(),
+            id: "com.slateos.archiver".into(),
             name: "Archive Manager".into(),
             icon: Some("archive-manager".into()),
             exec_path: "/usr/bin/archiver".into(),
             installed: true,
         };
         let code_editor = AppInfo {
-            id: "com.ouros.codeeditor".into(),
+            id: "com.slateos.codeeditor".into(),
             name: "Code Editor".into(),
             icon: Some("code-editor".into()),
             exec_path: "/usr/bin/codeeditor".into(),
@@ -1379,15 +1379,15 @@ mod tests {
         // .txt should start with text editor as default
         let default = mgr.get_default(".txt");
         assert!(default.is_some());
-        assert_eq!(default.unwrap().id, "com.ouros.texteditor");
+        assert_eq!(default.unwrap().id, "com.slateos.texteditor");
 
         // Set code editor as default
-        let result = mgr.set_default(".txt", "com.ouros.codeeditor");
+        let result = mgr.set_default(".txt", "com.slateos.codeeditor");
         assert!(result);
 
         let new_default = mgr.get_default(".txt");
         assert!(new_default.is_some());
-        assert_eq!(new_default.unwrap().id, "com.ouros.codeeditor");
+        assert_eq!(new_default.unwrap().id, "com.slateos.codeeditor");
     }
 
     #[test]
@@ -1395,14 +1395,14 @@ mod tests {
         let mut mgr = AssociationManager::new();
 
         // Change default for .txt from text editor to code editor
-        mgr.set_default(".txt", "com.ouros.codeeditor");
+        mgr.set_default(".txt", "com.slateos.codeeditor");
 
         // The fallback should now be the text editor
         let entry = mgr.entries.iter().find(|e| e.extension == ".txt").unwrap();
         assert!(entry.fallback_app.is_some());
         assert_eq!(
             entry.fallback_app.as_ref().unwrap().id,
-            "com.ouros.texteditor"
+            "com.slateos.texteditor"
         );
     }
 
@@ -1411,16 +1411,16 @@ mod tests {
         let mut mgr = AssociationManager::new();
 
         // Set code editor as default for .txt (text editor becomes fallback)
-        mgr.set_default(".txt", "com.ouros.codeeditor");
+        mgr.set_default(".txt", "com.slateos.codeeditor");
 
         // Uninstall code editor
-        let affected = mgr.handle_uninstall("com.ouros.codeeditor");
+        let affected = mgr.handle_uninstall("com.slateos.codeeditor");
         assert!(affected.contains(&".txt".to_string()));
 
         // Default should have fallen back to text editor
         let default = mgr.get_default(".txt");
         assert!(default.is_some());
-        assert_eq!(default.unwrap().id, "com.ouros.texteditor");
+        assert_eq!(default.unwrap().id, "com.slateos.texteditor");
     }
 
     #[test]
@@ -1441,11 +1441,11 @@ mod tests {
         let mut mgr = AssociationManager::new();
 
         // .txt starts with text editor. Change to code editor.
-        mgr.set_default(".txt", "com.ouros.codeeditor");
+        mgr.set_default(".txt", "com.slateos.codeeditor");
 
         let entry = mgr.entries.iter().find(|e| e.extension == ".txt").unwrap();
         assert_eq!(entry.handler_history.len(), 1);
-        assert_eq!(entry.handler_history[0].id, "com.ouros.texteditor");
+        assert_eq!(entry.handler_history[0].id, "com.slateos.texteditor");
     }
 
     #[test]
@@ -1480,7 +1480,7 @@ mod tests {
         mgr.add_association(".txt", extra_app3);
 
         // Cycle through defaults: text -> code -> extra1 -> extra2 -> extra3
-        mgr.set_default(".txt", "com.ouros.codeeditor");
+        mgr.set_default(".txt", "com.slateos.codeeditor");
         mgr.set_default(".txt", "com.extra.app1");
         mgr.set_default(".txt", "com.extra.app2");
         mgr.set_default(".txt", "com.extra.app3");
@@ -1567,8 +1567,8 @@ mod tests {
         let mgr = AssociationManager::new();
         let apps = mgr.get_available_apps(".rs");
         assert!(apps.len() >= 2); // code editor + text editor
-        assert!(apps.iter().any(|a| a.id == "com.ouros.codeeditor"));
-        assert!(apps.iter().any(|a| a.id == "com.ouros.texteditor"));
+        assert!(apps.iter().any(|a| a.id == "com.slateos.codeeditor"));
+        assert!(apps.iter().any(|a| a.id == "com.slateos.texteditor"));
     }
 
     #[test]
@@ -1599,7 +1599,7 @@ mod tests {
     fn test_add_association_no_duplicates() {
         let mut mgr = AssociationManager::new();
         let existing_app = AppInfo {
-            id: "com.ouros.imageviewer".into(),
+            id: "com.slateos.imageviewer".into(),
             name: "Image Viewer".into(),
             icon: Some("image-viewer".into()),
             exec_path: "/usr/bin/imageviewer".into(),
@@ -1616,7 +1616,7 @@ mod tests {
     fn test_remove_association() {
         let mut mgr = AssociationManager::new();
         let before = mgr.get_available_apps(".rs").len();
-        mgr.remove_association(".rs", "com.ouros.texteditor");
+        mgr.remove_association(".rs", "com.slateos.texteditor");
         let after = mgr.get_available_apps(".rs").len();
         assert_eq!(after, before - 1);
     }
@@ -1624,7 +1624,7 @@ mod tests {
     #[test]
     fn test_set_default_nonexistent_extension() {
         let mut mgr = AssociationManager::new();
-        let result = mgr.set_default(".nonexistent", "com.ouros.texteditor");
+        let result = mgr.set_default(".nonexistent", "com.slateos.texteditor");
         assert!(!result);
     }
 
@@ -1704,7 +1704,7 @@ mod tests {
         let mut mgr = AssociationManager::new();
 
         // Code editor is default for many code extensions
-        let affected = mgr.handle_uninstall("com.ouros.codeeditor");
+        let affected = mgr.handle_uninstall("com.slateos.codeeditor");
         // Should affect multiple code file types
         assert!(
             affected.len() > 5,
@@ -1716,7 +1716,7 @@ mod tests {
         // (since text editor is the other available app for code files)
         for ext in &affected {
             if let Some(default) = mgr.get_default(ext) {
-                assert_eq!(default.id, "com.ouros.texteditor");
+                assert_eq!(default.id, "com.slateos.texteditor");
             }
         }
     }

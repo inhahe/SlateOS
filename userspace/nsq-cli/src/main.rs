@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nsq-cli — OurOS NSQ messaging tools
+//! nsq-cli — SlateOS NSQ messaging tools
 //!
 //! Multi-personality: `nsq_tail`, `nsq_to_file`, `nsqlookupd`, `nsqadmin`
 
@@ -37,7 +37,7 @@ fn run_nsq(args: &[String], prog_name: &str) -> i32 {
                 println!("  --lookupd-http URL     nsqlookupd address");
             }
         }
-        println!("NSQ 1.3.0 (OurOS)");
+        println!("NSQ 1.3.0 (SlateOS)");
         return 0;
     }
     match prog_name {

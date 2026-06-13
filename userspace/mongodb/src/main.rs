@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mongodb — OurOS document database
+//! mongodb — SlateOS document database
 //!
 //! Multi-personality: `mongod` (server), `mongos` (router), `mongosh` (shell)
 
@@ -26,14 +26,14 @@ fn run_mongod(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("db version v7.0.9 (OurOS)");
+        println!("db version v7.0.9 (SlateOS)");
         println!("Build Info: {{");
         println!("    \"version\": \"7.0.9\",");
         println!("    \"gitVersion\": \"abc1234def5678\",");
         println!("    \"modules\": [],");
         println!("    \"allocator\": \"tcmalloc\",");
         println!("    \"environment\": {{");
-        println!("        \"distmod\": \"ouros-x86_64\",");
+        println!("        \"distmod\": \"slateos-x86_64\",");
         println!("        \"target_arch\": \"x86_64\"");
         println!("    }}");
         println!("}}");
@@ -68,7 +68,7 @@ fn run_mongos(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("mongos version v7.0.9 (OurOS)");
+        println!("mongos version v7.0.9 (SlateOS)");
         return 0;
     }
     let port = args.iter().position(|a| a == "--port")
@@ -97,7 +97,7 @@ fn run_mongosh(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("2.2.5 (OurOS)");
+        println!("2.2.5 (SlateOS)");
         return 0;
     }
 
@@ -108,7 +108,7 @@ fn run_mongosh(args: Vec<String>) -> i32 {
         let expr_upper = expr.to_uppercase();
         if expr_upper.contains("DB.SERVERSTATUS") {
             println!("{{");
-            println!("  host: 'ouros-host-1',");
+            println!("  host: 'slateos-host-1',");
             println!("  version: '7.0.9',");
             println!("  uptime: 86400,");
             println!("  connections: {{ current: 5, available: 838855 }},");
@@ -141,7 +141,7 @@ fn run_mongosh(args: Vec<String>) -> i32 {
         .unwrap_or("27017");
     println!("Current Mongosh Log ID: 664e1234567890abcdef1234");
     println!("Connecting to:          mongodb://{}:{}/", host, port);
-    println!("Using MongoDB:          7.0.9 (OurOS)");
+    println!("Using MongoDB:          7.0.9 (SlateOS)");
     println!("Using Mongosh:          2.2.5");
     println!();
     println!("For mongosh info see: https://docs.mongodb.com/mongodb-shell/");

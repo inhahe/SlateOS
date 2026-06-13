@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! flac-tools — OurOS FLAC audio codec tools
+//! flac-tools — SlateOS FLAC audio codec tools
 //!
 //! Multi-personality: `flac`, `metaflac`
 
@@ -173,7 +173,7 @@ fn main() {
     let rest: Vec<String> = args.into_iter().skip(1).collect();
 
     if rest.iter().any(|a| a == "--version") {
-        println!("flac 1.4.3 (OurOS)");
+        println!("flac 1.4.3 (SlateOS)");
         process::exit(0);
     }
 

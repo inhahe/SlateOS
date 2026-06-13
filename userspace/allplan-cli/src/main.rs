@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! allplan-cli — OurOS Nemetschek Allplan BIM for architects/engineers
+//! allplan-cli — SlateOS Nemetschek Allplan BIM for architects/engineers
 //!
 //! Single personality: `allplan`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_allplan(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: allplan [OPTIONS] [FILE]");
-        println!("Nemetschek Allplan 2025 (OurOS) — BIM for architecture/engineering");
+        println!("Nemetschek Allplan 2025 (SlateOS) — BIM for architecture/engineering");
         println!();
         println!("Options:");
         println!("  -project PRJ           Open project");
@@ -22,8 +22,8 @@ fn run_allplan(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Nemetschek Allplan 2025-1 (OurOS)"); return 0; }
-    println!("Nemetschek Allplan 2025-1 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Nemetschek Allplan 2025-1 (SlateOS)"); return 0; }
+    println!("Nemetschek Allplan 2025-1 (SlateOS)");
     println!("  Industries: Architecture, civil engineering, precast concrete");
     println!("  Format: .ndw/.nemproj native + IFC 4.3, DWG/DXF, RVT, SKP");
     println!("  Strengths: reinforced concrete, precast detailing, structural BIM");

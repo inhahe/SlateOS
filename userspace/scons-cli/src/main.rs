@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! scons-cli — OurOS SCons build system
+//! scons-cli — SlateOS SCons build system
 //!
 //! Multi-personality: `scons`, `sconsign`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_scons(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: scons [OPTIONS] [TARGET [TARGET ...]]");
-        println!("SCons 4.7.0 (OurOS)");
+        println!("SCons 4.7.0 (SlateOS)");
         println!();
         println!("Options:");
         println!("  -c, --clean          Remove targets");
@@ -33,7 +33,7 @@ fn run_scons(args: &[String]) -> i32 {
         println!("SCons by Steven Knight et al.:");
         println!("  SCons: v4.7.0, 2024-01-15, by");
         println!("  SCons path: ['/usr/lib/scons']");
-        println!("  OurOS/amd64");
+        println!("  SlateOS/amd64");
         println!("  Python: 3.12.2");
         return 0;
     }
@@ -88,7 +88,7 @@ fn run_sconsign(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("sconsign 4.7.0 (OurOS)");
+        println!("sconsign 4.7.0 (SlateOS)");
         return 0;
     }
     let file = args.iter()

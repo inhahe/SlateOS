@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! solvespace-cli — OurOS SolveSpace parametric 3D CAD
+//! solvespace-cli — SlateOS SolveSpace parametric 3D CAD
 //!
 //! Single personality: `solvespace`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_solvespace(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: solvespace [OPTIONS] [FILE.slvs]");
-        println!("solvespace v3.1 (OurOS) — Parametric 2D/3D CAD");
+        println!("solvespace v3.1 (SlateOS) — Parametric 2D/3D CAD");
         println!();
         println!("Options:");
         println!("  --export FILE     Export to STEP/STL/DXF/PDF");
@@ -25,7 +25,7 @@ fn run_solvespace(args: &[String], _prog: &str) -> i32 {
         println!("  Boolean operations, STEP/STL import/export");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("solvespace v3.1 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("solvespace v3.1 (SlateOS)"); return 0; }
     println!("solvespace: parametric CAD started");
     println!("  Sketch tools: line, arc, circle, bezier, point");
     println!("  Constraints: distance, angle, parallel, perpendicular, tangent");

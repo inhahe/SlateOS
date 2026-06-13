@@ -2,5 +2,5 @@
 name = "pgrep"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS process grep and kill"
+description = "SlateOS process grep and kill"
 [dependencies]

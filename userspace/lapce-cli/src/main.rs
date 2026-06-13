@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lapce-cli — OurOS Lapce code editor
+//! lapce-cli — SlateOS Lapce code editor
 //!
 //! Single personality: `lapce`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_lapce(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lapce [OPTIONS] [PATH...]");
-        println!("Lapce 0.4.2 (OurOS) — Lightning-fast and powerful code editor");
+        println!("Lapce 0.4.2 (SlateOS) — Lightning-fast and powerful code editor");
         println!();
         println!("Options:");
         println!("  -n, --new              New window");
@@ -27,7 +27,7 @@ fn run_lapce(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("Lapce 0.4.2 (OurOS)");
+        println!("Lapce 0.4.2 (SlateOS)");
         return 0;
     }
     let paths: Vec<&str> = args.iter()

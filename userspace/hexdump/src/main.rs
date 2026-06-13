@@ -1,4 +1,4 @@
-//! OurOS Hexadecimal File Dumper
+//! SlateOS Hexadecimal File Dumper
 //!
 //! Display file contents in hexadecimal, decimal, octal, or ASCII formats.
 //! Combines `hexdump`, `xxd`, and `od` functionality in a single binary.

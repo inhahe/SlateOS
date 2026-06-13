@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! audit-cli — OurOS Linux audit framework tools
+//! audit-cli — SlateOS Linux audit framework tools
 //!
 //! Multi-personality: `auditctl`, `ausearch`, `aureport`, `auditd`, `autrace`
 
@@ -19,7 +19,7 @@ fn run_auditctl(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: auditctl [OPTIONS]");
         println!();
-        println!("auditctl — control the audit system (OurOS).");
+        println!("auditctl — control the audit system (SlateOS).");
         println!();
         println!("Options:");
         println!("  -l                List rules");
@@ -66,7 +66,7 @@ fn run_ausearch(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ausearch [OPTIONS]");
         println!();
-        println!("ausearch — search audit records (OurOS).");
+        println!("ausearch — search audit records (SlateOS).");
         println!();
         println!("Options:");
         println!("  -k KEY         Search by key");
@@ -95,7 +95,7 @@ fn run_aureport(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: aureport [OPTIONS]");
         println!();
-        println!("aureport — produce summary reports (OurOS).");
+        println!("aureport — produce summary reports (SlateOS).");
         println!();
         println!("Options:");
         println!("  -au       Authentication report");
@@ -146,7 +146,7 @@ fn run_auditd(args: &[String]) -> i32 {
         return 0;
     }
     let _ = args;
-    println!("auditd: starting audit daemon (OurOS)");
+    println!("auditd: starting audit daemon (SlateOS)");
     println!("auditd: loaded 5 rules");
     println!("auditd: audit log: /var/log/audit/audit.log");
     0
@@ -156,7 +156,7 @@ fn run_autrace(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: autrace PROGRAM [ARGS]");
         println!();
-        println!("autrace — trace syscalls of a program via audit (OurOS).");
+        println!("autrace — trace syscalls of a program via audit (SlateOS).");
         return 0;
     }
     let program = args.first().map(|s| s.as_str()).unwrap_or("program");

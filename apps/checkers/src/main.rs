@@ -9,7 +9,7 @@
 #![allow(clippy::struct_excessive_bools)]
 #![allow(clippy::fn_params_excessive_bools)]
 
-//! OurOS Checkers — American Checkers (English draughts) with AI opponent.
+//! SlateOS Checkers — American Checkers (English draughts) with AI opponent.
 //!
 //! Features an 8x8 board with standard setup, mandatory jumps, multi-jump
 //! chains, king promotion, a minimax AI with alpha-beta pruning, legal move

@@ -1,4 +1,4 @@
-//! OurOS `column` Utility -- Columnate Text Formatter
+//! SlateOS `column` Utility -- Columnate Text Formatter
 //!
 //! Formats input text into neatly aligned columns. Supports two primary modes:
 //!
@@ -1043,7 +1043,7 @@ fn output_json(
 // ============================================================================
 
 fn print_help() {
-    println!("OurOS column v{VERSION}");
+    println!("SlateOS column v{VERSION}");
     println!();
     println!("Columnate lists or create aligned tables from delimited input.");
     println!("With no FILE, or when FILE is -, read standard input.");
@@ -1093,7 +1093,7 @@ fn main() {
             process::exit(0);
         }
         ParseResult::Version => {
-            println!("column (OurOS) {VERSION}");
+            println!("column (SlateOS) {VERSION}");
             process::exit(0);
         }
         ParseResult::Run(config) => {

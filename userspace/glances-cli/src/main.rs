@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! glances-cli — OurOS Glances system monitor
+//! glances-cli — SlateOS Glances system monitor
 //!
 //! Single personality: `glances`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_glances(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: glances [OPTIONS]");
-        println!("Glances 4.1.2 (OurOS) — Cross-platform system monitor");
+        println!("Glances 4.1.2 (SlateOS) — Cross-platform system monitor");
         println!();
         println!("Options:");
         println!("  -1                 Per-CPU stats");
@@ -37,7 +37,7 @@ fn run_glances(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("Glances v4.1.2 (OurOS)");
+        println!("Glances v4.1.2 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "-s") {
@@ -50,7 +50,7 @@ fn run_glances(args: &[String], _prog: &str) -> i32 {
         println!("glances: Web UI at http://0.0.0.0:{}", port);
         return 0;
     }
-    println!("OurOS x86_64 (Uptime: 2 days, 3:15:42)");
+    println!("SlateOS x86_64 (Uptime: 2 days, 3:15:42)");
     println!();
     println!("CPU  12.3%  MEM  26.2%  SWAP  0.0%  LOAD  0.45 0.38 0.31");
     println!();

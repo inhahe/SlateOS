@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! observium-cli — OurOS Observium network monitoring
+//! observium-cli — SlateOS Observium network monitoring
 //!
 //! Single personality: `observium`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_observium(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: observium COMMAND [OPTIONS]");
-        println!("Observium CE v23 (OurOS) — Network monitoring platform");
+        println!("Observium CE v23 (SlateOS) — Network monitoring platform");
         println!();
         println!("Commands:");
         println!("  add-device HOST COMMUNITY  Add SNMP device");
@@ -26,8 +26,8 @@ fn run_observium(args: &[String], _prog: &str) -> i32 {
         println!("  --version                  Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Observium CE v23.9 (OurOS)"); return 0; }
-    println!("Observium CE v23.9 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Observium CE v23.9 (SlateOS)"); return 0; }
+    println!("Observium CE v23.9 (SlateOS)");
     println!("  Devices: 75 monitored");
     println!("  Ports: 1,234 (890 up, 344 down)");
     println!("  Sensors: 567 (temperature, voltage, fan, power)");

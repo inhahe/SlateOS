@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! jaeger-cli — OurOS Jaeger distributed tracing query CLI
+//! jaeger-cli — SlateOS Jaeger distributed tracing query CLI
 //!
 //! Single personality: `jaeger-cli`
 
@@ -35,7 +35,7 @@ fn run_jaeger(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("jaeger-cli 1.0.0 (OurOS, Jaeger 1.54.0)");
+        println!("jaeger-cli 1.0.0 (SlateOS, Jaeger 1.54.0)");
         return 0;
     }
 

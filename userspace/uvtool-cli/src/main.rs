@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! uvtool-cli — OurOS uvtool cloud image management
+//! uvtool-cli — SlateOS uvtool cloud image management
 //!
 //! Multi-personality: `uvt-simplestreams-libvirt`, `uvt-kvm`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_uvt_simplestreams(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: uvt-simplestreams-libvirt <command> [OPTIONS]");
-        println!("uvt-simplestreams-libvirt v0.1 (OurOS) — Cloud image sync");
+        println!("uvt-simplestreams-libvirt v0.1 (SlateOS) — Cloud image sync");
         println!();
         println!("Commands:");
         println!("  sync             Sync cloud images from stream");
@@ -22,7 +22,7 @@ fn run_uvt_simplestreams(args: &[String], _prog: &str) -> i32 {
         println!("  --version        Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("uvt-simplestreams-libvirt v0.1 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("uvt-simplestreams-libvirt v0.1 (SlateOS)"); return 0; }
     match args.first().map(|s| s.as_str()) {
         Some("sync") => {
             println!("uvt-simplestreams-libvirt: syncing cloud images...");
@@ -31,8 +31,8 @@ fn run_uvt_simplestreams(args: &[String], _prog: &str) -> i32 {
         }
         Some("query") => {
             println!("Available images:");
-            println!("  ouros-24.04 amd64 (current)");
-            println!("  ouros-23.10 amd64 (current)");
+            println!("  slateos-24.04 amd64 (current)");
+            println!("  slateos-23.10 amd64 (current)");
         }
         _ => {
             println!("uvt-simplestreams-libvirt: use --help for commands");
@@ -44,7 +44,7 @@ fn run_uvt_simplestreams(args: &[String], _prog: &str) -> i32 {
 fn run_uvt_kvm(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: uvt-kvm <command> [OPTIONS]");
-        println!("uvt-kvm v0.1 (OurOS) — Create KVM VMs from cloud images");
+        println!("uvt-kvm v0.1 (SlateOS) — Create KVM VMs from cloud images");
         println!();
         println!("Commands:");
         println!("  create NAME     Create VM from cloud image");
@@ -55,7 +55,7 @@ fn run_uvt_kvm(args: &[String], _prog: &str) -> i32 {
         println!("  ip NAME         Show VM IP address");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("uvt-kvm v0.1 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("uvt-kvm v0.1 (SlateOS)"); return 0; }
     match args.first().map(|s| s.as_str()) {
         Some("list") => {
             println!("test-vm1    running    192.168.122.10");
@@ -64,7 +64,7 @@ fn run_uvt_kvm(args: &[String], _prog: &str) -> i32 {
         Some("create") => {
             let name = args.get(1).map(|s| s.as_str()).unwrap_or("vm1");
             println!("uvt-kvm: creating VM '{}'", name);
-            println!("  Image: ouros-24.04 amd64");
+            println!("  Image: slateos-24.04 amd64");
             println!("  Memory: 512 MiB");
         }
         _ => {

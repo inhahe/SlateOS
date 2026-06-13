@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! aerc-cli — OurOS aerc terminal email client
+//! aerc-cli — SlateOS aerc terminal email client
 //!
 //! Single personality: `aerc`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_aerc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: aerc [OPTIONS]");
-        println!("aerc v0.17 (OurOS) — Terminal email client");
+        println!("aerc v0.17 (SlateOS) — Terminal email client");
         println!();
         println!("Options:");
         println!("  --version         Show version");
@@ -23,7 +23,7 @@ fn run_aerc(args: &[String], _prog: &str) -> i32 {
         println!("Bindings are configured in ~/.config/aerc/binds.conf");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("aerc v0.17 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("aerc v0.17 (SlateOS)"); return 0; }
     if args.is_empty() {
         println!("aerc v0.17 — terminal email client");
         println!("  Accounts: 2 configured");

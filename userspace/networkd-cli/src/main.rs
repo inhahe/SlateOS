@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! networkd-cli — OurOS systemd-networkd tools
+//! networkd-cli — SlateOS systemd-networkd tools
 //!
 //! Multi-personality: `networkctl`, `resolvectl`, `systemd-resolve`
 
@@ -14,7 +14,7 @@ fn run_networkctl(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: networkctl [OPTIONS] COMMAND ...");
         println!();
-        println!("networkctl — network link management (OurOS).");
+        println!("networkctl — network link management (SlateOS).");
         println!();
         println!("Commands:");
         println!("  list                 List links");

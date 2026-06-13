@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! caddy — OurOS web server with automatic HTTPS
+//! caddy — SlateOS web server with automatic HTTPS
 //!
 //! Single personality: `caddy`
 
@@ -35,14 +35,14 @@ fn run_caddy(args: Vec<String>) -> i32 {
             0
         }
         "version" | "--version" => {
-            println!("v2.8.4 (OurOS) h1:abc1234=");
+            println!("v2.8.4 (SlateOS) h1:abc1234=");
             0
         }
         "build-info" => {
             println!("path: github.com/caddyserver/caddy/v2");
             println!("version: v2.8.4");
             println!("go: go1.22.2");
-            println!("os: ouros");
+            println!("os: slateos");
             println!("arch: amd64");
             0
         }

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! alitu-cli — OurOS Alitu podcast maker
+//! alitu-cli — SlateOS Alitu podcast maker
 //!
 //! Single personality: `alitu`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_al(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: alitu [COMMAND] [OPTIONS]");
-        println!("Alitu (OurOS) — Podcast maker for beginners (browser-based)");
+        println!("Alitu (SlateOS) — Podcast maker for beginners (browser-based)");
         println!();
         println!("Commands:");
         println!("  new                    New episode");
@@ -27,8 +27,8 @@ fn run_al(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Alitu v3.2 (OurOS)"); return 0; }
-    println!("Alitu (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Alitu v3.2 (SlateOS)"); return 0; }
+    println!("Alitu (SlateOS)");
     println!("  Mode: Browser-based, beginner-friendly");
     println!("  Features: Auto theme music splicing, transitions, fade ins/outs");
     println!("  Call Recorder: Solo or guest co-host call recording");

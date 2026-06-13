@@ -2,5 +2,5 @@
 name = "ldconfig"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS ldconfig utility"
+description = "SlateOS ldconfig utility"
 [dependencies]

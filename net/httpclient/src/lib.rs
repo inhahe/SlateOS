@@ -1,6 +1,6 @@
-//! # `OurOS` HTTP Client Library
+//! # `SlateOS` HTTP Client Library
 //!
-//! A native HTTP/1.1 client library for `OurOS`. Provides URL parsing, request building,
+//! A native HTTP/1.1 client library for `SlateOS`. Provides URL parsing, request building,
 //! response parsing, cookie handling, and HTTP protocol serialization/deserialization.
 //!
 //! This library is used by the package manager and other applications for network fetching.
@@ -1268,7 +1268,7 @@ impl Client {
             follow_redirects: true,
             max_redirects: 10,
             cookie_jar: CookieJar::new(),
-            user_agent: "OurOS-HttpClient/0.1".to_string(),
+            user_agent: "SlateOS-HttpClient/0.1".to_string(),
         }
     }
 

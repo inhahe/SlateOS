@@ -6,7 +6,7 @@
 // implementation can drop in without reshaping the enum.
 #![allow(dead_code)]
 
-//! chrony — OurOS NTP implementation
+//! chrony — SlateOS NTP implementation
 //!
 //! Multi-personality binary for time synchronization.
 //! Detected via argv[0]:
@@ -181,7 +181,7 @@ fn run_chronyd(args: Vec<String>) -> i32 {
             println!("  --version   Show version");
             0
         }
-        "--version" | "-V" => { println!("chronyd 0.1.0 (OurOS)"); 0 }
+        "--version" | "-V" => { println!("chronyd 0.1.0 (SlateOS)"); 0 }
         "-q" => {
             println!("chronyd: clock set mode");
             println!("  Querying time.cloudflare.com...");
@@ -238,7 +238,7 @@ fn run_chronyc(args: Vec<String>) -> i32 {
             println!("  version         Show version");
             0
         }
-        "version" | "--version" | "-V" => { println!("chronyc 0.1.0 (OurOS)"); 0 }
+        "version" | "--version" | "-V" => { println!("chronyc 0.1.0 (SlateOS)"); 0 }
         "tracking" => chronyc_tracking(),
         "sources" => chronyc_sources(cmd_args.iter().any(|a| a == "-v")),
         "sourcestats" => chronyc_sourcestats(),

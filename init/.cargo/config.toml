@@ -4,7 +4,7 @@
 # When you run `cargo build` from inside apps/<name>/, cargo merges
 # this config with the workspace-root .cargo/config.toml. Scalar
 # settings (like `build.target`) here override the kernel-default in
-# the parent; the parent's `[target.x86_64-ouros]` rustflags are
+# the parent; the parent's `[target.x86_64-slateos]` rustflags are
 # additively merged.
 #
 # build-std is set here (not at the workspace root) because cargo
@@ -13,7 +13,7 @@
 # parent) would also be forced to rebuild std and fail.
 
 [build]
-target = "../toolchain/x86_64-ouros.json"
+target = "../toolchain/x86_64-slateos.json"
 
 [unstable]
 build-std = ["core", "alloc", "std", "panic_abort"]

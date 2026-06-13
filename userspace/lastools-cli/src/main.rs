@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lastools-cli — OurOS LAStools LiDAR processing
+//! lastools-cli — SlateOS LAStools LiDAR processing
 //!
 //! Multi-personality: `lasinfo`, `lasview`, `las2txt`, `txt2las`, `lasmerge`, `lassort`
 
@@ -15,43 +15,43 @@ fn run_lastools(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "lasinfo" => {
-                println!("lasinfo (OurOS) — Display LAS/LAZ file information");
+                println!("lasinfo (SlateOS) — Display LAS/LAZ file information");
                 println!("  -i FILE        Input LAS/LAZ file");
                 println!("  -compute_density  Compute point density");
             }
             "las2txt" => {
-                println!("las2txt (OurOS) — Convert LAS/LAZ to text");
+                println!("las2txt (SlateOS) — Convert LAS/LAZ to text");
                 println!("  -i FILE        Input LAS/LAZ file");
                 println!("  -o FILE        Output text file");
                 println!("  -parse SPEC    Parse string (xyzirnctu)");
                 println!("  -sep CHAR      Separator (comma, tab, space)");
             }
             "txt2las" => {
-                println!("txt2las (OurOS) — Convert text to LAS/LAZ");
+                println!("txt2las (SlateOS) — Convert text to LAS/LAZ");
                 println!("  -i FILE        Input text file");
                 println!("  -o FILE        Output LAS/LAZ file");
                 println!("  -parse SPEC    Parse string");
             }
             "lasmerge" => {
-                println!("lasmerge (OurOS) — Merge LAS/LAZ files");
+                println!("lasmerge (SlateOS) — Merge LAS/LAZ files");
                 println!("  -i FILE [FILE...]  Input files");
                 println!("  -o FILE        Output file");
             }
             "lassort" => {
-                println!("lassort (OurOS) — Sort LAS/LAZ points");
+                println!("lassort (SlateOS) — Sort LAS/LAZ points");
                 println!("  -i FILE        Input file");
                 println!("  -o FILE        Output file");
                 println!("  -by_gps_time   Sort by GPS time");
             }
             _ => {
-                println!("LAStools (OurOS) — LiDAR processing suite");
+                println!("LAStools (SlateOS) — LiDAR processing suite");
                 println!("  Tools: lasinfo, lasview, las2txt, txt2las, lasmerge, lassort");
             }
         }
         println!("  --version      Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("LAStools v2.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("LAStools v2.0 (SlateOS)"); return 0; }
     match prog {
         "lasinfo" => {
             println!("lasinfo: reading LAS file...");
@@ -76,7 +76,7 @@ fn run_lastools(args: &[String], prog: &str) -> i32 {
             println!("  Output: merged.laz (4.5 GB)");
         }
         _ => {
-            println!("LAStools v2.0 (OurOS) — LiDAR Processing");
+            println!("LAStools v2.0 (SlateOS) — LiDAR Processing");
             println!("  Use specific tool: lasinfo, las2txt, txt2las, lasmerge, lassort");
         }
     }

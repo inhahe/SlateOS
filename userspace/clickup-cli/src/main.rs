@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! clickup-cli — OurOS ClickUp CLI
+//! clickup-cli — SlateOS ClickUp CLI
 //!
 //! Single personality: `clickup`
 
@@ -11,7 +11,7 @@ fn run_clickup(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: clickup <COMMAND> [OPTIONS]");
         println!();
-        println!("ClickUp project management CLI (OurOS).");
+        println!("ClickUp project management CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  tasks        Manage tasks");

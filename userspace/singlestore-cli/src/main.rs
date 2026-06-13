@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! singlestore-cli — OurOS SingleStore (formerly MemSQL, real-time HTAP, San Francisco, private)
+//! singlestore-cli — SlateOS SingleStore (formerly MemSQL, real-time HTAP, San Francisco, private)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_s2(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: singlestore [OPTIONS]");
-        println!("SingleStore (OurOS) — real-time distributed HTAP database (formerly MemSQL)");
+        println!("SingleStore (SlateOS) — real-time distributed HTAP database (formerly MemSQL)");
         println!();
         println!("Options:");
         println!("  --universal-storage    Universal Storage (rowstore + columnstore unified)");
@@ -21,8 +21,8 @@ fn run_s2(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("SingleStore 2024 (OurOS) — singlestore CLI 1.x"); return 0; }
-    println!("SingleStore 2024 (OurOS) — Real-Time Distributed HTAP Database");
+    if args.iter().any(|a| a == "--version") { println!("SingleStore 2024 (SlateOS) — singlestore CLI 1.x"); return 0; }
+    println!("SingleStore 2024 (SlateOS) — Real-Time Distributed HTAP Database");
     println!("  Vendor: SingleStore, Inc. (San Francisco, CA — private)");
     println!("          Renamed from MemSQL in October 2020");
     println!("  Founders: Eric Frenkiel + Nikita Shamgunov, 2011 (ex-Facebook engineers)");

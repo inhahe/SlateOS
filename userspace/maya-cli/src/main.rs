@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! maya-cli — OurOS Autodesk Maya 3D animation
+//! maya-cli — SlateOS Autodesk Maya 3D animation
 //!
 //! Single personality: `maya`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_maya(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: maya [OPTIONS] [FILE]");
-        println!("Autodesk Maya 2025 (OurOS) — 3D animation, modeling, simulation");
+        println!("Autodesk Maya 2025 (SlateOS) — 3D animation, modeling, simulation");
         println!();
         println!("Options:");
         println!("  -batch             Batch (no GUI) mode");
@@ -27,8 +27,8 @@ fn run_maya(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Autodesk Maya 2025.1 (OurOS)"); return 0; }
-    println!("Autodesk Maya 2025.1 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Autodesk Maya 2025.1 (SlateOS)"); return 0; }
+    println!("Autodesk Maya 2025.1 (SlateOS)");
     println!("  Renderer: Arnold (default), V-Ray, RenderMan");
     println!("  Scripting: MEL, Python");
     println!("  Plugins: 18 loaded");

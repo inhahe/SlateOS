@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! brave-cli — OurOS Brave Browser (privacy + crypto)
+//! brave-cli — SlateOS Brave Browser (privacy + crypto)
 //!
 //! Single personality: `brave`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_br(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: brave [URL] [OPTIONS]");
-        println!("Brave Browser (OurOS) — Privacy-first Chromium browser with crypto/BAT rewards");
+        println!("Brave Browser (SlateOS) — Privacy-first Chromium browser with crypto/BAT rewards");
         println!();
         println!("Options:");
         println!("  --tor                  Private window with Tor routing");
@@ -25,8 +25,8 @@ fn run_br(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Brave 1.73.91 (OurOS)"); return 0; }
-    println!("Brave 1.73.91 Chromium: 131.0.6778.86 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Brave 1.73.91 (SlateOS)"); return 0; }
+    println!("Brave 1.73.91 Chromium: 131.0.6778.86 (SlateOS)");
     println!("  Vendor: Brave Software, Inc. (San Francisco, founded 2015)");
     println!("  Founders: Brendan Eich (creator of JavaScript, ex-Mozilla CEO), Brian Bondy");
     println!("  Engine: Blink (Chromium fork), with Google services stripped");

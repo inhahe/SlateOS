@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! protools-cli — OurOS Avid Pro Tools DAW
+//! protools-cli — SlateOS Avid Pro Tools DAW
 //!
 //! Single personality: `protools`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pt(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: protools [OPTIONS] [SESSION]");
-        println!("Avid Pro Tools 2024 (OurOS) — Industry-standard music & post DAW");
+        println!("Avid Pro Tools 2024 (SlateOS) — Industry-standard music & post DAW");
         println!();
         println!("Options:");
         println!("  --new-session NAME     Create new session");
@@ -24,8 +24,8 @@ fn run_pt(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Avid Pro Tools 2024.6 (OurOS)"); return 0; }
-    println!("Avid Pro Tools 2024.6 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Avid Pro Tools 2024.6 (SlateOS)"); return 0; }
+    println!("Avid Pro Tools 2024.6 (SlateOS)");
     println!("  Editions: Intro, Artist, Studio, Ultimate, Carbon, MTRX");
     println!("  Audio engine: 384 kHz / 32-bit float");
     println!("  Plug-ins: AAX (Native, DSP), HEAT analog modeling");

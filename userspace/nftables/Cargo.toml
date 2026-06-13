@@ -2,5 +2,5 @@
 name = "nftables"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS nftables utility"
+description = "SlateOS nftables utility"
 [dependencies]

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! circleci-cli — OurOS CircleCI CLI
+//! circleci-cli — SlateOS CircleCI CLI
 //!
 //! Single personality: `circleci`
 
@@ -28,7 +28,7 @@ fn run_circleci(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
         "version" => {
-            println!("circleci-cli 0.1.30280 (OurOS)");
+            println!("circleci-cli 0.1.30280 (SlateOS)");
             0
         }
         "config" => {

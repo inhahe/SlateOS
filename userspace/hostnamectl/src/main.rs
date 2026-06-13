@@ -1,4 +1,4 @@
-//! OurOS hostname management utilities.
+//! SlateOS hostname management utilities.
 //!
 //! Multi-personality binary providing:
 //! - **hostnamectl** — query and set system hostname and related settings
@@ -781,14 +781,14 @@ mod tests {
     #[test]
     fn test_os_release_defaults() {
         let info = OsRelease {
-            name: "OurOS".to_string(),
+            name: "SlateOS".to_string(),
             version: "1.0".to_string(),
-            pretty_name: "OurOS 1.0".to_string(),
-            id: "ouros".to_string(),
+            pretty_name: "SlateOS 1.0".to_string(),
+            id: "slateos".to_string(),
             cpe_name: String::new(),
         };
-        assert_eq!(info.name, "OurOS");
-        assert_eq!(info.id, "ouros");
+        assert_eq!(info.name, "SlateOS");
+        assert_eq!(info.id, "slateos");
     }
 
     #[test]

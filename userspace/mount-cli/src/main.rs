@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mount-cli — OurOS mount/umount/findmnt CLI
+//! mount-cli — SlateOS mount/umount/findmnt CLI
 //!
 //! Multi-personality: `mount`, `umount`, `findmnt`
 
@@ -19,7 +19,7 @@ fn run_mount(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mount [OPTIONS] DEVICE MOUNTPOINT");
         println!();
-        println!("mount — mount a filesystem (OurOS).");
+        println!("mount — mount a filesystem (SlateOS).");
         println!();
         println!("Options:");
         println!("  -t, --types TYPE       Filesystem type");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! netsuite-cli — OurOS Oracle NetSuite cloud ERP
+//! netsuite-cli — SlateOS Oracle NetSuite cloud ERP
 //!
 //! Single personality: `netsuite`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ns(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: netsuite [OPTIONS] [SUBCMD]");
-        println!("Oracle NetSuite 2024.2 (OurOS) — Cloud ERP / accounting / commerce");
+        println!("Oracle NetSuite 2024.2 (SlateOS) — Cloud ERP / accounting / commerce");
         println!();
         println!("Options:");
         println!("  --account ACCT         Account ID");
@@ -23,8 +23,8 @@ fn run_ns(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Oracle NetSuite 2024.2 (OurOS)"); return 0; }
-    println!("Oracle NetSuite 2024.2 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Oracle NetSuite 2024.2 (SlateOS)"); return 0; }
+    println!("Oracle NetSuite 2024.2 (SlateOS)");
     println!("  Modules: Financial Management, ERP, CRM, PSA, HCM (SuitePeople),");
     println!("           E-commerce (SuiteCommerce), Omnichannel, Inventory, Manufacturing");
     println!("  Architecture: cloud-native multi-tenant, 2 releases/year");

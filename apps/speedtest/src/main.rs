@@ -1,4 +1,4 @@
-//! OurOS Network Speed Test
+//! SlateOS Network Speed Test
 //!
 //! Graphical network speed test utility with:
 //! - Download, upload, and latency measurement
@@ -11,7 +11,7 @@
 //! - Dark theme (Catppuccin Mocha)
 //!
 //! Uses the guitk library for UI rendering. Network I/O is
-//! performed through OurOS syscalls; simulated with representative
+//! performed through SlateOS syscalls; simulated with representative
 //! data for initial development.
 
 #[allow(unused_imports)]
@@ -204,7 +204,7 @@ pub struct SpeedTestConfig {
 impl Default for SpeedTestConfig {
     fn default() -> Self {
         Self {
-            server_url: String::from("speedtest.ouros.local"),
+            server_url: String::from("speedtest.slateos.local"),
             test_duration_secs: 10,
             num_connections: 4,
             download_size_mb: 25,
@@ -252,32 +252,32 @@ pub struct TestServer {
 fn default_servers() -> Vec<TestServer> {
     vec![
         TestServer {
-            name: "OurOS Central".into(),
-            url: "speedtest.ouros.local".into(),
+            name: "SlateOS Central".into(),
+            url: "speedtest.slateos.local".into(),
             location: "Local Network".into(),
             distance_km: 0,
         },
         TestServer {
             name: "Metro East".into(),
-            url: "east.speedtest.ouros.net".into(),
+            url: "east.speedtest.slateos.net".into(),
             location: "New York, US".into(),
             distance_km: 50,
         },
         TestServer {
             name: "Metro West".into(),
-            url: "west.speedtest.ouros.net".into(),
+            url: "west.speedtest.slateos.net".into(),
             location: "Los Angeles, US".into(),
             distance_km: 3800,
         },
         TestServer {
             name: "Europe".into(),
-            url: "eu.speedtest.ouros.net".into(),
+            url: "eu.speedtest.slateos.net".into(),
             location: "Frankfurt, DE".into(),
             distance_km: 6300,
         },
         TestServer {
             name: "Asia Pacific".into(),
-            url: "apac.speedtest.ouros.net".into(),
+            url: "apac.speedtest.slateos.net".into(),
             location: "Tokyo, JP".into(),
             distance_km: 10800,
         },
@@ -1859,7 +1859,7 @@ impl Default for SpeedTestUI {
 }
 
 // ============================================================================
-// Entry point (placeholder for OurOS)
+// Entry point (placeholder for SlateOS)
 // ============================================================================
 
 fn main() {}

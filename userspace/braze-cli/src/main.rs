@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! braze-cli — OurOS Braze (B2C customer engagement, NASDAQ:BRZE)
+//! braze-cli — SlateOS Braze (B2C customer engagement, NASDAQ:BRZE)
 //!
 //! Single personality: `braze`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_braze(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: braze [OPTIONS]");
-        println!("Braze (OurOS) — comprehensive customer engagement platform");
+        println!("Braze (SlateOS) — comprehensive customer engagement platform");
         println!();
         println!("Options:");
         println!("  --essential            Essential (mid-market, custom)");
@@ -26,8 +26,8 @@ fn run_braze(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Braze 2024 (OurOS)"); return 0; }
-    println!("Braze 2024 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Braze 2024 (SlateOS)"); return 0; }
+    println!("Braze 2024 (SlateOS)");
     println!("  Vendor: Braze, Inc. (NYC, NY — NASDAQ:BRZE)");
     println!("  Founders: Bill Magnuson (CEO), Jon Hyman (CTO), Mark Ghermezian (left 2018), 2011");
     println!("          all three were ex-Bridgewater Associates engineers");

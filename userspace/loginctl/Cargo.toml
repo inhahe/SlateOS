@@ -2,5 +2,5 @@
 name = "loginctl"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS loginctl utility"
+description = "SlateOS loginctl utility"
 [dependencies]

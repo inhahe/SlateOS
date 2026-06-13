@@ -2,6 +2,6 @@
 name = "mixer"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS Sound Mixer — per-app volume control"
+description = "SlateOS Sound Mixer — per-app volume control"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }

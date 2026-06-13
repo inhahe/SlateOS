@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lxappearance-cli — OurOS LXAppearance GTK theme switcher
+//! lxappearance-cli — SlateOS LXAppearance GTK theme switcher
 //!
 //! Single personality: `lxappearance`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_lxappearance(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: lxappearance [OPTIONS]");
-        println!("lxappearance v0.6 (OurOS) — GTK+ theme switcher");
+        println!("lxappearance v0.6 (SlateOS) — GTK+ theme switcher");
         println!();
         println!("Options:");
         println!("  --version         Show version");
@@ -21,7 +21,7 @@ fn run_lxappearance(args: &[String], _prog: &str) -> i32 {
         println!("Tabs: Widget, Color, Icon Theme, Mouse Cursor, Other");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("lxappearance v0.6 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("lxappearance v0.6 (SlateOS)"); return 0; }
     println!("lxappearance: GTK+ theme switcher");
     println!("  Widget Theme: Adwaita");
     println!("  Icon Theme: Papirus");

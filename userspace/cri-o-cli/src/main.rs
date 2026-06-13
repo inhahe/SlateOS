@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cri-o-cli — OurOS CRI-O container runtime
+//! cri-o-cli — SlateOS CRI-O container runtime
 //!
 //! Multi-personality: `crio`, `crio-status`
 
@@ -15,13 +15,13 @@ fn run_crio(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "crio-status" => {
-                println!("crio-status (OurOS) — CRI-O status tool");
+                println!("crio-status (SlateOS) — CRI-O status tool");
                 println!("  info           General daemon info");
                 println!("  containers     List containers");
                 println!("  config         Show config");
             }
             _ => {
-                println!("CRI-O v1.30 (OurOS) — OCI-based Kubernetes container runtime");
+                println!("CRI-O v1.30 (SlateOS) — OCI-based Kubernetes container runtime");
                 println!("  --config FILE      Config file");
                 println!("  --root DIR         Root directory");
                 println!("  --runroot DIR      Run root directory");
@@ -33,7 +33,7 @@ fn run_crio(args: &[String], prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("CRI-O v1.30.4 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("CRI-O v1.30.4 (SlateOS)"); return 0; }
     match prog {
         "crio-status" => {
             println!("CRI-O status:");
@@ -46,7 +46,7 @@ fn run_crio(args: &[String], prog: &str) -> i32 {
             println!("  Pods: 8");
         }
         _ => {
-            println!("CRI-O v1.30.4 (OurOS)");
+            println!("CRI-O v1.30.4 (SlateOS)");
             println!("  Listening: /var/run/crio/crio.sock");
             println!("  Runtime: crun");
             println!("  Storage: overlay");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! earlyoom — OurOS early OOM (Out-of-Memory) daemon
+//! earlyoom — SlateOS early OOM (Out-of-Memory) daemon
 //!
 //! Monitors memory and swap usage, kills memory-hogging processes before
 //! the kernel OOM killer triggers (which often kills the wrong process).
@@ -167,7 +167,7 @@ fn run_earlyoom(args: Vec<String>) -> i32 {
                 return 0;
             }
             "--version" | "-V" => {
-                println!("earlyoom 0.1.0 (OurOS)");
+                println!("earlyoom 0.1.0 (SlateOS)");
                 return 0;
             }
             "-m" => {

@@ -1,4 +1,4 @@
-// OurOS login — user login program
+// SlateOS login — user login program
 //
 // Authenticates users and starts their login session. Called by getty(8)
 // after a username is entered, or directly for console login.
@@ -624,7 +624,7 @@ fn print_help() {
 }
 
 fn print_version() {
-    println!("login (OurOS) 0.1.0");
+    println!("login (SlateOS) 0.1.0");
 }
 
 // ---------------------------------------------------------------------------

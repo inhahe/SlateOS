@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! teamwork-cli — OurOS Teamwork.com (Irish PM/PSA for client services agencies)
+//! teamwork-cli — SlateOS Teamwork.com (Irish PM/PSA for client services agencies)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_tw(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: teamwork [OPTIONS]");
-        println!("Teamwork.com (OurOS) — project management + PSA for client-services agencies");
+        println!("Teamwork.com (SlateOS) — project management + PSA for client-services agencies");
         println!();
         println!("Options:");
         println!("  --free                 Free Forever — up to 5 users");
@@ -25,8 +25,8 @@ fn run_tw(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Teamwork.com 2024 (OurOS)"); return 0; }
-    println!("Teamwork.com 2024 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Teamwork.com 2024 (SlateOS)"); return 0; }
+    println!("Teamwork.com 2024 (SlateOS)");
     println!("  Vendor: Teamwork.com Ltd. (Cork, Ireland — private, bootstrapped)");
     println!("  Founders: Peter Coppinger (CEO), Daniel Mackey (CTO), 2007");
     println!("          both Cork-based developers, built Teamwork as internal PM for their consultancy Digital Crew");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tesseract-cli — OurOS Tesseract OCR CLI
+//! tesseract-cli — SlateOS Tesseract OCR CLI
 //!
 //! Single personality: `tesseract`
 
@@ -11,7 +11,7 @@ fn run_tesseract(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: tesseract IMAGE OUTPUT [OPTIONS] [CONFIGFILE ...]");
         println!();
-        println!("Tesseract — OCR engine (OurOS).");
+        println!("Tesseract — OCR engine (SlateOS).");
         println!();
         println!("Options:");
         println!("  -l LANG           Language(s) (default eng)");
@@ -41,7 +41,7 @@ fn run_tesseract(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("tesseract 5.3.4 (OurOS)");
+        println!("tesseract 5.3.4 (SlateOS)");
         println!("  leptonica-1.84.1");
         println!("  libpng 1.6.43 : libtiff 4.6.0 : zlib 1.3.1 : libjpeg 9f : libwebp 1.3.2");
         println!("  Found NEON");

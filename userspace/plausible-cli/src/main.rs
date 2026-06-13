@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! plausible-cli — OurOS Plausible (lightweight, privacy-first, GA alternative)
+//! plausible-cli — SlateOS Plausible (lightweight, privacy-first, GA alternative)
 //!
 //! Single personality: `plausible`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_plausible(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: plausible [OPTIONS]");
-        println!("Plausible (OurOS) — lightweight, open-source, privacy-friendly web analytics");
+        println!("Plausible (SlateOS) — lightweight, open-source, privacy-friendly web analytics");
         println!();
         println!("Options:");
         println!("  --growth               Growth from $9/mo (10K pageviews/mo)");
@@ -25,8 +25,8 @@ fn run_plausible(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Plausible 2024 (OurOS)"); return 0; }
-    println!("Plausible 2024 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Plausible 2024 (SlateOS)"); return 0; }
+    println!("Plausible 2024 (SlateOS)");
     println!("  Vendor: Plausible Insights OÜ (Tallinn, Estonia — bootstrapped, profitable)");
     println!("  Founders: Uku Taht (Estonia) + Marko Saric (Denmark), 2018");
     println!("          Uku: developer who built the OG product in spare time");

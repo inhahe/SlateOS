@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kvantum-cli — OurOS Kvantum Qt SVG theme engine
+//! kvantum-cli — SlateOS Kvantum Qt SVG theme engine
 //!
 //! Multi-personality: `kvantummanager`, `kvantumpreview`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_manager(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: kvantummanager [OPTIONS]");
-        println!("kvantummanager v1.1 (OurOS) — Kvantum theme manager");
+        println!("kvantummanager v1.1 (SlateOS) — Kvantum theme manager");
         println!();
         println!("Options:");
         println!("  --set THEME       Set active theme");
@@ -21,7 +21,7 @@ fn run_manager(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("kvantummanager v1.1 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("kvantummanager v1.1 (SlateOS)"); return 0; }
     if args.iter().any(|a| a == "--list") {
         println!("KvAdaptaDark");
         println!("KvArcDark");
@@ -43,7 +43,7 @@ fn run_manager(args: &[String], _prog: &str) -> i32 {
 fn run_preview(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: kvantumpreview [THEME]");
-        println!("kvantumpreview v1.1 (OurOS) — Preview Kvantum themes");
+        println!("kvantumpreview v1.1 (SlateOS) — Preview Kvantum themes");
         return 0;
     }
     let theme = args.first().map(|s| s.as_str()).unwrap_or("current");

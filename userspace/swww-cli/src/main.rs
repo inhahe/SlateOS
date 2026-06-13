@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! swww-cli — OurOS swww animated wallpaper daemon
+//! swww-cli — SlateOS swww animated wallpaper daemon
 //!
 //! Multi-personality: `swww`, `swww-daemon`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_swww(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: swww COMMAND [OPTIONS]");
-        println!("swww v0.9 (OurOS) — Animated wallpaper daemon for Wayland");
+        println!("swww v0.9 (SlateOS) — Animated wallpaper daemon for Wayland");
         println!();
         println!("Commands:");
         println!("  init              Start swww-daemon");
@@ -52,7 +52,7 @@ fn run_swww(args: &[String], _prog: &str) -> i32 {
 fn run_daemon(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: swww-daemon [OPTIONS]");
-        println!("swww-daemon v0.9 (OurOS) — Wallpaper daemon process");
+        println!("swww-daemon v0.9 (SlateOS) — Wallpaper daemon process");
         println!();
         println!("Options:");
         println!("  --format FORMAT   Image format (xrgb, xbgr, rgb, bgr)");

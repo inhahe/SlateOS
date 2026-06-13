@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! telegram-cli — OurOS Telegram bot CLI
+//! telegram-cli — SlateOS Telegram bot CLI
 //!
 //! Single personality: `tg`
 
@@ -11,7 +11,7 @@ fn run_tg(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: tg <COMMAND> [OPTIONS]");
         println!();
-        println!("Telegram Bot API CLI (OurOS).");
+        println!("Telegram Bot API CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  send         Send a message");
@@ -39,7 +39,7 @@ fn run_tg(args: Vec<String>) -> i32 {
             println!("Bot Information:");
             println!("  ID:         987654321");
             println!("  Name:       MyBot");
-            println!("  Username:   @my_ouros_bot");
+            println!("  Username:   @my_slateos_bot");
             println!("  Can join groups:      true");
             println!("  Can read all messages: false");
             println!("  Supports inline:       true");

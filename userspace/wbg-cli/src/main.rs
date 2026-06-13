@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! wbg-cli — OurOS wbg minimal wallpaper setter
+//! wbg-cli — SlateOS wbg minimal wallpaper setter
 //!
 //! Single personality: `wbg`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_wbg(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: wbg IMAGE");
-        println!("wbg v1.1 (OurOS) — Minimal wallpaper setter for Wayland");
+        println!("wbg v1.1 (SlateOS) — Minimal wallpaper setter for Wayland");
         println!();
         println!("Arguments:");
         println!("  IMAGE             Path to wallpaper image");

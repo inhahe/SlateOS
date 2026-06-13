@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! woocommerce-cli — OurOS WooCommerce (the WordPress e-commerce plugin)
+//! woocommerce-cli — SlateOS WooCommerce (the WordPress e-commerce plugin)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_woo(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: woocommerce [OPTIONS]");
-        println!("WooCommerce (OurOS) — open-source e-commerce plugin for WordPress (Automattic-owned)");
+        println!("WooCommerce (SlateOS) — open-source e-commerce plugin for WordPress (Automattic-owned)");
         println!();
         println!("Options:");
         println!("  --core                 WooCommerce core plugin (free, GPL-licensed)");
@@ -22,8 +22,8 @@ fn run_woo(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("WooCommerce 9.x (OurOS)"); return 0; }
-    println!("WooCommerce 9.x (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("WooCommerce 9.x (SlateOS)"); return 0; }
+    println!("WooCommerce 9.x (SlateOS)");
     println!("  Vendor: Automattic Inc. (San Francisco — private)");
     println!("  Original: WooThemes (Mark Forrester, Magnus Jepson, Adii Pienaar — South Africa, 2008)");
     println!("  Founded: 2011 (WooCommerce plugin), built atop Jigoshop fork");

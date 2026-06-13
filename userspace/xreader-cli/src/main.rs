@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xreader-cli — OurOS X-Apps document reader
+//! xreader-cli — SlateOS X-Apps document reader
 //!
 //! Single personality: `xreader`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_xreader(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: xreader [OPTIONS] [FILE...]");
-        println!("xreader v4.0 (OurOS) — Linux Mint document reader");
+        println!("xreader v4.0 (SlateOS) — Linux Mint document reader");
         println!();
         println!("Options:");
         println!("  -p PAGE           Open at page");
@@ -22,7 +22,7 @@ fn run_xreader(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("xreader v4.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("xreader v4.0 (SlateOS)"); return 0; }
     println!("xreader: document reader started");
     println!("  Supported: PDF, DjVu, PostScript, XPS, TIFF, CBR/CBZ, ePub");
     println!("  Annotations: yes");

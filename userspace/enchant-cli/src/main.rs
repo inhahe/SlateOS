@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! enchant-cli — OurOS Enchant spell checking library CLI
+//! enchant-cli — SlateOS Enchant spell checking library CLI
 //!
 //! Multi-personality: `enchant-2`, `enchant-lsmod-2`
 
@@ -19,7 +19,7 @@ fn run_enchant(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: enchant-2 [OPTIONS]");
         println!();
-        println!("Enchant — spell checking interface (OurOS).");
+        println!("Enchant — spell checking interface (SlateOS).");
         println!();
         println!("Options:");
         println!("  -d DICT        Dictionary tag");
@@ -30,7 +30,7 @@ fn run_enchant(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-v") {
-        println!("enchant-2 2.6.8 (OurOS)");
+        println!("enchant-2 2.6.8 (SlateOS)");
         return 0;
     }
 
@@ -39,7 +39,7 @@ fn run_enchant(args: &[String]) -> i32 {
     let pipe_mode = args.iter().any(|a| a == "-a");
 
     if pipe_mode {
-        println!("@(#) Enchant 2.6.8 (OurOS)");
+        println!("@(#) Enchant 2.6.8 (SlateOS)");
     } else if list_mode {
         println!("teh");
         println!("recieve");
@@ -54,7 +54,7 @@ fn run_enchant_lsmod(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: enchant-lsmod-2 [OPTIONS]");
         println!();
-        println!("enchant-lsmod-2 — list Enchant providers (OurOS).");
+        println!("enchant-lsmod-2 — list Enchant providers (SlateOS).");
         println!();
         println!("Options:");
         println!("  -lang TAG     List providers for language");

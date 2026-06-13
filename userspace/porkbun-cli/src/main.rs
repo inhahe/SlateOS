@@ -1,5 +1,5 @@
 #![deny(clippy::all)]
-//! porkbun-cli — OurOS personality CLI for Porkbun, the playful low-price registrar.
+//! porkbun-cli — SlateOS personality CLI for Porkbun, the playful low-price registrar.
 
 use std::env;
 use std::process;

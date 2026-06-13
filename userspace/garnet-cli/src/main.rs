@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! garnet-cli — OurOS Microsoft Garnet cache store
+//! garnet-cli — SlateOS Microsoft Garnet cache store
 //!
 //! Single personality: `garnet-server`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_garnet(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: garnet-server [OPTIONS]");
-        println!("Garnet v1.0 (OurOS) — High-performance cache store (Redis-compatible)");
+        println!("Garnet v1.0 (SlateOS) — High-performance cache store (Redis-compatible)");
         println!();
         println!("Options:");
         println!("  --bind IP          Bind address (default: 0.0.0.0)");
@@ -28,8 +28,8 @@ fn run_garnet(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Garnet v1.0.32 (OurOS)"); return 0; }
-    println!("Garnet v1.0.32 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Garnet v1.0.32 (SlateOS)"); return 0; }
+    println!("Garnet v1.0.32 (SlateOS)");
     println!("  Listening: 0.0.0.0:6379");
     println!("  Protocol: RESP (Redis-compatible)");
     println!("  Memory: 256 MB limit");

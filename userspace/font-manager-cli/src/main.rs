@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! font-manager-cli — OurOS Font Manager
+//! font-manager-cli — SlateOS Font Manager
 //!
 //! Single personality: `font-manager`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_font_manager(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: font-manager [OPTIONS]");
-        println!("font-manager v0.9 (OurOS) — Font management application");
+        println!("font-manager v0.9 (SlateOS) — Font management application");
         println!();
         println!("Options:");
         println!("  --version         Show version");
@@ -23,7 +23,7 @@ fn run_font_manager(args: &[String], _prog: &str) -> i32 {
         println!("  family browsing, character map, Google Fonts");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("font-manager v0.9 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("font-manager v0.9 (SlateOS)"); return 0; }
     println!("font-manager: font management started");
     println!("  Installed: 142 font families");
     println!("  System: 98 families");

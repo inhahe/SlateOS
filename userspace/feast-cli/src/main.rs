@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! feast-cli — OurOS Feast feature store
+//! feast-cli — SlateOS Feast feature store
 //!
 //! Single personality: `feast`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_feast(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: feast COMMAND [OPTIONS]");
-        println!("Feast v0.37 (OurOS) — Open source feature store");
+        println!("Feast v0.37 (SlateOS) — Open source feature store");
         println!();
         println!("Commands:");
         println!("  init             Initialize a new feature repo");
@@ -30,8 +30,8 @@ fn run_feast(args: &[String], _prog: &str) -> i32 {
         println!("  --version        Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Feast v0.37.1 (OurOS)"); return 0; }
-    println!("Feast v0.37.1 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Feast v0.37.1 (SlateOS)"); return 0; }
+    println!("Feast v0.37.1 (SlateOS)");
     println!("  Feature repo: /project/feature_store");
     println!("  Provider: local");
     println!("  Online store: sqlite");

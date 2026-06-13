@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! conda-cli — OurOS Conda package/environment manager
+//! conda-cli — SlateOS Conda package/environment manager
 //!
 //! Multi-personality: `conda`, `mamba`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_conda(args: &[String], prog_name: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: {} COMMAND [OPTIONS]", prog_name);
-        println!("{} 24.5.0 (OurOS)", prog_name);
+        println!("{} 24.5.0 (SlateOS)", prog_name);
         println!();
         println!("Environment commands:");
         println!("  create      Create a new environment");

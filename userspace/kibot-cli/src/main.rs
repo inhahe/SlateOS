@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! kibot-cli — OurOS KiBot KiCad automation
+//! kibot-cli — SlateOS KiBot KiCad automation
 //!
 //! Single personality: `kibot`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_kibot(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: kibot [OPTIONS] -c CONFIG.yaml -b BOARD.kicad_pcb");
-        println!("KiBot v1.7 (OurOS) — KiCad automation tool");
+        println!("KiBot v1.7 (SlateOS) — KiCad automation tool");
         println!();
         println!("Options:");
         println!("  -c FILE           Configuration YAML file");
@@ -27,7 +27,7 @@ fn run_kibot(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("KiBot v1.7 (OurOS)");
+        println!("KiBot v1.7 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "--list") {

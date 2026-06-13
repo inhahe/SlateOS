@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! iterable-cli — OurOS Iterable (cross-channel marketing automation for growth teams)
+//! iterable-cli — SlateOS Iterable (cross-channel marketing automation for growth teams)
 //!
 //! Single personality: `iterable`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_iterable(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: iterable [OPTIONS]");
-        println!("Iterable (OurOS) — cross-channel growth marketing platform");
+        println!("Iterable (SlateOS) — cross-channel growth marketing platform");
         println!();
         println!("Options:");
         println!("  --essentials           Essentials tier (mid-market)");
@@ -23,8 +23,8 @@ fn run_iterable(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Iterable 2024 (OurOS)"); return 0; }
-    println!("Iterable 2024 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Iterable 2024 (SlateOS)"); return 0; }
+    println!("Iterable 2024 (SlateOS)");
     println!("  Vendor: Iterable, Inc. (San Francisco, CA — private)");
     println!("  Founders: Justin Zhu (CEO until 2021), Andrew Boni (CTO, now CEO from 2021), 2013");
     println!("          both ex-Twitter (engineers on growth+ads)");

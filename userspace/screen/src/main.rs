@@ -1,4 +1,4 @@
-//! OurOS Terminal Multiplexer
+//! SlateOS Terminal Multiplexer
 //!
 //! Manage multiple terminal windows within a single console session.
 //! Similar to GNU screen / tmux.
@@ -37,14 +37,14 @@ use std::process;
 // Syscall interface
 // ============================================================================
 
-// Native OurOS console syscalls (kernel syscall/number.rs).  These were
+// Native SlateOS console syscalls (kernel syscall/number.rs).  These were
 // previously 0/1, which are SYS_YIELD and SYS_EXIT — so a "read char" call
 // actually terminated the process.  The render loop polls for input (it must
 // keep refreshing the status bar while idle), so it uses the *non-blocking*
 // try-read variant (103); the blocking variant (101) would freeze the loop.
 const SYS_CONSOLE_WRITE: u64 = 100;
 const SYS_CONSOLE_TRY_READ_CHAR: u64 = 103;
-// Native OurOS monotonic clock (kernel syscall/number.rs); no-arg, returns
+// Native SlateOS monotonic clock (kernel syscall/number.rs); no-arg, returns
 // boot-relative nanoseconds in rax.  (Syscall 30 is SYS_IRQ_REGISTER.)
 const SYS_CLOCK_MONOTONIC: u64 = 10;
 const SYS_PROCESS_SPAWN: u64 = 500;
@@ -227,7 +227,7 @@ impl Session {
         let id = self.next_window_id;
         self.next_window_id += 1;
         let mut win = Window::new(id, title);
-        win.add_line(&format!("OurOS Screen — Window {} ({})", id, title));
+        win.add_line(&format!("SlateOS Screen — Window {} ({})", id, title));
         win.add_line("Type commands here. Use Ctrl+A ? for help.");
         win.add_line("");
         self.windows.push(win);
@@ -315,13 +315,13 @@ fn render_status_bar(session: &Session) {
 
     let title = if let Some(win) = session.active() {
         format!(
-            " OurOS Screen — {} [{}/{}]",
+            " SlateOS Screen — {} [{}/{}]",
             win.title,
             session.active_window + 1,
             session.windows.len()
         )
     } else {
-        " OurOS Screen".to_string()
+        " SlateOS Screen".to_string()
     };
 
     let mut title_bar = title;
@@ -369,7 +369,7 @@ fn render_window(session: &Session) {
 fn render_help() {
     term_clear();
     console_write("\x1b[1;33m");
-    console_write("  OurOS Screen — Key Bindings\r\n");
+    console_write("  SlateOS Screen — Key Bindings\r\n");
     console_write("\x1b[0m\r\n");
     console_write("  All commands use Ctrl+A as prefix key.\r\n\r\n");
     console_write("  \x1b[1mWindow Management:\x1b[0m\r\n");
@@ -950,7 +950,7 @@ fn run_session(session: &mut Session) {
 // ============================================================================
 
 fn print_usage() {
-    println!("OurOS Screen — Terminal Multiplexer v0.1.0");
+    println!("SlateOS Screen — Terminal Multiplexer v0.1.0");
     println!();
     println!("USAGE:");
     println!("  screen                 Start new session");
@@ -987,7 +987,7 @@ fn main() {
                 return;
             }
             "--version" => {
-                println!("screen (OurOS) 0.1.0");
+                println!("screen (SlateOS) 0.1.0");
                 return;
             }
             "-S" => {

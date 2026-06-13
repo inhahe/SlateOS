@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! semgrep-cli — OurOS Semgrep static analysis tool
+//! semgrep-cli — SlateOS Semgrep static analysis tool
 //!
 //! Multi-personality: `semgrep`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_semgrep(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: semgrep [COMMAND] [OPTIONS]");
-        println!("Semgrep 1.75.0 (OurOS) — Code scanning tool");
+        println!("Semgrep 1.75.0 (SlateOS) — Code scanning tool");
         println!();
         println!("Commands:");
         println!("  scan           Scan code for issues");

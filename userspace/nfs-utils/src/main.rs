@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nfs-utils — OurOS NFS server and client utilities
+//! nfs-utils — SlateOS NFS server and client utilities
 //!
 //! Multi-personality: `nfsd` (daemon), `exportfs`, `showmount`, `rpcinfo`, `nfsstat`
 
@@ -15,12 +15,12 @@ fn run_nfsd(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("nfsd (OurOS nfs-utils 2.6.4)");
+        println!("nfsd (SlateOS nfs-utils 2.6.4)");
         return 0;
     }
     let nprocs = args.first().and_then(|s| s.parse::<u32>().ok()).unwrap_or(8);
     println!("Starting NFS daemon with {} threads", nprocs);
-    println!("NFS server running (OurOS nfs-utils 2.6.4)");
+    println!("NFS server running (SlateOS nfs-utils 2.6.4)");
     0
 }
 

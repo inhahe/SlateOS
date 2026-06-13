@@ -1,4 +1,4 @@
-//! OurOS cgroup management utility.
+//! SlateOS cgroup management utility.
 //!
 //! Multi-personality binary providing:
 //! - **cgcreate** — create cgroups
@@ -10,7 +10,7 @@
 //! - **lscgroup** — list cgroups
 //! - **lssubsys** — list cgroup subsystems
 //!
-//! Manages Linux/OurOS cgroups v2 hierarchy for resource control.
+//! Manages Linux/SlateOS cgroups v2 hierarchy for resource control.
 
 #![deny(clippy::all)]
 

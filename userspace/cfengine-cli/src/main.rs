@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cfengine-cli — OurOS CFEngine configuration management
+//! cfengine-cli — SlateOS CFEngine configuration management
 //!
 //! Multi-personality: `cf-agent`, `cf-promises`, `cf-key`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_cf_agent(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: cf-agent [OPTIONS]");
-        println!("cf-agent v3.23 (OurOS) — CFEngine policy agent");
+        println!("cf-agent v3.23 (SlateOS) — CFEngine policy agent");
         println!();
         println!("Options:");
         println!("  -f FILE           Policy file to evaluate");
@@ -25,7 +25,7 @@ fn run_cf_agent(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("cf-agent v3.23 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("cf-agent v3.23 (SlateOS)"); return 0; }
     if args.iter().any(|a| a == "-n") {
         println!("Dry-run: evaluating promises...");
         println!("  Promise: files /etc/resolv.conf — would repair");
@@ -43,7 +43,7 @@ fn run_cf_agent(args: &[String], _prog: &str) -> i32 {
 fn run_cf_promises(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: cf-promises [OPTIONS] [FILE]");
-        println!("cf-promises v3.23 (OurOS) — CFEngine promise validator");
+        println!("cf-promises v3.23 (SlateOS) — CFEngine promise validator");
         return 0;
     }
     let file = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("promises.cf");
@@ -57,7 +57,7 @@ fn run_cf_promises(args: &[String], _prog: &str) -> i32 {
 fn run_cf_key(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: cf-key [OPTIONS]");
-        println!("cf-key v3.23 (OurOS) — CFEngine key management");
+        println!("cf-key v3.23 (SlateOS) — CFEngine key management");
         return 0;
     }
     println!("Generating RSA key pair...");

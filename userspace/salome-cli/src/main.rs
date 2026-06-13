@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! salome-cli — OurOS SALOME platform for CAE
+//! salome-cli — SlateOS SALOME platform for CAE
 //!
 //! Multi-personality: `salome`, `salome-mesh`, `salome-geom`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_salome(args: &[String], prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: {} [OPTIONS] [SCRIPT]", prog);
-        println!("{} v9.12 (OurOS) — Open-source CAE platform", prog);
+        println!("{} v9.12 (SlateOS) — Open-source CAE platform", prog);
         println!();
         println!("Options:");
         println!("  -t              Terminal mode (no GUI)");
@@ -25,7 +25,7 @@ fn run_salome(args: &[String], prog: &str) -> i32 {
         println!("  --version       Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("SALOME v9.12.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("SALOME v9.12.0 (SlateOS)"); return 0; }
     if args.iter().any(|a| a == "--shutdown") {
         println!("SALOME: shutting down servers...");
         println!("  Registry server: stopped");
@@ -33,7 +33,7 @@ fn run_salome(args: &[String], prog: &str) -> i32 {
         println!("  SALOME_Session: stopped");
         return 0;
     }
-    println!("SALOME v9.12.0 (OurOS) — CAE Platform");
+    println!("SALOME v9.12.0 (SlateOS) — CAE Platform");
     println!("  Modules: GEOM, SMESH, PARAVIS, YACS, MED");
     println!("  Python: 3.12");
     println!("  CORBA: omniORB");

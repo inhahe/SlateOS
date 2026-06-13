@@ -2,5 +2,5 @@
 name = "crond2"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS crond - cron daemon for scheduled task execution"
+description = "SlateOS crond - cron daemon for scheduled task execution"
 [dependencies]

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bcfg2-cli — OurOS Bcfg2 configuration management
+//! bcfg2-cli — SlateOS Bcfg2 configuration management
 //!
 //! Multi-personality: `bcfg2`, `bcfg2-server`, `bcfg2-info`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_bcfg2(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: bcfg2 [OPTIONS]");
-        println!("bcfg2 v1.4 (OurOS) — Configuration management client");
+        println!("bcfg2 v1.4 (SlateOS) — Configuration management client");
         println!();
         println!("Options:");
         println!("  -v              Verbose mode");
@@ -24,7 +24,7 @@ fn run_bcfg2(args: &[String], _prog: &str) -> i32 {
         println!("  --version       Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("bcfg2 v1.4 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("bcfg2 v1.4 (SlateOS)"); return 0; }
     if args.iter().any(|a| a == "-n") {
         println!("bcfg2: dry run — no changes applied");
         println!("  Correct entries: 42");
@@ -42,12 +42,12 @@ fn run_bcfg2(args: &[String], _prog: &str) -> i32 {
 fn run_bcfg2_server(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: bcfg2-server [OPTIONS]");
-        println!("bcfg2-server v1.4 (OurOS) — Configuration server");
+        println!("bcfg2-server v1.4 (SlateOS) — Configuration server");
         println!("  -D              Daemonize");
         println!("  --version       Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("bcfg2-server v1.4 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("bcfg2-server v1.4 (SlateOS)"); return 0; }
     println!("bcfg2-server: started on port 6789");
     println!("  Plugins: Bundler, Cfg, Metadata, Packages, SSHbase");
     println!("  Clients registered: 5");
@@ -57,7 +57,7 @@ fn run_bcfg2_server(args: &[String], _prog: &str) -> i32 {
 fn run_bcfg2_info(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: bcfg2-info [OPTIONS]");
-        println!("bcfg2-info v1.4 (OurOS) — Server introspection tool");
+        println!("bcfg2-info v1.4 (SlateOS) — Server introspection tool");
         return 0;
     }
     let _ = args;

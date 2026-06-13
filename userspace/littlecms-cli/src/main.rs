@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! littlecms-cli — OurOS Little CMS color management
+//! littlecms-cli — SlateOS Little CMS color management
 //!
 //! Multi-personality: `jpgicc`, `linkicc`, `transicc`, `tificc`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_jpgicc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: jpgicc [OPTIONS] INPUT.jpg OUTPUT.jpg");
-        println!("jpgicc v2.16 (OurOS) — Apply ICC profiles to JPEG files");
+        println!("jpgicc v2.16 (SlateOS) — Apply ICC profiles to JPEG files");
         println!();
         println!("Options:");
         println!("  -i PROFILE        Input ICC profile");
@@ -37,7 +37,7 @@ fn run_jpgicc(args: &[String], _prog: &str) -> i32 {
 fn run_linkicc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: linkicc [OPTIONS] PROFILES... OUTPUT.icc");
-        println!("linkicc v2.16 (OurOS) — Link multiple ICC profiles into a device link");
+        println!("linkicc v2.16 (SlateOS) — Link multiple ICC profiles into a device link");
         println!();
         println!("Options:");
         println!("  -t INTENT         Rendering intent (0-3)");
@@ -53,7 +53,7 @@ fn run_linkicc(args: &[String], _prog: &str) -> i32 {
 fn run_transicc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: transicc [OPTIONS]");
-        println!("transicc v2.16 (OurOS) — Transform colors between ICC profiles");
+        println!("transicc v2.16 (SlateOS) — Transform colors between ICC profiles");
         println!();
         println!("Options:");
         println!("  -i PROFILE        Input ICC profile");
@@ -70,7 +70,7 @@ fn run_transicc(args: &[String], _prog: &str) -> i32 {
 fn run_tificc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: tificc [OPTIONS] INPUT.tif OUTPUT.tif");
-        println!("tificc v2.16 (OurOS) — Apply ICC profiles to TIFF files");
+        println!("tificc v2.16 (SlateOS) — Apply ICC profiles to TIFF files");
         println!();
         println!("Options:");
         println!("  -i PROFILE        Input ICC profile");

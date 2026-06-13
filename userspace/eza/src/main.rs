@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! eza — OurOS modern ls replacement
+//! eza — SlateOS modern ls replacement
 //!
 //! Single personality: `eza`
 
@@ -50,7 +50,7 @@ fn run_eza(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("eza v0.18.17 (OurOS)");
+        println!("eza v0.18.17 (SlateOS)");
         return 0;
     }
 

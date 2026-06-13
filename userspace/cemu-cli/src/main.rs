@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cemu-cli — OurOS Cemu Wii U emulator
+//! cemu-cli — SlateOS Cemu Wii U emulator
 //!
 //! Single personality: `cemu`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_cemu(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: cemu [OPTIONS] [ROM]");
-        println!("cemu v2.0-89 (OurOS) — Wii U emulator");
+        println!("cemu v2.0-89 (SlateOS) — Wii U emulator");
         println!();
         println!("Options:");
         println!("  -g FILE           Boot ROM/WUD/WUX");
@@ -23,7 +23,7 @@ fn run_cemu(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("cemu v2.0-89 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("cemu v2.0-89 (SlateOS)"); return 0; }
     println!("cemu: Wii U emulator started");
     println!("  Backend: Vulkan");
     println!("  CPU: recompiler (multi-core)");

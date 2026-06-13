@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! polkit-kde-cli — OurOS KDE PolicyKit authentication agent
+//! polkit-kde-cli — SlateOS KDE PolicyKit authentication agent
 //!
 //! Single personality: `polkit-kde-authentication-agent-1`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_agent(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: polkit-kde-authentication-agent-1");
-        println!("KDE PolicyKit authentication agent (OurOS)");
+        println!("KDE PolicyKit authentication agent (SlateOS)");
         println!();
         println!("Runs as session daemon. Shows Qt dialog when");
         println!("applications request elevated privileges.");

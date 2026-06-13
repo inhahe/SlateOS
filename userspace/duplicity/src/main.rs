@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! duplicity — OurOS encrypted bandwidth-efficient backup
+//! duplicity — SlateOS encrypted bandwidth-efficient backup
 //!
 //! Single personality: `duplicity`
 
@@ -26,7 +26,7 @@ fn run_duplicity(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("duplicity 2.2.1 (OurOS)");
+        println!("duplicity 2.2.1 (SlateOS)");
         return 0;
     }
 

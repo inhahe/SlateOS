@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! postfix-cli — OurOS Postfix mail server CLI
+//! postfix-cli — SlateOS Postfix mail server CLI
 //!
 //! Multi-personality: `postfix`, `postconf`, `postqueue`, `postsuper`, `postalias`, `postmap`
 
@@ -19,7 +19,7 @@ fn run_postfix(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: postfix [start|stop|reload|status|flush|check]");
         println!();
-        println!("Postfix — mail server control (OurOS).");
+        println!("Postfix — mail server control (SlateOS).");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
@@ -42,7 +42,7 @@ fn run_postconf(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: postconf [OPTIONS] [PARAMETER ...]");
         println!();
-        println!("postconf — Postfix configuration utility (OurOS).");
+        println!("postconf — Postfix configuration utility (SlateOS).");
         println!();
         println!("Options:");
         println!("  -d    Show defaults");
@@ -78,7 +78,7 @@ fn run_postqueue(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: postqueue [-f | -p | -j | -s SITE]");
         println!();
-        println!("postqueue — Postfix queue control (OurOS).");
+        println!("postqueue — Postfix queue control (SlateOS).");
         return 0;
     }
     if args.iter().any(|a| a == "-f") {
@@ -98,7 +98,7 @@ fn run_postsuper(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: postsuper [-d ALL | -d QUEUE_ID | -h QUEUE_ID | -H QUEUE_ID | -r QUEUE_ID]");
         println!();
-        println!("postsuper — Postfix queue maintenance (OurOS).");
+        println!("postsuper — Postfix queue maintenance (SlateOS).");
         return 0;
     }
     if args.iter().any(|a| a == "-d") {
@@ -113,7 +113,7 @@ fn run_postalias(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: postalias [OPTIONS] FILE ...");
         println!();
-        println!("postalias — build/query Postfix alias database (OurOS).");
+        println!("postalias — build/query Postfix alias database (SlateOS).");
         return 0;
     }
     for f in args.iter().filter(|a| !a.starts_with('-')) {
@@ -126,7 +126,7 @@ fn run_postmap(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: postmap [OPTIONS] FILE ...");
         println!();
-        println!("postmap — build/query Postfix lookup table (OurOS).");
+        println!("postmap — build/query Postfix lookup table (SlateOS).");
         return 0;
     }
     if args.iter().any(|a| a == "-q") {

@@ -1,4 +1,4 @@
-//! OurOS Color Picker — system-wide color picker / eyedropper utility.
+//! SlateOS Color Picker — system-wide color picker / eyedropper utility.
 //!
 //! A PowerToys-style color picker that allows picking colors from the screen,
 //! converting between formats (Hex, RGB, HSL, HSV, CMYK), managing palettes,

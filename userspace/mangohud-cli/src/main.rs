@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mangohud-cli — OurOS MangoHud performance overlay
+//! mangohud-cli — SlateOS MangoHud performance overlay
 //!
 //! Multi-personality: `mangohud`, `mangoapp`, `mangostats`
 
@@ -14,7 +14,7 @@ fn run_mangohud(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: mangohud [OPTIONS] [COMMAND] [ARGS]");
         println!();
-        println!("mangohud — Vulkan/OpenGL performance overlay (OurOS).");
+        println!("mangohud — Vulkan/OpenGL performance overlay (SlateOS).");
         println!();
         println!("Options:");
         println!("  --dlsym              Force dlsym hooking");
@@ -27,7 +27,7 @@ fn run_mangohud(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("MangoHud v0.7.1 (OurOS)");
+        println!("MangoHud v0.7.1 (SlateOS)");
         return 0;
     }
 

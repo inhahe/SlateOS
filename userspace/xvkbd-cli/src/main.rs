@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xvkbd-cli — OurOS virtual keyboard
+//! xvkbd-cli — SlateOS virtual keyboard
 //!
 //! Single personality: `xvkbd`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_xvkbd(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: xvkbd [OPTIONS]");
-        println!("xvkbd v4.1 (OurOS) — Virtual keyboard for accessibility");
+        println!("xvkbd v4.1 (SlateOS) — Virtual keyboard for accessibility");
         println!();
         println!("Options:");
         println!("  -text STRING     Send keystrokes");
@@ -29,13 +29,13 @@ fn run_xvkbd(args: &[String], _prog: &str) -> i32 {
         println!("  --version        Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("xvkbd v4.1 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("xvkbd v4.1 (SlateOS)"); return 0; }
     if let Some(text) = args.windows(2).find(|w| w[0] == "-text").map(|w| w[1].as_str()) {
         println!("xvkbd: sending keystrokes: {}", text);
         println!("xvkbd: {} characters sent", text.len());
         return 0;
     }
-    println!("xvkbd v4.1 (OurOS) — Virtual Keyboard");
+    println!("xvkbd v4.1 (SlateOS) — Virtual Keyboard");
     println!("  Layout: US English (QWERTY)");
     println!("  Mode: on-screen keyboard");
     println!("  Geometry: 640x200");

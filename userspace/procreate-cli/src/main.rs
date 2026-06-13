@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! procreate-cli — OurOS Procreate digital illustration
+//! procreate-cli — SlateOS Procreate digital illustration
 //!
 //! Single personality: `procreate`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_procreate(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: procreate [OPTIONS] [FILE]");
-        println!("Procreate (OurOS) — Award-winning illustration & painting");
+        println!("Procreate (SlateOS) — Award-winning illustration & painting");
         println!();
         println!("Options:");
         println!("  --open FILE            Open .procreate file");
@@ -24,8 +24,8 @@ fn run_procreate(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Procreate 5.3.10 (OurOS)"); return 0; }
-    println!("Procreate 5.3.10 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Procreate 5.3.10 (SlateOS)"); return 0; }
+    println!("Procreate 5.3.10 (SlateOS)");
     println!("  Engine: Valkyrie graphics engine (Metal-based)");
     println!("  Brushes: 200+ default + StreamLine prediction");
     println!("  Color: 8/16-bit, P3 wide gamut, ColorDrop fill");

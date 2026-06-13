@@ -2,6 +2,6 @@
 name = "pkg"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS package manager — content-addressed store with atomic generations"
+description = "SlateOS package manager — content-addressed store with atomic generations"
 [dependencies]
 httpclient = { path = "../../net/httpclient" }

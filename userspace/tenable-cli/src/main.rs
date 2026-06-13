@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tenable-cli — OurOS Tenable (Nessus creator, exposure management, Columbia MD, NASDAQ:TENB)
+//! tenable-cli — SlateOS Tenable (Nessus creator, exposure management, Columbia MD, NASDAQ:TENB)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_tenable(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: tenable [OPTIONS]");
-        println!("Tenable (OurOS) — exposure management (Nessus creator, NASDAQ:TENB)");
+        println!("Tenable (SlateOS) — exposure management (Nessus creator, NASDAQ:TENB)");
         println!();
         println!("Options:");
         println!("  nessus                 Nessus Pro vulnerability scanner (the OG)");
@@ -23,8 +23,8 @@ fn run_tenable(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Tenable 2024 (OurOS), Nessus 10.8"); return 0; }
-    println!("Tenable 2024 (OurOS) — Exposure Management");
+    if args.iter().any(|a| a == "--version") { println!("Tenable 2024 (SlateOS), Nessus 10.8"); return 0; }
+    println!("Tenable 2024 (SlateOS) — Exposure Management");
     println!("  Vendor: Tenable Holdings, Inc. (Columbia, MD — NASDAQ:TENB since 2018)");
     println!("  Founders: Ron Gula + Jack Huffard + Renaud Deraison, 2002");
     println!("          Renaud Deraison: original creator of Nessus (1998) — at age 17 from France");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! coinbase-cli — OurOS Coinbase CLI
+//! coinbase-cli — SlateOS Coinbase CLI
 //!
 //! Single personality: `coinbase`
 
@@ -11,7 +11,7 @@ fn run_coinbase(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: coinbase <COMMAND> [OPTIONS]");
         println!();
-        println!("Coinbase cryptocurrency CLI (OurOS).");
+        println!("Coinbase cryptocurrency CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  accounts     List accounts");

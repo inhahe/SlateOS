@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gramps-cli — OurOS Gramps genealogy research tool
+//! gramps-cli — SlateOS Gramps genealogy research tool
 //!
 //! Single personality: `gramps`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gramps(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gramps [OPTIONS]");
-        println!("Gramps v5.2 (OurOS) — Genealogy research software");
+        println!("Gramps v5.2 (SlateOS) — Genealogy research software");
         println!();
         println!("Options:");
         println!("  -i FILE           Import file (GEDCOM, Gramps XML, CSV)");
@@ -28,14 +28,14 @@ fn run_gramps(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Gramps v5.2.1 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("Gramps v5.2.1 (SlateOS)"); return 0; }
     if args.iter().any(|a| a == "-l") {
         println!("Gramps databases:");
         println!("  Family Tree    1,234 people    456 families");
         println!("  Research       567 people      123 families");
         return 0;
     }
-    println!("Gramps v5.2.1 (OurOS) — Genealogy Research");
+    println!("Gramps v5.2.1 (SlateOS) — Genealogy Research");
     println!("  Database: Family Tree");
     println!("  People: 1,234");
     println!("  Families: 456");

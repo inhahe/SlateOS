@@ -2,5 +2,5 @@
 name = "perf"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS performance monitoring tool"
+description = "SlateOS performance monitoring tool"
 [dependencies]

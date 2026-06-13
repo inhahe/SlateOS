@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! node — OurOS Node.js JavaScript runtime
+//! node — SlateOS Node.js JavaScript runtime
 //!
 //! Multi-personality binary detected via argv[0]:
 //!
@@ -63,10 +63,10 @@ fn run_node(args: Vec<String>) -> i32 {
     }
 
     // Interactive REPL
-    println!("Welcome to Node.js v22.0.0 (OurOS).");
+    println!("Welcome to Node.js v22.0.0 (SlateOS).");
     println!("Type \".help\" for more information.");
     println!("> process.platform");
-    println!("'ouros'");
+    println!("'slateos'");
     println!("> process.version");
     println!("'v22.0.0'");
     println!("> process.arch");

@@ -2,5 +2,5 @@
 name = "nc"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS network utility (netcat)"
+description = "SlateOS network utility (netcat)"
 [dependencies]

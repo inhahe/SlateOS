@@ -2,5 +2,5 @@
 name = "powerctl"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS power management — shutdown, reboot, suspend, hibernate"
+description = "SlateOS power management — shutdown, reboot, suspend, hibernate"
 [dependencies]

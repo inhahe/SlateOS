@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! heap-cli — OurOS Heap (auto-capture analytics — never miss an event)
+//! heap-cli — SlateOS Heap (auto-capture analytics — never miss an event)
 //!
 //! Single personality: `heap`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_heap(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: heap [OPTIONS]");
-        println!("Heap (OurOS) — auto-capture digital insights (Contentsquare since 2024)");
+        println!("Heap (SlateOS) — auto-capture digital insights (Contentsquare since 2024)");
         println!();
         println!("Options:");
         println!("  --free                 Free tier (10K sessions/mo)");
@@ -25,8 +25,8 @@ fn run_heap(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Heap 2024 (OurOS)"); return 0; }
-    println!("Heap 2024 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Heap 2024 (SlateOS)"); return 0; }
+    println!("Heap 2024 (SlateOS)");
     println!("  Vendor: Heap, Inc. — acquired by Contentsquare Sep 2023 for ~$400M");
     println!("        now part of Contentsquare's 'digital experience analytics' empire");
     println!("        Heap brand still active as Contentsquare's product analytics SKU");

@@ -1,4 +1,4 @@
-//! OurOS Kernel Module Management Tools
+//! SlateOS Kernel Module Management Tools
 //!
 //! Multi-personality binary providing `lsmod`, `modprobe`, `insmod`, and `rmmod`
 //! functionality. The active personality is detected from `argv[0]`.
@@ -23,23 +23,23 @@ use std::process;
 // Module load/unload support
 // ============================================================================
 //
-// OurOS is a microkernel: there are no loadable kernel modules. Device drivers
+// SlateOS is a microkernel: there are no loadable kernel modules. Device drivers
 // run as ordinary userspace processes managed by the driver framework / service
 // manager, not as code injected into the kernel address space. There is
 // therefore no `init_module`/`delete_module` syscall to call (the previous code
-// targeted Linux numbers 150/151, which are unassigned on OurOS and so just
+// targeted Linux numbers 150/151, which are unassigned on SlateOS and so just
 // returned NotSupported). The mutating personalities (insmod, rmmod, and
 // modprobe's load/remove paths) report this clearly rather than invoking a
 // nonexistent syscall. The read-only `lsmod` listing and modprobe's dependency
 // resolution / dry-run / show-depends remain useful and work unchanged.
 //
-// See todo.txt ("DESIGN GAP — no kernel-module loading: OurOS is a microkernel")
+// See todo.txt ("DESIGN GAP — no kernel-module loading: SlateOS is a microkernel")
 // for the tracking note and the correct future direction (route driver
 // load/unload requests to the userspace driver framework over IPC).
 
 /// Human-readable explanation returned whenever a caller attempts to load or
 /// unload a kernel module.
-const MODULE_UNSUPPORTED: &str = "kernel modules are not supported on OurOS \
+const MODULE_UNSUPPORTED: &str = "kernel modules are not supported on SlateOS \
 (microkernel: device drivers run as userspace processes managed by the driver \
 framework, not as loadable kernel modules)";
 
@@ -281,7 +281,7 @@ fn get_kernel_version() -> String {
         }
     }
 
-    // Try /proc/version (format: "OurOS version X.Y.Z ...").
+    // Try /proc/version (format: "SlateOS version X.Y.Z ...").
     if let Ok(ver) = fs::read_to_string("/proc/version")
         && let Some(third) = ver.split_whitespace().nth(2)
     {
@@ -304,7 +304,7 @@ fn modules_dep_path() -> String {
 
 /// Load a kernel module from a memory image.
 ///
-/// Unsupported on OurOS — see the `MODULE_UNSUPPORTED` documentation above.
+/// Unsupported on SlateOS — see the `MODULE_UNSUPPORTED` documentation above.
 /// The image bytes and parameter string are accepted for signature
 /// compatibility with the calling personalities but cannot be acted on.
 fn do_init_module(_image: &[u8], _params: &str) -> Result<(), String> {
@@ -313,7 +313,7 @@ fn do_init_module(_image: &[u8], _params: &str) -> Result<(), String> {
 
 /// Remove a loaded kernel module.
 ///
-/// Unsupported on OurOS — see the `MODULE_UNSUPPORTED` documentation above.
+/// Unsupported on SlateOS — see the `MODULE_UNSUPPORTED` documentation above.
 fn do_delete_module(_name: &str, _force: bool) -> Result<(), String> {
     Err(MODULE_UNSUPPORTED.to_string())
 }

@@ -2,5 +2,5 @@
 name = "join"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS join utility -- join lines of two sorted files on a common field"
+description = "SlateOS join utility -- join lines of two sorted files on a common field"
 [dependencies]

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sbctl — OurOS Secure Boot key management
+//! sbctl — SlateOS Secure Boot key management
 //!
 //! Multi-personality binary for UEFI Secure Boot key enrollment and management.
 //! Detected via argv[0]:
@@ -154,7 +154,7 @@ fn cmd_status() {
     let status = read_sb_status();
 
     println!("Installed:   sbctl");
-    println!("Owner:       OurOS");
+    println!("Owner:       SlateOS");
     println!(
         "Setup Mode:  {}",
         if status.setup_mode {
@@ -352,21 +352,21 @@ fn cmd_list_enrolled() {
 
     if status.pk_enrolled {
         println!("  Platform Key (PK):");
-        println!("    Owner: OurOS");
+        println!("    Owner: SlateOS");
     } else {
         println!("  Platform Key (PK): Not enrolled");
     }
 
     if status.kek_enrolled {
         println!("  Key Exchange Key (KEK):");
-        println!("    Owner: OurOS");
+        println!("    Owner: SlateOS");
     } else {
         println!("  Key Exchange Key (KEK): Not enrolled");
     }
 
     if status.db_enrolled {
         println!("  Signature Database (db):");
-        println!("    Owner: OurOS");
+        println!("    Owner: SlateOS");
     } else {
         println!("  Signature Database (db): Not enrolled");
     }
@@ -725,12 +725,12 @@ mod tests {
     fn test_key_info_creation() {
         let k = _KeyInfo {
             key_type: _KeyType::Db,
-            owner: "OurOS".to_string(),
+            owner: "SlateOS".to_string(),
             _guid: "12345678-1234-1234-1234-123456789abc".to_string(),
             _cert_path: "/path/to/cert.pem".to_string(),
             _key_path: "/path/to/key.pem".to_string(),
         };
         assert_eq!(k.key_type, _KeyType::Db);
-        assert_eq!(k.owner, "OurOS");
+        assert_eq!(k.owner, "SlateOS");
     }
 }

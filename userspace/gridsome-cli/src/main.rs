@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gridsome-cli — OurOS Gridsome Vue.js static site generator
+//! gridsome-cli — SlateOS Gridsome Vue.js static site generator
 //!
 //! Single personality: `gridsome`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gridsome(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: gridsome COMMAND [OPTIONS]");
-        println!("Gridsome v0.7.24 (OurOS) — Vue.js-powered static site generator");
+        println!("Gridsome v0.7.24 (SlateOS) — Vue.js-powered static site generator");
         println!();
         println!("Commands:");
         println!("  create NAME     Create new project");
@@ -62,7 +62,7 @@ fn run_gridsome(args: &[String], _prog: &str) -> i32 {
         "info" => {
             println!("  Gridsome: 0.7.24");
             println!("  Vue: 2.7");
-            println!("  OS: OurOS x86_64");
+            println!("  OS: SlateOS x86_64");
         }
         _ => println!("gridsome {}: completed", cmd),
     }

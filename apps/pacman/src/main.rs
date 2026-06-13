@@ -11,7 +11,7 @@
 #![allow(clippy::needless_range_loop)]
 #![allow(unused_imports)]
 
-//! OurOS Pac-Man -- classic maze chase arcade game.
+//! SlateOS Pac-Man -- classic maze chase arcade game.
 //!
 //! Features a 28x31 grid-based maze with the classic Pac-Man layout,
 //! arrow-key movement, 4 ghosts with chase/scatter AI, power pellets

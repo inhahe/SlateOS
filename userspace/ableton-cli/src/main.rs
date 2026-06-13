@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ableton-cli — OurOS Ableton Live DAW
+//! ableton-cli — SlateOS Ableton Live DAW
 //!
 //! Single personality: `ableton`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_live(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: ableton [OPTIONS] [PROJECT]");
-        println!("Ableton Live 12 Suite (OurOS) — Performance-oriented DAW");
+        println!("Ableton Live 12 Suite (SlateOS) — Performance-oriented DAW");
         println!();
         println!("Options:");
         println!("  --open FILE            Open .als project");
@@ -24,8 +24,8 @@ fn run_live(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Ableton Live 12.0.10 Suite (OurOS)"); return 0; }
-    println!("Ableton Live 12.0.10 Suite (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Ableton Live 12.0.10 Suite (SlateOS)"); return 0; }
+    println!("Ableton Live 12.0.10 Suite (SlateOS)");
     println!("  Editions: Intro, Standard, Suite");
     println!("  Views: Session (clip launch), Arrangement (timeline)");
     println!("  Instruments: Wavetable, Operator, Drum Rack, Sampler, etc.");

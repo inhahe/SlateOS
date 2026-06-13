@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nmon-cli — OurOS nmon performance monitor
+//! nmon-cli — SlateOS nmon performance monitor
 //!
 //! Single personality: `nmon`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_nmon(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "-?") {
         println!("Usage: nmon [OPTIONS]");
-        println!("nmon 16p (OurOS) — Performance monitor");
+        println!("nmon 16p (SlateOS) — Performance monitor");
         println!();
         println!("Interactive keys:");
         println!("  c    CPU stats");

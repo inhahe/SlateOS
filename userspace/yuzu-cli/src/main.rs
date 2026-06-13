@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! yuzu-cli — OurOS Yuzu Nintendo Switch emulator
+//! yuzu-cli — SlateOS Yuzu Nintendo Switch emulator
 //!
 //! Multi-personality: `yuzu`, `yuzu-cmd`
 
@@ -18,7 +18,7 @@ fn run_yuzu(args: &[String], prog: &str) -> i32 {
         } else {
             println!("Usage: yuzu [OPTIONS] [ROM]");
         }
-        println!("yuzu v1734 (OurOS) — Nintendo Switch emulator");
+        println!("yuzu v1734 (SlateOS) — Nintendo Switch emulator");
         println!();
         println!("Options:");
         println!("  -f, --fullscreen  Start fullscreen");
@@ -27,7 +27,7 @@ fn run_yuzu(args: &[String], prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("yuzu v1734 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("yuzu v1734 (SlateOS)"); return 0; }
     if cmd_mode {
         println!("yuzu-cmd: headless Switch emulation started");
     } else {

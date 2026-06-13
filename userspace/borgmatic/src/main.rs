@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! borgmatic — OurOS simple BorgBackup wrapper and scheduler
+//! borgmatic — SlateOS simple BorgBackup wrapper and scheduler
 //!
 //! Single personality: `borgmatic`
 
@@ -36,7 +36,7 @@ fn run_borgmatic(args: Vec<String>) -> i32 {
     }
 
     if cmd == Some("version") || cmd == Some("--version") {
-        println!("borgmatic 1.8.12 (OurOS)");
+        println!("borgmatic 1.8.12 (SlateOS)");
         return 0;
     }
 
@@ -56,7 +56,7 @@ fn run_borgmatic(args: Vec<String>) -> i32 {
                 println!("  /home/user/photos: 1234 files, 4.5 GiB");
                 println!("  /etc: 89 files, 1.2 MiB");
             }
-            println!("Archive: ouros-2025-05-22T10:00:00");
+            println!("Archive: slateos-2025-05-22T10:00:00");
             println!("Duration: 0:01:23");
             println!("Number of files: 1465");
             println!("Original size: 4.76 GiB");
@@ -81,9 +81,9 @@ fn run_borgmatic(args: Vec<String>) -> i32 {
             0
         }
         "list" => {
-            println!("ouros-2025-05-22T10:00:00    Thu, 2025-05-22 10:00:00 [abc123]");
-            println!("ouros-2025-05-21T10:00:00    Wed, 2025-05-21 10:00:00 [def456]");
-            println!("ouros-2025-05-20T10:00:00    Tue, 2025-05-20 10:00:00 [ghi789]");
+            println!("slateos-2025-05-22T10:00:00    Thu, 2025-05-22 10:00:00 [abc123]");
+            println!("slateos-2025-05-21T10:00:00    Wed, 2025-05-21 10:00:00 [def456]");
+            println!("slateos-2025-05-20T10:00:00    Tue, 2025-05-20 10:00:00 [ghi789]");
             0
         }
         "info" => {
@@ -116,7 +116,7 @@ fn run_borgmatic(args: Vec<String>) -> i32 {
         _ => {
             // Default: full backup run (create + prune + compact + check)
             println!("borgmatic: running create, prune, compact, check");
-            println!("Archive: ouros-2025-05-22T10:00:00");
+            println!("Archive: slateos-2025-05-22T10:00:00");
             println!("Duration: 0:01:23");
             println!("All operations completed successfully.");
             0

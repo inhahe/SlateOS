@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! secret-tool-cli — OurOS libsecret secret-tool
+//! secret-tool-cli — SlateOS libsecret secret-tool
 //!
 //! Single personality: `secret-tool`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_secret_tool(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: secret-tool COMMAND [ARGS]");
-        println!("secret-tool v0.20 (OurOS) — Secret storage CLI");
+        println!("secret-tool v0.20 (SlateOS) — Secret storage CLI");
         println!();
         println!("Commands:");
         println!("  store             Store a secret");

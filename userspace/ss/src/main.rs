@@ -1,4 +1,4 @@
-// OurOS ss — socket statistics
+// SlateOS ss — socket statistics
 //
 // Multi-personality binary:
 //   ss       — display socket statistics (like Linux ss, replaces netstat)
@@ -790,7 +790,7 @@ fn print_version(personality: Personality) {
         Personality::Ss => "ss",
         Personality::Sockstat => "sockstat",
     };
-    println!("{name} (OurOS) 0.1.0");
+    println!("{name} (SlateOS) 0.1.0");
 }
 
 // ---------------------------------------------------------------------------

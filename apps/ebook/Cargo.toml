@@ -2,6 +2,6 @@
 name = "ebook"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS Ebook Reader — plain-text ebook reader with library, bookmarks, and search"
+description = "SlateOS Ebook Reader — plain-text ebook reader with library, bookmarks, and search"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }

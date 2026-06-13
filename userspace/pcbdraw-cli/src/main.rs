@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pcbdraw-cli — OurOS PcbDraw PCB rendering tool
+//! pcbdraw-cli — SlateOS PcbDraw PCB rendering tool
 //!
 //! Single personality: `pcbdraw`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_pcbdraw(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: pcbdraw [OPTIONS] INPUT.kicad_pcb OUTPUT");
-        println!("PcbDraw v1.1 (OurOS) — Render KiCad PCBs to images");
+        println!("PcbDraw v1.1 (SlateOS) — Render KiCad PCBs to images");
         println!();
         println!("Options:");
         println!("  INPUT.kicad_pcb   Input PCB file");
@@ -27,7 +27,7 @@ fn run_pcbdraw(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("PcbDraw v1.1 (OurOS)");
+        println!("PcbDraw v1.1 (SlateOS)");
         return 0;
     }
     let files: Vec<&str> = args.iter()

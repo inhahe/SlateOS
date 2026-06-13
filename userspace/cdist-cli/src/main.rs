@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cdist-cli — OurOS cdist configuration management
+//! cdist-cli — SlateOS cdist configuration management
 //!
 //! Single personality: `cdist`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_cdist(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: cdist <command> [OPTIONS]");
-        println!("cdist v7.0 (OurOS) — Usable configuration management");
+        println!("cdist v7.0 (SlateOS) — Usable configuration management");
         println!();
         println!("Commands:");
         println!("  config HOST      Configure a host");
@@ -28,7 +28,7 @@ fn run_cdist(args: &[String], _prog: &str) -> i32 {
         println!("  --version        Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("cdist v7.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("cdist v7.0 (SlateOS)"); return 0; }
     match args.first().map(|s| s.as_str()) {
         Some("config") => {
             let host = args.get(1).map(|s| s.as_str()).unwrap_or("localhost");

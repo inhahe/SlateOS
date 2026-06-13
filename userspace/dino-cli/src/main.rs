@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! dino-cli — OurOS Dino XMPP/Jabber client
+//! dino-cli — SlateOS Dino XMPP/Jabber client
 //!
 //! Single personality: `dino`
 
@@ -13,13 +13,13 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_dino(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: dino [OPTIONS]");
-        println!("dino v0.4 (OurOS) — Modern XMPP/Jabber client");
+        println!("dino v0.4 (SlateOS) — Modern XMPP/Jabber client");
         println!();
         println!("Options:");
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("dino v0.4 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("dino v0.4 (SlateOS)"); return 0; }
     println!("dino: XMPP client started");
     println!("  Accounts: 1 connected");
     println!("  Contacts: 25 online");

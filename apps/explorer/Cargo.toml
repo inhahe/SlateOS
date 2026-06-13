@@ -2,6 +2,6 @@
 name = "explorer"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS File Explorer — graphical file manager with tree view"
+description = "SlateOS File Explorer — graphical file manager with tree view"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }

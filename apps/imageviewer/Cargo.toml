@@ -2,6 +2,6 @@
 name = "imageviewer"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS Image Viewer — photo and image viewing with zoom and slideshow"
+description = "SlateOS Image Viewer — photo and image viewing with zoom and slideshow"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! indesign-cli — OurOS Adobe InDesign desktop publishing
+//! indesign-cli — SlateOS Adobe InDesign desktop publishing
 //!
 //! Single personality: `indesign`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_id(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: indesign [OPTIONS] [FILE]");
-        println!("Adobe InDesign 2024 (OurOS) — Desktop publishing & layout");
+        println!("Adobe InDesign 2024 (SlateOS) — Desktop publishing & layout");
         println!();
         println!("Options:");
         println!("  -r SCRIPT              Run ExtendScript / JSX");
@@ -24,8 +24,8 @@ fn run_id(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Adobe InDesign 2024 v19.4.0 (OurOS)"); return 0; }
-    println!("Adobe InDesign 2024 v19.4.0 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Adobe InDesign 2024 v19.4.0 (SlateOS)"); return 0; }
+    println!("Adobe InDesign 2024 v19.4.0 (SlateOS)");
     println!("  Scripting: JavaScript, AppleScript, VBScript, UXP");
     println!("  Features: Paragraph composer, GREP styles, Data Merge");
     println!("  Output: Print-ready PDF, EPUB 3, fixed-layout EPUB, HTML5");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! msgpack-cli — OurOS MessagePack tools
+//! msgpack-cli — SlateOS MessagePack tools
 //!
 //! Multi-personality: `msgpack`, `msgpack2json`, `json2msgpack`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_msgpack(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: msgpack COMMAND [OPTIONS]");
-        println!("MessagePack Tools 1.0.0 (OurOS)");
+        println!("MessagePack Tools 1.0.0 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  encode       Encode JSON to MessagePack");
@@ -26,7 +26,7 @@ fn run_msgpack(args: &[String]) -> i32 {
     }
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("version");
     match subcmd {
-        "version" | "--version" => println!("msgpack 1.0.0 (OurOS)"),
+        "version" | "--version" => println!("msgpack 1.0.0 (SlateOS)"),
         "encode" => {
             let file = args.get(1).map(|s| s.as_str()).unwrap_or("data.json");
             let base = file.rsplit_once('.').map_or(file, |(b, _)| b);

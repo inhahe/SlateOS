@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! elixir-cli — OurOS Elixir language tools
+//! elixir-cli — SlateOS Elixir language tools
 //!
 //! Multi-personality: `elixir`, `elixirc`, `iex`, `mix`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_elixir(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: elixir [OPTIONS] FILE.exs [ARGS]");
-        println!("Elixir 1.16.1 (OurOS)");
+        println!("Elixir 1.16.1 (SlateOS)");
         println!("  -e EXPR       Evaluate expression");
         println!("  -r FILE       Require file before executing");
         println!("  -S SCRIPT     Find and execute script");
@@ -72,7 +72,7 @@ fn run_iex(args: &[String]) -> i32 {
 fn run_mix(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: mix TASK [OPTIONS]");
-        println!("Mix 1.16.1 (OurOS)");
+        println!("Mix 1.16.1 (SlateOS)");
         println!();
         println!("Tasks:");
         println!("  new PATH         Create new project");

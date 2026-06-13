@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! spectral-cli — OurOS Spectral API linter
+//! spectral-cli — SlateOS Spectral API linter
 //!
 //! Multi-personality: `spectral`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_spectral(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: spectral COMMAND [OPTIONS]");
-        println!("Spectral 6.11.0 (OurOS) — API linter");
+        println!("Spectral 6.11.0 (SlateOS) — API linter");
         println!();
         println!("Commands:");
         println!("  lint           Lint API documents");

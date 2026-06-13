@@ -1,4 +1,4 @@
-//! Crossword puzzle application for OurOS.
+//! Crossword puzzle application for SlateOS.
 //!
 //! Features:
 //! - Multiple built-in crossword puzzles with clues

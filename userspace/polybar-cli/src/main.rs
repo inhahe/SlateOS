@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! polybar-cli — OurOS Polybar status bar
+//! polybar-cli — SlateOS Polybar status bar
 //!
 //! Multi-personality: `polybar`, `polybar-msg`
 
@@ -29,7 +29,7 @@ fn run_polybar(args: &[String], prog: &str) -> i32 {
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: polybar [OPTIONS] [BAR_NAME]");
-        println!("Polybar 3.7.1 (OurOS) — Status bar");
+        println!("Polybar 3.7.1 (SlateOS) — Status bar");
         println!();
         println!("Options:");
         println!("  -c, --config FILE   Config file");

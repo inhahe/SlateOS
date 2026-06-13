@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! tealdeer — OurOS fast tldr client (simplified man pages)
+//! tealdeer — SlateOS fast tldr client (simplified man pages)
 //!
 //! Single personality: `tldr`
 
@@ -28,7 +28,7 @@ fn run_tldr(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("tealdeer 1.6.1 (OurOS)");
+        println!("tealdeer 1.6.1 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "-u" || a == "--update") {

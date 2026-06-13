@@ -2,5 +2,5 @@
 name = "yacc"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS yacc - parser generator (yacc/bison)"
+description = "SlateOS yacc - parser generator (yacc/bison)"
 [dependencies]

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! az-cli — OurOS Azure CLI
+//! az-cli — SlateOS Azure CLI
 //!
 //! Single personality: `az`
 
@@ -11,7 +11,7 @@ fn run_az(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: az [OPTIONS] <GROUP> <COMMAND> [ARGS]");
         println!();
-        println!("Azure Command-Line Interface (OurOS).");
+        println!("Azure Command-Line Interface (SlateOS).");
         println!();
         println!("Groups:");
         println!("  vm           Virtual Machines");
@@ -38,7 +38,7 @@ fn run_az(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("azure-cli 2.57.0 (OurOS)");
+        println!("azure-cli 2.57.0 (SlateOS)");
         return 0;
     }
 

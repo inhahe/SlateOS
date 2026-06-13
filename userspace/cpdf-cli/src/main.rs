@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cpdf-cli — OurOS cpdf PDF command-line tools
+//! cpdf-cli — SlateOS cpdf PDF command-line tools
 //!
 //! Single personality: `cpdf`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_cpdf(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "-help") || args.is_empty() {
         println!("Usage: cpdf [OPTIONS] INPUT [-o OUTPUT]");
-        println!("cpdf 2.7 (OurOS) — Coherent PDF command-line tools");
+        println!("cpdf 2.7 (SlateOS) — Coherent PDF command-line tools");
         println!();
         println!("Operations:");
         println!("  -merge           Merge PDFs");
@@ -42,7 +42,7 @@ fn run_cpdf(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-version") {
-        println!("cpdf Version 2.7 (OurOS)");
+        println!("cpdf Version 2.7 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "-info") {

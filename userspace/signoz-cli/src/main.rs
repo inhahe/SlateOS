@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! signoz-cli — OurOS SigNoz (open-source OpenTelemetry-native observability, Bangalore + SF)
+//! signoz-cli — SlateOS SigNoz (open-source OpenTelemetry-native observability, Bangalore + SF)
 
 use std::env;
 use std::process;
@@ -11,7 +11,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_signoz(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: signoz [OPTIONS]");
-        println!("SigNoz (OurOS) — open-source OpenTelemetry-native observability (YC W21)");
+        println!("SigNoz (SlateOS) — open-source OpenTelemetry-native observability (YC W21)");
         println!();
         println!("Options:");
         println!("  --traces               Distributed tracing (OpenTelemetry-native)");
@@ -23,8 +23,8 @@ fn run_signoz(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("SigNoz 2024 (OurOS) — v0.45 community + cloud"); return 0; }
-    println!("SigNoz 2024 (OurOS) — Open-Source OpenTelemetry-Native Observability");
+    if args.iter().any(|a| a == "--version") { println!("SigNoz 2024 (SlateOS) — v0.45 community + cloud"); return 0; }
+    println!("SigNoz 2024 (SlateOS) — Open-Source OpenTelemetry-Native Observability");
     println!("  Vendor: SigNoz, Inc. (Bangalore + San Francisco — private, YC W21)");
     println!("  Founders: Pranay Prateek + Ankit Anand, 2021 (Y Combinator W21)");
     println!("          founded with thesis: 'open-source Datadog alternative on OpenTelemetry'");

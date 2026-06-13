@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! alertmanager-cli — OurOS Prometheus Alertmanager
+//! alertmanager-cli — SlateOS Prometheus Alertmanager
 //!
 //! Multi-personality: `alertmanager`, `amtool`
 
@@ -14,7 +14,7 @@ fn run_alertmanager(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: alertmanager [OPTIONS]");
         println!();
-        println!("alertmanager — Prometheus Alertmanager (OurOS).");
+        println!("alertmanager — Prometheus Alertmanager (SlateOS).");
         println!();
         println!("Options:");
         println!("  --config.file <f>         Config file");
@@ -26,13 +26,13 @@ fn run_alertmanager(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("alertmanager, version 0.27.0 (OurOS)");
+        println!("alertmanager, version 0.27.0 (SlateOS)");
         println!("  build date: 2024-01-15");
         println!("  go:          go1.22.0");
         return 0;
     }
 
-    println!("level=info ts=2024-05-22T12:00:00.000Z caller=main.go:231 msg=\"Starting Alertmanager\" version=\"0.27.0 (OurOS)\"");
+    println!("level=info ts=2024-05-22T12:00:00.000Z caller=main.go:231 msg=\"Starting Alertmanager\" version=\"0.27.0 (SlateOS)\"");
     println!("level=info ts=2024-05-22T12:00:00.001Z caller=coordinator.go:113 msg=\"Loading configuration file\" file=/etc/alertmanager/alertmanager.yml");
     println!("level=info ts=2024-05-22T12:00:00.002Z caller=coordinator.go:126 msg=\"Completed loading of configuration file\"");
     println!("level=info ts=2024-05-22T12:00:00.003Z caller=main.go:535 msg=\"Listening\" address=0.0.0.0:9093");
@@ -43,7 +43,7 @@ fn run_amtool(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: amtool [OPTIONS] COMMAND");
         println!();
-        println!("amtool — Alertmanager CLI (OurOS).");
+        println!("amtool — Alertmanager CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  alert         Manage alerts");
@@ -60,7 +60,7 @@ fn run_amtool(args: &[String]) -> i32 {
             let cmd = args.get(1).map(|s| s.as_str()).unwrap_or("query");
             if cmd == "query" {
                 println!("Alertname        Starts At                Summary");
-                println!("HighCPU          2024-05-22 10:00:00 UTC  CPU usage above 90% on ouros-node-1");
+                println!("HighCPU          2024-05-22 10:00:00 UTC  CPU usage above 90% on slateos-node-1");
                 println!("DiskSpaceLow     2024-05-22 11:00:00 UTC  Disk space below 10% on /dev/sda1");
                 println!("ServiceDown      2024-05-22 11:30:00 UTC  Service 'webapp' not responding");
             } else {
@@ -99,7 +99,7 @@ fn run_amtool(args: &[String]) -> i32 {
             println!("receivers:");
             println!("  - name: default");
             println!("    email_configs:");
-            println!("      - to: admin@ouros.local");
+            println!("      - to: admin@slateos.local");
         }
         _ => println!("amtool: command '{}' completed", subcmd),
     }

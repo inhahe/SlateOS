@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! nfs-cli — OurOS NFS client/server tools
+//! nfs-cli — SlateOS NFS client/server tools
 //!
 //! Multi-personality: `showmount`, `exportfs`, `nfsstat`, `rpcinfo`, `nfsd`
 
@@ -127,7 +127,7 @@ fn main() {
         "exportfs" => run_exportfs(&rest),
         "nfsstat" => run_nfsstat(&rest),
         "rpcinfo" => run_rpcinfo(&rest),
-        "nfsd" => { println!("nfsd: starting NFS server (OurOS)"); println!("nfsd: 8 threads started"); 0 }
+        "nfsd" => { println!("nfsd: starting NFS server (SlateOS)"); println!("nfsd: 8 threads started"); 0 }
         _ => run_showmount(&rest),
     };
     process::exit(code);

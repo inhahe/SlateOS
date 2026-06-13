@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! influxdb-cli — OurOS InfluxDB CLI
+//! influxdb-cli — SlateOS InfluxDB CLI
 //!
 //! Single personality: `influx`
 
@@ -11,7 +11,7 @@ fn run_influx(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "help") {
         println!("Usage: influx [COMMAND] [OPTIONS]");
         println!();
-        println!("influx — InfluxDB CLI (OurOS).");
+        println!("influx — InfluxDB CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  setup            Setup InfluxDB");
@@ -29,7 +29,7 @@ fn run_influx(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "version") {
-        println!("Influx CLI 2.7.3 (OurOS)");
+        println!("Influx CLI 2.7.3 (SlateOS)");
         return 0;
     }
 

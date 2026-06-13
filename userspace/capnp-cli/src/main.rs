@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! capnp-cli — OurOS Cap'n Proto schema compiler
+//! capnp-cli — SlateOS Cap'n Proto schema compiler
 //!
 //! Multi-personality: `capnp`, `capnpc`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_capnp(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: capnp COMMAND [OPTIONS] FILE.capnp...");
-        println!("capnp v1.0 (OurOS) — Cap'n Proto tool");
+        println!("capnp v1.0 (SlateOS) — Cap'n Proto tool");
         println!();
         println!("Commands:");
         println!("  compile           Compile schema files");
@@ -45,7 +45,7 @@ fn run_capnp(args: &[String], _prog: &str) -> i32 {
             println!("  Output: 64 bytes written");
         }
         "id" => println!("@0x{:016x};", 0xabcd_ef01_2345_6789_u64),
-        "version" | "--version" => println!("capnp v1.0 (OurOS)"),
+        "version" | "--version" => println!("capnp v1.0 (SlateOS)"),
         _ => println!("capnp {}: completed", cmd),
     }
     0
@@ -54,7 +54,7 @@ fn run_capnp(args: &[String], _prog: &str) -> i32 {
 fn run_capnpc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: capnpc [OPTIONS] FILE.capnp...");
-        println!("capnpc v1.0 (OurOS) — Cap'n Proto compiler plugin driver");
+        println!("capnpc v1.0 (SlateOS) — Cap'n Proto compiler plugin driver");
         println!();
         println!("Options:");
         println!("  -oLANG[:DIR]      Output language plugin and directory");

@@ -2,5 +2,5 @@
 name = "last"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS login records viewer"
+description = "SlateOS login records viewer"
 [dependencies]

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mapnik-cli — OurOS Mapnik map rendering toolkit
+//! mapnik-cli — SlateOS Mapnik map rendering toolkit
 //!
 //! Multi-personality: `mapnik-render`, `mapnik-index`, `mapnik-config`
 
@@ -21,7 +21,7 @@ fn run_mapnik_render(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Mapnik 4.0.0 (OurOS)");
+        println!("Mapnik 4.0.0 (SlateOS)");
         return 0;
     }
     let stylesheet = args.iter().find(|a| a.ends_with(".xml")).map(|s| s.as_str()).unwrap_or("style.xml");

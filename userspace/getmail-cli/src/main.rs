@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! getmail-cli — OurOS getmail mail retriever
+//! getmail-cli — SlateOS getmail mail retriever
 //!
 //! Single personality: `getmail`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_getmail(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: getmail [OPTIONS]");
-        println!("getmail v6.19 (OurOS) — Mail retriever with Strstrong filtering");
+        println!("getmail v6.19 (SlateOS) — Mail retriever with Strstrong filtering");
         println!();
         println!("Options:");
         println!("  -r FILE           Configuration file");
@@ -24,7 +24,7 @@ fn run_getmail(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("getmail v6.19 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("getmail v6.19 (SlateOS)"); return 0; }
     if args.iter().any(|a| a == "--dump") {
         println!("Configuration:");
         println!("  Retriever: IMAP (imap.example.com:993)");

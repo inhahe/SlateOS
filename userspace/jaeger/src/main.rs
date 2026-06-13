@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! jaeger — OurOS distributed tracing system
+//! jaeger — SlateOS distributed tracing system
 //!
 //! Multi-personality: `jaeger`, `jaeger-agent`, `jaeger-collector`, `jaeger-query`
 
@@ -27,7 +27,7 @@ fn run_jaeger_all_in_one(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("jaeger 1.57.0 (OurOS)");
+        println!("jaeger 1.57.0 (SlateOS)");
         return 0;
     }
 
@@ -53,7 +53,7 @@ fn run_jaeger_component(args: Vec<String>, component: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("jaeger-{} 1.57.0 (OurOS)", component);
+        println!("jaeger-{} 1.57.0 (SlateOS)", component);
         return 0;
     }
 

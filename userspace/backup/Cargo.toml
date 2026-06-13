@@ -2,5 +2,5 @@
 name = "backup"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS backup utility — snapshot-based with full and incremental backup modes"
+description = "SlateOS backup utility — snapshot-based with full and incremental backup modes"
 [dependencies]

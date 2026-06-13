@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cargo-bloat — OurOS find out what takes most of the space in your executable
+//! cargo-bloat — SlateOS find out what takes most of the space in your executable
 //!
 //! Single personality: `cargo-bloat`
 
@@ -38,7 +38,7 @@ fn run_cargo_bloat(args: Vec<String>) -> i32 {
         return 0;
     }
     if subargs.iter().any(|a| a == "-V" || a == "--version") {
-        println!("cargo-bloat 0.11.1 (OurOS)");
+        println!("cargo-bloat 0.11.1 (SlateOS)");
         return 0;
     }
 

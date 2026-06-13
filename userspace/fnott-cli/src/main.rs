@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! fnott-cli — OurOS fnott notification daemon
+//! fnott-cli — SlateOS fnott notification daemon
 //!
 //! Single personality: `fnott`
 
@@ -13,14 +13,14 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_fnott(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: fnott [OPTIONS]");
-        println!("fnott v1.5 (OurOS) — Lightweight Wayland notification daemon");
+        println!("fnott v1.5 (SlateOS) — Lightweight Wayland notification daemon");
         println!();
         println!("Options:");
         println!("  (fnott reads config from ~/.config/fnott/fnott.ini)");
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("fnott v1.5 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("fnott v1.5 (SlateOS)"); return 0; }
     println!("fnott: notification daemon running");
     println!("  Config: ~/.config/fnott/fnott.ini");
     if args.is_empty() {

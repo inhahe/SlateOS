@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sysstat-cli — OurOS sysstat system performance tools
+//! sysstat-cli — SlateOS sysstat system performance tools
 //!
 //! Multi-personality: `sar`, `iostat`, `mpstat`, `pidstat`, `cifsiostat`
 
@@ -13,14 +13,14 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sar(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sar [OPTIONS] [INTERVAL [COUNT]]");
-        println!("sar v12.7 (OurOS) — System Activity Reporter");
+        println!("sar v12.7 (SlateOS) — System Activity Reporter");
         println!("  -u    CPU utilization");
         println!("  -r    Memory utilization");
         println!("  -b    I/O activity");
         println!("  -n DEV Network statistics");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("sar v12.7 (OurOS, sysstat)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("sar v12.7 (SlateOS, sysstat)"); return 0; }
     println!("12:00:01    CPU   %user   %system   %idle");
     println!("12:00:02    all    5.20     2.10    92.70");
     0
@@ -29,10 +29,10 @@ fn run_sar(args: &[String], _prog: &str) -> i32 {
 fn run_iostat(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: iostat [OPTIONS] [INTERVAL [COUNT]]");
-        println!("iostat v12.7 (OurOS) — I/O statistics");
+        println!("iostat v12.7 (SlateOS) — I/O statistics");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("iostat v12.7 (OurOS, sysstat)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("iostat v12.7 (SlateOS, sysstat)"); return 0; }
     println!("Device     tps    kB_read/s    kB_wrtn/s");
     println!("sda       12.50      156.00       89.00");
     0
@@ -41,10 +41,10 @@ fn run_iostat(args: &[String], _prog: &str) -> i32 {
 fn run_mpstat(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mpstat [OPTIONS] [INTERVAL [COUNT]]");
-        println!("mpstat v12.7 (OurOS) — Per-processor statistics");
+        println!("mpstat v12.7 (SlateOS) — Per-processor statistics");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("mpstat v12.7 (OurOS, sysstat)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("mpstat v12.7 (SlateOS, sysstat)"); return 0; }
     println!("CPU    %usr   %sys   %idle");
     println!("  0    3.20   1.50   95.30");
     println!("  1    7.10   2.80   90.10");
@@ -54,10 +54,10 @@ fn run_mpstat(args: &[String], _prog: &str) -> i32 {
 fn run_pidstat(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pidstat [OPTIONS] [INTERVAL [COUNT]]");
-        println!("pidstat v12.7 (OurOS) — Per-process statistics");
+        println!("pidstat v12.7 (SlateOS) — Per-process statistics");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("pidstat v12.7 (OurOS, sysstat)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("pidstat v12.7 (SlateOS, sysstat)"); return 0; }
     println!("PID     %usr  %system  Command");
     println!("1234    2.10    0.50   firefox");
     0

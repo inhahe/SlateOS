@@ -2,5 +2,5 @@
 name = "ntpd"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS ntpd/ntpdate - NTP time synchronization"
+description = "SlateOS ntpd/ntpdate - NTP time synchronization"
 [dependencies]

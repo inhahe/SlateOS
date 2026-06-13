@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! accerciser-cli — OurOS accessibility explorer
+//! accerciser-cli — SlateOS accessibility explorer
 //!
 //! Single personality: `accerciser`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_accerciser(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: accerciser [OPTIONS]");
-        println!("Accerciser v3.44 (OurOS) — AT-SPI accessibility explorer");
+        println!("Accerciser v3.44 (SlateOS) — AT-SPI accessibility explorer");
         println!();
         println!("Options:");
         println!("  --tree            Print accessibility tree");
@@ -24,7 +24,7 @@ fn run_accerciser(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Accerciser v3.44 (OurOS)");
+        println!("Accerciser v3.44 (SlateOS)");
         return 0;
     }
     if args.iter().any(|a| a == "--tree") {

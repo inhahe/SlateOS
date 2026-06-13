@@ -2,5 +2,5 @@
 name = "strings"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS printable string finder in binary files"
+description = "SlateOS printable string finder in binary files"
 [dependencies]

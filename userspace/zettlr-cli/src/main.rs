@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! zettlr-cli — OurOS Zettlr Markdown editor for academics
+//! zettlr-cli — SlateOS Zettlr Markdown editor for academics
 //!
 //! Single personality: `zettlr`
 
@@ -13,14 +13,14 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_zettlr(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: zettlr [OPTIONS] [FILE/DIR]");
-        println!("zettlr v3.0 (OurOS) — Markdown editor for researchers");
+        println!("zettlr v3.0 (SlateOS) — Markdown editor for researchers");
         println!();
         println!("Options:");
         println!("  --data-dir DIR    Data directory");
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("zettlr v3.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("zettlr v3.0 (SlateOS)"); return 0; }
     println!("zettlr: Markdown editor started");
     println!("  Workspace: ~/Documents/Research");
     println!("  Files: 120 Markdown files");

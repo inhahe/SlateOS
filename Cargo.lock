@@ -7398,10 +7398,6 @@ name = "ouch"
 version = "0.1.0"
 
 [[package]]
-name = "ouros-stubs"
-version = "0.1.0"
-
-[[package]]
 name = "outline-cli"
 version = "0.1.0"
 
@@ -9409,6 +9405,10 @@ version = "0.1.0"
 
 [[package]]
 name = "slack-cli"
+version = "0.1.0"
+
+[[package]]
+name = "slateos-stubs"
 version = "0.1.0"
 
 [[package]]

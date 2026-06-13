@@ -1,4 +1,4 @@
-//! Tic-Tac-Toe game with AI opponent for OurOS.
+//! Tic-Tac-Toe game with AI opponent for SlateOS.
 //!
 //! Features:
 //! - 3x3 grid with X and O

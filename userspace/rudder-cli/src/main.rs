@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rudder-cli — OurOS Rudder continuous auditing & configuration
+//! rudder-cli — SlateOS Rudder continuous auditing & configuration
 //!
 //! Multi-personality: `rudder`, `rudder-agent`, `rudder-relayd`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rudder(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: rudder <command> [OPTIONS]");
-        println!("rudder v8.0 (OurOS) — Continuous auditing & configuration");
+        println!("rudder v8.0 (SlateOS) — Continuous auditing & configuration");
         println!();
         println!("Commands:");
         println!("  agent run        Run agent policies");
@@ -23,7 +23,7 @@ fn run_rudder(args: &[String], _prog: &str) -> i32 {
         println!("  --version        Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("rudder v8.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("rudder v8.0 (SlateOS)"); return 0; }
     if args.len() >= 2 && args[0] == "agent" {
         match args[1].as_str() {
             "run" => {
@@ -52,10 +52,10 @@ fn run_rudder(args: &[String], _prog: &str) -> i32 {
 fn run_rudder_agent(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: rudder-agent [run|info|inventory]");
-        println!("rudder-agent v8.0 (OurOS) — Rudder agent wrapper");
+        println!("rudder-agent v8.0 (SlateOS) — Rudder agent wrapper");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("rudder-agent v8.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("rudder-agent v8.0 (SlateOS)"); return 0; }
     println!("rudder-agent: running policy enforcement");
     println!("  Compliance: 100%");
     0
@@ -64,10 +64,10 @@ fn run_rudder_agent(args: &[String], _prog: &str) -> i32 {
 fn run_rudder_relayd(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: rudder-relayd [OPTIONS]");
-        println!("rudder-relayd v8.0 (OurOS) — Rudder relay daemon");
+        println!("rudder-relayd v8.0 (SlateOS) — Rudder relay daemon");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("rudder-relayd v8.0 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("rudder-relayd v8.0 (SlateOS)"); return 0; }
     println!("rudder-relayd: relay daemon started");
     println!("  Listen: 0.0.0.0:443");
     println!("  Nodes relayed: 10");

@@ -2,5 +2,5 @@
 name = "iconv"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS iconv - character encoding conversion"
+description = "SlateOS iconv - character encoding conversion"
 [dependencies]

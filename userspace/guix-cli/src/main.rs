@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! guix-cli — OurOS GNU Guix package manager
+//! guix-cli — SlateOS GNU Guix package manager
 //!
 //! Multi-personality: `guix`
 
@@ -10,7 +10,7 @@ use std::process;
 fn run_guix(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: guix COMMAND [OPTIONS]");
-        println!("GNU Guix 1.4.0 (OurOS)");
+        println!("GNU Guix 1.4.0 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  install      Install packages");

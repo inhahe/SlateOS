@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! grafana-cli — OurOS Grafana CLI
+//! grafana-cli — SlateOS Grafana CLI
 //!
 //! Single personality: `grafana-cli`
 
@@ -27,7 +27,7 @@ fn run_grafana_cli(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("grafana-cli version 10.3.1 (OurOS)");
+        println!("grafana-cli version 10.3.1 (SlateOS)");
         return 0;
     }
 

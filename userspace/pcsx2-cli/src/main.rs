@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! pcsx2-cli — OurOS PCSX2 PlayStation 2 emulator
+//! pcsx2-cli — SlateOS PCSX2 PlayStation 2 emulator
 //!
 //! Multi-personality: `pcsx2`, `pcsx2-qt`
 
@@ -14,7 +14,7 @@ fn run_pcsx2(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: pcsx2 [OPTIONS] [ISO]");
         println!();
-        println!("pcsx2 — PlayStation 2 emulator (OurOS).");
+        println!("pcsx2 — PlayStation 2 emulator (SlateOS).");
         println!();
         println!("Options:");
         println!("  --batch           Headless mode, exit on close");
@@ -28,7 +28,7 @@ fn run_pcsx2(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("PCSX2 v1.7.5491 (OurOS)");
+        println!("PCSX2 v1.7.5491 (SlateOS)");
         return 0;
     }
 
@@ -39,7 +39,7 @@ fn run_pcsx2(args: &[String]) -> i32 {
     let iso = args.iter().find(|a| !a.starts_with('-') && (a.ends_with(".iso") || a.ends_with(".bin") || a.ends_with(".cso")))
         .map(|s| s.as_str());
 
-    println!("[PCSX2] Version 1.7.5491 (OurOS)");
+    println!("[PCSX2] Version 1.7.5491 (SlateOS)");
     println!("[PCSX2] GS/Renderer: {} ({}x native)", renderer, upscale);
     println!("[PCSX2] SPU2: PulseAudio, 48000 Hz");
     println!("[PCSX2] PAD: evdev input");

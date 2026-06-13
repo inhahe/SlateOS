@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! berglas-cli — OurOS Berglas GCP secret management
+//! berglas-cli — SlateOS Berglas GCP secret management
 //!
 //! Single personality: `berglas`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_berglas(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: berglas COMMAND [OPTIONS]");
-        println!("Berglas v1.0.0 (OurOS) — GCP secret management");
+        println!("Berglas v1.0.0 (SlateOS) — GCP secret management");
         println!();
         println!("Commands:");
         println!("  create          Create a secret");
@@ -32,7 +32,7 @@ fn run_berglas(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("berglas v1.0.0 (OurOS)");
+        println!("berglas v1.0.0 (SlateOS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("list");

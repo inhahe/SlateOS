@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! unrealengine-cli — OurOS Unreal Engine (Epic's AAA game engine)
+//! unrealengine-cli — SlateOS Unreal Engine (Epic's AAA game engine)
 //!
 //! Single personality: `unrealengine`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ue(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: unrealengine [OPTIONS]");
-        println!("Unreal Engine 5.5 (OurOS) — Epic Games AAA game engine + creation suite");
+        println!("Unreal Engine 5.5 (SlateOS) — Epic Games AAA game engine + creation suite");
         println!();
         println!("Options:");
         println!("  --launcher             Epic Games Launcher (engine version + marketplace)");
@@ -25,8 +25,8 @@ fn run_ue(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Unreal Engine 5.5.1 (OurOS)"); return 0; }
-    println!("Unreal Engine 5.5.1 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Unreal Engine 5.5.1 (SlateOS)"); return 0; }
+    println!("Unreal Engine 5.5.1 (SlateOS)");
     println!("  Vendor: Epic Games Inc. (Cary, NC) — owned by Tim Sweeney + Tencent 40%");
     println!("  History: Unreal Engine 1.0 (1998, ships with Unreal game)");
     println!("           UE2 (2002), UE3 (2006 — Gears of War era), UE4 (2014 — open license)");

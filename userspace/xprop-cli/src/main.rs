@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xprop-cli — OurOS xprop/xwininfo X11 property tools CLI
+//! xprop-cli — SlateOS xprop/xwininfo X11 property tools CLI
 //!
 //! Multi-personality: `xprop`, `xwininfo`
 
@@ -19,7 +19,7 @@ fn run_xprop(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: xprop [OPTIONS] [PROPERTY ...]");
         println!();
-        println!("xprop — X11 property displayer (OurOS).");
+        println!("xprop — X11 property displayer (SlateOS).");
         println!();
         println!("Options:");
         println!("  -id WID         Window ID");
@@ -54,7 +54,7 @@ fn run_xwininfo(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: xwininfo [OPTIONS]");
         println!();
-        println!("xwininfo — X11 window information (OurOS).");
+        println!("xwininfo — X11 window information (SlateOS).");
         println!();
         println!("Options:");
         println!("  -id WID         Window ID");

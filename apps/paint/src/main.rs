@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! OurOS Paint
+//! SlateOS Paint
 //!
 //! A full-featured drawing and image editing application with:
 //! - Canvas with configurable dimensions and background color

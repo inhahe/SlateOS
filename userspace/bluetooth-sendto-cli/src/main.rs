@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bluetooth-sendto-cli — OurOS gnome-bluetooth file sender
+//! bluetooth-sendto-cli — SlateOS gnome-bluetooth file sender
 //!
 //! Single personality: `bluetooth-sendto`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sendto(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: bluetooth-sendto [OPTIONS] FILE...");
-        println!("bluetooth-sendto v3.34 (OurOS) — Send files via Bluetooth");
+        println!("bluetooth-sendto v3.34 (SlateOS) — Send files via Bluetooth");
         println!();
         println!("Options:");
         println!("  --device MAC      Target device address");

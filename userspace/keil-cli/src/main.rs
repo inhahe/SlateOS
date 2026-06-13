@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! keil-cli — OurOS Arm Keil MDK (Microcontroller Development Kit)
+//! keil-cli — SlateOS Arm Keil MDK (Microcontroller Development Kit)
 //!
 //! Single personality: `keil`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_keil(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: keil [OPTIONS] [PROJECT]");
-        println!("Arm Keil MDK 5.41 (OurOS) — Cortex-M development kit");
+        println!("Arm Keil MDK 5.41 (SlateOS) — Cortex-M development kit");
         println!();
         println!("Options:");
         println!("  -b PROJECT             Build project (.uvprojx)");
@@ -23,8 +23,8 @@ fn run_keil(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Arm Keil MDK-Professional 5.41 (OurOS)"); return 0; }
-    println!("Arm Keil MDK-Professional 5.41 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Arm Keil MDK-Professional 5.41 (SlateOS)"); return 0; }
+    println!("Arm Keil MDK-Professional 5.41 (SlateOS)");
     println!("  Targets: Arm Cortex-M0/M0+/M3/M4/M7/M23/M33/M55/M85");
     println!("  IDE: µVision5 (project mgmt, source, debug, profiler)");
     println!("  Compiler: Arm Compiler 6 (armclang/armlink/armar/fromelf) — LLVM-based");

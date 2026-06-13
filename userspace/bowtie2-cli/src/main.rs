@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bowtie2-cli — OurOS Bowtie2 short read aligner
+//! bowtie2-cli — SlateOS Bowtie2 short read aligner
 //!
 //! Multi-personality: `bowtie2`, `bowtie2-build`, `bowtie2-inspect`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_bowtie2(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: bowtie2 [OPTIONS] -x INDEX -1 READS_1 -2 READS_2 -S OUTPUT");
-        println!("Bowtie 2 v2.5.4 (OurOS) — Fast short-read alignment");
+        println!("Bowtie 2 v2.5.4 (SlateOS) — Fast short-read alignment");
         println!();
         println!("Options:");
         println!("  -x INDEX          Index prefix");
@@ -27,7 +27,7 @@ fn run_bowtie2(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Bowtie 2 v2.5.4 (OurOS)");
+        println!("Bowtie 2 v2.5.4 (SlateOS)");
         return 0;
     }
     println!("1000000 reads; of these:");
@@ -42,7 +42,7 @@ fn run_bowtie2(args: &[String], _prog: &str) -> i32 {
 fn run_bowtie2_build(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: bowtie2-build [OPTIONS] REF.fa INDEX_PREFIX");
-        println!("bowtie2-build v2.5.4 (OurOS) — Build Bowtie 2 index");
+        println!("bowtie2-build v2.5.4 (SlateOS) — Build Bowtie 2 index");
         return 0;
     }
     println!("Building index...");
@@ -54,7 +54,7 @@ fn run_bowtie2_build(args: &[String], _prog: &str) -> i32 {
 fn run_bowtie2_inspect(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: bowtie2-inspect [OPTIONS] INDEX_PREFIX");
-        println!("bowtie2-inspect v2.5.4 (OurOS) — Inspect Bowtie 2 index");
+        println!("bowtie2-inspect v2.5.4 (SlateOS) — Inspect Bowtie 2 index");
         return 0;
     }
     println!("Index summary:");

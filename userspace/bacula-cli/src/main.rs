@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bacula-cli — OurOS Bacula backup CLI
+//! bacula-cli — SlateOS Bacula backup CLI
 //!
 //! Multi-personality: `bconsole`, `bscan`, `bls`, `bextract`
 
@@ -19,7 +19,7 @@ fn run_bconsole(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "-?") {
         println!("Usage: bconsole [OPTIONS]");
         println!();
-        println!("bconsole — Bacula console (OurOS).");
+        println!("bconsole — Bacula console (SlateOS).");
         println!();
         println!("Options:");
         println!("  -c FILE     Config file");
@@ -28,11 +28,11 @@ fn run_bconsole(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("bconsole 13.0.4 (OurOS)");
+        println!("bconsole 13.0.4 (SlateOS)");
         return 0;
     }
     println!("Connecting to Director localhost:9101...");
-    println!("1000 OK: director version 13.0.4 (OurOS)");
+    println!("1000 OK: director version 13.0.4 (SlateOS)");
     println!("Enter a period (.) to cancel a command.");
     println!("*");
     0
@@ -42,7 +42,7 @@ fn run_bscan(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: bscan [OPTIONS] DEVICE");
         println!();
-        println!("bscan — scan Bacula volumes into catalog (OurOS).");
+        println!("bscan — scan Bacula volumes into catalog (SlateOS).");
         println!();
         println!("Options:");
         println!("  -b BS      Bootstrap file");
@@ -66,7 +66,7 @@ fn run_bls(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: bls [OPTIONS] DEVICE");
         println!();
-        println!("bls — list Bacula volume contents (OurOS).");
+        println!("bls — list Bacula volume contents (SlateOS).");
         return 0;
     }
     println!("bls: listing volume contents");
@@ -82,7 +82,7 @@ fn run_bextract(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: bextract [OPTIONS] DEVICE DIRECTORY");
         println!();
-        println!("bextract — extract Bacula volume to directory (OurOS).");
+        println!("bextract — extract Bacula volume to directory (SlateOS).");
         println!();
         println!("Options:");
         println!("  -b BS      Bootstrap file");

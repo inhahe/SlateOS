@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sqlfluff-cli — OurOS SQLFluff SQL linter
+//! sqlfluff-cli — SlateOS SQLFluff SQL linter
 //!
 //! Single personality: `sqlfluff`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sqlfluff(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: sqlfluff COMMAND [OPTIONS] [PATHS]");
-        println!("SQLFluff v3.0.0 (OurOS) — SQL linter and formatter");
+        println!("SQLFluff v3.0.0 (SlateOS) — SQL linter and formatter");
         println!();
         println!("Commands:");
         println!("  lint            Lint SQL files");
@@ -32,7 +32,7 @@ fn run_sqlfluff(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("SQLFluff v3.0.0 (OurOS)");
+        println!("SQLFluff v3.0.0 (SlateOS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("lint");

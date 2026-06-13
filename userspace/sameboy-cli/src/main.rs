@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! sameboy-cli — OurOS SameBoy Game Boy emulator
+//! sameboy-cli — SlateOS SameBoy Game Boy emulator
 //!
 //! Single personality: `sameboy`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sameboy(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: sameboy [OPTIONS] [ROM]");
-        println!("SameBoy v0.16 (OurOS) — Accurate Game Boy / Game Boy Color emulator");
+        println!("SameBoy v0.16 (SlateOS) — Accurate Game Boy / Game Boy Color emulator");
         println!();
         println!("Options:");
         println!("  --model MODEL    Hardware model (dmg, cgb, mgb, sgb, sgb2, agb)");
@@ -27,7 +27,7 @@ fn run_sameboy(args: &[String], _prog: &str) -> i32 {
         println!("  --version        Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("SameBoy v0.16.2 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("SameBoy v0.16.2 (SlateOS)"); return 0; }
     let model = args.windows(2).find(|w| w[0] == "--model").map(|w| w[1].as_str()).unwrap_or("cgb");
     let model_name = match model {
         "dmg" => "Game Boy (DMG)",
@@ -41,7 +41,7 @@ fn run_sameboy(args: &[String], _prog: &str) -> i32 {
         idx == 0 || !matches!(args.get(idx.wrapping_sub(1)).map(|s| s.as_str()), Some("--model" | "--scale" | "--boot-rom" | "--filter" | "--palette"))
     }).collect();
     if files.is_empty() {
-        println!("SameBoy v0.16.2 (OurOS) — Game Boy Emulator");
+        println!("SameBoy v0.16.2 (SlateOS) — Game Boy Emulator");
         println!("  Model: {}", model_name);
         println!("  CPU: Sharp LR35902 @ 4.19 MHz (emulated)");
         println!("  Display: 160x144, 4 shades (DMG) / 32768 colors (CGB)");

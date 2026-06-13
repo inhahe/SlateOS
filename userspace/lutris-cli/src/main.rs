@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! lutris-cli — OurOS Lutris game manager
+//! lutris-cli — SlateOS Lutris game manager
 //!
 //! Single personality: `lutris`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_lutris(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: lutris [OPTIONS] [URI]");
-        println!("lutris v0.5 (OurOS) — Open source game manager");
+        println!("lutris v0.5 (SlateOS) — Open source game manager");
         println!();
         println!("Options:");
         println!("  -l                List installed games");
@@ -24,7 +24,7 @@ fn run_lutris(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("lutris v0.5 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("lutris v0.5 (SlateOS)"); return 0; }
     if args.iter().any(|a| a == "-l") {
         println!("Installed games:");
         println!("  Portal 2          (wine-ge-8-26)  [steam]");

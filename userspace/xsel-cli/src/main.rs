@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! xsel-cli — OurOS xsel clipboard CLI
+//! xsel-cli — SlateOS xsel clipboard CLI
 //!
 //! Single personality: `xsel`
 
@@ -11,7 +11,7 @@ fn run_xsel(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: xsel [OPTIONS]");
         println!();
-        println!("xsel — X11 selection manipulation (OurOS).");
+        println!("xsel — X11 selection manipulation (SlateOS).");
         println!();
         println!("Options:");
         println!("  -i, --input          Read stdin into selection");
@@ -30,7 +30,7 @@ fn run_xsel(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("xsel version 1.2.1 (OurOS)");
+        println!("xsel version 1.2.1 (SlateOS)");
         return 0;
     }
 

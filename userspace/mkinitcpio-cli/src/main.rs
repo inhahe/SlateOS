@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mkinitcpio-cli — OurOS initramfs generator (Arch-style)
+//! mkinitcpio-cli — SlateOS initramfs generator (Arch-style)
 //!
 //! Multi-personality: `mkinitcpio`, `update-initramfs`
 
@@ -19,7 +19,7 @@ fn run_mkinitcpio(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mkinitcpio [OPTIONS]");
         println!();
-        println!("mkinitcpio — generate initramfs images (OurOS).");
+        println!("mkinitcpio — generate initramfs images (SlateOS).");
         println!();
         println!("Options:");
         println!("  -g FILE        Generate image to FILE");
@@ -36,7 +36,7 @@ fn run_mkinitcpio(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("mkinitcpio 37 (OurOS)");
+        println!("mkinitcpio 37 (SlateOS)");
         return 0;
     }
 
@@ -61,7 +61,7 @@ fn run_mkinitcpio(args: &[String]) -> i32 {
     let output = args.windows(2).find(|w| w[0] == "-g").map(|w| w[1].as_str())
         .unwrap_or("/boot/initramfs-1.0.0.img");
 
-    println!("==> Building image from preset: /etc/mkinitcpio.d/ouros.preset: 'default'");
+    println!("==> Building image from preset: /etc/mkinitcpio.d/slateos.preset: 'default'");
     println!("  -> -k {} -g {}", version, output);
     println!("==> Starting build: {}", version);
     println!("  -> Running build hook: [base]");
@@ -82,7 +82,7 @@ fn run_update_initramfs(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: update-initramfs [OPTIONS]");
         println!();
-        println!("update-initramfs — generate initramfs for given kernel (OurOS).");
+        println!("update-initramfs — generate initramfs for given kernel (SlateOS).");
         println!();
         println!("Options:");
         println!("  -c    Create initramfs");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! exoscale-cli — OurOS Exoscale cloud CLI
+//! exoscale-cli — SlateOS Exoscale cloud CLI
 //!
 //! Multi-personality: `exo`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_exo(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: exo COMMAND [OPTIONS]");
-        println!("Exoscale CLI 1.78.0 (OurOS)");
+        println!("Exoscale CLI 1.78.0 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  compute      Manage compute instances");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! imagemagick-cli — OurOS ImageMagick-compatible CLI (convert/identify/mogrify)
+//! imagemagick-cli — SlateOS ImageMagick-compatible CLI (convert/identify/mogrify)
 //!
 //! Multi-personality: `convert`, `identify`, `mogrify`, `composite`, `montage`
 
@@ -244,7 +244,7 @@ fn main() {
     let rest: Vec<String> = args.into_iter().skip(1).collect();
 
     if rest.iter().any(|a| a == "-V" || a == "--version") {
-        println!("ImageMagick 7.1.1-29 (OurOS)");
+        println!("ImageMagick 7.1.1-29 (SlateOS)");
         process::exit(0);
     }
 

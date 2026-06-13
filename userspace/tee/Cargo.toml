@@ -2,5 +2,5 @@
 name = "tee"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS tee - read stdin, write to stdout and files"
+description = "SlateOS tee - read stdin, write to stdout and files"
 [dependencies]

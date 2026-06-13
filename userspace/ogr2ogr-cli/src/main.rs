@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! ogr2ogr-cli — OurOS OGR vector data converter
+//! ogr2ogr-cli — SlateOS OGR vector data converter
 //!
 //! Multi-personality: `ogr2ogr`, `ogrinfo`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_ogr2ogr(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: ogr2ogr [OPTIONS] DST_FILE SRC_FILE");
-        println!("ogr2ogr v3.9 (OurOS) — Convert vector geospatial data");
+        println!("ogr2ogr v3.9 (SlateOS) — Convert vector geospatial data");
         println!();
         println!("Options:");
         println!("  -f FORMAT         Output format (GeoJSON, GPKG, SHP, ...)");
@@ -26,7 +26,7 @@ fn run_ogr2ogr(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("ogr2ogr v3.9 (OurOS) — GDAL/OGR");
+        println!("ogr2ogr v3.9 (SlateOS) — GDAL/OGR");
         return 0;
     }
     let files: Vec<&str> = args.iter()
@@ -44,7 +44,7 @@ fn run_ogr2ogr(args: &[String], _prog: &str) -> i32 {
 fn run_ogrinfo(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: ogrinfo [OPTIONS] FILE [LAYER]");
-        println!("ogrinfo v3.9 (OurOS) — List info about OGR data source");
+        println!("ogrinfo v3.9 (SlateOS) — List info about OGR data source");
         return 0;
     }
     let file = args.iter()

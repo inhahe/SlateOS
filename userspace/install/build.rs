@@ -10,7 +10,7 @@
 //! `embed-manifest` generates the COFF resource object in pure Rust (no
 //! external tools such as `windres`, which is not installed on the dev
 //! machine). Its `cargo:rustc-link-arg-bins` covers the bin's unit-test
-//! harness. The ouros target is left untouched: its TARGET triple matches no
+//! harness. The slateos target is left untouched: its TARGET triple matches no
 //! Windows ABI, so no manifest is linked.
 
 fn main() {
@@ -24,6 +24,6 @@ fn main() {
         return;
     }
 
-    embed_manifest::embed_manifest(embed_manifest::new_manifest("OurOS.install"))
+    embed_manifest::embed_manifest(embed_manifest::new_manifest("SlateOS.install"))
         .expect("failed to embed Windows manifest");
 }

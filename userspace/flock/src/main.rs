@@ -1,4 +1,4 @@
-//! OurOS file locking utilities.
+//! SlateOS file locking utilities.
 //!
 //! Multi-personality binary providing:
 //! - **flock** — manage locks from shell scripts

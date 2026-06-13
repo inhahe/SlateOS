@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! megahit-cli — OurOS MEGAHIT metagenome assembler
+//! megahit-cli — SlateOS MEGAHIT metagenome assembler
 //!
 //! Single personality: `megahit`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_megahit(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: megahit [OPTIONS]");
-        println!("MEGAHIT v1.2 (OurOS) — Ultra-fast metagenome assembler");
+        println!("MEGAHIT v1.2 (SlateOS) — Ultra-fast metagenome assembler");
         println!();
         println!("Input:");
         println!("  -1 FILE       Forward reads");
@@ -30,8 +30,8 @@ fn run_megahit(args: &[String], _prog: &str) -> i32 {
         println!("  --version     Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("MEGAHIT v1.2.9 (OurOS)"); return 0; }
-    println!("MEGAHIT v1.2.9 (OurOS) — Metagenome Assembly");
+    if args.iter().any(|a| a == "--version") { println!("MEGAHIT v1.2.9 (SlateOS)"); return 0; }
+    println!("MEGAHIT v1.2.9 (SlateOS) — Metagenome Assembly");
     println!("  K-mer sizes: 21,29,39,59,79,99,119,141");
     println!("  Assembling k=21...");
     println!("  Assembling k=29...");

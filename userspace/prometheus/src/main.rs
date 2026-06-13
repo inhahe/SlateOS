@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! prometheus — OurOS monitoring and alerting toolkit
+//! prometheus — SlateOS monitoring and alerting toolkit
 //!
 //! Multi-personality: `prometheus` (server), `promtool` (CLI tool)
 
@@ -23,7 +23,7 @@ fn run_prometheus(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("prometheus, version 2.50.0 (OurOS)");
+        println!("prometheus, version 2.50.0 (SlateOS)");
         println!("  build date: 2025-05-22");
         println!("  go version: go1.22.0");
         return 0;

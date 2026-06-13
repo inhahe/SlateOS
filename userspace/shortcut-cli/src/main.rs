@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! shortcut-cli — OurOS Shortcut (formerly Clubhouse) CLI
+//! shortcut-cli — SlateOS Shortcut (formerly Clubhouse) CLI
 //!
 //! Single personality: `shortcut`
 
@@ -11,7 +11,7 @@ fn run_shortcut(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: shortcut <COMMAND> [OPTIONS]");
         println!();
-        println!("Shortcut project management CLI (OurOS).");
+        println!("Shortcut project management CLI (SlateOS).");
         println!();
         println!("Commands:");
         println!("  stories      Manage stories");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! rebelle-cli — OurOS Escape Motions Rebelle realistic painting
+//! rebelle-cli — SlateOS Escape Motions Rebelle realistic painting
 //!
 //! Single personality: `rebelle`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_rebelle(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: rebelle [OPTIONS] [FILE]");
-        println!("Escape Motions Rebelle 7 Pro (OurOS) — Realistic watercolor & wet/dry media");
+        println!("Escape Motions Rebelle 7 Pro (SlateOS) — Realistic watercolor & wet/dry media");
         println!();
         println!("Options:");
         println!("  --open FILE            Open .reb project");
@@ -23,8 +23,8 @@ fn run_rebelle(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Rebelle 7 Pro v7.2.5 (OurOS)"); return 0; }
-    println!("Rebelle 7 Pro v7.2.5 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Rebelle 7 Pro v7.2.5 (SlateOS)"); return 0; }
+    println!("Rebelle 7 Pro v7.2.5 (SlateOS)");
     println!("  Media: Watercolor, oil, acrylic, pastels, ink, pencils");
     println!("  Engine: Real Watercolor (wet diffusion), Real Oil tech");
     println!("  Layers: pixel, vector, reference, watercolor wet");

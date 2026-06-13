@@ -2,5 +2,5 @@
 name = "w"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS w - show who is logged in and what they are doing"
+description = "SlateOS w - show who is logged in and what they are doing"
 [dependencies]

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! scheme-cli — OurOS Scheme interpreters
+//! scheme-cli — SlateOS Scheme interpreters
 //!
 //! Multi-personality: `guile`, `chicken`, `chez`, `gambit`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_guile(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: guile [OPTIONS] [FILE [ARGS]]");
-        println!("GNU Guile 3.0.9 (OurOS)");
+        println!("GNU Guile 3.0.9 (SlateOS)");
         println!("  -c EXPR      Evaluate expression");
         println!("  -e FUNC      Use FUNC as entry point");
         println!("  -l FILE      Load file before main");
@@ -44,14 +44,14 @@ fn run_guile(args: &[String]) -> i32 {
 fn run_chicken(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: chicken [OPTIONS] FILE.scm");
-        println!("CHICKEN Scheme 5.3.0 (OurOS)");
+        println!("CHICKEN Scheme 5.3.0 (SlateOS)");
         println!("  -output-file FILE  Output file");
         println!("  -optimize-level N  Optimization level (0-5)");
         println!("  -debug-level N     Debug level (0-3)");
         return 0;
     }
     if args.iter().any(|a| a == "-version") {
-        println!("CHICKEN 5.3.0 (OurOS)");
+        println!("CHICKEN 5.3.0 (SlateOS)");
         return 0;
     }
     let file = args.iter().find(|a| a.ends_with(".scm")).map(|s| s.as_str());
@@ -68,7 +68,7 @@ fn run_chicken(args: &[String]) -> i32 {
 fn run_chez(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: chez [OPTIONS] [FILE]");
-        println!("Chez Scheme 10.0.0 (OurOS)");
+        println!("Chez Scheme 10.0.0 (SlateOS)");
         println!("  --program FILE    Run as program");
         println!("  --script FILE     Run as script");
         println!("  --compile-imported-libraries  Compile imported libs");
@@ -76,7 +76,7 @@ fn run_chez(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Chez Scheme Version 10.0.0 (OurOS)");
+        println!("Chez Scheme Version 10.0.0 (SlateOS)");
         return 0;
     }
     let file = args.iter().find(|a| a.ends_with(".ss") || a.ends_with(".scm")).map(|s| s.as_str());
@@ -92,7 +92,7 @@ fn run_chez(args: &[String]) -> i32 {
 fn run_gambit(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: gsi [OPTIONS] [FILE]");
-        println!("Gambit v4.9.5 (OurOS)");
+        println!("Gambit v4.9.5 (SlateOS)");
         println!("  -e EXPR      Evaluate expression");
         println!("  --version    Show version");
         return 0;

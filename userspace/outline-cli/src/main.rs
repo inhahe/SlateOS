@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! outline-cli — OurOS Outline team wiki
+//! outline-cli — SlateOS Outline team wiki
 //!
 //! Single personality: `outline`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_outline(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: outline [COMMAND] [OPTIONS]");
-        println!("Outline v0.75 (OurOS) — Team knowledge base and wiki");
+        println!("Outline v0.75 (SlateOS) — Team knowledge base and wiki");
         println!();
         println!("Commands:");
         println!("  serve              Start Outline server");
@@ -32,8 +32,8 @@ fn run_outline(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Outline v0.75.2 (OurOS)"); return 0; }
-    println!("Outline v0.75.2 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Outline v0.75.2 (SlateOS)"); return 0; }
+    println!("Outline v0.75.2 (SlateOS)");
     println!("  Collections: 18");
     println!("  Documents: 1,234");
     println!("  Users: 56");

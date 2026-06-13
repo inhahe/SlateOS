@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! solidworks-cli — OurOS Dassault Systèmes SOLIDWORKS
+//! solidworks-cli — SlateOS Dassault Systèmes SOLIDWORKS
 //!
 //! Single personality: `solidworks`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_sw(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: solidworks [OPTIONS] [FILE]");
-        println!("Dassault SOLIDWORKS 2024 (OurOS) — 3D mechanical CAD");
+        println!("Dassault SOLIDWORKS 2024 (SlateOS) — 3D mechanical CAD");
         println!();
         println!("Options:");
         println!("  /m PATH                Open part/assembly/drawing");
@@ -24,8 +24,8 @@ fn run_sw(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Dassault SOLIDWORKS 2024 SP4 (OurOS)"); return 0; }
-    println!("Dassault SOLIDWORKS 2024 SP4 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Dassault SOLIDWORKS 2024 SP4 (SlateOS)"); return 0; }
+    println!("Dassault SOLIDWORKS 2024 SP4 (SlateOS)");
     println!("  Editions: Standard, Professional, Premium, Education, Student");
     println!("  Modules: Simulation, Flow, CAM, Composer, Electrical, PDM");
     println!("  Format: .sldprt/.sldasm/.slddrw native + STEP/IGES/STL/Parasolid");

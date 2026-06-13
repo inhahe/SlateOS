@@ -1,4 +1,4 @@
-//! OurOS Installer — CLI frontend.
+//! SlateOS Installer — CLI frontend.
 //!
 //! Usage:
 //!   installer --config <path.yaml>       Run unattended installation
@@ -93,7 +93,7 @@ fn parse_args() -> Mode {
 
 /// Print usage information.
 fn print_usage() {
-    println!("OurOS Installer v0.1.0");
+    println!("SlateOS Installer v0.1.0");
     println!();
     println!("Usage:");
     println!("  installer --config <path.yaml>       Run unattended installation");
@@ -186,7 +186,7 @@ fn cmd_install(path: &str) {
 
     let plan = InstallPlan::from_config(&config);
 
-    println!("OurOS Installer");
+    println!("SlateOS Installer");
     println!("===============");
     println!();
     println!("Target disk: {}", config.disk.target);

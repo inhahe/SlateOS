@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! krdc-cli — OurOS KRDC KDE remote desktop client
+//! krdc-cli — SlateOS KRDC KDE remote desktop client
 //!
 //! Single personality: `krdc`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_krdc(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: krdc [OPTIONS] [URI]");
-        println!("krdc v23.08 (OurOS) — KDE Remote Desktop Connection");
+        println!("krdc v23.08 (SlateOS) — KDE Remote Desktop Connection");
         println!();
         println!("Options:");
         println!("  --fullscreen      Start fullscreen");
@@ -23,7 +23,7 @@ fn run_krdc(args: &[String], _prog: &str) -> i32 {
         println!("URI format: vnc://host:port or rdp://host");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("krdc v23.08 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("krdc v23.08 (SlateOS)"); return 0; }
     println!("krdc: KDE remote desktop client started");
     println!("  Bookmarks: 0 saved connections");
     println!("  Protocols: VNC (TigerVNC), RDP (FreeRDP)");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! power-profiles-daemon-cli — OurOS power-profiles-daemon
+//! power-profiles-daemon-cli — SlateOS power-profiles-daemon
 //!
 //! Multi-personality: `power-profiles-daemon`, `powerprofilesctl`
 
@@ -13,14 +13,14 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_daemon(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: power-profiles-daemon [OPTIONS]");
-        println!("power-profiles-daemon v0.21 (OurOS) — Power profile management");
+        println!("power-profiles-daemon v0.21 (SlateOS) — Power profile management");
         println!();
         println!("Options:");
         println!("  --replace         Replace running daemon");
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("power-profiles-daemon v0.21 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("power-profiles-daemon v0.21 (SlateOS)"); return 0; }
     println!("power-profiles-daemon: started");
     println!("  D-Bus: net.hadess.PowerProfiles");
     0
@@ -29,7 +29,7 @@ fn run_daemon(args: &[String], _prog: &str) -> i32 {
 fn run_ctl(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: powerprofilesctl COMMAND");
-        println!("powerprofilesctl v0.21 (OurOS) — Control power profiles");
+        println!("powerprofilesctl v0.21 (SlateOS) — Control power profiles");
         println!();
         println!("Commands:");
         println!("  list              List available profiles");

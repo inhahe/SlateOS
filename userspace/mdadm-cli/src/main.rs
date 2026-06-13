@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! mdadm-cli — OurOS mdadm RAID management CLI
+//! mdadm-cli — SlateOS mdadm RAID management CLI
 //!
 //! Single personality: `mdadm`
 
@@ -11,7 +11,7 @@ fn run_mdadm(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: mdadm [MODE] DEVICE [OPTIONS]");
         println!();
-        println!("mdadm — manage MD (Software RAID) devices (OurOS).");
+        println!("mdadm — manage MD (Software RAID) devices (SlateOS).");
         println!();
         println!("Modes:");
         println!("  --create, -C           Create array");
@@ -31,7 +31,7 @@ fn run_mdadm(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("mdadm - v4.3 (OurOS)");
+        println!("mdadm - v4.3 (SlateOS)");
         return 0;
     }
 
@@ -74,13 +74,13 @@ fn run_mdadm(args: Vec<String>) -> i32 {
         println!("  Magic : a92b4efc");
         println!("  Version : 1.2");
         println!("  Array UUID : abcdef12:34567890:abcdef12:34567890");
-        println!("  Name : ouros:0");
+        println!("  Name : slateos:0");
         println!("  Raid Level : raid1");
         println!("  Raid Devices : 2");
     } else if stop {
         println!("mdadm: stopped {}.", device);
     } else if scan {
-        println!("ARRAY /dev/md0 metadata=1.2 name=ouros:0 UUID=abcdef12:34567890:abcdef12:34567890");
+        println!("ARRAY /dev/md0 metadata=1.2 name=slateos:0 UUID=abcdef12:34567890:abcdef12:34567890");
     } else {
         eprintln!("mdadm: no mode specified. See --help.");
         return 1;

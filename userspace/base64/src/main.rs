@@ -1,4 +1,4 @@
-//! OurOS base64/base32/uuencode/uudecode — encoding/decoding tools
+//! SlateOS base64/base32/uuencode/uudecode — encoding/decoding tools
 //!
 //! Multi-personality binary detected via argv[0]:
 //! - `base64`: RFC 4648 Base64 encode/decode
@@ -396,7 +396,7 @@ fn parse_args(mode: Mode) -> Args {
                 process::exit(0);
             }
             "-V" | "--version" => {
-                println!("{} (OurOS) 0.1.0", match mode {
+                println!("{} (SlateOS) 0.1.0", match mode {
                     Mode::Base64 => "base64",
                     Mode::Base32 => "base32",
                     Mode::Uuencode => "uuencode",

@@ -1,4 +1,4 @@
-//! OurOS group switching utility.
+//! SlateOS group switching utility.
 //!
 //! Multi-personality binary providing:
 //! - **newgrp** — log in to a new group
@@ -235,7 +235,7 @@ fn newgrp_main(args: &[String]) -> i32 {
                 return 0;
             }
             "--version" => {
-                println!("newgrp (OurOS coreutils) {VERSION}");
+                println!("newgrp (SlateOS coreutils) {VERSION}");
                 return 0;
             }
             s if !s.starts_with('-') => {
@@ -323,7 +323,7 @@ fn sg_main(args: &[String]) -> i32 {
             return 0;
         }
         "--version" => {
-            println!("sg (OurOS coreutils) {VERSION}");
+            println!("sg (SlateOS coreutils) {VERSION}");
             return 0;
         }
         _ => {}

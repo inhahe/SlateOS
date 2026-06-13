@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! python3 — OurOS Python interpreter
+//! python3 — SlateOS Python interpreter
 //!
 //! Multi-personality binary detected via argv[0]:
 //!
@@ -33,7 +33,7 @@ fn run_python(args: Vec<String>) -> i32 {
     }
 
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("Python 3.13.0 (OurOS)");
+        println!("Python 3.13.0 (SlateOS)");
         return 0;
     }
 
@@ -64,13 +64,13 @@ fn run_python(args: Vec<String>) -> i32 {
     }
 
     // Interactive mode
-    println!("Python 3.13.0 (OurOS) [GCC 13.2.0 compatible]");
+    println!("Python 3.13.0 (SlateOS) [GCC 13.2.0 compatible]");
     println!("Type \"help\", \"copyright\", \"credits\" or \"license\" for more information.");
     println!(">>> import sys");
     println!(">>> sys.platform");
-    println!("'ouros'");
+    println!("'slateos'");
     println!(">>> sys.version");
-    println!("'3.13.0 (OurOS)'");
+    println!("'3.13.0 (SlateOS)'");
     println!(">>> exit()");
     0
 }
@@ -163,8 +163,8 @@ fn run_pydoc(args: Vec<String>) -> i32 {
             println!("    sys - System-specific parameters and functions.");
             println!();
             println!("DATA");
-            println!("    platform = 'ouros'");
-            println!("    version = '3.13.0 (OurOS)'");
+            println!("    platform = 'slateos'");
+            println!("    version = '3.13.0 (SlateOS)'");
         }
         _ => println!("Help on '{}': (simulated)", topic),
     }

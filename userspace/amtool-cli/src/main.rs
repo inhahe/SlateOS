@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! amtool-cli — OurOS Alertmanager CLI tool
+//! amtool-cli — SlateOS Alertmanager CLI tool
 //!
 //! Single personality: `amtool`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_amtool(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: amtool COMMAND [OPTIONS]");
-        println!("amtool v0.27.0 (OurOS) — Alertmanager CLI");
+        println!("amtool v0.27.0 (SlateOS) — Alertmanager CLI");
         println!();
         println!("Commands:");
         println!("  alert           Manage alerts");
@@ -29,7 +29,7 @@ fn run_amtool(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("amtool v0.27.0 (OurOS)");
+        println!("amtool v0.27.0 (SlateOS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("alert");

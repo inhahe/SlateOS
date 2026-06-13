@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! qemu-cli — OurOS QEMU emulator CLI
+//! qemu-cli — SlateOS QEMU emulator CLI
 //!
 //! Multi-personality: `qemu-system-x86_64`, `qemu-img`, `qemu-nbd`
 
@@ -19,7 +19,7 @@ fn run_qemu_system(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: qemu-system-x86_64 [OPTIONS]");
         println!();
-        println!("QEMU x86_64 system emulator (OurOS).");
+        println!("QEMU x86_64 system emulator (SlateOS).");
         println!();
         println!("Options:");
         println!("  -m SIZE            Memory size (e.g., 2G)");
@@ -43,7 +43,7 @@ fn run_qemu_system(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version" || a == "-version") {
-        println!("QEMU emulator version 8.2.2 (OurOS)");
+        println!("QEMU emulator version 8.2.2 (SlateOS)");
         return 0;
     }
 
@@ -69,7 +69,7 @@ fn run_qemu_img(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: qemu-img COMMAND [OPTIONS]");
         println!();
-        println!("qemu-img — QEMU disk image utility (OurOS).");
+        println!("qemu-img — QEMU disk image utility (SlateOS).");
         println!();
         println!("Commands:");
         println!("  create       Create new disk image");
@@ -127,7 +127,7 @@ fn run_qemu_nbd(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: qemu-nbd [OPTIONS] FILE");
         println!();
-        println!("qemu-nbd — QEMU NBD server (OurOS).");
+        println!("qemu-nbd — QEMU NBD server (SlateOS).");
         println!();
         println!("Options:");
         println!("  -c DEV       Connect to NBD device");

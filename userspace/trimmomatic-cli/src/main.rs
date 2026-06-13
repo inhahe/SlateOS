@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! trimmomatic-cli — OurOS Trimmomatic read trimmer
+//! trimmomatic-cli — SlateOS Trimmomatic read trimmer
 //!
 //! Single personality: `trimmomatic`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_trimmomatic(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: trimmomatic <SE|PE> [OPTIONS] INPUT OUTPUT [STEPS]");
-        println!("Trimmomatic v0.39 (OurOS) — Read quality trimming");
+        println!("Trimmomatic v0.39 (SlateOS) — Read quality trimming");
         println!();
         println!("Modes:");
         println!("  SE            Single-end mode");
@@ -35,8 +35,8 @@ fn run_trimmomatic(args: &[String], _prog: &str) -> i32 {
         println!("  --version     Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Trimmomatic v0.39 (OurOS)"); return 0; }
-    println!("Trimmomatic v0.39 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Trimmomatic v0.39 (SlateOS)"); return 0; }
+    println!("Trimmomatic v0.39 (SlateOS)");
     println!("  Mode: PE (paired-end)");
     println!("  Input reads: 10,000,000 pairs");
     println!("  Both surviving: 9,234,567 (92.35%)");

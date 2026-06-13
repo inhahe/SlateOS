@@ -1,4 +1,4 @@
-//! OurOS CUPS Printing System
+//! SlateOS CUPS Printing System
 //!
 //! Multi-personality binary implementing the CUPS printing subsystem.
 //! Personality is detected via `argv[0]` basename (stripping path separators
@@ -33,7 +33,7 @@ use std::process;
 // Constants
 // ============================================================================
 
-const VERSION: &str = "2.4.0-ouros";
+const VERSION: &str = "2.4.0-slateos";
 const DEFAULT_PRINTER: &str = "default";
 const MAX_JOB_ID: u32 = 999_999;
 const DEFAULT_PORT: u16 = 631;
@@ -3414,7 +3414,7 @@ fn build_test_ppd(filename: &str) -> PpdFile {
         ppd
     } else {
         // Default: valid PPD
-        build_sample_ppd(filename, "OurOS", "Generic Printer")
+        build_sample_ppd(filename, "SlateOS", "Generic Printer")
     }
 }
 

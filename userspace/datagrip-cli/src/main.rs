@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! datagrip-cli — OurOS DataGrip database IDE
+//! datagrip-cli — SlateOS DataGrip database IDE
 //!
 //! Single personality: `datagrip`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_datagrip(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: datagrip [OPTIONS] [PROJECT]");
-        println!("DataGrip v2024.1 (OurOS) — Multi-engine database IDE");
+        println!("DataGrip v2024.1 (SlateOS) — Multi-engine database IDE");
         println!();
         println!("Options:");
         println!("  --project DIR      Open project directory");
@@ -25,8 +25,8 @@ fn run_datagrip(args: &[String], _prog: &str) -> i32 {
         println!("  --version          Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("DataGrip v2024.1.5 (OurOS)"); return 0; }
-    println!("DataGrip v2024.1.5 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("DataGrip v2024.1.5 (SlateOS)"); return 0; }
+    println!("DataGrip v2024.1.5 (SlateOS)");
     println!("  Datasources: 7 configured");
     println!("  Drivers: PostgreSQL, MySQL, Oracle, MSSQL, MongoDB, Cassandra, Redis");
     println!("  Consoles: 4 open");

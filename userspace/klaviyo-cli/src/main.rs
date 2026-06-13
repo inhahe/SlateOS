@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! klaviyo-cli — OurOS Klaviyo (e-commerce email/SMS marketing, NYSE:KVYO)
+//! klaviyo-cli — SlateOS Klaviyo (e-commerce email/SMS marketing, NYSE:KVYO)
 //!
 //! Single personality: `klaviyo`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_klaviyo(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: klaviyo [OPTIONS]");
-        println!("Klaviyo (OurOS) — owned marketing for e-commerce (email + SMS + reviews + CDP)");
+        println!("Klaviyo (SlateOS) — owned marketing for e-commerce (email + SMS + reviews + CDP)");
         println!();
         println!("Options:");
         println!("  --free                 Free up to 250 profiles + 500 emails/mo");
@@ -24,8 +24,8 @@ fn run_klaviyo(args: &[String], _prog: &str) -> i32 {
         println!("  --version              Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Klaviyo 2024 (OurOS)"); return 0; }
-    println!("Klaviyo 2024 (OurOS)");
+    if args.iter().any(|a| a == "--version") { println!("Klaviyo 2024 (SlateOS)"); return 0; }
+    println!("Klaviyo 2024 (SlateOS)");
     println!("  Vendor: Klaviyo, Inc. (Boston, MA — NYSE:KVYO)");
     println!("  Founders: Andrew Bialecki (CEO), Ed Hallen (Chief Strategy Officer), 2012");
     println!("          Bialecki: ex-Applied Predictive Technologies (Mastercard subsidiary)");

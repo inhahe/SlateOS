@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! terraform-cli — OurOS Terraform infrastructure-as-code CLI
+//! terraform-cli — SlateOS Terraform infrastructure-as-code CLI
 //!
 //! Single personality: `terraform`
 
@@ -44,8 +44,8 @@ fn run_terraform(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
         "version" | "-version" => {
-            println!("Terraform v1.7.4 (OurOS)");
-            println!("on ouros_amd64");
+            println!("Terraform v1.7.4 (SlateOS)");
+            println!("on slateos_amd64");
             0
         }
         "init" => {

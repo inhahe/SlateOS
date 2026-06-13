@@ -1,4 +1,4 @@
-//! nano -- simple terminal text editor for OurOS.
+//! nano -- simple terminal text editor for SlateOS.
 //!
 //! A minimal clone of GNU nano providing full-screen editing, search/replace,
 //! cut/paste, undo/redo, syntax highlighting, and line numbers. Communicates
@@ -127,7 +127,7 @@ fn reset_attr() {
 }
 
 /// Enable raw mode by setting the terminal via stty-equivalent ioctls.
-/// On OurOS we use the libc termios interface.
+/// On SlateOS we use the libc termios interface.
 fn enable_raw_mode() -> Option<RawModeGuard> {
     // We use the POSIX termios interface through std's libc bindings.
     // On our custom target this goes through the POSIX compatibility layer.

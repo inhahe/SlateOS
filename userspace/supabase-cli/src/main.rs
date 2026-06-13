@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! supabase-cli — OurOS Supabase CLI
+//! supabase-cli — SlateOS Supabase CLI
 //!
 //! Multi-personality: `supabase`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_supabase(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: supabase COMMAND [OPTIONS]");
-        println!("Supabase CLI 1.187.0 (OurOS)");
+        println!("Supabase CLI 1.187.0 (SlateOS)");
         println!();
         println!("Commands:");
         println!("  init         Initialize a local project");

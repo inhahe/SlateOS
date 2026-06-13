@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! skanlite-cli — OurOS Skanlite KDE scanner application
+//! skanlite-cli — SlateOS Skanlite KDE scanner application
 //!
 //! Single personality: `skanlite`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_skanlite(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: skanlite [OPTIONS]");
-        println!("skanlite v23.08 (OurOS) — KDE scanner application");
+        println!("skanlite v23.08 (SlateOS) — KDE scanner application");
         println!();
         println!("Options:");
         println!("  -d DEVICE         Use specific scanner");
@@ -21,7 +21,7 @@ fn run_skanlite(args: &[String], _prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("skanlite v23.08 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("skanlite v23.08 (SlateOS)"); return 0; }
     println!("skanlite: KDE scanner application started");
     println!("  Available scanners: 2");
     println!("  Default: Epson Perfection V39");

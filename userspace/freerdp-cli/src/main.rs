@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! freerdp-cli — OurOS FreeRDP RDP client
+//! freerdp-cli — SlateOS FreeRDP RDP client
 //!
 //! Multi-personality: `xfreerdp`, `wlfreerdp`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_freerdp(args: &[String], prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: {} [OPTIONS] /v:HOST[:PORT]", prog);
-        println!("{} v3.4 (OurOS) — FreeRDP client", prog);
+        println!("{} v3.4 (SlateOS) — FreeRDP client", prog);
         println!();
         println!("Options:");
         println!("  /v:HOST[:PORT]    Server address");
@@ -28,7 +28,7 @@ fn run_freerdp(args: &[String], prog: &str) -> i32 {
         println!("  --version         Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("{} v3.4 (OurOS, FreeRDP)", prog); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("{} v3.4 (SlateOS, FreeRDP)", prog); return 0; }
     println!("{}: connecting to RDP server...", prog);
     0
 }

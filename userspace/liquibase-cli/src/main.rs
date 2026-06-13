@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! liquibase-cli — OurOS Liquibase CLI
+//! liquibase-cli — SlateOS Liquibase CLI
 //!
 //! Single personality: `liquibase`
 
@@ -11,7 +11,7 @@ fn run_liquibase(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: liquibase <COMMAND> [OPTIONS]");
         println!();
-        println!("Liquibase database change management (OurOS).");
+        println!("Liquibase database change management (SlateOS).");
         println!();
         println!("Commands:");
         println!("  update           Apply pending changesets");
@@ -26,7 +26,7 @@ fn run_liquibase(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("Liquibase 4.25.1 (OurOS)");
+        println!("Liquibase 4.25.1 (SlateOS)");
         return 0;
     }
 

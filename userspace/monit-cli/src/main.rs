@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! monit-cli — OurOS Monit process supervisor & monitor
+//! monit-cli — SlateOS Monit process supervisor & monitor
 //!
 //! Single personality: `monit`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_monit(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: monit [OPTIONS] <command>");
-        println!("monit v5.33 (OurOS) — Process supervision and monitoring");
+        println!("monit v5.33 (SlateOS) — Process supervision and monitoring");
         println!();
         println!("Commands:");
         println!("  start <name>     Start a monitored service");
@@ -31,7 +31,7 @@ fn run_monit(args: &[String], _prog: &str) -> i32 {
         println!("  --version        Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("monit v5.33 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("monit v5.33 (SlateOS)"); return 0; }
     if args.iter().any(|a| a == "-t") {
         println!("monit: control file syntax OK");
         return 0;
@@ -41,7 +41,7 @@ fn run_monit(args: &[String], _prog: &str) -> i32 {
             println!("Process 'sshd'         Running - PID 892");
             println!("Process 'nginx'        Running - PID 1205");
             println!("Process 'postgresql'   Running - PID 1340");
-            println!("System 'ouros-host'    Running");
+            println!("System 'slateos-host'    Running");
             println!("  CPU: 5.2%  Memory: 42.1%  Swap: 0.0%");
         }
         Some("validate") => {

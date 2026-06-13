@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! bincode-cli — OurOS bincode serialization tool
+//! bincode-cli — SlateOS bincode serialization tool
 //!
 //! Single personality: `bincode`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_bincode(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: bincode COMMAND [OPTIONS] [FILE]");
-        println!("bincode v2.0 (OurOS) — Bincode serialization inspector");
+        println!("bincode v2.0 (SlateOS) — Bincode serialization inspector");
         println!();
         println!("Commands:");
         println!("  inspect           Inspect bincode file structure");
@@ -38,7 +38,7 @@ fn run_bincode(args: &[String], _prog: &str) -> i32 {
             println!("  0000: 01 00 00 00 05 00 00 00  68 65 6C 6C 6F 2A 00 00");
             println!("  0010: 00 00 00 00 00 01 03 00  00 00 01 00 00 00 02 00");
         }
-        "version" | "--version" => println!("bincode v2.0 (OurOS)"),
+        "version" | "--version" => println!("bincode v2.0 (SlateOS)"),
         _ => {
             let file = args.first().map(|s| s.as_str()).unwrap_or("data.bin");
             println!("File: {}", file);

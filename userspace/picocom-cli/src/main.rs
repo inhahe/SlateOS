@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! picocom-cli — OurOS minimal serial terminal
+//! picocom-cli — SlateOS minimal serial terminal
 //!
 //! Multi-personality: `picocom`, `cu`
 
@@ -19,7 +19,7 @@ fn run_picocom(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: picocom [OPTIONS] DEVICE");
         println!();
-        println!("picocom — minimal serial terminal (OurOS).");
+        println!("picocom — minimal serial terminal (SlateOS).");
         println!();
         println!("Options:");
         println!("  -b, --baud BAUD       Baud rate (default 9600)");
@@ -41,7 +41,7 @@ fn run_picocom(args: &[String]) -> i32 {
         .and_then(|w| w[1].parse::<u32>().ok())
         .unwrap_or(9600);
 
-    println!("picocom v3.1 (OurOS)");
+    println!("picocom v3.1 (SlateOS)");
     println!();
     println!("port is        : {}", device);
     println!("flowcontrol    : none");
@@ -61,7 +61,7 @@ fn run_cu(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: cu [OPTIONS] [SYSTEM|PHONE|HOST]");
         println!();
-        println!("cu — call another Unix system (serial/network) (OurOS).");
+        println!("cu — call another Unix system (serial/network) (SlateOS).");
         println!();
         println!("Options:");
         println!("  -l LINE     Device line");

@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! oguri-cli — OurOS oguri animated wallpaper daemon
+//! oguri-cli — SlateOS oguri animated wallpaper daemon
 //!
 //! Multi-personality: `oguri`, `ogurictl`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_oguri(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: oguri [OPTIONS]");
-        println!("oguri v0.1 (OurOS) — Animated wallpaper daemon for Wayland");
+        println!("oguri v0.1 (SlateOS) — Animated wallpaper daemon for Wayland");
         println!();
         println!("Options:");
         println!("  -c CONFIG         Config file path");
@@ -22,7 +22,7 @@ fn run_oguri(args: &[String], _prog: &str) -> i32 {
         println!("Supports animated GIFs and static images as wallpaper.");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("oguri v0.1 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("oguri v0.1 (SlateOS)"); return 0; }
     println!("oguri: animated wallpaper daemon started");
     println!("  Config: ~/.config/oguri/config");
     0
@@ -31,7 +31,7 @@ fn run_oguri(args: &[String], _prog: &str) -> i32 {
 fn run_ogurictl(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: ogurictl COMMAND [ARGS]");
-        println!("ogurictl v0.1 (OurOS) — Control oguri daemon");
+        println!("ogurictl v0.1 (SlateOS) — Control oguri daemon");
         println!();
         println!("Commands:");
         println!("  output OUTPUT image PATH  Set wallpaper");

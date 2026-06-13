@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! cargo-make-cli — OurOS cargo-make CLI
+//! cargo-make-cli — SlateOS cargo-make CLI
 //!
 //! Single personality: `makers` (also `cargo-make`)
 
@@ -11,7 +11,7 @@ fn run_makers(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: makers [OPTIONS] [TASK]");
         println!();
-        println!("cargo-make — Rust task runner and build tool (OurOS).");
+        println!("cargo-make — Rust task runner and build tool (SlateOS).");
         println!();
         println!("Options:");
         println!("  --makefile FILE      Makefile.toml path");
@@ -23,7 +23,7 @@ fn run_makers(args: Vec<String>) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("cargo-make 0.37.8 (OurOS)");
+        println!("cargo-make 0.37.8 (SlateOS)");
         return 0;
     }
 

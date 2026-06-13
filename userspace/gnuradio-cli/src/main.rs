@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! gnuradio-cli — OurOS GNU Radio SDR framework
+//! gnuradio-cli — SlateOS GNU Radio SDR framework
 //!
 //! Multi-personality: `gnuradio-companion`, `grcc`, `gr_modtool`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_gnuradio(args: &[String], prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: {} [OPTIONS] [FILE]", prog);
-        println!("GNU Radio v3.10 (OurOS) — Software-defined radio framework");
+        println!("GNU Radio v3.10 (SlateOS) — Software-defined radio framework");
         println!();
         match prog {
             "grcc" => {
@@ -38,7 +38,7 @@ fn run_gnuradio(args: &[String], prog: &str) -> i32 {
         println!("  --version       Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("GNU Radio v3.10.9 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("GNU Radio v3.10.9 (SlateOS)"); return 0; }
     match prog {
         "grcc" => {
             let files: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
@@ -53,7 +53,7 @@ fn run_gnuradio(args: &[String], prog: &str) -> i32 {
             println!("  Use 'gr_modtool newmod NAME' to create a module");
         }
         _ => {
-            println!("GNU Radio Companion v3.10.9 (OurOS)");
+            println!("GNU Radio Companion v3.10.9 (SlateOS)");
             println!("  SDR framework ready");
             println!("  Blocks library: 500+ blocks");
         }

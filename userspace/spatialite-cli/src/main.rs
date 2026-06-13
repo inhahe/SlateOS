@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! spatialite-cli — OurOS SpatiaLite spatial SQLite extension
+//! spatialite-cli — SlateOS SpatiaLite spatial SQLite extension
 //!
 //! Multi-personality: `spatialite`, `spatialite_tool`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_spatialite(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h" || a == "-help") {
         println!("Usage: spatialite [OPTIONS] [DATABASE] [SQL]");
-        println!("SpatiaLite 5.1.0 (OurOS)");
+        println!("SpatiaLite 5.1.0 (SlateOS)");
         println!();
         println!("  -init FILE     Read/process SQL from FILE");
         println!("  -header        Turn headers on");
@@ -63,7 +63,7 @@ fn run_spatialite_tool(args: &[String]) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "--version") {
-        println!("spatialite_tool 5.1.0 (OurOS)");
+        println!("spatialite_tool 5.1.0 (SlateOS)");
         return 0;
     }
     let importing = args.iter().any(|a| a == "-i" || a == "--import");

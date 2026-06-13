@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! metasploit-cli — OurOS Metasploit Framework
+//! metasploit-cli — SlateOS Metasploit Framework
 //!
 //! Multi-personality: `msfconsole`, `msfvenom`, `msfrpcd`
 
@@ -15,7 +15,7 @@ fn run_metasploit(args: &[String], prog: &str) -> i32 {
         println!("Usage: {} [OPTIONS]", prog);
         match prog {
             "msfvenom" => {
-                println!("msfvenom (OurOS) — Payload generator and encoder");
+                println!("msfvenom (SlateOS) — Payload generator and encoder");
                 println!("  -p PAYLOAD     Payload to use");
                 println!("  -f FORMAT      Output format (exe, elf, raw, python, c)");
                 println!("  -e ENCODER     Encoder to use");
@@ -27,14 +27,14 @@ fn run_metasploit(args: &[String], prog: &str) -> i32 {
                 println!("  -l encoders    List encoders");
             }
             "msfrpcd" => {
-                println!("msfrpcd (OurOS) — RPC daemon");
+                println!("msfrpcd (SlateOS) — RPC daemon");
                 println!("  -P PASS    Password");
                 println!("  -S         Use SSL");
                 println!("  -a ADDR    Bind address");
                 println!("  -p PORT    Listen port");
             }
             _ => {
-                println!("msfconsole v6.3 (OurOS) — Metasploit Framework console");
+                println!("msfconsole v6.3 (SlateOS) — Metasploit Framework console");
                 println!("  -r FILE    Resource script");
                 println!("  -x CMD     Execute command");
                 println!("  -q         Quiet mode (no banner)");
@@ -44,10 +44,10 @@ fn run_metasploit(args: &[String], prog: &str) -> i32 {
         println!("  --version  Show version");
         return 0;
     }
-    if args.iter().any(|a| a == "--version") { println!("Metasploit Framework v6.3.55 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--version") { println!("Metasploit Framework v6.3.55 (SlateOS)"); return 0; }
     match prog {
         "msfvenom" => {
-            println!("msfvenom (OurOS)");
+            println!("msfvenom (SlateOS)");
             println!("  Payload: linux/x64/meterpreter/reverse_tcp");
             println!("  LHOST: 192.168.1.100, LPORT: 4444");
             println!("  Format: elf");
@@ -56,7 +56,7 @@ fn run_metasploit(args: &[String], prog: &str) -> i32 {
             println!("  Output: payload.elf");
         }
         _ => {
-            println!("Metasploit Framework v6.3.55 (OurOS)");
+            println!("Metasploit Framework v6.3.55 (SlateOS)");
             println!("  Exploits: 2,345");
             println!("  Auxiliary: 1,234");
             println!("  Post: 567");

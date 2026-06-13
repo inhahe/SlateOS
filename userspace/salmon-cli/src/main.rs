@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-//! salmon-cli — OurOS Salmon transcript quantification
+//! salmon-cli — SlateOS Salmon transcript quantification
 //!
 //! Single personality: `salmon`
 
@@ -13,7 +13,7 @@ fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)
 fn run_salmon(args: &[String], _prog: &str) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") || args.is_empty() {
         println!("Usage: salmon COMMAND [OPTIONS]");
-        println!("Salmon v1.10 (OurOS) — Fast transcript quantification");
+        println!("Salmon v1.10 (SlateOS) — Fast transcript quantification");
         println!();
         println!("Commands:");
         println!("  index             Build index from transcriptome");
@@ -24,7 +24,7 @@ fn run_salmon(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     if args.iter().any(|a| a == "version" || a == "--version") {
-        println!("salmon v1.10 (OurOS)");
+        println!("salmon v1.10 (SlateOS)");
         return 0;
     }
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("quant");

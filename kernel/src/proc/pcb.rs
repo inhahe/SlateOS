@@ -3624,6 +3624,61 @@ pub fn remove_vma(pid: ProcessId, start: u64) -> bool {
     }
 }
 
+/// Remove (and split where necessary) every VMA intersecting the range
+/// `[start, end)` from a process's VMA list.
+///
+/// This is the address-space surgery Linux performs for `munmap` and for
+/// `MAP_FIXED`, which replaces whatever currently occupies the target
+/// range.  Three overlap shapes are handled, mirroring `__split_vma` +
+/// `unmap_region`:
+///
+/// - **Fully covered** (`start <= vma.start && vma.end <= end`): dropped.
+/// - **Edge overlap**: the VMA is truncated to the part outside the
+///   range — left remainder `[vma.start, start)` and/or right remainder
+///   `[end, vma.end)`.
+/// - **Strict superset** (`vma.start < start && end < vma.end`): split
+///   into both remainders, dropping the middle.
+///
+/// Only the VMA bookkeeping (which drives `/proc/<pid>/maps` and the
+/// demand-fault resolver) is updated; unmapping and freeing the backing
+/// frames is the caller's responsibility.  Used by the `MAP_FIXED`
+/// file-backed `mmap` path, where `ld.so` overlays each shared-object
+/// segment onto a previously-reserved span.
+///
+/// # Errors
+///
+/// - [`KernelError::NoSuchProcess`] if the PID doesn't exist.
+/// - [`KernelError::InvalidArgument`] if `end <= start`.
+pub fn remove_vma_range(pid: ProcessId, start: u64, end: u64) -> KernelResult<()> {
+    if end <= start {
+        return Err(KernelError::InvalidArgument);
+    }
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+
+    let mut kept: Vec<Vma> = Vec::with_capacity(proc.vmas.len());
+    for vma in proc.vmas.drain(..) {
+        // No overlap with [start, end): keep unchanged.
+        if vma.end <= start || vma.start >= end {
+            kept.push(vma);
+            continue;
+        }
+        // Left remainder [vma.start, start) survives an edge/superset
+        // overlap on the low side.
+        if vma.start < start {
+            kept.push(Vma { end: start, ..vma });
+        }
+        // Right remainder [end, vma.end) survives on the high side.
+        if vma.end > end {
+            kept.push(Vma { start: end, ..vma });
+        }
+        // Anything else (the part inside [start, end)) is dropped.
+    }
+    kept.sort_unstable_by_key(|v| v.start);
+    proc.vmas = kept;
+    Ok(())
+}
+
 /// Resolve a user-space page fault against a process's VMA list.
 ///
 /// Called from the page fault handler (IDT vector 14) when a user-mode

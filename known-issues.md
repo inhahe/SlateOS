@@ -491,6 +491,46 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
+### TD22. File-backed `mmap` is an eager private copy — no demand paging, no shared write-back — DEBT 2026-06-13
+
+**Where:** `kernel/src/syscall/linux.rs` — `linux_file_mmap` (the file-backed
+arm of `sys_mmap`), plus `unmap_user_range` / `linux_file_mmap_rollback`
+helpers and `pcb::remove_vma_range` (VMA split for `MAP_FIXED`).
+
+**What it is:** the file-backed `mmap(2)` path (the #1 blocker for running
+prebuilt Linux binaries — `ld.so`'s `_dl_map_segments`) is implemented with an
+**eager private-copy** model, not Linux's demand-paged page cache:
+- Every 16 KiB frame of the mapping is allocated, the file bytes are copied in
+  via `read_at` at map time, and the frame is mapped. There is no demand
+  paging — a large sparse file map populates the whole span up front.
+- The mapping is a **private snapshot**: it registers a `VmaKind::Fixed` VMA
+  ("already fully backed"), so writes to a `MAP_PRIVATE` map never participate
+  in CoW with the file, and the page cache is not shared between two processes
+  mapping the same file.
+- **Writable `MAP_SHARED` is rejected with `ENOSYS`** — we never write modified
+  pages back to the file, so honouring the shared-write contract is impossible
+  under this model. Read-only `MAP_SHARED` is served as a private copy (no
+  write is observable, so the distinction is moot).
+- `MAP_FIXED` correctly replaces an existing mapping (unmaps/frees the old
+  frames and splits the covering VMA via `pcb::remove_vma_range`), which is
+  what `ld.so` relies on when overlaying per-segment maps onto its reservation.
+
+**Impact:** medium. Sufficient for `ld.so` shared-object loading and ordinary
+`MAP_PRIVATE` data maps (the Path X target). Two real gaps remain: (1) memory
+cost / latency for large maps (no lazy population); (2) writable `MAP_SHARED`
+file maps fail — any Linux program using shared mmap'd files for IPC or
+in-place file editing (e.g. some databases, `mmap`-based logging) will get
+`ENOSYS`.
+
+**Proper fix:** introduce a file-backed VMA kind resolved by the page-fault
+handler (demand paging): on fault, look up the backing fd + offset, fetch the
+page from a shared page cache, map CoW for `MAP_PRIVATE` / shared for
+`MAP_SHARED`. For writable `MAP_SHARED`, add msync/writeback (dirty-page
+tracking + flush on unmap/msync). This depends on a unified page cache shared
+between the VFS read path and mmap, which does not exist yet.
+
+---
+
 ### TD21. Minor Linux-ABI fidelity gaps — procfs fd visibility for native processes; sendfile pos write-back — APPROXIMATION 2026-06-13
 
 **Where:** `kernel/src/fs/procfs` (`/proc/<pid>/fd[info]`, `linux_fd_list`) and

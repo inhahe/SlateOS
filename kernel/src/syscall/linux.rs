@@ -4762,9 +4762,28 @@ fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
         }
     }
 
-    // File-backed maps not yet supported.
-    if (flags & MAP_ANONYMOUS) == 0 || fd >= 0 {
-        return linux_err(errno::ENOSYS);
+    // File-backed mmap: anything without MAP_ANONYMOUS maps the fd's
+    // contents.  (A non-negative fd *with* MAP_ANONYMOUS is still anonymous
+    // on Linux — the fd is ignored — so we gate purely on the MAP_ANONYMOUS
+    // bit.)  The DRM dumb-buffer special case above already handled the one
+    // device fd we map; everything else routes through `linux_file_mmap`,
+    // which backs `ld.so`'s shared-object loading and MAP_PRIVATE data maps.
+    if (flags & MAP_ANONYMOUS) == 0 {
+        if fd < 0 {
+            // File-backed map with no fd is EBADF on Linux.
+            return linux_err(errno::EBADF);
+        }
+        let pid = match caller_pid() {
+            Some(p) => p,
+            // No owning process (kernel context) has no fd table or address
+            // space to map into.
+            None => return linux_err(errno::ENOMEM),
+        };
+        let entry = match pcb::linux_fd_lookup(pid, fd) {
+            Some(e) => e,
+            None => return linux_err(errno::EBADF),
+        };
+        return linux_file_mmap(&entry, pid, addr_hint, length, prot, flags, offset);
     }
     if (flags & MAP_PRIVATE) == 0 {
         // We don't support shared anonymous in Linux ABI yet.
@@ -8439,6 +8458,301 @@ fn drm_mmap_dumb(
             pcb::linux_as_release(pid, length_aligned);
             return linux_err(errno::ENOMEM);
         }
+    }
+
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(base as i64)
+}
+
+/// Unmap and free every present, allocator-owned frame in the user range
+/// `[start, end)` of `pml4`.
+///
+/// Used by the `MAP_FIXED` file-backed `mmap` path to clear whatever
+/// previously occupied the target span before the overlay (Linux:
+/// `MAP_FIXED` silently replaces existing mappings).  Frames that aren't
+/// present (e.g. a lazy reservation never faulted in) or aren't
+/// allocator-owned (shared/device frames) are skipped.  [`frame::free_frame`]
+/// is refcount-aware, so a CoW-shared reservation frame is decremented rather
+/// than hard-freed.  Each `unmap_frame` performs its own TLB invalidation.
+fn unmap_user_range(pml4: u64, start: u64, end: u64, frame_size: u64) {
+    use crate::mm::frame;
+    use crate::mm::page_table::{self, VirtAddr};
+    let mut va = start;
+    while va < end {
+        // SAFETY: `pml4` is the live page table for the caller and `va` is a
+        // user address.  `unmap_frame` reports an absent mapping via `Err`,
+        // which we skip.
+        if let Ok(pf) = unsafe { page_table::unmap_frame(pml4, VirtAddr::new(va)) } {
+            if frame::is_allocator_owned(pf) {
+                // SAFETY: the frame was just unmapped (no PTE references it)
+                // and is allocator-owned; `free_frame` handles the refcount.
+                let _ = unsafe { frame::free_frame(pf) };
+            }
+        }
+        va = match va.checked_add(frame_size) {
+            Some(v) => v,
+            None => break,
+        };
+    }
+}
+
+/// Roll back a partial [`linux_file_mmap`]: unmap each frame mapped at
+/// `[base, base + count*frame_size)` and free it back to the allocator.
+///
+/// Best-effort teardown of state created earlier in the same call: every
+/// step is the inverse of an operation we just performed successfully, so
+/// each frame is known mapped and allocator-owned.  Errors are ignored —
+/// there is nothing useful to do on the (impossible) failure of an inverse
+/// operation.  Mirrors [`drm_mmap_dumb_rollback`], but frees the frames (we
+/// allocated them via `alloc_frame_zeroed`) rather than dropping a borrowed
+/// reference.
+fn linux_file_mmap_rollback(pml4: u64, base: u64, count: usize, frame_size: u64) {
+    use crate::mm::frame;
+    use crate::mm::page_table::{self, VirtAddr};
+    for j in 0..count {
+        let off = u64::try_from(j).unwrap_or(u64::MAX).saturating_mul(frame_size);
+        let Some(va) = base.checked_add(off) else {
+            continue;
+        };
+        // SAFETY: we mapped this frame earlier in this same call, so its PTE
+        // is present and `pml4` is the live page table for the caller.
+        if let Ok(pf) = unsafe { page_table::unmap_frame(pml4, VirtAddr::new(va)) } {
+            if frame::is_allocator_owned(pf) {
+                // SAFETY: `pf` was allocated by this call via
+                // `alloc_frame_zeroed` and, having just been unmapped, is no
+                // longer referenced by any page table.
+                let _ = unsafe { frame::free_frame(pf) };
+            }
+        }
+    }
+}
+
+/// Map a regular file (or `memfd`) into the calling process — the
+/// file-backed `mmap(2)` path that backs `ld.so`'s shared-object loading
+/// (glibc `_dl_map_segments`) and `MAP_PRIVATE` data maps.
+///
+/// ## Model: eager private copy
+///
+/// We do not demand-page or write back.  Each 16 KiB frame of the mapping
+/// is allocated zeroed, the corresponding file bytes are read into it
+/// (`read_at`), and it is mapped at `prot`-derived permissions.  Bytes past
+/// EOF stay zero, matching Linux's page-tail zero-fill.  A [`Vma`] of kind
+/// [`VmaKind::Fixed`] ("already fully backed") is registered so
+/// `/proc/<pid>/maps` reflects the mapping and the fault resolver treats a
+/// fault in the range as a bug.
+///
+/// ## `MAP_FIXED`
+///
+/// `ld.so` first reserves the whole load span (one file-backed
+/// `MAP_PRIVATE`), then overlays each segment with `MAP_FIXED`.  When
+/// `MAP_FIXED` is set we first clear the target range — unmap/free any frames
+/// there ([`unmap_user_range`]) and split/remove the covering VMAs
+/// ([`pcb::remove_vma_range`]) — exactly as Linux silently replaces existing
+/// mappings.
+///
+/// ## Unsupported
+///
+/// Writable `MAP_SHARED` (no writeback) → `ENOSYS`; non-file/memfd kinds →
+/// `ENODEV`.  Read-only `MAP_SHARED` is served as a private copy (no
+/// writeback is observable for a read-only map, so the distinction is moot).
+#[allow(clippy::too_many_arguments)]
+fn linux_file_mmap(
+    entry: &FdEntry,
+    pid: u64,
+    addr_hint: u64,
+    length: u64,
+    prot: u64,
+    flags: u64,
+    offset: u64,
+) -> SyscallResult {
+    use crate::mm::frame::{self, FRAME_SIZE};
+    use crate::mm::page_table::{self, PageFlags, VirtAddr};
+    use crate::mm::vma::{Vma, VmaKind};
+    use crate::proc::linux_fd::HandleKind;
+
+    const MAP_SHARED: u64 = 0x01;
+    const MAP_PRIVATE: u64 = 0x02;
+    const MAP_FIXED: u64 = 0x10;
+    const PROT_WRITE: u64 = 0x2;
+    const PROT_EXEC: u64 = 0x4;
+
+    // Linux rejects a zero-length mmap with EINVAL.
+    if length == 0 {
+        return linux_err(errno::EINVAL);
+    }
+
+    // Only regular files and memfds are mappable here.  Pipes, sockets,
+    // eventfds, etc. are not (Linux: ENODEV).
+    match entry.kind {
+        HandleKind::File | HandleKind::MemFd => {}
+        _ => return linux_err(errno::ENODEV),
+    }
+
+    // Exactly one of MAP_SHARED / MAP_PRIVATE must be set.
+    let shared = (flags & MAP_SHARED) != 0;
+    let private = (flags & MAP_PRIVATE) != 0;
+    if shared == private {
+        return linux_err(errno::EINVAL);
+    }
+    // We don't write back, so a writable shared map can't honour its
+    // contract.  Read-only shared maps are indistinguishable from a private
+    // copy (no write ever reaches the file), so we serve those.
+    if shared && (prot & PROT_WRITE) != 0 {
+        return linux_err(errno::ENOSYS);
+    }
+
+    let frame_size = FRAME_SIZE as u64;
+    // Round the requested length up to whole frames.
+    let length_aligned = match length
+        .checked_add(frame_size.wrapping_sub(1))
+        .map(|v| v & !frame_size.wrapping_sub(1))
+    {
+        Some(v) if v != 0 => v,
+        _ => return linux_err(errno::ENOMEM),
+    };
+    // `checked_div` rather than `/` keeps the arithmetic-side-effects lint
+    // happy; `frame_size` is a nonzero constant so the `None` arm is dead.
+    let want_frames =
+        usize::try_from(length_aligned.checked_div(frame_size).unwrap_or(0)).unwrap_or(usize::MAX);
+
+    // Page permissions: always present + user; PROT_WRITE → writable,
+    // no PROT_EXEC → no-execute.
+    let mut page_flags = PageFlags::PRESENT | PageFlags::USER_ACCESSIBLE;
+    if prot & PROT_WRITE != 0 {
+        page_flags |= PageFlags::WRITABLE;
+    }
+    if prot & PROT_EXEC == 0 {
+        page_flags |= PageFlags::NO_EXECUTE;
+    }
+
+    let hhdm = match page_table::hhdm() {
+        Some(h) => h,
+        None => return linux_err(errno::ENOMEM),
+    };
+    let pml4 = match pcb::get_pml4(pid) {
+        Some(p) if p != 0 => p,
+        _ => return linux_err(errno::ENOMEM),
+    };
+
+    // Pick the base virtual address.  Honour an aligned MAP_FIXED hint;
+    // otherwise let the mmap bump allocator choose.
+    let fixed = (flags & MAP_FIXED) != 0;
+    let base = if fixed {
+        if addr_hint & frame_size.wrapping_sub(1) != 0 {
+            return linux_err(errno::EINVAL);
+        }
+        addr_hint
+    } else {
+        handlers::mmap_alloc_vaddr(length_aligned)
+    };
+    if base == 0 {
+        return linux_err(errno::ENOMEM);
+    }
+    let end = match base.checked_add(length_aligned) {
+        Some(e) => e,
+        None => return linux_err(errno::ENOMEM),
+    };
+
+    // Charge RLIMIT_AS for the virtual span (refunded on any failure below).
+    if pcb::linux_as_charge(pid, length_aligned).is_err() {
+        return linux_err(errno::ENOMEM);
+    }
+
+    // MAP_FIXED silently replaces whatever currently occupies the range:
+    // clear the existing frames and split/remove the covering VMAs first.
+    if fixed {
+        unmap_user_range(pml4, base, end, frame_size);
+        if pcb::remove_vma_range(pid, base, end).is_err() {
+            pcb::linux_as_release(pid, length_aligned);
+            return linux_err(errno::ENOMEM);
+        }
+    }
+
+    // Allocate, fill from the file, and map each frame; roll back fully on
+    // the first failure.
+    for i in 0..want_frames {
+        let voff = u64::try_from(i)
+            .unwrap_or(u64::MAX)
+            .saturating_mul(frame_size);
+        let va = match base.checked_add(voff) {
+            Some(v) => v,
+            None => {
+                linux_file_mmap_rollback(pml4, base, i, frame_size);
+                pcb::linux_as_release(pid, length_aligned);
+                return linux_err(errno::ENOMEM);
+            }
+        };
+        if !VirtAddr::new(va).is_user() {
+            linux_file_mmap_rollback(pml4, base, i, frame_size);
+            pcb::linux_as_release(pid, length_aligned);
+            return linux_err(errno::ENOMEM);
+        }
+        let pf = match frame::alloc_frame_zeroed() {
+            Ok(f) => f,
+            Err(_) => {
+                linux_file_mmap_rollback(pml4, base, i, frame_size);
+                pcb::linux_as_release(pid, length_aligned);
+                return linux_err(errno::ENOMEM);
+            }
+        };
+        // File offset for this frame.  Bytes past EOF leave the frame tail
+        // zero (matches Linux's page-tail zero-fill).
+        let file_off = match offset.checked_add(voff) {
+            Some(o) => o,
+            None => {
+                // SAFETY: `pf` was just allocated by us and is not mapped.
+                let _ = unsafe { frame::free_frame(pf) };
+                linux_file_mmap_rollback(pml4, base, i, frame_size);
+                pcb::linux_as_release(pid, length_aligned);
+                return linux_err(errno::ENOMEM);
+            }
+        };
+        let frame_virt = pf.to_virt(hhdm);
+        // SAFETY: `frame_virt` is the HHDM mapping of a freshly allocated,
+        // exclusively owned, zeroed frame of exactly FRAME_SIZE bytes.
+        let buf =
+            unsafe { core::slice::from_raw_parts_mut(frame_virt as *mut u8, FRAME_SIZE) };
+        let read_res = match entry.kind {
+            HandleKind::File => crate::fs::handle::read_at(entry.raw_handle, file_off, buf),
+            HandleKind::MemFd => {
+                let h = crate::ipc::memfd::MemFdHandle::from_raw(entry.raw_handle);
+                crate::ipc::memfd::read_at(h, file_off, buf)
+            }
+            // Unreachable: kind validated above.
+            _ => Err(crate::error::KernelError::InvalidArgument),
+        };
+        if read_res.is_err() {
+            // SAFETY: `pf` was just allocated by us and is not mapped.
+            let _ = unsafe { frame::free_frame(pf) };
+            linux_file_mmap_rollback(pml4, base, i, frame_size);
+            pcb::linux_as_release(pid, length_aligned);
+            return linux_err(errno::EIO);
+        }
+        // SAFETY: `pml4` is the live page table for the caller, `pf` is a
+        // freshly allocated frame we exclusively own, `va` is in user space.
+        if unsafe { page_table::map_frame(pml4, VirtAddr::new(va), pf, page_flags) }.is_err() {
+            // SAFETY: `pf` was just allocated and never mapped.
+            let _ = unsafe { frame::free_frame(pf) };
+            linux_file_mmap_rollback(pml4, base, i, frame_size);
+            pcb::linux_as_release(pid, length_aligned);
+            return linux_err(errno::ENOMEM);
+        }
+    }
+
+    // Register the VMA so /proc/<pid>/maps reflects it and the fault
+    // resolver knows the range is fully backed.
+    let vma = Vma {
+        start: base,
+        end,
+        kind: VmaKind::Fixed,
+        flags: page_flags,
+    };
+    if pcb::add_vma(pid, vma).is_err() {
+        // Couldn't record the mapping — tear it down so we don't leave frames
+        // mapped with no bookkeeping.
+        linux_file_mmap_rollback(pml4, base, want_frames, frame_size);
+        pcb::linux_as_release(pid, length_aligned);
+        return linux_err(errno::ENOMEM);
     }
 
     #[allow(clippy::cast_possible_wrap)]
@@ -38675,6 +38989,244 @@ fn sys_getrandom(args: &SyscallArgs) -> SyscallResult {
 fn caller_pid() -> Option<u64> {
     let task = crate::sched::current_task_id();
     crate::proc::thread::owner_process(task)
+}
+
+// ---------------------------------------------------------------------------
+// File-backed mmap self-test (VFS-dependent)
+// ---------------------------------------------------------------------------
+
+/// End-to-end test of the file-backed `mmap` path ([`linux_file_mmap`]).
+///
+/// Runs after VFS init (so it can stage a real file) rather than in
+/// [`self_test`], which precedes the filesystem.  It uses a throwaway
+/// process — created directly via [`pcb::create`] — so it can drive
+/// `linux_file_mmap` with an explicit pid instead of relying on
+/// `caller_pid()` (there is no running Linux task at boot).
+///
+/// Coverage:
+///  1. **Argument gates** (no VFS needed): zero length → `EINVAL`;
+///     non-file/memfd kind → `ENODEV`.
+///  2. **Eager private copy + tail zero-fill**: a 20000-byte file mapped
+///     over two 16 KiB frames.  The first frame is fully file-backed; the
+///     second is partially file-backed with a zero tail past EOF — exactly
+///     Linux's page-tail zero-fill.  Content is verified by walking the
+///     throwaway process's page table (`translate`) and reading each frame
+///     through the HHDM.
+///  3. **`MAP_FIXED` overlay + VMA split**: re-map only the first frame at
+///     the same base with `MAP_FIXED`, proving the existing mapping is
+///     replaced and the covering VMA splits into the overlaid range plus a
+///     surviving right remainder.
+///
+/// Returns `Ok(())` on success (or a clean SKIP if the VFS write fails),
+/// and an error on the first hard failure.
+//
+// Boot self-test scaffolding: the arithmetic operates on fixed compile-time
+// constants (FILE_LEN, frame_size) and HHDM addresses that cannot overflow
+// on x86_64, and the sign-loss casts read back a base address we just
+// returned as a non-negative `SyscallResult`.  Allowing these here mirrors
+// the test-code lint exemption (this fn is never on a production path).
+#[allow(clippy::arithmetic_side_effects, clippy::cast_sign_loss)]
+pub fn self_test_file_mmap() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+    use crate::mm::frame::FRAME_SIZE;
+    use crate::mm::page_table::{self, VirtAddr};
+    use crate::mm::vma::VmaKind;
+    use crate::proc::linux_fd::{FdEntry, HandleKind};
+    use crate::serial_println;
+
+    const PATH: &str = "/slateos-test-mmap.bin";
+    const FILE_LEN: usize = 20_000;
+    const MAP_PRIVATE: u64 = 0x02;
+    const MAP_FIXED: u64 = 0x10;
+    const PROT_READ: u64 = 0x1;
+
+    serial_println!("[syscall/linux] Running file-backed mmap self-test...");
+
+    let frame_size = FRAME_SIZE as u64;
+
+    // (1) Argument gates — no process or VFS required.  A dummy non-file
+    // entry must be rejected before any address-space work.
+    let dummy = FdEntry {
+        kind: HandleKind::Pipe,
+        raw_handle: 0,
+        fd_flags: 0,
+        status_flags: 0,
+        f_owner: 0,
+        f_owner_sig: 0,
+    };
+    if linux_file_mmap(&dummy, 0, 0, 4096, PROT_READ, MAP_PRIVATE, 0).value
+        != i64::from(-errno::ENODEV)
+    {
+        serial_println!("[syscall/linux]   FAIL: non-file kind should map to ENODEV");
+        return Err(KernelError::InternalError);
+    }
+    let dummy_file = FdEntry {
+        kind: HandleKind::File,
+        raw_handle: 0,
+        ..dummy
+    };
+    if linux_file_mmap(&dummy_file, 0, 0, 0, PROT_READ, MAP_PRIVATE, 0).value
+        != i64::from(-errno::EINVAL)
+    {
+        serial_println!("[syscall/linux]   FAIL: zero length should map to EINVAL");
+        return Err(KernelError::InternalError);
+    }
+
+    // (2) Stage a file with a recognisable per-byte pattern.
+    let mut content = alloc::vec::Vec::with_capacity(FILE_LEN);
+    for i in 0..FILE_LEN {
+        // Non-zero, position-dependent pattern so a zero tail is
+        // distinguishable from real content.
+        content.push((((i * 31 + 7) & 0xff) as u8) | 1);
+    }
+    if let Err(e) = crate::fs::Vfs::write_file(PATH, &content) {
+        serial_println!(
+            "[syscall/linux]   file mmap: SKIP (VFS write failed: {:?})",
+            e
+        );
+        return Ok(());
+    }
+
+    // Throwaway process with its own address space.
+    let pid = pcb::create("linux-mmap-test", 0);
+    let Some(pml4) = pcb::get_pml4(pid).filter(|&p| p != 0) else {
+        pcb::destroy(pid);
+        let _ = crate::fs::Vfs::remove(PATH);
+        serial_println!("[syscall/linux]   FAIL: test process has no PML4");
+        return Err(KernelError::InternalError);
+    };
+
+    let handle = match crate::fs::handle::open(PATH, crate::fs::handle::OpenFlags::READ) {
+        Ok(h) => h,
+        Err(e) => {
+            pcb::destroy(pid);
+            let _ = crate::fs::Vfs::remove(PATH);
+            serial_println!("[syscall/linux]   FAIL: open returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let entry = FdEntry::file(handle, 0);
+
+    // Cleanup helper closure body is inlined at each exit because we can't
+    // capture `?`-style early returns cleanly without it; keep it explicit.
+    macro_rules! teardown {
+        () => {{
+            let _ = crate::fs::handle::close(handle);
+            pcb::destroy(pid);
+            let _ = crate::fs::Vfs::remove(PATH);
+        }};
+    }
+
+    // Map the whole file (length rounds up to 2 frames).
+    let res = linux_file_mmap(
+        &entry,
+        pid,
+        0,
+        FILE_LEN as u64,
+        PROT_READ,
+        MAP_PRIVATE,
+        0,
+    );
+    if res.value <= 0 {
+        teardown!();
+        serial_println!("[syscall/linux]   FAIL: file mmap returned {}", res.value);
+        return Err(KernelError::InternalError);
+    }
+    #[allow(clippy::cast_sign_loss)]
+    let base = res.value as u64;
+    let length_aligned = (FILE_LEN as u64)
+        .checked_add(frame_size - 1)
+        .map(|v| v & !(frame_size - 1))
+        .unwrap_or(0);
+    let end = base.saturating_add(length_aligned);
+
+    // The VMA must be registered as a fully-backed Fixed range.
+    let has_vma = pcb::list_vmas(pid).is_some_and(|vmas| {
+        vmas.iter()
+            .any(|v| v.start == base && v.end == end && v.kind == VmaKind::Fixed)
+    });
+    if !has_vma {
+        teardown!();
+        serial_println!("[syscall/linux]   FAIL: Fixed VMA [{:#x},{:#x}) not registered", base, end);
+        return Err(KernelError::InternalError);
+    }
+
+    // Verify every mapped byte: file content where it exists, zero past EOF.
+    // Read through the throwaway process's page table via the HHDM.
+    let hhdm = page_table::hhdm().ok_or(KernelError::InternalError)?;
+    for off in 0..length_aligned {
+        let va = base.saturating_add(off);
+        let Some(phys) = page_table::translate(pml4, VirtAddr::new(va)) else {
+            teardown!();
+            serial_println!("[syscall/linux]   FAIL: va {:#x} not mapped", va);
+            return Err(KernelError::InternalError);
+        };
+        // SAFETY: `phys + hhdm` is the HHDM mapping of a mapped, owned frame;
+        // we read exactly one byte within the frame.
+        let got = unsafe { ((phys + hhdm) as *const u8).read_volatile() };
+        let want = content.get(off as usize).copied().unwrap_or(0);
+        if got != want {
+            teardown!();
+            serial_println!(
+                "[syscall/linux]   FAIL: byte {:#x} = {:#x}, expected {:#x}",
+                off, got, want
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // (3) MAP_FIXED overlay of just the first frame.  This must replace the
+    // existing mapping and split the original VMA, leaving a right remainder
+    // [base+frame_size, end).
+    let res2 = linux_file_mmap(
+        &entry,
+        pid,
+        base,
+        frame_size,
+        PROT_READ,
+        MAP_PRIVATE | MAP_FIXED,
+        0,
+    );
+    #[allow(clippy::cast_sign_loss)]
+    if res2.value as u64 != base {
+        teardown!();
+        serial_println!("[syscall/linux]   FAIL: MAP_FIXED overlay returned {}", res2.value);
+        return Err(KernelError::InternalError);
+    }
+    let vmas = pcb::list_vmas(pid).unwrap_or_default();
+    let overlay_ok = vmas
+        .iter()
+        .any(|v| v.start == base && v.end == base.saturating_add(frame_size));
+    let remainder_ok = vmas
+        .iter()
+        .any(|v| v.start == base.saturating_add(frame_size) && v.end == end);
+    if !overlay_ok || !remainder_ok {
+        teardown!();
+        serial_println!(
+            "[syscall/linux]   FAIL: MAP_FIXED split — overlay={} remainder={}",
+            overlay_ok, remainder_ok
+        );
+        return Err(KernelError::InternalError);
+    }
+    // Content of the re-mapped first frame must still match the file.
+    let Some(phys0) = page_table::translate(pml4, VirtAddr::new(base)) else {
+        teardown!();
+        serial_println!("[syscall/linux]   FAIL: overlaid base {:#x} not mapped", base);
+        return Err(KernelError::InternalError);
+    };
+    // SAFETY: HHDM mapping of the freshly overlaid, owned frame; one byte.
+    let got0 = unsafe { ((phys0 + hhdm) as *const u8).read_volatile() };
+    if got0 != content.first().copied().unwrap_or(0) {
+        teardown!();
+        serial_println!("[syscall/linux]   FAIL: overlaid frame content mismatch");
+        return Err(KernelError::InternalError);
+    }
+
+    teardown!();
+    serial_println!(
+        "[syscall/linux]   file-backed mmap (2-frame copy + tail zero-fill + MAP_FIXED split): OK"
+    );
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

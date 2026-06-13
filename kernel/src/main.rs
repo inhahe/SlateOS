@@ -1200,6 +1200,13 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: Linux dynamic-interpreter self-test failed: {:?}", e);
     }
 
+    // File-backed Linux mmap test (needs a writable VFS to stage a file, so
+    // it runs here rather than in syscall::linux::self_test() which precedes
+    // VFS init).  Exercises the path ld.so uses to map shared objects.
+    if let Err(e) = syscall::linux::self_test_file_mmap() {
+        serial_println!("WARNING: Linux file-backed mmap self-test failed: {:?}", e);
+    }
+
     boot_timing::mark(boot_timing::Milestone::Filesystem);
 
     // ProcFs self-test — constructs its own `ProcFs::new()` and reads live

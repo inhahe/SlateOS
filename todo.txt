@@ -11,9 +11,10 @@
 ##   [DONE 3b039e40] elf::load_segments_with_bias(elf,pml4,bias) — map every PT_LOAD at bias+p_vaddr,
 ##       re-validating against USER_SPACE_END. load_segments() now delegates with bias=0 (pure refactor;
 ##       init-process load path unchanged, boot still BOOT_OK). bias!=0 path lands with spawn wiring.
-##   [TODO commit 3] Plumb AT_BASE into the auxv: base_auxv()/install_linux_stack()/build_linux_initial_stack()
-##       gain an Option<u64> interp_base; when Some, push AuxEntry(AT_BASE, base). AT_ENTRY stays the
-##       EXECUTABLE's e_entry (already correct). Self-test build_sysv_stack with an AT_BASE entry present.
+##   [DONE 7189a2c0] Plumb AT_BASE into the auxv: base_auxv()/install_linux_stack() gained Option<u64>
+##       interp_base; build_linux_initial_stack() forwards it; when Some, push AuxEntry(AT_BASE, base).
+##       AT_ENTRY stays the EXECUTABLE's e_entry. spawn+exec pass None for now. Self-test verifies AT_BASE
+##       round-trips into the stack image when supplied and is absent otherwise. Boot still BOOT_OK.
 ##   [TODO commit 4] Wire spawn_process (+ exec): if elf.interp_path() is Some, read that file from the
 ##       VFS, parse it, pick an interpreter base (fixed mmap-region base for now, no ASLR — document as a
 ##       known limitation), load_segments_with_bias(interp, pml4, base), set entry_rip = base+interp.e_entry,

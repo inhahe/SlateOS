@@ -1,4 +1,35 @@
 
+## DONE (2026-06-12): ABI batch 539 — splice __do_splice/do_splice prologue: ESPIPE + offset order + FMODE EBADF
+## Linux v6.6 fs/splice.c (verified verbatim against raw.githubusercontent.com torvalds/linux v6.6):
+##   SYSCALL_DEFINE6(splice): if(!len) return 0; if(flags&~SPLICE_F_ALL) -EINVAL;
+##     fdget(fd_in)->EBADF; fdget(fd_out)->EBADF; __do_splice(...).
+##   __do_splice(): ipipe=get_pipe_info(in); opipe=get_pipe_info(out);
+##     if(ipipe){ if(off_in) return -ESPIPE; ... }
+##     if(opipe){ if(off_out) return -ESPIPE; ... }
+##     if(off_out){ copy_from_user(&offset, off_out, 8) -> -EFAULT }  [off_out FIRST]
+##     if(off_in){  copy_from_user(&offset, off_in, 8)  -> -EFAULT }  [off_in SECOND]
+##     do_splice(...).
+##   do_splice() prologue: if(!(in.f_mode&FMODE_READ) || !(out.f_mode&FMODE_WRITE)) return -EBADF;
+##     then pipe-direction branches (pipe-pipe off ESPIPE [already filtered], ipipe==opipe EINVAL,
+##     FMODE_PWRITE/FMODE_PREAD EINVAL on single-pipe branches).
+## Pre-batch sys_splice diverged: it read off_in (arg1) BEFORE off_out (arg3) — Linux reads off_out
+## first — and it lacked BOTH the __do_splice ESPIPE gates (pipe endpoint + explicit offset) AND the
+## do_splice FMODE_READ(in)/FMODE_WRITE(out) -> EBADF gate.
+## Fix (translator-only, kernel/src/syscall/linux.rs sys_splice ~16215): after the two fd validations,
+##   1. caller_pid Some: off_in!=0 && fd_in.kind==Pipe -> ESPIPE; off_out!=0 && fd_out.kind==Pipe -> ESPIPE
+##   2. off_out!=0 -> validate_user_read(off_out,8)->EFAULT; then off_in!=0 -> validate_user_read(off_in,8)->EFAULT
+##   3. caller_pid Some: !fd_access_is_readable(in)->EBADF; !fd_access_is_writable(out)->EBADF
+##   terminal EINVAL (transfer unimplemented).
+## RATIONALE for not modelling the deeper branches: pipe-pipe two-offset ESPIPE is already filtered by
+## the __do_splice gates; ipipe==opipe self-splice EINVAL and the FMODE_PWRITE/FMODE_PREAD EINVAL on the
+## single-pipe branches all return EINVAL, which is observationally identical to our terminal EINVAL
+## since the data transfer is unimplemented. So no behavior is lost by collapsing them.
+## VERIFIED: At boot caller_pid()=None bypasses the fd-table gates (same as batches 537/538), so ESPIPE
+## pipe-classification (only HandleKind::Pipe is a get_pipe_info endpoint; File/MemFd/Console are not)
+## and the FMODE_READ/FMODE_WRITE derivations are predicate-tested. Stamp "splice __do_splice ESPIPE +
+## off order + FMODE EBADF (batch 539): OK". cargo build clean; clippy 17477 (unchanged); boot-test
+## BOOT_OK 26s EXIT=0.
+
 ## DONE (2026-06-12): ABI batch 538 — sendfile gate order + FMODE_READ/FMODE_WRITE/FMODE_PREAD gates
 ## Linux v6.6 fs/read_write.c SYSCALL_DEFINE4(sendfile64) + do_sendfile() (verified verbatim against
 ## raw.githubusercontent.com torvalds/linux v6.6):

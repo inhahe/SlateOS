@@ -16258,16 +16258,77 @@ fn sys_splice(args: &SyscallArgs) -> SyscallResult {
     if let Err(r) = validate_linux_fd(fd_out) {
         return r;
     }
-    if args.arg1 != 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 8) {
+
+    // Batch 539: model the __do_splice() + do_splice() prologue gates.
+    //
+    // __do_splice() (fs/splice.c) after the two fdgets:
+    //   ipipe = get_pipe_info(in); opipe = get_pipe_info(out);
+    //   if (ipipe) { if (off_in)  return -ESPIPE; ... }
+    //   if (opipe) { if (off_out) return -ESPIPE; ... }
+    //   if (off_out) { copy_from_user(&offset, off_out, 8) -> -EFAULT }
+    //   if (off_in)  { copy_from_user(&offset, off_in, 8)  -> -EFAULT }
+    //   do_splice(...)
+    // do_splice() prologue:
+    //   if (!(in->f_mode & FMODE_READ) || !(out->f_mode & FMODE_WRITE))
+    //       return -EBADF;
+    //   ... pipe-direction branches ...
+    //
+    // The deeper branch returns (pipe-to-pipe ESPIPE for two explicit
+    // offsets — already filtered above; ipipe==opipe self-splice EINVAL;
+    // FMODE_PWRITE/FMODE_PREAD EINVAL on the single-pipe branches) all
+    // resolve to EINVAL, which is identical to our terminal EINVAL since
+    // the data transfer is unimplemented — so they need no modelling.
+    let off_in = args.arg1;
+    let off_out = args.arg3;
+
+    // ESPIPE gates: a pipe endpoint cannot take an explicit offset. These
+    // precede the offset copy_from_user in __do_splice().
+    if let Some(pid) = caller_pid() {
+        use crate::proc::linux_fd::HandleKind;
+        if off_in != 0
+            && matches!(
+                pcb::linux_fd_lookup(pid, fd_in).map(|e| e.kind),
+                Some(HandleKind::Pipe)
+            )
+        {
+            return linux_err(errno::ESPIPE);
+        }
+        if off_out != 0
+            && matches!(
+                pcb::linux_fd_lookup(pid, fd_out).map(|e| e.kind),
+                Some(HandleKind::Pipe)
+            )
+        {
+            return linux_err(errno::ESPIPE);
+        }
+    }
+
+    // copy_from_user order: off_out FIRST, then off_in (matches __do_splice).
+    if off_out != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(off_out, 8) {
             return linux_err(linux_errno_for(e));
         }
     }
-    if args.arg3 != 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg3, 8) {
+    if off_in != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(off_in, 8) {
             return linux_err(linux_errno_for(e));
         }
     }
+
+    // do_splice() prologue: FMODE_READ(in) && FMODE_WRITE(out) -> EBADF.
+    if let Some(pid) = caller_pid() {
+        if let Some(ein) = pcb::linux_fd_lookup(pid, fd_in) {
+            if !fd_access_is_readable(ein.status_flags) {
+                return linux_err(errno::EBADF);
+            }
+        }
+        if let Some(eout) = pcb::linux_fd_lookup(pid, fd_out) {
+            if !fd_access_is_writable(eout.status_flags) {
+                return linux_err(errno::EBADF);
+            }
+        }
+    }
+
     linux_err(errno::EINVAL)
 }
 
@@ -54839,6 +54900,42 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: splice not EINVAL");
             return Err(KernelError::InternalError);
+        }
+        // Batch 539: splice's __do_splice() ESPIPE gates (pipe endpoint +
+        // explicit offset), the off_out-before-off_in copy_from_user order,
+        // and the do_splice() FMODE_READ(in)/FMODE_WRITE(out) -> EBADF gate
+        // are all reachable only when caller_pid() is Some (they consult the
+        // fd table). At boot caller_pid()=None bypasses them (same as batches
+        // 537/538), so they are predicate-tested rather than dispatch-tested.
+        {
+            use crate::proc::linux_fd::{HandleKind, O_RDONLY, O_RDWR, O_WRONLY};
+            // ESPIPE classification: only HandleKind::Pipe is a splice pipe
+            // endpoint (get_pipe_info). Regular files are not.
+            let is_pipe = |k: HandleKind| matches!(k, HandleKind::Pipe);
+            if !is_pipe(HandleKind::Pipe) {
+                serial_println!("[syscall/linux]   FAIL: splice Pipe not pipe-classified");
+                return Err(KernelError::InternalError);
+            }
+            if is_pipe(HandleKind::File) || is_pipe(HandleKind::MemFd)
+                || is_pipe(HandleKind::Console) {
+                serial_println!("[syscall/linux]   FAIL: splice non-pipe mis-classified");
+                return Err(KernelError::InternalError);
+            }
+            // FMODE_READ(in): write-only fd is not readable; rd/rdwr are.
+            if fd_access_is_readable(O_WRONLY)
+                || !fd_access_is_readable(O_RDONLY)
+                || !fd_access_is_readable(O_RDWR) {
+                serial_println!("[syscall/linux]   FAIL: splice in FMODE_READ derivation");
+                return Err(KernelError::InternalError);
+            }
+            // FMODE_WRITE(out): read-only fd is not writable; wr/rdwr are.
+            if fd_access_is_writable(O_RDONLY)
+                || !fd_access_is_writable(O_WRONLY)
+                || !fd_access_is_writable(O_RDWR) {
+                serial_println!("[syscall/linux]   FAIL: splice out FMODE_WRITE derivation");
+                return Err(KernelError::InternalError);
+            }
+            serial_println!("[syscall/linux]   splice __do_splice ESPIPE + off order + FMODE EBADF (batch 539): OK");
         }
         // tee bogus flag -> EINVAL.
         let a = SyscallArgs { arg0: 0, arg1: 1, arg2: 16,

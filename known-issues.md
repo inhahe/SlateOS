@@ -491,6 +491,38 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
+### TD14. No per-process CPU-time accounting — `getrusage`/`times` report zero CPU time — DEBT 2026-06-13
+
+**Where:** `kernel/src/syscall/linux.rs` `sys_getrusage` (~10275) and `sys_times`
+(~10495); the scheduler `kernel/src/sched/mod.rs` has no per-thread/per-process
+accumulated run-time fields.
+
+**What it is:** `getrusage(2)` leaves `ru_utime`/`ru_stime` (and the fault and
+context-switch counters `ru_minflt`/`ru_majflt`/`ru_nvcsw`/`ru_nivcsw`) zero, and
+`times(2)` writes an all-zero `struct tms` (`tms_utime`/`tms_stime`/`tms_cutime`/
+`tms_cstime`). Linux fills these from per-task accumulated CPU time. We have no
+such accounting, so the values are an honest 0 rather than a wrong non-zero — but
+tools that measure CPU usage (`time(1)`'s user/sys split, `getrusage`-based
+profilers, shell `times` builtin) see no CPU time consumed.
+
+**Why it's not an ABI gap (and not fixed in the batch-553/554 sweep):** unlike
+the zeroed *peak-RSS* field (batch 554) or sysinfo `loads[]` (batch 553), there is
+no existing data source to read — populating CPU time requires building real
+accounting: accumulate elapsed time per thread on every context switch (and roll
+it up per process), split user vs kernel time, and track minor/major fault and
+voluntary/involuntary context-switch counters. That is a scheduler hot-path
+feature with its own correctness and performance (benchmark) requirements, not a
+one-line ABI fix.
+
+**Proper fix:** add `utime_ns`/`stime_ns` (and fault / ctxsw counters) to the
+thread accounting struct, charge them at context-switch boundaries (user/kernel
+split via the entry/exit transition), expose a `sched::cpu_time_ns(tid)` /
+process roll-up, then source `getrusage` `ru_utime`/`ru_stime` and `times` `tms_*`
+from it (and `/proc/<pid>/stat` utime/stime, which is also currently approximate).
+Trigger: when CPU-usage-reporting tooling becomes a priority, or when the
+scheduler is next reworked. Keep it native-neutral — elapsed-time accounting is
+not a Linux-specific construct; only the rusage/tms *wire format* is.
+
 ### TD13. A few Linux-compat-flavored fields live in the native PCB — WATCH 2026-06-13
 
 **Where:** `kernel/src/proc/pcb.rs` — job-control stop state

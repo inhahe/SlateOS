@@ -491,6 +491,33 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
+### TD13. A few Linux-compat-flavored fields live in the native PCB — WATCH 2026-06-13
+
+**Where:** `kernel/src/proc/pcb.rs` — job-control stop state
+(`ProcessState::Stopped`/stop-signal tracking) and the `PR_SET_PDEATHSIG`
+parent-death-signal storage (`get`/`set` around lines 2282–2290; field noted
+"not wired because we don't yet have user-signal infrastructure").
+
+**What it is:** the native process control block carries a small amount of
+state whose *origin* is Linux/POSIX semantics (job-control stop/continue and
+`prctl(PR_SET_PDEATHSIG)`). Per design-decisions.md §4 and §12, Linux-ABI
+constructs should stay confined to the compat layer / Linux-ABI PCB state and
+not accrete in the native PCB.
+
+**Why it's not a live bug:** stop/continue is arguably a general
+process-lifecycle notion (not strictly Linux), and `PR_SET_PDEATHSIG` storage
+is inert (delivery is unwired). Nothing native consumes these as signals;
+native process control remains IPC-based and faults remain SEH-style
+exceptions. So the native ABI is not actually leaking *behavior* today.
+
+**Proper fix (when the boundary is next touched):** move the pdeathsig value
+(and any other purely-Linux fields) into the Linux-ABI PCB side-state (next to
+`KernelFdTable`/the saved auxv), keyed by pid, so the native PCB carries only
+constructs that would exist if Linux had never existed. Keep `ProcessState`
+lifecycle states that are genuinely ABI-neutral. The trigger to do this is the
+Linux compat ELF loader / signal-infrastructure work landing — co-locate all
+Linux-ABI per-process state there in one pass rather than piecemeal.
+
 ### TD12. DRM event `read(2)` returns EAGAIN instead of blocking when empty — DEBT 2026-06-13
 
 **Where:** `dispatch_drm_card_read` in `kernel/src/syscall/linux.rs`.

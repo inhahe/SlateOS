@@ -4810,10 +4810,39 @@ fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
         }
     }
 
-    // Native SYS_MMAP: arg0 = hint, arg1 = length, arg2 = our flags,
-    // arg3 = phys addr.  We pass 0 flags (private RW), which our handler
-    // treats as "anonymous, demand-allocated".
-    let native_flags: u64 = if fixed { 0x01 } else { 0 };
+    // Native SYS_MMAP: arg0 = hint, arg1 = length, arg2 = native flags,
+    // arg3 = phys addr.  The native flags must carry two things:
+    //
+    //  1. **Protection.** Translate Linux `PROT_WRITE`/`PROT_EXEC` into the
+    //     native `MAP_WRITE`/`MAP_EXEC` bits.  The native handler stores these
+    //     on the VMA and uses them as the page-protection for both eager and
+    //     demand-paged frames.  Without this translation anonymous memory would
+    //     be mapped read-only / no-execute, and the very first write to a
+    //     freshly `mmap`ed (PROT_READ|PROT_WRITE) region — i.e. essentially every
+    //     malloc arena — would fault.  (The previous code passed a bare `0x01`,
+    //     which is `MAP_READ`, not `MAP_WRITE`, so the region was non-writable.)
+    //
+    //  2. **Commit policy: default to lazy (demand-paged).** Linux programs
+    //     assume overcommit semantics — they reserve large sparse mappings and
+    //     expect backing only on touch — so the Linux ABI defaults to lazy
+    //     allocation, i.e. `vm/overcommit_memory = 0`.  See the memory-commit
+    //     policy decision (design-decisions.md §11).  Native OuRoS programs keep
+    //     the committed (eager) default; this lazy default is Linux-ABI-only.
+    //     A future per-program override may force committed allocation, but that
+    //     is not wired yet.
+    //
+    // `MAP_FIXED` is conveyed implicitly: the resolved `addr_hint` is passed in
+    // arg0, which the native handler honors when non-zero — so no flag bit is
+    // needed for it (the old `0x01` did nothing here).
+    const PROT_WRITE: u64 = 2;
+    const PROT_EXEC: u64 = 4;
+    let mut native_flags: u64 = super::number::MAP_LAZY;
+    if prot & PROT_WRITE != 0 {
+        native_flags |= super::number::MAP_WRITE;
+    }
+    if prot & PROT_EXEC != 0 {
+        native_flags |= super::number::MAP_EXEC;
+    }
     let native_args = SyscallArgs {
         arg0: addr_hint,
         arg1: length,

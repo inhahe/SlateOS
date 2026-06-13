@@ -560,13 +560,14 @@ const SYS_FILES: &[&str] = &[
     "kernel/random/boot_id",
     "kernel/random/poolsize",
     "kernel/random/entropy_avail",
+    "vm/overcommit_memory",
     "fs/nr_open",
 ];
 
 /// Directories in the `/proc/sys` tree, keyed by their path under `/proc/sys`
 /// (`""` denotes `/proc/sys` itself).  Used to answer `stat`/`readdir` on the
 /// interior directories of the sysctl tree.
-const SYS_DIRS: &[&str] = &["", "kernel", "kernel/random", "fs"];
+const SYS_DIRS: &[&str] = &["", "kernel", "kernel/random", "vm", "fs"];
 
 /// Names of virtual files inside each `/proc/<pid>/` directory.
 const PID_FILES: &[&str] = &[
@@ -11940,6 +11941,22 @@ fn gen_sys(rel: &str) -> KernelResult<Vec<u8>> {
             let avail = if crate::rng::is_initialized() { 256 } else { 0 };
             format!("{avail}\n")
         }
+        // Memory-commit policy as seen through the Linux ABI.  `/proc/sys/vm/`
+        // is a Linux-ABI-only surface — native OuRoS programs use native APIs,
+        // so the only readers of this file are Linux binaries.  Per the
+        // memory-commit policy decision (design-decisions.md §11), the Linux ABI
+        // defaults anonymous mappings to lazy/demand-paged allocation
+        // (`sys_mmap` in `syscall/linux.rs` passes `MAP_LAZY`), which is exactly
+        // Linux's heuristic-overcommit behavior — so the honest value here is
+        // `0` (heuristic overcommit).  This is real, not fabricated: a Linux
+        // program's `mmap` genuinely is backed on touch, not up front.
+        //
+        // We deliberately do NOT expose `overcommit_ratio` / `overcommit_kbytes`:
+        // those only parameterize Linux's *strict commit accounting*
+        // (overcommit_memory = 2), which we do not perform, so advertising them
+        // would imply a knob with no backing (violates the "never advertise an
+        // unhonored feature" rule, design-decisions.md §1).
+        "vm/overcommit_memory" => String::from("0\n"),
         _ => return Err(KernelError::NotFound),
     };
     Ok(text.into_bytes())
@@ -14447,9 +14464,11 @@ pub fn self_test() -> KernelResult<()> {
             ("sys", "sysdir"),
             ("sys/kernel", "sysdir"),
             ("sys/kernel/random", "sysdir"),
+            ("sys/vm", "sysdir"),
             ("sys/fs", "sysdir"),
             ("sys/kernel/osrelease", "sysfile"),
             ("sys/kernel/random/boot_id", "sysfile"),
+            ("sys/vm/overcommit_memory", "sysfile"),
             ("sys/fs/nr_open", "sysfile"),
             ("sys/bogus", "notfound"),             // unknown subdir
             ("sys/kernel/bogus", "notfound"),      // unknown file
@@ -14472,7 +14491,7 @@ pub fn self_test() -> KernelResult<()> {
         }
 
         // 2. stat: /proc/sys and an interior dir are directories.
-        for d in ["/sys", "/sys/kernel", "/sys/kernel/random", "/sys/fs"] {
+        for d in ["/sys", "/sys/kernel", "/sys/kernel/random", "/sys/vm", "/sys/fs"] {
             if fs.stat(d)?.entry_type != EntryType::Directory {
                 serial_println!("[procfs]   FAIL: stat {} not a directory", d);
                 return Err(KernelError::InternalError);
@@ -14482,7 +14501,7 @@ pub fn self_test() -> KernelResult<()> {
         // 3. readdir /proc/sys lists exactly the two interior dirs (no files
         //    sit directly at the root) — order: dirs before files.
         let root = fs.readdir("/sys")?;
-        for d in ["kernel", "fs"] {
+        for d in ["kernel", "vm", "fs"] {
             if !root.iter().any(|e| e.name == d && e.entry_type == EntryType::Directory) {
                 serial_println!("[procfs]   FAIL: /sys missing dir {}", d);
                 return Err(KernelError::InternalError);
@@ -14529,6 +14548,28 @@ pub fn self_test() -> KernelResult<()> {
         if pid_max != Some(crate::pidns::MAX_PIDS_PER_NS) {
             serial_println!("[procfs]   FAIL: kernel/pid_max = {:?}, want {}",
                 pid_max, crate::pidns::MAX_PIDS_PER_NS);
+            return Err(KernelError::InternalError);
+        }
+
+        // 5b. /sys/vm lists overcommit_memory, which reads as the Linux-ABI
+        //     default policy `0` (heuristic). This surface is Linux-compat only:
+        //     OuRoS's Linux mmap path always passes MAP_LAZY (demand-paged), so
+        //     reporting overcommit_memory=0 is honest — Linux programs see the
+        //     lazy/overcommit allocation idiom they expect. overcommit_ratio /
+        //     overcommit_kbytes are deliberately absent (no commit accounting).
+        let vm = fs.readdir("/sys/vm")?;
+        if !vm.iter().any(|e| e.name == "overcommit_memory"
+            && e.entry_type == EntryType::File)
+        {
+            serial_println!("[procfs]   FAIL: /sys/vm missing overcommit_memory");
+            return Err(KernelError::InternalError);
+        }
+        let overcommit = core::str::from_utf8(
+            &fs.read_file("/sys/vm/overcommit_memory")?)
+            .unwrap_or("").trim().parse::<u32>().ok();
+        if overcommit != Some(0) {
+            serial_println!("[procfs]   FAIL: vm/overcommit_memory = {:?}, want 0",
+                overcommit);
             return Err(KernelError::InternalError);
         }
 

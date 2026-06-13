@@ -511,9 +511,14 @@
 ##   "sanitize_mpol_flags NUMA_BALANCING bit + static/relative mutual-exclusion + numa-balancing-requires-BIND (batch 545): OK"
 ## VERIFIED: build clean; clippy 17475 (baseline, new asserts use i64::from(errno::EINVAL).wrapping_neg());
 ##   boot-test BOOT_OK + stamp in serial-test.txt + EXIT=0, no SELF-TEST FAILURE.
-## DEFERRED (out of scope, later batch): get_nodes() maxnode cap divergence — Linux does `--maxnode;
-##   if (maxnode > PAGE_SIZE*BITS_PER_BYTE) return -EINVAL` whereas we use `maxnode > (1<<23)` with no
-##   decrement; murkier (PAGE_SIZE interpretation on a 16 KiB-page kernel), keep as its own batch.
+## RESOLVED (2026-06-13, verified already-fixed): get_nodes() maxnode cap divergence. The fix lives in
+##   `get_nodes_uma` (kernel/src/syscall/linux.rs ~25602): it does `let maxnode = maxnode_arg.wrapping_sub(1)`
+##   (the C `--maxnode`, with unsigned wraparound so maxnode==0 -> u64::MAX fails the cap), then
+##   `if maxnode > NODE_BITS_CAP` where `NODE_BITS_CAP = 4096*8 = 32768` = PAGE_SIZE*BITS_PER_BYTE using the
+##   Linux ABI's 4 KiB page (NOT our 16 KiB frame), matching mm/mempolicy.c get_nodes() bit-for-bit. The
+##   PAGE_SIZE "murkiness" is resolved the same way sys_mbind resolves addr alignment: honour the ABI value.
+##   sys_get_mempolicy carries an identical NODE_BITS_CAP=32768 with `(maxnode-1) > cap`. No standalone batch
+##   was needed — the cap was already correct when this note was revisited.
 
 ## DONE (2026-06-12): ABI batch 544 — semop/semtimedop: E2BIG/EINVAL structural gates precede copy_from_user(sops); nsops unsigned-int truncation
 ## Linux v6.6 ipc/sem.c (verified verbatim against raw.githubusercontent.com torvalds/linux v6.6):

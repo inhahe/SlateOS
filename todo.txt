@@ -1,4 +1,32 @@
 
+## DONE (2026-06-12): ABI batch 542 — io_pgetevents timeout/sigset gate order + NULL-mask sigsetsize short-circuit
+## Linux v6.6 fs/aio.c SYSCALL_DEFINE6(io_pgetevents) + kernel/signal.c set_user_sigmask (verified
+## verbatim against raw.githubusercontent.com torvalds/linux v6.6):
+##   io_pgetevents: if(timeout && get_timespec64(&ts,timeout)) return -EFAULT;
+##                  if(usig && copy_from_user(&ksig,usig,16)) return -EFAULT;
+##                  ret=set_user_sigmask(ksig.sigmask, ksig.sigsetsize); if(ret) return ret;
+##                  ret=do_io_getevents(ctx_id, min_nr, nr, events, timeout?&ts:NULL);
+##   set_user_sigmask: if(!umask) return 0;  // NULL mask: NO further checks
+##                     if(sigsetsize != sizeof(sigset_t)) return -EINVAL;  // 8 on x86_64
+##                     if(copy_from_user(&kmask,umask,8)) return -EFAULT;
+##   do_io_getevents -> lookup_ioctx -> -EINVAL (no AIO ctx ever exists here = terminal); the min_nr/nr
+##     ordering check and the events write live in read_events, reached only AFTER a valid ctx.
+## Pre-batch sys_io_pgetevents had TWO real divergences: (a) it ran the min_nr/nr -> EINVAL check and
+## the events write validation FIRST, before even reading timeout — so a probe with (min_nr>nr,
+## timeout=BADPTR) saw EINVAL where Linux returns EFAULT (get_timespec64 runs first); (b) it checked
+## sigsetsize != 8 -> EINVAL even when sigmask was NULL, but set_user_sigmask early-returns 0 on a NULL
+## mask BEFORE the size check, so a NULL mask with a bogus sigsetsize must fall through, not EINVAL.
+## Fix (translator-only, kernel/src/syscall/linux.rs sys_io_pgetevents ~32757): reorder to
+##   timeout EFAULT -> usig copy EFAULT -> [sigmask!=0 ? (sigsetsize!=8 EINVAL -> sigmask EFAULT) : skip]
+##   -> terminal EINVAL. Removed the leading min_nr/nr and events gates (unreachable; collapse to terminal).
+## VERIFIED: at boot all paths surface EINVAL (the size-gate value equals the terminal) and EFAULT is
+## bypassed in kernel context, so the dispatch tests prove which path is taken (premise) rather than
+## distinguishing by errno. Updated the self-tests: the NULL-mask sigsetsize cases now document the
+## short-circuit-to-terminal semantics, and a non-NULL-mask case exercises the real sigsetsize gate.
+## Stamp "io_pgetevents timeout/sigset order + NULL-mask short-circuit (batch 542): OK". cargo build
+## clean; clippy 17475 (DOWN 2 from 17477 — removing the old min_nr/nr cast+arithmetic code dropped two
+## warnings; new baseline 17475); boot-test BOOT_OK 27s EXIT=0.
+
 ## DONE (2026-06-12): ABI batch 541 — vmsplice fdget/vmsplice_type EBADF before import_iovec (gate reorder)
 ## Linux v6.6 fs/splice.c SYSCALL_DEFINE4(vmsplice) (verified verbatim against
 ## raw.githubusercontent.com torvalds/linux v6.6) + vmsplice_type() + import_iovec/iovec_from_user:

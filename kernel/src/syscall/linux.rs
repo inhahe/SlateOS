@@ -32755,40 +32755,41 @@ fn resolve_ioprio_target(which: i32, who: i32) -> Result<u64, SyscallResult> {
 /// for shape, then return EINVAL — mirrors what io_getevents does for
 /// an unknown context.
 fn sys_io_pgetevents(args: &SyscallArgs) -> SyscallResult {
-    let _ctx_id = args.arg0;
-    let min_nr = args.arg1 as i64;
-    let nr = args.arg2 as i64;
-    let events = args.arg3;
+    // Linux v6.6 fs/aio.c SYSCALL_DEFINE6(io_pgetevents) verbatim order:
+    //   if (timeout && get_timespec64(&ts, timeout))     return -EFAULT;
+    //   if (usig && copy_from_user(&ksig, usig, 16))      return -EFAULT;
+    //   ret = set_user_sigmask(ksig.sigmask, ksig.sigsetsize); if (ret) return ret;
+    //   ret = do_io_getevents(ctx_id, min_nr, nr, events, timeout ? &ts : NULL);
+    // set_user_sigmask (kernel/signal.c) verbatim order:
+    //   if (!umask)                          return 0;    // NULL mask: NO further checks
+    //   if (sigsetsize != sizeof(sigset_t))  return -EINVAL;   // 8 on x86_64
+    //   if (copy_from_user(&kmask, umask, 8)) return -EFAULT;
+    // do_io_getevents -> lookup_ioctx -> -EINVAL (no AIO context ever exists
+    //   here, so this is the terminal). The min_nr/nr ordering check and the
+    //   events write live in read_events, reached only AFTER a valid ctx, so
+    //   they are unreachable on this kernel and collapse into the terminal.
+    //
+    // Batch 542: the pre-batch order was substantially wrong. It ran the
+    // min_nr/nr -> EINVAL check and the `events` write validation FIRST
+    // (before even reading `timeout`), and it checked `sigsetsize != 8` even
+    // when `sigmask` was NULL. Two real divergences: (a) a probe with
+    // (min_nr>nr, timeout=BADPTR) must see EFAULT (get_timespec64 runs first),
+    // not EINVAL; (b) a NULL sigmask paired with a bogus sigsetsize must NOT
+    // see the sigsetsize EINVAL, because set_user_sigmask early-returns 0 on a
+    // NULL mask before touching sigsetsize. Reorder and gate to match Linux.
     let timeout = args.arg4;
     let sig = args.arg5;
-    if min_nr < 0 || nr < 0 || min_nr > nr {
-        return linux_err(errno::EINVAL);
-    }
-    if nr > 0 && events != 0 {
-        // struct io_event is 32 bytes (data, obj, res, res2).
-        let len = match (nr as u64).checked_mul(32) {
-            Some(v) => v as usize,
-            None => return linux_err(errno::EINVAL),
-        };
-        if let Err(e) = crate::mm::user::validate_user_write(events, len) {
-            return linux_err(linux_errno_for(e));
-        }
-    }
+
+    // 1. get_timespec64(timeout): 16-byte copy_from_user -> EFAULT.
     if timeout != 0 {
-        // 16B timespec.
         if let Err(e) = crate::mm::user::validate_user_read(timeout, 16) {
             return linux_err(linux_errno_for(e));
         }
     }
+
+    // 2. copy_from_user(&ksig, usig, sizeof(__aio_sigset)=16) -> EFAULT, then
+    //    set_user_sigmask(ksig.sigmask, ksig.sigsetsize).
     if sig != 0 {
-        // struct __aio_sigset { sigset_t *sigmask; size_t sigsetsize; } — 16B.
-        // Linux: SYSCALL_DEFINE6(io_pgetevents) does copy_from_user(&ksig, usig,
-        // sizeof(ksig)) then set_user_sigmask(ksig.sigmask, ksig.sigsetsize).
-        // set_user_sigmask in kernel/signal.c gates on sigsetsize ==
-        // sizeof(sigset_t) (8 on x86_64) and copies the sigmask before
-        // returning to the read_events path.  Mirror that ordering so probes
-        // see EFAULT/EINVAL on a malformed sigset ahead of the terminal
-        // "no context" EINVAL.
         if let Err(e) = crate::mm::user::validate_user_read(sig, 16) {
             return linux_err(linux_errno_for(e));
         }
@@ -32808,15 +32809,21 @@ fn sys_io_pgetevents(args: &SyscallArgs) -> SyscallResult {
             Ok(b) => b,
             Err(_) => return linux_err(errno::EINVAL),
         });
-        if sigsetsize != 8 {
-            return linux_err(errno::EINVAL);
-        }
+        // set_user_sigmask: a NULL sigmask short-circuits to success BEFORE the
+        // sigsetsize check, so the size gate only applies when sigmask != 0.
         if sigmask != 0 {
+            if sigsetsize != 8 {
+                return linux_err(errno::EINVAL);
+            }
             if let Err(e) = crate::mm::user::validate_user_read(sigmask, 8) {
                 return linux_err(linux_errno_for(e));
             }
         }
     }
+
+    // 3. do_io_getevents -> lookup_ioctx fails (no AIO context) -> terminal
+    //    EINVAL. The min_nr/nr ordering and events write (read_events) are
+    //    unreachable without a valid ctx and collapse into this terminal.
     linux_err(errno::EINVAL)
 }
 
@@ -71159,10 +71166,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "[syscall/linux]   ioprio_set class-switch matches Linux block/ioprio.c (RT→EPERM, NONE+data→EINVAL, IDLE+any-data→0, class gate ordered before which gate): OK"
         );
 
-        // io_pgetevents bad nr ordering -> EINVAL.
+        // io_pgetevents (min_nr=5, nr=3): the min_nr/nr ordering check lives
+        // in read_events, reachable only AFTER a valid ctx, so on this kernel
+        // (no AIO context) it is unreachable and collapses into the terminal
+        // EINVAL from the failed lookup_ioctx. Batch 542 stopped treating it
+        // as a leading gate; the observable errno is unchanged (EINVAL).
         let a = SyscallArgs { arg0: 0, arg1: 5, arg2: 3, arg3: events_ptr, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::IO_PGETEVENTS, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: io_pgetevents min>nr not EINVAL");
+            serial_println!("[syscall/linux]   FAIL: io_pgetevents min>nr not EINVAL (terminal)");
             return Err(KernelError::InternalError);
         }
         // io_pgetevents valid (no ctx) -> EINVAL.
@@ -71171,19 +71182,23 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: io_pgetevents valid not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // io_pgetevents __aio_sigset gating.  Build dedicated 16-byte
-        // sigset buffers exercising sigmask/sigsetsize handling.
+        // io_pgetevents __aio_sigset gating.  Build dedicated 16-byte sigset
+        // buffers exercising sigmask/sigsetsize handling.
         // Layout: [sigmask u64 LE][sigsetsize u64 LE].
         //
         // Kernel-context note: validate_user_read/copy_from_user bypass
         // validation when there's no owning user process (see
-        // mm/user::is_kernel_context).  That means we cannot synthesize
-        // the EFAULT path from kernel-context tests — pointer validity is
-        // always treated as OK.  What we *can* test is the sigsetsize
-        // gate, which fires on the in-struct field independent of any
-        // pointer check.
+        // mm/user::is_kernel_context). We cannot synthesize the EFAULT path
+        // from kernel-context tests — pointer validity is always treated as OK.
+        // The sigsetsize EINVAL gate is logic-testable, but only when
+        // sigmask != 0: set_user_sigmask early-returns 0 on a NULL mask BEFORE
+        // the size check (kernel/signal.c), so a NULL mask with any sigsetsize
+        // skips the gate entirely. At boot every path still surfaces EINVAL
+        // (the gate value equals the terminal), so these cases prove the
+        // premises (which path is taken) rather than distinguishing by errno.
         //
-        // Valid: sigmask=NULL, sigsetsize=8 -> falls through to terminal EINVAL.
+        // (a) sigmask=NULL, sigsetsize=8 -> set_user_sigmask returns 0 ->
+        //     terminal EINVAL (no ctx).
         let aio_sig_null: [u8; 16] = {
             let mut b = [0u8; 16];
             b[8..16].copy_from_slice(&8u64.to_ne_bytes());
@@ -71199,58 +71214,49 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        // Bad sigsetsize (7) -> EINVAL.  Distinguished from the terminal
-        // EINVAL by ordering: the set_user_sigmask gate rejects ahead of
-        // the do_io_getevents context lookup.  Both surface EINVAL here
-        // but a probe pairing this with a sigsetsize=8 + bad-ctx request
-        // would see the size errno on every non-8 value uniformly.
-        let aio_sig_badsz: [u8; 16] = {
+        // (b) Batch 542 correctness: sigmask=NULL, sigsetsize=7 (bogus). Linux
+        //     set_user_sigmask early-returns 0 on the NULL mask and NEVER
+        //     reaches the size check — so this does NOT hit the sigsetsize
+        //     EINVAL gate; it falls through to the terminal EINVAL. (Pre-batch
+        //     wrongly applied the size gate here.)
+        let aio_sig_null_badsz: [u8; 16] = {
             let mut b = [0u8; 16];
             b[8..16].copy_from_slice(&7u64.to_ne_bytes());
             b
         };
-        let aio_sig_badsz_ptr = aio_sig_badsz.as_ptr() as u64;
+        let aio_sig_null_badsz_ptr = aio_sig_null_badsz.as_ptr() as u64;
         let a = SyscallArgs {
-            arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: aio_sig_badsz_ptr,
+            arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: aio_sig_null_badsz_ptr,
         };
         if dispatch_linux(nr::IO_PGETEVENTS, &a).value != -i64::from(errno::EINVAL) {
             serial_println!(
-                "[syscall/linux]   FAIL: io_pgetevents sigsetsize=7 not EINVAL"
+                "[syscall/linux]   FAIL: io_pgetevents null mask sz=7 not EINVAL (terminal)"
             );
             return Err(KernelError::InternalError);
         }
-        // sigsetsize=9 -> EINVAL (only exactly 8 is accepted).
-        let aio_sig_sz9: [u8; 16] = {
-            let mut b = [0u8; 16];
-            b[8..16].copy_from_slice(&9u64.to_ne_bytes());
-            b
-        };
-        let aio_sig_sz9_ptr = aio_sig_sz9.as_ptr() as u64;
-        let a = SyscallArgs {
-            arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: aio_sig_sz9_ptr,
-        };
-        if dispatch_linux(nr::IO_PGETEVENTS, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: io_pgetevents sigsetsize=9 not EINVAL"
-            );
-            return Err(KernelError::InternalError);
-        }
-        // sigsetsize=0 -> EINVAL.
-        let aio_sig_sz0 = [0u8; 16];
-        let aio_sig_sz0_ptr = aio_sig_sz0.as_ptr() as u64;
-        let a = SyscallArgs {
-            arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: aio_sig_sz0_ptr,
-        };
-        if dispatch_linux(nr::IO_PGETEVENTS, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: io_pgetevents sigsetsize=0 not EINVAL"
-            );
-            return Err(KernelError::InternalError);
-        }
-        // Valid sigmask + sigsetsize=8 (mask points at kernel stack
-        // buffer which validates in kernel context) -> terminal EINVAL.
+        // (c) Non-NULL sigmask exercises the real sigsetsize gate. mask points
+        //     at a valid kernel-stack buffer (validates in kernel context).
         let sigmask_buf = [0u8; 8];
         let sigmask_ptr = sigmask_buf.as_ptr() as u64;
+        for &sz in &[7u64, 9, 0] {
+            let aio_sig: [u8; 16] = {
+                let mut b = [0u8; 16];
+                b[0..8].copy_from_slice(&sigmask_ptr.to_ne_bytes());
+                b[8..16].copy_from_slice(&sz.to_ne_bytes());
+                b
+            };
+            let a = SyscallArgs {
+                arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: aio_sig.as_ptr() as u64,
+            };
+            if dispatch_linux(nr::IO_PGETEVENTS, &a).value != -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: io_pgetevents non-null mask bad sigsetsize not EINVAL"
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        // (d) Non-NULL sigmask + sigsetsize=8 -> size gate passes, the sigmask
+        //     copy is bypassed in kernel context -> terminal EINVAL.
         let aio_sig_valid: [u8; 16] = {
             let mut b = [0u8; 16];
             b[0..8].copy_from_slice(&sigmask_ptr.to_ne_bytes());
@@ -71268,7 +71274,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!(
-            "[syscall/linux]   io_pgetevents sigset validation: OK"
+            "[syscall/linux]   io_pgetevents timeout/sigset order + NULL-mask short-circuit (batch 542): OK"
         );
 
         // Batch 493: Linux v6.6 fs/namespace.c::SYSCALL_DEFINE5(

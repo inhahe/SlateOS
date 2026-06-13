@@ -700,16 +700,69 @@ pub unsafe fn load_segments(
     elf: &ElfFile<'_>,
     pml4_phys: u64,
 ) -> KernelResult<()> {
+    // SAFETY: forwarding caller's safety requirements to the bias-aware
+    // loader; bias 0 maps every segment at its own `p_vaddr`, exactly the
+    // historical behaviour of this function.
+    unsafe { load_segments_with_bias(elf, pml4_phys, 0) }
+}
+
+/// Load all `PT_LOAD` segments at a runtime load bias.
+///
+/// Identical to [`load_segments`] except that every segment is mapped at
+/// `bias + p_vaddr` instead of `p_vaddr`.  This is how a position-
+/// independent program interpreter (`ld.so`, always `ET_DYN` with
+/// `p_vaddr` values relative to 0) is placed at a chosen base address:
+/// the kernel picks `bias`, maps the loader there, and enters it at
+/// `bias + e_entry`.  For the main executable `bias` is 0 (`ET_EXEC`
+/// images have absolute `p_vaddr`s; `ET_DYN`/PIE executables are loaded
+/// at a fixed bias chosen by the caller — currently 0).
+///
+/// The biased range `[bias + p_vaddr, bias + p_vaddr + p_memsz)` is
+/// re-validated against [`USER_SPACE_END`]; an overflow or out-of-range
+/// segment yields [`KernelError::InvalidAddress`].
+///
+/// # Errors
+///
+/// Same as [`load_segments`], plus [`KernelError::InvalidAddress`] when
+/// applying `bias` overflows or pushes a segment past the user-space
+/// limit.
+///
+/// # Safety
+///
+/// Same requirements as [`load_segments`]: `pml4_phys` must be a valid
+/// PML4 and no other CPU may use the address space concurrently.
+pub unsafe fn load_segments_with_bias(
+    elf: &ElfFile<'_>,
+    pml4_phys: u64,
+    bias: u64,
+) -> KernelResult<()> {
     let hhdm = page_table::hhdm()
         .ok_or(KernelError::InternalError)?;
 
-    let segments = elf.loadable_segments()?;
-
-    for seg in segments {
+    for seg in elf.loadable_segments()? {
+        // Apply the load bias to the segment's virtual placement.  All of
+        // load_one_segment's address math (frame mapping AND file-overlap
+        // copy) derives from `seg.vaddr`, so shifting it by a constant
+        // bias relocates the whole segment consistently while the file
+        // offsets stay relative.
+        let biased_vaddr = seg
+            .vaddr
+            .checked_add(bias)
+            .ok_or(KernelError::InvalidAddress)?;
+        let seg_end = biased_vaddr
+            .checked_add(seg.mem_size)
+            .ok_or(KernelError::InvalidAddress)?;
+        if seg_end > USER_SPACE_END {
+            return Err(KernelError::InvalidAddress);
+        }
+        let biased = LoadableSegment {
+            vaddr: biased_vaddr,
+            ..seg
+        };
         // SAFETY: Forwarding caller's safety requirements — pml4_phys
         // is valid, no concurrent access.
         unsafe {
-            load_one_segment(elf, &seg, pml4_phys, hhdm)?;
+            load_one_segment(elf, &biased, pml4_phys, hhdm)?;
         }
     }
 

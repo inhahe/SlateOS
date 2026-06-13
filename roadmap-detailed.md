@@ -187,7 +187,7 @@ batches must hold to the same discipline.
 
 ## Phase 0: Project Foundation
 
-- [ ] Choose a project name - out of ai's suggestions, so far it's Slate, Facet or Rime. My ideas: Neo (going with that so far)
+- [x] Choose a project name — RESOLVED: **Slate OS** (display name; identifier form "SlateOS"). Renamed from OuRoS across the codebase 2026-06-13. [original brainstorm: out of ai's suggestions, so far it's Slate, Facet or Rime. My ideas: Neo (going with that so far)]
 - [x] Set up git repo, CI, build system (cargo workspace)
 - [x] Set up QEMU/VirtualBox dev loop (edit on Windows, cross-compile, boot in VM)
 - [x] Set up Rust cross-compilation (`x86_64-unknown-none` target)

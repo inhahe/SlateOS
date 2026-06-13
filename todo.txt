@@ -5310,14 +5310,7 @@
 ##       std::net::Ipv6Addr::new and the segment count is inherent to IPv6.
 ##   Clippy-clean host + slateos; builds for slateos.
 ##
-## JUDGMENT CALL (2026-05-31, avahi autoipd MAX_CONFLICTS semantics):
-##   The conflict counter previously failed when count >= MAX_CONFLICTS (10),
-##   i.e. it tolerated only 9 retries.  The unit test encodes the opposite
-##   intent (10 retries tolerated, fail on the 11th conflict), which matches
-##   RFC 3927 §2.2.1's "exceeds MAX_CONFLICTS" wording.  I changed production to
-##   `> MAX_CONFLICTS` to align with the test + RFC rather than relaxing the
-##   test.  Easy to reverse (one comparison at AutoIpd::step, Conflict arm) if
-##   the human prefers the stricter "give up at the 10th conflict" reading.
+## [migrated 2026-06-13 -> design-decisions.md §15] avahi autoipd MAX_CONFLICTS: fail on the 11th conflict (> MAX_CONFLICTS) per RFC 3927 §2.2.1. Autonomous, reversible.
 ##
 ## BUG (noticed+FIXED 2026-05-31): cups had a broken test build + ~9
 ##   pre-existing clippy errors.  userspace/cups/src/main.rs:
@@ -8514,23 +8507,7 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##     improvement that sidesteps the reader-stream codegen path on every
 ##     toolchain.
 ##
-## JUDGMENT CALL — TOOLCHAIN POLICY for nushell:
-##   The project's default toolchain remains 1.93.1-x86_64-pc-windows-gnu
-##   per `rust-toolchain.toml`.  We have NOT upgraded the project pin.
-##   When building the nushell port specifically, invoke it with
-##   `rustup run nightly-x86_64-pc-windows-msvc` until the upstream gnu
-##   issue is resolved or until the broader project moves to msvc.  This
-##   only affects how nushell is built; it does not affect any other crate
-##   in the OS workspace.
-##
-## NEW BUG NOTICED 2026-06-03 (NOT FIXED — upstream nushell):
-##   - nu-cli unused import `PipelineMetadata` in
-##     crates/nu-cli/src/commands/history/history_.rs
-##   - nu binary unused import `path::Path` in src/command.rs
-##   - dead-code variant `ListPath` somewhere in the nu binary
-##   - future-incompat warning on proc-macro-error2 v2.0.1 (dep of a dep)
-##   These are warnings only and not introduced by our port.  Not worth
-##   patching upstream code for these.
+## [migrated 2026-06-13 -> design-decisions.md §16] nushell port: build with nightly-x86_64-pc-windows-msvc (project pin unchanged) until the upstream gnu issue is fixed; leave the handful of upstream nushell warnings unpatched. Autonomous, reversible.
 
 ## BUG (noticed+FIXED 2026-06-03): gui/desktop/src/launcher.rs was a complete
 ##   953-line Spotlight-style LauncherState module (fuzzy matching + frecency

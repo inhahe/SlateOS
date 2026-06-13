@@ -1211,3 +1211,63 @@ judgment calls→design-decisions.md/open-questions.md).
 - Restore `todo.backup-2026-06-13.txt` to recover any migrated block verbatim;
   the per-block moves are also in git history. Revert this section and the
   `todo.txt`/`roadmap-detailed.md` headers to return to the catch-all model.
+
+## 15. avahi `autoipd` MAX_CONFLICTS — fail on the (MAX_CONFLICTS+1)th conflict, matching RFC 3927
+
+**Date:** 2026-05-31
+
+**Decided by:** Claude (autonomous) — a small implementation choice made while
+bringing `userspace/avahi` (autoipd) up; easily reversible.
+
+**Context:**
+RFC 3927 §2.2.1 (IPv4 Link-Local) says a host that experiences more than
+`MAX_CONFLICTS` (10) address conflicts should rate-limit / give up. The avahi
+`autoipd` conflict counter previously failed when `count >= MAX_CONFLICTS`,
+i.e. it tolerated only 9 retries and gave up on the 10th. The unit test encodes
+the opposite intent — 10 retries tolerated, fail on the 11th — which matches the
+RFC's "exceeds MAX_CONFLICTS" wording.
+
+**Decision:** changed production to `count > MAX_CONFLICTS` to align with both the
+test and the RFC, rather than relaxing the test to match the stricter code.
+
+**Why not the alternative:** the stricter "give up at the 10th conflict" reading
+is defensible (one fewer probe), but it contradicts the literal RFC wording and
+the test's encoded intent; aligning to the RFC is the lower-surprise choice.
+
+**Where it lives:** `userspace/avahi` — `AutoIpd::step`, the `Conflict` arm (one
+comparison). Reverse by flipping `>` back to `>=` if the operator prefers the
+strict reading.
+
+## 16. nushell port — build with the msvc nightly toolchain; leave upstream warnings unpatched
+
+**Date:** 2026-06-03
+
+**Decided by:** Claude (autonomous) — a build-toolchain workaround and a
+don't-touch-upstream call made while bringing up the nushell port; both
+reversible.
+
+**Context:**
+The project's default toolchain is `1.93.1-x86_64-pc-windows-gnu` (per
+`rust-toolchain.toml`). The nushell port hit an upstream gnu-toolchain build
+issue. Separately, building nushell surfaces a handful of upstream warnings not
+introduced by our port: an unused `PipelineMetadata` import in
+`nu-cli/.../history_.rs`, an unused `path::Path` import in `nu/src/command.rs`, a
+dead-code `ListPath` variant in the nu binary, and a future-incompat warning on
+`proc-macro-error2 v2.0.1` (a dep of a dep).
+
+**Decision:**
+- **Build nushell specifically with `rustup run nightly-x86_64-pc-windows-msvc`**
+  until the upstream gnu issue is resolved or the broader project moves to msvc.
+  The project pin is NOT changed; this affects only how nushell is built, no
+  other workspace crate.
+- **Do not patch the upstream nushell warnings** — they are warnings only, not
+  introduced by our port, and not worth carrying local edits to upstream code.
+
+**Why not the alternatives:** upgrading the project-wide toolchain pin to msvc
+would affect every crate and is a larger decision than one port warrants;
+patching upstream warnings creates a maintenance burden against future nushell
+updates for no functional gain.
+
+**Where it lives:** the nushell port build invocation (msvc nightly); the warnings
+live in upstream `nu-cli`/`nu` sources. Reverse the toolchain workaround when the
+gnu issue is fixed or the project moves to msvc.

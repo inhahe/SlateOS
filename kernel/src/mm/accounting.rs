@@ -369,7 +369,7 @@ impl AddressSpaceStats {
 
     /// Peak RSS in bytes.
     #[must_use]
-    #[allow(dead_code)] // Public API for procfs/diagnostics.
+    // Backs the Linux getrusage(2) ru_maxrss field (peak resident set size).
     pub fn peak_rss_bytes(&self) -> u64 {
         self.peak_rss_frames.saturating_mul(super::frame::FRAME_SIZE as u64)
     }

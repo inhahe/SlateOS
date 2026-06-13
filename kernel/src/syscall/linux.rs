@@ -10266,12 +10266,19 @@ fn write_uid32_triple(a: u64, b: u64, c: u64) -> SyscallResult {
 ///   - `RUSAGE_CHILDREN == -1`: aggregate stats for reaped children
 ///   - `RUSAGE_THREAD == 1`: stats for the calling thread
 ///
-/// We accept all three (and silently accept anything else) — every
-/// value gets the same zero rusage back.  Strict Linux returns EINVAL
-/// for unknown `who`, but we'd rather be lenient than break a program
-/// that's sloppy about the constant.
+/// Only those three are valid; any other `who` is rejected with
+/// `-EINVAL` before the rusage pointer is touched (matching Linux's
+/// gate order — see batch 305).
 ///
-/// Returns 0 on success, `-EFAULT` if `usage` is a bad pointer.
+/// The returned rusage is mostly zero: we have no per-process CPU-time,
+/// page-fault, or context-switch accounting yet, so utime/stime,
+/// minflt/majflt, nvcsw/nivcsw, etc. stay 0.  The one populated field is
+/// `ru_maxrss` (peak resident set size in KiB), sourced from the
+/// per-address-space RSS accounting for `RUSAGE_SELF`/`RUSAGE_THREAD`;
+/// `RUSAGE_CHILDREN` keeps it 0 (no child accounting).
+///
+/// Returns 0 on success, `-EINVAL` for an unknown `who`, `-EFAULT` if
+/// `usage` is a bad pointer.
 fn sys_getrusage(args: &SyscallArgs) -> SyscallResult {
     // Linux gate order (kernel/sys.c::SYSCALL_DEFINE2(getrusage)):
     //   1. who not in {SELF=0, CHILDREN=-1, THREAD=1}    -> -EINVAL
@@ -10305,10 +10312,45 @@ fn sys_getrusage(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = crate::mm::user::validate_user_write(usage_ptr, RUSAGE_SIZE) {
         return linux_err(linux_errno_for(e));
     }
-    let zero = [0u8; RUSAGE_SIZE];
+    // Build the rusage in kernel memory.  Most fields stay zero because we
+    // have no per-process CPU-time / fault / context-switch accounting yet
+    // (utime/stime, minflt/majflt, nvcsw/nivcsw, ...).  See known-issues:
+    // populating those requires scheduler-level CPU accounting on the hot
+    // path and is a separate feature, not an ABI gap.
+    let mut buf = [0u8; RUSAGE_SIZE];
+
+    // Batch 554: ru_maxrss (offset 32, __kernel_long_t) — peak resident set
+    // size in KiB.  Linux `kernel/sys.c::getrusage` (v6.6):
+    //   if (who != RUSAGE_CHILDREN) {
+    //       mm = get_task_mm(p);
+    //       if (mm) setmax_mm_hiwater_rss(&maxrss, mm);   // peak rss in PAGES
+    //   }
+    //   r->ru_maxrss = maxrss * (PAGE_SIZE / 1024);       // pages -> KiB
+    // So for RUSAGE_SELF and RUSAGE_THREAD (both `who != CHILDREN`) ru_maxrss
+    // is the address space's high-water resident size in KiB; RUSAGE_CHILDREN
+    // draws maxrss solely from `signal->cmaxrss` (child accounting we don't
+    // keep) and therefore stays 0.  We source the peak from the SAME
+    // per-address-space RSS accounting that charges every mapped 16 KiB frame
+    // (mm::accounting, via the central page_table::map_frame path).  Dividing
+    // peak BYTES by 1024 reproduces Linux's `pages * (PAGE_SIZE/1024)` exactly
+    // while staying page-size-agnostic: it honours our 16 KiB frame size, not
+    // the Linux ABI's 4 KiB page.  The caller is running, so its address space
+    // is the active CR3's PML4 — no pid->mm lookup is needed.  An untracked
+    // address space (e.g. a boot-context probe whose PML4 was never registered
+    // via init_address_space) yields no stats and leaves ru_maxrss 0.
+    if who_i32 != RUSAGE_CHILDREN {
+        let pml4 = crate::mm::page_table::active_pml4_phys();
+        if let Some(stats) = crate::mm::accounting::query(pml4) {
+            let maxrss_kib = stats.peak_rss_bytes() / 1024;
+            #[allow(clippy::cast_possible_wrap)]
+            let v = maxrss_kib as i64;
+            buf[32..40].copy_from_slice(&v.to_ne_bytes());
+        }
+    }
+
     // SAFETY: validate_user_write above confirmed a 144-byte
-    // writable user range; we copy 144 zero bytes from kernel memory.
-    let r = unsafe { crate::mm::user::copy_to_user(zero.as_ptr(), usage_ptr, RUSAGE_SIZE) };
+    // writable user range; we copy our 144-byte rusage image.
+    let r = unsafe { crate::mm::user::copy_to_user(buf.as_ptr(), usage_ptr, RUSAGE_SIZE) };
     if let Err(e) = r {
         return linux_err(linux_errno_for(e));
     }
@@ -42882,6 +42924,65 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         serial_println!(
             "[syscall/linux]   getrusage who input validation + int truncation: OK"
+        );
+    }
+
+    // Batch 554 — sys_getrusage ru_maxrss (offset 32) must report the
+    // caller's peak resident set size in KiB, sourced from the same
+    // per-address-space RSS accounting that backs the OOM killer.  Pre-batch
+    // the whole 144-byte rusage was zeroed, so tools that read the peak
+    // (time(1)'s "Maximum resident set size", valgrind's ceiling readback,
+    // and ru_maxrss-based memory monitors) saw a constant 0 KiB.  Peak RSS is
+    // monotonic non-decreasing, so a frame mapped between the bracketing
+    // accounting snapshots can only raise it — the reported value must lie in
+    // [before, after].  A boot-context PML4 that accounting never registered
+    // (no init_address_space) yields no stats, in which case ru_maxrss is 0.
+    {
+        let mut rbuf = [0u8; 144];
+        let rptr = rbuf.as_mut_ptr() as u64;
+        let a = SyscallArgs {
+            arg0: 0, // RUSAGE_SELF
+            arg1: rptr,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let pml4 = crate::mm::page_table::active_pml4_phys();
+        let snap = |p: u64| -> Option<i64> {
+            crate::mm::accounting::query(p).map(|s| {
+                // RSS in KiB never approaches i64::MAX; the cast cannot wrap.
+                #[allow(clippy::cast_possible_wrap)]
+                let kib = (s.peak_rss_bytes() / 1024) as i64;
+                kib
+            })
+        };
+        let before = snap(pml4);
+        if dispatch_linux(nr::GETRUSAGE, &a).value != 0 {
+            serial_println!("[syscall/linux]   FAIL: getrusage(SELF, valid) not 0 for maxrss check");
+            return Err(KernelError::InternalError);
+        }
+        let after = snap(pml4);
+        let rep = match rbuf.get(32..40).and_then(|s| <[u8; 8]>::try_from(s).ok()) {
+            Some(bytes) => i64::from_ne_bytes(bytes),
+            None => {
+                serial_println!("[syscall/linux]   FAIL: getrusage ru_maxrss slice");
+                return Err(KernelError::InternalError);
+            }
+        };
+        let ok = match (before, after) {
+            (None, None) => rep == 0,
+            (Some(b), Some(af)) => rep >= b && rep <= af,
+            // Tracking could begin/end mid-call; bound on the live snapshot.
+            (None, Some(af)) => rep >= 0 && rep <= af,
+            (Some(b), None) => rep >= b,
+        };
+        if !ok {
+            serial_println!(
+                "[syscall/linux]   FAIL: getrusage ru_maxrss {} outside accounting bracket [{:?}, {:?}]",
+                rep, before, after
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   getrusage ru_maxrss = peak RSS KiB from mm::accounting (RUSAGE_SELF; batch 554; pre-batch zeroed): OK"
         );
     }
 

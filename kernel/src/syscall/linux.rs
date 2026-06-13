@@ -16365,6 +16365,31 @@ fn sys_tee(args: &SyscallArgs) -> SyscallResult {
     if let Err(r) = validate_linux_fd(fd_out) {
         return r;
     }
+
+    // Batch 540: do_tee() prologue (fs/splice.c) after the two fdgets:
+    //   int ret = -EINVAL;
+    //   if (!(in->f_mode & FMODE_READ) || !(out->f_mode & FMODE_WRITE))
+    //       return -EBADF;
+    //   if (ipipe && opipe && ipipe != opipe) { ... transfer ... }
+    //   return ret;
+    // The only observable non-EINVAL gate is the FMODE_READ/FMODE_WRITE
+    // EBADF check: tee requires two distinct pipes, and both the
+    // "not two distinct pipes" path and the unimplemented transfer path
+    // return EINVAL, identical to our terminal EINVAL. Pre-batch sys_tee
+    // lacked this gate.
+    if let Some(pid) = caller_pid() {
+        if let Some(ein) = pcb::linux_fd_lookup(pid, fd_in) {
+            if !fd_access_is_readable(ein.status_flags) {
+                return linux_err(errno::EBADF);
+            }
+        }
+        if let Some(eout) = pcb::linux_fd_lookup(pid, fd_out) {
+            if !fd_access_is_writable(eout.status_flags) {
+                return linux_err(errno::EBADF);
+            }
+        }
+    }
+
     linux_err(errno::EINVAL)
 }
 
@@ -55163,6 +55188,27 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             != -i64::from(errno::EINVAL) {
             serial_println!("[syscall/linux]   FAIL: tee(high-half flag) not EINVAL");
             return Err(KernelError::InternalError);
+        }
+
+        // Batch 540: do_tee()'s FMODE_READ(in)/FMODE_WRITE(out) -> EBADF gate
+        // is reachable only when caller_pid() is Some (fd-table lookup); at
+        // boot caller_pid()=None bypasses it (same as batches 537/538/539), so
+        // it is predicate-tested via the access-mode derivations that drive it.
+        {
+            use crate::proc::linux_fd::{O_RDONLY, O_RDWR, O_WRONLY};
+            if fd_access_is_readable(O_WRONLY)
+                || !fd_access_is_readable(O_RDONLY)
+                || !fd_access_is_readable(O_RDWR) {
+                serial_println!("[syscall/linux]   FAIL: tee in FMODE_READ derivation");
+                return Err(KernelError::InternalError);
+            }
+            if fd_access_is_writable(O_RDONLY)
+                || !fd_access_is_writable(O_WRONLY)
+                || !fd_access_is_writable(O_RDWR) {
+                serial_println!("[syscall/linux]   FAIL: tee out FMODE_WRITE derivation");
+                return Err(KernelError::InternalError);
+            }
+            serial_println!("[syscall/linux]   tee do_tee FMODE_READ/FMODE_WRITE EBADF (batch 540): OK");
         }
 
         // (f) vmsplice(nr_segs=0, valid flags) -> 0 (gate 3 fires

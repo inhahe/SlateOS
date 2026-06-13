@@ -1,4 +1,23 @@
 
+## DONE (2026-06-12): ABI batch 540 — tee do_tee() FMODE_READ(in)/FMODE_WRITE(out) -> EBADF gate
+## Linux v6.6 fs/splice.c (verified verbatim against raw.githubusercontent.com torvalds/linux v6.6):
+##   SYSCALL_DEFINE4(tee): if(flags&~SPLICE_F_ALL) -EINVAL; if(!len) return 0;
+##     fdget(fdin)->EBADF; fdget(fdout)->EBADF; do_tee(...).
+##   do_tee(): ipipe=get_pipe_info(in); opipe=get_pipe_info(out); int ret=-EINVAL;
+##     if(!(in.f_mode&FMODE_READ) || !(out.f_mode&FMODE_WRITE)) return -EBADF;
+##     if(ipipe && opipe && ipipe!=opipe){ ... ipipe_prep/opipe_prep/link_pipe ... }
+##     return ret;  // default -EINVAL when not two distinct pipes
+## Pre-batch sys_tee lacked the FMODE_READ(in)/FMODE_WRITE(out) -> EBADF gate; it returned the
+## terminal EINVAL directly after the two fd validations.
+## Fix (translator-only, kernel/src/syscall/linux.rs sys_tee ~16275): after the two fd validations,
+##   caller_pid Some: !fd_access_is_readable(in)->EBADF; !fd_access_is_writable(out)->EBADF; terminal EINVAL.
+## RATIONALE: the only observable non-EINVAL gate in do_tee is the FMODE EBADF check. tee requires two
+## distinct pipes; both the "not two distinct pipes" path (default ret=-EINVAL) and the unimplemented
+## transfer path return EINVAL, identical to our terminal EINVAL — so nothing else needs modelling.
+## VERIFIED: At boot caller_pid()=None bypasses the fd-table gate (same as batches 537/538/539), so the
+## FMODE_READ/FMODE_WRITE derivations are predicate-tested. Stamp "tee do_tee FMODE_READ/FMODE_WRITE
+## EBADF (batch 540): OK". cargo build clean; clippy 17477 (unchanged); boot-test BOOT_OK 25s EXIT=0.
+
 ## DONE (2026-06-12): ABI batch 539 — splice __do_splice/do_splice prologue: ESPIPE + offset order + FMODE EBADF
 ## Linux v6.6 fs/splice.c (verified verbatim against raw.githubusercontent.com torvalds/linux v6.6):
 ##   SYSCALL_DEFINE6(splice): if(!len) return 0; if(flags&~SPLICE_F_ALL) -EINVAL;

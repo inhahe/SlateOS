@@ -2378,6 +2378,13 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     let utime = task.user_ticks;
     let stime = task.sys_ticks;
 
+    // cutime/cstime (fields 16/17): user/system CPU time of this process's
+    // reaped descendants, in clock ticks.  Process-wide, so keyed off
+    // `proc_id` (a bare kernel thread with no PCB reports 0).  Credited at
+    // wait/reap from each reaped child's (utime+cutime, stime+cstime),
+    // mirroring Linux's `signal->cutime`/`cstime`.
+    let (cutime, cstime) = crate::proc::pcb::process_child_ticks(proc_id);
+
     // Virtual size (bytes) and resident pages, in Linux ABI page units.
     // Bare scheduler tasks (no process / address-space charge) report 0,
     // exactly as Linux does for kernel threads.  Threads share the owning
@@ -2443,15 +2450,15 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     // 49:arg_end 50:env_start 51:env_end 52:exit_code
     // One space between every field, terminated by a single newline.
     // Placeholders left-to-right: pid comm state ppid pgrp session
-    // <tty_nr/tpgid/flags=0/-1/0> <minflt..cmajflt=0> utime
-    // <stime..cstime=0> priority nice=0 num_threads itrealvalue=0
+    // <tty_nr/tpgid/flags=0/-1/0> <minflt..cmajflt=0> utime stime
+    // cutime cstime priority nice=0 num_threads itrealvalue=0
     // starttime vsize rss rsslim <startcode..wchan=0> <nswap/cnswap=0>
     // exit_signal=17 processor <rt_priority..env_end=0> exit_code.
     let text = format!(
-        "{} ({}) {} {} {} {} 0 -1 0 0 0 0 0 {} {} 0 0 {} 0 {} 0 {} {} {} {} \
+        "{} ({}) {} {} {} {} 0 -1 0 0 0 0 0 {} {} {} {} {} 0 {} 0 {} {} {} {} \
          0 0 0 0 0 0 0 0 0 0 0 0 17 {} 0 0 0 0 0 0 0 0 0 0 0 0 {}\n",
         task.id, name, state_char, ppid, pgrp_sid, pgrp_sid,
-        utime, stime, priority, num_threads, starttime,
+        utime, stime, cutime, cstime, priority, num_threads, starttime,
         vsize, rss_pages, rsslim,
         processor,
         exit_code,

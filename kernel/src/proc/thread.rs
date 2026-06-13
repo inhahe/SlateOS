@@ -389,8 +389,15 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
     // This prevents dangling registrations when a driver process crashes.
     crate::ioapic::release_irqs_for_task(task_id);
 
+    // Capture the exiting thread's accumulated CPU ticks while its Task is
+    // still alive in the scheduler — `remove_thread` folds them into the
+    // owning process's accumulator so they survive the Task's destruction.
+    // (Lock ordering: read SCHED here, before taking PROCESS_TABLE inside
+    // remove_thread, to avoid nesting the two locks.)
+    let (exit_user, exit_sys) = sched::cpu_ticks(task_id).unwrap_or((0, 0));
+
     // Remove from the process's thread list.
-    match pcb::remove_thread(pid, task_id) {
+    match pcb::remove_thread(pid, task_id, exit_user, exit_sys) {
         Ok((is_zombie, wake_task, any_waiter)) => {
             if is_zombie {
                 serial_println!(
@@ -434,35 +441,39 @@ pub fn owner_process(task_id: TaskId) -> Option<ProcessId> {
     owners.get(&task_id).copied()
 }
 
-/// Sum the `(user_ticks, sys_ticks)` CPU time across all **live**
-/// threads of a process.
+/// Sum the `(user_ticks, sys_ticks)` CPU time of a process across both
+/// its **live** threads and its **already-exited** threads.
 ///
 /// Each thread's CPU time is charged tick-by-tick by the scheduler
-/// (Linux tick-sampling model).  Returns `(0, 0)` if the process has no
-/// registered threads.  Ticks are at `USER_HZ` (100 Hz).
+/// (Linux tick-sampling model).  When a thread exits, `on_thread_exit`
+/// folds its ticks into the per-process accumulator
+/// (`Process::acct_user_ticks`/`acct_sys_ticks`) before the scheduler
+/// destroys the Task, so the total here is
+/// `accumulator + Σ(live thread ticks)`.  Returns `(0, 0)` if the process
+/// is unknown.  Ticks are at `USER_HZ` (100 Hz).
+///
+/// This makes the result exact for multi-threaded processes even after
+/// worker threads have exited — not just single-threaded ones.
 ///
 /// Sourced by the Linux-ABI `getrusage(RUSAGE_SELF)` `ru_utime`/
 /// `ru_stime`, `times` `tms_utime`/`tms_stime`, and `/proc/<pid>/stat`
-/// utime/stime surfaces.
-///
-/// **Limitation:** only live threads contribute — a multi-threaded
-/// process that has already reaped worker threads under-reports their
-/// CPU time, since exited threads are removed from the scheduler.  For
-/// single-threaded processes (the common case) the sum is exact, as the
-/// main thread lives for the whole process lifetime.  Children-time
-/// accounting (`cutime`/`cstime`, `RUSAGE_CHILDREN`) is separate and not
-/// yet tracked (known-issues TD14).
+/// utime/stime surfaces.  Children-time (`cutime`/`cstime`,
+/// `RUSAGE_CHILDREN`) is tracked separately — see
+/// [`crate::proc::pcb::process_child_ticks`].
 #[must_use]
 pub fn process_cpu_ticks(pid: ProcessId) -> (u64, u64) {
-    let Some(task_ids) = pcb::get_threads(pid) else {
+    // Exited-thread accumulator (also serves as the existence check:
+    // `None` means the process is unknown).
+    let Some((mut user, mut sys)) = pcb::process_acct_ticks(pid) else {
         return (0, 0);
     };
-    let mut user: u64 = 0;
-    let mut sys: u64 = 0;
-    for tid in task_ids {
-        if let Some((u, s)) = sched::cpu_ticks(tid) {
-            user = user.saturating_add(u);
-            sys = sys.saturating_add(s);
+    // Add live threads' in-flight ticks.
+    if let Some(task_ids) = pcb::get_threads(pid) {
+        for tid in task_ids {
+            if let Some((u, s)) = sched::cpu_ticks(tid) {
+                user = user.saturating_add(u);
+                sys = sys.saturating_add(s);
+            }
         }
     }
     (user, sys)

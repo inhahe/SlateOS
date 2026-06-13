@@ -10625,11 +10625,12 @@ fn write_uid32_triple(a: u64, b: u64, c: u64) -> SyscallResult {
 ///
 /// Populated fields: `ru_utime`/`ru_stime` (user/system CPU time from
 /// the scheduler's per-task tick counters — process-wide for
-/// `RUSAGE_SELF`, the calling thread for `RUSAGE_THREAD`) and
-/// `ru_maxrss` (peak resident set size in KiB, from the per-address-space
-/// RSS accounting).  `RUSAGE_CHILDREN` keeps both at 0 (reaped-children
-/// accounting not tracked yet — known-issues TD14).  The fault and
-/// context-switch counters stay 0.
+/// `RUSAGE_SELF`, the calling thread for `RUSAGE_THREAD`, and the
+/// reaped-children accumulator for `RUSAGE_CHILDREN`) and `ru_maxrss`
+/// (peak resident set size in KiB, from the per-address-space RSS
+/// accounting; `RUSAGE_CHILDREN` keeps `ru_maxrss` at 0, matching Linux's
+/// `signal->cmaxrss` which we don't track).  The fault and context-switch
+/// counters stay 0 (known-issues TD14 follow-up).
 ///
 /// Returns 0 on success, `-EINVAL` for an unknown `who`, `-EFAULT` if
 /// `usage` is a bad pointer.
@@ -10701,10 +10702,10 @@ fn sys_getrusage(args: &SyscallArgs) -> SyscallResult {
     // (Linux `account_user_time`/`account_system_time` model).  Ticks at
     // USER_HZ == 100 Hz, so each tick is 10 ms == 10_000 us.
     //
-    //   - RUSAGE_SELF (0): sum across all live threads of the process.
+    //   - RUSAGE_SELF (0): sum across this process's live + exited threads.
     //   - RUSAGE_THREAD (1): just the calling thread.
-    //   - RUSAGE_CHILDREN (-1): reaped-children CPU time, which we don't
-    //     accumulate yet (known-issues TD14) — stays 0.
+    //   - RUSAGE_CHILDREN (-1): CPU time of reaped descendants
+    //     (`signal->cutime`/`cstime`), accumulated at wait/reap.
     let (user_ticks, sys_ticks): (u64, u64) = match who_i32 {
         RUSAGE_SELF => {
             let pid = caller_pid().unwrap_or(0);
@@ -10714,7 +10715,11 @@ fn sys_getrusage(args: &SyscallArgs) -> SyscallResult {
             let tid = crate::sched::current_task_id();
             crate::sched::cpu_ticks(tid).unwrap_or((0, 0))
         }
-        _ => (0, 0), // RUSAGE_CHILDREN
+        _ => {
+            // RUSAGE_CHILDREN: reaped-children CPU time.
+            let pid = caller_pid().unwrap_or(0);
+            crate::proc::pcb::process_child_ticks(pid)
+        }
     };
     write_rusage_timeval(&mut buf, 0, user_ticks);
     write_rusage_timeval(&mut buf, 16, sys_ticks);
@@ -10944,9 +10949,10 @@ fn sys_sysinfo(args: &SyscallArgs) -> SyscallResult {
 ///
 /// `tms_utime`/`tms_stime` (the calling process's user/system CPU time
 /// in clock ticks at `USER_HZ == 100`) are sourced from the scheduler's
-/// per-task tick counters, summed across the process's live threads.
-/// `tms_cutime`/`tms_cstime` (reaped-children time) are not tracked yet
-/// (known-issues TD14) and stay 0.  `buf == NULL` is permitted (POSIX:
+/// per-task tick counters, summed across the process's live and exited
+/// threads.  `tms_cutime`/`tms_cstime` (CPU time of reaped descendants)
+/// come from the per-process children-time accumulator credited at
+/// wait/reap.  `buf == NULL` is permitted (POSIX:
 /// the caller wants only the return value). A non-NULL but unwritable
 /// `buf` returns `EFAULT`.  Because our tick rate equals Linux's USER_HZ,
 /// a tick count maps directly to a `clock_t` with no rescale.
@@ -10964,14 +10970,20 @@ fn sys_times(args: &SyscallArgs) -> SyscallResult {
         }
         let pid = caller_pid().unwrap_or(0);
         let (user_ticks, sys_ticks) = crate::proc::thread::process_cpu_ticks(pid);
+        let (cuser_ticks, csys_ticks) = crate::proc::pcb::process_child_ticks(pid);
         let mut buf = [0u8; TMS_SIZE];
         #[allow(clippy::cast_possible_wrap)]
         let utime_i = user_ticks as i64;
         #[allow(clippy::cast_possible_wrap)]
         let stime_i = sys_ticks as i64;
+        #[allow(clippy::cast_possible_wrap)]
+        let cutime_i = cuser_ticks as i64;
+        #[allow(clippy::cast_possible_wrap)]
+        let cstime_i = csys_ticks as i64;
         buf[0..8].copy_from_slice(&utime_i.to_ne_bytes()); // tms_utime
         buf[8..16].copy_from_slice(&stime_i.to_ne_bytes()); // tms_stime
-        // tms_cutime (16..24) / tms_cstime (24..32) stay 0 (TD14).
+        buf[16..24].copy_from_slice(&cutime_i.to_ne_bytes()); // tms_cutime
+        buf[24..32].copy_from_slice(&cstime_i.to_ne_bytes()); // tms_cstime
         // SAFETY: validate_user_write above confirmed a 32-byte
         // writable user range; we copy exactly 32 bytes.
         let r = unsafe { crate::mm::user::copy_to_user(buf.as_ptr(), tms_ptr, TMS_SIZE) };
@@ -34619,7 +34631,7 @@ fn test_waitid_scan() -> crate::error::KernelResult<()> {
     pcb::set_exit_code(child, 42)?;
     // Transition to Zombie: register then drop the last thread.
     pcb::add_thread(child, 7000)?;
-    pcb::remove_thread(child, 7000)?;
+    pcb::remove_thread(child, 7000, 0, 0)?;
 
     // WNOWAIT (any-child) finds the zombie but must NOT reap it.
     match waitid_scan(parent, None, true, false, false, true)? {

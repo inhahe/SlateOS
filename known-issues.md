@@ -797,44 +797,57 @@ this kernel rarely steps the realtime clock at runtime.
 stamp it into the timerfd at settime when `CANCEL_ON_SET` is set; on read/poll, if
 the counter advanced, return `ECANCELED`/`EPOLLERR` and disarm.
 
-### TD14. Per-process CPU-time accounting — PARTIALLY RESOLVED 2026-06-13 (self/thread done; children + exited-thread pending)
+### TD14. Per-process CPU-time accounting — MOSTLY RESOLVED 2026-06-13 (self/thread/children + exited-thread done; only fault/ctxsw counters pending)
 
 **Where:** `kernel/src/syscall/linux.rs` `sys_getrusage` and `sys_times`;
 `kernel/src/sched/task.rs` (`Task::user_ticks`/`sys_ticks`, `tick_burst(from_user)`);
 `kernel/src/sched/mod.rs` (`timer_tick(from_user)`, `cpu_ticks(tid)`, `TaskInfo`);
-`kernel/src/proc/thread.rs` (`process_cpu_ticks(pid)`); `kernel/src/apic.rs`
-(CPL sampling in `handle_timer_irq`); `kernel/src/fs/procfs.rs` (`build_pid_stat`).
+`kernel/src/proc/thread.rs` (`process_cpu_ticks(pid)`, `on_thread_exit`);
+`kernel/src/proc/pcb.rs` (`Process::{acct_,child_}{user,sys}_ticks`, `remove_thread`,
+`try_reap`/`try_reap_any`, `process_acct_ticks`/`process_child_ticks`);
+`kernel/src/apic.rs` (CPL sampling in `handle_timer_irq`); `kernel/src/fs/procfs.rs`
+(`build_pid_stat`).
 
-**Resolved (2026-06-13):** implemented Linux-style tick-sampling CPU-time
+**Resolved — base (2026-06-13):** Linux-style tick-sampling CPU-time
 accounting. On every timer IRQ, `handle_timer_irq` reads the interrupted frame's
 CPL (`(frame.cs & 0x3) == 0x3` ⇒ ring-3) and passes `from_user` down through
 `sched::timer_tick` → `Task::tick_burst`, which charges the whole tick to
 `user_ticks` or `sys_ticks` (O(1), zero syscall-fastpath cost — Linux's default
-non-NO_HZ_FULL model). `sched::cpu_ticks(tid)` exposes the per-thread split;
-`proc::thread::process_cpu_ticks(pid)` rolls it up across a process's live
-threads. Wired into:
-- `getrusage(RUSAGE_SELF)` → process roll-up; `getrusage(RUSAGE_THREAD)` →
-  current thread. `ru_utime`/`ru_stime` now populated (ticks×10ms → timeval).
-- `times(2)` `tms_utime`/`tms_stime` (USER_HZ==TICK_RATE_HZ==100, so tick
-  counts map directly to clock_t).
-- `/proc/<pid>/stat` fields 14 (utime) / 15 (stime).
+non-NO_HZ_FULL model). `sched::cpu_ticks(tid)` exposes the per-thread split.
+
+**Resolved — exited-thread fold + children-time (2026-06-13):** added a
+per-process CPU-time accumulator to the PCB. When a thread exits,
+`on_thread_exit` captures its `(user, sys)` ticks (while the Task is still
+alive in the scheduler) and `remove_thread` folds them into
+`Process::acct_user_ticks`/`acct_sys_ticks`. `process_cpu_ticks` now returns
+`accumulator + Σ(live thread ticks)`, so it is exact for multi-threaded
+processes that have already reaped worker threads — not just single-threaded
+ones. For children time, `try_reap`/`try_reap_any` credit the parent's
+`child_user_ticks`/`child_sys_ticks` with the reaped child's total CPU time
+plus the child's own children-time (POSIX cutime/cstime carry-up, mirroring
+Linux `wait_task_zombie` → `signal->cutime`/`cstime`). Both reset to 0 on fork.
+
+Wired into:
+- `getrusage(RUSAGE_SELF)` → process roll-up (live + exited threads);
+  `getrusage(RUSAGE_THREAD)` → current thread; `getrusage(RUSAGE_CHILDREN)` →
+  children accumulator. `ru_utime`/`ru_stime` populated (ticks×10ms → timeval).
+- `times(2)` `tms_utime`/`tms_stime` and `tms_cutime`/`tms_cstime`
+  (USER_HZ==TICK_RATE_HZ==100, so tick counts map directly to clock_t).
+- `/proc/<pid>/stat` fields 14/15 (utime/stime) and 16/17 (cutime/cstime).
+
+Self-test: `pcb::test_cpu_time_accounting` exercises the exited-thread fold,
+`process_cpu_ticks` after all threads exit, and the parent←child←grandchild
+children-time carry-up (asserts parent sees `(5+2, 3+1)`). Boot-test PASSED.
 
 **Still pending (TD14-followup):**
-1. **Children time** — `times` `tms_cutime`/`tms_cstime`, `getrusage(RUSAGE_CHILDREN)`,
-   and `/proc/<pid>/stat` fields 16/17 (cutime/cstime) stay 0. Proper fix: a
-   per-process child-time accumulator credited at `wait4`/reap from the reaped
-   child's (utime+cutime, stime+cstime).
-2. **Exited-thread accumulation** — `process_cpu_ticks` only sums *live* threads,
-   so a multi-threaded process under-reports CPU consumed by already-exited
-   worker threads. Exact for single-threaded processes. Proper fix: a per-process
-   `user_ticks`/`sys_ticks` accumulator that a thread folds its counters into on
-   exit, summed with live-thread counters at query time.
-3. **Fault / ctxsw counters** — `ru_minflt`/`ru_majflt`/`ru_nvcsw`/`ru_nivcsw`
-   remain 0 (separate per-task counters, not yet tracked).
+- **Fault / ctxsw counters** — `getrusage` `ru_minflt`/`ru_majflt`/`ru_nvcsw`/
+  `ru_nivcsw` remain 0 (separate per-task counters, not yet tracked). Proper
+  fix: increment per-task minor/major fault counters in the page-fault handler
+  and voluntary/involuntary ctxsw counters at the scheduler switch point, roll
+  them up per process, and source the four rusage fields from them.
 
-Trigger for the followups: when CPU-usage tooling that needs children-time
-(shell `times` after subprocesses, `time(1)` on a pipeline) or multi-threaded
-fidelity becomes a priority.
+Trigger for the followup: when rusage-based profilers that read the fault/ctxsw
+counters become a priority.
 
 ### TD13. A few Linux-compat-flavored fields live in the native PCB — WATCH 2026-06-13
 

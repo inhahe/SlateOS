@@ -28968,22 +28968,31 @@ fn sys_get_robust_list(args: &SyscallArgs) -> SyscallResult {
 
 /// `set_mempolicy_home_node(start, len, home_node, flags)`.
 fn sys_set_mempolicy_home_node(args: &SyscallArgs) -> SyscallResult {
-    // Linux mm/mempolicy.c::SYSCALL_DEFINE4(set_mempolicy_home_node)
+    // Linux v6.6 mm/mempolicy.c::SYSCALL_DEFINE4(set_mempolicy_home_node)
     // gate order — port literally so feature-probing libraries
     // (libnuma, glibc numa_set_localalloc) see the documented errno
-    // discriminator for each malformed input:
+    // discriminator for each malformed input.  Verified verbatim against
+    // raw.githubusercontent.com torvalds/linux v6.6:
     //
-    //   1. start & ~PAGE_MASK             -> EINVAL
-    //   2. flags != 0                     -> EINVAL
-    //   3. PAGE_ALIGN(len) overflow       -> EINVAL  (len_aligned wraps)
-    //   4. (start + len_aligned) overflow -> EINVAL  (end < start)
-    //   5. end == start (len rounds to 0) -> return 0   <-- success!
-    //   6. home_node out of range         -> EINVAL
+    //   start = untagged_addr(start);
+    //   if (start & ~PAGE_MASK)                       return -EINVAL;  (1)
+    //   if (flags != 0)                               return -EINVAL;  (2)
+    //   /* Check home_node is online to avoid accessing uninitialized
+    //      NODE_DATA. */
+    //   if (home_node >= MAX_NUMNODES || !node_online(home_node))
+    //                                                 return -EINVAL;  (3)
+    //   len = PAGE_ALIGN(len);                                         (4)
+    //   end = start + len;
+    //   if (end < start)                              return -EINVAL;  (5)
+    //   if (end == start)                             return 0;        (6)
+    //   ... then iterate VMAs (see known-issues -ENOENT note) ...
     //
-    // Pre-batch-240 we returned EINVAL for len==0 (which Linux turns
-    // into a successful no-op via the PAGE_ALIGN(0)==0 path) and we
-    // ran the home_node check ahead of every other gate.  Both are
-    // observable to userspace and would mis-train glibc's probe.
+    // CRITICAL ordering: the home_node range/online check runs BEFORE
+    // PAGE_ALIGN(len) and the end==start short-circuit — exactly because
+    // the upstream comment wants to bail on a bad node before touching
+    // NODE_DATA.  Batch 240 mistakenly moved the home_node check AFTER the
+    // end==start short-circuit, so `len==0 with a bad home_node` returned 0
+    // instead of EINVAL.  Batch 551 restores the literal upstream order.
     //
     // 4 KiB ABI page alignment for start: Linux uses PAGE_SIZE (4096
     // on x86_64).  Our internal FRAME_SIZE is 16 KiB but the user-
@@ -28998,7 +29007,14 @@ fn sys_set_mempolicy_home_node(args: &SyscallArgs) -> SyscallResult {
     if args.arg3 != 0 {
         return linux_err(errno::EINVAL);
     }
-    // (3) PAGE_ALIGN(len) — round up to the next 4 KiB boundary, with
+    // (3) home_node range / online check, BEFORE the len/end gates.
+    //     MAX_NUMNODES == 1 and node 0 is the only online node, so any
+    //     home_node > 0 is rejected (covers both `>= MAX_NUMNODES` and
+    //     `!node_online`).
+    if args.arg2 > 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // (4) PAGE_ALIGN(len) — round up to the next 4 KiB boundary, with
     //     overflow check.  Linux's PAGE_ALIGN macro silently wraps on
     //     overflow; we detect and reject it (Linux's downstream "end <
     //     start" check catches the wrap, so the userspace-visible
@@ -29007,37 +29023,34 @@ fn sys_set_mempolicy_home_node(args: &SyscallArgs) -> SyscallResult {
         Some(v) => v & !(ABI_PAGE_SIZE - 1),
         None => return linux_err(errno::EINVAL),
     };
-    // (4) end = start + len_aligned, with overflow check (Linux:
+    // (5) end = start + len_aligned, with overflow check (Linux:
     //     "if (end < start) return -EINVAL").
     let end = match args.arg0.checked_add(len_aligned) {
         Some(v) => v,
         None => return linux_err(errno::EINVAL),
     };
-    // (5) end == start: the requested range is empty (either len was
-    //     0, or len was strictly less than the page size and rounded
-    //     to 0 after... wait, PAGE_ALIGN(1) == 4096, so the only way
-    //     to land here is len == 0).  Linux short-circuits to success
-    //     without examining home_node — there's nothing to apply a
-    //     policy to.
+    // (6) end == start: the requested range is empty (PAGE_ALIGN(1)==4096,
+    //     so the only way to land here is len == 0).  Linux short-circuits
+    //     to success — there's nothing to apply a policy to.
     if end == args.arg0 {
         return SyscallResult::ok(0);
     }
-    // (6) home_node is an unsigned long; must be < MAX_NUMNODES (we
-    //     have 1 node so anything > 0 is invalid).
-    if args.arg2 > 0 {
-        return linux_err(errno::EINVAL);
-    }
     // With a single NUMA node (node 0), pinning the home node of
-    // [start, start+len) to "node 0" is necessarily a no-op: every
-    // page already lives on node 0 because no other node exists.
-    // Linux returns 0 for this call on a single-node system once
-    // the range has a valid MBIND policy (which, here, defaults to
-    // MPOL_DEFAULT covering everything).  Returning 0 — "applied,
-    // no further action required" — is therefore the truthful
-    // answer, not a placeholder.  The previous ENOSYS forced glibc
-    // numa_set_localalloc() callers to log a "kernel lacks home-
-    // node API" warning even though our single-node topology means
-    // they got exactly the behaviour they asked for.
+    // [start, start+len) to "node 0" is a no-op: every page already
+    // lives on node 0 because no other node exists.  We return 0 here.
+    //
+    // KNOWN DIVERGENCE (see known-issues.md): on real Linux this path
+    // iterates the VMAs in [start, end) and returns -ENOENT when no VMA
+    // carries an explicit MPOL_BIND / MPOL_PREFERRED_MANY policy (err is
+    // initialized to -ENOENT and only overwritten when a matching policy
+    // is found), or -EOPNOTSUPP for a non-bind policy.  Because mbind is a
+    // UMA no-op that does NOT store per-VMA mempolicy, we cannot tell
+    // whether the caller previously set a policy on this range.  We pick 0
+    // (the "policy was set, home node applied" success outcome — the common
+    // real-world usage where set_mempolicy_home_node follows a successful
+    // mbind(MPOL_BIND)) over -ENOENT (the "no policy" outcome).  Returning
+    // -ENOENT would instead break the common path.  The only fully faithful
+    // fix is real per-VMA mempolicy storage; tracked as an open question.
     SyscallResult::ok(0)
 }
 
@@ -67896,12 +67909,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: set_mempolicy_home_node flags!=0 not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // Batch 240: set_mempolicy_home_node len=0 -> 0 (success).
-        // Linux's PAGE_ALIGN(0)==0, so end == start, and the function
-        // short-circuits to success WITHOUT examining the home_node.
-        // Pre-batch-240 we returned EINVAL here — userspace probes
-        // (libnuma) special-case len==0 as a feature probe and expect
-        // 0 from a kernel that supports the syscall at all.
+        // set_mempolicy_home_node len=0, home_node=0 -> 0 (success).
+        // home_node 0 passes the (now earlier) online check, then
+        // PAGE_ALIGN(0)==0 makes end == start and the function
+        // short-circuits to success.  libnuma special-cases len==0 as a
+        // feature probe and expects 0 from a kernel that supports the call.
         let a = SyscallArgs { arg0: 0x4000, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::SET_MEMPOLICY_HOME_NODE, &a).value != 0 {
             serial_println!(
@@ -67910,18 +67922,25 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        // Batch 240: len=0 + bad home_node -> still 0.  Proves the
-        // end==start short-circuit fires BEFORE the home_node check,
-        // matching Linux's literal gate order.  Pre-batch-240 this
-        // returned EINVAL via the home_node-first check.
+        // Batch 551: len=0 + bad home_node -> EINVAL.  v6.6 checks
+        // `home_node >= MAX_NUMNODES || !node_online(home_node)` BEFORE
+        // PAGE_ALIGN(len) and the end==start short-circuit (the upstream
+        // comment: "Check home_node is online to avoid accessing
+        // uninitialized NODE_DATA").  Batch 240 wrongly ordered the
+        // home_node check after the short-circuit and returned 0 here.
         let a = SyscallArgs { arg0: 0x4000, arg1: 0, arg2: 99, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::SET_MEMPOLICY_HOME_NODE, &a).value != 0 {
+        if dispatch_linux(nr::SET_MEMPOLICY_HOME_NODE, &a).value
+            != i64::from(errno::EINVAL).wrapping_neg()
+        {
             serial_println!(
-                "[syscall/linux]   FAIL: set_mempolicy_home_node len=0+bad_node not 0 ({})",
+                "[syscall/linux]   FAIL: set_mempolicy_home_node len=0+bad_node not EINVAL ({})",
                 dispatch_linux(nr::SET_MEMPOLICY_HOME_NODE, &a).value
             );
             return Err(KernelError::InternalError);
         }
+        serial_println!(
+            "[syscall/linux]   set_mempolicy_home_node home_node check before len/end gates (batch 551): OK"
+        );
         // Batch 240: PAGE_ALIGN(len) overflow -> EINVAL.  len near
         // u64::MAX causes the round-up to overflow; Linux's wrap-on-
         // overflow would be caught by the downstream end<start check,

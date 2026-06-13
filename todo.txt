@@ -1,4 +1,27 @@
 
+## DONE (2026-06-12): ABI batch 551 — set_mempolicy_home_node: restore v6.6 gate order (home_node before len/end)
+## Linux v6.6 mm/mempolicy.c SYSCALL_DEFINE4(set_mempolicy_home_node) — verified verbatim against
+## raw.githubusercontent.com torvalds/linux v6.6. Gate order:
+##   if (start & ~PAGE_MASK) return -EINVAL;
+##   if (flags != 0) return -EINVAL;
+##   /* Check home_node is online to avoid accessing uninitialized NODE_DATA. */
+##   if (home_node >= MAX_NUMNODES || !node_online(home_node)) return -EINVAL;   <-- BEFORE len/end
+##   len = PAGE_ALIGN(len); end = start + len;
+##   if (end < start) return -EINVAL;
+##   if (end == start) return 0;
+## REGRESSION FIXED: batch 240 mis-read the source and moved the home_node check AFTER the
+## end==start short-circuit, so `set_mempolicy_home_node(start, len=0, home_node=99, 0)` returned 0
+## instead of EINVAL. Batch 551 moves the home_node check back to position 3 (between flags and
+## PAGE_ALIGN(len)), matching the literal upstream order. The batch-240 self-test that asserted the
+## wrong behavior (len=0 + bad node -> 0) is corrected to expect EINVAL.
+## KNOWN DIVERGENCE (NOT fixed, documented): on a valid non-empty range Linux walks the VMAs and
+## returns -ENOENT (no explicit MPOL_BIND/MPOL_PREFERRED_MANY policy) or -EOPNOTSUPP (wrong mode);
+## we return 0 because mbind is a UMA no-op with no per-VMA policy storage. We pick 0 (the common
+## post-mbind success path) over -ENOENT. Logged as known-issues TD7 and open-questions Q1
+## (per-VMA mempolicy storage is the only fully-faithful fix).
+## VERIFIED: build clean; clippy 17462 (<= baseline 17463); boot self-test stamp
+## "set_mempolicy_home_node home_node check before len/end gates (batch 551): OK".
+
 ## DONE (2026-06-12): ABI batch 550 — get_mempolicy: faithful do_get_mempolicy / copy_nodes_to_user rewrite
 ## Linux v6.6 mm/mempolicy.c kernel_get_mempolicy + do_get_mempolicy + copy_nodes_to_user
 ## (verified verbatim against raw.githubusercontent.com torvalds/linux v6.6). Divergences fixed:

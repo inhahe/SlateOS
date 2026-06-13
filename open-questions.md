@@ -60,6 +60,140 @@ standalone per-tool crates are canonical; see `design-decisions.md` §8.)
   `sys_get_mempolicy` (the empty-mask/default-policy answers).
 - **Status** — OPEN
 
+#### Answers to the operator's questions (2026-06-13)
+
+**Plain-language primer (UMA vs NUMA vs VMA).**
+
+- **RAM and "distance" to the CPU.** A modern machine can have its RAM wired up
+  in one of two layouts. In a **UMA** (Uniform Memory Access) machine, every CPU
+  core reaches every byte of RAM at the *same* speed — there is one pool of
+  memory and no core is "closer" to part of it. Essentially all desktops,
+  laptops, and single-socket servers are UMA. In a **NUMA** (Non-Uniform Memory
+  Access) machine, the hardware is split into **nodes** — each node is a group of
+  CPU cores bundled with its own bank of RAM. A core reads its *own* node's RAM
+  quickly ("local") but reaching *another* node's RAM is slower because the
+  request has to cross a chip-to-chip interconnect ("remote"). NUMA only appears
+  on big iron: multi-socket servers (two or more physical CPU chips) and some
+  high-core-count workstation chips. **OuRoS targets desktops, so we are UMA: one
+  pool, one speed, no near/far distinction.**
+
+- **Why a program would ever care.** On a NUMA box, a performance-sensitive app
+  (a database, a scientific simulation, a JVM tuned for big servers) can ask the
+  OS: "please keep *this* chunk of my memory on the *same* node as the threads
+  that use it, so accesses stay local and fast." The Linux calls for expressing
+  that wish are `mbind`, `set_mempolicy`, and `set_mempolicy_home_node` — the
+  "NUMA mempolicy" family. This is a *hint about placement*; it changes *where*
+  pages physically live, never *what* the program computes.
+
+- **What a VMA is.** A running program's address space isn't one flat blob — it's
+  a series of labelled regions: the code, the heap, each memory-mapped file, each
+  thread's stack, and so on. Each such region is a **VMA** (Virtual Memory Area):
+  a contiguous span of addresses that share the same properties (permissions,
+  backing file, and — on Linux — NUMA placement policy). It's the unit Linux uses
+  to track "this stretch of memory behaves like *this*." You can see a process's
+  VMAs in `/proc/<pid>/maps`.
+
+- **What option C actually is.** "Per-VMA mempolicy storage" means: attach a
+  little NUMA-placement record to *each* VMA, so the kernel can remember "the
+  caller asked for node 2 on this particular region." Linux needs this because on
+  real NUMA hardware the policy has teeth. **On UMA hardware there is only one
+  node, so any placement policy resolves to "use the one and only pool" — the
+  record would be stored, dutifully maintained across every memory operation, and
+  then never change any actual behavior.**
+
+**Advantages of being UMA (your first question).** This isn't a choice we make —
+it's a property of the desktop hardware we target — but the *consequences* are
+all upside for us:
+
+- **Simpler, faster memory manager.** No node-aware allocator, no per-node free
+  lists, no "fall back to a remote node when the local one is full" logic, no
+  inter-node page migration, no NUMA balancing daemon. Linux carries thousands of
+  lines for all of this; a UMA kernel needs none of it.
+- **No placement decisions on the hot path.** Every page allocation just pulls
+  from the single pool. On NUMA the allocator must first decide *which* node,
+  consult the policy, and maybe migrate — overhead on an operation that runs
+  constantly.
+- **Predictable performance.** Memory latency is uniform, so there's no
+  "accidentally slow" memory and no tuning burden. NUMA's whole reason to exist
+  is to *recover* the performance it costs you when placement goes wrong.
+- The flip side — NUMA's *only* advantage — is that it lets you build machines
+  with far more total RAM and cores than a single memory bus can serve. That
+  scaling matters for 2-socket+ servers; it is irrelevant to a desktop OS.
+
+**How much overhead does option C add (your second question)?** Three kinds, and
+the important one is the third:
+
+- **Runtime CPU: effectively zero.** The policy record is only ever consulted
+  inside the NUMA syscalls themselves (`mbind`/`set_mempolicy`/…), which a normal
+  program never calls. It is *not* touched on the page-allocation hot path on a
+  UMA system, because there's only one node to allocate from regardless. So
+  day-to-day CPU cost ≈ 0.
+- **Memory: tiny.** One extra pointer-sized field per VMA, normally null (no
+  policy set). A policy object is allocated only for the rare VMA that actually
+  has an explicit policy. For virtually every process the added memory is a
+  handful of null pointers — negligible.
+- **Code complexity: the real cost, and it's significant.** This is the reason
+  not to do it. Per-VMA policy means every operation that *splits* or *merges*
+  VMAs (`mmap`, `munmap`, `mprotect`, `madvise`, `mremap`) has to correctly
+  duplicate/split/merge the attached policy too; `fork` has to deep-copy policies
+  (`mpol_dup`); and the whole `mbind_range` machinery has to exist. That's a
+  meaningful, bug-prone chunk of kernel code **whose entire payoff is faithful
+  errno values on syscalls almost nothing calls, with zero effect on what any
+  program computes or how fast it runs** — because we're UMA.
+
+**Is there a better 4th option (you couldn't judge, so here's mine)?** No — and
+that's a genuine conclusion, not a dodge. The whole question only has stakes on
+NUMA hardware we don't target. The realistic choices collapse to "how honest is
+the errno on a syscall almost nobody calls," and option A already picks the
+answer that keeps the *common* sequence working. A 4th option would just be a
+different shade of errno bikeshedding. If OuRoS ever targets real multi-node
+servers, the correct move isn't a clever 4th option — it's to implement option C
+*properly* (real placement, not just storage), at which point the errnos come
+for free.
+
+**End-results of A vs B, and what % of programs are affected (your third
+question).** The split is tiny and low-stakes:
+
+- **Who is affected at all:** only programs that call `set_mempolicy_home_node`,
+  a NUMA-tuning syscall added in Linux 5.17 (2022). In practice that's a short
+  list of server software explicitly tuned for multi-socket boxes (some database
+  and big-JVM deployments) and the `numactl`/`libnuma` tooling. **A normal
+  desktop program — a browser, an editor, a shell, a game, a compiler — never
+  calls it.** Realistic impact: **well under 0.1% of programs**, and ~0% of
+  desktop programs.
+- **Native OuRoS programs:** unaffected entirely. NUMA mempolicy is a Linux-ABI
+  construct; native code doesn't use it.
+- **For the few Linux programs that do call it:**
+  - **Option A (return 0, current):** we report "your placement request
+    succeeded." Since there's one node, the request is trivially satisfied. The
+    common real-world sequence — `mbind(MPOL_BIND)` then
+    `set_mempolicy_home_node` — sees success, which is exactly what
+    glibc/libnuma expect; they proceed normally. Worst case: a program *thinks*
+    it pinned memory to a node that doesn't separately exist, which on UMA is
+    harmless (there's nothing to pin it away from).
+  - **Option B (return `-ENOENT`):** we report "no policy found for this range."
+    This is the literal Linux answer for a *default-policy* range, but it
+    **breaks the common post-`mbind` success path** — a program that just set a
+    bind policy and asks to confirm the home node gets a failure for a sequence
+    Linux would have accepted. libnuma/glibc may then log "kernel lacks home-node
+    support" warnings or take a degraded fallback path.
+  - **Net:** A keeps more Linux programs on their happy path; B is "more literal"
+    only for a case that, on UMA, has no practical consequence. Neither A nor B
+    makes any program *crash* or *fail to start* — at most B causes a warning
+    log or a slightly different (still-functional) code path in NUMA-tuning
+    software.
+
+**Claude's recommendation (restated for the answer):** keep **option A** and
+**close this question** — adopt it as settled rather than leaving it open. The
+stakes are negligible on desktop (UMA) hardware: A maximizes Linux-program
+compatibility, costs nothing, and the only "more faithful" alternative (C) is a
+real pile of fragile code for zero functional benefit until/unless OuRoS targets
+multi-socket servers. If that day ever comes, the trigger is "implement C
+properly," and the errno question answers itself. **Suggested resolution: adopt
+A, record it in `design-decisions.md` as the operator's call, and remove Q1 from
+this file.** (Leaving as OPEN pending your nod, since you asked me to lay out the
+reasoning first.)
+
 ---
 
 ### Q2. Should `/proc/sys/vm/overcommit_memory` (and the `vm/` tree) be exposed, and at what value?
@@ -81,8 +215,11 @@ standalone per-tool crates are canonical; see `design-decisions.md` §8.)
 - **Options**
   - **(A) Expose `vm/overcommit_memory = 2`** — pro: honest reflection of the
     "no silent overcommit" design; apps that respect it allocate within real
-    limits. con: a minority of apps tuned for the Linux default-`0` world may
-    behave conservatively or warn; read-only means they can't flip it.
+    limits. con: **its biggest risk is that some apps refuse to start or scale
+    back** — software tuned for the Linux default (Go/JVM/Electron/some WINE
+    paths) reserves large sparse mappings expecting lazy backing; on seeing
+    strict accounting (`= 2`) it may shrink its arenas, warn, or in a few cases
+    bail out at startup. A further con: read-only means an app can't flip it.
   - **(B) Expose `vm/overcommit_memory = 0`** (advertise heuristic overcommit) —
     pro: matches what most Linux desktop apps assume, maximizing drop-in
     compatibility. con: a *lie* — we don't actually overcommit, so an app that
@@ -90,65 +227,83 @@ standalone per-tool crates are canonical; see `design-decisions.md` §8.)
     to surface up front; contradicts the design and the "never fabricate" rule.
   - **(C) Keep `vm/` omitted** *(current)* — pro: an absent file makes glibc/apps
     fall back to their built-in default assumptions rather than acting on a
-    value we're unsure about; no fabrication. con: some readers treat a missing
-    sysctl as an error or log noise; we forgo signalling our real policy.
-- **Claude's recommendation** — Lean **(A)** (`= 2`) on the merits — it's the
-  honest, design-faithful value and read-only exposure is harmless — but this is
-  a user-visible compatibility/behavior tradeoff, so deferring to the operator
-  rather than guessing. Staying on **(C)** (omitted) until decided. If (A) is
-  chosen, `vm/overcommit_ratio` (default 50) and `vm/overcommit_kbytes` (0)
-  would naturally follow for completeness.
+    value we're unsure about; no fabrication. con: some readers log a warning
+    when the sysctl is missing. **Clarification (answering your question):** a
+    *missing* `/proc/sys/vm/overcommit_memory` almost never stops a program from
+    running. Well-behaved code treats the open/read failure as "this knob isn't
+    available, use my built-in default" and carries on; the visible effect is at
+    most a line of log noise. The "treated as an error" case is the program's
+    *own internal* error path for the file read, not a refusal to run — so under
+    your stated priority (maximize programs that run and don't crash, log noise
+    acceptable) option C is *safe*. The thing that actually risks a refusal-to-
+    start is option A's strict value, not C's absence.
+- **Operator-proposed options (2026-06-13):**
+  - **(4) Per-program user-configurable value, with OS-surfaced diagnosis.** Ship
+    a default (still TBD — see below), but let the user override the
+    `overcommit_memory` value *per program*. Crucially, when the OS detects a
+    program is hitting (or likely to hit) an overcommit-related problem, it
+    surfaces a plain-language explanation of the issue and how to fix it (i.e.
+    which knob to change), so the user isn't left guessing. — pro: turns an
+    obscure kernel tunable into a discoverable, fixable setting; a single
+    misbehaving app can be accommodated without changing global policy. con:
+    needs (a) a per-program config store, (b) real detection of "this commit
+    failure was overcommit-related," and (c) UI/notification plumbing to explain
+    it — none of which exist yet; and it still leaves the "default default"
+    open.
+  - **(5) Implement BOTH memory strategies and make them configurable.** Actually
+    build strict-commit *and* lazy/overcommit allocation in the kernel, expose a
+    choice **system-wide** *and* **per-program**, for both Linux and native
+    programs. Default Linux programs to `overcommit_memory = 0` (overcommit) but
+    let the user change that default and override per Linux program; allow
+    per-program override for non-Linux (native) programs too. All of this lives
+    under **Settings → Advanced**, with warnings (and/or a blanket "changing
+    advanced options can cause problems" warning). — pro: **this is the
+    design-faithful answer.** `design.txt`/CLAUDE.md already say "Committed
+    memory by default, **lazy allocation opt-in**. No silent overcommit." — i.e.
+    *both* strategies are already sanctioned, with lazy as an explicit opt-in.
+    Option 5 is the full realization of that policy: maximum app compatibility
+    (overcommit-expecting Linux apps get what they want) without lying (the user
+    opted in; nothing is silent), and the strict default for native code stays
+    true to "committed by default." con: it's the most engineering. It requires
+    the allocation path to *actually honor* the mode (see feasibility note),
+    per-program policy storage, and the Settings UI. It's a real feature, not a
+    one-line sysctl value.
+- **Feasibility note (state of the code, 2026-06-13).** A config *surface* for
+  this already exists but is **advisory-only**: `kernel/src/fs/mmtune.rs` defines
+  `OvercommitMode { Never, Heuristic, Always }` with per-profile `overcommit` +
+  `overcommit_ratio` fields, and `set_overcommit`/`set_overcommit_ratio`. **But
+  nothing in the allocation/commit path reads it** — there are no consumers of
+  `.overcommit` in `mm/` or `accounting.rs`; the actual behavior is hardcoded
+  "committed by default, no overcommit" (`mm/oom.rs:39`). So Options 4/5 are not
+  starting from zero (the mode enum, ratio, and a tuning-profile system exist),
+  but the *load-bearing* work — wiring the mode into `mmap`/commit-charge so it
+  changes real allocation behavior, plus per-program policy and Settings UI — is
+  genuinely unbuilt. That's the cost line for Options 4 and 5.
+- **Claude's recommendation (revised 2026-06-13)** — Two-phase:
+  1. **Now (cheap, unblocks the immediate question):** since your priority is
+     "max programs run and don't crash, log noise OK," the lowest-risk immediate
+     value is **(C) keep `vm/` omitted** — it can't cause a refusal-to-start the
+     way (A) can, and it doesn't lie the way (B) does. Avoid (A) precisely
+     because of the refuse-to-start risk you flagged.
+  2. **Target (the right end-state):** **Option 5**, because it's the literal
+     implementation of the existing design ("lazy allocation opt-in"), gives the
+     best compatibility *and* honesty, and Option 4's per-program override +
+     diagnosis is naturally a *subset* of Option 5's per-program policy. Treat 4
+     as the UX half of 5 rather than a competing option. The honest caveat: 5 is
+     a multi-step feature (kernel commit-mode enforcement → per-program policy →
+     Settings UI → detection/diagnosis), so it should be scheduled as its own
+     roadmap initiative, not slipped in. **Open sub-question for you:** the
+     "default default" for *Linux* programs — you proposed `0` (overcommit) for
+     max compatibility, which I agree with; native programs stay strict-commit
+     per the design. Once 5 lands, the procfs `vm/overcommit_memory` value simply
+     *reports the active mode* honestly (no longer a fabrication), which retires
+     the original A/B/C dilemma entirely.
 - **Where it bites** — `kernel/src/fs/procfs.rs`: `SYS_FILES`/`SYS_DIRS`
-  (add `"vm"` dir + `"vm/overcommit_memory"`), `gen_sys` (the value), and the
-  procfs self-test.
-- **Status** — OPEN
-
----
-
-### Q3. Which major initiative comes next? (the autonomous loop has run out of *bounded* roadmap work)
-
-- **Question** — An autonomous-loop survey (2026-06-13) confirmed that every
-  readily-actionable surface is already mature, so the only remaining roadmap
-  work is large multi-day ports. Which should be prioritized? This is a strategic
-  direction call with a costly, hard-to-reverse commitment (days of work each)
-  and no obviously-correct ordering, so it's being put to the operator rather
-  than picked autonomously.
-- **What's already done (why there's no bounded increment left to grab):**
-  - `/proc` + `/proc/sys` (procfs.rs) — exhaustive; further sysctl entries are
-    blocked on **Q2** or lack honest backing.
-  - sysfs (`sysfs.rs`), sysctlfs (`sysctlfs.rs`) — present.
-  - Linux syscall table (`syscall/linux.rs`) — every named syscall has a handler
-    (down to historical no-ops like `nfsservctl`/`tuxcall`/`vserver`); the
-    "syscall-by-syscall audit" (task 5089) yields no edits — coverage is complete.
-  - POSIX layer (`posix/src/`, ~2294 files) — no `todo!`/`unimplemented!` stubs;
-    extraordinarily complete.
-  - Container runtime (task 5223) — complete except "Port Docker".
-  - ALSA shim (task 5095) — complete except STATUS ioctl (**TD10**, blocked on the
-    time64 timespec-ABI decision) and a real hardware audio backend (a driver task).
-  - DRM/KMS Linux-ABI shim — recent; swept clean; open debt is **TD11/TD12**.
-  - Most recent bug-hunt find: **F12** (alsa_pcm mixer-slot leak), now fixed.
-- **Options** (each is a large initiative; dependency notes in parens)
-  - **(A) Port bash** (task 1491) — gateway to a real interactive userspace.
-    Depends on the POSIX libc layer (1184/1430), which is already very mature, so
-    this is plausibly the *least-blocked* big task. Best if the goal is a usable
-    shell / dev environment.
-  - **(B) Port the GCC/CMake/Make toolchain** (5031) + **CPython** (5033) — a
-    self-hosting dev environment; also rides the mature POSIX layer.
-  - **(C) GPU drivers → Mesa → Vulkan/OpenGL** (4554/4582) — unblocks the GUI
-    stack and is a prerequisite for (D)/(E). Largest and most hardware-dependent.
-  - **(D) WINE** (5096) — Windows-app support; needs Mesa + audio (audio shim is
-    in place; Mesa is not), so effectively gated behind (C).
-  - **(E) Chromium** (5025) — needs POSIX + GPU + audio + networking; the heaviest
-    single port; gated behind (C).
-- **Claude's recommendation** — **(A) bash** as the immediate next step: it's the
-  least-blocked (rides the mature POSIX layer, no GPU dependency), it's
-  decomposable into small tested increments (the ALSA shim showed this pattern
-  works well for the autonomous loop), and a working shell is high leverage for
-  everything downstream. (C) is the long pole for the GUI/app vision and should
-  start in parallel when the operator is available to steer hardware/driver
-  choices. **The autonomous loop is stopping here** rather than guessing a
-  multi-day direction or spinning on no-edit sweeps; resume it (or point it at a
-  specific target, e.g. "get bash building") when you're back.
-- **Where it bites** — new top-level work; entry points depend on the choice
-  (`userspace/` for a bash port, `drivers/`/`gui/gpu/` for GPU/Mesa).
-- **Status** — OPEN
+  (add `"vm"` dir + `"vm/overcommit_memory"`), `gen_sys` (the value/report).
+  For Options 4/5: `kernel/src/fs/mmtune.rs` (`OvercommitMode`, already present),
+  the `mm/` commit/allocation path (must learn to honor the mode — currently
+  doesn't), per-program policy storage (PCB / Linux-ABI PCB state), and the
+  Settings app (Advanced section + warnings).
+- **Status** — OPEN (immediate: stay on C; strategic: Option 5 as a scheduled
+  initiative — awaiting operator confirmation of the two-phase plan and the
+  Linux-default `= 0`).

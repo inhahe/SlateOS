@@ -589,3 +589,86 @@ code — is fully recovered by a shared **library** crate rather than a shared
   grants (or building per-`argv[0]` identity into the kernel's capability check,
   which effectively reinvents separate binaries). Only revisit if the capability
   model itself changes.
+
+---
+
+## 9. Next major initiative ordering — terminal/dev toolchain before GUI; fastpy before/instead of CPython
+
+**Date:** 2026-06-13
+
+**Decided by:** Operator (Claude surveyed the roadmap, found bounded work
+exhausted, and put the strategic ordering to the operator as `open-questions.md`
+Q3 with options A–E and a recommendation of "bash first"; the operator chose a
+different ordering — toolchain before bash, terminal/dev before GUI, fastpy
+before CPython — which overrules Claude's recommendation).
+
+**Context:**
+An autonomous-loop survey (2026-06-13) confirmed every readily-actionable
+roadmap surface was already mature (procfs/`/proc/sys`, sysfs, sysctlfs, the
+full Linux syscall table, the POSIX layer, the container runtime, the ALSA
+shim, the DRM/KMS shim). The only remaining roadmap work is large, multi-day
+*ports*, each a costly and hard-to-reverse commitment with no obviously-correct
+ordering — so the direction was put to the operator rather than picked
+autonomously. The candidates were: (A) bash, (B) GCC/CMake/Make toolchain +
+CPython, (C) GPU drivers → Mesa → Vulkan/OpenGL, (D) WINE, (E) Chromium.
+
+**Decision:**
+- **Terminal / developer environment comes before the GUI stack.** Build out a
+  usable command-line dev environment first; defer the GPU/Mesa/compositor app
+  vision (options C/D/E) until that's in place.
+- **Port the GCC/CMake/Make toolchain (roadmap task 5031) before bash (task
+  1491).** The toolchain is the prioritized next initiative.
+- **Integrate fastpy (roadmap tasks 24 "integrate fastpy compiler into build
+  system" and 5034 "fastpy compiler") before — and likely *instead of* —
+  CPython (task 5033).** fastpy is being maintained (in another project) to be
+  CPython 3.14-compatible and is many times faster than CPython, so it is the
+  preferred Python implementation for OuRoS userspace. CPython is only revisited
+  if a real compatibility gap forces it. **Status check:** fastpy is *not yet
+  ported* — tasks 24 and 5034 are both `[ ]` (unstarted) in `roadmap.md`.
+
+**Rationale:**
+- A working dev toolchain is the foundation for self-hosting and for building
+  everything downstream; it rides the already-mature POSIX layer and has **no
+  GPU dependency**, making it the least-blocked big initiative. Doing it before
+  the GUI is the intuitive ordering (you build the tools before the storefront).
+- fastpy gives CPython-3.14 compatibility at much higher performance, and the
+  project's own guidance already prefers "Python via fastpy" for userspace
+  components (CLAUDE.md). Porting it instead of CPython avoids carrying a slower
+  second Python runtime unless compatibility forces it.
+
+**Honest nuance recorded at decision time (toolchain ↔ shell bootstrap
+co-dependency):** the operator's reasoning was "porting bash will be easier once
+the toolchain exists." The dependency is *mostly* the other way around —
+GCC/Make are built and driven *by* a shell (`configure` scripts, recipe command
+lines invoke `/bin/sh`). In practice neither strictly blocks the other here
+because OuRoS already has a kernel shell (`kshell`) and a coreutils set, and the
+toolchain itself is **cross-built on the dev host**, not self-hosted on OuRoS
+initially — so we don't need bash-on-OuRoS to *produce* the toolchain binaries.
+The conclusion (toolchain first) stands; the ordering is fine because the
+host-side cross-build sidesteps the circular dependency. A full `make` driving
+`configure` scripts *on OuRoS* will eventually want a real `/bin/sh`, at which
+point bash (or a smaller POSIX sh) becomes the natural follow-on.
+
+**Alternatives considered:**
+- **(A) bash first** — Claude's original recommendation (least-blocked, highly
+  decomposable, high leverage). Not chosen: the operator preferred the toolchain
+  first; the bootstrap nuance above shows bash-first isn't *required* for the
+  toolchain, so toolchain-first is a valid ordering.
+- **(C/D/E) GPU/Mesa, WINE, Chromium** — deferred: these are the GUI/app long
+  pole, the most hardware-dependent, and (D)/(E) are gated behind the GPU/Mesa
+  work. The operator explicitly wants terminal/dev before GUI.
+- **CPython before/instead of fastpy** — rejected: fastpy is faster and
+  CPython-3.14-compatible; carry CPython only if a real gap appears.
+
+**Where it lives:**
+- `roadmap.md`: task 5031 (gcc/cmake/make/pkg-config — next), tasks 24 & 5034
+  (fastpy integration & compiler — before CPython), task 5033 (CPython —
+  deprioritized), task 1491 (bash — follow-on after toolchain).
+- New top-level work; entry points emerge as the toolchain port begins
+  (build wiring under the workspace + `pkg/`/`userspace/` as needed).
+
+**How to reverse:**
+- Re-prioritize by reordering the roadmap tasks. If fastpy proves to have a
+  blocking CPython-compat gap for a required package, promote task 5033 (CPython)
+  ahead of relying on fastpy. If GUI work becomes more urgent than dev tooling,
+  start option (C) instead — but per this decision, terminal/dev leads.

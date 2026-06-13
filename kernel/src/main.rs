@@ -1191,6 +1191,15 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: SysFs self-test failed: {:?}", e);
     }
 
+    // End-to-end dynamically-linked Linux launch test (needs a writable VFS,
+    // so it runs here rather than in proc::self_test() which precedes VFS
+    // init).  Places a minimal interpreter ("ld.so" stand-in) on the
+    // filesystem and verifies the kernel loads + enters it for a
+    // dynamically-linked Linux binary.  See proc::spawn for details.
+    if let Err(e) = proc::spawn::self_test_linux_dynamic_interp() {
+        serial_println!("WARNING: Linux dynamic-interpreter self-test failed: {:?}", e);
+    }
+
     boot_timing::mark(boot_timing::Milestone::Filesystem);
 
     // ProcFs self-test — constructs its own `ProcFs::new()` and reads live

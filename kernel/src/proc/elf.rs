@@ -2333,6 +2333,184 @@ fn build_interp_elf(osabi: u8, interp_path: &[u8]) -> alloc::vec::Vec<u8> {
     buf
 }
 
+/// Machine code for `exit(exit_code)` via the Linux x86_64 `syscall`
+/// convention: `mov edi, exit_code; mov eax, 60 (SYS_exit); syscall`.
+///
+/// Returned as a fixed 12-byte array so callers can `copy_from_slice` it
+/// into a segment without per-byte indexing.
+#[must_use]
+fn linux_exit_machine_code(exit_code: u8) -> [u8; 12] {
+    [
+        0xBF, exit_code, 0x00, 0x00, 0x00, // mov edi, exit_code
+        0xB8, 0x3C, 0x00, 0x00, 0x00, // mov eax, 60 (Linux SYS_exit)
+        0x0F, 0x05, // syscall
+    ]
+}
+
+/// Build a minimal Linux-ABI program **interpreter** ("ld.so" stand-in)
+/// that simply calls `exit(exit_code)`.
+///
+/// This is an `ET_DYN` (PIE) image with a single `PT_LOAD` at `p_vaddr = 0`
+/// and `e_entry = 0`, so the kernel's `load_interpreter` maps it at
+/// `LINUX_INTERP_BASE` and enters it at `base + 0` — exactly the path a real
+/// `ld.so` takes.  Tagged `ELFOSABI_GNU`.
+///
+/// Used by the dynamic-launch end-to-end self-test: if the kernel correctly
+/// loads and enters the interpreter (rather than the executable's own
+/// entry), the process exits with `exit_code`, proving the whole
+/// dynamically-linked launch path executes.
+// Test fixture: the buffer is sized to fit exactly and every offset is a
+// compile-time constant, so the indexing is provably in-bounds and the
+// offset arithmetic cannot overflow.  Matches the surrounding `build_*` ELF
+// fixture builders.
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
+#[must_use]
+pub fn build_linux_interp_exit_elf(exit_code: u8) -> alloc::vec::Vec<u8> {
+    use alloc::vec;
+
+    let phdr_offset: u64 = 64;
+    let code_offset: u64 = phdr_offset + ELF64_PHDR_SIZE as u64; // 120
+    let code = linux_exit_machine_code(exit_code);
+    let code_size = code.len() as u64;
+    // ET_DYN / PIE: p_vaddr = 0, e_entry = 0 (entry at segment start).
+    let load_vaddr: u64 = 0;
+
+    let mut buf = vec![0u8; (code_offset + code_size) as usize];
+
+    // --- ELF header ---
+    buf[0] = 0x7F;
+    buf[1] = b'E';
+    buf[2] = b'L';
+    buf[3] = b'F';
+    buf[EI_CLASS] = ELFCLASS64;
+    buf[EI_DATA] = ELFDATA2LSB;
+    buf[EI_VERSION] = EV_CURRENT;
+    buf[EI_OSABI] = ELFOSABI_GNU;
+    write_u16(&mut buf, 16, ET_DYN);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr); // e_entry = 0 (allowed for ET_DYN)
+    write_u64(&mut buf, 32, phdr_offset); // e_phoff
+    write_u64(&mut buf, 40, 0); // e_shoff
+    write_u32(&mut buf, 48, 0); // e_flags
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, 1); // e_phnum
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0);
+    write_u16(&mut buf, 62, 0);
+
+    // --- Program header (PT_LOAD, R+X) ---
+    let ph = phdr_offset as usize;
+    write_u32(&mut buf, ph, PT_LOAD);
+    write_u32(&mut buf, ph + 4, PF_R | PF_X);
+    write_u64(&mut buf, ph + 8, code_offset); // p_offset
+    write_u64(&mut buf, ph + 16, load_vaddr); // p_vaddr = 0
+    write_u64(&mut buf, ph + 24, 0); // p_paddr
+    write_u64(&mut buf, ph + 32, code_size); // p_filesz
+    write_u64(&mut buf, ph + 40, code_size); // p_memsz
+    write_u64(&mut buf, ph + 48, 0x1000); // p_align
+
+    // --- Code ---
+    let cs = code_offset as usize;
+    if let Some(dst) = buf.get_mut(cs..cs + code.len()) {
+        dst.copy_from_slice(&code);
+    }
+
+    buf
+}
+
+/// Build a dynamically-linked Linux-ABI **executable** that names
+/// `interp_path` (which must be NUL-terminated) in a `PT_INTERP` segment.
+///
+/// The executable also carries its own `PT_LOAD` code that would
+/// `exit(exit_code)` — but that code must **not** run: when an interpreter
+/// is present the kernel enters the interpreter's entry instead.  The
+/// self-test gives the executable and interpreter distinct exit codes so
+/// the observed exit code proves which one actually executed.
+///
+/// `ET_EXEC`, tagged `ELFOSABI_GNU`.
+// Test fixture: the buffer is sized to fit exactly (header + 2 phdrs +
+// interp path + code) and every offset is derived from compile-time
+// constants plus the caller-supplied path length, so the indexing is
+// provably in-bounds and the offset arithmetic cannot overflow for any
+// realistic interpreter path.  Matches the surrounding `build_*` builders.
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
+#[must_use]
+pub fn build_linux_dynamic_exe_elf(interp_path: &[u8], exit_code: u8) -> alloc::vec::Vec<u8> {
+    use alloc::vec;
+
+    let phdr_offset: u64 = 64;
+    // Two program headers: PT_INTERP then PT_LOAD.
+    let interp_offset: u64 = phdr_offset + 2 * ELF64_PHDR_SIZE as u64; // 176
+    let interp_size: u64 = interp_path.len() as u64;
+    let code_offset: u64 = interp_offset + interp_size;
+    let code = linux_exit_machine_code(exit_code);
+    let code_size = code.len() as u64;
+    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+
+    let mut buf = vec![0u8; (code_offset + code_size) as usize];
+
+    // --- ELF header ---
+    buf[0] = 0x7F;
+    buf[1] = b'E';
+    buf[2] = b'L';
+    buf[3] = b'F';
+    buf[EI_CLASS] = ELFCLASS64;
+    buf[EI_DATA] = ELFDATA2LSB;
+    buf[EI_VERSION] = EV_CURRENT;
+    buf[EI_OSABI] = ELFOSABI_GNU;
+    write_u16(&mut buf, 16, ET_EXEC);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr); // e_entry = code segment start
+    write_u64(&mut buf, 32, phdr_offset); // e_phoff
+    write_u64(&mut buf, 40, 0); // e_shoff
+    write_u32(&mut buf, 48, 0); // e_flags
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, 2); // e_phnum (PT_INTERP + PT_LOAD)
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0);
+    write_u16(&mut buf, 62, 0);
+
+    // --- Program header 0: PT_INTERP ---
+    let ph0 = phdr_offset as usize;
+    write_u32(&mut buf, ph0, PT_INTERP);
+    write_u32(&mut buf, ph0 + 4, PF_R);
+    write_u64(&mut buf, ph0 + 8, interp_offset); // p_offset
+    write_u64(&mut buf, ph0 + 16, load_vaddr); // p_vaddr (arbitrary, not loaded)
+    write_u64(&mut buf, ph0 + 24, 0);
+    write_u64(&mut buf, ph0 + 32, interp_size); // p_filesz
+    write_u64(&mut buf, ph0 + 40, interp_size); // p_memsz
+    write_u64(&mut buf, ph0 + 48, 1); // p_align
+
+    // --- Program header 1: PT_LOAD (R+X) for the executable's own code ---
+    let ph1 = phdr_offset as usize + ELF64_PHDR_SIZE;
+    write_u32(&mut buf, ph1, PT_LOAD);
+    write_u32(&mut buf, ph1 + 4, PF_R | PF_X);
+    write_u64(&mut buf, ph1 + 8, code_offset); // p_offset
+    write_u64(&mut buf, ph1 + 16, load_vaddr); // p_vaddr
+    write_u64(&mut buf, ph1 + 24, 0);
+    write_u64(&mut buf, ph1 + 32, code_size); // p_filesz
+    write_u64(&mut buf, ph1 + 40, code_size); // p_memsz
+    write_u64(&mut buf, ph1 + 48, 0x1000); // p_align
+
+    // --- PT_INTERP path bytes (caller supplies the NUL terminator) ---
+    let is = interp_offset as usize;
+    if let Some(dst) = buf.get_mut(is..is + interp_path.len()) {
+        dst.copy_from_slice(interp_path);
+    }
+
+    // --- Executable's own code (should be shadowed by the interpreter) ---
+    let cs = code_offset as usize;
+    if let Some(dst) = buf.get_mut(cs..cs + code.len()) {
+        dst.copy_from_slice(&code);
+    }
+
+    buf
+}
+
 /// Build a tiny ELF with a single `PT_GNU_PROPERTY` program header and
 /// `EI_OSABI = ELFOSABI_SYSV` (no other Linux markers).  Used to verify
 /// that the property-segment signal alone trips detection.

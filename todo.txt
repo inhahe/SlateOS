@@ -157,9 +157,20 @@
 ##       test_load_interpreter_fallbacks() (spawn.rs Test 21) covers the static-ELF and absent-interpreter
 ##       Ok(None) paths against a real freshly-created PML4; stamps "[spawn] load_interpreter fallbacks
 ##       (static + absent): OK". elf::build_dynamic_interp_test_elf() added as the test ELF builder.
-##   [REMAINING] END-TO-END interpreter EXECUTION (entering ld.so, relocating, running a real dynamic
-##       binary) needs an actual glibc/musl ld.so on the filesystem — deferred until one is present. The
-##       load mechanism (base selection, biased segment mapping, AT_BASE/AT_ENTRY auxv) is unit-tested.
+##   [DONE 2026-06-13] END-TO-END interpreter EXECUTION now verified WITHOUT needing a real glibc/musl
+##       ld.so: hand-crafted minimal interpreter ELF removes the blocker. elf::build_linux_interp_exit_elf()
+##       builds an ET_DYN (PIE, p_vaddr=0/e_entry=0) "ld.so" stand-in that exit(42)s; elf::
+##       build_linux_dynamic_exe_elf() builds an ET_EXEC with PT_INTERP + its own PT_LOAD that would
+##       exit(7). proc::spawn::self_test_linux_dynamic_interp() (called post-VFS-init from main.rs, since it
+##       needs a writable VFS) writes the interpreter to /ouros-test-ld.so, spawns the dynamic exe, and
+##       asserts the child exits 42 (interpreter ran) not 7 (executable) — proving the kernel loaded the
+##       interpreter at LINUX_INTERP_BASE and transferred control to ITS entry, and that the interpreter's
+##       Linux exit() routed through dispatch_linux. Boot-verified: "loaded interpreter '/ouros-test-ld.so'
+##       at base=0x700000000000, entry=0x700000000000" + "entered ld.so -> exit(42): OK".
+##       [STILL REMAINING] Running a REAL glibc/musl ld.so (actual relocation processing, shared-lib
+##       loading, TLS setup) still needs a real interpreter on the FS — that is a toolchain-port concern,
+##       not a kernel-launch-path gap. The kernel side (base selection, biased segment mapping,
+##       AT_BASE/AT_ENTRY auxv, ring-3 entry) is now verified end-to-end.
 ## DESIGN NOTES (Claude autonomous, clearly-correct defaults; revisit if operator disagrees):
 ##   - Interpreter base: fixed address (no ASLR yet). ASLR is a security enhancement, not required for
 ##     correctness; documenting rather than blocking.

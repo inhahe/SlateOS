@@ -1719,6 +1719,113 @@ fn test_spawn_linux_sysv_stack() -> KernelResult<()> {
     Ok(())
 }
 
+/// VFS-dependent integration self-test: end-to-end dynamically-linked
+/// Linux launch through the program interpreter (`ld.so`).
+///
+/// This is the piece the in-`proc::self_test` tests could not cover —
+/// `test_load_interpreter_fallbacks` only exercises the static and
+/// missing-interpreter *fallback* cases (both `Ok(None)`), because a
+/// successful interpreter load needs a real interpreter file on the
+/// filesystem and the VFS is not mounted yet when `proc::self_test()` runs.
+///
+/// Here, after the VFS is up, we:
+///   1. Write a minimal `ET_DYN` interpreter ("ld.so" stand-in) that calls
+///      `exit(42)` to a known path.
+///   2. Spawn a dynamically-linked executable whose `PT_INTERP` names that
+///      path and whose *own* code would `exit(7)`.
+///   3. Let the child run and assert it exited with **42**, not 7 —
+///      proving the kernel loaded the interpreter at `LINUX_INTERP_BASE`
+///      and transferred control to *its* entry (the real ld.so contract),
+///      and that the interpreter's `exit` syscall routed through the Linux
+///      ABI translation layer.
+///
+/// Skips gracefully (returns `Ok`) if the VFS write fails — the test is a
+/// best-effort integration check, not a gate on unrelated VFS state.
+///
+/// Must be called **after** filesystem initialization (see `main.rs`); it
+/// is intentionally *not* part of `self_test()` for that reason.
+pub fn self_test_linux_dynamic_interp() -> KernelResult<()> {
+    const INTERP_PATH: &str = "/ouros-test-ld.so";
+    const INTERP_PATH_NUL: &[u8] = b"/ouros-test-ld.so\0";
+    const INTERP_EXIT: u8 = 42;
+    const EXE_EXIT: u8 = 7;
+
+    serial_println!("[spawn] Running Linux dynamic-interpreter integration test...");
+
+    // Step 1: place the interpreter ("ld.so" stand-in) on the filesystem.
+    let interp_elf = elf::build_linux_interp_exit_elf(INTERP_EXIT);
+    if let Err(e) = crate::fs::Vfs::write_file(INTERP_PATH, &interp_elf) {
+        serial_println!(
+            "[spawn]   Linux dynamic interp: SKIP (VFS write failed: {:?})",
+            e
+        );
+        return Ok(());
+    }
+
+    // Step 2: spawn a dynamically-linked executable naming that interpreter.
+    let exe_elf = elf::build_linux_dynamic_exe_elf(INTERP_PATH_NUL, EXE_EXIT);
+    let argv: &[&[u8]] = &[b"dynprog"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-dyn",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = crate::fs::Vfs::remove(INTERP_PATH);
+            serial_println!("[spawn]   FAIL: dynamic spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Let the thread run: trampoline → ring 3 at the interpreter entry →
+    // exit(42).
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+
+    // Capture state/exit code BEFORE tearing the process down.
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(INTERP_PATH);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: dynamic interp — expected Zombie, got {:?}",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // The decisive check: the interpreter (exit 42) ran, not the
+    // executable's own code (exit 7).  Anything else means the kernel
+    // failed to enter the interpreter.
+    if exit_code != Some(i32::from(INTERP_EXIT)) {
+        serial_println!(
+            "[spawn]   FAIL: dynamic interp — expected exit {} (interpreter), got {:?} \
+             (7 would mean the executable ran instead of ld.so)",
+            INTERP_EXIT, exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   Linux dynamic-interpreter launch (entered ld.so → exit({})): OK",
+        INTERP_EXIT
+    );
+    Ok(())
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

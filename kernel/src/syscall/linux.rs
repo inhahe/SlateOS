@@ -7209,7 +7209,38 @@ fn drm_card_ioctl(entry: &FdEntry, request: u32, argp: u64) -> SyscallResult {
             }
             drm_card_ioctl_mode_getplane(handle, argp)
         }
-        // Dumb-buffer / framebuffer / page-flip ioctls land in commit 6.
+        // --- dumb-buffer + framebuffer allocation lifecycle (primary-node only) ---
+        //
+        // Dumb buffers are scanout-intended CPU-mappable buffers; Linux gates
+        // CREATE/DESTROY_DUMB and the ADDFB/RMFB framebuffer ioctls to the
+        // primary node (no DRM_RENDER_ALLOW), so a render node gets EACCES.
+        uapi::DRM_IOCTL_MODE_CREATE_DUMB => {
+            if render_node {
+                return linux_err(errno::EACCES);
+            }
+            drm_card_ioctl_mode_create_dumb(handle, argp)
+        }
+        uapi::DRM_IOCTL_MODE_DESTROY_DUMB => {
+            if render_node {
+                return linux_err(errno::EACCES);
+            }
+            drm_card_ioctl_mode_destroy_dumb(handle, argp)
+        }
+        uapi::DRM_IOCTL_MODE_ADDFB2 => {
+            if render_node {
+                return linux_err(errno::EACCES);
+            }
+            drm_card_ioctl_mode_addfb2(handle, argp)
+        }
+        uapi::DRM_IOCTL_MODE_RMFB => {
+            if render_node {
+                return linux_err(errno::EACCES);
+            }
+            drm_card_ioctl_mode_rmfb(handle, argp)
+        }
+        // MAP_DUMB (+ the mmap-on-drm-fd integration that flips
+        // DRM_CAP_DUMB_BUFFER on) and PAGE_FLIP (+ vblank-event delivery) land
+        // in the follow-up commits.
         _ => linux_err(errno::ENOTTY),
     }
 }
@@ -7390,11 +7421,13 @@ fn drm_card_device(handle: crate::drm::card_fd::DrmCardHandle) -> Result<usize, 
 
 /// Map a [`crate::drm`] lookup error onto a DRM ioctl errno.
 ///
-/// A missing object id (`NotFound`) is Linux's `ENOENT` for the KMS getters;
-/// anything else is `EINVAL`.
+/// A missing object id (`NotFound`) is Linux's `ENOENT` for the KMS getters
+/// and the GEM-handle lookups; a failed allocation is `ENOMEM`; anything else
+/// is `EINVAL`.
 fn drm_kernel_err(e: crate::error::KernelError) -> i32 {
     match e {
         crate::error::KernelError::NotFound => errno::ENOENT,
+        crate::error::KernelError::OutOfMemory => errno::ENOMEM,
         _ => errno::EINVAL,
     }
 }
@@ -7816,6 +7849,169 @@ fn drm_card_ioctl_mode_getplane(
     match write_user_struct(argp, &pl) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => linux_err(e),
+    }
+}
+
+/// Pick the [`crate::drm::mode::PixelFormat`] a dumb buffer of `bpp` bits per
+/// pixel maps to.
+///
+/// `CREATE_DUMB` only carries a bpp (no FourCC), so we map the two depths the
+/// native GEM allocator supports: 32 bpp → `XRGB8888` (the conventional dumb
+/// scanout format every modesetting client requests) and 16 bpp → `RGB565`.
+/// Any other bpp is unsupported (`None` → `EINVAL`).
+fn drm_dumb_format(bpp: u32) -> Option<crate::drm::mode::PixelFormat> {
+    use crate::drm::mode::PixelFormat;
+    match bpp {
+        32 => Some(PixelFormat::Xrgb8888),
+        16 => Some(PixelFormat::Rgb565),
+        _ => None,
+    }
+}
+
+/// `DRM_IOCTL_MODE_CREATE_DUMB` — allocate a CPU-mappable scanout buffer.
+///
+/// Maps onto the native GEM allocator: the requested bpp selects a pixel
+/// format (see [`drm_dumb_format`]), and [`crate::drm::DrmDevice::gem_create`]
+/// allocates the backing frames and computes the row pitch.  We report the
+/// allocated handle, the actual pitch, and the total byte size back to the
+/// client.  The `flags` field must be 0 (no allocation hints are defined).
+fn drm_card_ioctl_mode_create_dumb(
+    handle: crate::drm::card_fd::DrmCardHandle,
+    argp: u64,
+) -> SyscallResult {
+    use crate::drm::uapi;
+    let mut cd = match read_user_struct::<uapi::DrmModeCreateDumb>(argp) {
+        Ok(v) => v,
+        Err(e) => return linux_err(e),
+    };
+    // No allocation flags are defined; a non-zero value is EINVAL on Linux.
+    if cd.flags != 0 || cd.width == 0 || cd.height == 0 {
+        return linux_err(errno::EINVAL);
+    }
+    let format = match drm_dumb_format(cd.bpp) {
+        Some(f) => f,
+        None => return linux_err(errno::EINVAL),
+    };
+    let device = match drm_card_device(handle) {
+        Ok(d) => d,
+        Err(e) => return linux_err(e),
+    };
+    let (gem_handle, pitch, size) = match crate::drm::with_device_mut(device, |dev| {
+        let gem_handle = dev.gem_create(cd.width, cd.height, format)?;
+        let pitch = dev.gem_pitch(gem_handle)?;
+        // pitch * height cannot overflow a u64 here (both fit in u32, product
+        // fits in u64), but guard with checked arithmetic regardless.
+        let size = u64::from(pitch)
+            .checked_mul(u64::from(cd.height))
+            .ok_or(crate::error::KernelError::InvalidArgument)?;
+        Ok((gem_handle, pitch, size))
+    }) {
+        Ok(v) => v,
+        Err(e) => return linux_err(drm_kernel_err(e)),
+    };
+    cd.handle = gem_handle;
+    cd.pitch = pitch;
+    cd.size = size;
+    match write_user_struct(argp, &cd) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(e),
+    }
+}
+
+/// `DRM_IOCTL_MODE_DESTROY_DUMB` — free a dumb buffer by GEM handle.
+fn drm_card_ioctl_mode_destroy_dumb(
+    handle: crate::drm::card_fd::DrmCardHandle,
+    argp: u64,
+) -> SyscallResult {
+    use crate::drm::uapi;
+    let dd = match read_user_struct::<uapi::DrmModeDestroyDumb>(argp) {
+        Ok(v) => v,
+        Err(e) => return linux_err(e),
+    };
+    let device = match drm_card_device(handle) {
+        Ok(d) => d,
+        Err(e) => return linux_err(e),
+    };
+    match crate::drm::with_device_mut(device, |dev| dev.gem_destroy(dd.handle)) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(drm_kernel_err(e)),
+    }
+}
+
+/// `DRM_IOCTL_MODE_ADDFB2` — create a framebuffer object from a GEM handle.
+///
+/// We support the single-plane packed formats the native model knows (the
+/// `XRGB8888` / `ARGB8888` family + `RGB565`); a multi-plane request (any of
+/// `handles[1..]` set) or an unknown FourCC is `EINVAL`.  The framebuffer's
+/// new object id is written back into `fb_id`.
+fn drm_card_ioctl_mode_addfb2(
+    handle: crate::drm::card_fd::DrmCardHandle,
+    argp: u64,
+) -> SyscallResult {
+    use crate::drm::mode::PixelFormat;
+    use crate::drm::uapi;
+    let mut fb = match read_user_struct::<uapi::DrmModeFbCmd2>(argp) {
+        Ok(v) => v,
+        Err(e) => return linux_err(e),
+    };
+    let format = match PixelFormat::from_raw(fb.pixel_format) {
+        Some(f) => f,
+        None => return linux_err(errno::EINVAL),
+    };
+    // Single-plane only: reject any secondary-plane handles/pitches/offsets.
+    if fb.handles.get(1..).is_some_and(|h| h.iter().any(|&v| v != 0))
+        || fb.pitches.get(1..).is_some_and(|p| p.iter().any(|&v| v != 0))
+        || fb.offsets.iter().any(|&v| v != 0)
+    {
+        return linux_err(errno::EINVAL);
+    }
+    let gem_handle = match fb.handles.first() {
+        Some(&h) if h != 0 => h,
+        _ => return linux_err(errno::EINVAL),
+    };
+    let pitch = match fb.pitches.first() {
+        Some(&p) if p != 0 => p,
+        _ => return linux_err(errno::EINVAL),
+    };
+    if fb.width == 0 || fb.height == 0 {
+        return linux_err(errno::EINVAL);
+    }
+    let device = match drm_card_device(handle) {
+        Ok(d) => d,
+        Err(e) => return linux_err(e),
+    };
+    let fb_id = match crate::drm::with_device_mut(device, |dev| {
+        dev.fb_create(gem_handle, fb.width, fb.height, pitch, format)
+    }) {
+        Ok(id) => id.raw(),
+        Err(e) => return linux_err(drm_kernel_err(e)),
+    };
+    fb.fb_id = fb_id;
+    match write_user_struct(argp, &fb) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(e),
+    }
+}
+
+/// `DRM_IOCTL_MODE_RMFB` — destroy a framebuffer object.
+///
+/// The payload is a bare `unsigned int` framebuffer id (not a struct).
+fn drm_card_ioctl_mode_rmfb(
+    handle: crate::drm::card_fd::DrmCardHandle,
+    argp: u64,
+) -> SyscallResult {
+    let fb_id = match read_user_struct::<u32>(argp) {
+        Ok(v) => v,
+        Err(e) => return linux_err(e),
+    };
+    let device = match drm_card_device(handle) {
+        Ok(d) => d,
+        Err(e) => return linux_err(e),
+    };
+    let id = crate::drm::DrmObjectId::new(fb_id);
+    match crate::drm::with_device_mut(device, |dev| dev.fb_destroy(id)) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(drm_kernel_err(e)),
     }
 }
 
@@ -78210,6 +78406,36 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[syscall/linux]   DRM KMS enumeration conversions: OK");
+    }
+
+    // DRM dumb-buffer + framebuffer allocation mapping (commit 6).
+    {
+        use crate::drm::mode::PixelFormat;
+        // CREATE_DUMB bpp → pixel format.
+        if drm_dumb_format(32) != Some(PixelFormat::Xrgb8888) {
+            serial_println!("[syscall/linux]   FAIL: dumb bpp32 format");
+            return Err(KernelError::InternalError);
+        }
+        if drm_dumb_format(16) != Some(PixelFormat::Rgb565) {
+            serial_println!("[syscall/linux]   FAIL: dumb bpp16 format");
+            return Err(KernelError::InternalError);
+        }
+        if drm_dumb_format(24).is_some() || drm_dumb_format(8).is_some() {
+            serial_println!("[syscall/linux]   FAIL: unsupported dumb bpp accepted");
+            return Err(KernelError::InternalError);
+        }
+        // ADDFB2 FourCC → pixel format (the formats a modesetting client uses).
+        if PixelFormat::from_raw(PixelFormat::Xrgb8888.raw()) != Some(PixelFormat::Xrgb8888)
+            || PixelFormat::from_raw(PixelFormat::Argb8888.raw()) != Some(PixelFormat::Argb8888)
+        {
+            serial_println!("[syscall/linux]   FAIL: ADDFB2 FourCC round-trip");
+            return Err(KernelError::InternalError);
+        }
+        if PixelFormat::from_raw(0xDEAD_BEEF).is_some() {
+            serial_println!("[syscall/linux]   FAIL: unknown FourCC accepted");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[syscall/linux]   DRM dumb-buffer format mapping: OK");
     }
 
     serial_println!("[syscall/linux] Translation self-test PASSED");

@@ -1,4 +1,40 @@
 
+## IN PROGRESS (2026-06-13): ALSA/PulseAudio compatibility shim — roadmap 5.1 / 5095
+## Goal: Linux audio apps (and PulseAudio/PipeWire/WINE) play sound by speaking the ALSA kernel PCM
+## interface: open("/dev/snd/pcmC0D0p"), a sequence of ioctl(SNDRV_PCM_IOCTL_*), then stream frames.
+## ALSA is the foundation everything else sits on, so build it first. Backed by the existing
+## kernel/src/audio_mixer.rs (open_stream/write_pcm/close_stream/set_volume; fixed 48kHz/S16_LE/stereo).
+## Decomposed into small, individually-tested commits (same pattern as the ELF-loader work):
+##   [DONE 924db82d3 commit 1] kernel/src/audio_alsa.rs — pure ABI layer: SNDRV_PCM_* stream/access/
+##       format/state constants, the _IOC request-number encoder, and the no-struct/plain-int PCM ioctls
+##       (PVERSION/PREPARE/RESET/START/DROP/DRAIN/PAUSE/RESUME/XRUN/HWSYNC/LINK/UNLINK/TTSTAMP), asserted
+##       against known Linux hex. format->bytes-per-sample + mixer_accepts_directly/mixer_frames_to_bytes
+##       translation. Exhaustive boot self-test. No unsafe/devnodes/state yet.
+##   [TODO commit 2] Byte-exact #[repr(C)] mirrors of the asound.h structs, with size_of_ assertions in
+##       self_test against the authoritative Linux sizes, then derive the struct-carrying ioctl numbers
+##       from them (HW_REFINE/HW_PARAMS=_IOWR('A',0x10/0x11,snd_pcm_hw_params), SW_PARAMS=_IOWR('A',0x13,
+##       snd_pcm_sw_params), WRITEI_FRAMES=_IOW('A',0x50,snd_xferi), READI=0x51, STATUS=_IOR('A',0x20,
+##       snd_pcm_status), INFO=_IOR('A',0x01,snd_pcm_info), SYNC_PTR=_IOWR('A',0x23,snd_pcm_sync_ptr)).
+##       CRITICAL: sizeof(snd_pcm_hw_params) must match Linux exactly (snd_mask=__u32 bits[8]=32B,
+##       snd_interval=12B; masks[3]+mres[5]+intervals[12]+ires[9]+scalar tail). Verify the size against
+##       a real asound.h before asserting — a wrong size means real ALSA-lib's ioctl number never matches.
+##   [TODO commit 3] devfs: register /dev/snd/ + pcmC0D0p (playback) and controlC0 nodes so openat()
+##       returns an fd backed by a new HandleKind::AlsaPcm. Mirror the eventfd/timerfd fd-family wiring
+##       (linux_fd.rs FdEntry, cap, fork dup/close, procfs anon-or-path, ipc cleanup_handles, and the
+##       ~50 exhaustive HandleKind match sites in syscall/linux.rs).
+##   [TODO commit 4] Per-open PCM state machine (OPEN->SETUP->PREPARED->RUNNING) keyed by the fd handle:
+##       HW_REFINE advertises only the native config (forces ALSA-lib to negotiate down to 48k/S16/2),
+##       HW_PARAMS validates+stores it and opens an audio_mixer stream, PREPARE/START/DROP/DRAIN drive
+##       the mixer stream, WRITEI_FRAMES (and write()) push frames via audio_mixer::write_pcm, STATUS/
+##       SYNC_PTR report avail/hw_ptr from audio_mixer::buffered. Route SNDRV_PCM_IOCTL_* through
+##       audio_alsa from sys_ioctl when the fd is HandleKind::AlsaPcm.
+##   [TODO commit 5] control device (controlC0): SNDRV_CTL_IOCTL_PVERSION/CARD_INFO/ELEM_* enough for
+##       ALSA-lib to enumerate the card; mixer elements map to audio_mixer master volume/mute.
+##   DESIGN NOTE (clearly-correct default, not blocking): ALSA-direct kernel interface chosen over a
+##   userspace PulseAudio-protocol daemon because PA/PipeWire/JACK/SDL/WINE all layer on ALSA — providing
+##   ALSA gives the broadest compat with one interface. If the operator prefers a userspace PA-protocol
+##   shim instead, this is reversible (the kernel ALSA nodes can coexist or be dropped).
+
 ## DONE (2026-06-13): PIE (ET_DYN) main-executable load basing — continues the Linux ABI loader
 ## Modern Linux executables are PIE (ET_DYN, segments often at vaddr 0). spawn currently loads the main
 ## executable at bias 0 and enters at the raw e_entry — for a PIE that maps the null page and gives wrong

@@ -18,9 +18,15 @@
 //! │   ├── <name>           Sysctl parameters — one file per param (read/write)
 //! │   └── ...              Values are decimal u64 strings
 //! ├── devices/
-//! │   └── pci/
-//! │       ├── BB:DD.F      PCI device info per BDF address
-//! │       └── ...
+//! │   ├── pci/
+//! │   │   ├── BB:DD.F      PCI device info per BDF address
+//! │   │   └── ...
+//! │   └── system/
+//! │       └── cpu/
+//! │           ├── online    Online CPU range, e.g. "0-7" (read-only)
+//! │           ├── present   Present (populated) CPU range (read-only)
+//! │           ├── possible  Possible CPU range (read-only)
+//! │           └── kernel_max Highest addressable CPU index (read-only)
 //! └── fs/
 //!     ├── cache_sectors    Buffer cache capacity (read-only)
 //!     ├── cache_stats      Buffer cache hit/miss stats (read-only)
@@ -99,6 +105,12 @@ enum SysPath<'a> {
     PciDir,
     /// A PCI device file: /sys/devices/pci/00:01.0
     PciDevice(&'a str),
+    /// The devices/system/ directory.
+    SystemDir,
+    /// The devices/system/cpu/ directory.
+    SystemCpuDir,
+    /// A CPU range file: /sys/devices/system/cpu/online etc.
+    CpuFile(&'a str),
     /// File in fs/ subdir: /sys/fs/cache_sectors etc.
     FsFile(&'a str),
     /// Not found.
@@ -119,6 +131,13 @@ const KERNEL_FILES: &[&str] = &[
 
 /// Files in /sys/fs/.
 const FS_FILES: &[&str] = &["cache_sectors", "cache_stats", "mount_count"];
+
+/// CPU mask/range files in /sys/devices/system/cpu/.
+///
+/// These are the files glibc's `get_nprocs()`/`get_nprocs_conf()`, lscpu,
+/// nproc, hwloc, and OpenMP/TBB runtimes consult to size thread pools — they
+/// try this authoritative sysfs path *before* falling back to /proc/cpuinfo.
+const CPU_FILES: &[&str] = &["online", "present", "possible", "kernel_max"];
 
 fn classify_path(rel: &str) -> SysPath<'_> {
     if rel.is_empty() {
@@ -171,6 +190,29 @@ fn classify_path(rel: &str) -> SysPath<'_> {
                         SysPath::PciDevice(tail)
                     } else {
                         SysPath::NotFound
+                    }
+                } else if second == "system" {
+                    if tail.is_empty() {
+                        SysPath::SystemDir
+                    } else {
+                        let (third, rest2) = match tail.find('/') {
+                            Some(pos) => {
+                                let (a, b) = tail.split_at(pos);
+                                (a, b.get(1..).unwrap_or(""))
+                            }
+                            None => (tail, ""),
+                        };
+                        if third == "cpu" {
+                            if rest2.is_empty() {
+                                SysPath::SystemCpuDir
+                            } else if !rest2.contains('/') && CPU_FILES.contains(&rest2) {
+                                SysPath::CpuFile(rest2)
+                            } else {
+                                SysPath::NotFound
+                            }
+                        } else {
+                            SysPath::NotFound
+                        }
                     }
                 } else {
                     SysPath::NotFound
@@ -237,6 +279,36 @@ fn gen_pci_device(bdf: &str) -> KernelResult<Vec<u8>> {
         }
     }
     Err(KernelError::NotFound)
+}
+
+/// Format a contiguous CPU range the way Linux does: `0` for a single CPU,
+/// `0-N` for N+1 CPUs.  CPUs are numbered contiguously from 0 in our model.
+fn cpu_range(count: usize) -> String {
+    let n = count.max(1);
+    if n == 1 {
+        String::from("0\n")
+    } else {
+        format!("0-{}\n", n.saturating_sub(1))
+    }
+}
+
+fn gen_cpu_file(name: &str) -> KernelResult<Vec<u8>> {
+    match name {
+        // CPUs currently online and schedulable (post-SMP-bringup).
+        "online" => Ok(cpu_range(crate::smp::cpu_count()).into_bytes()),
+        // CPUs present (populated) — enabled entries in the ACPI MADT.
+        // We don't model hot-plug slots beyond the MADT, so possible ==
+        // present (correct for non-hotplug hardware; never over-reported).
+        "present" | "possible" => {
+            Ok(cpu_range(crate::acpi::processor_count()).into_bytes())
+        }
+        // Highest CPU index the kernel can address (NR_CPUS - 1 in Linux).
+        "kernel_max" => {
+            let max = crate::sched::priority_rr::MAX_CPUS.saturating_sub(1);
+            Ok(format!("{max}\n").into_bytes())
+        }
+        _ => Err(KernelError::NotFound),
+    }
 }
 
 fn gen_fs_file(name: &str) -> KernelResult<Vec<u8>> {
@@ -357,12 +429,41 @@ impl FileSystem for SysFs {
                 Ok(entries)
             }
             SysPath::DevicesDir => {
-                // Just "pci/" for now.
+                // "pci/" (PCI devices) and "system/" (CPU/topology tree).
+                Ok(vec![
+                    DirEntry {
+                        name: String::from("pci"),
+                        entry_type: EntryType::Directory,
+                        size: 0,
+                    },
+                    DirEntry {
+                        name: String::from("system"),
+                        entry_type: EntryType::Directory,
+                        size: 0,
+                    },
+                ])
+            }
+            SysPath::SystemDir => {
+                // Just "cpu/" for now (memory/node trees can follow).
                 Ok(vec![DirEntry {
-                    name: String::from("pci"),
+                    name: String::from("cpu"),
                     entry_type: EntryType::Directory,
                     size: 0,
                 }])
+            }
+            SysPath::SystemCpuDir => {
+                let entries = CPU_FILES
+                    .iter()
+                    .map(|name| {
+                        let size = gen_cpu_file(name).map_or(0, |d| d.len() as u64);
+                        DirEntry {
+                            name: String::from(*name),
+                            entry_type: EntryType::File,
+                            size,
+                        }
+                    })
+                    .collect();
+                Ok(entries)
             }
             SysPath::PciDir => {
                 // List all PCI devices as files named by BDF address.
@@ -394,12 +495,15 @@ impl FileSystem for SysFs {
             SysPath::Root
             | SysPath::SubDir(_)
             | SysPath::DevicesDir
-            | SysPath::PciDir => Err(KernelError::IsADirectory),
+            | SysPath::PciDir
+            | SysPath::SystemDir
+            | SysPath::SystemCpuDir => Err(KernelError::IsADirectory),
 
             SysPath::KernelFile(name) => gen_kernel_file(name),
             SysPath::ParamFile(name) => gen_param_file(name),
             SysPath::PciDevice(bdf) => gen_pci_device(bdf),
             SysPath::FsFile(name) => gen_fs_file(name),
+            SysPath::CpuFile(name) => gen_cpu_file(name),
             SysPath::NotFound => Err(KernelError::NotFound),
         }
     }
@@ -460,6 +564,24 @@ impl FileSystem for SysFs {
                     size,
                 })
             }
+            SysPath::SystemDir => Ok(DirEntry {
+                name: String::from("system"),
+                entry_type: EntryType::Directory,
+                size: 0,
+            }),
+            SysPath::SystemCpuDir => Ok(DirEntry {
+                name: String::from("cpu"),
+                entry_type: EntryType::Directory,
+                size: 0,
+            }),
+            SysPath::CpuFile(name) => {
+                let size = gen_cpu_file(name).map_or(0, |d| d.len() as u64);
+                Ok(DirEntry {
+                    name: String::from(name),
+                    entry_type: EntryType::File,
+                    size,
+                })
+            }
             SysPath::NotFound => Err(KernelError::NotFound),
         }
     }
@@ -486,14 +608,19 @@ impl FileSystem for SysFs {
                     None => Err(KernelError::InvalidArgument),
                 }
             }
-            SysPath::KernelFile(_) | SysPath::FsFile(_) | SysPath::PciDevice(_) => {
+            SysPath::KernelFile(_)
+            | SysPath::FsFile(_)
+            | SysPath::PciDevice(_)
+            | SysPath::CpuFile(_) => {
                 // Read-only files.
                 Err(KernelError::NotSupported)
             }
             SysPath::Root
             | SysPath::SubDir(_)
             | SysPath::DevicesDir
-            | SysPath::PciDir => Err(KernelError::IsADirectory),
+            | SysPath::PciDir
+            | SysPath::SystemDir
+            | SysPath::SystemCpuDir => Err(KernelError::IsADirectory),
             SysPath::NotFound => Err(KernelError::NotFound),
         }
     }
@@ -664,6 +791,10 @@ pub fn self_test() -> KernelResult<()> {
         dev_dir.iter().any(|e| e.name == "pci"),
         "devices dir should contain 'pci'"
     );
+    assert!(
+        dev_dir.iter().any(|e| e.name == "system"),
+        "devices dir should contain 'system'"
+    );
     serial_println!("[sysfs]   devices directory: OK");
 
     // 8. PCI device listing (may be empty if no PCI bus).
@@ -686,6 +817,80 @@ pub fn self_test() -> KernelResult<()> {
     let version_meta = fs.metadata("/kernel/version")?;
     assert!(version_meta.permissions == 0o444, "version should be r--r--r--");
     serial_println!("[sysfs]   metadata/permissions: OK");
+
+    // 11. CPU topology tree (/sys/devices/system/cpu).  This is the
+    // authoritative path glibc get_nprocs()/lscpu/nproc try before the
+    // /proc/cpuinfo fallback, so the range files must be present, correctly
+    // formatted ("0" or "0-N"), and consistent with the kernel CPU counts.
+    {
+        // system/ lists cpu/.
+        let sys_dir = fs.readdir("/devices/system")?;
+        assert!(
+            sys_dir.iter().any(|e| e.name == "cpu" && e.entry_type == EntryType::Directory),
+            "devices/system should contain 'cpu' directory"
+        );
+
+        // cpu/ lists exactly the range files.
+        let cpu_dir = fs.readdir("/devices/system/cpu")?;
+        for name in CPU_FILES {
+            assert!(
+                cpu_dir.iter().any(|e| e.name == *name && e.entry_type == EntryType::File),
+                "devices/system/cpu missing '{}'",
+                name
+            );
+        }
+
+        // online must equal the SMP online count, formatted Linux-style.
+        let online = fs.read_file("/devices/system/cpu/online")?;
+        let online_txt = core::str::from_utf8(&online)
+            .map_err(|_| KernelError::InternalError)?;
+        let want_online = cpu_range(crate::smp::cpu_count());
+        assert!(
+            online_txt == want_online,
+            "cpu/online = {:?}, want {:?}",
+            online_txt, want_online
+        );
+
+        // present/possible must equal the ACPI present count.
+        let present = fs.read_file("/devices/system/cpu/present")?;
+        let present_txt = core::str::from_utf8(&present)
+            .map_err(|_| KernelError::InternalError)?;
+        let want_present = cpu_range(crate::acpi::processor_count());
+        assert!(
+            present_txt == want_present,
+            "cpu/present = {:?}, want {:?}",
+            present_txt, want_present
+        );
+
+        // kernel_max parses as a number and is >= any online index.
+        let kmax = fs.read_file("/devices/system/cpu/kernel_max")?;
+        let kmax_txt = core::str::from_utf8(&kmax)
+            .map_err(|_| KernelError::InternalError)?;
+        let kmax_val: usize = kmax_txt.trim().parse()
+            .map_err(|_| KernelError::InternalError)?;
+        assert!(
+            kmax_val >= crate::smp::cpu_count().saturating_sub(1),
+            "cpu/kernel_max {} < highest online index",
+            kmax_val
+        );
+
+        // The range files are read-only.
+        assert!(
+            fs.write_file("/devices/system/cpu/online", b"0-1").is_err(),
+            "cpu/online should reject writes"
+        );
+
+        // Stat reports a directory for cpu/ and a file for online.
+        assert!(fs.stat("/devices/system/cpu")?.entry_type == EntryType::Directory);
+        assert!(fs.stat("/devices/system/cpu/online")?.entry_type == EntryType::File);
+        // An unknown cpu file is NotFound, not a phantom.
+        assert!(fs.stat("/devices/system/cpu/bogus").is_err());
+
+        serial_println!(
+            "[sysfs]   devices/system/cpu: OK (online={}, present={})",
+            online_txt.trim(), present_txt.trim()
+        );
+    }
 
     serial_println!("[sysfs] Self-test passed.");
     Ok(())

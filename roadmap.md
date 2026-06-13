@@ -1430,7 +1430,7 @@ _Port ext4 first. Don't write a custom filesystem._
 - [-] Translate POSIX calls to native syscalls
 - [x] /proc, /sys equivalents (for programs that need them)
   - [x] procfs mounted at /proc: 10K+ lines, 70+ root files (version, uptime, meminfo, cpuinfo, stat, vmstat, buddyinfo, net, etc.) + per-PID directories (status, cmdline, stat, maps, caps)
-  - [x] sysfs mounted at /sys: kernel info, hostname (r/w), sysctl params (r/w), PCI devices, fs cache stats
+  - [x] sysfs mounted at /sys: kernel info, hostname (r/w), sysctl params (r/w), PCI devices, fs cache stats; `/sys/devices/system/cpu/{online,present,possible,kernel_max}` CPU-count tree added (2026-06-13) — the authoritative path glibc `get_nprocs()`/`get_nprocs_conf()`, lscpu, nproc, hwloc, and OpenMP/TBB consult before the `/proc/cpuinfo` fallback; ranges use Linux `0`/`0-N` formatting (clamped to ≥1 CPU), online from `smp::cpu_count()`, present/possible from `acpi::processor_count()`, kernel_max from `priority_rr::MAX_CPUS-1`; read-only, self-tested
 - [x] POSIX signals → translate to native IPC messages — implemented via the kernel signal shim (kernel/src/proc/signal.rs + posix/src/signal.rs). kill()/raise() no longer pretend to be Unix signals: cross-process kill() routes through SYS_SIGNAL_SEND, the kernel holds per-process pending/blocked/trampoline state and delivers asynchronously at syscall-return by redirecting to a userspace trampoline (SEH-style), and the target's own disposition table decides terminate/ignore/handle. This is the native-mechanism translation the design calls for (process control via the kernel's own signal channel, not real Unix signals). See POSIX section "Full signal delivery via kernel signal shim" for the full description.
 
 ### 2.6 Init / service manager

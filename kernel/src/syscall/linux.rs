@@ -2643,6 +2643,21 @@ pub fn close_handle(entry: FdEntry) -> SyscallResult {
             crate::ipc::alsa_pcm::close(h);
             SyscallResult::ok(0)
         }
+        HandleKind::DrmCard => {
+            // Deregister from the per-process ipc_handles list — same
+            // rationale as the EventFd/.../AlsaPcm arms above — then drop one
+            // refcount on the in-kernel DRM card client instance.
+            if let Some(pid) = caller_pid() {
+                pcb::deregister_ipc_handle(
+                    pid,
+                    crate::cap::ResourceType::Drm,
+                    entry.raw_handle,
+                );
+            }
+            let h = crate::drm::card_fd::DrmCardHandle::from_raw(entry.raw_handle);
+            crate::drm::card_fd::close(h);
+            SyscallResult::ok(0)
+        }
     }
 }
 
@@ -2700,8 +2715,9 @@ fn dispatch_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
         }
         HandleKind::EventFd => dispatch_eventfd_write(entry, buf, len),
         // signalfd, timerfd and inotify are read-only: write(2) → EINVAL.
-        // The ALSA control device is ioctl-only, so write(2) → EINVAL too.
-        HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaControl => {
+        // The ALSA control device and DRM card are ioctl-only, so
+        // write(2) → EINVAL too.
+        HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaControl | HandleKind::DrmCard => {
             linux_err(errno::EINVAL)
         }
         // ALSA PCM playback substream — `write(2)` pushes interleaved frames
@@ -2886,8 +2902,8 @@ fn dispatch_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
             linux_from_native(handlers::sys_pipe_read(&a))
         }
         HandleKind::EventFd => dispatch_eventfd_read(entry, buf, cap),
-        // The ALSA control device is ioctl-only: read(2) → EINVAL.
-        HandleKind::PidFd | HandleKind::Epoll | HandleKind::AlsaControl => linux_err(errno::EINVAL),
+        // The ALSA control device and DRM card are ioctl-only: read(2) → EINVAL.
+        HandleKind::PidFd | HandleKind::Epoll | HandleKind::AlsaControl | HandleKind::DrmCard => linux_err(errno::EINVAL),
         HandleKind::MemFd => dispatch_memfd_read(entry, buf, cap),
         HandleKind::SignalFd => dispatch_signalfd_read(entry, buf, cap),
         HandleKind::Timerfd => dispatch_timerfd_read(entry, buf, cap),
@@ -3866,7 +3882,8 @@ fn fcntl_flock_apply(
         | HandleKind::Timerfd
         | HandleKind::Inotify
         | HandleKind::AlsaPcm
-        | HandleKind::AlsaControl => {
+        | HandleKind::AlsaControl
+        | HandleKind::DrmCard => {
             return linux_err(errno::EBADF);
         }
     }
@@ -4001,7 +4018,7 @@ fn sys_lseek(args: &SyscallArgs) -> SyscallResult {
                 Err(e) => linux_err(linux_errno_for(e)),
             }
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl | HandleKind::DrmCard => linux_err(errno::ESPIPE),
     }
 }
 
@@ -4131,6 +4148,70 @@ fn try_open_alsa_control(path: &[u8], flags: u32) -> Option<SyscallResult> {
     }
 }
 
+/// Intercept `open()` of a DRM device node (`/dev/dri/card0`,
+/// `/dev/dri/renderD128`) and mint a
+/// [`crate::proc::linux_fd::HandleKind::DrmCard`] fd instead of routing
+/// through the VFS.  Mirrors [`try_open_alsa_pcm`]: both open entry points
+/// consult this helper *before* the VFS open so a single place owns the
+/// DRM-node recognition.
+///
+/// Like a PCM substream — and unlike the stateless ALSA control node — a DRM
+/// fd carries a per-open *client* object ([`crate::drm::card_fd`]) holding the
+/// target device, the render-node flag, and the per-fd `DRM_CLIENT_CAP_*`
+/// state, so it is created here, registered as a per-process IPC resource, and
+/// rolled back on a table-install failure.
+///
+/// Returns `Some(result)` when `path` is a recognised DRM node (the result
+/// being the new fd or an errno); `None` when it is not, so the caller falls
+/// through to the normal VFS open.
+///
+/// Recognised today (the first DRM device, index 0):
+///   * `/dev/dri/card0`       — full KMS authority
+///   * `/dev/dri/renderD128`  — render-only node (no modeset authority)
+fn try_open_drm(path: &[u8], flags: u32) -> Option<SyscallResult> {
+    let render_node = match path {
+        b"/dev/dri/card0" => false,
+        b"/dev/dri/renderD128" => true,
+        _ => return None,
+    };
+
+    // No DRM device present → ENODEV, matching Linux opening a card node on a
+    // machine with no GPU bound.
+    if crate::drm::device_count() == 0 {
+        return Some(linux_err(errno::ENODEV));
+    }
+
+    // A real caller is required — kernel context has no fd table to install
+    // into.  Return EBADF the same way the VFS path does for kernel context.
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => return Some(linux_err(errno::EBADF)),
+    };
+
+    // Create the per-open client instance (device index 0) and register it as
+    // a per-process IPC resource so exit-cleanup and fork-sharing see it.
+    let handle = crate::drm::card_fd::create(0, render_node);
+    pcb::register_ipc_handle(pid, crate::cap::ResourceType::Drm, handle.raw());
+
+    let status_flags = flags & oflags::O_NONBLOCK;
+    let fd_flags = if flags & oflags::O_CLOEXEC != 0 {
+        crate::proc::linux_fd::FD_CLOEXEC
+    } else {
+        0
+    };
+    let entry = FdEntry::drm_card(handle.raw(), fd_flags, status_flags);
+
+    match pcb::linux_fd_install(pid, entry, 0) {
+        Ok(fd) => Some(SyscallResult::ok(i64::from(fd))),
+        Err(e) => {
+            // Roll back the registration + instance on table failure.
+            pcb::deregister_ipc_handle(pid, crate::cap::ResourceType::Drm, handle.raw());
+            crate::drm::card_fd::close(handle);
+            Some(linux_err(linux_errno_for(e)))
+        }
+    }
+}
+
 /// Shared backend for `open` / `openat`.
 fn open_common(path_ptr: u64, path_len_hint: u64, flags: u32) -> SyscallResult {
     if path_ptr == 0 {
@@ -4174,6 +4255,9 @@ fn open_common(path_ptr: u64, path_len_hint: u64, flags: u32) -> SyscallResult {
             return r;
         }
         if let Some(r) = try_open_alsa_control(path_slice, flags) {
+            return r;
+        }
+        if let Some(r) = try_open_drm(path_slice, flags) {
             return r;
         }
     }
@@ -4364,6 +4448,9 @@ fn open_kernel_path_install(path: &str, flags: u32) -> SyscallResult {
         return r;
     }
     if let Some(r) = try_open_alsa_control(path.as_bytes(), flags) {
+        return r;
+    }
+    if let Some(r) = try_open_drm(path.as_bytes(), flags) {
         return r;
     }
     if let Err(e) = handlers::require_cap_type(
@@ -6398,7 +6485,8 @@ fn sys_ioctl(args: &SyscallArgs) -> SyscallResult {
             // Device-specific ioctls: route by handle kind.  An ALSA PCM
             // substream answers the `SNDRV_PCM_IOCTL_*` family ('A' magic);
             // an ALSA control device answers the `SNDRV_CTL_IOCTL_*` family
-            // ('U' magic); everything else is an unsupported request on this
+            // ('U' magic); a DRM card answers the `DRM_IOCTL_*` family
+            // ('d' magic); everything else is an unsupported request on this
             // fd → ENOTTY.
             if let Some(entry) = pcb::linux_fd_lookup(pid, fd) {
                 match entry.kind {
@@ -6407,6 +6495,9 @@ fn sys_ioctl(args: &SyscallArgs) -> SyscallResult {
                     }
                     crate::proc::linux_fd::HandleKind::AlsaControl => {
                         return alsa_control_ioctl(&entry, request, args.arg2);
+                    }
+                    crate::proc::linux_fd::HandleKind::DrmCard => {
+                        return drm_card_ioctl(&entry, request, args.arg2);
                     }
                     _ => {}
                 }
@@ -7004,6 +7095,35 @@ fn alsa_control_ioctl_elem_write(argp: u64) -> SyscallResult {
         _ => return linux_err(errno::ENOENT),
     }
     SyscallResult::ok(0)
+}
+
+/// `ioctl(DRM_IOCTL_*)` dispatch for a `/dev/dri/*` fd.
+///
+/// This commit installs the routing entry point only: it recognises that the
+/// request targets the DRM device (the `'d'` ioctl magic, `DRM_IOCTL_BASE`)
+/// and otherwise reports `ENOTTY`, exactly as Linux does for an unsupported
+/// request on a DRM fd.  The actual request handlers (`DRM_IOCTL_VERSION`,
+/// `GET_CAP`, `SET_CLIENT_CAP`, the KMS enumeration family, dumb-buffer
+/// allocation, page-flip) are wired in the follow-up commits that map each
+/// request onto the native [`crate::drm`] device model.
+///
+/// `entry.raw_handle` is the [`crate::drm::card_fd::DrmCardHandle`] of the
+/// open client; a stale handle (the instance was already closed) is reported
+/// as `EBADF`.
+fn drm_card_ioctl(entry: &FdEntry, request: u32, _argp: u64) -> SyscallResult {
+    let handle = crate::drm::card_fd::DrmCardHandle::from_raw(entry.raw_handle);
+    if !crate::drm::card_fd::exists(handle) {
+        return linux_err(errno::EBADF);
+    }
+    // Reject anything that is not a DRM ('d' magic) ioctl outright — those
+    // can never be meant for this fd.
+    if crate::drm::uapi::ioc_type(request) != crate::drm::uapi::DRM_IOCTL_BASE {
+        return linux_err(errno::ENOTTY);
+    }
+    // Request handlers land in a later commit; until then every recognised DRM
+    // ioctl is reported as unsupported, matching Linux's ENOTTY for an ioctl a
+    // driver doesn't implement.
+    linux_err(errno::ENOTTY)
 }
 
 /// Copy a fixed `#[repr(C)]` payload struct out of userspace by value.
@@ -11321,7 +11441,7 @@ fn sys_fsync(args: &SyscallArgs) -> SyscallResult {
     };
     match entry.kind {
         HandleKind::File | HandleKind::MemFd => SyscallResult::ok(0),
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl => linux_err(errno::EINVAL),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl | HandleKind::DrmCard => linux_err(errno::EINVAL),
     }
 }
 
@@ -12214,7 +12334,8 @@ fn sys_readahead(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::Timerfd
         | HandleKind::Inotify
         | HandleKind::AlsaPcm
-        | HandleKind::AlsaControl => return linux_err(errno::EINVAL),
+        | HandleKind::AlsaControl
+        | HandleKind::DrmCard => return linux_err(errno::EINVAL),
     }
     SyscallResult::ok(0)
 }
@@ -13938,6 +14059,9 @@ fn fill_stat_for_fd(
         HandleKind::AlsaPcm => (S_IFCHR | 0o660, 4096),
         // ALSA control device is a character device node like the PCM one.
         HandleKind::AlsaControl => (S_IFCHR | 0o660, 4096),
+        // DRM card / render node is a character device node under /dev/dri
+        // (crw-rw---- root:video on Linux), like the ALSA nodes.
+        HandleKind::DrmCard => (S_IFCHR | 0o660, 4096),
     };
 
     // Inode: use the raw_handle as a stable-ish identity.
@@ -14229,6 +14353,8 @@ fn fill_statx_for_fd(
         HandleKind::AlsaPcm => ((S_IFCHR | 0o660) as u16, 4096),
         // ALSA control character device node under /dev/snd.
         HandleKind::AlsaControl => ((S_IFCHR | 0o660) as u16, 4096),
+        // DRM card / render node character device node under /dev/dri.
+        HandleKind::DrmCard => ((S_IFCHR | 0o660) as u16, 4096),
     };
     let st_ino: u64 = entry.raw_handle;
     // Surface the live memfd data length so stx_size reflects what callers
@@ -15406,7 +15532,7 @@ fn sys_ftruncate(args: &SyscallArgs) -> SyscallResult {
         }
         // Pipes, consoles, eventfds, pidfds, epoll, signalfds, timerfds cannot
         // be truncated.
-        HandleKind::Pipe | HandleKind::Console | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl => linux_err(errno::EINVAL),
+        HandleKind::Pipe | HandleKind::Console | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl | HandleKind::DrmCard => linux_err(errno::EINVAL),
     }
 }
 
@@ -19180,6 +19306,12 @@ fn sys_pidfd_getfd(args: &SyscallArgs) -> SyscallResult {
                 return linux_err(errno::EBADF);
             }
         }
+        HandleKind::DrmCard => {
+            let h = crate::drm::card_fd::DrmCardHandle::from_raw(entry.raw_handle);
+            if crate::drm::card_fd::dup(h).is_err() {
+                return linux_err(errno::EBADF);
+            }
+        }
     }
 
     // Linux always sets FD_CLOEXEC on the new fd, regardless of the
@@ -19217,6 +19349,7 @@ fn sys_pidfd_getfd(args: &SyscallArgs) -> SyscallResult {
         HandleKind::Timerfd => Some(crate::cap::ResourceType::Timerfd),
         HandleKind::Inotify => Some(crate::cap::ResourceType::Inotify),
         HandleKind::AlsaPcm => Some(crate::cap::ResourceType::AlsaPcm),
+        HandleKind::DrmCard => Some(crate::cap::ResourceType::Drm),
         HandleKind::Console | HandleKind::PidFd | HandleKind::AlsaControl => None,
     };
     if let Some(rt) = resource {
@@ -19291,6 +19424,10 @@ fn release_handle_ref(kind: HandleKind, raw_handle: u64) {
         HandleKind::AlsaPcm => {
             let h = crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(raw_handle);
             crate::ipc::alsa_pcm::close(h);
+        }
+        HandleKind::DrmCard => {
+            let h = crate::drm::card_fd::DrmCardHandle::from_raw(raw_handle);
+            crate::drm::card_fd::close(h);
         }
     }
 }
@@ -22061,6 +22198,14 @@ fn poll_revents_from_entry(
             // POLLIN (no events queued) and never POLLOUT (ioctl-only).
             0
         }
+        HandleKind::DrmCard => {
+            // A DRM fd becomes readable (POLLIN) when a KMS event is queued
+            // (e.g. a completed page-flip's vblank event delivered via
+            // read(2)).  Event delivery is wired in a later commit, so a DRM
+            // fd is never reported ready for now — never POLLIN (no events)
+            // and never POLLOUT (ioctl-only, write(2) is EINVAL).
+            0
+        }
     };
 
     raw & mask
@@ -22845,7 +22990,8 @@ fn sys_epoll_ctl(args: &SyscallArgs) -> SyscallResult {
         | HandleKind::Timerfd
         | HandleKind::Inotify
         | HandleKind::AlsaPcm
-        | HandleKind::AlsaControl => {}
+        | HandleKind::AlsaControl
+        | HandleKind::DrmCard => {}
     }
 
     // Gate 5: f.file == tf.file || !is_file_epoll(f.file) -> EINVAL.
@@ -26055,6 +26201,7 @@ fn handle_kind_ord(k: crate::proc::linux_fd::HandleKind) -> u64 {
         HandleKind::Inotify => 9,
         HandleKind::AlsaPcm => 10,
         HandleKind::AlsaControl => 11,
+        HandleKind::DrmCard => 12,
     }
 }
 
@@ -27038,7 +27185,7 @@ fn sys_cachestat(args: &SyscallArgs) -> SyscallResult {
                 // memfd is page-cache-backed on Linux, so cachestat is
                 // valid against it (always zero in our world).
                 HandleKind::File | HandleKind::MemFd => {}
-                HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl => {
+                HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl | HandleKind::DrmCard => {
                     return linux_err(errno::EOPNOTSUPP);
                 }
             }
@@ -31589,7 +31736,7 @@ fn sys_pread64(args: &SyscallArgs) -> SyscallResult {
                 Err(e) => linux_err(e),
             }
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl | HandleKind::DrmCard => linux_err(errno::ESPIPE),
     }
 }
 
@@ -31646,7 +31793,7 @@ fn sys_pwrite64(args: &SyscallArgs) -> SyscallResult {
                 Err(e) => linux_err(e),
             }
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl | HandleKind::DrmCard => linux_err(errno::ESPIPE),
     }
 }
 
@@ -33346,7 +33493,7 @@ fn sys_preadv(args: &SyscallArgs) -> SyscallResult {
             let off = offset as u64;
             preadv_memfd_walk(entry.raw_handle, off, iov_ptr, iovcnt)
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl | HandleKind::DrmCard => linux_err(errno::ESPIPE),
     }
 }
 
@@ -33377,7 +33524,7 @@ fn sys_pwritev(args: &SyscallArgs) -> SyscallResult {
             let off = offset as u64;
             pwritev_memfd_walk(entry.raw_handle, off, iov_ptr, iovcnt)
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl | HandleKind::DrmCard => linux_err(errno::ESPIPE),
     }
 }
 
@@ -33439,7 +33586,7 @@ fn sys_preadv2(args: &SyscallArgs) -> SyscallResult {
             let off = offset as u64;
             preadv_memfd_walk(entry.raw_handle, off, iov_ptr, iovcnt)
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl | HandleKind::DrmCard => linux_err(errno::ESPIPE),
     }
 }
 
@@ -33483,7 +33630,7 @@ fn sys_pwritev2(args: &SyscallArgs) -> SyscallResult {
             let off = offset as u64;
             pwritev_memfd_walk(entry.raw_handle, off, iov_ptr, iovcnt)
         }
-        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl => linux_err(errno::ESPIPE),
+        HandleKind::Console | HandleKind::Pipe | HandleKind::EventFd | HandleKind::PidFd | HandleKind::Epoll | HandleKind::SignalFd | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::AlsaPcm | HandleKind::AlsaControl | HandleKind::DrmCard => linux_err(errno::ESPIPE),
     }
 }
 
@@ -47215,6 +47362,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 HandleKind::Timerfd => Some(crate::cap::ResourceType::Timerfd),
                 HandleKind::Inotify => Some(crate::cap::ResourceType::Inotify),
                 HandleKind::AlsaPcm => Some(crate::cap::ResourceType::AlsaPcm),
+                HandleKind::DrmCard => Some(crate::cap::ResourceType::Drm),
                 HandleKind::Console | HandleKind::PidFd | HandleKind::AlsaControl => None,
             }
         };
@@ -47229,6 +47377,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(kind_to_rt(HandleKind::Console), None);
         assert_eq!(kind_to_rt(HandleKind::PidFd), None);
         assert_eq!(kind_to_rt(HandleKind::AlsaControl), None);
+        assert_eq!(kind_to_rt(HandleKind::DrmCard),
+                   Some(crate::cap::ResourceType::Drm));
 
         // (b) Per-resource register / deregister round-trip on a
         //     synthetic PCB.  This is the contract sys_pidfd_getfd

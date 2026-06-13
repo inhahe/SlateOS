@@ -255,6 +255,17 @@ fn dup_one(rtype: ResourceType, id: u64) -> KernelResult<Option<(ResourceType, u
             )?;
             Ok(Some((rtype, id)))
         }
+        ResourceType::Drm => {
+            // Bump the DRM client-instance refcount so parent and child each
+            // own one reference to the same open client (shared device,
+            // render-node flag, and DRM_CLIENT_CAP_* opt-ins) — same id.
+            // A cap set through either fd is visible to the other, matching
+            // Linux's shared `struct drm_file` across fork.
+            crate::drm::card_fd::dup(
+                crate::drm::card_fd::DrmCardHandle::from_raw(id),
+            )?;
+            Ok(Some((rtype, id)))
+        }
         // No refcounted same-id dup yet — not inherited.  Documented
         // limitation in todo.txt; revisit when these gain dup support.
         ResourceType::Channel
@@ -328,6 +339,11 @@ fn close_one(rtype: ResourceType, id: u64) {
         ResourceType::AlsaPcm => {
             crate::ipc::alsa_pcm::close(
                 crate::ipc::alsa_pcm::AlsaPcmHandle::from_raw(id),
+            );
+        }
+        ResourceType::Drm => {
+            crate::drm::card_fd::close(
+                crate::drm::card_fd::DrmCardHandle::from_raw(id),
             );
         }
         // Nothing was duped for these in `dup_one`.

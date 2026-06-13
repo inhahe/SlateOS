@@ -158,6 +158,19 @@ pub enum HandleKind {
     /// the card number (always 0) and `needs_kernel_close()` returns
     /// `false`.  This mirrors `Console`/`PidFd`.
     AlsaControl,
+    /// DRM card / render node — Linux `/dev/dri/card0` (full KMS authority)
+    /// or `/dev/dri/renderD128` (render-only).  Opened by Linux graphics
+    /// clients (Mesa, libdrm, the X.Org modesetting driver, Wayland
+    /// compositors, SDL/KMSDRM) and driven entirely via `ioctl(DRM_IOCTL_*)`.
+    /// `raw_handle` holds the `drm::card_fd::DrmCardHandle` raw u64 — the
+    /// per-open *client* object that records the target DRM device, whether
+    /// this is a render node, and the per-fd `DRM_CLIENT_CAP_*` opt-ins.
+    /// `read`/`write` return `EINVAL` (DRM is ioctl-driven).  Unlike the
+    /// stateless `AlsaControl`, a DRM fd carries mutable per-open state
+    /// shared across `dup`/`fork`, so it uses the refcounted instance model
+    /// (like `AlsaPcm`) and `needs_kernel_close()` returns `true` (close
+    /// releases one refcount on the in-kernel `DRM_CARD_TABLE` entry).
+    DrmCard,
 }
 
 impl HandleKind {
@@ -175,7 +188,8 @@ impl HandleKind {
             | Self::SignalFd
             | Self::Timerfd
             | Self::Inotify
-            | Self::AlsaPcm => true,
+            | Self::AlsaPcm
+            | Self::DrmCard => true,
         }
     }
 }
@@ -392,6 +406,23 @@ impl FdEntry {
         Self {
             kind: HandleKind::AlsaControl,
             raw_handle: 0,
+            fd_flags,
+            status_flags,
+            f_owner: 0,
+            f_owner_sig: 0,
+        }
+    }
+
+    /// Construct an entry for a DRM card / render node (`/dev/dri/card0`,
+    /// `/dev/dri/renderD128`).  `raw_handle` is the
+    /// `drm::card_fd::DrmCardHandle` raw u64.  `fd_flags` carries
+    /// `FD_CLOEXEC` when opened with `O_CLOEXEC`; `status_flags` carries
+    /// `O_NONBLOCK` when opened non-blocking.
+    #[must_use]
+    pub const fn drm_card(handle: u64, fd_flags: u32, status_flags: u32) -> Self {
+        Self {
+            kind: HandleKind::DrmCard,
+            raw_handle: handle,
             fd_flags,
             status_flags,
             f_owner: 0,

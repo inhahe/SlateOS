@@ -2861,6 +2861,12 @@ extern "C" fn kernel_main() -> ! {
         cpu::halt_loop();
     }
 
+    // DRM card client-instance lifecycle self-test (the /dev/dri fd family).
+    if let Err(e) = drm::card_fd::self_test() {
+        serial_println!("FATAL: DRM card client self-test failed: {:?}", e);
+        cpu::halt_loop();
+    }
+
     // Console VT100/ANSI escape sequence self-test.
     console::self_test();
 

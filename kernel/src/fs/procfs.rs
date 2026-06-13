@@ -2869,6 +2869,20 @@ fn fd_link_target(entry: &crate::proc::linux_fd::FdEntry) -> String {
         }
         // ALSA control device is a real device node at a fixed path.
         HandleKind::AlsaControl => String::from("/dev/snd/controlC0"),
+        // DRM card / render node is a real device node under /dev/dri; the
+        // render-node flag is recorded on the instance object, and a stale
+        // handle falls back to the card node name.
+        HandleKind::DrmCard => {
+            let render = crate::drm::card_fd::is_render_node(
+                crate::drm::card_fd::DrmCardHandle::from_raw(entry.raw_handle),
+            )
+            .unwrap_or(false);
+            if render {
+                String::from("/dev/dri/renderD128")
+            } else {
+                String::from("/dev/dri/card0")
+            }
+        }
     }
 }
 

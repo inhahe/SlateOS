@@ -92,6 +92,15 @@ const fn struct_size<T>() -> u32 {
     core::mem::size_of::<T>() as u32
 }
 
+/// Extract the type ("magic") field from an encoded ioctl request number.
+///
+/// Used by the syscall dispatch layer to confirm a request really targets
+/// the DRM driver ([`DRM_IOCTL_BASE`]) before trying to interpret it.
+#[must_use]
+pub const fn ioc_type(cmd: u32) -> u32 {
+    (cmd >> IOC_TYPESHIFT) & ((1 << IOC_TYPEBITS) - 1)
+}
+
 /// `DRM_IOWR('d', nr, struct)` — bidirectional struct payload.
 const fn iowr<T>(nr: u32) -> u32 {
     ioc(IOC_READ | IOC_WRITE, DRM_IOCTL_BASE, nr, struct_size::<T>())

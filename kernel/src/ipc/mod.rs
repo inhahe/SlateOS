@@ -95,6 +95,11 @@ pub fn cleanup_handles(handles: &[(ResourceType, u64)]) {
             ResourceType::AlsaPcm => {
                 alsa_pcm::close(alsa_pcm::AlsaPcmHandle::from_raw(handle_raw));
             }
+            ResourceType::Drm => {
+                crate::drm::card_fd::close(
+                    crate::drm::card_fd::DrmCardHandle::from_raw(handle_raw),
+                );
+            }
             ResourceType::File => {
                 // Open file handles are refcounted in the open-file table;
                 // closing here drops this process's single reference.  A

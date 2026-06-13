@@ -195,6 +195,16 @@ pub enum ResourceType {
     /// slot) is released when an owning process dies, and so `fork()` knows to
     /// bump the refcount in the child.
     AlsaPcm = 22,
+    /// A DRM card / render-node client instance (Linux `/dev/dri/card0`,
+    /// `/dev/dri/renderD128`).
+    ///
+    /// A refcounted reference into [`crate::drm::card_fd`] holding one open
+    /// DRM client's per-fd state (target device, render-node flag, and the
+    /// `DRM_CLIENT_CAP_*` opt-ins); no capability is required to create one —
+    /// the handle itself is the authority.  Tracked per-process so the
+    /// instance is released when an owning process dies, and so `fork()` knows
+    /// to bump the refcount in the child.
+    Drm = 23,
 }
 
 // ---------------------------------------------------------------------------

@@ -1,4 +1,30 @@
 
+## DONE (2026-06-12): ABI batch 549 — move_pages: per-page bad-node status = -ENODEV (was -EINVAL), matching do_pages_move (closes TD6)
+## Linux v6.6 mm/migrate.c do_pages_move per-page node validation (verified verbatim against raw.githubusercontent.com torvalds/linux v6.6):
+##   err = -ENODEV;
+##   if (node < 0 || node >= MAX_NUMNODES) goto out_flush;     // out of range -> -ENODEV
+##   if (!node_state(node, N_MEMORY))      goto out_flush;     // node has no memory -> -ENODEV
+##   err = -EACCES;
+##   if (!node_isset(node, task_nodes))    goto out_flush;     // valid+online but disallowed -> -EACCES
+##   ... add_page_for_migration(...); store_status(status, i, err ? : current_node, 1);
+## On our single-node UMA box: task_nodes = mems_allowed = {0}; node 0 is the ONLY node with N_MEMORY and is always
+##   in task_nodes.  So target 0 -> status 0 (page already there); EVERY other target (negative, >= MAX_NUMNODES, or
+##   in-range-but-no-memory like node 1) fails the range/N_MEMORY check and stores -ENODEV.  The -EACCES branch is
+##   UNREACHABLE on a single-node box: it requires a node that HAS memory yet is not in task_nodes, impossible when
+##   only node 0 has memory and node 0 is always allowed.
+## DIVERGENCE (pre-batch, batch-105 stub): sys_move_pages stored status[i] = -EINVAL for any non-zero target node.
+##   -EINVAL is not a value do_pages_move ever stores for a bad node; the correct UMA answer is -ENODEV.
+## FIX (translator-only): per-entry decision now `want == 0 ? 0 : -ENODEV` (errno::ENODEV.wrapping_neg()).  Updated
+##   the function doc bullet and batch-105 self-test Case 4: status [0,-EINVAL,0] -> [0,-ENODEV,0].
+## SELF-TEST (boot, dispatch_linux) stamp:
+##   "move_pages per-page bad-node status=-ENODEV (batch 549): OK"
+## VERIFIED: build clean; clippy 17463 (== batch 548; the two `-errno::EINVAL` arithmetic warnings became
+##   `.wrapping_neg()`); boot-test BOOT_OK + stamp in serial-test.txt + EXIT=0, no SELF-TEST FAILURE.
+## NOTE: used errno::ENODEV.wrapping_neg() (NOT i32::from(...).wrapping_neg()) — errno consts are already i32, so
+##   i32::from() trips clippy::useless_conversion, which is DENY-level (an error, not a warning).  Remember this for
+##   future i32-status asserts: only i64 comparisons (r.value) need i64::from(errno::X).wrapping_neg().
+## TD6 (known-issues.md) is now RESOLVED by this batch.
+
 ## DONE (2026-06-12): ABI batch 548 — move_pages: add missing pid->ESRCH lookup (find_mm_struct); remove invented E2BIG count cap
 ## Linux v6.6 mm/migrate.c (verified verbatim against raw.githubusercontent.com torvalds/linux v6.6):
 ##   kernel_move_pages(pid, nr_pages, pages, nodes, status, flags):

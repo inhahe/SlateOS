@@ -471,7 +471,17 @@ are hard-rejected by Linux's `get_nodes` itself), and apply the per-mode
 emptiness check to the *intersected* mask in `mpol_new_check`'s spirit.
 This is only worth doing if/when we support more than one NUMA node.
 
-### TD6. `move_pages` per-page node error stores `-EINVAL` where Linux stores `-ENODEV`/`-EACCES` — APPROXIMATION 2026-06-12
+### TD6. `move_pages` per-page node error stores `-EINVAL` where Linux stores `-ENODEV`/`-EACCES` — RESOLVED 2026-06-12 (batch 549)
+
+**Resolution:** `sys_move_pages` now stores `-ENODEV` for any non-zero
+target node, matching `do_pages_move`'s `err = -ENODEV` path (out-of-range
+or `!node_state(node, N_MEMORY)`). On a single-node box every node but 0
+lacks `N_MEMORY`, so `-ENODEV` is correct for all of them; the `-EACCES`
+"valid node not in `task_nodes`" branch is unreachable when only node 0 has
+memory. Batch-105 self-test Case 4 updated to expect `[0, -ENODEV, 0]`.
+Original analysis retained below for reference.
+
+---
 
 **What:** `sys_move_pages` (`kernel/src/syscall/linux.rs`), in move mode
 (`nodes != NULL`), writes `status[i] = -EINVAL` for any requested target

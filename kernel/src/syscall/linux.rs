@@ -23827,8 +23827,10 @@ fn sys_migrate_pages(args: &SyscallArgs) -> SyscallResult {
 ///     we conservatively claim "on node 0" for every entry — matching
 ///     what a single-node Linux box returns for any successful page.
 ///   * When `nodes != NULL`, we read each requested target node id:
-///     if it's 0, status[i] = 0; if it's non-zero, status[i] = -EINVAL
-///     (Linux's "target not in mems_allowed" rejection).
+///     if it's 0, status[i] = 0; if it's non-zero, status[i] = -ENODEV
+///     (do_pages_move stores -ENODEV when a target node is out of range
+///     or lacks N_MEMORY — true of every node but 0 on a single-node
+///     box; the -EACCES "not in task_nodes" branch is unreachable here).
 ///   * Return 0 unconditionally on accept (per-page errors live in
 ///     status[i], not the return code).
 ///
@@ -23939,13 +23941,25 @@ fn sys_move_pages(args: &SyscallArgs) -> SyscallResult {
                 return linux_err(linux_errno_for(e));
             }
             for j in 0..n {
-                // Per-entry decision: target node 0 -> status 0;
-                // any other node -> -EINVAL (we have only node 0).
+                // Per-entry decision mirroring do_pages_move's per-page
+                // node validation (mm/migrate.c):
+                //   err = -ENODEV; if (node < 0 || node >= MAX_NUMNODES) store;
+                //                  if (!node_state(node, N_MEMORY))     store;
+                //   err = -EACCES; if (!node_isset(node, task_nodes))   store;
+                // On a single-node UMA box, node 0 is the only node with
+                // N_MEMORY and is always in task_nodes = {0}, so target 0
+                // -> status 0 (page already there).  EVERY other target
+                // (negative, out of range, or in-range-but-no-memory)
+                // fails the N_MEMORY check (or the range check) and stores
+                // -ENODEV — the -EACCES branch is unreachable here because
+                // it requires a node that HAS memory yet is disallowed,
+                // which cannot happen when only node 0 has memory.
                 #[allow(clippy::indexing_slicing)]
                 let want = nodes_chunk[j];
                 #[allow(clippy::indexing_slicing)]
                 {
-                    status_chunk[j] = if want == 0 { 0 } else { -errno::EINVAL };
+                    status_chunk[j] =
+                        if want == 0 { 0 } else { errno::ENODEV.wrapping_neg() };
                 }
             }
         } else {
@@ -38015,7 +38029,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
 
         // Case 4: mixed targets — node 0 / node 1 / node 0.
-        // status must be 0 / -EINVAL / 0.
+        // status must be 0 / -ENODEV / 0.  Batch 549: do_pages_move
+        // stores -ENODEV (not -EINVAL) for a target node that lacks
+        // N_MEMORY — node 1 has no memory on a single-node box.
         let nodes: [i32; 3] = [0, 1, 0];
         let mut status: [i32; 3] = [0x77; 3];
         let a = SyscallArgs {
@@ -38026,13 +38042,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             arg5: 0,
         };
         let r = dispatch_linux(nr::MOVE_PAGES, &a);
-        if r.value != 0 || status != [0, -errno::EINVAL, 0] {
+        if r.value != 0 || status != [0, errno::ENODEV.wrapping_neg(), 0] {
             serial_println!(
                 "[syscall/linux]   FAIL: move_pages(mixed) ret {} status {:?}",
                 r.value, status,
             );
             return Err(KernelError::InternalError);
         }
+        serial_println!(
+            "[syscall/linux]   move_pages per-page bad-node status=-ENODEV (batch 549): OK"
+        );
 
         // Case 5: large count (self pid) has NO E2BIG cap — Linux
         // imposes no nr_pages limit.  With NULL pages it flows to the

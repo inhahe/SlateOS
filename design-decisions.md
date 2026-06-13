@@ -768,6 +768,24 @@ asked to **do Option 5 now if there's no good reason to defer** — and a code
 survey found most of the mechanism already exists, so the kernel core is being
 built now. See "Revision").
 
+**Status (2026-06-13) — all three now-doable kernel items have landed.**
+The unblocked kernel work below (items 1–3) is implemented and boot-tested:
+- **(2) Linux mmap defaults to lazy/overcommit** + **(3) `/proc/sys/vm/overcommit_memory`
+  exposed** (reading `0`, honest now that the Linux path passes `MAP_LAZY`) — commit
+  *"mm: Linux mmap defaults to lazy/overcommit + expose vm/overcommit_memory"*.
+  The Linux `mmap` path now also translates `PROT_WRITE`/`PROT_EXEC` into
+  `MAP_WRITE`/`MAP_EXEC` (a latent read-only-anon bug fixed in passing).
+- **(1) Per-program policy** — `pcb::MmapCommitPolicy` {Inherit, ForceCommitted,
+  ForceLazy} stored on the PCB, inherited across fork, consulted by *both* `mmap`
+  paths via pure `native_lazy`/`linux_lazy` helpers; kernel API
+  `pcb::get/set_mmap_commit_policy`; covered by `pcb` self-test. Commit
+  *"mm: per-program memory-commit policy override (Option 5 kernel core)"*.
+Still following their dependencies (unchanged): the Settings → Advanced GUI
+front-end and the capability-gated *writes* to `/proc/sys/vm/*` (`admin.memory_policy`).
+The advisory `OvercommitMode` enum in `mmtune.rs` remains unwired — the live
+mechanism is `MAP_LAZY` + `PARAM_MM_LAZY_DEFAULT` + the per-program policy; a
+future cleanup could retire `OvercommitMode` or fold it into this path.
+
 **Revision (2026-06-13) — do Option 5 now; only the GUI front-end and
 capability-gated writes follow their dependencies.**
 A survey of the actual code (prompted by the operator asking whether Option 5

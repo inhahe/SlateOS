@@ -1,4 +1,32 @@
 
+## IN PROGRESS (2026-06-12): Linux dynamic-linker (ld.so) load path — roadmap 5.1 remaining item
+## The Linux ABI loader currently handles STATIC executables only: spawn_process maps the
+## executable's PT_LOAD segments and enters at its e_entry. A dynamically-linked Linux binary
+## instead names a program interpreter (ld.so) in a PT_INTERP segment; the kernel must load THAT
+## interpreter at a chosen base and enter ld.so's entry, passing the real program entry via AT_ENTRY
+## and the interpreter base via AT_BASE. ld.so then maps shared libs and jumps to the program.
+## Decomposed into small, individually-tested commits:
+##   [DONE 0e706334] elf::ElfFile::interp_path() — extract+NUL-trim the PT_INTERP path (raw bytes,
+##       never str). Returns None for static/malformed/empty. Boot self-tests: dynamic/static/empty.
+##   [DONE 3b039e40] elf::load_segments_with_bias(elf,pml4,bias) — map every PT_LOAD at bias+p_vaddr,
+##       re-validating against USER_SPACE_END. load_segments() now delegates with bias=0 (pure refactor;
+##       init-process load path unchanged, boot still BOOT_OK). bias!=0 path lands with spawn wiring.
+##   [TODO commit 3] Plumb AT_BASE into the auxv: base_auxv()/install_linux_stack()/build_linux_initial_stack()
+##       gain an Option<u64> interp_base; when Some, push AuxEntry(AT_BASE, base). AT_ENTRY stays the
+##       EXECUTABLE's e_entry (already correct). Self-test build_sysv_stack with an AT_BASE entry present.
+##   [TODO commit 4] Wire spawn_process (+ exec): if elf.interp_path() is Some, read that file from the
+##       VFS, parse it, pick an interpreter base (fixed mmap-region base for now, no ASLR — document as a
+##       known limitation), load_segments_with_bias(interp, pml4, base), set entry_rip = base+interp.e_entry,
+##       and pass Some(base) to the stack builder. If the interpreter file is absent/unreadable, log and
+##       fall back to direct entry (today's behavior) so static binaries are unaffected. Needs: VFS read
+##       in spawn context + path resolution; an actual ld.so on disk is required for an END-TO-END boot
+##       test (deferred until a glibc/musl loader is present — the mechanism is unit-tested meanwhile).
+## DESIGN NOTES (Claude autonomous, clearly-correct defaults; revisit if operator disagrees):
+##   - Interpreter base: fixed address (no ASLR yet). ASLR is a security enhancement, not required for
+##     correctness; documenting rather than blocking.
+##   - Interpreter path read as bytes via VFS (CLAUDE.md path rule), substring-matched for Linux loaders
+##     only via detect_linux_abi already.
+
 ## DONE (2026-06-12): ABI batch 552 — getcpu: attempt both writes, accumulate EFAULT (match v6.6)
 ## Linux v6.6 kernel/sys.c SYSCALL_DEFINE3(getcpu) — verified verbatim against
 ## raw.githubusercontent.com torvalds/linux v6.6:

@@ -812,6 +812,25 @@ pub fn spawn_process(
 // exec — replace current process image
 // ---------------------------------------------------------------------------
 
+/// Maximum visible length of a task `comm` name (Linux's
+/// `TASK_COMM_LEN - 1`).  The full field is 16 bytes including the NUL.
+const COMM_MAX_VISIBLE: usize = 15;
+
+/// Compute the `comm` basename for a new exec image the way Linux's
+/// `kbasename()` does: the path component after the final `/`, truncated
+/// to `TASK_COMM_LEN - 1` (15) bytes.
+///
+/// Returns an empty slice when `src` has no usable trailing component
+/// (e.g. it is empty or ends in `/`), in which case the caller should
+/// leave the existing comm unchanged.
+fn exec_comm_basename(src: &[u8]) -> &[u8] {
+    // `rsplit` always yields at least one element, so `next()` is `Some`;
+    // `unwrap_or` keeps it total without an `expect`.
+    let base = src.rsplit(|&b| b == b'/').next().unwrap_or(src);
+    let n = base.len().min(COMM_MAX_VISIBLE);
+    base.get(..n).unwrap_or(&[])
+}
+
 /// Replace the current process's address space with a new ELF binary.
 ///
 /// This is the `exec` equivalent: the calling thread's process gets a
@@ -829,7 +848,9 @@ pub fn spawn_process(
 ///
 /// ## What It Does NOT Do
 ///
-/// - Does NOT modify the thread's kernel stack or scheduler state.
+/// - Does NOT modify the thread's kernel stack or scheduler run state.
+///   (It does update the scheduler task's `comm` name to the new image's
+///   basename, mirroring Linux's execve — see the end of the function.)
 /// - Does NOT modify the capability table (capabilities survive exec,
 ///   matching our security model — the process keeps its existing
 ///   rights unless explicitly revoked).
@@ -1184,6 +1205,28 @@ pub fn exec_process(
         }
     } else {
         pcb::clear_exe_path(pid);
+    }
+
+    // Update the calling thread's comm to the new program's basename, the
+    // way Linux's execve does (`set_task_comm(current, kbasename(filename))`).
+    // The comm lives on the per-thread scheduler task — it is what
+    // `/proc/<id>/comm`, `/proc/<id>/stat` field 2, `/proc/<id>/status`
+    // `Name:`, and `prctl(PR_GET_NAME)` all read — so without this an
+    // exec'd process would keep reporting its pre-exec name.  Prefer the
+    // resolved exe_path (matching Linux's use of the filename); fall back
+    // to argv[0] for callers that pass no path (e.g. the native SYS_EXEC
+    // surface).  Best-effort: a process with no derivable name keeps its
+    // previous comm, and a missing scheduler task (no current task) is a
+    // silent no-op.
+    let comm_src: Option<&[u8]> = exe_path.or_else(|| argv.first().copied());
+    if let Some(src) = comm_src {
+        let base = exec_comm_basename(src);
+        if !base.is_empty() {
+            let _ = crate::sched::set_task_name(
+                crate::sched::current_task_id(),
+                base,
+            );
+        }
     }
 
     serial_println!(
@@ -1568,7 +1611,52 @@ pub fn self_test() -> KernelResult<()> {
     test_spawn_ex_args_layout()?;
     test_spawn_linux_sysv_stack()?;
     test_load_interpreter_fallbacks()?;
+    test_exec_comm_basename()?;
 
+    Ok(())
+}
+
+/// Test: `exec_comm_basename` mirrors Linux `kbasename()` + the 15-byte
+/// `TASK_COMM_LEN - 1` truncation that execve applies to `current->comm`.
+fn test_exec_comm_basename() -> KernelResult<()> {
+    // Absolute path -> last component.
+    if exec_comm_basename(b"/usr/bin/ls") != b"ls" {
+        serial_println!("[spawn]   FAIL: exec_comm_basename(/usr/bin/ls)");
+        return Err(KernelError::InternalError);
+    }
+    // Bare name -> itself.
+    if exec_comm_basename(b"sh") != b"sh" {
+        serial_println!("[spawn]   FAIL: exec_comm_basename(sh)");
+        return Err(KernelError::InternalError);
+    }
+    // Root-relative single component.
+    if exec_comm_basename(b"/init") != b"init" {
+        serial_println!("[spawn]   FAIL: exec_comm_basename(/init)");
+        return Err(KernelError::InternalError);
+    }
+    // Trailing slash -> empty (caller leaves comm unchanged).
+    if !exec_comm_basename(b"/usr/bin/").is_empty() {
+        serial_println!("[spawn]   FAIL: exec_comm_basename(/usr/bin/) not empty");
+        return Err(KernelError::InternalError);
+    }
+    // Empty input -> empty.
+    if !exec_comm_basename(b"").is_empty() {
+        serial_println!("[spawn]   FAIL: exec_comm_basename(empty) not empty");
+        return Err(KernelError::InternalError);
+    }
+    // 15-byte truncation: a 20-char basename keeps only the first 15.
+    let long = b"/bin/abcdefghijklmnopqrst"; // basename is 20 chars
+    if exec_comm_basename(long) != b"abcdefghijklmno" {
+        serial_println!("[spawn]   FAIL: exec_comm_basename truncation");
+        return Err(KernelError::InternalError);
+    }
+    // Non-UTF-8 bytes in the basename are preserved (comm is raw bytes at
+    // the scheduler layer; the path layer never forces UTF-8).
+    if exec_comm_basename(b"/x/\xff\xfe") != b"\xff\xfe" {
+        serial_println!("[spawn]   FAIL: exec_comm_basename non-utf8");
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[spawn]   exec_comm_basename: all cases OK");
     Ok(())
 }
 

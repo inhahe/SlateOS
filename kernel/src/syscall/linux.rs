@@ -42576,6 +42576,77 @@ fn self_test_rt_sigprocmask() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+/// TD4 extraction: mprotect argument-validation self-test.
+///
+/// Proves the do_mprotect_pkey gate order (mm/mprotect.c) rejects bad
+/// input before the page-table walk: aligned addr + len=0 succeeds;
+/// unknown prot bit → EINVAL; misaligned addr → EINVAL even with len=0
+/// (alignment fires before the len==0 short-circuit); kernel-space addr
+/// → ENOMEM; PAGE_ALIGN(len) and addr+len overflow → ENOMEM. The success
+/// path proper can't run from boot context (no owning Linux process).
+/// Self-contained. See [`self_test_errno_mapping`] for the TD4 rationale.
+#[inline(never)]
+fn self_test_mprotect_validation() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+    let args0 = SyscallArgs { arg0: 0x4000, arg1: 0, arg2: 0,
+        arg3: 0, arg4: 0, arg5: 0 };
+    if dispatch_linux(nr::MPROTECT, &args0).value != 0 {
+        serial_println!("[syscall/linux]   FAIL: mprotect zero-len");
+        return Err(KernelError::InternalError);
+    }
+    let args1 = SyscallArgs { arg0: 0x4000, arg1: 0x4000,
+        arg2: 0x100, arg3: 0, arg4: 0, arg5: 0 };
+    if dispatch_linux(nr::MPROTECT, &args1).value != -i64::from(errno::EINVAL) {
+        serial_println!("[syscall/linux]   FAIL: mprotect bad-prot");
+        return Err(KernelError::InternalError);
+    }
+    let args2 = SyscallArgs { arg0: 0x4001, arg1: 0x4000,
+        arg2: 1, arg3: 0, arg4: 0, arg5: 0 };
+    if dispatch_linux(nr::MPROTECT, &args2).value != -i64::from(errno::EINVAL) {
+        serial_println!("[syscall/linux]   FAIL: mprotect misalign");
+        return Err(KernelError::InternalError);
+    }
+    // Batch 248: kernel-addr now returns ENOMEM (matches Linux's
+    // find_vma_intersection NULL path), not EFAULT.
+    let args3 = SyscallArgs {
+        arg0: 0xFFFF_8000_0000_0000,
+        arg1: 0x4000, arg2: 1, arg3: 0, arg4: 0, arg5: 0
+    };
+    if dispatch_linux(nr::MPROTECT, &args3).value != -i64::from(errno::ENOMEM) {
+        serial_println!("[syscall/linux]   FAIL: mprotect kernel-addr not ENOMEM");
+        return Err(KernelError::InternalError);
+    }
+    // Batch 248: misaligned addr with len=0 -> EINVAL (alignment
+    // fires before the len==0 short-circuit).  Pre-batch this
+    // returned 0 because len==0 was the first gate.
+    let args4 = SyscallArgs { arg0: 0x4001, arg1: 0, arg2: 0,
+        arg3: 0, arg4: 0, arg5: 0 };
+    if dispatch_linux(nr::MPROTECT, &args4).value != -i64::from(errno::EINVAL) {
+        serial_println!("[syscall/linux]   FAIL: mprotect misalign+len0 not EINVAL");
+        return Err(KernelError::InternalError);
+    }
+    // Batch 248: PAGE_ALIGN(len) overflow -> ENOMEM (not EINVAL).
+    // len = u64::MAX falls past checked_add(FRAME_SIZE-1).
+    let args5 = SyscallArgs { arg0: 0x4000, arg1: u64::MAX, arg2: 1,
+        arg3: 0, arg4: 0, arg5: 0 };
+    if dispatch_linux(nr::MPROTECT, &args5).value != -i64::from(errno::ENOMEM) {
+        serial_println!("[syscall/linux]   FAIL: mprotect len-overflow not ENOMEM");
+        return Err(KernelError::InternalError);
+    }
+    // Batch 248: addr + len_aligned overflow -> ENOMEM (not EINVAL).
+    // addr = 0xFFFF_FFFF_FFFF_C000, len = 0x8000 → end wraps.
+    // (This addr is also > USER_SPACE_END, but the overflow check
+    // fires earlier in the gate sequence.)
+    let args6 = SyscallArgs { arg0: 0xFFFF_FFFF_FFFF_C000, arg1: 0x8000,
+        arg2: 1, arg3: 0, arg4: 0, arg5: 0 };
+    if dispatch_linux(nr::MPROTECT, &args6).value != -i64::from(errno::ENOMEM) {
+        serial_println!("[syscall/linux]   FAIL: mprotect end-overflow not ENOMEM");
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[syscall/linux]   mprotect do_mprotect_pkey gate order: OK");
+    Ok(())
+}
+
 pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
@@ -42828,64 +42899,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // We can't exercise the success path from boot context (no owning
     // Linux process), but we *can* prove the validation layer rejects
     // bad input before reaching the page-table walk.
-    {
-        let args0 = SyscallArgs { arg0: 0x4000, arg1: 0, arg2: 0,
-            arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::MPROTECT, &args0).value != 0 {
-            serial_println!("[syscall/linux]   FAIL: mprotect zero-len");
-            return Err(KernelError::InternalError);
-        }
-        let args1 = SyscallArgs { arg0: 0x4000, arg1: 0x4000,
-            arg2: 0x100, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::MPROTECT, &args1).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: mprotect bad-prot");
-            return Err(KernelError::InternalError);
-        }
-        let args2 = SyscallArgs { arg0: 0x4001, arg1: 0x4000,
-            arg2: 1, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::MPROTECT, &args2).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: mprotect misalign");
-            return Err(KernelError::InternalError);
-        }
-        // Batch 248: kernel-addr now returns ENOMEM (matches Linux's
-        // find_vma_intersection NULL path), not EFAULT.
-        let args3 = SyscallArgs {
-            arg0: 0xFFFF_8000_0000_0000,
-            arg1: 0x4000, arg2: 1, arg3: 0, arg4: 0, arg5: 0
-        };
-        if dispatch_linux(nr::MPROTECT, &args3).value != -i64::from(errno::ENOMEM) {
-            serial_println!("[syscall/linux]   FAIL: mprotect kernel-addr not ENOMEM");
-            return Err(KernelError::InternalError);
-        }
-        // Batch 248: misaligned addr with len=0 -> EINVAL (alignment
-        // fires before the len==0 short-circuit).  Pre-batch this
-        // returned 0 because len==0 was the first gate.
-        let args4 = SyscallArgs { arg0: 0x4001, arg1: 0, arg2: 0,
-            arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::MPROTECT, &args4).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: mprotect misalign+len0 not EINVAL");
-            return Err(KernelError::InternalError);
-        }
-        // Batch 248: PAGE_ALIGN(len) overflow -> ENOMEM (not EINVAL).
-        // len = u64::MAX falls past checked_add(FRAME_SIZE-1).
-        let args5 = SyscallArgs { arg0: 0x4000, arg1: u64::MAX, arg2: 1,
-            arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::MPROTECT, &args5).value != -i64::from(errno::ENOMEM) {
-            serial_println!("[syscall/linux]   FAIL: mprotect len-overflow not ENOMEM");
-            return Err(KernelError::InternalError);
-        }
-        // Batch 248: addr + len_aligned overflow -> ENOMEM (not EINVAL).
-        // addr = 0xFFFF_FFFF_FFFF_C000, len = 0x8000 → end wraps.
-        // (This addr is also > USER_SPACE_END, but the overflow check
-        // fires earlier in the gate sequence.)
-        let args6 = SyscallArgs { arg0: 0xFFFF_FFFF_FFFF_C000, arg1: 0x8000,
-            arg2: 1, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::MPROTECT, &args6).value != -i64::from(errno::ENOMEM) {
-            serial_println!("[syscall/linux]   FAIL: mprotect end-overflow not ENOMEM");
-            return Err(KernelError::InternalError);
-        }
-        serial_println!("[syscall/linux]   mprotect do_mprotect_pkey gate order: OK");
-    }
+    self_test_mprotect_validation()?;
 
     // mprotect_flush_range routing: tiny range (<= MPROTECT_FULL_FLUSH_
     // PAGES) takes the per-page invlpg path; large range promotes to

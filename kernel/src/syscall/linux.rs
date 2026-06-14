@@ -54851,6 +54851,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_clock_settime_adjtimex()?;
+
+    #[inline(never)]
+    fn self_test_clock_settime_adjtimex() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // clock_settime / clock_adjtime / adjtimex — Linux gate order:
     // clockid -> EINVAL/EOPNOTSUPP, then EFAULT, then EPERM.
     {
@@ -55709,6 +55714,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   clock_adjtime copy-first/EOPNOTSUPP gating: OK"
         );
+    }
+        Ok(())
     }
 
     // clock_nanosleep — Linux gate order: clockid -> EINVAL/EOPNOTSUPP,

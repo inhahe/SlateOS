@@ -63015,6 +63015,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_xattr_quota_mount()?;
+
+    #[inline(never)]
+    fn self_test_xattr_quota_mount() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // xattr / quota / module / namespace / mount / swap / reboot /
     // syslog — input validation plus principled errno.
     {
@@ -64237,6 +64242,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   syslog int truncation + perm gate: OK"
         );
+    }
+        Ok(())
     }
 
     // SysV IPC and POSIX message queues — input validation plus

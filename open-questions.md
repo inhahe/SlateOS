@@ -157,3 +157,71 @@ block buffer cache C would relate to).
 **Status:** PARTIAL — option **B (demand-paged `MAP_PRIVATE`)** built
 autonomously 2026-06-14 (TD22 Phase 1). Option **C (unified page cache +
 writable `MAP_SHARED`)** remains **OPEN** for the operator.
+
+---
+
+## Q6 — Cross-process memory introspection (`process_vm_readv`/`writev`, `ptrace`): permit it at all, and behind what gate? — OPEN (2026-06-14)
+
+**Background.** `process_vm_readv(2)` / `process_vm_writev(2)`
+(`process_vm_impl` in `kernel/src/syscall/linux.rs`) currently implement the
+**same-address-space** transfer (the target thread shares the caller's PCB) but
+return **`-ESRCH`** for any *cross-process* target — explicitly documented in the
+code as "Cross-AS not implemented." Likewise `sys_ptrace` returns **`-EPERM`
+unconditionally** (no tracer may ever attach). So today the kernel permits **no
+cross-process memory introspection of any kind** — a coherent, deliberate
+security posture.
+
+The 2026-06-14 zero-copy work added the missing *mechanism*: pml4-parameterized
+`copy_from_user_as` / `copy_to_user_as` (`kernel/src/mm/user.rs`) can read/write
+an arbitrary address space's user pages through the HHDM. Wiring the cross-process
+data path in `process_vm_impl` is now mechanically straightforward (resolve the
+target's pml4 via `pcb::get_pml4`, route the *remote* side of each copy through
+the `_as` primitive while the *local* side stays on the current CR3). **The only
+thing missing is the authorization model** — and that is a genuine design fork,
+not something to default my way through.
+
+**Question.** Should cross-process `process_vm_readv`/`writev` (and, relatedly,
+real `ptrace` attach) be allowed at all — and if so, gated by what?
+
+**Options.**
+
+- **A. Keep the status quo: no cross-process introspection (`ESRCH`/`EPERM`).**
+  - *Pros:* maximally safe; consistent with the current posture; nothing to
+    design; gdb/strace/CRIU simply can't peer into *other* processes (they still
+    work on the same-AS / self case).
+  - *Cons:* real debuggers (`gdb attach`, `strace -p`, `lldb`), checkpoint/restore
+    (CRIU), and some profilers genuinely need cross-process reads; they'll fail.
+
+- **B. Allow it, gated by a capability the caller must hold over the target.**
+  Consistent with the design spec's "capability-based security from day one, no
+  ambient authority": cross-process memory access requires the caller to hold an
+  unforgeable handle/capability to the target process (e.g. a `ProcessCap` with a
+  DEBUG/INTROSPECT right), not merely to know its PID. A debugger would obtain
+  that capability through an explicit grant (parent→child, or a privileged broker).
+  - *Pros:* aligns with the microkernel capability model; far stronger than
+    Linux's PID-plus-yama check; auditable; no ambient authority.
+  - *Cons:* requires designing the process-capability + right (does one exist
+    yet?), a grant path, and plumbing it through `process_vm_impl` and `ptrace`;
+    debuggers must be taught to acquire the capability (not a drop-in Linux ABI).
+
+- **C. Allow it, gated by a Linux-style `ptrace_may_access` (same-uid / CAP_SYS_PTRACE / yama).**
+  - *Pros:* drop-in compatible with how Linux debuggers expect to work; familiar.
+  - *Cons:* "ambient authority by PID + uid" is exactly what the design spec says
+    to avoid; requires a real uid/cred model and a yama-scope policy knob; weaker
+    than B.
+
+**Claude's recommendation.** Defer — this is a security-policy fork the operator
+should own. If forced to pick a default I'd lean **A (keep ESRCH/EPERM)** until
+there's a concrete consumer, because it's safe and the mechanism can be wired in
+a day once the gate is decided; and **B** as the eventual target since it matches
+the capability-based design. I am **not** opening cross-process access
+autonomously — silently granting any process the ability to read/write any other
+process's memory would be a serious regression and contradicts the core design.
+
+**Where it bites.** `kernel/src/syscall/linux.rs` (`process_vm_impl` — the
+`if !same_addr_space { return ESRCH }` arm; `sys_ptrace`); `kernel/src/mm/user.rs`
+(`copy_from_user_as`/`copy_to_user_as` — the mechanism, already built);
+`kernel/src/proc/pcb.rs` (`get_pml4`); and whatever process-capability type a
+choice of **B** would introduce (`kernel/src/cap/`).
+
+**Status:** OPEN — mechanism exists; authorization model is the operator's call.

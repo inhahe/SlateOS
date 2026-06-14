@@ -1128,6 +1128,18 @@ exists, draw the interpreter base (and PIE executable base) from it with
 per-exec randomisation instead of the fixed constant.  Keep the AT_BASE
 plumbing as-is — it already carries whatever base is chosen.
 
+**Update 2026-06-14:** the dependency is now in place — a per-process
+VMA-aware mmap gap allocator (`pcb::reserve_unmapped_area` →
+`mm::vma::find_gap`, fronted by `handlers::alloc_user_mmap_reserve`) now
+serves the general user mmap window with freed-gap reuse and atomic
+find+insert.  ld.so's general-region maps already flow through it; what
+remains for TD9 is purely the *randomisation policy*: pick a randomised
+base for the interpreter/PIE load instead of the fixed `LINUX_INTERP_BASE`
+constant.  Note the interpreter is loaded at `0x7000_…`, disjoint from the
+mmap window `0x0060_…`, so ASLR for it will need its own randomised
+placement (or be folded into the mmap region) rather than just calling the
+new allocator.
+
 **Related limitation (not debt, just unimplemented):** end-to-end
 interpreter *execution* is untested because no real glibc/musl ld.so is
 on the filesystem yet.  The load mechanism (base selection, biased

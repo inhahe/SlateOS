@@ -8404,7 +8404,9 @@ fn drm_mmap_dumb(
     }
 
     // Pick the base virtual address.  Honour an aligned MAP_FIXED hint;
-    // otherwise let the mmap bump allocator choose.
+    // otherwise allocate from the device mmap region (DRM dumb buffers are
+    // not VMA-tracked, so they use the bump allocator in the window
+    // disjoint from the VMA-tracked general region).
     let fixed = (flags & MAP_FIXED) != 0;
     let base = if fixed {
         if addr_hint & frame_size.wrapping_sub(1) != 0 {
@@ -8597,8 +8599,8 @@ fn linux_file_mmap(
     flags: u64,
     offset: u64,
 ) -> SyscallResult {
-    use crate::mm::frame::{self, FRAME_SIZE};
-    use crate::mm::page_table::{self, PageFlags, VirtAddr};
+    use crate::mm::frame::FRAME_SIZE;
+    use crate::mm::page_table::{self, PageFlags};
     use crate::mm::vma::{Vma, VmaKind};
     use crate::proc::linux_fd::HandleKind;
 
@@ -8666,84 +8668,55 @@ fn linux_file_mmap(
         _ => return linux_err(errno::ENOMEM),
     };
 
-    // Pick the base virtual address.  Honour an aligned MAP_FIXED hint;
-    // otherwise let the mmap bump allocator choose.
     let fixed = (flags & MAP_FIXED) != 0;
-    let base = if fixed {
+
+    // -------------------------------------------------------------------
+    // MAP_FIXED: the caller dictates the address and the mapping silently
+    // replaces whatever currently occupies the range.  Fixed maps are
+    // always eager (overlays — e.g. ld.so's per-segment loader).
+    // -------------------------------------------------------------------
+    if fixed {
         if addr_hint & frame_size.wrapping_sub(1) != 0 {
             return linux_err(errno::EINVAL);
         }
-        addr_hint
-    } else {
-        handlers::mmap_alloc_vaddr(length_aligned)
-    };
-    if base == 0 {
-        return linux_err(errno::ENOMEM);
-    }
-    let end = match base.checked_add(length_aligned) {
-        Some(e) => e,
-        None => return linux_err(errno::ENOMEM),
-    };
+        let base = addr_hint;
+        let end = match base.checked_add(length_aligned) {
+            Some(e) => e,
+            None => return linux_err(errno::ENOMEM),
+        };
 
-    // Charge RLIMIT_AS for the virtual span (refunded on any failure below).
-    // For MAP_FIXED, the overlapping range is already accounted for by the
-    // VMAs we are about to replace, so only the *net* change is charged (or
-    // released) — otherwise reserving a span then overlaying segments onto it
-    // double-counts the overlap.  After this block the range's accounting
-    // reflects exactly `length_aligned` bytes, so the per-frame rollback paths
-    // below correctly release `length_aligned`.
-    let prior_charge = if fixed {
-        linux_vma_overlap_bytes(pid, base, end)
-    } else {
-        0
-    };
-    if length_aligned > prior_charge {
-        if pcb::linux_as_charge(pid, length_aligned.wrapping_sub(prior_charge)).is_err() {
-            return linux_err(errno::ENOMEM);
+        // Net RLIMIT_AS charge: the range we're about to replace already
+        // accounts for its overlapping VMAs, so only the delta is charged
+        // (or released) — otherwise reserving a span then overlaying
+        // segments onto it (exactly what ld.so does) double-counts.
+        let prior_charge = linux_vma_overlap_bytes(pid, base, end);
+        if length_aligned > prior_charge {
+            if pcb::linux_as_charge(pid, length_aligned.wrapping_sub(prior_charge)).is_err() {
+                return linux_err(errno::ENOMEM);
+            }
+        } else {
+            pcb::linux_as_release(pid, prior_charge.wrapping_sub(length_aligned));
         }
-    } else {
-        pcb::linux_as_release(pid, prior_charge.wrapping_sub(length_aligned));
-    }
 
-    // MAP_FIXED silently replaces whatever currently occupies the range:
-    // clear the existing frames and split/remove the covering VMAs first.
-    if fixed {
+        // Clear the existing frames and split/remove the covering VMAs.
         unmap_user_range(pml4, base, end, frame_size);
         if pcb::remove_vma_range(pid, base, end).is_err() {
             pcb::linux_as_release(pid, length_aligned);
             return linux_err(errno::ENOMEM);
         }
-    }
 
-    // Demand-paged fast path (TD22): a private, non-fixed mapping of a
-    // regular file is served lazily by the page-fault handler.  Register a
-    // `FileBacked` VMA that owns its own reference to the open file and
-    // return immediately — no frames are allocated until first touch, and
-    // private writes copy-on-fault without ever reaching the file.
-    //
-    // memfd-backed maps and `MAP_FIXED` overlays (the ld.so segment loader)
-    // keep the eager path below: memfd has a separate handle layer, and
-    // FIXED mappings are typically faulted in immediately by the loader, so
-    // there is little to gain and the eager path is already proven there.
-    if matches!(entry.kind, HandleKind::File) && private && !fixed {
-        // Take an independent reference on the open file description so the
-        // mapping keeps working after the caller closes its fd.
-        let mapped_handle = match crate::fs::handle::dup_shared(entry.raw_handle) {
-            Ok(h) => h,
-            Err(_) => {
-                pcb::linux_as_release(pid, length_aligned);
-                return linux_err(errno::ENOMEM);
-            }
-        };
-        let vma = Vma {
-            start: base,
-            end,
-            kind: VmaKind::FileBacked { handle: mapped_handle, file_offset: offset },
-            flags: page_flags,
-        };
+        if let Err(e) = linux_file_mmap_fill(
+            pml4, base, want_frames, frame_size, hhdm, entry, offset, page_flags,
+        ) {
+            pcb::linux_as_release(pid, length_aligned);
+            return linux_err(e);
+        }
+
+        // Register the VMA so /proc/<pid>/maps reflects it and the fault
+        // resolver knows the range is fully backed.
+        let vma = Vma { start: base, end, kind: VmaKind::Fixed, flags: page_flags };
         if pcb::add_vma(pid, vma).is_err() {
-            // Couldn't record the mapping — drop our reference and refund.
-            let _ = crate::fs::handle::close(mapped_handle);
+            linux_file_mmap_rollback(pml4, base, want_frames, frame_size);
             pcb::linux_as_release(pid, length_aligned);
             return linux_err(errno::ENOMEM);
         }
@@ -8751,8 +8724,111 @@ fn linux_file_mmap(
         return SyscallResult::ok(base as i64);
     }
 
-    // Allocate, fill from the file, and map each frame; roll back fully on
-    // the first failure.
+    // -------------------------------------------------------------------
+    // Non-fixed: the kernel picks the address.  We reserve a free gap in
+    // the VMA-tracked general mmap region *together with* the mapping's
+    // final VMA, under one lock, so the placement can never collide with
+    // an existing mapping and two concurrent same-process mmaps (this is
+    // an SMP kernel) can never be handed the same gap.
+    // -------------------------------------------------------------------
+    if pcb::linux_as_charge(pid, length_aligned).is_err() {
+        return linux_err(errno::ENOMEM);
+    }
+
+    // Demand-paged fast path (TD22): a private mapping of a regular file is
+    // served lazily by the page-fault handler.  Reserve a `FileBacked` VMA
+    // that owns its own reference to the open file and return immediately —
+    // no frames are allocated until first touch, and private writes
+    // copy-on-fault without ever reaching the file.
+    //
+    // memfd-backed maps and read-only shared maps take the eager path
+    // below: memfd has a separate handle layer, and there is little to gain
+    // from demand-paging them.
+    if matches!(entry.kind, HandleKind::File) && private {
+        // Take an independent reference on the open file description so the
+        // mapping keeps working after the caller closes its fd.  The
+        // reserved VMA owns this reference; `remove_vma` releases it.
+        let mapped_handle = match crate::fs::handle::dup_shared(entry.raw_handle) {
+            Ok(h) => h,
+            Err(_) => {
+                pcb::linux_as_release(pid, length_aligned);
+                return linux_err(errno::ENOMEM);
+            }
+        };
+        let kind = VmaKind::FileBacked { handle: mapped_handle, file_offset: offset };
+        let base = match pcb::reserve_unmapped_area(
+            pid,
+            length_aligned,
+            handlers::USER_MMAP_BASE,
+            handlers::USER_MMAP_END,
+            kind,
+            page_flags,
+        ) {
+            Some(b) => b,
+            None => {
+                // Couldn't place the mapping — drop our reference and refund.
+                let _ = crate::fs::handle::close(mapped_handle);
+                pcb::linux_as_release(pid, length_aligned);
+                return linux_err(errno::ENOMEM);
+            }
+        };
+        #[allow(clippy::cast_possible_wrap)]
+        return SyscallResult::ok(base as i64);
+    }
+
+    // Eager non-fixed map (memfd-backed, or read-only shared): reserve a
+    // `Fixed` VMA (already fully backed once filled), then fill it; on any
+    // failure remove the reservation and refund.
+    let base = match pcb::reserve_unmapped_area(
+        pid,
+        length_aligned,
+        handlers::USER_MMAP_BASE,
+        handlers::USER_MMAP_END,
+        VmaKind::Fixed,
+        page_flags,
+    ) {
+        Some(b) => b,
+        None => {
+            pcb::linux_as_release(pid, length_aligned);
+            return linux_err(errno::ENOMEM);
+        }
+    };
+    if let Err(e) = linux_file_mmap_fill(
+        pml4, base, want_frames, frame_size, hhdm, entry, offset, page_flags,
+    ) {
+        pcb::remove_vma(pid, base);
+        pcb::linux_as_release(pid, length_aligned);
+        return linux_err(e);
+    }
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(base as i64)
+}
+
+/// Allocate, fill from the backing object, and map every frame of an eager
+/// file mapping covering `[base, base + want_frames * frame_size)`.
+///
+/// On the first failure it tears down the frames already mapped in this
+/// call (via [`linux_file_mmap_rollback`]) and returns the Linux errno to
+/// report; the caller is responsible for the `RLIMIT_AS` refund and any VMA
+/// bookkeeping (the fill helper deliberately does neither, so it can serve
+/// both the `MAP_FIXED` path — VMA added after a successful fill — and the
+/// reserved non-fixed path — VMA reserved before the fill).  Returns
+/// `Ok(())` once every frame is mapped.
+#[allow(clippy::too_many_arguments)]
+fn linux_file_mmap_fill(
+    pml4: u64,
+    base: u64,
+    want_frames: usize,
+    frame_size: u64,
+    hhdm: u64,
+    entry: &FdEntry,
+    offset: u64,
+    page_flags: crate::mm::page_table::PageFlags,
+) -> Result<(), i32> {
+    use crate::mm::frame::{self, FRAME_SIZE};
+    use crate::mm::page_table::{self, VirtAddr};
+    use crate::proc::linux_fd::HandleKind;
+
     for i in 0..want_frames {
         let voff = u64::try_from(i)
             .unwrap_or(u64::MAX)
@@ -8761,21 +8837,18 @@ fn linux_file_mmap(
             Some(v) => v,
             None => {
                 linux_file_mmap_rollback(pml4, base, i, frame_size);
-                pcb::linux_as_release(pid, length_aligned);
-                return linux_err(errno::ENOMEM);
+                return Err(errno::ENOMEM);
             }
         };
         if !VirtAddr::new(va).is_user() {
             linux_file_mmap_rollback(pml4, base, i, frame_size);
-            pcb::linux_as_release(pid, length_aligned);
-            return linux_err(errno::ENOMEM);
+            return Err(errno::ENOMEM);
         }
         let pf = match frame::alloc_frame_zeroed() {
             Ok(f) => f,
             Err(_) => {
                 linux_file_mmap_rollback(pml4, base, i, frame_size);
-                pcb::linux_as_release(pid, length_aligned);
-                return linux_err(errno::ENOMEM);
+                return Err(errno::ENOMEM);
             }
         };
         // File offset for this frame.  Bytes past EOF leave the frame tail
@@ -8786,8 +8859,7 @@ fn linux_file_mmap(
                 // SAFETY: `pf` was just allocated by us and is not mapped.
                 let _ = unsafe { frame::free_frame(pf) };
                 linux_file_mmap_rollback(pml4, base, i, frame_size);
-                pcb::linux_as_release(pid, length_aligned);
-                return linux_err(errno::ENOMEM);
+                return Err(errno::ENOMEM);
             }
         };
         let frame_virt = pf.to_virt(hhdm);
@@ -8801,15 +8873,14 @@ fn linux_file_mmap(
                 let h = crate::ipc::memfd::MemFdHandle::from_raw(entry.raw_handle);
                 crate::ipc::memfd::read_at(h, file_off, buf)
             }
-            // Unreachable: kind validated above.
+            // Unreachable: kind validated by the caller.
             _ => Err(crate::error::KernelError::InvalidArgument),
         };
         if read_res.is_err() {
             // SAFETY: `pf` was just allocated by us and is not mapped.
             let _ = unsafe { frame::free_frame(pf) };
             linux_file_mmap_rollback(pml4, base, i, frame_size);
-            pcb::linux_as_release(pid, length_aligned);
-            return linux_err(errno::EIO);
+            return Err(errno::EIO);
         }
         // SAFETY: `pml4` is the live page table for the caller, `pf` is a
         // freshly allocated frame we exclusively own, `va` is in user space.
@@ -8817,29 +8888,11 @@ fn linux_file_mmap(
             // SAFETY: `pf` was just allocated and never mapped.
             let _ = unsafe { frame::free_frame(pf) };
             linux_file_mmap_rollback(pml4, base, i, frame_size);
-            pcb::linux_as_release(pid, length_aligned);
-            return linux_err(errno::ENOMEM);
+            return Err(errno::ENOMEM);
         }
     }
 
-    // Register the VMA so /proc/<pid>/maps reflects it and the fault
-    // resolver knows the range is fully backed.
-    let vma = Vma {
-        start: base,
-        end,
-        kind: VmaKind::Fixed,
-        flags: page_flags,
-    };
-    if pcb::add_vma(pid, vma).is_err() {
-        // Couldn't record the mapping — tear it down so we don't leave frames
-        // mapped with no bookkeeping.
-        linux_file_mmap_rollback(pml4, base, want_frames, frame_size);
-        pcb::linux_as_release(pid, length_aligned);
-        return linux_err(errno::ENOMEM);
-    }
-
-    #[allow(clippy::cast_possible_wrap)]
-    SyscallResult::ok(base as i64)
+    Ok(())
 }
 
 /// Copy a fixed `#[repr(C)]` payload struct out of userspace by value.

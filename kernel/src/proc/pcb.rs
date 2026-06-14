@@ -3920,6 +3920,54 @@ pub fn list_vmas(pid: ProcessId) -> Option<Vec<Vma>> {
     table.get(&pid).map(|proc| proc.vmas.clone())
 }
 
+/// Atomically find the lowest free gap of `size` bytes inside
+/// `[region_start, region_end)` of `pid`'s address space **and** register a
+/// VMA of the given `kind`/`flags` covering `[base, base + size)`, returning
+/// the chosen base.
+///
+/// This is the per-process replacement for the old global monotonic mmap
+/// bump allocator: it scans the process's live (sorted) VMA list via
+/// [`crate::mm::vma::find_gap`], so gaps freed by `munmap` are reused and
+/// the returned address can never overlap an existing mapping in the window.
+/// The window must be one in which every mapping is VMA-tracked (the
+/// general-purpose user mmap region); device mappings that bypass the VMA
+/// list use a disjoint window and a separate allocator.
+///
+/// Performing the search and the insertion under a single lock acquisition
+/// closes the time-of-check/time-of-use race a separate find-then-[`add_vma`]
+/// would have: two threads of the same process calling `mmap` concurrently
+/// (this kernel is SMP) can never be handed the same gap, because the first
+/// insertion is visible to the second search.  The caller owns the inserted
+/// VMA and must remove it (via [`remove_vma`]) on any later failure.
+///
+/// `size` must be frame-aligned; it is the caller's responsibility (mmap
+/// already rounds the request up to a whole number of frames).
+///
+/// Returns `None` if the PID has no live record or no gap large enough
+/// exists (callers map that to `OutOfMemory`/`ENOMEM`).
+#[must_use]
+pub fn reserve_unmapped_area(
+    pid: ProcessId,
+    size: u64,
+    region_start: u64,
+    region_end: u64,
+    kind: VmaKind,
+    flags: crate::mm::page_table::PageFlags,
+) -> Option<u64> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid)?;
+    let base = crate::mm::vma::find_gap(&proc.vmas, size, region_start, region_end)?;
+    // `find_gap` guarantees `base + size <= region_end`, so this cannot
+    // overflow; `checked_add` keeps the arithmetic lint satisfied.
+    let end = base.checked_add(size)?;
+    let pos = proc
+        .vmas
+        .binary_search_by_key(&base, |v| v.start)
+        .unwrap_or_else(|p| p);
+    proc.vmas.insert(pos, Vma { start: base, end, kind, flags });
+    Some(base)
+}
+
 /// Remove a VMA from a process's VMA list by start address.
 ///
 /// Returns `true` if a VMA was found and removed, `false` otherwise.

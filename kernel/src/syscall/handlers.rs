@@ -719,16 +719,33 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
     }
 
     // Pick a virtual address.
+    //
+    // `reserved` records whether the address was chosen by the VMA-aware
+    // reservation path, which *atomically* finds a free gap and inserts the
+    // anonymous VMA under one lock (closing the find/insert race between
+    // concurrent same-process mmaps on this SMP kernel).  When set, the
+    // anonymous branches below must NOT add the VMA again.
+    let mut reserved = false;
     let base_vaddr = if vaddr_hint != 0 {
         // Caller specified an address — validate alignment.
         if !vaddr_hint.is_multiple_of(frame_size) {
             return SyscallResult::err(KernelError::BadAlignment);
         }
         vaddr_hint
-    } else {
-        // Kernel picks: use a simple bump allocator in the mmap region.
-        // Range: 0x0000_0060_0000_0000 .. 0x0000_0070_0000_0000.
+    } else if flags & MAP_MMIO != 0 {
+        // MMIO mappings are not VMA-tracked, so they use the device mmap
+        // region's bump allocator, disjoint from the VMA-tracked general
+        // region the gap finder serves (they can never collide).
         mmap_alloc_vaddr(size_aligned)
+    } else {
+        // Anonymous mapping in the VMA-tracked general region: atomically
+        // reserve a free gap with its Anonymous VMA.  Reusing freed gaps
+        // (rather than a monotonic bump) means a map/unmap-heavy process
+        // never exhausts the window, and the result can never overlap an
+        // existing mapping.
+        use crate::mm::vma::VmaKind;
+        reserved = true;
+        alloc_user_mmap_reserve(pid, size_aligned, VmaKind::Anonymous, page_flags)
     };
 
     if base_vaddr == 0 {
@@ -797,19 +814,25 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
         // MAP_LAZY + MAP_MMIO makes no sense — MMIO regions must be
         // backed by specific physical addresses, not demand-paged.
         // (MAP_MMIO was already handled above, but defensive check.)
-        let vma = Vma {
-            start: base_vaddr,
-            end: base_vaddr.saturating_add(size_aligned),
-            kind: VmaKind::Anonymous,
-            flags: page_flags,
-        };
+        //
+        // When `reserved`, the gap reservation already inserted this
+        // Anonymous VMA atomically; adding it again would overlap.  Only
+        // the explicit-hint path (which doesn't reserve) registers it here.
+        if !reserved {
+            let vma = Vma {
+                start: base_vaddr,
+                end: base_vaddr.saturating_add(size_aligned),
+                kind: VmaKind::Anonymous,
+                flags: page_flags,
+            };
 
-        if let Err(e) = pcb::add_vma(pid, vma) {
-            serial_println!(
-                "[mmap] Lazy VMA registration failed at {:#x}: {:?}",
-                base_vaddr, e
-            );
-            return SyscallResult::err(e);
+            if let Err(e) = pcb::add_vma(pid, vma) {
+                serial_println!(
+                    "[mmap] Lazy VMA registration failed at {:#x}: {:?}",
+                    base_vaddr, e
+                );
+                return SyscallResult::err(e);
+            }
         }
 
         serial_println!(
@@ -832,21 +855,27 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
         // would correctly resolve to a fresh zero page via the demand-fault
         // handler.  We add the VMA before mapping so a mapping failure rolls
         // back cleanly with `remove_vma` (no unmap loop needed).
+        //
+        // When `reserved`, the gap reservation already inserted this
+        // Anonymous VMA atomically; only the explicit-hint path registers
+        // it here.  Either way the rollback below removes it on failure.
         use crate::mm::vma::{Vma, VmaKind};
 
-        let vma = Vma {
-            start: base_vaddr,
-            end: base_vaddr.saturating_add(size_aligned),
-            kind: VmaKind::Anonymous,
-            flags: page_flags,
-        };
+        if !reserved {
+            let vma = Vma {
+                start: base_vaddr,
+                end: base_vaddr.saturating_add(size_aligned),
+                kind: VmaKind::Anonymous,
+                flags: page_flags,
+            };
 
-        if let Err(e) = pcb::add_vma(pid, vma) {
-            serial_println!(
-                "[mmap] Committed VMA registration failed at {:#x}: {:?}",
-                base_vaddr, e
-            );
-            return SyscallResult::err(e);
+            if let Err(e) = pcb::add_vma(pid, vma) {
+                serial_println!(
+                    "[mmap] Committed VMA registration failed at {:#x}: {:?}",
+                    base_vaddr, e
+                );
+                return SyscallResult::err(e);
+            }
         }
 
         // SAFETY: pml4_phys is a valid page table for this process.
@@ -963,25 +992,71 @@ pub fn sys_munmap(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(0)
 }
 
-/// Simple bump allocator for mmap virtual addresses.
+// User mmap address-space layout.
+//
+// The user mmap window `0x0000_0060_0000_0000 .. 0x0000_0070_0000_0000`
+// is split into two disjoint sub-regions so two allocators with different
+// views of the address space can coexist without ever colliding:
+//
+// * **General region** (VMA-tracked).  Every mapping placed here —
+//   anonymous mmap and file-backed mmap — registers a VMA, so
+//   [`alloc_user_mmap_reserve`] can scan the process VMA list for a free gap
+//   and *reuse* space freed by `munmap`.  This is the bulk of the window.
+// * **Device region** (not VMA-tracked).  DRM dumb-buffer mmap maps device
+//   frames directly without registering a VMA, so the gap finder cannot
+//   see those mappings.  Keeping them in a disjoint window with a simple
+//   bump allocator ([`mmap_alloc_vaddr`]) guarantees they never overlap a
+//   gap-finder allocation.  (Reuse of freed device space remains future
+//   work, tracked alongside the broader DRM mmap debt; device buffers are
+//   few and long-lived, so a bump allocator is adequate.)
+
+/// Base of the VMA-tracked general user mmap region (inclusive).
+pub(crate) const USER_MMAP_BASE: u64 = 0x0000_0060_0000_0000;
+/// End of the VMA-tracked general user mmap region (exclusive).
+pub(crate) const USER_MMAP_END: u64 = 0x0000_006f_0000_0000;
+/// Base of the device (non-VMA-tracked) mmap region (inclusive).
+const DEVICE_MMAP_BASE: u64 = 0x0000_006f_0000_0000;
+/// End of the device mmap region (exclusive).
+const DEVICE_MMAP_END: u64 = 0x0000_0070_0000_0000;
+
+/// Atomically reserve a free, frame-aligned virtual-address gap of `size`
+/// bytes in the VMA-tracked general user mmap region of process `pid`,
+/// registering a VMA of `kind`/`flags` there, and return the base address.
 ///
-/// Allocates virtual addresses in the range
-/// `0x0000_0060_0000_0000..0x0000_0070_0000_0000` (256 GiB region).
-/// This is a temporary solution — a proper VMA (virtual memory area)
-/// tracker will replace this.
+/// Scans the process VMA list via [`pcb::reserve_unmapped_area`] for the
+/// lowest free gap and inserts the VMA under a single lock, so `munmap`'d
+/// space is reused (no monotonic leak), the result can never overlap an
+/// existing mapping, and two concurrent same-process mmaps can never be
+/// handed the same gap.  Returns 0 if no record/gap is available (the
+/// caller maps 0 to `OutOfMemory`/`ENOMEM`).
+///
+/// Because the VMA is inserted here, the caller must NOT register it again,
+/// and must remove it (via [`pcb::remove_vma`]) if a later step fails.
+pub(crate) fn alloc_user_mmap_reserve(
+    pid: pcb::ProcessId,
+    size: u64,
+    kind: crate::mm::vma::VmaKind,
+    flags: crate::mm::page_table::PageFlags,
+) -> u64 {
+    pcb::reserve_unmapped_area(pid, size, USER_MMAP_BASE, USER_MMAP_END, kind, flags)
+        .unwrap_or(0)
+}
+
+/// Simple bump allocator for the device mmap region (DRM dumb buffers).
+///
+/// Device mappings are not VMA-tracked, so they live in a window disjoint
+/// from the VMA-tracked general region (see the layout note above) and use
+/// a monotonic bump allocator, which cannot collide with
+/// [`alloc_user_mmap_reserve`].  Returns 0 when the device window is
+/// exhausted.
 pub(crate) fn mmap_alloc_vaddr(size: u64) -> u64 {
     use core::sync::atomic::{AtomicU64, Ordering};
 
-    /// Base of the mmap region in user address space.
-    const MMAP_BASE: u64 = 0x0000_0060_0000_0000;
-    /// End of the mmap region (exclusive).
-    const MMAP_END: u64 = 0x0000_0070_0000_0000;
-
-    static NEXT_VADDR: AtomicU64 = AtomicU64::new(MMAP_BASE);
+    static NEXT_VADDR: AtomicU64 = AtomicU64::new(DEVICE_MMAP_BASE);
 
     let addr = NEXT_VADDR.fetch_add(size, Ordering::Relaxed);
-    if addr.checked_add(size).is_none_or(|end| end > MMAP_END) {
-        // Ran out of mmap space.
+    if addr.checked_add(size).is_none_or(|end| end > DEVICE_MMAP_END) {
+        // Ran out of device mmap space.
         return 0;
     }
     addr

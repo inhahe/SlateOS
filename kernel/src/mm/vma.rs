@@ -122,6 +122,76 @@ impl Vma {
 }
 
 // ---------------------------------------------------------------------------
+// Unmapped-area search
+// ---------------------------------------------------------------------------
+
+/// Find the lowest frame-aligned gap of at least `size` bytes within the
+/// half-open virtual-address window `[region_start, region_end)` that does
+/// not overlap any VMA in `vmas`.
+///
+/// `vmas` must be sorted by `start` (the per-process VMA-list invariant
+/// maintained by [`AddressSpace::add_vma`] / `pcb::add_vma`).  This is a
+/// bottom-up first-fit search: it returns the lowest address whose
+/// `[addr, addr + size)` range is entirely free, mirroring the default
+/// bottom-up behaviour of Linux's `vm_unmapped_area` (`mm/mmap.c`).
+///
+/// Unlike a monotonic bump allocator, this reuses gaps freed by `munmap`,
+/// so a process that maps and unmaps repeatedly does not exhaust the
+/// window — and because it consults the live VMA list it can never hand
+/// out an address that overlaps an existing mapping (e.g. a `MAP_FIXED`
+/// overlay or a file-backed map).
+///
+/// Returns `None` if no free gap large enough exists (the caller maps that
+/// to `OutOfMemory`/`ENOMEM`).
+///
+/// VMAs outside the window are handled naturally: those ending at or below
+/// `region_start` are skipped; once a VMA starts at or beyond
+/// `region_end`, the remainder of the (sorted) list is irrelevant.
+#[must_use]
+pub fn find_gap(vmas: &[Vma], size: u64, region_start: u64, region_end: u64) -> Option<u64> {
+    if size == 0 || region_end <= region_start {
+        return None;
+    }
+
+    // `cursor` is the lowest address in the window not yet ruled out by a
+    // VMA we've already passed.
+    let mut cursor = region_start;
+    for vma in vmas {
+        // VMAs are sorted by `start`; one ending at/below the cursor is
+        // entirely behind us and cannot bound the current gap.
+        if vma.end <= cursor {
+            continue;
+        }
+        // The first VMA starting at/after the window end (and, by sort
+        // order, every VMA after it) cannot reduce any remaining gap.
+        if vma.start >= region_end {
+            break;
+        }
+        // The candidate gap is `[cursor, vma.start)`.  `checked_sub`
+        // yields `None` when `vma.start <= cursor` (the VMA straddles the
+        // cursor from below), which correctly reports "no gap here".
+        if let Some(gap) = vma.start.checked_sub(cursor) {
+            if gap >= size {
+                return Some(cursor);
+            }
+        }
+        // Advance past this VMA (it may extend the cursor forward).
+        if vma.end > cursor {
+            cursor = vma.end;
+        }
+        if cursor >= region_end {
+            return None;
+        }
+    }
+
+    // Trailing gap `[cursor, region_end)` after the last in-window VMA.
+    match region_end.checked_sub(cursor) {
+        Some(tail) if tail >= size => Some(cursor),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Address space
 // ---------------------------------------------------------------------------
 
@@ -460,6 +530,82 @@ pub fn self_test() {
 
     // Clean up: remove remaining VMA.
     addr_space.remove_vma(0x0000_4000_0000_0000);
+
+    // Test 10: find_gap over an empty VMA list returns the region start.
+    let base = 0x0000_0060_0000_0000_u64;
+    let end = 0x0000_0070_0000_0000_u64;
+    assert_eq!(
+        find_gap(&[], 4 * frame_size, base, end),
+        Some(base),
+        "empty list: lowest address"
+    );
+
+    // A gap-finder VMA helper (kind/flags are irrelevant to find_gap).
+    let mk = |s: u64, e: u64| Vma {
+        start: s,
+        end: e,
+        kind: VmaKind::Anonymous,
+        flags: PageFlags::PRESENT,
+    };
+
+    // Test 11: a single VMA at the base pushes the allocation past it.
+    let v_a = [mk(base, base + 4 * frame_size)];
+    assert_eq!(
+        find_gap(&v_a, 2 * frame_size, base, end),
+        Some(base + 4 * frame_size),
+        "single VMA at base: allocate after it"
+    );
+
+    // Test 12: a freed hole between two VMAs is reused (first-fit).
+    //   [base, base+2f) used | [base+2f, base+6f) FREE | [base+6f, base+8f) used
+    let v_b = [
+        mk(base, base + 2 * frame_size),
+        mk(base + 6 * frame_size, base + 8 * frame_size),
+    ];
+    assert_eq!(
+        find_gap(&v_b, 4 * frame_size, base, end),
+        Some(base + 2 * frame_size),
+        "reuse the exact-size hole between mappings"
+    );
+    // A request one frame larger than the hole skips it and lands after
+    // the last VMA.
+    assert_eq!(
+        find_gap(&v_b, 5 * frame_size, base, end),
+        Some(base + 8 * frame_size),
+        "too big for the hole: allocate after the last VMA"
+    );
+
+    // Test 13: a request that does not fit anywhere in the window → None.
+    let v_full = [mk(base, end - frame_size)];
+    assert_eq!(
+        find_gap(&v_full, 2 * frame_size, base, end),
+        None,
+        "no gap large enough: None"
+    );
+
+    // Test 14: VMAs entirely below/above the window are ignored.
+    let v_outside = [
+        mk(base - 8 * frame_size, base - 2 * frame_size), // wholly below
+        mk(end + 2 * frame_size, end + 4 * frame_size),   // wholly above
+    ];
+    assert_eq!(
+        find_gap(&v_outside, 4 * frame_size, base, end),
+        Some(base),
+        "out-of-window VMAs do not consume the window"
+    );
+
+    // Test 15: a VMA straddling the window start consumes the low part.
+    let v_straddle = [mk(base - 2 * frame_size, base + 3 * frame_size)];
+    assert_eq!(
+        find_gap(&v_straddle, frame_size, base, end),
+        Some(base + 3 * frame_size),
+        "straddling VMA: allocate after its in-window tail"
+    );
+
+    // Test 16: degenerate inputs.
+    assert_eq!(find_gap(&[], 0, base, end), None, "zero size: None");
+    assert_eq!(find_gap(&[], 4 * frame_size, end, base), None, "inverted window: None");
+    serial_println!("[vma]   find_gap: OK");
 
     serial_println!("[vma] Self-test PASSED");
 }

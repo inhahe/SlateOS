@@ -210,7 +210,10 @@ pub fn sys_drm_gem_mmap(args: &SyscallArgs) -> SyscallResult {
     let frame_size_u64 = FRAME_SIZE as u64;
     let size_aligned = (num_frames as u64) * frame_size_u64;
 
-    // Allocate a contiguous virtual address range.
+    // Allocate a contiguous virtual address range from the device mmap
+    // region.  DRM dumb buffers are not VMA-tracked, so they use the bump
+    // allocator in the window disjoint from the VMA-tracked general mmap
+    // region (see `handlers::mmap_alloc_vaddr`).
     let base_vaddr = crate::syscall::handlers::mmap_alloc_vaddr(size_aligned);
     if base_vaddr == 0 {
         return SyscallResult::err(KernelError::OutOfMemory);

@@ -44556,6 +44556,61 @@ fn self_test_msync_truncation() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+#[inline(never)]
+fn self_test_default_rlimits() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+    // DEFAULT_RLIMITS coverage — pure const table, no userspace.
+    //
+    // Critical defaults programs depend on:
+    //   - RLIMIT_STACK (3) cur == 8 MiB so glibc's main-thread sizing
+    //     produces a usable stack.
+    //   - RLIMIT_NOFILE (7) cur == 1024 to fit FD_SETSIZE on select().
+    //   - RLIMIT_CORE (4) cur == max == 0 (we don't produce cores).
+    //   - All others either INFINITY or honestly zero.
+    {
+        let (cur, max) = pcb::DEFAULT_RLIMITS[3]; // RLIMIT_STACK
+        if cur != 8 * 1024 * 1024 {
+            serial_println!(
+                "[syscall/linux]   FAIL: DEFAULT_RLIMITS[STACK].cur = {}", cur
+            );
+            return Err(KernelError::InternalError);
+        }
+        if max != u64::MAX {
+            serial_println!(
+                "[syscall/linux]   FAIL: DEFAULT_RLIMITS[STACK].max = {}", max
+            );
+            return Err(KernelError::InternalError);
+        }
+        let (cur, max) = pcb::DEFAULT_RLIMITS[7]; // RLIMIT_NOFILE
+        if cur != 1024 || max != 4096 {
+            serial_println!(
+                "[syscall/linux]   FAIL: DEFAULT_RLIMITS[NOFILE] = ({}, {})",
+                cur, max
+            );
+            return Err(KernelError::InternalError);
+        }
+        let (cur, max) = pcb::DEFAULT_RLIMITS[4]; // RLIMIT_CORE
+        if cur != 0 || max != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: DEFAULT_RLIMITS[CORE] = ({}, {})",
+                cur, max
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Default for an arbitrary RLIM_INFINITY one — CPU.
+        let (cur, max) = pcb::DEFAULT_RLIMITS[0];
+        if cur != u64::MAX || max != u64::MAX {
+            serial_println!(
+                "[syscall/linux]   FAIL: DEFAULT_RLIMITS[CPU] = ({}, {})",
+                cur, max
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    Ok(())
+}
+
 pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
@@ -44846,54 +44901,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
     self_test_msync_truncation()?;
 
-    // DEFAULT_RLIMITS coverage — pure const table, no userspace.
-    //
-    // Critical defaults programs depend on:
-    //   - RLIMIT_STACK (3) cur == 8 MiB so glibc's main-thread sizing
-    //     produces a usable stack.
-    //   - RLIMIT_NOFILE (7) cur == 1024 to fit FD_SETSIZE on select().
-    //   - RLIMIT_CORE (4) cur == max == 0 (we don't produce cores).
-    //   - All others either INFINITY or honestly zero.
-    {
-        let (cur, max) = pcb::DEFAULT_RLIMITS[3]; // RLIMIT_STACK
-        if cur != 8 * 1024 * 1024 {
-            serial_println!(
-                "[syscall/linux]   FAIL: DEFAULT_RLIMITS[STACK].cur = {}", cur
-            );
-            return Err(KernelError::InternalError);
-        }
-        if max != u64::MAX {
-            serial_println!(
-                "[syscall/linux]   FAIL: DEFAULT_RLIMITS[STACK].max = {}", max
-            );
-            return Err(KernelError::InternalError);
-        }
-        let (cur, max) = pcb::DEFAULT_RLIMITS[7]; // RLIMIT_NOFILE
-        if cur != 1024 || max != 4096 {
-            serial_println!(
-                "[syscall/linux]   FAIL: DEFAULT_RLIMITS[NOFILE] = ({}, {})",
-                cur, max
-            );
-            return Err(KernelError::InternalError);
-        }
-        let (cur, max) = pcb::DEFAULT_RLIMITS[4]; // RLIMIT_CORE
-        if cur != 0 || max != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: DEFAULT_RLIMITS[CORE] = ({}, {})",
-                cur, max
-            );
-            return Err(KernelError::InternalError);
-        }
-        // Default for an arbitrary RLIM_INFINITY one — CPU.
-        let (cur, max) = pcb::DEFAULT_RLIMITS[0];
-        if cur != u64::MAX || max != u64::MAX {
-            serial_println!(
-                "[syscall/linux]   FAIL: DEFAULT_RLIMITS[CPU] = ({}, {})",
-                cur, max
-            );
-            return Err(KernelError::InternalError);
-        }
-    }
+    self_test_default_rlimits()?;
 
     // prlimit64 dispatch validation:
     //   - resource > 15 -> EINVAL.

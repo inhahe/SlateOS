@@ -74485,6 +74485,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_settimeofday_mincore_mremap()?;
+
+    #[inline(never)]
+    fn self_test_settimeofday_mincore_mremap() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // -----------------------------------------------------------------
     // settimeofday / mincore / mremap / fallocate / mlock2 / acct /
     // ustat
@@ -75122,6 +75127,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   ustat super_get_super-first EINVAL (gate-1 terminal): OK"
         );
+    }
+        Ok(())
     }
 
     // -----------------------------------------------------------------

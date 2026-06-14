@@ -1595,6 +1595,32 @@ pub unsafe fn clear_user_address_space(pml4_phys: u64) {
                     // FRAME_SIZE.
                     let frame_base = pte.phys_addr() & !(FRAME_SIZE as u64 - 1);
                     if let Some(frame) = PhysFrame::from_addr(frame_base) {
+                        // Drop this frame's reverse-mapping (if any) before
+                        // freeing it.  A demand-faulted user page is registered
+                        // in rmap (proc::pcb fault handler, cow, swap); without
+                        // removing it here the entry would dangle, pointing into
+                        // a physical frame that is about to be freed and handed
+                        // to another address space — compaction/swap could then
+                        // migrate or evict a frame that no longer belongs to
+                        // this process.  rmap::remove is a no-op for frames that
+                        // were never tracked (eagerly-mapped / kernel frames).
+                        //
+                        // The mapping key is (frame_phys, pml4_phys, virt_frame
+                        // _base); reconstruct the 16 KiB-aligned user virtual
+                        // address from the walk indices (the user half has bit
+                        // 47 == 0, so no sign extension is needed).
+                        let virt_frame_base = ((pml4_idx as u64) << 39)
+                            | ((pdpt_idx as u64) << 30)
+                            | ((pd_idx as u64) << 21)
+                            | ((base_pt_idx as u64) << 12);
+                        super::rmap::remove(frame_base, pml4_phys, virt_frame_base);
+                        // Same reasoning for the swap reclaimable set: a
+                        // demand-faulted page is registered there too
+                        // (proc::pcb fault handler), and the bulk teardown here
+                        // bypasses unmap_frame (which is what normally
+                        // unregisters).  Drop it so the Clock reclaimer can
+                        // never select a freed/reused frame.  No-op if absent.
+                        super::swap::unregister_reclaimable(pml4_phys, virt_frame_base);
                         // SAFETY: This frame was mapped exclusively
                         // into this process's address space and the
                         // process is being destroyed / exec'd.

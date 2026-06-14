@@ -49179,6 +49179,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_fcntl_pipe_sz()?;
+
+    #[inline(never)]
+    fn self_test_fcntl_pipe_sz() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // ------------------------------------------------------------------
     // Batch 88: fcntl(F_GETPIPE_SZ / F_SETPIPE_SZ) — per-pipe buffer
     // capacity query / resize.
@@ -49336,6 +49341,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         crate::ipc::pipe::close(rh);
         crate::ipc::pipe::close(wh);
         pcb::destroy(test_pid);
+    }
+        Ok(())
     }
 
     // Batch 89: prctl(PR_GET_AUXV) — Linux 6.4+ glibc/perf/BPF

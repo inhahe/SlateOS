@@ -72957,6 +72957,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_addr_len_bounds()?;
+
+    #[inline(never)]
+    fn self_test_addr_len_bounds() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // Batch 464: bind / connect / sendto — addr_len bound checks
     // (`(int)ulen < 0 || ulen > 128 → EINVAL`) BEFORE pointer
     // access, matching Linux's `move_addr_to_kernel`
@@ -73138,6 +73143,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   bind/connect/sendto addr_len bound checks (Linux move_addr_to_kernel: (int)ulen<0 || ulen>128 → EINVAL; ulen==0 → per-protocol EINVAL; all before pointer access): OK"
         );
+    }
+        Ok(())
     }
 
     // Batch 436: sendto / recvfrom — fd lookup gates BETWEEN buf

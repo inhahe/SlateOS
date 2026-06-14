@@ -9260,9 +9260,11 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##        - PR_CAPBSET_DROP — silent success.
 ##      [SUPERSEDED — the per-option sub-claims above are stale; see the
 ##       later per-option resolutions for the current behaviour:
-##         * PR_SET_NAME/PR_GET_NAME now persist through pcb.name and are
-##           visible via /proc/<pid>/{comm,stat,status} (entry #82, and the
-##           NULL-arg2 EFAULT fix in batch 269). They are NOT no-ops.
+##         * PR_SET_NAME/PR_GET_NAME persist the calling thread's comm on
+##           the scheduler task (sched::set_task_name on current_task_id);
+##           visible via /proc/<pid>/{comm,stat field 2,status Name:}
+##           (entry #82, the NULL-arg2 EFAULT fix in batch 269, and the
+##           pcb.name->sched-task-name re-route below). They are NOT no-ops.
 ##         * PR_SET_DUMPABLE/PR_GET_DUMPABLE persist per-PCB; GET round-trips
 ##           the stored value (default 1), not a fixed 0.
 ##         * PR_SET_KEEPCAPS/PR_GET_KEEPCAPS are backed by securebits bit 4
@@ -9270,11 +9272,23 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##           the SECBIT_KEEP_CAPS_LOCKED EPERM gate enforced.
 ##         * PR_SET_NO_NEW_PRIVS/PR_GET_NO_NEW_PRIVS persist per-PCB; GET
 ##           round-trips the stored value (default 0), not a fixed 1.]
-##      Residual limitation: comm is stored per-process (pcb.name), not
-##      per-thread as Linux does — in a multi-threaded process all threads
-##      share one comm. Closing this needs per-TCB name storage. Secondary:
-##      non-UTF-8 comm bytes are rejected with EINVAL (we store comm as a
-##      Rust String) where Linux keeps raw bytes.
+##      RE-ROUTE (2026-06-14): PR_SET_NAME/PR_GET_NAME formerly wrote/read
+##      the process-level pcb.name, but /proc/<pid>/{comm,stat,status}
+##      read the per-thread *scheduler task name*, so after PR_SET_NAME
+##      those surfaces disagreed with prctl(PR_GET_NAME), and PR_SET_NAME
+##      also wrongly mutated /proc/<pid>/cmdline arg0 (which is backed by
+##      pcb.name and must reflect the exec argv, not comm). Fixed by adding
+##      sched::{set,copy}_task_name and routing both prctl ops through the
+##      calling thread's scheduler task (current_task_id) — the per-thread
+##      storage Linux's comm lives in. This also makes comm genuinely
+##      per-thread (resolves the old "all threads share one comm"
+##      limitation). pcb.name is no longer touched by SET_NAME.
+##      Residual limitation: non-UTF-8 comm bytes are still rejected with
+##      EINVAL — the scheduler stores raw bytes, but the procfs surfaces
+##      lossily decode the task name to a str (invalid bytes render as
+##      "???"), so SET_NAME rejects rather than store something that won't
+##      read back faithfully. Linux keeps raw bytes. Closing it needs
+##      procfs to emit comm as raw bytes.
 ##  17. PERSONALITY — DONE as static PER_LINUX.  sys_personality
 ##      returns 0 (PER_LINUX) regardless of input.  Programs query
 ##      with personality(0xffff_ffff) to verify "are we Linux?";

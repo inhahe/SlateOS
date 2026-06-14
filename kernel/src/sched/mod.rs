@@ -2910,6 +2910,47 @@ pub fn task_list() -> alloc::vec::Vec<TaskInfo> {
         .collect()
 }
 
+/// Install a new scheduler task name ("comm") for `task_id`, returning
+/// `true` if the task exists (and `false` if it is unknown).
+///
+/// This is the per-thread `comm` that `/proc/<pid>/comm`,
+/// `/proc/<pid>/stat` field 2, and `/proc/<pid>/status` `Name:` all read,
+/// and the storage Linux's `PR_SET_NAME` targets (`current->comm`).  The
+/// `name` is copied into the fixed 32-byte field (truncated if longer);
+/// callers wanting Linux's 15-visible-byte `TASK_COMM_LEN - 1` rule must
+/// apply it before calling.  The field is fully cleared first so no stale
+/// tail bytes survive a shorter replacement.
+#[must_use]
+pub fn set_task_name(task_id: TaskId, name: &[u8]) -> bool {
+    let mut state = SCHED.lock();
+    let Some(task) = state.tasks.get_mut(&task_id) else {
+        return false;
+    };
+    task.name = [0u8; 32];
+    let copy_len = name.len().min(task.name.len());
+    if let (Some(dst), Some(src)) = (task.name.get_mut(..copy_len), name.get(..copy_len)) {
+        dst.copy_from_slice(src);
+    }
+    task.name_len = copy_len;
+    true
+}
+
+/// Copy the scheduler task name ("comm") for `task_id` into `out`,
+/// returning the number of bytes written (0 if the task is unknown or
+/// `out` is empty).  Reads the same storage `set_task_name` writes.
+#[must_use]
+pub fn copy_task_name(task_id: TaskId, out: &mut [u8]) -> usize {
+    let state = SCHED.lock();
+    let Some(task) = state.tasks.get(&task_id) else {
+        return 0;
+    };
+    let n = task.name_len.min(task.name.len()).min(out.len());
+    if let (Some(dst), Some(src)) = (out.get_mut(..n), task.name.get(..n)) {
+        dst.copy_from_slice(src);
+    }
+    n
+}
+
 /// Result of a stack canary scan.
 #[derive(Debug, Clone)]
 pub struct CanaryScanResult {

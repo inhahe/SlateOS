@@ -8949,15 +8949,20 @@ fn write_cstr_field(dst: &mut [u8], src: &[u8]) {
 /// else — Linux's documented response for "unrecognised option".
 ///
 /// Accepted as silent success (returning 0):
-///   - `PR_SET_NAME` (15): install the comm name (up to 15 visible
-///     bytes; the 16th is the implicit NUL).  We copy 16 bytes from
-///     user space, truncate at the first NUL, and persist it through
-///     `pcb::set_name`, so it is observable via `prctl(PR_GET_NAME)`,
-///     `/proc/<pid>/comm`, `/proc/<pid>/stat`, and `/proc/<pid>/status`.
+///   - `PR_SET_NAME` (15): install the calling thread's comm (up to 15
+///     visible bytes; the 16th is the implicit NUL).  We copy 16 bytes
+///     from user space, truncate at the first NUL, and persist it on the
+///     scheduler task (`sched::set_task_name` on `current_task_id()`) —
+///     the per-thread storage Linux's comm lives in.  It is therefore
+///     observable via `prctl(PR_GET_NAME)`, `/proc/<pid>/comm`,
+///     `/proc/<pid>/stat` field 2, and `/proc/<pid>/status` `Name:`, all
+///     of which read that same task name.  It does NOT touch the
+///     process-level `pcb.name` that backs `/proc/<pid>/cmdline` arg0
+///     (Linux's cmdline reflects the exec argv, unchanged by SET_NAME).
 ///     NULL arg2 → EFAULT (matching `strncpy_from_user`).
-///   - `PR_GET_NAME` (16): the symmetric query — writes the stored comm
-///     into a 16-byte user buffer (NUL-padded, 16th byte always NUL).
-///     NULL arg2 → EFAULT.
+///   - `PR_GET_NAME` (16): the symmetric query — writes the calling
+///     thread's comm (scheduler task name) into a 16-byte user buffer
+///     (NUL-padded, 16th byte always NUL).  NULL arg2 → EFAULT.
 ///   - `PR_SET_DUMPABLE` (4) / `PR_GET_DUMPABLE` (3): the SUID-dump
 ///     flag.  SET accepts the full-64-bit arg2 ∈ {0, 1} (anything
 ///     else, including high-half noise, is EINVAL), persists it
@@ -9010,16 +9015,15 @@ fn write_cstr_field(dst: &mut [u8], src: &[u8]) {
 ///
 /// Everything else: `-EINVAL`.
 ///
-/// Limitation: the comm name is stored per-process (`pcb.name`), not
-/// per-thread as Linux does (each `task_struct` carries its own comm).
-/// In a multi-threaded process every thread therefore shares one comm,
-/// so a thread that sets its own name overwrites the shared value and
-/// `/proc/<pid>/task/<tid>/comm` reports that shared name rather than a
-/// per-thread one.  Single-threaded programs (the common case) are
-/// unaffected.  A secondary limitation: non-UTF-8 comm bytes are
-/// rejected with EINVAL (we store comm as a Rust `String`) where Linux
-/// would keep the raw bytes.  Both are tracked in todo.txt; closing the
-/// first needs per-TCB name storage.
+/// Limitation: non-UTF-8 comm bytes are rejected with EINVAL.  The
+/// scheduler stores comm as raw bytes, but `PR_SET_NAME` still validates
+/// UTF-8 because the procfs surfaces lossily decode the task name to a
+/// `str` (invalid bytes would render as `???`), so we reject rather than
+/// store something that wouldn't read back faithfully.  Linux keeps the
+/// raw bytes.  Tracked in todo.txt; closing it needs procfs to emit the
+/// comm as raw bytes.  (The former per-thread limitation is resolved:
+/// comm now lives on the per-thread scheduler task, so each thread names
+/// itself independently and `/proc/<pid>/task/<tid>/comm` is per-thread.)
 ///
 /// Returns `true` if `PR_SET_KEEPCAPS` may modify the keepcaps flag
 /// given the caller's current `securebits`.  Mirrors Linux's
@@ -9274,11 +9278,22 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
             SyscallResult::ok(i64::from(v))
         }
         // PR_SET_NAME — install up to 16 bytes (NUL-terminated within
-        // 16) as the calling process's comm.  Linux reads with
+        // 16) as the calling thread's comm.  Linux reads with
         // strncpy_from_user(len=TASK_COMM_LEN=16): everything past the
         // first NUL is ignored, the 16th byte is always treated as a
-        // NUL terminator.  We persist through pcb::set_name on the
-        // caller's PCB; kernel context (no PCB) silently succeeds.
+        // NUL terminator.
+        //
+        // In Linux the comm lives in the per-thread `task_struct`
+        // (`current->comm`), which is exactly what `/proc/<pid>/comm`,
+        // `/proc/<pid>/stat` field 2, and `/proc/<pid>/status` `Name:`
+        // all read.  We therefore write the *scheduler task name* of the
+        // calling thread (`sched::current_task_id()`), NOT the
+        // process-level `pcb.name` — the latter backs
+        // `/proc/<pid>/cmdline` arg0, which Linux's PR_SET_NAME must not
+        // disturb (cmdline reflects the exec argv).  Routing through the
+        // scheduler task keeps comm per-thread and keeps all four
+        // surfaces consistent.  Kernel context with no live task for the
+        // current id silently succeeds without storing.
         15 => {
             let user_buf = args.arg1;
             if user_buf == 0 {
@@ -9313,16 +9328,19 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
             // documented as a known limitation in todo.txt — every
             // userspace program we've seen sets ASCII comms so this
             // is observationally equivalent.
-            let name_str = match core::str::from_utf8(name_bytes) {
-                Ok(s) => s,
-                Err(_) => return linux_err(errno::EINVAL),
-            };
-            if let Some(pid) = caller_pid() {
-                let _ = pcb::set_name(pid, alloc::string::String::from(name_str));
+            if core::str::from_utf8(name_bytes).is_err() {
+                return linux_err(errno::EINVAL);
             }
+            // Install on the calling thread's scheduler task (its comm).
+            // A missing task (kernel context) is a silent success — there
+            // is nothing observable to name.
+            let _ = crate::sched::set_task_name(
+                crate::sched::current_task_id(),
+                name_bytes,
+            );
             SyscallResult::ok(0)
         }
-        // PR_GET_NAME — write the calling process's comm into a 16-byte
+        // PR_GET_NAME — write the calling thread's comm into a 16-byte
         // user buffer.  Always 16 bytes (NUL-padded), with the 16th
         // byte guaranteed NUL.  Visible comm is truncated at 15 bytes.
         16 => {
@@ -9335,16 +9353,17 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
                 return linux_err(linux_errno_for(e));
             }
             let mut out = [0u8; 16];
-            // Read the live PCB name on the caller's PID.  Kernel
-            // context falls back to an empty (all-zero) buffer, which
-            // matches what an unnamed task would observe.
-            if let Some(pid) = caller_pid() {
-                if let Some(name) = pcb::name(pid) {
-                    let bytes = name.as_bytes();
-                    let n = core::cmp::min(bytes.len(), 15);
-                    out[..n].copy_from_slice(&bytes[..n]);
-                    // out[15] stays 0 (guaranteed NUL terminator).
-                }
+            // Read the calling thread's scheduler task name (its comm) —
+            // the same storage PR_SET_NAME writes and /proc/<pid>/comm
+            // reads.  Copy into the first 15 bytes so out[15] stays 0
+            // (the guaranteed NUL terminator); an unknown task (kernel
+            // context) leaves the buffer all-zero, matching what an
+            // unnamed task would observe.
+            if let Some(dst) = out.get_mut(..15) {
+                let _ = crate::sched::copy_task_name(
+                    crate::sched::current_task_id(),
+                    dst,
+                );
             }
             // SAFETY: validate_user_write above confirmed a 16-byte
             // writable user range; we copy exactly 16 bytes.
@@ -49675,50 +49694,50 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // Batch 56: PR_SET_NAME / PR_GET_NAME PCB round-trip.
-        //   - Fresh PCB: name reads back as the create()-provided
-        //     value.
-        //   - set_name installs a new comm, get_name reads it back.
-        //   - 16-byte truncation: a 20-byte input is stored as its
-        //     first 15 bytes (the 16th storage byte is the NUL).
-        //   - Non-UTF-8 bytes in PR_SET_NAME storage path would be
-        //     rejected by the syscall path (not exercised here
-        //     because we can't reach userspace from kernel context;
-        //     the PCB-level helper accepts arbitrary Strings).
+        // PR_SET_NAME / PR_GET_NAME now route through the *scheduler
+        // task name* (the per-thread comm Linux stores in task_struct),
+        // not the process-level pcb.name — so /proc/<pid>/comm,
+        // /proc/<pid>/stat field 2, /proc/<pid>/status `Name:`, and
+        // prctl(PR_GET_NAME) all read one source of truth.  Exercise the
+        // sched::{set,copy}_task_name storage layer directly against the
+        // running self-test task, snapshotting and restoring its comm so
+        // the test leaves no side effect:
+        //   - set installs a new comm, copy reads it back;
+        //   - the 15-byte truncation the syscall applies (mirrored here);
+        //   - an unknown task id is rejected (returns false).
         {
-            let test_pid = pcb::create("orig-comm", 0);
-            assert_eq!(
-                pcb::name(test_pid).as_deref(),
-                Some("orig-comm"),
-            );
-            let prev = pcb::set_name(
-                test_pid,
-                alloc::string::String::from("new-comm"),
-            ).expect("set_name");
-            assert_eq!(prev, "orig-comm");
-            assert_eq!(
-                pcb::name(test_pid).as_deref(),
-                Some("new-comm"),
-            );
+            let cur = crate::sched::current_task_id();
 
-            // 15-char truncation invariant (the call-site of
-            // PR_SET_NAME enforces this; the helper itself does
-            // not — verify the call-site truncates by storing the
-            // pre-truncated string and checking it matches what
-            // PR_GET_NAME would emit through copy_to_user.  The
-            // truncation logic is also exercised in production
-            // because the syscall always goes through the 16-byte
-            // copy_from_user buffer.).
-            let long = alloc::string::String::from("abcdefghijklmnop");
+            // Snapshot the live task's comm so we can restore it.
+            let mut saved = [0u8; 32];
+            let saved_len = crate::sched::copy_task_name(cur, &mut saved);
+
+            // Set then read back.
+            assert!(crate::sched::set_task_name(cur, b"new-comm"));
+            let mut buf = [0u8; 32];
+            let n = crate::sched::copy_task_name(cur, &mut buf);
+            assert_eq!(buf.get(..n), Some(&b"new-comm"[..]));
+
+            // 15-byte truncation invariant: the syscall handler truncates
+            // a 16-byte input to 15 visible bytes before storing (the
+            // 16th storage byte is the implicit NUL).  Mirror the
+            // call-site truncation and verify the storage layer keeps it.
+            let long = b"abcdefghijklmnop"; // 16 bytes
             assert_eq!(long.len(), 16);
-            // PR_SET_NAME would truncate to 15 bytes ("abcdefghijklmno");
-            // we model that at the call-site and store the truncated
-            // form here.
-            let truncated = alloc::string::String::from(&long[..15]);
-            let _ = pcb::set_name(test_pid, truncated.clone());
-            assert_eq!(pcb::name(test_pid).as_deref(), Some("abcdefghijklmno"));
+            let truncated = long.get(..15).unwrap_or(&[]);
+            assert!(crate::sched::set_task_name(cur, truncated));
+            let mut buf2 = [0u8; 32];
+            let n2 = crate::sched::copy_task_name(cur, &mut buf2);
+            assert_eq!(buf2.get(..n2), Some(&b"abcdefghijklmno"[..]));
 
-            pcb::destroy(test_pid);
+            // Unknown task id -> false (no such task to name).
+            assert!(!crate::sched::set_task_name(u64::MAX, b"nope"));
+            assert_eq!(crate::sched::copy_task_name(u64::MAX, &mut buf), 0);
+
+            // Restore the original comm so the running task is unchanged.
+            let restore = saved.get(..saved_len).unwrap_or(&[]);
+            assert!(crate::sched::set_task_name(cur, restore));
+            serial_println!("[syscall/linux]   OK: PR_SET/GET_NAME -> sched task comm round-trip");
         }
 
         // Batch 61: PR_SET_PDEATHSIG / PR_GET_PDEATHSIG.

@@ -41333,6 +41333,218 @@ fn self_test_migrate_pages() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+/// TD4 extraction: move_pages UMA-aware no-op + per-page status writer
+/// (self_test group 9i). Verifies query/move status writes, per-page
+/// -ENODEV for memoryless nodes, the absence of an E2BIG cap, and the Linux
+/// gate order (MOVE_ALL EPERM -> pid ESRCH -> pages EFAULT). Self-contained.
+/// See [`self_test_errno_mapping`] for the TD4 rationale.
+#[inline(never)]
+fn self_test_move_pages() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+
+    // Case 1: count == 0 -> 0 (Linux no-op success).
+    let a = SyscallArgs {
+        arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::MOVE_PAGES, &a);
+    if r.value != 0 {
+        serial_println!(
+            "[syscall/linux]   FAIL: move_pages(count=0) -> {} (expected 0)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 2: query mode (nodes == NULL) on 3 pages.  All
+    // status entries must be 0 (= node 0).
+    let pages: [u64; 3] = [0x1000, 0x2000, 0x3000];
+    let mut status: [i32; 3] = [0x55; 3];
+    let a = SyscallArgs {
+        arg0: 0, arg1: 3,
+        arg2: pages.as_ptr().addr() as u64,
+        arg3: 0,
+        arg4: status.as_mut_ptr().addr() as u64,
+        arg5: 0,
+    };
+    let r = dispatch_linux(nr::MOVE_PAGES, &a);
+    if r.value != 0 || status != [0, 0, 0] {
+        serial_println!(
+            "[syscall/linux]   FAIL: move_pages(query) ret {} status {:?}",
+            r.value, status,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 3: move mode with target = node 0 for every page.
+    // status[i] must be 0.
+    let nodes: [i32; 3] = [0, 0, 0];
+    let mut status: [i32; 3] = [0xaa; 3];
+    let a = SyscallArgs {
+        arg0: 0, arg1: 3,
+        arg2: pages.as_ptr().addr() as u64,
+        arg3: nodes.as_ptr().addr() as u64,
+        arg4: status.as_mut_ptr().addr() as u64,
+        arg5: 0,
+    };
+    let r = dispatch_linux(nr::MOVE_PAGES, &a);
+    if r.value != 0 || status != [0, 0, 0] {
+        serial_println!(
+            "[syscall/linux]   FAIL: move_pages(all->0) ret {} status {:?}",
+            r.value, status,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 4: mixed targets — node 0 / node 1 / node 0.
+    // status must be 0 / -ENODEV / 0.  Batch 549: do_pages_move
+    // stores -ENODEV (not -EINVAL) for a target node that lacks
+    // N_MEMORY — node 1 has no memory on a single-node box.
+    let nodes: [i32; 3] = [0, 1, 0];
+    let mut status: [i32; 3] = [0x77; 3];
+    let a = SyscallArgs {
+        arg0: 0, arg1: 3,
+        arg2: pages.as_ptr().addr() as u64,
+        arg3: nodes.as_ptr().addr() as u64,
+        arg4: status.as_mut_ptr().addr() as u64,
+        arg5: 0,
+    };
+    let r = dispatch_linux(nr::MOVE_PAGES, &a);
+    if r.value != 0 || status != [0, errno::ENODEV.wrapping_neg(), 0] {
+        serial_println!(
+            "[syscall/linux]   FAIL: move_pages(mixed) ret {} status {:?}",
+            r.value, status,
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[syscall/linux]   move_pages per-page bad-node status=-ENODEV (batch 549): OK"
+    );
+
+    // Case 5: large count (self pid) has NO E2BIG cap — Linux
+    // imposes no nr_pages limit.  With NULL pages it flows to the
+    // pages/status validation and returns -EFAULT.  Batch 548
+    // removed the invented `count > (1<<20) -> E2BIG` gate.
+    let a = SyscallArgs {
+        arg0: 0, arg1: (1 << 21), arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::MOVE_PAGES, &a);
+    if r.value != i64::from(errno::EFAULT).wrapping_neg() {
+        serial_println!(
+            "[syscall/linux]   FAIL: move_pages(huge count,NULL pages) -> {} (expected -EFAULT)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 6: count > 0 with NULL pages pointer -> -EFAULT.
+    let mut status: [i32; 1] = [0];
+    let a = SyscallArgs {
+        arg0: 0, arg1: 1,
+        arg2: 0,
+        arg3: 0,
+        arg4: status.as_mut_ptr().addr() as u64,
+        arg5: 0,
+    };
+    let r = dispatch_linux(nr::MOVE_PAGES, &a);
+    if r.value != -i64::from(errno::EFAULT) {
+        serial_println!(
+            "[syscall/linux]   FAIL: move_pages(NULL pages) -> {} (expected -EFAULT)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 7: MPOL_MF_MOVE_ALL without CAP_SYS_NICE -> -EPERM.
+    // Linux kernel_move_pages (mm/migrate.c) runs the EPERM gate
+    // immediately after the flag-bits mask, ahead of the pid
+    // lookup AND ahead of the count==0 no-op shortcut.  Pre-batch
+    // we accepted MOVE_ALL silently; a probe passing
+    // (count=0, flags=MOVE_ALL) saw 0 where Linux returns -EPERM.
+    const MPOL_MF_MOVE_ALL_FLAG: u64 = 0x4;
+    let a = SyscallArgs {
+        arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0,
+        arg5: MPOL_MF_MOVE_ALL_FLAG,
+    };
+    let r = dispatch_linux(nr::MOVE_PAGES, &a);
+    if r.value != -i64::from(errno::EPERM) {
+        serial_println!(
+            "[syscall/linux]   FAIL: move_pages(count=0,MOVE_ALL) -> {} (expected -EPERM)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 8: MOVE_ALL EPERM fires ahead of the pid lookup and the
+    // pages handling.  Probe passing (large count, foreign pid,
+    // flags=MOVE_ALL) must see EPERM (the step-2 gate), not ESRCH
+    // (step 3) or EFAULT (step 4) — Linux gate order.
+    let a = SyscallArgs {
+        arg0: 99_999, arg1: (1 << 21), arg2: 0, arg3: 0, arg4: 0,
+        arg5: MPOL_MF_MOVE_ALL_FLAG,
+    };
+    let r = dispatch_linux(nr::MOVE_PAGES, &a);
+    if r.value != i64::from(errno::EPERM).wrapping_neg() {
+        serial_println!(
+            "[syscall/linux]   FAIL: move_pages(huge,foreign pid,MOVE_ALL) -> {} (expected -EPERM)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 9: MPOL_MF_MOVE (not MOVE_ALL) does NOT trigger EPERM
+    // — MOVE is allowed for any user.  count=0 still succeeds.
+    const MPOL_MF_MOVE_FLAG: u64 = 0x2;
+    let a = SyscallArgs {
+        arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0,
+        arg5: MPOL_MF_MOVE_FLAG,
+    };
+    let r = dispatch_linux(nr::MOVE_PAGES, &a);
+    if r.value != 0 {
+        serial_println!(
+            "[syscall/linux]   FAIL: move_pages(count=0,MOVE) -> {} (expected 0)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 10: unknown pid (not self) -> -ESRCH (find_mm_struct ->
+    // find_task_by_vpid -> NULL).  The pid lookup runs AFTER the
+    // MOVE_ALL gate but BEFORE the count==0 shortcut and the
+    // pages/status validation, so count==0 with a foreign pid still
+    // returns ESRCH (pre-batch the missing pid lookup let this
+    // return 0).
+    let a = SyscallArgs {
+        arg0: 99_999, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::MOVE_PAGES, &a);
+    if r.value != i64::from(errno::ESRCH).wrapping_neg() {
+        serial_println!(
+            "[syscall/linux]   FAIL: move_pages(foreign pid,count=0) -> {} (expected -ESRCH)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 11: negative pid resolves to NULL too -> -ESRCH, and the
+    // lookup beats the pages/status EFAULT (Linux step 3 before
+    // step 4).
+    let a = SyscallArgs {
+        arg0: u64::MAX, arg1: 3, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::MOVE_PAGES, &a);
+    if r.value != i64::from(errno::ESRCH).wrapping_neg() {
+        serial_println!(
+            "[syscall/linux]   FAIL: move_pages(neg pid) -> {} (expected -ESRCH)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[syscall/linux]   move_pages MOVE_ALL EPERM / pid-ESRCH (no E2BIG cap) (batch 548): OK"
+    );
+    Ok(())
+}
+
 pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
@@ -41457,211 +41669,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     self_test_migrate_pages()?;
 
     // (9i) Batch 105: move_pages upgraded from -ENOSYS stub to a
-    // UMA-aware no-op + per-page status writer.  Verifies that
-    // status[i] is written correctly for both query (nodes==NULL)
-    // and move (nodes != NULL with target 0 / non-zero) modes.
-    {
-        // Case 1: count == 0 -> 0 (Linux no-op success).
-        let a = SyscallArgs {
-            arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::MOVE_PAGES, &a);
-        if r.value != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: move_pages(count=0) -> {} (expected 0)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 2: query mode (nodes == NULL) on 3 pages.  All
-        // status entries must be 0 (= node 0).
-        let pages: [u64; 3] = [0x1000, 0x2000, 0x3000];
-        let mut status: [i32; 3] = [0x55; 3];
-        let a = SyscallArgs {
-            arg0: 0, arg1: 3,
-            arg2: pages.as_ptr().addr() as u64,
-            arg3: 0,
-            arg4: status.as_mut_ptr().addr() as u64,
-            arg5: 0,
-        };
-        let r = dispatch_linux(nr::MOVE_PAGES, &a);
-        if r.value != 0 || status != [0, 0, 0] {
-            serial_println!(
-                "[syscall/linux]   FAIL: move_pages(query) ret {} status {:?}",
-                r.value, status,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 3: move mode with target = node 0 for every page.
-        // status[i] must be 0.
-        let nodes: [i32; 3] = [0, 0, 0];
-        let mut status: [i32; 3] = [0xaa; 3];
-        let a = SyscallArgs {
-            arg0: 0, arg1: 3,
-            arg2: pages.as_ptr().addr() as u64,
-            arg3: nodes.as_ptr().addr() as u64,
-            arg4: status.as_mut_ptr().addr() as u64,
-            arg5: 0,
-        };
-        let r = dispatch_linux(nr::MOVE_PAGES, &a);
-        if r.value != 0 || status != [0, 0, 0] {
-            serial_println!(
-                "[syscall/linux]   FAIL: move_pages(all->0) ret {} status {:?}",
-                r.value, status,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 4: mixed targets — node 0 / node 1 / node 0.
-        // status must be 0 / -ENODEV / 0.  Batch 549: do_pages_move
-        // stores -ENODEV (not -EINVAL) for a target node that lacks
-        // N_MEMORY — node 1 has no memory on a single-node box.
-        let nodes: [i32; 3] = [0, 1, 0];
-        let mut status: [i32; 3] = [0x77; 3];
-        let a = SyscallArgs {
-            arg0: 0, arg1: 3,
-            arg2: pages.as_ptr().addr() as u64,
-            arg3: nodes.as_ptr().addr() as u64,
-            arg4: status.as_mut_ptr().addr() as u64,
-            arg5: 0,
-        };
-        let r = dispatch_linux(nr::MOVE_PAGES, &a);
-        if r.value != 0 || status != [0, errno::ENODEV.wrapping_neg(), 0] {
-            serial_println!(
-                "[syscall/linux]   FAIL: move_pages(mixed) ret {} status {:?}",
-                r.value, status,
-            );
-            return Err(KernelError::InternalError);
-        }
-        serial_println!(
-            "[syscall/linux]   move_pages per-page bad-node status=-ENODEV (batch 549): OK"
-        );
-
-        // Case 5: large count (self pid) has NO E2BIG cap — Linux
-        // imposes no nr_pages limit.  With NULL pages it flows to the
-        // pages/status validation and returns -EFAULT.  Batch 548
-        // removed the invented `count > (1<<20) -> E2BIG` gate.
-        let a = SyscallArgs {
-            arg0: 0, arg1: (1 << 21), arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::MOVE_PAGES, &a);
-        if r.value != i64::from(errno::EFAULT).wrapping_neg() {
-            serial_println!(
-                "[syscall/linux]   FAIL: move_pages(huge count,NULL pages) -> {} (expected -EFAULT)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 6: count > 0 with NULL pages pointer -> -EFAULT.
-        let mut status: [i32; 1] = [0];
-        let a = SyscallArgs {
-            arg0: 0, arg1: 1,
-            arg2: 0,
-            arg3: 0,
-            arg4: status.as_mut_ptr().addr() as u64,
-            arg5: 0,
-        };
-        let r = dispatch_linux(nr::MOVE_PAGES, &a);
-        if r.value != -i64::from(errno::EFAULT) {
-            serial_println!(
-                "[syscall/linux]   FAIL: move_pages(NULL pages) -> {} (expected -EFAULT)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 7: MPOL_MF_MOVE_ALL without CAP_SYS_NICE -> -EPERM.
-        // Linux kernel_move_pages (mm/migrate.c) runs the EPERM gate
-        // immediately after the flag-bits mask, ahead of the pid
-        // lookup AND ahead of the count==0 no-op shortcut.  Pre-batch
-        // we accepted MOVE_ALL silently; a probe passing
-        // (count=0, flags=MOVE_ALL) saw 0 where Linux returns -EPERM.
-        const MPOL_MF_MOVE_ALL_FLAG: u64 = 0x4;
-        let a = SyscallArgs {
-            arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0,
-            arg5: MPOL_MF_MOVE_ALL_FLAG,
-        };
-        let r = dispatch_linux(nr::MOVE_PAGES, &a);
-        if r.value != -i64::from(errno::EPERM) {
-            serial_println!(
-                "[syscall/linux]   FAIL: move_pages(count=0,MOVE_ALL) -> {} (expected -EPERM)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 8: MOVE_ALL EPERM fires ahead of the pid lookup and the
-        // pages handling.  Probe passing (large count, foreign pid,
-        // flags=MOVE_ALL) must see EPERM (the step-2 gate), not ESRCH
-        // (step 3) or EFAULT (step 4) — Linux gate order.
-        let a = SyscallArgs {
-            arg0: 99_999, arg1: (1 << 21), arg2: 0, arg3: 0, arg4: 0,
-            arg5: MPOL_MF_MOVE_ALL_FLAG,
-        };
-        let r = dispatch_linux(nr::MOVE_PAGES, &a);
-        if r.value != i64::from(errno::EPERM).wrapping_neg() {
-            serial_println!(
-                "[syscall/linux]   FAIL: move_pages(huge,foreign pid,MOVE_ALL) -> {} (expected -EPERM)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 9: MPOL_MF_MOVE (not MOVE_ALL) does NOT trigger EPERM
-        // — MOVE is allowed for any user.  count=0 still succeeds.
-        const MPOL_MF_MOVE_FLAG: u64 = 0x2;
-        let a = SyscallArgs {
-            arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0,
-            arg5: MPOL_MF_MOVE_FLAG,
-        };
-        let r = dispatch_linux(nr::MOVE_PAGES, &a);
-        if r.value != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: move_pages(count=0,MOVE) -> {} (expected 0)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 10: unknown pid (not self) -> -ESRCH (find_mm_struct ->
-        // find_task_by_vpid -> NULL).  The pid lookup runs AFTER the
-        // MOVE_ALL gate but BEFORE the count==0 shortcut and the
-        // pages/status validation, so count==0 with a foreign pid still
-        // returns ESRCH (pre-batch the missing pid lookup let this
-        // return 0).
-        let a = SyscallArgs {
-            arg0: 99_999, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::MOVE_PAGES, &a);
-        if r.value != i64::from(errno::ESRCH).wrapping_neg() {
-            serial_println!(
-                "[syscall/linux]   FAIL: move_pages(foreign pid,count=0) -> {} (expected -ESRCH)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 11: negative pid resolves to NULL too -> -ESRCH, and the
-        // lookup beats the pages/status EFAULT (Linux step 3 before
-        // step 4).
-        let a = SyscallArgs {
-            arg0: u64::MAX, arg1: 3, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::MOVE_PAGES, &a);
-        if r.value != i64::from(errno::ESRCH).wrapping_neg() {
-            serial_println!(
-                "[syscall/linux]   FAIL: move_pages(neg pid) -> {} (expected -ESRCH)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-        serial_println!(
-            "[syscall/linux]   move_pages MOVE_ALL EPERM / pid-ESRCH (no E2BIG cap) (batch 548): OK"
-        );
-    }
+    // UMA-aware no-op + per-page status writer.  Verifies status[i]
+    // writes for query/move modes plus the Linux gate order
+    // (MOVE_ALL EPERM -> pid ESRCH -> pages EFAULT).  Extracted to
+    // self_test_move_pages (TD4).
+    self_test_move_pages()?;
 
     // (10) LinuxTimespec round-trip.
     let ts = LinuxTimespec { tv_sec: 5, tv_nsec: 123_456_789 };

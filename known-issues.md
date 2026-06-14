@@ -491,6 +491,37 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
+### TD24. `link`/`linkat` return a blanket `EROFS` regardless of mount/filesystem — APPROXIMATION 2026-06-14
+
+**Where:** `sys_link` / `sys_linkat` in `kernel/src/syscall/linux.rs` (both
+return `errno::EROFS` after validating their path/flags arguments).
+
+**What it is:** no filesystem in the OS implements hard links, so both syscalls
+fail unconditionally with `EROFS` ("read-only file system"). Linux instead
+returns errno by case, in `do_linkat`/`vfs_link` order: oldpath missing →
+`ENOENT`; newpath already exists → `EEXIST`; the two paths are on different
+mounts → `EXDEV`; the destination mount is read-only → `EROFS`; and a writable
+filesystem that simply lacks a `->link` op → `EPERM`. The common real case —
+`link("/tmp/a", "/tmp/b")` on our *writable* `/tmp` memfs — should be `EPERM`
+(unsupported), not `EROFS` (which misleadingly claims the mount is read-only).
+
+**Why it's not a live bug today:** programs that use `link(2)` for speed
+(git's `link_or_copy`, rsync `--link-dest`, `cp -l`, `ln`) fall back to copying
+or report the error; none branch on `EROFS`-vs-`EPERM` in a way that corrupts
+data. The only observable effect is a misleading error *message* on an
+operation that cannot succeed regardless.
+
+**Proper fix:** the real fix is hard-link support in the backing filesystems
+(a substantial FS feature — memfs/ext4/FAT inode link-count + dirent aliasing).
+Until then, an interim accuracy improvement would resolve oldpath/newpath, emit
+`ENOENT`/`EEXIST`/`EXDEV` (the `KernelError::CrossDevice` variant added 2026-06-14
+already maps to `EXDEV`) / `EROFS` / `EPERM` in Linux's order. That interim step
+was deliberately NOT taken: faithfully reproducing `do_linkat`'s lookup ordering
+(`AT_SYMLINK_FOLLOW` oldpath resolution, `AT_EMPTY_PATH`, dirfd resolution,
+parent `ENOTDIR`/trailing-slash handling) for a syscall that always fails risks
+introducing *new* divergences that are worse than the current honest-but-coarse
+`EROFS`. Revisit when hard links are actually implemented.
+
 ### TD23. No `/sys/devices/system/cpu/cpuN/cache/` tree — lscpu/hwloc cannot read real cache geometry — RESOLVED 2026-06-13
 
 **Resolution (2026-06-13):** Built the per-CPU `cache/indexI/` sysfs subtree in

@@ -32,6 +32,13 @@ use std::process;
 /// Network IOCTL syscall number -- shared with the `ip` utility.
 const SYS_NET_IOCTL: u64 = 810;
 
+/// Read-only interface-info query syscall (`kernel/src/syscall/number.rs`,
+/// `SYS_NET_IF_INFO`). Returns a fixed 24-byte record describing the default
+/// network interface. This is the live read source: the kernel does not yet
+/// populate `/sys/class/net/` or `/proc/net/dev`, so display mode falls back to
+/// this syscall (TD18 read-path wiring).
+const SYS_NET_IF_INFO: u64 = 842;
+
 // IOCTL sub-commands for network interface configuration.
 const NET_IF_UP: u64 = 1;
 const NET_IF_DOWN: u64 = 2;
@@ -67,6 +74,139 @@ fn net_ioctl(cmd: u64, iface: &str, arg: u64) -> i64 {
     let name = format!("{iface}\0");
     // SAFETY: We pass a valid NUL-terminated interface name and a numeric arg.
     unsafe { syscall4(SYS_NET_IOCTL, cmd, name.as_ptr() as u64, arg, 0) }
+}
+
+// ============================================================================
+// Kernel interface-info query (SYS_NET_IF_INFO, read-only)
+// ============================================================================
+
+/// Size of the `SYS_NET_IF_INFO` record (must match the kernel's `INFO_SIZE`).
+const NET_IF_INFO_SIZE: usize = 24;
+
+/// Decoded form of the kernel's 24-byte `SYS_NET_IF_INFO` record.
+///
+/// Layout (see `kernel/src/syscall/handlers.rs::sys_net_if_info`):
+/// `[0..4]` IPv4 address, `[4..8]` subnet mask, `[8..12]` gateway,
+/// `[12..16]` DNS server, `[16..22]` MAC, `[22]` up flag, `[23]` reserved.
+struct NetIfInfo {
+    ip: [u8; 4],
+    mask: [u8; 4],
+    mac: [u8; 6],
+    up: bool,
+}
+
+/// Decode a raw `SYS_NET_IF_INFO` record. Pure (no syscall) so it is unit-test
+/// friendly on the host.
+fn parse_net_if_info(rec: &[u8; NET_IF_INFO_SIZE]) -> NetIfInfo {
+    let mut ip = [0u8; 4];
+    ip.copy_from_slice(&rec[0..4]);
+    let mut mask = [0u8; 4];
+    mask.copy_from_slice(&rec[4..8]);
+    let mut mac = [0u8; 6];
+    mac.copy_from_slice(&rec[16..22]);
+    NetIfInfo {
+        ip,
+        mask,
+        mac,
+        up: rec[22] != 0,
+    }
+}
+
+/// True if a 4-byte address is all zeros (i.e. unconfigured).
+fn is_zero4(addr: [u8; 4]) -> bool {
+    addr == [0, 0, 0, 0]
+}
+
+/// Format a 4-byte address as a dotted quad.
+fn fmt_ipv4(addr: [u8; 4]) -> String {
+    format!("{}.{}.{}.{}", addr[0], addr[1], addr[2], addr[3])
+}
+
+/// Format a 6-byte MAC address as colon-separated lowercase hex.
+fn fmt_mac(mac: [u8; 6]) -> String {
+    format!(
+        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+    )
+}
+
+/// Compute the directed broadcast address for an `ip`/`mask` pair:
+/// `(ip & mask) | !mask`.
+fn compute_broadcast(ip: [u8; 4], mask: [u8; 4]) -> [u8; 4] {
+    [
+        (ip[0] & mask[0]) | !mask[0],
+        (ip[1] & mask[1]) | !mask[1],
+        (ip[2] & mask[2]) | !mask[2],
+        (ip[3] & mask[3]) | !mask[3],
+    ]
+}
+
+/// Synthesize an [`InterfaceInfo`] for the default interface from a decoded
+/// kernel record. The kernel record carries no name or byte counters, so we
+/// use the conventional `eth0` name (matching the rest of the OS) and leave the
+/// counters at zero rather than fabricating traffic statistics.
+fn interface_from_net_if_info(info: &NetIfInfo) -> InterfaceInfo {
+    let has_ip = !is_zero4(info.ip);
+    let ip_addr = if has_ip { fmt_ipv4(info.ip) } else { String::new() };
+    let netmask = if has_ip {
+        fmt_ipv4(info.mask)
+    } else {
+        String::new()
+    };
+    let broadcast = if has_ip {
+        fmt_ipv4(compute_broadcast(info.ip, info.mask))
+    } else {
+        String::new()
+    };
+    let flags = if info.up {
+        iff::UP | iff::BROADCAST | iff::RUNNING | iff::MULTICAST
+    } else {
+        iff::BROADCAST | iff::MULTICAST
+    };
+    InterfaceInfo {
+        name: "eth0".to_string(),
+        flags,
+        mtu: 1500,
+        mac: fmt_mac(info.mac),
+        ip_addr,
+        netmask,
+        broadcast,
+        tx_queuelen: 1000,
+        rx_bytes: 0,
+        rx_packets: 0,
+        rx_errors: 0,
+        rx_dropped: 0,
+        rx_overruns: 0,
+        rx_frame: 0,
+        tx_bytes: 0,
+        tx_packets: 0,
+        tx_errors: 0,
+        tx_dropped: 0,
+        tx_overruns: 0,
+        tx_carrier: 0,
+        tx_collisions: 0,
+    }
+}
+
+/// Query the kernel for the default interface's configuration via
+/// `SYS_NET_IF_INFO`. Returns `None` if the syscall fails.
+fn query_net_if_info() -> Option<NetIfInfo> {
+    let mut buf = [0u8; NET_IF_INFO_SIZE];
+    // SAFETY: `buf` is exactly NET_IF_INFO_SIZE bytes, satisfying the kernel's
+    // minimum-length contract; the kernel writes at most that many bytes.
+    let ret = unsafe {
+        syscall4(
+            SYS_NET_IF_INFO,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+            0,
+            0,
+        )
+    };
+    if ret < 0 {
+        return None;
+    }
+    Some(parse_net_if_info(&buf))
 }
 
 // ============================================================================
@@ -324,6 +464,16 @@ fn read_interfaces() -> Vec<InterfaceInfo> {
                 }
             }
         }
+
+    // Last resort: query the kernel directly. The kernel does not yet populate
+    // /sys/class/net/ or /proc/net/dev, so without this the tool would report
+    // no interfaces at all. SYS_NET_IF_INFO yields the default interface's live
+    // configuration (TD18 read-path wiring).
+    if interfaces.is_empty()
+        && let Some(info) = query_net_if_info()
+    {
+        interfaces.push(interface_from_net_if_info(&info));
+    }
 
     interfaces.sort_by(|a, b| {
         // Sort loopback first, then alphabetically.
@@ -1160,5 +1310,117 @@ mod tests {
     #[test]
     fn test_ip_to_u32_class_a_mask() {
         assert_eq!(ip_to_u32("255.0.0.0"), Some(0xFF000000));
+    }
+
+    // --- SYS_NET_IF_INFO record decoding ---
+
+    #[test]
+    fn test_parse_net_if_info_full() {
+        // 10.0.2.15 / 255.255.255.0, mac 52:54:00:12:34:56, up.
+        let rec: [u8; NET_IF_INFO_SIZE] = [
+            10, 0, 2, 15, // ip
+            255, 255, 255, 0, // mask
+            10, 0, 2, 2, // gateway
+            10, 0, 2, 3, // dns
+            0x52, 0x54, 0x00, 0x12, 0x34, 0x56, // mac
+            1,    // up
+            0,    // reserved
+        ];
+        let info = parse_net_if_info(&rec);
+        assert_eq!(info.ip, [10, 0, 2, 15]);
+        assert_eq!(info.mask, [255, 255, 255, 0]);
+        assert_eq!(info.mac, [0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
+        assert!(info.up);
+    }
+
+    #[test]
+    fn test_parse_net_if_info_down_unconfigured() {
+        let rec = [0u8; NET_IF_INFO_SIZE];
+        let info = parse_net_if_info(&rec);
+        assert!(is_zero4(info.ip));
+        assert!(!info.up);
+    }
+
+    #[test]
+    fn test_fmt_ipv4() {
+        assert_eq!(fmt_ipv4([10, 0, 2, 15]), "10.0.2.15");
+        assert_eq!(fmt_ipv4([0, 0, 0, 0]), "0.0.0.0");
+        assert_eq!(fmt_ipv4([255, 255, 255, 255]), "255.255.255.255");
+    }
+
+    #[test]
+    fn test_fmt_mac() {
+        assert_eq!(
+            fmt_mac([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]),
+            "52:54:00:12:34:56"
+        );
+        assert_eq!(fmt_mac([0, 0, 0, 0, 0, 0]), "00:00:00:00:00:00");
+        assert_eq!(fmt_mac([0xff, 0xab, 0x0c, 0xde, 0x01, 0x9f]), "ff:ab:0c:de:01:9f");
+    }
+
+    #[test]
+    fn test_is_zero4() {
+        assert!(is_zero4([0, 0, 0, 0]));
+        assert!(!is_zero4([0, 0, 0, 1]));
+        assert!(!is_zero4([10, 0, 0, 0]));
+    }
+
+    #[test]
+    fn test_compute_broadcast() {
+        // /24 network.
+        assert_eq!(
+            compute_broadcast([10, 0, 2, 15], [255, 255, 255, 0]),
+            [10, 0, 2, 255]
+        );
+        // /16 network.
+        assert_eq!(
+            compute_broadcast([192, 168, 5, 7], [255, 255, 0, 0]),
+            [192, 168, 255, 255]
+        );
+        // /8 network.
+        assert_eq!(
+            compute_broadcast([10, 1, 2, 3], [255, 0, 0, 0]),
+            [10, 255, 255, 255]
+        );
+        // host route /32 -> broadcast is the host itself.
+        assert_eq!(
+            compute_broadcast([10, 0, 0, 1], [255, 255, 255, 255]),
+            [10, 0, 0, 1]
+        );
+    }
+
+    #[test]
+    fn test_interface_from_net_if_info_configured_up() {
+        let info = NetIfInfo {
+            ip: [10, 0, 2, 15],
+            mask: [255, 255, 255, 0],
+            mac: [0x52, 0x54, 0x00, 0x12, 0x34, 0x56],
+            up: true,
+        };
+        let iface = interface_from_net_if_info(&info);
+        assert_eq!(iface.name, "eth0");
+        assert_eq!(iface.ip_addr, "10.0.2.15");
+        assert_eq!(iface.netmask, "255.255.255.0");
+        assert_eq!(iface.broadcast, "10.0.2.255");
+        assert_eq!(iface.mac, "52:54:00:12:34:56");
+        assert_ne!(iface.flags & iff::UP, 0);
+        assert_ne!(iface.flags & iff::RUNNING, 0);
+    }
+
+    #[test]
+    fn test_interface_from_net_if_info_unconfigured_down() {
+        let info = NetIfInfo {
+            ip: [0, 0, 0, 0],
+            mask: [0, 0, 0, 0],
+            mac: [0, 0, 0, 0, 0, 0],
+            up: false,
+        };
+        let iface = interface_from_net_if_info(&info);
+        // No IP => the inet line is suppressed (empty strings).
+        assert!(iface.ip_addr.is_empty());
+        assert!(iface.netmask.is_empty());
+        assert!(iface.broadcast.is_empty());
+        // Down => UP flag is clear.
+        assert_eq!(iface.flags & iff::UP, 0);
     }
 }

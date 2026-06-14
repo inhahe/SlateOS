@@ -735,14 +735,31 @@ client-side number correction:
 **Impact:** these specific tools are non-functional (no-op at best). They are not
 on any critical path, so nothing currently blocks on them.
 
+**Read-path wiring — IN PROGRESS 2026-06-14.** The decision-free near-term win
+below is being applied incrementally:
+- **`ifconfig` (no-args / `-a` / `-s` / `ifconfig <iface>`) — DONE 2026-06-14.**
+  Display mode previously read `/sys/class/net/` and `/proc/net/dev`, neither of
+  which the kernel populates (sysfs only serves `kernel`/`params`/`devices`;
+  `/proc/net` is a flat file with no `dev`/`if_inet` subfiles), so the tool
+  reported "No network interfaces found". It now falls back to the existing
+  read-only `SYS_NET_IF_INFO=842` syscall, decoding the 24-byte record
+  (ip/mask/gw/dns/mac/up) into a synthesized `eth0` interface (counters left at
+  0 — the syscall carries none — rather than fabricating traffic stats). Pure
+  decode/format helpers (`parse_net_if_info`, `fmt_ipv4`, `fmt_mac`,
+  `compute_broadcast`) are host-unit-tested (8 new tests; `cargo test -p
+  ifconfig` 32 pass). The **write** paths (`up`/`down`/`set ip`/…) still issue
+  the non-existent `SYS_NET_IOCTL` and remain no-ops (unchanged — that half
+  needs the operator ABI decision below).
+- **`ip addr show`, `route -n` — still TODO** (same `SYS_NET_IF_INFO` wiring).
+
 **Proper fix:** this is an **operator design decision**, not a mechanical fix —
 the kernel must first grow the missing ABI, and the *shape* of that ABI is a
 fork: a native net-config syscall family vs. a network-manager IPC daemon for
 the net tools; a real mount/umount + fs-admin (format/verify/repair) syscall set;
 and a process-credential + fs-root ABI for chroot. A partial near-term win that
-needs no decision: wire the net tools' **read** paths (`ifconfig` no-args, `ip
-addr show`, `route -n`) to `NET_IF_INFO=842`. Trigger to revisit: when the
-matching kernel syscalls land (track via roadmap net-config / mount / fs-admin
+needs no decision: wire the net tools' **read** paths (`ifconfig` no-args — DONE;
+`ip addr show`, `route -n` — TODO) to `NET_IF_INFO=842`. Trigger to revisit: when
+the matching kernel syscalls land (track via roadmap net-config / mount / fs-admin
 tasks). Related: `sys_clock_settime`/`sys_clock_adjtime` now enforce
 `require_clock_authority()` keyed on `uid==0`; revisit to key off a real
 per-process `CAP_SYS_TIME` bit when the PCB gains a POSIX capability set (today

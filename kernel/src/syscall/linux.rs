@@ -43666,6 +43666,155 @@ fn self_test_module_archprctl_truncation() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+#[inline(never)]
+fn self_test_itimer_getrusage_validation() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+    // Batch 304 — sys_getitimer + sys_setitimer int which
+    // truncation audit.
+    //
+    // Pre-batch reads: `let which = args.arg0; if which > 2 ->
+    // EINVAL` on raw u64.  Linux declares `which` as `int`, so
+    // probes with the high half set (e.g. which=0x1_0000_0000,
+    // truncates to ITIMER_REAL=0) hit EINVAL where Linux truncates
+    // and passes the gate.
+    {
+        // (a) getitimer(which=0x1_0000_0000, value=&buf).
+        //     Pre-batch: raw 0x1_0000_0000 > 2 -> EINVAL.
+        //     Post-batch: which truncates to 0, passes the range
+        //     gate, value!=0 skips EFAULT, validate_user_write is
+        //     a kernel-context no-op, zero buffer copied -> 0.
+        let mut itv_buf = [0u8; 32];
+        let itv_ptr = itv_buf.as_mut_ptr() as u64;
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0000,
+            arg1: itv_ptr,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        let v = dispatch_linux(nr::GETITIMER, &a).value;
+        if v != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: getitimer high-half which -> {} (expected 0)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) setitimer(which=0x1_0000_0000, new=NULL, old=NULL).
+        //     Pre-batch: raw 0x1_0000_0000 > 2 -> EINVAL (after
+        //     the zero-buffer timeval_valid pass).  Post-batch:
+        //     which truncates to 0, passes the range gate,
+        //     is_cancel=true (all zeros), old=NULL skip -> 0.
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0000,
+            arg1: 0,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        let v = dispatch_linux(nr::SETITIMER, &a).value;
+        if v != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: setitimer high-half which -> {} (expected 0)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   getitimer/setitimer int which truncation: OK"
+        );
+    }
+
+    // Batch 305 — sys_getrusage missing `who` input validation.
+    // Linux gates `who not in {SELF=0, CHILDREN=-1, THREAD=1}` -> EINVAL
+    // *before* touching the rusage pointer; pre-batch we skipped that
+    // and went straight to the EFAULT/copy_to_user path.  Also covers
+    // the int-truncation thread: high-half sentinels for `who` must be
+    // cast to i32 first so RUSAGE_SELF/CHILDREN/THREAD comparisons see
+    // the truncated value, not the raw 64-bit register.
+    {
+        // (a) getrusage(who=2, ru=NULL).  Linux: who=2 is not in the
+        //     allowed set -> EINVAL (before the NULL check).  Pre-
+        //     batch we returned EFAULT (NULL gate fired first).
+        let a = SyscallArgs {
+            arg0: 2,
+            arg1: 0,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::GETRUSAGE, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: getrusage(who=2) -> {} (expected -EINVAL)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) getrusage(who=0x1_0000_0000, ru=NULL).  Pre-batch: raw
+        //     0x1_0000_0000 != 0/1/-1 -> would have been EINVAL once
+        //     we added the gate, BUT we have no gate -> EFAULT.
+        //     Post-batch: who truncates to (int)0 = RUSAGE_SELF,
+        //     passes the gate, then NULL pointer -> EFAULT.
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0000,
+            arg1: 0,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::GETRUSAGE, &a).value;
+        if v != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: getrusage(who=high-half-zero) -> {} (expected -EFAULT)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (c) getrusage(who=u64::MAX, ru=NULL).  Truncates to
+        //     (int)-1 = RUSAGE_CHILDREN -> passes who gate, NULL
+        //     pointer -> EFAULT.  Pre-batch: huge u64 != 0 -> EFAULT
+        //     coincidentally (NULL path), but we want to lock in the
+        //     post-batch reasoning so a future regression that drops
+        //     CHILDREN from the allowed set is caught.
+        let a = SyscallArgs {
+            arg0: u64::MAX,
+            arg1: 0,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::GETRUSAGE, &a).value;
+        if v != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: getrusage(who=u64::MAX trunc -1) -> {} (expected -EFAULT)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (d) getrusage(who=42, ru=NULL).  Garbage who: EINVAL.
+        let a = SyscallArgs {
+            arg0: 42,
+            arg1: 0,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::GETRUSAGE, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: getrusage(who=42) -> {} (expected -EINVAL)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   getrusage who input validation + int truncation: OK"
+        );
+    }
+    Ok(())
+}
+
 pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
@@ -43944,149 +44093,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
     self_test_module_archprctl_truncation()?;
 
-    // Batch 304 — sys_getitimer + sys_setitimer int which
-    // truncation audit.
-    //
-    // Pre-batch reads: `let which = args.arg0; if which > 2 ->
-    // EINVAL` on raw u64.  Linux declares `which` as `int`, so
-    // probes with the high half set (e.g. which=0x1_0000_0000,
-    // truncates to ITIMER_REAL=0) hit EINVAL where Linux truncates
-    // and passes the gate.
-    {
-        // (a) getitimer(which=0x1_0000_0000, value=&buf).
-        //     Pre-batch: raw 0x1_0000_0000 > 2 -> EINVAL.
-        //     Post-batch: which truncates to 0, passes the range
-        //     gate, value!=0 skips EFAULT, validate_user_write is
-        //     a kernel-context no-op, zero buffer copied -> 0.
-        let mut itv_buf = [0u8; 32];
-        let itv_ptr = itv_buf.as_mut_ptr() as u64;
-        let a = SyscallArgs {
-            arg0: 0x1_0000_0000,
-            arg1: itv_ptr,
-            arg2: 0,
-            arg3: 0,
-            arg4: 0,
-            arg5: 0,
-        };
-        let v = dispatch_linux(nr::GETITIMER, &a).value;
-        if v != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: getitimer high-half which -> {} (expected 0)",
-                v
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // (b) setitimer(which=0x1_0000_0000, new=NULL, old=NULL).
-        //     Pre-batch: raw 0x1_0000_0000 > 2 -> EINVAL (after
-        //     the zero-buffer timeval_valid pass).  Post-batch:
-        //     which truncates to 0, passes the range gate,
-        //     is_cancel=true (all zeros), old=NULL skip -> 0.
-        let a = SyscallArgs {
-            arg0: 0x1_0000_0000,
-            arg1: 0,
-            arg2: 0,
-            arg3: 0,
-            arg4: 0,
-            arg5: 0,
-        };
-        let v = dispatch_linux(nr::SETITIMER, &a).value;
-        if v != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: setitimer high-half which -> {} (expected 0)",
-                v
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        serial_println!(
-            "[syscall/linux]   getitimer/setitimer int which truncation: OK"
-        );
-    }
-
-    // Batch 305 — sys_getrusage missing `who` input validation.
-    // Linux gates `who not in {SELF=0, CHILDREN=-1, THREAD=1}` -> EINVAL
-    // *before* touching the rusage pointer; pre-batch we skipped that
-    // and went straight to the EFAULT/copy_to_user path.  Also covers
-    // the int-truncation thread: high-half sentinels for `who` must be
-    // cast to i32 first so RUSAGE_SELF/CHILDREN/THREAD comparisons see
-    // the truncated value, not the raw 64-bit register.
-    {
-        // (a) getrusage(who=2, ru=NULL).  Linux: who=2 is not in the
-        //     allowed set -> EINVAL (before the NULL check).  Pre-
-        //     batch we returned EFAULT (NULL gate fired first).
-        let a = SyscallArgs {
-            arg0: 2,
-            arg1: 0,
-            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-        };
-        let v = dispatch_linux(nr::GETRUSAGE, &a).value;
-        if v != -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: getrusage(who=2) -> {} (expected -EINVAL)",
-                v
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // (b) getrusage(who=0x1_0000_0000, ru=NULL).  Pre-batch: raw
-        //     0x1_0000_0000 != 0/1/-1 -> would have been EINVAL once
-        //     we added the gate, BUT we have no gate -> EFAULT.
-        //     Post-batch: who truncates to (int)0 = RUSAGE_SELF,
-        //     passes the gate, then NULL pointer -> EFAULT.
-        let a = SyscallArgs {
-            arg0: 0x1_0000_0000,
-            arg1: 0,
-            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-        };
-        let v = dispatch_linux(nr::GETRUSAGE, &a).value;
-        if v != -i64::from(errno::EFAULT) {
-            serial_println!(
-                "[syscall/linux]   FAIL: getrusage(who=high-half-zero) -> {} (expected -EFAULT)",
-                v
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // (c) getrusage(who=u64::MAX, ru=NULL).  Truncates to
-        //     (int)-1 = RUSAGE_CHILDREN -> passes who gate, NULL
-        //     pointer -> EFAULT.  Pre-batch: huge u64 != 0 -> EFAULT
-        //     coincidentally (NULL path), but we want to lock in the
-        //     post-batch reasoning so a future regression that drops
-        //     CHILDREN from the allowed set is caught.
-        let a = SyscallArgs {
-            arg0: u64::MAX,
-            arg1: 0,
-            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-        };
-        let v = dispatch_linux(nr::GETRUSAGE, &a).value;
-        if v != -i64::from(errno::EFAULT) {
-            serial_println!(
-                "[syscall/linux]   FAIL: getrusage(who=u64::MAX trunc -1) -> {} (expected -EFAULT)",
-                v
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // (d) getrusage(who=42, ru=NULL).  Garbage who: EINVAL.
-        let a = SyscallArgs {
-            arg0: 42,
-            arg1: 0,
-            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-        };
-        let v = dispatch_linux(nr::GETRUSAGE, &a).value;
-        if v != -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: getrusage(who=42) -> {} (expected -EINVAL)",
-                v
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        serial_println!(
-            "[syscall/linux]   getrusage who input validation + int truncation: OK"
-        );
-    }
+    self_test_itimer_getrusage_validation()?;
 
     // Batch 554 — sys_getrusage ru_maxrss (offset 32) must report the
     // caller's peak resident set size in KiB, sourced from the same

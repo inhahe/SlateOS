@@ -51034,6 +51034,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_getresuid_getresgid()?;
+
+    #[inline(never)]
+    fn self_test_getresuid_getresgid() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // getresuid / getresgid dispatch validation.
     //
     // Batch 450: NULL pointer arguments must return -EFAULT, matching
@@ -51071,6 +51076,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   getres{{u,g}}id NULL pointer -> EFAULT (Linux put_user fault): OK"
         );
+    }
+        Ok(())
     }
 
     // getrusage / sysinfo / times dispatch validation.

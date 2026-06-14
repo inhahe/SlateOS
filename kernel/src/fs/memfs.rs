@@ -210,6 +210,33 @@ impl MemFsNode {
         }
     }
 
+    /// Link count surfaced as `st_nlink`.
+    ///
+    /// memfs does not implement file hard links yet, so regular files and
+    /// symlinks always report a single link.  Directories follow the Unix
+    /// convention: a directory's link count is 2 (its own name in the
+    /// parent directory plus its own `.` entry) plus one for each immediate
+    /// subdirectory (each contributes a `..` entry pointing back to here).
+    ///
+    /// Reporting this honestly matters for tools that exploit it: `find(1)`
+    /// uses the "leaf optimisation" — a directory whose `nlink == 2` has no
+    /// subdirectories, so `find` can skip stat'ing its entries to decide
+    /// whether to descend.  Hardcoding `1` defeated that optimisation and
+    /// produced a link count no real filesystem ever reports for a directory.
+    fn nlink_count(&self) -> u32 {
+        match &self.kind {
+            MemFsNodeKind::Dir(children) => {
+                let subdirs = children.values().filter(|c| c.is_dir()).count();
+                // 2 ("." + the name in the parent) + one ".." per immediate
+                // subdirectory.  `saturating_add`/`try_from(..).unwrap_or`
+                // keep this arithmetic-side-effect free and clamp the
+                // (practically unreachable) > u32::MAX case.
+                u32::try_from(subdirs.saturating_add(2)).unwrap_or(u32::MAX)
+            }
+            MemFsNodeKind::File(_) | MemFsNodeKind::Symlink(_) => 1,
+        }
+    }
+
     /// Entry type for this node.
     fn entry_type(&self) -> EntryType {
         match &self.kind {
@@ -242,8 +269,10 @@ impl MemFsNode {
             gid: self.gid,
             permissions: self.permissions,
             attributes: self.attributes,
-            // memfs has no hard link support; always 1.
-            nlinks: 1,
+            // Directories report 2 + immediate-subdir count (Unix `.`/`..`
+            // convention); files and symlinks report 1 (no file hard links
+            // yet).  See `nlink_count`.
+            nlinks: self.nlink_count(),
             blocks: 0,
             xattrs: self.xattrs.clone(),
             hash: Vec::new(),
@@ -1542,6 +1571,69 @@ fn test_symlinks(fs: &mut MemFs) -> KernelResult<()> {
             return Err(KernelError::IoError);
         }
     }
+
+    // --- Directory link-count (st_nlink) ---
+    //
+    // A fresh directory with no subdirectories reports nlink == 2 ("." plus
+    // its name in the parent).  Each immediate subdirectory adds one (its
+    // ".." back-reference); files and symlinks inside it do NOT.  Removing a
+    // subdirectory decrements the count again.
+    fs.mkdir("/nlinkdir")?;
+    let m_empty = fs.metadata("/nlinkdir")?;
+    if m_empty.nlinks != 2 {
+        crate::serial_println!(
+            "[memfs]   FAILED: empty dir nlink expected 2, got {}",
+            m_empty.nlinks
+        );
+        return Err(KernelError::IoError);
+    }
+    // A regular file and a symlink must NOT bump the parent's link count.
+    fs.write_file("/nlinkdir/file.txt", b"x")?;
+    fs.symlink("/nlinkdir/lnk", "file.txt")?;
+    let m_file = fs.metadata("/nlinkdir")?;
+    if m_file.nlinks != 2 {
+        crate::serial_println!(
+            "[memfs]   FAILED: dir nlink with file+symlink expected 2, got {}",
+            m_file.nlinks
+        );
+        return Err(KernelError::IoError);
+    }
+    // Two subdirectories bring it to 4.
+    fs.mkdir("/nlinkdir/sub1")?;
+    fs.mkdir("/nlinkdir/sub2")?;
+    let m_subs = fs.metadata("/nlinkdir")?;
+    if m_subs.nlinks != 4 {
+        crate::serial_println!(
+            "[memfs]   FAILED: dir nlink with 2 subdirs expected 4, got {}",
+            m_subs.nlinks
+        );
+        return Err(KernelError::IoError);
+    }
+    // Removing one subdirectory drops it back to 3.
+    fs.rmdir("/nlinkdir/sub1")?;
+    let m_after = fs.metadata("/nlinkdir")?;
+    if m_after.nlinks != 3 {
+        crate::serial_println!(
+            "[memfs]   FAILED: dir nlink after rmdir expected 3, got {}",
+            m_after.nlinks
+        );
+        return Err(KernelError::IoError);
+    }
+    // A regular file still reports a single link.
+    let m_regfile = fs.metadata("/nlinkdir/file.txt")?;
+    if m_regfile.nlinks != 1 {
+        crate::serial_println!(
+            "[memfs]   FAILED: file nlink expected 1, got {}",
+            m_regfile.nlinks
+        );
+        return Err(KernelError::IoError);
+    }
+    crate::serial_println!("[memfs]   directory link count (st_nlink): OK");
+    // Clean up the nlink fixtures.
+    fs.remove("/nlinkdir/lnk")?;
+    fs.remove("/nlinkdir/file.txt")?;
+    fs.rmdir("/nlinkdir/sub2")?;
+    fs.rmdir("/nlinkdir")?;
 
     // Clean up.
     fs.remove("/target.txt")?;

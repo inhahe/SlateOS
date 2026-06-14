@@ -511,6 +511,17 @@ filesystem that simply lacks a `->link` op → `EPERM`. The common real case —
 `link("/tmp/a", "/tmp/b")` on our *writable* `/tmp` memfs — should be `EPERM`
 (unsupported), not `EROFS` (which misleadingly claims the mount is read-only).
 
+**Related sub-fix landed 2026-06-14 (directory `st_nlink`):** memfs previously
+hardcoded every node's `st_nlink` to `1`, including directories. A Unix
+directory's link count is `2` (its name in the parent + its own `.`) plus one
+per immediate subdirectory (each subdir's `..`); files/symlinks do not bump it.
+`find(1)`'s leaf optimisation keys off `nlink == 2` (no subdirs ⇒ skip stat'ing
+entries), so the hardcoded `1` both defeated that optimisation and reported a
+count no real filesystem produces. memfs now computes directory link counts
+honestly via `MemFsNode::nlink_count()` (files/symlinks still report `1` because
+file hard links remain unimplemented — the main debt below). This does NOT
+resolve TD24: `link`/`linkat` still return blanket `EROFS`.
+
 **Why it's not a live bug today:** programs that use `link(2)` for speed
 (git's `link_or_copy`, rsync `--link-dest`, `cp -l`, `ln`) fall back to copying
 or report the error; none branch on `EROFS`-vs-`EPERM` in a way that corrupts

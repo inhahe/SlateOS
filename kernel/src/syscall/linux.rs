@@ -49989,6 +49989,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_register_ipc_eventfd_memfd()?;
+
+    #[inline(never)]
+    fn self_test_register_ipc_eventfd_memfd() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // Batch 129: register_ipc_handle wiring for EventFd / MemFd
     // (class-bug fix).
     //
@@ -50127,6 +50132,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   register_ipc_handle EventFd/MemFd wiring: OK",
         );
+    }
+        Ok(())
     }
 
     // Batch 130: register_ipc_handle wiring for `sys_pidfd_getfd`.

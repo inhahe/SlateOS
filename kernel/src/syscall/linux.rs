@@ -44116,6 +44116,249 @@ fn self_test_setgroups_validation() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+#[inline(never)]
+fn self_test_dup3_validation() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+    // Batch 307 — sys_dup3 missing `flags & ~O_CLOEXEC` validation +
+    // int truncation.  Linux's ksys_dup3 gates the flags mask BEFORE
+    // the oldfd==newfd check; pre-batch we skipped the flags gate
+    // entirely and only consulted the O_CLOEXEC bit.  Probes with
+    // bogus flag bits saw EBADF (from the dup2_impl path in kernel
+    // context) where Linux returns EINVAL.
+    {
+        // (a) dup3(oldfd=5, newfd=6, flags=0x10) — bogus flag bit
+        //     (0x10 is not O_CLOEXEC and not in the accepted set).
+        //     Linux: EINVAL via the flags gate.  Pre-batch: kernel-
+        //     context dup2_impl → EBADF.
+        let a = SyscallArgs {
+            arg0: 5,
+            arg1: 6,
+            arg2: 0x10,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::DUP3, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: dup3(5,6,flags=0x10) -> {} (expected -EINVAL)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) dup3(oldfd=5, newfd=6, flags=0x1_0000_0010) — high-half
+        //     sentinel + bogus low bit.  Linux truncates to (int)0x10
+        //     → EINVAL via flags gate.  Pre-batch: cast as u32 still
+        //     gave 0x10, but no gate fired → dup2_impl → EBADF.
+        let a = SyscallArgs {
+            arg0: 5,
+            arg1: 6,
+            arg2: 0x1_0000_0010,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::DUP3, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: dup3(5,6,flags=high-half-0x10) -> {} (expected -EINVAL)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (c) dup3(oldfd=5, newfd=6, flags=0x1_0000_0000) — high-half
+        //     sentinel only, low bits zero.  Linux truncates to
+        //     (int)0 → flags gate passes → caller_pid()=None →
+        //     EBADF.  Same result as raw 0 — verifies int truncation
+        //     correctly strips the high bit so the flags gate doesn't
+        //     spuriously fire.
+        let a = SyscallArgs {
+            arg0: 5,
+            arg1: 6,
+            arg2: 0x1_0000_0000,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::DUP3, &a).value;
+        if v != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: dup3(5,6,flags=high-half-zero) -> {} (expected -EBADF)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (d) dup3(oldfd=5, newfd=5, flags=0x10) — Linux's flags gate
+        //     fires BEFORE the oldfd==newfd gate, so this is EINVAL
+        //     "for flags" (Linux) vs EINVAL "for same fd" (pre-batch).
+        //     Same errno but the test verifies the *flags-first* gate
+        //     order; without the gate, pre-batch would have returned
+        //     EINVAL via the oldfd==newfd branch and the flag bit
+        //     would have been silently ignored.  We can't directly
+        //     observe gate order from a single probe, but combined
+        //     with probe (a) — which differs in errno from EBADF —
+        //     this locks in the post-batch behaviour.
+        let a = SyscallArgs {
+            arg0: 5,
+            arg1: 5,
+            arg2: 0x10,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::DUP3, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: dup3(5,5,flags=0x10) -> {} (expected -EINVAL)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   dup3 flags-gate validation + int truncation: OK"
+        );
+    }
+
+    // Batch 346 — sys_dup3 RLIMIT_NOFILE gate.  Linux's
+    // fs/file.c::ksys_dup3 calls `if ((unsigned int)newfd >=
+    // rlimit(RLIMIT_NOFILE)) return -EBADF` AFTER the flags gate
+    // and the oldfd==newfd gate, but BEFORE touching oldfd.  Pre-
+    // batch we had no RLIMIT_NOFILE check in dup3 at all — a caller
+    // could install at any newfd value as long as the underlying
+    // fd table could grow that far, defeating ulimit-based fd
+    // budgeting in sandboxes / posix_spawn fd-actions / init-system
+    // fd-allocators.  Documented as deferred in todo.txt prior to
+    // this batch.
+    //
+    // Kernel context (caller_pid() == None) bypasses the gate
+    // because there's no PCB to read rlimits from; dup2_impl's None
+    // arm returns EBADF anyway, so the observable end state is
+    // unchanged for boot self-test probes.  To exercise the gate
+    // proper we (i) seed a test PCB with a low RLIMIT_NOFILE, (ii)
+    // verify pcb::get_rlimit reports the seeded value, (iii) test
+    // the gate predicate `(newfd as u64) >= cur` at boundary points
+    // — accept side (newfd < cur), reject side (newfd >= cur),
+    // exactly-equal (newfd == cur, must reject).
+    {
+        // (i) dup3(0, 1, 0) from kernel context — no PCB, bypass
+        //     the RLIMIT gate, fall through to dup2_impl which
+        //     returns EBADF for None pid.  Regression guard that
+        //     the new gate doesn't accidentally fail closed in
+        //     kernel context.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 1, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::DUP3, &a).value;
+        if v != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: dup3(0,1,0) kernel-ctx -> {} (expected -EBADF)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (j) dup3(2, 1_000_000, 0) — large newfd from kernel
+        //     context.  Pre-batch would also have hit the dup2_impl
+        //     None-pid arm and returned EBADF; post-batch same
+        //     result because the RLIMIT gate is bypassed in kernel
+        //     context.  Regression guard: a future restructure
+        //     that mistakenly enforces RLIMIT in kernel context
+        //     (e.g. by treating None pid as "uid 0 with default
+        //     rlimits") would change this errno's routing.
+        let a = SyscallArgs {
+            arg0: 2, arg1: 1_000_000, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::DUP3, &a).value;
+        if v != -i64::from(errno::EBADF) {
+            serial_println!(
+                "[syscall/linux]   FAIL: dup3(2,1M,0) kernel-ctx -> {} (expected -EBADF)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (k) Seed a test PCB with RLIMIT_NOFILE = (8, 4096).
+        //     Verify the lookup the gate uses returns the seeded
+        //     value.  This is the predicate the gate evaluates in
+        //     the userspace path; pre-batch dup3 simply did not
+        //     consult this value at all.
+        {
+            let test_pid = pcb::create("dup3-rlimit-test", 0);
+            // set_rlimit returns Result; rlim_max must not increase
+            // above the default's max (4096) for non-CAP_SYS_RESOURCE
+            // callers, and (8, 4096) lowers cur from the default
+            // 1024 → 8 with max unchanged at 4096, which is a valid
+            // unprivileged-lowering operation.
+            match pcb::set_rlimit(test_pid, 7, 8, 4096) {
+                Ok(()) => {}
+                Err(e) => {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: set_rlimit(NOFILE) -> {:?}",
+                        e
+                    );
+                    pcb::destroy(test_pid);
+                    return Err(KernelError::InternalError);
+                }
+            }
+            let (cur, max) = match pcb::get_rlimit(test_pid, 7) {
+                Some(v) => v,
+                None => {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: get_rlimit(NOFILE) returned None"
+                    );
+                    pcb::destroy(test_pid);
+                    return Err(KernelError::InternalError);
+                }
+            };
+            if cur != 8 || max != 4096 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: get_rlimit(NOFILE) -> ({}, {}) (expected (8, 4096))",
+                    cur, max
+                );
+                pcb::destroy(test_pid);
+                return Err(KernelError::InternalError);
+            }
+            pcb::destroy(test_pid);
+        }
+
+        // (l) Gate-predicate boundary check.  The dup3 RLIMIT gate
+        //     evaluates `(newfd as u64) >= cur`.  Verify the
+        //     boundary at cur=8:
+        //       newfd=7 -> accept  (7 < 8)
+        //       newfd=8 -> reject  (8 >= 8, exact-equal)
+        //       newfd=9 -> reject  (9 > 8)
+        //     This locks in the inclusive-upper-bound semantics
+        //     Linux uses (`>= rlimit` not `> rlimit`).
+        let cur: u64 = 8;
+        let gate = |newfd: i32| -> bool {
+            #[allow(clippy::cast_sign_loss)]
+            { newfd >= 0 && (newfd as u64) >= cur }
+        };
+        if gate(7) {
+            serial_println!(
+                "[syscall/linux]   FAIL: dup3 RLIMIT gate accepted newfd=7 at cur=8"
+            );
+            return Err(KernelError::InternalError);
+        }
+        if !gate(8) {
+            serial_println!(
+                "[syscall/linux]   FAIL: dup3 RLIMIT gate did not reject newfd=8 at cur=8"
+            );
+            return Err(KernelError::InternalError);
+        }
+        if !gate(9) {
+            serial_println!(
+                "[syscall/linux]   FAIL: dup3 RLIMIT gate did not reject newfd=9 at cur=8"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   dup3 RLIMIT_NOFILE gate: OK"
+        );
+    }
+
+    Ok(())
+}
+
 pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
@@ -44400,242 +44643,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
     self_test_setgroups_validation()?;
 
-    // Batch 307 — sys_dup3 missing `flags & ~O_CLOEXEC` validation +
-    // int truncation.  Linux's ksys_dup3 gates the flags mask BEFORE
-    // the oldfd==newfd check; pre-batch we skipped the flags gate
-    // entirely and only consulted the O_CLOEXEC bit.  Probes with
-    // bogus flag bits saw EBADF (from the dup2_impl path in kernel
-    // context) where Linux returns EINVAL.
-    {
-        // (a) dup3(oldfd=5, newfd=6, flags=0x10) — bogus flag bit
-        //     (0x10 is not O_CLOEXEC and not in the accepted set).
-        //     Linux: EINVAL via the flags gate.  Pre-batch: kernel-
-        //     context dup2_impl → EBADF.
-        let a = SyscallArgs {
-            arg0: 5,
-            arg1: 6,
-            arg2: 0x10,
-            arg3: 0, arg4: 0, arg5: 0,
-        };
-        let v = dispatch_linux(nr::DUP3, &a).value;
-        if v != -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: dup3(5,6,flags=0x10) -> {} (expected -EINVAL)",
-                v
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // (b) dup3(oldfd=5, newfd=6, flags=0x1_0000_0010) — high-half
-        //     sentinel + bogus low bit.  Linux truncates to (int)0x10
-        //     → EINVAL via flags gate.  Pre-batch: cast as u32 still
-        //     gave 0x10, but no gate fired → dup2_impl → EBADF.
-        let a = SyscallArgs {
-            arg0: 5,
-            arg1: 6,
-            arg2: 0x1_0000_0010,
-            arg3: 0, arg4: 0, arg5: 0,
-        };
-        let v = dispatch_linux(nr::DUP3, &a).value;
-        if v != -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: dup3(5,6,flags=high-half-0x10) -> {} (expected -EINVAL)",
-                v
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // (c) dup3(oldfd=5, newfd=6, flags=0x1_0000_0000) — high-half
-        //     sentinel only, low bits zero.  Linux truncates to
-        //     (int)0 → flags gate passes → caller_pid()=None →
-        //     EBADF.  Same result as raw 0 — verifies int truncation
-        //     correctly strips the high bit so the flags gate doesn't
-        //     spuriously fire.
-        let a = SyscallArgs {
-            arg0: 5,
-            arg1: 6,
-            arg2: 0x1_0000_0000,
-            arg3: 0, arg4: 0, arg5: 0,
-        };
-        let v = dispatch_linux(nr::DUP3, &a).value;
-        if v != -i64::from(errno::EBADF) {
-            serial_println!(
-                "[syscall/linux]   FAIL: dup3(5,6,flags=high-half-zero) -> {} (expected -EBADF)",
-                v
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // (d) dup3(oldfd=5, newfd=5, flags=0x10) — Linux's flags gate
-        //     fires BEFORE the oldfd==newfd gate, so this is EINVAL
-        //     "for flags" (Linux) vs EINVAL "for same fd" (pre-batch).
-        //     Same errno but the test verifies the *flags-first* gate
-        //     order; without the gate, pre-batch would have returned
-        //     EINVAL via the oldfd==newfd branch and the flag bit
-        //     would have been silently ignored.  We can't directly
-        //     observe gate order from a single probe, but combined
-        //     with probe (a) — which differs in errno from EBADF —
-        //     this locks in the post-batch behaviour.
-        let a = SyscallArgs {
-            arg0: 5,
-            arg1: 5,
-            arg2: 0x10,
-            arg3: 0, arg4: 0, arg5: 0,
-        };
-        let v = dispatch_linux(nr::DUP3, &a).value;
-        if v != -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: dup3(5,5,flags=0x10) -> {} (expected -EINVAL)",
-                v
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        serial_println!(
-            "[syscall/linux]   dup3 flags-gate validation + int truncation: OK"
-        );
-    }
-
-    // Batch 346 — sys_dup3 RLIMIT_NOFILE gate.  Linux's
-    // fs/file.c::ksys_dup3 calls `if ((unsigned int)newfd >=
-    // rlimit(RLIMIT_NOFILE)) return -EBADF` AFTER the flags gate
-    // and the oldfd==newfd gate, but BEFORE touching oldfd.  Pre-
-    // batch we had no RLIMIT_NOFILE check in dup3 at all — a caller
-    // could install at any newfd value as long as the underlying
-    // fd table could grow that far, defeating ulimit-based fd
-    // budgeting in sandboxes / posix_spawn fd-actions / init-system
-    // fd-allocators.  Documented as deferred in todo.txt prior to
-    // this batch.
-    //
-    // Kernel context (caller_pid() == None) bypasses the gate
-    // because there's no PCB to read rlimits from; dup2_impl's None
-    // arm returns EBADF anyway, so the observable end state is
-    // unchanged for boot self-test probes.  To exercise the gate
-    // proper we (i) seed a test PCB with a low RLIMIT_NOFILE, (ii)
-    // verify pcb::get_rlimit reports the seeded value, (iii) test
-    // the gate predicate `(newfd as u64) >= cur` at boundary points
-    // — accept side (newfd < cur), reject side (newfd >= cur),
-    // exactly-equal (newfd == cur, must reject).
-    {
-        // (i) dup3(0, 1, 0) from kernel context — no PCB, bypass
-        //     the RLIMIT gate, fall through to dup2_impl which
-        //     returns EBADF for None pid.  Regression guard that
-        //     the new gate doesn't accidentally fail closed in
-        //     kernel context.
-        let a = SyscallArgs {
-            arg0: 0, arg1: 1, arg2: 0,
-            arg3: 0, arg4: 0, arg5: 0,
-        };
-        let v = dispatch_linux(nr::DUP3, &a).value;
-        if v != -i64::from(errno::EBADF) {
-            serial_println!(
-                "[syscall/linux]   FAIL: dup3(0,1,0) kernel-ctx -> {} (expected -EBADF)",
-                v
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // (j) dup3(2, 1_000_000, 0) — large newfd from kernel
-        //     context.  Pre-batch would also have hit the dup2_impl
-        //     None-pid arm and returned EBADF; post-batch same
-        //     result because the RLIMIT gate is bypassed in kernel
-        //     context.  Regression guard: a future restructure
-        //     that mistakenly enforces RLIMIT in kernel context
-        //     (e.g. by treating None pid as "uid 0 with default
-        //     rlimits") would change this errno's routing.
-        let a = SyscallArgs {
-            arg0: 2, arg1: 1_000_000, arg2: 0,
-            arg3: 0, arg4: 0, arg5: 0,
-        };
-        let v = dispatch_linux(nr::DUP3, &a).value;
-        if v != -i64::from(errno::EBADF) {
-            serial_println!(
-                "[syscall/linux]   FAIL: dup3(2,1M,0) kernel-ctx -> {} (expected -EBADF)",
-                v
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // (k) Seed a test PCB with RLIMIT_NOFILE = (8, 4096).
-        //     Verify the lookup the gate uses returns the seeded
-        //     value.  This is the predicate the gate evaluates in
-        //     the userspace path; pre-batch dup3 simply did not
-        //     consult this value at all.
-        {
-            let test_pid = pcb::create("dup3-rlimit-test", 0);
-            // set_rlimit returns Result; rlim_max must not increase
-            // above the default's max (4096) for non-CAP_SYS_RESOURCE
-            // callers, and (8, 4096) lowers cur from the default
-            // 1024 → 8 with max unchanged at 4096, which is a valid
-            // unprivileged-lowering operation.
-            match pcb::set_rlimit(test_pid, 7, 8, 4096) {
-                Ok(()) => {}
-                Err(e) => {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: set_rlimit(NOFILE) -> {:?}",
-                        e
-                    );
-                    pcb::destroy(test_pid);
-                    return Err(KernelError::InternalError);
-                }
-            }
-            let (cur, max) = match pcb::get_rlimit(test_pid, 7) {
-                Some(v) => v,
-                None => {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: get_rlimit(NOFILE) returned None"
-                    );
-                    pcb::destroy(test_pid);
-                    return Err(KernelError::InternalError);
-                }
-            };
-            if cur != 8 || max != 4096 {
-                serial_println!(
-                    "[syscall/linux]   FAIL: get_rlimit(NOFILE) -> ({}, {}) (expected (8, 4096))",
-                    cur, max
-                );
-                pcb::destroy(test_pid);
-                return Err(KernelError::InternalError);
-            }
-            pcb::destroy(test_pid);
-        }
-
-        // (l) Gate-predicate boundary check.  The dup3 RLIMIT gate
-        //     evaluates `(newfd as u64) >= cur`.  Verify the
-        //     boundary at cur=8:
-        //       newfd=7 -> accept  (7 < 8)
-        //       newfd=8 -> reject  (8 >= 8, exact-equal)
-        //       newfd=9 -> reject  (9 > 8)
-        //     This locks in the inclusive-upper-bound semantics
-        //     Linux uses (`>= rlimit` not `> rlimit`).
-        let cur: u64 = 8;
-        let gate = |newfd: i32| -> bool {
-            #[allow(clippy::cast_sign_loss)]
-            { newfd >= 0 && (newfd as u64) >= cur }
-        };
-        if gate(7) {
-            serial_println!(
-                "[syscall/linux]   FAIL: dup3 RLIMIT gate accepted newfd=7 at cur=8"
-            );
-            return Err(KernelError::InternalError);
-        }
-        if !gate(8) {
-            serial_println!(
-                "[syscall/linux]   FAIL: dup3 RLIMIT gate did not reject newfd=8 at cur=8"
-            );
-            return Err(KernelError::InternalError);
-        }
-        if !gate(9) {
-            serial_println!(
-                "[syscall/linux]   FAIL: dup3 RLIMIT gate did not reject newfd=9 at cur=8"
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        serial_println!(
-            "[syscall/linux]   dup3 RLIMIT_NOFILE gate: OK"
-        );
-    }
+    self_test_dup3_validation()?;
 
     // Batch 308: mlockall int truncation — high-half register garbage
     // must not influence the 32-bit C ABI's flags mask check.

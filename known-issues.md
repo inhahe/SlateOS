@@ -585,6 +585,58 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
+### TD26. User-mode CET shadow-stack state (`IA32_PL3_SSP`, `IA32_U_CET`) will be the next instance of the F13/F14 bug class when user CET is enabled — FORWARD-LOOKING HAZARD 2026-06-14
+
+**Where:** `kernel/src/cet.rs` — `set_user_cet(enable_shstk, enable_ibt, user_ssp)`
+and `read_user_ssp()`, both currently `#[allow(dead_code)]`. The per-task
+context-switch save/restore lives in `kernel/src/sched/mod.rs` (the two
+switch sites near lines 3779/3795 and 3974/3985 that already restore
+`IA32_FS_BASE` and `IA32_GS_BASE`).
+
+**What it is:** a forward-looking hazard, not a live bug. User-mode CET
+(shadow stacks / IBT) is **not currently wired up for user tasks** — the
+shadow-stack MSRs `IA32_PL3_SSP` (per-thread user SSP) and `IA32_U_CET`
+(per-thread user CET config) are written only by the dead-code
+`set_user_cet`, which nothing calls. So today there is no per-thread CET
+state to clobber. The doc comment on `set_user_cet` already *claims* it is
+"Called during context switch to restore per-task CET state" — that wiring
+does not yet exist.
+
+**Why it matters:** `IA32_PL3_SSP` and `IA32_U_CET` are exactly the same
+**bug class** as F13/F14 (FS/GS base): they are userspace-settable
+*per-thread* CPU register state that lives in MSRs, **not** in the saved GP
+`Context` and **not** in the XSAVE area unless XSAVES + the CET_U state
+component (bit 11) is enabled. The moment user shadow stacks are turned on,
+each thread gets its own shadow stack and its own SSP; if the SSP (and the
+U_CET enables) are not saved on switch-out and restored on switch-in, the
+first context switch will leave a thread running on another thread's shadow
+stack → spurious `#CP` faults or a security hole (shadow-stack reuse). This
+audit (the same sweep that found F13/F14) flagged it proactively so it is
+not re-discovered the hard way.
+
+**Proper fix (when user CET is enabled):**
+1. Add `pub user_ssp: u64` and `pub user_cet: u64` fields to `Task`
+   (`kernel/src/sched/task.rs`), symmetric to `fs_base`/`gs_base`; `0` =
+   no user CET (the default).
+2. In both `sched::mod.rs` switch sites, after the FS/GS restore, restore
+   `IA32_PL3_SSP` and `IA32_U_CET` for user tasks (gated on the task
+   actually having CET enabled, to avoid a `#GP` writing an SSP MSR when
+   CET is off in CR4/U_CET).
+3. Sync the fields wherever the SSP/U_CET change: thread creation (allocate
+   the shadow stack), `clone`/`fork` (new thread gets a fresh shadow stack;
+   `fork` child inherits the parent's SSP value but its own COW shadow-stack
+   page), and `exec` (reset to a fresh shadow stack or `0`).
+4. Alternatively, if XSAVES is adopted, enabling the CET_U state component
+   (XCR0/IA32_XSS bit 11) folds SSP/U_CET into the existing
+   `xsave64`/`xrstor64` context-switch path — preferable because it reuses
+   the FPU save machinery instead of hand-rolled MSR save/restore. Decide
+   between explicit MSR save and XSAVES-CET_U at the time user CET lands.
+
+**Trigger:** do this in the same change that first calls `set_user_cet`
+from a live path (i.e. when user-mode shadow stacks / IBT are enabled for
+user processes). Until then this is inert dead code and there is nothing to
+fix.
+
 ### TD24. `link`/`linkat` return a blanket `EROFS` regardless of mount/filesystem — APPROXIMATION 2026-06-14
 
 **Where:** `sys_link` / `sys_linkat` in `kernel/src/syscall/linux.rs` (both

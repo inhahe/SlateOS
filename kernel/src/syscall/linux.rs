@@ -44449,6 +44449,113 @@ fn self_test_mlockall_truncation() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+#[inline(never)]
+fn self_test_msync_truncation() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+    // Batch 309: msync int truncation — high-half register garbage
+    // must be stripped before the flags mask check.
+    //
+    // Linux signature: `int msync(void *addr, size_t length, int flags)`.
+    // SYSCALL_DEFINE3 narrows flags to (int) on entry; the mask check
+    // `flags & ~(MS_ASYNC|MS_INVALIDATE|MS_SYNC)` runs at 32-bit width.
+    // Pre-batch we held flags as u64 and ran the mask check at 64-bit
+    // width, so high-half register garbage tripped the mask check and
+    // returned EINVAL where Linux returns success.
+    //
+    // We probe with addr=0, len=0 (which is the early end==addr exit
+    // for any flags that pass the mask).  All four probes lock in the
+    // 32-bit width of the mask check.
+    {
+        // (a) msync(addr=0, len=0, flags=0x1_0000_0001) — high-half
+        //     garbage + MS_ASYNC.  Linux truncates to (int)1; mask
+        //     passes; SYNC/ASYNC mutual-exclusion passes (only ASYNC
+        //     set); addr=0 is page-aligned; len=0 → end==addr → 0.
+        //     Pre-batch: 64-bit mask trip → EINVAL.
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: 0,
+            arg2: 0x1_0000_0001,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::MSYNC, &a).value;
+        if v != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: msync(0,0,high|MS_ASYNC) -> {} (expected 0)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) msync(addr=0, len=0, flags=0x1_0000_0007) — high-half
+        //     garbage + MS_ALL (with SYNC and ASYNC both set).  Linux
+        //     truncates to (int)7; mask passes; mutual-exclusion gate
+        //     fires (SYNC | ASYNC both set) → EINVAL.  Verifies the
+        //     mutual-exclusion gate still operates on the truncated
+        //     value.
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: 0,
+            arg2: 0x1_0000_0007,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::MSYNC, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: msync(0,0,high|MS_ALL) -> {} (expected -EINVAL)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (c) msync(addr=0, len=0, flags=0x1_0000_0000) — high-half
+        //     garbage only, low half zero.  Linux truncates to (int)0;
+        //     mask passes; mutual-exclusion passes; addr=0 page-
+        //     aligned; len=0 → 0.  Verifies that flags=0 is accepted
+        //     after truncation (the documented behaviour from msync's
+        //     existing batch comments).
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: 0,
+            arg2: 0x1_0000_0000,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::MSYNC, &a).value;
+        if v != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: msync(0,0,high-half-zero) -> {} (expected 0)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (d) msync(addr=0, len=0, flags=0x1_0000_0010) — high-half
+        //     garbage + unknown low bit 0x10.  Linux truncates to
+        //     (int)0x10; mask check fires (bit outside MS_ALL) →
+        //     EINVAL.  Verifies the mask gate still rejects bogus low
+        //     bits after the high half is stripped.
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: 0,
+            arg2: 0x1_0000_0010,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::MSYNC, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: msync(0,0,high|0x10) -> {} (expected -EINVAL)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   msync int truncation (high-half ignored): OK"
+        );
+    }
+
+    Ok(())
+}
+
 pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
@@ -44737,106 +44844,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
     self_test_mlockall_truncation()?;
 
-    // Batch 309: msync int truncation — high-half register garbage
-    // must be stripped before the flags mask check.
-    //
-    // Linux signature: `int msync(void *addr, size_t length, int flags)`.
-    // SYSCALL_DEFINE3 narrows flags to (int) on entry; the mask check
-    // `flags & ~(MS_ASYNC|MS_INVALIDATE|MS_SYNC)` runs at 32-bit width.
-    // Pre-batch we held flags as u64 and ran the mask check at 64-bit
-    // width, so high-half register garbage tripped the mask check and
-    // returned EINVAL where Linux returns success.
-    //
-    // We probe with addr=0, len=0 (which is the early end==addr exit
-    // for any flags that pass the mask).  All four probes lock in the
-    // 32-bit width of the mask check.
-    {
-        // (a) msync(addr=0, len=0, flags=0x1_0000_0001) — high-half
-        //     garbage + MS_ASYNC.  Linux truncates to (int)1; mask
-        //     passes; SYNC/ASYNC mutual-exclusion passes (only ASYNC
-        //     set); addr=0 is page-aligned; len=0 → end==addr → 0.
-        //     Pre-batch: 64-bit mask trip → EINVAL.
-        let a = SyscallArgs {
-            arg0: 0,
-            arg1: 0,
-            arg2: 0x1_0000_0001,
-            arg3: 0, arg4: 0, arg5: 0,
-        };
-        let v = dispatch_linux(nr::MSYNC, &a).value;
-        if v != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: msync(0,0,high|MS_ASYNC) -> {} (expected 0)",
-                v
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // (b) msync(addr=0, len=0, flags=0x1_0000_0007) — high-half
-        //     garbage + MS_ALL (with SYNC and ASYNC both set).  Linux
-        //     truncates to (int)7; mask passes; mutual-exclusion gate
-        //     fires (SYNC | ASYNC both set) → EINVAL.  Verifies the
-        //     mutual-exclusion gate still operates on the truncated
-        //     value.
-        let a = SyscallArgs {
-            arg0: 0,
-            arg1: 0,
-            arg2: 0x1_0000_0007,
-            arg3: 0, arg4: 0, arg5: 0,
-        };
-        let v = dispatch_linux(nr::MSYNC, &a).value;
-        if v != -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: msync(0,0,high|MS_ALL) -> {} (expected -EINVAL)",
-                v
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // (c) msync(addr=0, len=0, flags=0x1_0000_0000) — high-half
-        //     garbage only, low half zero.  Linux truncates to (int)0;
-        //     mask passes; mutual-exclusion passes; addr=0 page-
-        //     aligned; len=0 → 0.  Verifies that flags=0 is accepted
-        //     after truncation (the documented behaviour from msync's
-        //     existing batch comments).
-        let a = SyscallArgs {
-            arg0: 0,
-            arg1: 0,
-            arg2: 0x1_0000_0000,
-            arg3: 0, arg4: 0, arg5: 0,
-        };
-        let v = dispatch_linux(nr::MSYNC, &a).value;
-        if v != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: msync(0,0,high-half-zero) -> {} (expected 0)",
-                v
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // (d) msync(addr=0, len=0, flags=0x1_0000_0010) — high-half
-        //     garbage + unknown low bit 0x10.  Linux truncates to
-        //     (int)0x10; mask check fires (bit outside MS_ALL) →
-        //     EINVAL.  Verifies the mask gate still rejects bogus low
-        //     bits after the high half is stripped.
-        let a = SyscallArgs {
-            arg0: 0,
-            arg1: 0,
-            arg2: 0x1_0000_0010,
-            arg3: 0, arg4: 0, arg5: 0,
-        };
-        let v = dispatch_linux(nr::MSYNC, &a).value;
-        if v != -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: msync(0,0,high|0x10) -> {} (expected -EINVAL)",
-                v
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        serial_println!(
-            "[syscall/linux]   msync int truncation (high-half ignored): OK"
-        );
-    }
+    self_test_msync_truncation()?;
 
     // DEFAULT_RLIMITS coverage — pure const table, no userspace.
     //

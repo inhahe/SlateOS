@@ -53790,7 +53790,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
         }
     }
+        Ok(())
+    }
 
+    self_test_fs_sync_family()?;
+
+    #[inline(never)]
+    fn self_test_fs_sync_family() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // Filesystem sync-family validation (batch 50).
     //
     //   - `sync()` takes no fd and always returns 0.

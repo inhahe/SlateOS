@@ -9119,12 +9119,28 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      while RSS grew unbounded.  Treating advisory hints as a no-op
 ##      is always semantically valid (Linux is allowed to ignore any
 ##      MADV_* hint) and lets allocators stop spamming the syscall.
-##      Limitation: we don't actually free anonymous frames on
-##      MADV_DONTNEED yet — that needs VMA tracking to know what's
-##      anonymous vs file-backed.  Tracked in item 3 (PROT_NONE
-##      with VMA layer).  Until then, MADV_DONTNEED leaves the pages
-##      committed; future allocator activity re-uses them in place
-##      rather than re-zero-faulting.
+##      UPDATE 2026-06-14 — RECLAIM NOW IMPLEMENTED.  The old
+##      limitation ("we don't actually free anonymous frames on
+##      MADV_DONTNEED yet — needs VMA tracking") is resolved: the VMA
+##      layer from the brk/mmap work is now in place, so MADV_DONTNEED /
+##      MADV_FREE / MADV_DONTNEED_LOCKED free the resident frames backing
+##      anonymous-class pages (Anonymous/Stack/Brk VMAs) in the range via
+##      madvise_reclaim() (reuses unmap_user_range: refcount-aware free +
+##      per-page TLB invalidation; VMA + RLIMIT_AS reservation kept, so the
+##      mapping stays valid and a later access zero-fills via the fault
+##      resolver — exactly Linux's anonymous DONTNEED contract).  Only
+##      whole 16 KiB frames fully inside the (4 KiB-ABI) request are
+##      dropped; partial edge frames are preserved.  File-backed/fixed
+##      mappings keep the lenient no-op (acting on those needs the page
+##      cache declined in design-decisions.md §22).  Tested by
+##      self_test_madvise_dontneed (boot, main.rs): faults 2 anon frames,
+##      stamps a sentinel, reclaims, asserts PTEs gone + VMA persists +
+##      re-fault reads zero.  MADV_FREE is realised as an immediate reclaim
+##      (Linux may reclaim MADV_FREE pages at any time; post-reclaim reads
+##      see zero — a valid eager realisation).  Minor remaining fidelity
+##      gap: MADV_FREE on a file mapping returns 0 here where Linux returns
+##      EINVAL (we keep the lenient success rather than walk the VMA type
+##      for an errno-only distinction) — negligible.
 ##   9. WAIT4 — DONE.  sys_wait4 is wired through dispatch_linux,
 ##      validates the options bitmap (WNOHANG=1, WUNTRACED=2,
 ##      WCONTINUED=8; unknown bits -> EINVAL), pre-validates wstatus

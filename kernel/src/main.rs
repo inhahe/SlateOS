@@ -1266,6 +1266,14 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: Linux brk(2) heap (ring 3) self-test failed: {:?}", e);
     }
 
+    // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
+    // reclaims it, and verifies the frames are freed, the VMA persists, and a
+    // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live
+    // process + page tables, so it runs here alongside the other MM tests.
+    if let Err(e) = syscall::linux::self_test_madvise_dontneed() {
+        serial_println!("WARNING: Linux madvise(MADV_DONTNEED) self-test failed: {:?}", e);
+    }
+
     boot_timing::mark(boot_timing::Milestone::Filesystem);
 
     // ProcFs self-test — constructs its own `ProcFs::new()` and reads live

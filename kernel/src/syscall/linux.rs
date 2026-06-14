@@ -5170,11 +5170,18 @@ fn mprotect_flush_range(start: u64, end: u64) {
 /// Our policy:
 ///
 /// - Accept every documented MADV_* hint in `1..=25` plus `0`
-///   (MADV_NORMAL) and return 0.  We don't actually act on any of them
-///   yet — MADV_DONTNEED on anonymous memory could free the frames
-///   eagerly, but that needs VMA tracking to know what's anonymous.
-///   Treating them as no-ops is the documented "kernel ignored the
-///   hint" path and is always semantically valid.
+///   (MADV_NORMAL) and return 0.  Most hints are advisory and remain
+///   no-ops (the documented "kernel ignored the hint" path, always valid).
+/// - **The reclaim hints — MADV_DONTNEED (4), MADV_FREE (8) and
+///   MADV_DONTNEED_LOCKED (24) — are now acted on**: we free the resident
+///   physical frames backing anonymous-class pages (Anonymous / Stack /
+///   Brk VMAs) in the range via [`madvise_reclaim`], so long-running
+///   allocators that `madvise(MADV_DONTNEED)` their freed arenas actually
+///   return memory to the kernel instead of growing RSS unbounded.  A
+///   later access zero-fills via the demand-paging fault resolver (exactly
+///   Linux's anonymous DONTNEED contract).  File-backed / fixed mappings
+///   keep the lenient no-op (acting on those needs the page-cache work
+///   declined in design-decisions.md §22).
 /// - Reject `MADV_HWPOISON` (100) and `MADV_SOFT_OFFLINE` (101) with
 ///   EPERM — on Linux these require CAP_SYS_ADMIN and we don't expose
 ///   memory-failure injection to userspace.
@@ -5398,8 +5405,87 @@ fn sys_madvise(args: &SyscallArgs) -> SyscallResult {
         return linux_err(errno::ENOMEM);
     }
 
-    // Known advisory hint over a valid user-space range: no-op success.
+    // Reclaim hints actually free the resident frames backing
+    // anonymous-class pages in the range — the *action* Linux performs for
+    // MADV_DONTNEED / MADV_FREE / MADV_DONTNEED_LOCKED.  Without this, a
+    // long-running allocator (glibc malloc, jemalloc, tcmalloc all
+    // `madvise(MADV_DONTNEED)` freed arenas) never returns memory to the
+    // kernel and its RSS grows unbounded.  The mapping stays valid: a later
+    // access zero-fills via the demand-paging fault resolver, which is
+    // exactly Linux's anonymous MADV_DONTNEED contract.  MADV_FREE is
+    // implemented as an immediate reclaim (Linux is permitted to reclaim
+    // MADV_FREE pages at any time; after reclaim, reads see zero — a valid,
+    // more-eager realisation of the lazy hint).  In-kernel callers (no
+    // caller pid / no address space) just get the validated success.
+    if advice == MADV_DONTNEED || advice == MADV_FREE || advice == MADV_DONTNEED_LOCKED {
+        if let Some(pid) = caller_pid() {
+            if let Some(pml4) = pcb::get_pml4(pid).filter(|&p| p != 0) {
+                madvise_reclaim(pid, pml4, addr, end);
+            }
+        }
+    }
+
+    // Known advisory hint over a valid user-space range: success.
     SyscallResult::ok(0)
+}
+
+/// Free the resident physical frames backing anonymous-class pages in the
+/// user range `[start, end)` of process `pid` (page table `pml4`) — the
+/// action half of `MADV_DONTNEED` / `MADV_FREE` / `MADV_DONTNEED_LOCKED`.
+///
+/// Only `Anonymous`, `Stack`, and `Brk` VMAs are touched: those are the
+/// kinds the demand-paging fault resolver repopulates with a fresh
+/// zero-filled frame, so dropping their frames yields exactly Linux's
+/// anonymous `MADV_DONTNEED` contract ("subsequent reads observe zero").
+/// File-backed and fixed mappings are left untouched — the lenient
+/// return-0 no-op they had before is preserved for them (acting on those
+/// would change their observable contents, which needs the page-cache work
+/// declined in design-decisions.md §22).
+///
+/// Only whole 16 KiB frames *entirely contained* in `[start, end)` are
+/// dropped — a partial frame at either edge is preserved, because we cannot
+/// drop part of a frame without destroying the rest (the request is
+/// 4 KiB-ABI-aligned but our frame granularity is 16 KiB; rounding inward is
+/// the conservative, always-correct choice).
+///
+/// The VMA bookkeeping and the `RLIMIT_AS` reservation are deliberately left
+/// intact: `MADV_DONTNEED` reclaims resident frames, it does not unmap the
+/// region. [`unmap_user_range`] is refcount-aware (a CoW-shared frame is
+/// decremented rather than hard-freed) and TLB-invalidates each page it
+/// clears, so there is no stale-mapping window onto a freed/reused frame.
+fn madvise_reclaim(pid: u64, pml4: u64, start: u64, end: u64) {
+    use crate::mm::frame::FRAME_SIZE;
+    use crate::mm::vma::VmaKind;
+    let frame_size = FRAME_SIZE as u64;
+    // FRAME_SIZE is a power of two, so `frame_size - 1` is its low-bit mask;
+    // `saturating_sub` keeps clippy's arithmetic-side-effects lint happy.
+    let mask = frame_size.saturating_sub(1);
+
+    // Round the (4 KiB-ABI) request inward to whole 16 KiB frames.
+    let Some(aligned_start) = start.checked_add(mask).map(|v| v & !mask) else {
+        return;
+    };
+    let aligned_end = end & !mask;
+    if aligned_end <= aligned_start {
+        return;
+    }
+
+    let Some(vmas) = pcb::list_vmas(pid) else {
+        return;
+    };
+    for vma in &vmas {
+        if !matches!(
+            vma.kind,
+            VmaKind::Anonymous | VmaKind::Stack | VmaKind::Brk
+        ) {
+            continue;
+        }
+        let lo = vma.start.max(aligned_start);
+        let hi = vma.end.min(aligned_end);
+        if lo < hi {
+            unmap_user_range(pml4, lo, hi, frame_size);
+        }
+    }
 }
 
 /// `munmap(addr, len)` — passes through to native, then refunds the
@@ -42590,6 +42676,125 @@ pub fn self_test_file_mmap() -> crate::error::KernelResult<()> {
     teardown!();
     serial_println!(
         "[syscall/linux]   file-backed mmap (demand-paged 2 frames + tail zero-fill + MAP_FIXED split): OK"
+    );
+    Ok(())
+}
+
+/// Self-test for `madvise(MADV_DONTNEED)`'s reclaim action ([`madvise_reclaim`]).
+///
+/// Builds a throwaway process with a 2-frame anonymous VMA, faults both
+/// pages in, stamps a sentinel into each, then reclaims the range and
+/// verifies the Linux anonymous `MADV_DONTNEED` contract end to end:
+/// 1. both PTEs become absent (frames freed, mapping cleared);
+/// 2. the VMA itself **persists** (DONTNEED reclaims frames, not the mapping);
+/// 3. a subsequent access re-faults a fresh **zero-filled** page (the old
+///    sentinel is gone), proving the demand-paging resolver repopulates it.
+pub fn self_test_madvise_dontneed() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+    use crate::mm::frame::FRAME_SIZE;
+    use crate::mm::page_table::{self, PageFlags, VirtAddr};
+    use crate::mm::vma::{Vma, VmaKind};
+    use crate::serial_println;
+
+    serial_println!("[syscall/linux] Running madvise(MADV_DONTNEED) reclaim self-test...");
+
+    let frame_size = FRAME_SIZE as u64;
+    let pid = pcb::create("linux-madvise-test", 0);
+    let Some(pml4) = pcb::get_pml4(pid).filter(|&p| p != 0) else {
+        pcb::destroy(pid);
+        serial_println!("[syscall/linux]   FAIL: test process has no PML4");
+        return Err(KernelError::InternalError);
+    };
+
+    // Reserve a 2-frame anonymous VMA at a fixed, frame-aligned user address
+    // well inside the user range and clear of the mmap/heap windows.
+    let base: u64 = 0x0000_0010_0000_0000; // 64 GiB
+    let end = base.saturating_add(frame_size.saturating_mul(2));
+    let flags = PageFlags::PRESENT
+        | PageFlags::WRITABLE
+        | PageFlags::USER_ACCESSIBLE
+        | PageFlags::NO_EXECUTE;
+    if let Err(e) = pcb::add_vma(pid, Vma { start: base, end, kind: VmaKind::Anonymous, flags }) {
+        pcb::destroy(pid);
+        serial_println!("[syscall/linux]   FAIL: add_vma {:?}", e);
+        return Err(KernelError::InternalError);
+    }
+
+    // Fault both pages in (user not-present access: error-code bit 2 set).
+    let mut va = base;
+    while va < end {
+        if !pcb::try_resolve_fault(pid, va, 1 << 2) {
+            pcb::destroy(pid);
+            serial_println!("[syscall/linux]   FAIL: demand fault unresolved at {:#x}", va);
+            return Err(KernelError::InternalError);
+        }
+        va = va.saturating_add(frame_size);
+    }
+
+    // Stamp a sentinel into the first byte of each page through the HHDM.
+    let hhdm = page_table::hhdm().ok_or(KernelError::InternalError)?;
+    const SENTINEL: u8 = 0xAB;
+    let mut va = base;
+    while va < end {
+        let Some(phys) = page_table::translate(pml4, VirtAddr::new(va)) else {
+            pcb::destroy(pid);
+            serial_println!("[syscall/linux]   FAIL: page {:#x} not mapped post-fault", va);
+            return Err(KernelError::InternalError);
+        };
+        // SAFETY: HHDM mapping of a freshly faulted, owned, writable frame;
+        // we write exactly one byte within the frame.
+        unsafe { (phys.saturating_add(hhdm) as *mut u8).write_volatile(SENTINEL) };
+        va = va.saturating_add(frame_size);
+    }
+
+    // Reclaim the whole range (the action half of MADV_DONTNEED).
+    madvise_reclaim(pid, pml4, base, end);
+
+    // (1) Both PTEs must now be absent.
+    if page_table::translate(pml4, VirtAddr::new(base)).is_some()
+        || page_table::translate(pml4, VirtAddr::new(base.saturating_add(frame_size))).is_some()
+    {
+        pcb::destroy(pid);
+        serial_println!("[syscall/linux]   FAIL: page still mapped after MADV_DONTNEED");
+        return Err(KernelError::InternalError);
+    }
+
+    // (2) The VMA must still be present (reclaim drops frames, not the mapping).
+    let vma_intact = pcb::list_vmas(pid).is_some_and(|vmas| {
+        vmas.iter()
+            .any(|v| v.start == base && v.end == end && matches!(v.kind, VmaKind::Anonymous))
+    });
+    if !vma_intact {
+        pcb::destroy(pid);
+        serial_println!("[syscall/linux]   FAIL: VMA removed by MADV_DONTNEED (must persist)");
+        return Err(KernelError::InternalError);
+    }
+
+    // (3) A subsequent access re-faults a fresh zero-filled page.
+    if !pcb::try_resolve_fault(pid, base, 1 << 2) {
+        pcb::destroy(pid);
+        serial_println!("[syscall/linux]   FAIL: re-fault after reclaim unresolved");
+        return Err(KernelError::InternalError);
+    }
+    let Some(phys_new) = page_table::translate(pml4, VirtAddr::new(base)) else {
+        pcb::destroy(pid);
+        serial_println!("[syscall/linux]   FAIL: page not re-mapped after re-fault");
+        return Err(KernelError::InternalError);
+    };
+    // SAFETY: HHDM mapping of the freshly re-faulted owned frame; one byte.
+    let got = unsafe { (phys_new.saturating_add(hhdm) as *const u8).read_volatile() };
+    if got != 0 {
+        pcb::destroy(pid);
+        serial_println!(
+            "[syscall/linux]   FAIL: re-faulted page = {:#x}, expected zero (DONTNEED contract)",
+            got
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    pcb::destroy(pid);
+    serial_println!(
+        "[syscall/linux]   madvise(MADV_DONTNEED): frames freed + VMA persists + zero-refault: OK"
     );
     Ok(())
 }

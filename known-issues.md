@@ -775,24 +775,31 @@ on inode-identity semantics across delete+recreate (rarer); low for the common
 native VFS so they generate `fs::notify` events; (c) switch watch identity to
 inode if/when stable inode numbers are available.
 
-### TD16. epoll fd readiness not reported when an epoll is nested in poll/select/epoll — DEBT 2026-06-12
+### TD16. epoll fd readiness not reported when an epoll is nested in poll/select/epoll — RESOLVED 2026-06-14
 
 **Where:** `kernel/src/ipc/epoll.rs` + the `HandleKind::Epoll` arm of
 `poll_revents_from_entry` in `kernel/src/syscall/linux.rs`.
 
-**What it is:** an epoll fd is itself pollable on Linux (it reports `EPOLLIN` when
-any monitored fd is ready), allowing epoll fds to be nested inside another
-epoll/poll/select. We currently return 0 (never-ready) for `HandleKind::Epoll` in
-`poll_revents_from_entry`, so nested-epoll readiness is NOT reported. The
-prerequisite for the fix is now in place: `poll_revents_from_entry` carries an
-`owner_pid` (added for signalfd readiness); what remains is the recursion arm.
+**What it was:** an epoll fd is itself pollable on Linux (it reports `EPOLLIN`
+when any monitored fd is ready), allowing epoll fds to be nested inside another
+epoll/poll/select. The `HandleKind::Epoll` arm of `poll_revents_from_entry`
+returned 0 (never-ready), so nested-epoll readiness was NOT reported. `epoll_wait`
+over directly-monitored fds always worked fully; only the nested case was wrong.
 
-**Impact:** low — nested epoll is rare (libevent/libev use a single flat epoll;
-tokio/glommio likewise). `epoll_wait` over directly-monitored fds works fully.
-
-**Proper fix:** add a `HandleKind::Epoll` arm to `poll_revents_from_entry` that
-(given the threaded `owner_pid`) calls `epoll::interest_list` and recursively
-evaluates each child fd, with a depth cap matching Linux's `EP_MAX_NESTS = 4`.
+**Resolved (2026-06-14):** added `epoll_instance_ready(pid, handle, depth)` next
+to `poll_revents_from_entry`. The Epoll arm now, given the threaded `owner_pid`,
+resolves the epoll's `interest_list` against that process's fd table and reports
+`POLLIN|POLLRDNORM` if any member is ready. Non-epoll members are evaluated by
+`poll_revents_from_entry` (which never recurses back, as only the epoll arm calls
+the helper); nested-epoll members recurse into `epoll_instance_ready` with
+`depth + 1`, bounded by `EP_MAX_NESTS = 4` (mirrors `fs/eventpoll.c`) so a cyclic
+or pathologically-deep nest can never blow the kernel stack. Without an
+`owner_pid` (kernel/self-test context) the arm still reports not-ready rather
+than consult an unrelated process's fd table. Boot self-test added in
+`syscall::linux::self_test` ("nested-epoll readiness (TD16) OK"): a throwaway
+process with a pipe → inner epoll E1 (watches pipe read) → outer epoll E0
+(watches E1), asserting both E1 and the nested E0 are not-ready on an empty pipe,
+both ready after a write, and not-ready when evaluated with `owner_pid = None`.
 
 ### TD15. timerfd `TFD_TIMER_CANCEL_ON_SET` is a silent no-op — DEBT 2026-06-12
 

@@ -23927,6 +23927,66 @@ mod poll_bits {
     pub const POLLWRBAND: u16 = 0x0200;
 }
 
+/// Linux `EP_MAX_NESTS` (fs/eventpoll.c): the maximum depth to which an
+/// epoll fd may be nested inside other epoll fds.  We use it to bound the
+/// readiness-recursion below so a cyclic or pathologically-deep nest can
+/// never blow the kernel stack.
+const EP_MAX_NESTS: u32 = 4;
+
+/// Returns `true` if the epoll instance `handle` (whose interest set is
+/// resolved against process `pid`'s fd table) is *readable* — i.e. at
+/// least one fd in its interest set is ready for the events it was
+/// registered with.  This is what makes an epoll fd itself pollable
+/// (`EPOLLIN` when any monitored member is ready), so an epoll can be
+/// nested inside `poll`/`select`/another epoll.
+///
+/// `depth` bounds nested-epoll recursion to [`EP_MAX_NESTS`]; beyond that
+/// we stop descending and report "not ready" rather than risk unbounded
+/// recursion.  Non-epoll members are evaluated by [`poll_revents_from_entry`]
+/// (which never recurses back here, as only the epoll arm calls this);
+/// epoll members recurse here directly with `depth + 1`.
+fn epoll_instance_ready(
+    pid: u64,
+    handle: crate::ipc::epoll::EpollHandle,
+    depth: u32,
+) -> bool {
+    use crate::proc::linux_fd::HandleKind;
+    if depth > EP_MAX_NESTS {
+        return false;
+    }
+    let Some(interest) = crate::ipc::epoll::interest_list(handle) else {
+        return false;
+    };
+    for (fd, events, _data) in interest {
+        // A registered fd that has since been closed is simply not ready
+        // (Linux auto-removes it on close); skip it.
+        let Some(target) = pcb::linux_fd_lookup(pid, fd) else {
+            continue;
+        };
+        let member_ready = if target.kind == HandleKind::Epoll {
+            // A nested epoll member is "ready" (reports POLLIN) exactly
+            // when it is itself readable.  Only honour it if the parent
+            // actually registered interest in POLLIN/EPOLLIN for it.
+            events & u32::from(poll_bits::POLLIN) != 0
+                && epoll_instance_ready(
+                    pid,
+                    crate::ipc::epoll::EpollHandle::from_raw(target.raw_handle),
+                    depth.saturating_add(1),
+                )
+        } else {
+            // EPOLL* readiness bits share POLL* values; behaviour flags in
+            // the high bits (EPOLLET/EPOLLONESHOT) are dropped by the cast.
+            #[allow(clippy::cast_possible_truncation)]
+            let revents = poll_revents_from_entry(target, events as u16, Some(pid));
+            revents != 0
+        };
+        if member_ready {
+            return true;
+        }
+    }
+    false
+}
+
 /// Compute revents for a known fd entry.  Used by `sys_poll`, by the
 /// per-pid wrapper, and directly by the self-test (with a synthetic
 /// FdEntry).
@@ -24039,15 +24099,26 @@ fn poll_revents_from_entry(
             // Polling an epoll fd *itself* (nesting it inside poll/select
             // or another epoll) reports POLLIN once any registered fd in
             // its interest set is ready.  Computing that requires resolving
-            // each member fd against the *owning process's* fd table, but
-            // this shared readiness engine has no pid in scope — it is
-            // called with a bare FdEntry by poll/ppoll/select/pselect6 and
-            // by epoll_wait for member fds.  Until the engine is threaded
-            // with the owner pid, a polled epoll fd reports "not ready"
-            // (0) rather than lying.  Direct epoll_wait is unaffected: it
-            // walks interest_list and polls each member fd with the pid in
-            // hand.  Tracked in todo.txt (epoll nesting in poll/select).
-            0
+            // each member fd against the *owning process's* fd table, so it
+            // needs the owner pid (threaded in as `owner_pid` on the real
+            // poll/epoll paths).  Without it (kernel/self-test context) we
+            // report "not ready" rather than consulting an unrelated
+            // process's fd table.  Recursion into nested epoll members is
+            // bounded by EP_MAX_NESTS.
+            match owner_pid {
+                Some(pid) => {
+                    if epoll_instance_ready(
+                        pid,
+                        crate::ipc::epoll::EpollHandle::from_raw(entry.raw_handle),
+                        1,
+                    ) {
+                        poll_bits::POLLIN | poll_bits::POLLRDNORM
+                    } else {
+                        0
+                    }
+                }
+                None => 0,
+            }
         }
         HandleKind::SignalFd => {
             // A signalfd is readable exactly when one of the signals in
@@ -65980,6 +66051,84 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 return Err(KernelError::InternalError);
             }
             crate::ipc::pipe::close(rh);
+        }
+        // Nested-epoll readiness (TD16): an epoll fd is itself pollable —
+        // it reports POLLIN when any monitored member fd is ready, which
+        // is what lets an epoll be nested inside poll/select/another
+        // epoll.  Evaluating that resolves the epoll's interest set
+        // against the *owning* process's fd table, so it needs a real
+        // process (poll_revents_from_entry's Epoll arm only acts when
+        // `owner_pid` is Some).  Build a throwaway process to exercise
+        // both the direct (member-ready) and nested (epoll-in-epoll)
+        // readiness paths.
+        {
+            use crate::proc::linux_fd::FdEntry;
+            let req = poll_bits::POLLIN | poll_bits::POLLRDNORM;
+            let tpid = pcb::create("epoll-nest-test", 0);
+            pcb::linux_fd_install_stdio(tpid).expect("install stdio");
+
+            // A pipe whose read end the inner epoll will monitor.
+            let (rh, wh) = crate::ipc::pipe::create();
+            let pr_fd = pcb::linux_fd_install(tpid, FdEntry::pipe(rh.raw(), 0), 0)
+                .expect("install pipe read fd");
+
+            // Inner epoll E1 watches the pipe read end for POLLIN.
+            let e1 = crate::ipc::epoll::create();
+            crate::ipc::epoll::ctl_add(e1, pr_fd, u32::from(poll_bits::POLLIN), 0xAA)
+                .expect("ctl_add pipe -> e1");
+            let e1_fd = pcb::linux_fd_install(tpid, FdEntry::epoll(e1.raw(), 0), 0)
+                .expect("install e1 fd");
+
+            // Outer epoll E0 watches E1 (a nested epoll) for POLLIN.
+            let e0 = crate::ipc::epoll::create();
+            crate::ipc::epoll::ctl_add(e0, e1_fd, u32::from(poll_bits::POLLIN), 0xBB)
+                .expect("ctl_add e1 -> e0");
+
+            let e1_entry = pcb::linux_fd_lookup(tpid, e1_fd).expect("lookup e1 fd");
+
+            // Empty pipe: E1 not ready, and the nested E0 not ready either.
+            let r = poll_revents_from_entry(e1_entry, req, Some(tpid));
+            if r != 0 {
+                pcb::destroy(tpid);
+                serial_println!("[syscall/linux]   FAIL: empty-pipe epoll E1 ready {:x}", r);
+                return Err(KernelError::InternalError);
+            }
+            if epoll_instance_ready(tpid, e0, 1) {
+                pcb::destroy(tpid);
+                serial_println!("[syscall/linux]   FAIL: empty-pipe nested epoll E0 ready");
+                return Err(KernelError::InternalError);
+            }
+
+            // Make the pipe readable: E1 must now report POLLIN|POLLRDNORM,
+            // and the nested E0 must observe E1's readiness.
+            let _ = crate::ipc::pipe::try_write(wh, b"x");
+            let r2 = poll_revents_from_entry(e1_entry, req, Some(tpid));
+            if r2 != req {
+                pcb::destroy(tpid);
+                serial_println!("[syscall/linux]   FAIL: ready-pipe epoll E1 got {:x}", r2);
+                return Err(KernelError::InternalError);
+            }
+            if !epoll_instance_ready(tpid, e0, 1) {
+                pcb::destroy(tpid);
+                serial_println!("[syscall/linux]   FAIL: ready-pipe nested epoll E0 not ready");
+                return Err(KernelError::InternalError);
+            }
+
+            // Without an owner pid the engine cannot resolve members, so it
+            // must report not-ready rather than consult an unrelated table.
+            let r3 = poll_revents_from_entry(e1_entry, req, None);
+            if r3 != 0 {
+                pcb::destroy(tpid);
+                serial_println!("[syscall/linux]   FAIL: epoll readiness w/o owner_pid {:x}", r3);
+                return Err(KernelError::InternalError);
+            }
+
+            crate::ipc::epoll::close(e0);
+            crate::ipc::epoll::close(e1);
+            crate::ipc::pipe::close(wh);
+            crate::ipc::pipe::close(rh);
+            pcb::destroy(tpid);
+            serial_println!("[syscall/linux]   nested-epoll readiness (TD16) OK");
         }
         // ppoll: non-NULL sigmask + bad sigsetsize -> EINVAL.  Linux's
         // set_user_sigmask only checks sigsetsize when umask != NULL; we

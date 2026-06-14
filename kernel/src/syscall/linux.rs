@@ -42647,6 +42647,54 @@ fn self_test_mprotect_validation() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+#[inline(never)]
+fn self_test_mprotect_flush_range() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+    // mprotect_flush_range routing: tiny range (<= MPROTECT_FULL_FLUSH_
+    // PAGES) takes the per-page invlpg path; large range promotes to
+    // full TLB flush.  We can't directly observe which path was taken
+    // from outside the function, but we *can* prove the function
+    // doesn't panic, doesn't deadlock the shootdown lock, and returns
+    // promptly on every code path including the degenerate end<=start
+    // and zero-length cases.  We use a kernel-space address since the
+    // function only flushes — it doesn't touch the page tables.
+    let pre = crate::tlb::stats();
+    // Degenerate: end == start -> no-op.
+    mprotect_flush_range(0xFFFF_8000_0000_0000, 0xFFFF_8000_0000_0000);
+    // Degenerate: end < start -> no-op.
+    mprotect_flush_range(0xFFFF_8000_0001_0000, 0xFFFF_8000_0000_0000);
+    // Small range: 16 KiB = 4 hardware pages, below threshold.
+    // Should take flush_range path (one range-flush stat bump).
+    mprotect_flush_range(0xFFFF_8000_0010_0000, 0xFFFF_8000_0010_4000);
+    // Threshold-boundary range: exactly 64 4 KiB pages = 16 frames
+    // = 256 KiB.  Should still take flush_range path (page_count
+    // == MPROTECT_FULL_FLUSH_PAGES is "<= threshold"... wait, our
+    // check is `> MPROTECT_FULL_FLUSH_PAGES`, so == takes range).
+    mprotect_flush_range(0xFFFF_8000_0020_0000, 0xFFFF_8000_0024_0000);
+    // Large range: well above threshold, promotes to full flush.
+    mprotect_flush_range(0xFFFF_8000_0030_0000, 0xFFFF_8000_0100_0000);
+    let post = crate::tlb::stats();
+    // Three non-degenerate calls -> three flush stat bumps total
+    // (two range + one full).
+    let range_delta = post.range_flushes.saturating_sub(pre.range_flushes);
+    let full_delta = post.full_flushes.saturating_sub(pre.full_flushes);
+    if range_delta < 2 {
+        serial_println!(
+            "[syscall/linux]   FAIL: mprotect_flush_range small/threshold not range-flushed (delta={})",
+            range_delta,
+        );
+        return Err(KernelError::InternalError);
+    }
+    if full_delta < 1 {
+        serial_println!(
+            "[syscall/linux]   FAIL: mprotect_flush_range large not full-flushed (delta={})",
+            full_delta,
+        );
+        return Err(KernelError::InternalError);
+    }
+    Ok(())
+}
+
 pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
@@ -42909,42 +42957,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // promptly on every code path including the degenerate end<=start
     // and zero-length cases.  We use a kernel-space address since the
     // function only flushes — it doesn't touch the page tables.
-    {
-        let pre = crate::tlb::stats();
-        // Degenerate: end == start -> no-op.
-        mprotect_flush_range(0xFFFF_8000_0000_0000, 0xFFFF_8000_0000_0000);
-        // Degenerate: end < start -> no-op.
-        mprotect_flush_range(0xFFFF_8000_0001_0000, 0xFFFF_8000_0000_0000);
-        // Small range: 16 KiB = 4 hardware pages, below threshold.
-        // Should take flush_range path (one range-flush stat bump).
-        mprotect_flush_range(0xFFFF_8000_0010_0000, 0xFFFF_8000_0010_4000);
-        // Threshold-boundary range: exactly 64 4 KiB pages = 16 frames
-        // = 256 KiB.  Should still take flush_range path (page_count
-        // == MPROTECT_FULL_FLUSH_PAGES is "<= threshold"... wait, our
-        // check is `> MPROTECT_FULL_FLUSH_PAGES`, so == takes range).
-        mprotect_flush_range(0xFFFF_8000_0020_0000, 0xFFFF_8000_0024_0000);
-        // Large range: well above threshold, promotes to full flush.
-        mprotect_flush_range(0xFFFF_8000_0030_0000, 0xFFFF_8000_0100_0000);
-        let post = crate::tlb::stats();
-        // Three non-degenerate calls -> three flush stat bumps total
-        // (two range + one full).
-        let range_delta = post.range_flushes.saturating_sub(pre.range_flushes);
-        let full_delta = post.full_flushes.saturating_sub(pre.full_flushes);
-        if range_delta < 2 {
-            serial_println!(
-                "[syscall/linux]   FAIL: mprotect_flush_range small/threshold not range-flushed (delta={})",
-                range_delta,
-            );
-            return Err(KernelError::InternalError);
-        }
-        if full_delta < 1 {
-            serial_println!(
-                "[syscall/linux]   FAIL: mprotect_flush_range large not full-flushed (delta={})",
-                full_delta,
-            );
-            return Err(KernelError::InternalError);
-        }
-    }
+    self_test_mprotect_flush_range()?;
 
     // madvise(addr, len, advice) coverage, Linux do_madvise gate order:
     //   1. behavior_valid  -> EINVAL  (FIRST — fires for unknown advice

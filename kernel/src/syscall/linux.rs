@@ -43938,6 +43938,184 @@ fn self_test_getrusage_maxrss_times() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+#[inline(never)]
+fn self_test_setgroups_validation() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+    // Batch 306 — sys_setgroups int truncation + unsigned NGROUPS_MAX
+    // gate.  Linux's `SYSCALL_DEFINE2(setgroups, int gidsetsize, ...)`
+    // does `if ((unsigned)gidsetsize > NGROUPS_MAX) return -EINVAL`;
+    // pre-batch we compared raw u64 against NGROUPS_MAX, so high-half
+    // sentinels (which Linux truncates to small positives) were
+    // erroneously rejected as EINVAL where Linux accepts them.
+    {
+        // (a) setgroups(size=0x1_0000_0000, list=NULL).  Linux:
+        //     (int)0 = 0 → empty install → 0.  Pre-batch: raw
+        //     0x1_0000_0000 > 65536 → EINVAL.  Kernel context skips
+        //     PCB writes; returns 0 directly from the size==0 arm.
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0000,
+            arg1: 0,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::SETGROUPS, &a).value;
+        if v != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: setgroups(size=high-half-zero) -> {} (expected 0)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) setgroups(size=0x1_0000_0001, list=NULL).  Linux:
+        //     (int)1 → passes NGROUPS_MAX → kernel-context bypass
+        //     in our code returns 0 (no PCB to write into).  Pre-
+        //     batch: raw 0x1_0000_0001 > 65536 → EINVAL.
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0001,
+            arg1: 0,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::SETGROUPS, &a).value;
+        if v != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: setgroups(size=high-half-one) -> {} (expected 0)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (c) setgroups(size=0x8000_0000, list=NULL).  Linux:
+        //     (int)0x80000000 = INT_MIN, (unsigned)= 0x80000000 >
+        //     65536 → EINVAL.  Regression guard for the int→u32
+        //     reinterpret: a naive `if size_i32 < 0 { ok }` would
+        //     mis-handle this, and a naive `size_u32 > NGROUPS_MAX`
+        //     comparison that forgot the sign-bit reinterpret would
+        //     also fail.  Pre-batch we returned EINVAL by accident
+        //     (raw u64 > 65536); post-batch we return EINVAL for
+        //     the right reason.
+        let a = SyscallArgs {
+            arg0: 0x8000_0000,
+            arg1: 0,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::SETGROUPS, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: setgroups(size=INT_MIN) -> {} (expected -EINVAL)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (d) setgroups(size=u64::MAX, list=NULL).  Truncates to
+        //     (int)-1, (unsigned)-1 = 0xFFFFFFFF > 65536 → EINVAL.
+        //     Same result as pre-batch but locks in the post-batch
+        //     reasoning.
+        let a = SyscallArgs {
+            arg0: u64::MAX,
+            arg1: 0,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::SETGROUPS, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: setgroups(size=u64::MAX) -> {} (expected -EINVAL)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   setgroups int truncation + unsigned NGROUPS_MAX: OK"
+        );
+    }
+
+    // Batch 345 — sys_setgroups EPERM-before-EINVAL gate reorder.
+    // Linux's `kernel/groups.c::SYSCALL_DEFINE2(setgroups)` runs
+    // `may_setgroups()` (CAP_SETGID + user-ns policy → EPERM) BEFORE
+    // the `(unsigned)gidsetsize > NGROUPS_MAX` check (→ EINVAL).
+    // Pre-batch we had the order inverted, so an unprivileged caller
+    // passing a bad gidsetsize saw EINVAL where Linux returns EPERM.
+    // Userspace probes (newgrp, gpasswd, libc tooling) use that
+    // errno to decide between "abort, no privilege" (EPERM) vs
+    // "retry with a different size" (EINVAL) — pre-batch we sent
+    // them into an unwinnable retry loop.
+    //
+    // The kernel-context test path cannot directly observe the
+    // EPERM short-circuit because caller_pid() is None during boot
+    // self-test, so the CAP gate bypasses.  The probes below verify
+    // the gate-2 (NGROUPS_MAX) behaviour is unchanged post-reorder,
+    // acting as a regression guard against any future restructure
+    // that breaks gate-2 while moving the CAP gate.
+    {
+        // (e) size = 0 (post-reorder, gate-1 bypass in kernel ctx,
+        //     gate-2 passes, falls through to kernel-context
+        //     ok(0)).  Same result as pre-batch.
+        let a = SyscallArgs {
+            arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::SETGROUPS, &a).value;
+        if v != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: setgroups(0) post-reorder -> {} (expected 0)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (f) size = NGROUPS_MAX (65536) — the exact upper bound,
+        //     not over.  gate-2 must NOT reject this.  Kernel
+        //     context returns ok(0).
+        let a = SyscallArgs {
+            arg0: 65536, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::SETGROUPS, &a).value;
+        if v != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: setgroups(NGROUPS_MAX) -> {} (expected 0)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (g) size = NGROUPS_MAX + 1 — gate-2 must still fire post-
+        //     reorder.  Regression guard.
+        let a = SyscallArgs {
+            arg0: 65537, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::SETGROUPS, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: setgroups(NGROUPS_MAX+1) -> {} (expected -EINVAL)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (h) size = 0x8000_0000 (INT_MIN reinterpret) — gate-2 must
+        //     still fire on the sign-bit reinterpret post-reorder.
+        //     Locks in the batch-306 truncation contract under the
+        //     new gate ordering.
+        let a = SyscallArgs {
+            arg0: 0x8000_0000, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::SETGROUPS, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: setgroups(INT_MIN) post-reorder -> {} (expected -EINVAL)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   setgroups gate-order EPERM-before-EINVAL: OK"
+        );
+    }
+
+    Ok(())
+}
+
 pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
@@ -44220,177 +44398,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
     self_test_getrusage_maxrss_times()?;
 
-    // Batch 306 — sys_setgroups int truncation + unsigned NGROUPS_MAX
-    // gate.  Linux's `SYSCALL_DEFINE2(setgroups, int gidsetsize, ...)`
-    // does `if ((unsigned)gidsetsize > NGROUPS_MAX) return -EINVAL`;
-    // pre-batch we compared raw u64 against NGROUPS_MAX, so high-half
-    // sentinels (which Linux truncates to small positives) were
-    // erroneously rejected as EINVAL where Linux accepts them.
-    {
-        // (a) setgroups(size=0x1_0000_0000, list=NULL).  Linux:
-        //     (int)0 = 0 → empty install → 0.  Pre-batch: raw
-        //     0x1_0000_0000 > 65536 → EINVAL.  Kernel context skips
-        //     PCB writes; returns 0 directly from the size==0 arm.
-        let a = SyscallArgs {
-            arg0: 0x1_0000_0000,
-            arg1: 0,
-            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-        };
-        let v = dispatch_linux(nr::SETGROUPS, &a).value;
-        if v != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: setgroups(size=high-half-zero) -> {} (expected 0)",
-                v
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // (b) setgroups(size=0x1_0000_0001, list=NULL).  Linux:
-        //     (int)1 → passes NGROUPS_MAX → kernel-context bypass
-        //     in our code returns 0 (no PCB to write into).  Pre-
-        //     batch: raw 0x1_0000_0001 > 65536 → EINVAL.
-        let a = SyscallArgs {
-            arg0: 0x1_0000_0001,
-            arg1: 0,
-            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-        };
-        let v = dispatch_linux(nr::SETGROUPS, &a).value;
-        if v != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: setgroups(size=high-half-one) -> {} (expected 0)",
-                v
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // (c) setgroups(size=0x8000_0000, list=NULL).  Linux:
-        //     (int)0x80000000 = INT_MIN, (unsigned)= 0x80000000 >
-        //     65536 → EINVAL.  Regression guard for the int→u32
-        //     reinterpret: a naive `if size_i32 < 0 { ok }` would
-        //     mis-handle this, and a naive `size_u32 > NGROUPS_MAX`
-        //     comparison that forgot the sign-bit reinterpret would
-        //     also fail.  Pre-batch we returned EINVAL by accident
-        //     (raw u64 > 65536); post-batch we return EINVAL for
-        //     the right reason.
-        let a = SyscallArgs {
-            arg0: 0x8000_0000,
-            arg1: 0,
-            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-        };
-        let v = dispatch_linux(nr::SETGROUPS, &a).value;
-        if v != -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: setgroups(size=INT_MIN) -> {} (expected -EINVAL)",
-                v
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // (d) setgroups(size=u64::MAX, list=NULL).  Truncates to
-        //     (int)-1, (unsigned)-1 = 0xFFFFFFFF > 65536 → EINVAL.
-        //     Same result as pre-batch but locks in the post-batch
-        //     reasoning.
-        let a = SyscallArgs {
-            arg0: u64::MAX,
-            arg1: 0,
-            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-        };
-        let v = dispatch_linux(nr::SETGROUPS, &a).value;
-        if v != -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: setgroups(size=u64::MAX) -> {} (expected -EINVAL)",
-                v
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        serial_println!(
-            "[syscall/linux]   setgroups int truncation + unsigned NGROUPS_MAX: OK"
-        );
-    }
-
-    // Batch 345 — sys_setgroups EPERM-before-EINVAL gate reorder.
-    // Linux's `kernel/groups.c::SYSCALL_DEFINE2(setgroups)` runs
-    // `may_setgroups()` (CAP_SETGID + user-ns policy → EPERM) BEFORE
-    // the `(unsigned)gidsetsize > NGROUPS_MAX` check (→ EINVAL).
-    // Pre-batch we had the order inverted, so an unprivileged caller
-    // passing a bad gidsetsize saw EINVAL where Linux returns EPERM.
-    // Userspace probes (newgrp, gpasswd, libc tooling) use that
-    // errno to decide between "abort, no privilege" (EPERM) vs
-    // "retry with a different size" (EINVAL) — pre-batch we sent
-    // them into an unwinnable retry loop.
-    //
-    // The kernel-context test path cannot directly observe the
-    // EPERM short-circuit because caller_pid() is None during boot
-    // self-test, so the CAP gate bypasses.  The probes below verify
-    // the gate-2 (NGROUPS_MAX) behaviour is unchanged post-reorder,
-    // acting as a regression guard against any future restructure
-    // that breaks gate-2 while moving the CAP gate.
-    {
-        // (e) size = 0 (post-reorder, gate-1 bypass in kernel ctx,
-        //     gate-2 passes, falls through to kernel-context
-        //     ok(0)).  Same result as pre-batch.
-        let a = SyscallArgs {
-            arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-        };
-        let v = dispatch_linux(nr::SETGROUPS, &a).value;
-        if v != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: setgroups(0) post-reorder -> {} (expected 0)",
-                v
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // (f) size = NGROUPS_MAX (65536) — the exact upper bound,
-        //     not over.  gate-2 must NOT reject this.  Kernel
-        //     context returns ok(0).
-        let a = SyscallArgs {
-            arg0: 65536, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-        };
-        let v = dispatch_linux(nr::SETGROUPS, &a).value;
-        if v != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: setgroups(NGROUPS_MAX) -> {} (expected 0)",
-                v
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // (g) size = NGROUPS_MAX + 1 — gate-2 must still fire post-
-        //     reorder.  Regression guard.
-        let a = SyscallArgs {
-            arg0: 65537, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-        };
-        let v = dispatch_linux(nr::SETGROUPS, &a).value;
-        if v != -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: setgroups(NGROUPS_MAX+1) -> {} (expected -EINVAL)",
-                v
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // (h) size = 0x8000_0000 (INT_MIN reinterpret) — gate-2 must
-        //     still fire on the sign-bit reinterpret post-reorder.
-        //     Locks in the batch-306 truncation contract under the
-        //     new gate ordering.
-        let a = SyscallArgs {
-            arg0: 0x8000_0000, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-        };
-        let v = dispatch_linux(nr::SETGROUPS, &a).value;
-        if v != -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: setgroups(INT_MIN) post-reorder -> {} (expected -EINVAL)",
-                v
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        serial_println!(
-            "[syscall/linux]   setgroups gate-order EPERM-before-EINVAL: OK"
-        );
-    }
+    self_test_setgroups_validation()?;
 
     // Batch 307 — sys_dup3 missing `flags & ~O_CLOEXEC` validation +
     // int truncation.  Linux's ksys_dup3 gates the flags mask BEFORE

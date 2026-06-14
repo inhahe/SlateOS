@@ -39506,6 +39506,122 @@ fn self_test_native_translation() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+/// TD4 extraction: basic dispatch sanity (self_test check groups 4–7b2).
+///
+/// Covers unknown-nr → ENOSYS, sched_yield success, bad-fd write/writev,
+/// the fd-table-less EBADF surface for read/close/dup/fcntl/lseek, and the
+/// dup3/pipe/pipe2 NULL/flag gates. These checks reuse `args`/`r` locals
+/// among themselves but export nothing — the whole contiguous run is
+/// self-contained. See [`self_test_errno_mapping`] for the TD4 rationale.
+#[inline(never)]
+fn self_test_dispatch_basics() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+
+    // (4) Unknown Linux numbers return -ENOSYS through dispatch_linux.
+    let args = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+    let r = dispatch_linux(9999, &args);
+    if r.value != -(errno::ENOSYS as i64) {
+        serial_println!(
+            "[syscall/linux]   FAIL: 9999 → {} (expected -ENOSYS={})",
+            r.value, -(errno::ENOSYS as i64),
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // (5) sched_yield: no-arg, no-state, must succeed.
+    let r = dispatch_linux(nr::SCHED_YIELD, &args);
+    if r.value != 0 {
+        serial_println!("[syscall/linux]   FAIL: sched_yield → {}", r.value);
+        return Err(KernelError::InternalError);
+    }
+
+    // (6) write to invalid fd → -EBADF.
+    let bad_write = SyscallArgs { arg0: 99, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+    let r = dispatch_linux(nr::WRITE, &bad_write);
+    if r.value != -(errno::EBADF as i64) {
+        serial_println!(
+            "[syscall/linux]   FAIL: write(99) → {} (expected -EBADF)", r.value
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // (7) writev with negative iovcnt → -EINVAL.
+    let bad_iov = SyscallArgs {
+        arg0: 1, arg1: 0, arg2: u64::MAX, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::WRITEV, &bad_iov);
+    if r.value != -(errno::EINVAL as i64) {
+        serial_println!(
+            "[syscall/linux]   FAIL: writev(iovcnt=-1) → {} (expected -EINVAL)", r.value
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // (7a) The kernel self-test runs from a kernel task with no Linux fd
+    // table, so every fd-table-backed syscall must surface -EBADF rather
+    // than panicking.  Exercise read / close / dup / fcntl(F_GETFD) /
+    // openat(non-AT_FDCWD).
+    let any_fd = SyscallArgs { arg0: 5, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+    for (which, syscall) in [
+        ("read", nr::READ),
+        ("close", nr::CLOSE),
+        ("dup", nr::DUP),
+        ("fcntl", nr::FCNTL),
+        ("lseek", nr::LSEEK),
+    ] {
+        let r = dispatch_linux(syscall, &any_fd);
+        if r.value != -(errno::EBADF as i64) {
+            serial_println!(
+                "[syscall/linux]   FAIL: {}(fd=5) on a process w/o fd table → {} (expected -EBADF)",
+                which, r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // (7b) dup3(0, 0, 0) — same fd is EINVAL even before fd-table lookup.
+    let dup3_same = SyscallArgs {
+        arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::DUP3, &dup3_same);
+    if r.value != -(errno::EINVAL as i64) {
+        serial_println!(
+            "[syscall/linux]   FAIL: dup3(0,0,0) → {} (expected -EINVAL)", r.value
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // (7b1) pipe / pipe2 with NULL pipefd → -EFAULT.
+    let pipe_null = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+    let r = dispatch_linux(nr::PIPE, &pipe_null);
+    if r.value != -(errno::EFAULT as i64) {
+        serial_println!(
+            "[syscall/linux]   FAIL: pipe(NULL) → {} (expected -EFAULT)", r.value
+        );
+        return Err(KernelError::InternalError);
+    }
+    let r = dispatch_linux(nr::PIPE2, &pipe_null);
+    if r.value != -(errno::EFAULT as i64) {
+        serial_println!(
+            "[syscall/linux]   FAIL: pipe2(NULL, 0) → {} (expected -EFAULT)", r.value
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // (7b2) pipe2 with an unknown flag bit → -EINVAL.
+    let pipe2_bad_flag = SyscallArgs {
+        arg0: 1, arg1: 0x1, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::PIPE2, &pipe2_bad_flag);
+    if r.value != -(errno::EINVAL as i64) {
+        serial_println!(
+            "[syscall/linux]   FAIL: pipe2(1, 0x1) → {} (expected -EINVAL)", r.value
+        );
+        return Err(KernelError::InternalError);
+    }
+    Ok(())
+}
+
 /// TD4 extraction: pipe2 flag-mask gate ordering (self_test check group 7b).
 ///
 /// Verifies the pipe2 flag-validation gate precedes the fildes pointer
@@ -39659,108 +39775,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // (2)-(3) native↔Linux result translation round-trips.
     self_test_native_translation()?;
 
-    // (4) Unknown Linux numbers return -ENOSYS through dispatch_linux.
-    let args = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-    let r = dispatch_linux(9999, &args);
-    if r.value != -(errno::ENOSYS as i64) {
-        serial_println!(
-            "[syscall/linux]   FAIL: 9999 → {} (expected -ENOSYS={})",
-            r.value, -(errno::ENOSYS as i64),
-        );
-        return Err(KernelError::InternalError);
-    }
-
-    // (5) sched_yield: no-arg, no-state, must succeed.
-    let r = dispatch_linux(nr::SCHED_YIELD, &args);
-    if r.value != 0 {
-        serial_println!("[syscall/linux]   FAIL: sched_yield → {}", r.value);
-        return Err(KernelError::InternalError);
-    }
-
-    // (6) write to invalid fd → -EBADF.
-    let bad_write = SyscallArgs { arg0: 99, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-    let r = dispatch_linux(nr::WRITE, &bad_write);
-    if r.value != -(errno::EBADF as i64) {
-        serial_println!(
-            "[syscall/linux]   FAIL: write(99) → {} (expected -EBADF)", r.value
-        );
-        return Err(KernelError::InternalError);
-    }
-
-    // (7) writev with negative iovcnt → -EINVAL.
-    let bad_iov = SyscallArgs {
-        arg0: 1, arg1: 0, arg2: u64::MAX, arg3: 0, arg4: 0, arg5: 0,
-    };
-    let r = dispatch_linux(nr::WRITEV, &bad_iov);
-    if r.value != -(errno::EINVAL as i64) {
-        serial_println!(
-            "[syscall/linux]   FAIL: writev(iovcnt=-1) → {} (expected -EINVAL)", r.value
-        );
-        return Err(KernelError::InternalError);
-    }
-
-    // (7a) The kernel self-test runs from a kernel task with no Linux fd
-    // table, so every fd-table-backed syscall must surface -EBADF rather
-    // than panicking.  Exercise read / close / dup / fcntl(F_GETFD) /
-    // openat(non-AT_FDCWD).
-    let any_fd = SyscallArgs { arg0: 5, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-    for (which, syscall) in [
-        ("read", nr::READ),
-        ("close", nr::CLOSE),
-        ("dup", nr::DUP),
-        ("fcntl", nr::FCNTL),
-        ("lseek", nr::LSEEK),
-    ] {
-        let r = dispatch_linux(syscall, &any_fd);
-        if r.value != -(errno::EBADF as i64) {
-            serial_println!(
-                "[syscall/linux]   FAIL: {}(fd=5) on a process w/o fd table → {} (expected -EBADF)",
-                which, r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-    }
-
-    // (7b) dup3(0, 0, 0) — same fd is EINVAL even before fd-table lookup.
-    let dup3_same = SyscallArgs {
-        arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-    };
-    let r = dispatch_linux(nr::DUP3, &dup3_same);
-    if r.value != -(errno::EINVAL as i64) {
-        serial_println!(
-            "[syscall/linux]   FAIL: dup3(0,0,0) → {} (expected -EINVAL)", r.value
-        );
-        return Err(KernelError::InternalError);
-    }
-
-    // (7b1) pipe / pipe2 with NULL pipefd → -EFAULT.
-    let pipe_null = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-    let r = dispatch_linux(nr::PIPE, &pipe_null);
-    if r.value != -(errno::EFAULT as i64) {
-        serial_println!(
-            "[syscall/linux]   FAIL: pipe(NULL) → {} (expected -EFAULT)", r.value
-        );
-        return Err(KernelError::InternalError);
-    }
-    let r = dispatch_linux(nr::PIPE2, &pipe_null);
-    if r.value != -(errno::EFAULT as i64) {
-        serial_println!(
-            "[syscall/linux]   FAIL: pipe2(NULL, 0) → {} (expected -EFAULT)", r.value
-        );
-        return Err(KernelError::InternalError);
-    }
-
-    // (7b2) pipe2 with an unknown flag bit → -EINVAL.
-    let pipe2_bad_flag = SyscallArgs {
-        arg0: 1, arg1: 0x1, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-    };
-    let r = dispatch_linux(nr::PIPE2, &pipe2_bad_flag);
-    if r.value != -(errno::EINVAL as i64) {
-        serial_println!(
-            "[syscall/linux]   FAIL: pipe2(1, 0x1) → {} (expected -EINVAL)", r.value
-        );
-        return Err(KernelError::InternalError);
-    }
+    // (4)-(7b2) basic dispatch sanity (unknown nr, sched_yield, bad-fd
+    // write/writev, fd-table-less EBADF surface, dup3/pipe/pipe2 gates).
+    self_test_dispatch_basics()?;
 
     // ---- pipe2 flag-mask precedes fildes pointer access ----
     // Batch 476 — Linux's do_pipe2 calls __do_pipe_flags BEFORE

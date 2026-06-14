@@ -2146,7 +2146,13 @@ fn rel_self_or_child(r: Rel<'_>) -> Option<&[u8]> {
 /// `affected` / `new_path` are the kernel-supplied paths (already
 /// NUL-stripped).  `cookie` is a non-zero pairing cookie for renames
 /// (ignored for other event types).
-#[allow(clippy::fn_params_excessive_bools)]
+// The 8 parameters are the distinct fields of one kernel watch event
+// (watch identity: watched/mask/wd; event payload: type/affected/new_path/
+// cookie/is_dir).  They crossed clippy's 7-arg threshold when `is_dir` was
+// added for IN_ISDIR (TD17); bundling them into a struct would only add
+// indirection to this pure, host-unit-tested translator for no correctness
+// gain, so suppress the complexity heuristic here rather than refactor.
+#[allow(clippy::fn_params_excessive_bools, clippy::too_many_arguments)]
 fn translate_kernel_event(
     watched: &[u8],
     inotify_mask: u32,

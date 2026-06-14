@@ -46362,6 +46362,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_ioctl_dispatch()?;
+
+    #[inline(never)]
+    fn self_test_ioctl_dispatch() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // ioctl dispatch validation:
     //   - In kernel context (no caller PCB) every ioctl now returns
     //     -EBADF: sys_ioctl gates on caller_pid() so it can route
@@ -46403,6 +46408,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+    }
+        Ok(())
     }
 
     // prctl dispatch validation.

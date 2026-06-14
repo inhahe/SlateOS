@@ -75131,6 +75131,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_pread_pwrite_getcwd()?;
+
+    #[inline(never)]
+    fn self_test_pread_pwrite_getcwd() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // -----------------------------------------------------------------
     // pread64 / pwrite64 / getcwd / chdir / fchdir
     // -----------------------------------------------------------------
@@ -75332,6 +75337,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: canonicalize NUL not EINVAL");
             return Err(KernelError::InternalError);
         }
+    }
+        Ok(())
     }
 
     // -----------------------------------------------------------------

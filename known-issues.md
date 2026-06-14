@@ -61,11 +61,17 @@ path, and the canary did not trip. This recurrence **resets the clean
 streak** that the 22/22 soak had been accumulating toward the ~90 closure
 bar.
 
-**Status:** passive monitoring, clean streak reset to 0 by the 2026-06-12
-recurrence. **Closure condition unchanged:** close this item (move to
-Fixed/Closed as "likely cured incidentally," like F6/F7) once a fresh
-combined dedicated-soak + routine-boot clean streak passes ~90 with no
-recurrence. Re-open and bisect immediately on the next mid-self-test
+**Soak 2026-06-14:** 7 consecutive clean runs back-to-back (1× full
+build+boot + 6× `--no-build`, `build/w1-soak-*.log`), every run BOOT_OK in
+26–32s with the OOM self-test passing (`[oom]` step clean, no mid-line
+`[sysctl] mm.oom_pol…` truncation). 0/7 recurrence. Clean streak now **7**
+toward the ~90 closure bar.
+
+**Status:** passive monitoring, clean streak **7** (after the 2026-06-14
+soak; was reset to 0 by the 2026-06-12 recurrence). **Closure condition
+unchanged:** close this item (move to Fixed/Closed as "likely cured
+incidentally," like F6/F7) once a fresh combined dedicated-soak +
+routine-boot clean streak passes ~90 with no recurrence. Re-open and bisect immediately on the next mid-self-test
 truncation; given two recorded recurrences now, a finer-grained marker
 pass around the `mm::oom::self_test()` / `sysctl::set` lock window
 (per the F1/F4 method) is the priority diagnostic when next observed.

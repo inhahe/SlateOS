@@ -74,8 +74,17 @@ impl FsEventMask {
     pub const METADATA: Self = Self(1 << 4);
     /// A file was read/accessed (high-frequency, off by default).
     pub const ACCESS: Self = Self(1 << 5);
+    /// A file was opened (high-frequency, off by default).
+    pub const OPEN: Self = Self(1 << 6);
+    /// A file opened for writing was closed (off by default).
+    pub const CLOSE_WRITE: Self = Self(1 << 7);
+    /// A file not opened for writing was closed (off by default).
+    pub const CLOSE_NOWRITE: Self = Self(1 << 8);
 
-    /// All events except ACCESS (common usage).
+    /// All change events (create/delete/modify/rename/metadata).  Excludes the
+    /// high-frequency, opt-in access/open/close notifications (`ACCESS`,
+    /// `OPEN`, `CLOSE_WRITE`, `CLOSE_NOWRITE`) so the common "watch a dir for
+    /// changes" idiom never pays for them.
     pub const ALL_CHANGES: Self = Self(0x1F);
 
     /// Check if a specific event type is enabled.
@@ -100,6 +109,12 @@ pub enum FsEventType {
     MetadataChanged = 4,
     /// A file was accessed/read (optional, high-frequency).
     Accessed = 5,
+    /// A file was opened (optional, high-frequency).
+    Opened = 6,
+    /// A file opened for writing was closed (optional).
+    ClosedWrite = 7,
+    /// A file not opened for writing was closed (optional).
+    ClosedNoWrite = 8,
     /// Events were lost due to queue overflow.
     Overflow = 255,
 }
@@ -114,6 +129,9 @@ impl FsEventType {
             Self::Renamed => FsEventMask::RENAME,
             Self::MetadataChanged => FsEventMask::METADATA,
             Self::Accessed => FsEventMask::ACCESS,
+            Self::Opened => FsEventMask::OPEN,
+            Self::ClosedWrite => FsEventMask::CLOSE_WRITE,
+            Self::ClosedNoWrite => FsEventMask::CLOSE_NOWRITE,
             Self::Overflow => FsEventMask(0),
         }
     }
@@ -193,12 +211,16 @@ static WATCHES: Mutex<BTreeMap<u64, FsWatch>> = Mutex::new(BTreeMap::new());
 // nothing when unused; `emit()` itself uses it as a lock-free early-out.
 
 /// Number of distinct event-type bits in [`FsEventMask`] — CREATE, DELETE,
-/// MODIFY, RENAME, METADATA, ACCESS (bits 0..=5).
-const NUM_EVENT_BITS: usize = 6;
+/// MODIFY, RENAME, METADATA, ACCESS, OPEN, CLOSE_WRITE, CLOSE_NOWRITE
+/// (bits 0..=8).
+const NUM_EVENT_BITS: usize = 9;
 
 /// Per-event-bit reference counts: `INTEREST_COUNTS[b]` is the number of live
 /// watches whose mask includes bit `b`.  See the module-internal note above.
 static INTEREST_COUNTS: [AtomicU32; NUM_EVENT_BITS] = [
+    AtomicU32::new(0),
+    AtomicU32::new(0),
+    AtomicU32::new(0),
     AtomicU32::new(0),
     AtomicU32::new(0),
     AtomicU32::new(0),
@@ -635,6 +657,41 @@ pub fn emit_metadata(path: &str) {
     emit(FsEventType::MetadataChanged, path, None);
 }
 
+/// Convenience: emit an "accessed" (read) event.
+///
+/// High-frequency and opt-in: emitted from the VFS read path only when a live
+/// watch requests `ACCESS` (see the `INTEREST_COUNTS` gate). Surfaces as
+/// inotify `IN_ACCESS`.
+#[inline]
+pub fn emit_accessed(path: &str) {
+    emit(FsEventType::Accessed, path, None);
+}
+
+/// Convenience: emit an "opened" event.
+///
+/// Emitted from the file-handle open path. High-frequency and opt-in (gated by
+/// the `OPEN` interest count). Surfaces as inotify `IN_OPEN`.
+#[inline]
+pub fn emit_opened(path: &str) {
+    emit(FsEventType::Opened, path, None);
+}
+
+/// Convenience: emit a "closed" event.
+///
+/// `was_writable` selects between `ClosedWrite` (the handle was opened for
+/// writing → inotify `IN_CLOSE_WRITE`) and `ClosedNoWrite` (read-only →
+/// `IN_CLOSE_NOWRITE`). Emitted from the file-handle final-close path; opt-in,
+/// gated by the matching interest count.
+#[inline]
+pub fn emit_closed(path: &str, was_writable: bool) {
+    let ty = if was_writable {
+        FsEventType::ClosedWrite
+    } else {
+        FsEventType::ClosedNoWrite
+    };
+    emit(ty, path, None);
+}
+
 // ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
@@ -860,58 +917,17 @@ pub fn self_test() -> KernelResult<()> {
     }
     crate::serial_println!("[notify]   Watch cleanup verified ✓");
 
-    // --- IN_ACCESS / interest-gate coverage (TD17) -------------------------
+    // --- End-to-end VFS/handle hooks (TD17) --------------------------------
     //
-    // ACCESS is deliberately *excluded* from `ALL_CHANGES` so the read hot path
-    // never emits unless a watch explicitly asks for it. The emit fast path is
-    // gated on `interest_includes(ACCESS)`; verify the gate tracks watch
-    // create/close and that an ACCESS watch actually receives `Accessed`.
+    // The FS-independent interest-gate / synthetic-emit / mask-filtering checks
+    // for the opt-in events live in `interest_gate_self_test()` (run
+    // unconditionally at boot via `ipc::inotify::self_test`). Here we verify the
+    // actual VFS and file-handle wiring emits those events, which needs a
+    // mounted filesystem.
 
-    // Baseline: capture current ACCESS interest (could be true if some unrelated
-    // ACCESS watch is live; the invariant we assert is delta-correct regardless).
-    let access_baseline = interest_includes(FsEventMask::ACCESS);
-
-    let access_id = create_watch("/", FsEventMask::ACCESS, false)?;
-    if !interest_includes(FsEventMask::ACCESS) {
-        crate::serial_println!("[notify]   FAIL: ACCESS interest gate not set after watch create");
-        close_watch(access_id)?;
-        return Err(KernelError::InternalError);
-    }
-    crate::serial_println!("[notify]   ACCESS interest gate set on create ✓");
-
-    // Synthetic Accessed event must reach the ACCESS watch.
-    emit(FsEventType::Accessed, "/PROBE.TXT", None);
-    let events = read_events(access_id, 10)?;
-    if events.len() != 1 || events[0].event_type != FsEventType::Accessed {
-        crate::serial_println!(
-            "[notify]   FAIL: ACCESS watch expected 1 Accessed event, got {}",
-            events.len()
-        );
-        close_watch(access_id)?;
-        return Err(KernelError::InternalError);
-    }
-    crate::serial_println!("[notify]   Synthetic Accessed event received ✓");
-
-    // A non-ACCESS watch must NOT see the Accessed event (mask filtering).
-    let create_only = create_watch("/", FsEventMask::CREATE, false)?;
-    emit(FsEventType::Accessed, "/PROBE.TXT", None);
-    let leaked = read_events(create_only, 10)?;
-    if !leaked.is_empty() {
-        crate::serial_println!(
-            "[notify]   FAIL: CREATE-only watch leaked Accessed event ({} events)",
-            leaked.len()
-        );
-        close_watch(access_id)?;
-        close_watch(create_only)?;
-        return Err(KernelError::InternalError);
-    }
-    // Drain the ACCESS watch's copy of that second emit.
-    let _ = read_events(access_id, 10)?;
-    close_watch(create_only)?;
-    crate::serial_println!("[notify]   Non-ACCESS watch ignores Accessed ✓");
-
-    // End-to-end: a real `Vfs::read_file` must surface an Accessed event when an
+    // ACCESS: a real `Vfs::read_file` must surface an Accessed event when an
     // ACCESS watch is live. Write a probe, read it, assert the event surfaces.
+    let access_id = create_watch("/", FsEventMask::ACCESS, false)?;
     let probe_path = "/ACCESS_PROBE.TXT";
     super::vfs::Vfs::write_file(probe_path, b"hi")?;
     let _ = super::vfs::Vfs::read_file(probe_path)?;
@@ -929,22 +945,148 @@ pub fn self_test() -> KernelResult<()> {
         let _ = super::vfs::Vfs::remove(probe_path);
         return Err(KernelError::InternalError);
     }
-    crate::serial_println!("[notify]   End-to-end Vfs::read_file ACCESS hook verified ✓");
-
-    // Cleanup: closing the ACCESS watch must return interest to baseline.
     close_watch(access_id)?;
     let _ = super::vfs::Vfs::remove(probe_path);
-    if interest_includes(FsEventMask::ACCESS) != access_baseline {
+    crate::serial_println!("[notify]   End-to-end Vfs::read_file ACCESS hook verified ✓");
+
+    // --- IN_OPEN / IN_CLOSE_* coverage (TD17) ------------------------------
+    //
+    // File-handle open/close surface Opened / ClosedWrite / ClosedNoWrite,
+    // gated (like ACCESS) on the interest counts so the open/close path pays
+    // nothing unless a watch asks for them. Drive a real open/close through the
+    // handle layer and assert the events surface with the right write-mode
+    // discrimination. (CREATE/MODIFY from write_file are filtered out by the
+    // open/close-only watch mask, so they add no noise.)
+    let oc_mask = FsEventMask(
+        FsEventMask::OPEN.0 | FsEventMask::CLOSE_WRITE.0 | FsEventMask::CLOSE_NOWRITE.0,
+    );
+    let oc_id = create_watch("/", oc_mask, false)?;
+    let oc_probe = "/OPENCLOSE_PROBE.TXT";
+    super::vfs::Vfs::write_file(oc_probe, b"x")?;
+
+    // Read-only open then close → Opened + ClosedNoWrite (never ClosedWrite).
+    let h_ro = super::handle::open(oc_probe, super::handle::OpenFlags::READ)?;
+    super::handle::close(h_ro)?;
+    let ro_events = read_events(oc_id, 10)?;
+    let saw_open = ro_events
+        .iter()
+        .any(|e| e.event_type == FsEventType::Opened && e.path == oc_probe);
+    let saw_close_nw = ro_events
+        .iter()
+        .any(|e| e.event_type == FsEventType::ClosedNoWrite && e.path == oc_probe);
+    let bad_close_w = ro_events
+        .iter()
+        .any(|e| e.event_type == FsEventType::ClosedWrite);
+    if !saw_open || !saw_close_nw || bad_close_w {
         crate::serial_println!(
-            "[notify]   FAIL: ACCESS interest gate did not return to baseline after close"
+            "[notify]   FAIL: read-only open/close (open={}, close_nw={}, bad_close_w={})",
+            saw_open,
+            saw_close_nw,
+            bad_close_w
         );
+        close_watch(oc_id)?;
+        let _ = super::vfs::Vfs::remove(oc_probe);
         return Err(KernelError::InternalError);
     }
-    crate::serial_println!("[notify]   ACCESS interest gate cleared on close ✓");
+    crate::serial_println!("[notify]   read-only open→Opened, close→ClosedNoWrite ✓");
+
+    // Writable open then close → Opened + ClosedWrite.
+    let h_rw = super::handle::open(
+        oc_probe,
+        super::handle::OpenFlags::READ.union(super::handle::OpenFlags::WRITE),
+    )?;
+    super::handle::close(h_rw)?;
+    let rw_events = read_events(oc_id, 10)?;
+    let saw_open_rw = rw_events
+        .iter()
+        .any(|e| e.event_type == FsEventType::Opened && e.path == oc_probe);
+    let saw_close_w = rw_events
+        .iter()
+        .any(|e| e.event_type == FsEventType::ClosedWrite && e.path == oc_probe);
+    if !saw_open_rw || !saw_close_w {
+        crate::serial_println!(
+            "[notify]   FAIL: writable open/close (open={}, close_w={})",
+            saw_open_rw,
+            saw_close_w
+        );
+        close_watch(oc_id)?;
+        let _ = super::vfs::Vfs::remove(oc_probe);
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("[notify]   writable open→Opened, close→ClosedWrite ✓");
+
+    close_watch(oc_id)?;
+    let _ = super::vfs::Vfs::remove(oc_probe);
 
     waiter_registry_self_test()?;
 
     crate::serial_println!("[notify] Self-test passed.");
+    Ok(())
+}
+
+/// FS-independent coverage for the opt-in event-bit interest gate (TD17).
+///
+/// Exercises the per-event-bit [`INTEREST_COUNTS`] gate, synthetic emit/read,
+/// and mask filtering for the four high-frequency opt-in events (`ACCESS`,
+/// `OPEN`, `CLOSE_WRITE`, `CLOSE_NOWRITE`) without touching a real filesystem,
+/// so it runs **unconditionally** at boot (driven from
+/// [`crate::ipc::inotify::self_test`]) — unlike the FAT-gated [`self_test`],
+/// whose end-to-end hooks need a mounted filesystem. All assertions are
+/// delta-correct against a captured baseline, so a concurrent unrelated watch
+/// of the same bit cannot make them flake.
+pub fn interest_gate_self_test() -> KernelResult<()> {
+    // (interest bit, the event type that sets it).
+    let cases: [(FsEventMask, FsEventType); 4] = [
+        (FsEventMask::ACCESS, FsEventType::Accessed),
+        (FsEventMask::OPEN, FsEventType::Opened),
+        (FsEventMask::CLOSE_WRITE, FsEventType::ClosedWrite),
+        (FsEventMask::CLOSE_NOWRITE, FsEventType::ClosedNoWrite),
+    ];
+    for (bit, ty) in cases {
+        let baseline = interest_includes(bit);
+
+        // Create → gate must report interest.
+        let wid = create_watch("/", bit, false)?;
+        if !interest_includes(bit) {
+            crate::serial_println!("[notify]   FAIL: interest gate not set for {:?}", ty);
+            close_watch(wid)?;
+            return Err(KernelError::InternalError);
+        }
+
+        // Synthetic emit must reach the watch as exactly one event of that type.
+        emit(ty, "/GATE_PROBE", None);
+        let events = read_events(wid, 10)?;
+        if events.len() != 1 || events.first().map(|e| e.event_type) != Some(ty) {
+            crate::serial_println!(
+                "[notify]   FAIL: synthetic {:?} not received ({} events)",
+                ty,
+                events.len()
+            );
+            close_watch(wid)?;
+            return Err(KernelError::InternalError);
+        }
+
+        // A CREATE-only watch must NOT see it (mask filtering).
+        let other = create_watch("/", FsEventMask::CREATE, false)?;
+        emit(ty, "/GATE_PROBE", None);
+        let leaked = read_events(other, 10)?;
+        if !leaked.is_empty() {
+            crate::serial_println!("[notify]   FAIL: CREATE-only watch leaked {:?}", ty);
+            close_watch(wid)?;
+            close_watch(other)?;
+            return Err(KernelError::InternalError);
+        }
+        let _ = read_events(wid, 10)?; // drain the matching watch's copy.
+        close_watch(other)?;
+
+        // Close → gate must return to baseline.
+        close_watch(wid)?;
+        if interest_includes(bit) != baseline {
+            crate::serial_println!("[notify]   FAIL: interest gate not cleared for {:?}", ty);
+            return Err(KernelError::InternalError);
+        }
+    }
+    crate::serial_println!("[notify]   opt-in interest gate (ACCESS/OPEN/CLOSE_*) verified ✓");
     Ok(())
 }
 

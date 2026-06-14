@@ -138,6 +138,9 @@ pub const IN_EXCL_UNLINK: u32 = 0x0400_0000;
 const REPORTABLE_EVENTS: u32 = IN_ACCESS
     | IN_MODIFY
     | IN_ATTRIB
+    | IN_CLOSE_WRITE
+    | IN_CLOSE_NOWRITE
+    | IN_OPEN
     | IN_MOVED_FROM
     | IN_MOVED_TO
     | IN_CREATE
@@ -151,12 +154,11 @@ const REPORTABLE_EVENTS: u32 = IN_ACCESS
 
 /// Translate a Linux inotify interest mask into the native event mask.
 ///
-/// Bits the native layer cannot observe (`IN_OPEN`, `IN_CLOSE_*`) are
-/// silently dropped — the watch is still registered, those events just never
-/// fire, exactly as if the underlying filesystem never produced them.  The
-/// returned mask may be empty (e.g. a caller that asked only for `IN_OPEN`);
-/// the caller handles that by registering a watch with no backing native
-/// watch (see [`add_watch`]).
+/// `IN_ISDIR` is still not observable (the native layer carries no dir flag),
+/// so a caller that asks only for it gets an empty mask; the caller handles
+/// that by registering a watch with no backing native watch (see
+/// [`add_watch`]).  `IN_OPEN` / `IN_CLOSE_WRITE` / `IN_CLOSE_NOWRITE` are now
+/// observable via the file-handle open/close hooks.
 #[must_use]
 pub fn to_native_mask(in_mask: u32) -> FsEventMask {
     let mut bits = 0u32;
@@ -168,6 +170,15 @@ pub fn to_native_mask(in_mask: u32) -> FsEventMask {
     }
     if in_mask & IN_ATTRIB != 0 {
         bits |= FsEventMask::METADATA.0;
+    }
+    if in_mask & IN_OPEN != 0 {
+        bits |= FsEventMask::OPEN.0;
+    }
+    if in_mask & IN_CLOSE_WRITE != 0 {
+        bits |= FsEventMask::CLOSE_WRITE.0;
+    }
+    if in_mask & IN_CLOSE_NOWRITE != 0 {
+        bits |= FsEventMask::CLOSE_NOWRITE.0;
     }
     if in_mask & (IN_CREATE) != 0 {
         bits |= FsEventMask::CREATE.0;
@@ -195,6 +206,9 @@ const fn native_type_to_in_bit(t: FsEventType) -> u32 {
         FsEventType::Renamed => IN_MOVED_TO,
         FsEventType::MetadataChanged => IN_ATTRIB,
         FsEventType::Accessed => IN_ACCESS,
+        FsEventType::Opened => IN_OPEN,
+        FsEventType::ClosedWrite => IN_CLOSE_WRITE,
+        FsEventType::ClosedNoWrite => IN_CLOSE_NOWRITE,
         FsEventType::Overflow => IN_Q_OVERFLOW,
     }
 }
@@ -742,10 +756,14 @@ pub fn read_into(handle: InotifyHandle, budget: usize) -> KernelResult<Vec<Inoti
 pub fn self_test() -> KernelResult<()> {
     serial_println!("[inotify] Running inotify instance self-test...");
 
-    // 1. Mask translation sanity.
+    // 1. Mask translation sanity.  IN_OPEN / IN_CLOSE_* are now observable
+    //    (file-handle open/close hooks); IN_ISDIR remains unmapped.
     if to_native_mask(IN_CREATE).0 != FsEventMask::CREATE.0
         || to_native_mask(IN_MODIFY).0 != FsEventMask::MODIFY.0
-        || to_native_mask(IN_OPEN).0 != 0
+        || to_native_mask(IN_OPEN).0 != FsEventMask::OPEN.0
+        || to_native_mask(IN_CLOSE_WRITE).0 != FsEventMask::CLOSE_WRITE.0
+        || to_native_mask(IN_CLOSE_NOWRITE).0 != FsEventMask::CLOSE_NOWRITE.0
+        || to_native_mask(IN_ISDIR).0 != 0
     {
         serial_println!("[inotify]   FAIL: mask translation wrong");
         return Err(KernelError::InternalError);
@@ -888,6 +906,11 @@ pub fn self_test() -> KernelResult<()> {
     // gated behind a mounted FAT filesystem, so this is the path that actually
     // verifies the inotify-blocking-read wake registry on a typical boot.
     crate::fs::notify::waiter_registry_self_test()?;
+
+    // Likewise drive the FS-independent opt-in interest-gate checks (ACCESS /
+    // OPEN / CLOSE_* synthetic emit + mask filtering) here so they run on a
+    // typical (diskless) boot rather than only under a mounted FAT root.
+    crate::fs::notify::interest_gate_self_test()?;
 
     Ok(())
 }

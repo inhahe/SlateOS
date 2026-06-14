@@ -13569,6 +13569,9 @@ fn cmd_fswatch(args: &str) {
                                 notify::FsEventType::Renamed => "RENAME",
                                 notify::FsEventType::MetadataChanged => "META",
                                 notify::FsEventType::Accessed => "ACCESS",
+                                notify::FsEventType::Opened => "OPEN",
+                                notify::FsEventType::ClosedWrite => "CLOSE_W",
+                                notify::FsEventType::ClosedNoWrite => "CLOSE_NW",
                                 notify::FsEventType::Overflow => "OVERFLOW",
                             };
                             if let Some(ref new) = ev.new_path {

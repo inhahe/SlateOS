@@ -289,7 +289,13 @@ pub fn open(path: &str, flags: OpenFlags) -> KernelResult<u64> {
                 0
             };
 
-            allocate_handle(norm, offset, size, flags)
+            // inotify IN_OPEN: emit only after the handle is installed so a
+            // failed allocation never produces a spurious open event.  The
+            // emit is gated lock-free on the OPEN interest count, so opens
+            // pay nothing when no watch is watching for opens.
+            let handle = allocate_handle(norm.clone(), offset, size, flags)?;
+            crate::fs::notify::emit_opened(&norm);
+            Ok(handle)
         }
         Err(KernelError::NotFound) => {
             // File doesn't exist — create if CREATE is set.
@@ -306,10 +312,13 @@ pub fn open(path: &str, flags: OpenFlags) -> KernelResult<u64> {
                 return Err(KernelError::InvalidArgument);
             }
 
-            // Create an empty file.
+            // Create an empty file.  write_file already emits IN_CREATE; the
+            // IN_OPEN below follows it, matching Linux's O_CREAT open order.
             crate::fs::Vfs::write_file(&norm, &[])?;
 
-            allocate_handle(norm, 0, 0, flags)
+            let handle = allocate_handle(norm.clone(), 0, 0, flags)?;
+            crate::fs::notify::emit_opened(&norm);
+            Ok(handle)
         }
         Err(e) => Err(e),
     }
@@ -326,7 +335,7 @@ pub fn close(handle: u64) -> KernelResult<()> {
     // locks — earlier closes by other owners (forked siblings, shared
     // dups) just drop their reference, leaving the shared cursor intact
     // for the remaining owners.
-    let path = {
+    let closed = {
         let mut table = OPEN_FILES.lock();
         let file = table.get_mut(&handle).ok_or(KernelError::InvalidHandle)?;
         file.refcount = file.refcount.saturating_sub(1);
@@ -335,17 +344,30 @@ pub fn close(handle: u64) -> KernelResult<()> {
             // down yet.
             return Ok(());
         }
-        // Last reference — remove the entry and capture the path so we
-        // can release any advisory lock below.
-        table.remove(&handle).map(|file| file.path)
+        // Last reference — remove the entry and capture the path, write-mode,
+        // and directory flag so we can release any advisory lock and emit an
+        // inotify close event below (both after dropping this lock, to keep
+        // the OPEN_FILES → WATCHES lock order one-directional).
+        table
+            .remove(&handle)
+            .map(|file| (file.path, file.flags.is_writable(), file.is_directory))
     };
 
-    // Release any advisory lock this handle holds on the file path.
-    // Using the handle ID as the owner (consistent with how flock
-    // syscalls pass owner IDs).
-    if let Some(ref p) = path {
-        // Best-effort: ignore errors from lock release.
+    if let Some((ref p, writable, is_dir)) = closed {
+        // Release any advisory lock this handle holds on the file path.
+        // Using the handle ID as the owner (consistent with how flock
+        // syscalls pass owner IDs).  Best-effort: ignore errors from
+        // lock release.
         let _ = crate::fs::Vfs::funlock(p, handle);
+
+        // inotify IN_CLOSE_WRITE / IN_CLOSE_NOWRITE on the final close of the
+        // open file description.  Directory handles are deferred (they need
+        // the not-yet-implemented IN_ISDIR flag to be reported correctly), so
+        // only regular files emit a close event.  Gated lock-free on the
+        // matching CLOSE interest count.
+        if !is_dir {
+            crate::fs::notify::emit_closed(p, writable);
+        }
     }
 
     Ok(())

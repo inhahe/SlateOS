@@ -41628,6 +41628,225 @@ fn self_test_timespec_and_marshalling() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+/// TD4 extraction: dispatch_linux_with_frame routing self-test (group 13).
+///
+/// Exercises the frame-aware dispatch path without a live calling process:
+/// a non-frame syscall (READ) routes to None; EXECVE resolves the caller
+/// PID first and returns -ESRCH; FORK reaches fork::fork_process (-ESRCH);
+/// thread/stack CLONE variants reject with -ENOSYS; and the CLONE_SETTLS
+/// canonical-address gate returns -EPERM for non-canonical / kernel-half
+/// TLS bases (preventing a #GP in the new thread's WRMSR trampoline) while
+/// accepting valid user addresses and tls==0. Self-contained — references
+/// only module-level items. See [`self_test_errno_mapping`] for the TD4
+/// rationale (shrinking self_test()'s single boot-stack frame).
+#[inline(never)]
+fn self_test_dispatch_with_frame_routing() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+    use crate::syscall::entry::SyscallFrame;
+    let mut f = SyscallFrame {
+        syscall_nr: nr::READ,
+        arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        rbx: 0, rbp: 0, r12: 0, r13: 0, r14: 0, r15: 0,
+        user_rip: 0, user_rsp: 0, user_rflags: 0,
+    };
+    if dispatch_linux_with_frame(&mut f).is_some() {
+        serial_println!(
+            "[syscall/linux]   FAIL: with_frame routed non-frame syscall"
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    f.syscall_nr = nr::EXECVE;
+    match dispatch_linux_with_frame(&mut f) {
+        Some(v) if v == -i64::from(errno::ESRCH) => {}
+        other => {
+            serial_println!(
+                "[syscall/linux]   FAIL: execve via with_frame → {:?}", other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // FORK and VFORK in self-test context have no calling process
+    // either, but they reach fork::fork_process which returns
+    // ProcessNotFound → ESRCH.  This exercises the routing.
+    f.syscall_nr = nr::FORK;
+    match dispatch_linux_with_frame(&mut f) {
+        Some(v) if v < 0 => {} // any negative errno is fine
+        other => {
+            serial_println!(
+                "[syscall/linux]   FAIL: fork via with_frame → {:?}", other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // CLONE with CLONE_VM | CLONE_THREAD | SIGCHLD — pthread-like.
+    f.syscall_nr = nr::CLONE;
+    f.arg0 = clone_flags::CLONE_VM
+        | clone_flags::CLONE_THREAD
+        | clone_flags::CLONE_SIGHAND
+        | clone_flags::SIGCHLD;
+    f.arg1 = 0; // child_stack must be 0 to reach the flag check
+    match dispatch_linux_with_frame(&mut f) {
+        Some(v) if v == -i64::from(errno::ENOSYS) => {}
+        other => {
+            serial_println!(
+                "[syscall/linux]   FAIL: thread-clone via with_frame → {:?}",
+                other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // CLONE with a non-zero child_stack but no CLONE_VM /
+    // CLONE_THREAD pair — invalid, must reject as -ENOSYS.
+    f.syscall_nr = nr::CLONE;
+    f.arg0 = clone_flags::SIGCHLD;
+    f.arg1 = 0xDEAD_BEEF;
+    match dispatch_linux_with_frame(&mut f) {
+        Some(v) if v == -i64::from(errno::ENOSYS) => {}
+        other => {
+            serial_println!(
+                "[syscall/linux]   FAIL: stack-clone via with_frame → {:?}",
+                other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Full pthread-like clone: CLONE_VM | CLONE_THREAD | ...
+    // with a non-zero child_stack reaches thread_clone::clone_thread
+    // which then fails with ESRCH (no owning Linux process in the
+    // self-test context).  Proves the new thread-creation route is
+    // wired correctly — must NOT return -ENOSYS.
+    f.syscall_nr = nr::CLONE;
+    f.arg0 = clone_flags::CLONE_VM
+        | clone_flags::CLONE_FS
+        | clone_flags::CLONE_FILES
+        | clone_flags::CLONE_SIGHAND
+        | clone_flags::CLONE_THREAD
+        | clone_flags::CLONE_SYSVSEM
+        | clone_flags::CLONE_SETTLS
+        | clone_flags::CLONE_PARENT_SETTID
+        | clone_flags::CLONE_CHILD_CLEARTID
+        | clone_flags::CLONE_CHILD_SETTID;
+    f.arg1 = 0xDEAD_BEEF; // non-zero child_stack
+    f.arg2 = 0; // ptid
+    f.arg3 = 0; // ctid
+    f.arg4 = 0; // tls
+    match dispatch_linux_with_frame(&mut f) {
+        Some(v) if v == -i64::from(errno::ESRCH) => {}
+        other => {
+            serial_println!(
+                "[syscall/linux]   FAIL: pthread-clone via with_frame → {:?} (expected -ESRCH)",
+                other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // CLONE_SETTLS path: when the requested TLS base is non-
+    // canonical or sits in the kernel half, linux_clone must
+    // reject with -EPERM BEFORE reaching thread_clone::clone_thread
+    // (which would otherwise hand the value to the trampoline's
+    // WRMSR(IA32_FS_BASE, …) and crash the kernel synchronously
+    // with #GP on the new thread's first dispatch).  The
+    // pthread-like clone above already used flags with
+    // CLONE_SETTLS — keep the same frame and just vary arg4 (tls).
+    // Boundary (== 1 << 47): EPERM.
+    f.arg4 = 1u64 << 47;
+    match dispatch_linux_with_frame(&mut f) {
+        Some(v) if v == -i64::from(errno::EPERM) => {}
+        other => {
+            serial_println!(
+                "[syscall/linux]   FAIL: clone CLONE_SETTLS tls=1<<47 → {:?} (expected -EPERM)",
+                other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    // Kernel-half canonical address: EPERM.
+    f.arg4 = 0xffff_ffff_8000_0000;
+    match dispatch_linux_with_frame(&mut f) {
+        Some(v) if v == -i64::from(errno::EPERM) => {}
+        other => {
+            serial_println!(
+                "[syscall/linux]   FAIL: clone CLONE_SETTLS tls=kernel → {:?} (expected -EPERM)",
+                other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    // Top of 64-bit space (non-canonical): EPERM.  Without the
+    // gate, this would #GP inside the new thread's trampoline.
+    f.arg4 = u64::MAX;
+    match dispatch_linux_with_frame(&mut f) {
+        Some(v) if v == -i64::from(errno::EPERM) => {}
+        other => {
+            serial_println!(
+                "[syscall/linux]   FAIL: clone CLONE_SETTLS tls=u64::MAX → {:?} (expected -EPERM)",
+                other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    // Just below the boundary: a valid canonical user address —
+    // the TLS check must pass and we proceed to clone_thread,
+    // which still returns -ESRCH in self-test context (no owning
+    // Linux process).  Proves the gate doesn't reject good
+    // inputs.
+    f.arg4 = (1u64 << 47) - 0x1000;
+    match dispatch_linux_with_frame(&mut f) {
+        Some(v) if v == -i64::from(errno::ESRCH) => {}
+        other => {
+            serial_println!(
+                "[syscall/linux]   FAIL: clone CLONE_SETTLS tls=just-below → {:?} (expected -ESRCH)",
+                other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    // CLONE_SETTLS not set + garbage tls: gate must NOT fire (tls
+    // is meaningless without the flag).  Result is -ESRCH again.
+    f.arg0 = clone_flags::CLONE_VM
+        | clone_flags::CLONE_FS
+        | clone_flags::CLONE_FILES
+        | clone_flags::CLONE_SIGHAND
+        | clone_flags::CLONE_THREAD
+        | clone_flags::CLONE_SYSVSEM
+        | clone_flags::CLONE_PARENT_SETTID
+        | clone_flags::CLONE_CHILD_CLEARTID
+        | clone_flags::CLONE_CHILD_SETTID;
+    f.arg4 = u64::MAX;
+    match dispatch_linux_with_frame(&mut f) {
+        Some(v) if v == -i64::from(errno::ESRCH) => {}
+        other => {
+            serial_println!(
+                "[syscall/linux]   FAIL: clone no-SETTLS garbage-tls → {:?} (expected -ESRCH)",
+                other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    // CLONE_SETTLS set with tls == 0: also accepted (trampoline
+    // skips the WRMSR for new_tls == 0, mirroring "leave MSR
+    // alone").  Result -ESRCH.
+    f.arg0 |= clone_flags::CLONE_SETTLS;
+    f.arg4 = 0;
+    match dispatch_linux_with_frame(&mut f) {
+        Some(v) if v == -i64::from(errno::ESRCH) => {}
+        other => {
+            serial_println!(
+                "[syscall/linux]   FAIL: clone CLONE_SETTLS tls=0 → {:?} (expected -ESRCH)",
+                other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    Ok(())
+}
+
 pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
@@ -41764,225 +41983,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // to self_test_timespec_and_marshalling (TD4).
     self_test_timespec_and_marshalling()?;
 
-    // (13) dispatch_linux_with_frame routing.
-    //
-    // We can exercise the routing logic without actually calling
-    // fork::fork_process by:
-    //   - feeding a non-frame syscall_nr (READ) and expecting None;
-    //   - feeding EXECVE and expecting Some(-ESRCH) — execve resolves
-    //     the calling PID as its first step and the boot self-test
-    //     task has no owning Linux process;
-    //   - feeding CLONE with thread-creation bits and expecting
-    //     Some(-ENOSYS) (linux_clone rejects before touching fork).
-    //
-    // We CANNOT exercise the fork-equivalent CLONE / FORK / VFORK
-    // paths here because they require a live calling process to
-    // succeed.  Those are covered by the boot-time integration
-    // suite when a real Linux binary calls them.
-    {
-        use crate::syscall::entry::SyscallFrame;
-        let mut f = SyscallFrame {
-            syscall_nr: nr::READ,
-            arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-            rbx: 0, rbp: 0, r12: 0, r13: 0, r14: 0, r15: 0,
-            user_rip: 0, user_rsp: 0, user_rflags: 0,
-        };
-        if dispatch_linux_with_frame(&mut f).is_some() {
-            serial_println!(
-                "[syscall/linux]   FAIL: with_frame routed non-frame syscall"
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        f.syscall_nr = nr::EXECVE;
-        match dispatch_linux_with_frame(&mut f) {
-            Some(v) if v == -i64::from(errno::ESRCH) => {}
-            other => {
-                serial_println!(
-                    "[syscall/linux]   FAIL: execve via with_frame → {:?}", other
-                );
-                return Err(KernelError::InternalError);
-            }
-        }
-
-        // FORK and VFORK in self-test context have no calling process
-        // either, but they reach fork::fork_process which returns
-        // ProcessNotFound → ESRCH.  This exercises the routing.
-        f.syscall_nr = nr::FORK;
-        match dispatch_linux_with_frame(&mut f) {
-            Some(v) if v < 0 => {} // any negative errno is fine
-            other => {
-                serial_println!(
-                    "[syscall/linux]   FAIL: fork via with_frame → {:?}", other
-                );
-                return Err(KernelError::InternalError);
-            }
-        }
-
-        // CLONE with CLONE_VM | CLONE_THREAD | SIGCHLD — pthread-like.
-        f.syscall_nr = nr::CLONE;
-        f.arg0 = clone_flags::CLONE_VM
-            | clone_flags::CLONE_THREAD
-            | clone_flags::CLONE_SIGHAND
-            | clone_flags::SIGCHLD;
-        f.arg1 = 0; // child_stack must be 0 to reach the flag check
-        match dispatch_linux_with_frame(&mut f) {
-            Some(v) if v == -i64::from(errno::ENOSYS) => {}
-            other => {
-                serial_println!(
-                    "[syscall/linux]   FAIL: thread-clone via with_frame → {:?}",
-                    other
-                );
-                return Err(KernelError::InternalError);
-            }
-        }
-
-        // CLONE with a non-zero child_stack but no CLONE_VM /
-        // CLONE_THREAD pair — invalid, must reject as -ENOSYS.
-        f.syscall_nr = nr::CLONE;
-        f.arg0 = clone_flags::SIGCHLD;
-        f.arg1 = 0xDEAD_BEEF;
-        match dispatch_linux_with_frame(&mut f) {
-            Some(v) if v == -i64::from(errno::ENOSYS) => {}
-            other => {
-                serial_println!(
-                    "[syscall/linux]   FAIL: stack-clone via with_frame → {:?}",
-                    other
-                );
-                return Err(KernelError::InternalError);
-            }
-        }
-
-        // Full pthread-like clone: CLONE_VM | CLONE_THREAD | ...
-        // with a non-zero child_stack reaches thread_clone::clone_thread
-        // which then fails with ESRCH (no owning Linux process in the
-        // self-test context).  Proves the new thread-creation route is
-        // wired correctly — must NOT return -ENOSYS.
-        f.syscall_nr = nr::CLONE;
-        f.arg0 = clone_flags::CLONE_VM
-            | clone_flags::CLONE_FS
-            | clone_flags::CLONE_FILES
-            | clone_flags::CLONE_SIGHAND
-            | clone_flags::CLONE_THREAD
-            | clone_flags::CLONE_SYSVSEM
-            | clone_flags::CLONE_SETTLS
-            | clone_flags::CLONE_PARENT_SETTID
-            | clone_flags::CLONE_CHILD_CLEARTID
-            | clone_flags::CLONE_CHILD_SETTID;
-        f.arg1 = 0xDEAD_BEEF; // non-zero child_stack
-        f.arg2 = 0; // ptid
-        f.arg3 = 0; // ctid
-        f.arg4 = 0; // tls
-        match dispatch_linux_with_frame(&mut f) {
-            Some(v) if v == -i64::from(errno::ESRCH) => {}
-            other => {
-                serial_println!(
-                    "[syscall/linux]   FAIL: pthread-clone via with_frame → {:?} (expected -ESRCH)",
-                    other
-                );
-                return Err(KernelError::InternalError);
-            }
-        }
-
-        // CLONE_SETTLS path: when the requested TLS base is non-
-        // canonical or sits in the kernel half, linux_clone must
-        // reject with -EPERM BEFORE reaching thread_clone::clone_thread
-        // (which would otherwise hand the value to the trampoline's
-        // WRMSR(IA32_FS_BASE, …) and crash the kernel synchronously
-        // with #GP on the new thread's first dispatch).  The
-        // pthread-like clone above already used flags with
-        // CLONE_SETTLS — keep the same frame and just vary arg4 (tls).
-        // Boundary (== 1 << 47): EPERM.
-        f.arg4 = 1u64 << 47;
-        match dispatch_linux_with_frame(&mut f) {
-            Some(v) if v == -i64::from(errno::EPERM) => {}
-            other => {
-                serial_println!(
-                    "[syscall/linux]   FAIL: clone CLONE_SETTLS tls=1<<47 → {:?} (expected -EPERM)",
-                    other
-                );
-                return Err(KernelError::InternalError);
-            }
-        }
-        // Kernel-half canonical address: EPERM.
-        f.arg4 = 0xffff_ffff_8000_0000;
-        match dispatch_linux_with_frame(&mut f) {
-            Some(v) if v == -i64::from(errno::EPERM) => {}
-            other => {
-                serial_println!(
-                    "[syscall/linux]   FAIL: clone CLONE_SETTLS tls=kernel → {:?} (expected -EPERM)",
-                    other
-                );
-                return Err(KernelError::InternalError);
-            }
-        }
-        // Top of 64-bit space (non-canonical): EPERM.  Without the
-        // gate, this would #GP inside the new thread's trampoline.
-        f.arg4 = u64::MAX;
-        match dispatch_linux_with_frame(&mut f) {
-            Some(v) if v == -i64::from(errno::EPERM) => {}
-            other => {
-                serial_println!(
-                    "[syscall/linux]   FAIL: clone CLONE_SETTLS tls=u64::MAX → {:?} (expected -EPERM)",
-                    other
-                );
-                return Err(KernelError::InternalError);
-            }
-        }
-        // Just below the boundary: a valid canonical user address —
-        // the TLS check must pass and we proceed to clone_thread,
-        // which still returns -ESRCH in self-test context (no owning
-        // Linux process).  Proves the gate doesn't reject good
-        // inputs.
-        f.arg4 = (1u64 << 47) - 0x1000;
-        match dispatch_linux_with_frame(&mut f) {
-            Some(v) if v == -i64::from(errno::ESRCH) => {}
-            other => {
-                serial_println!(
-                    "[syscall/linux]   FAIL: clone CLONE_SETTLS tls=just-below → {:?} (expected -ESRCH)",
-                    other
-                );
-                return Err(KernelError::InternalError);
-            }
-        }
-        // CLONE_SETTLS not set + garbage tls: gate must NOT fire (tls
-        // is meaningless without the flag).  Result is -ESRCH again.
-        f.arg0 = clone_flags::CLONE_VM
-            | clone_flags::CLONE_FS
-            | clone_flags::CLONE_FILES
-            | clone_flags::CLONE_SIGHAND
-            | clone_flags::CLONE_THREAD
-            | clone_flags::CLONE_SYSVSEM
-            | clone_flags::CLONE_PARENT_SETTID
-            | clone_flags::CLONE_CHILD_CLEARTID
-            | clone_flags::CLONE_CHILD_SETTID;
-        f.arg4 = u64::MAX;
-        match dispatch_linux_with_frame(&mut f) {
-            Some(v) if v == -i64::from(errno::ESRCH) => {}
-            other => {
-                serial_println!(
-                    "[syscall/linux]   FAIL: clone no-SETTLS garbage-tls → {:?} (expected -ESRCH)",
-                    other
-                );
-                return Err(KernelError::InternalError);
-            }
-        }
-        // CLONE_SETTLS set with tls == 0: also accepted (trampoline
-        // skips the WRMSR for new_tls == 0, mirroring "leave MSR
-        // alone").  Result -ESRCH.
-        f.arg0 |= clone_flags::CLONE_SETTLS;
-        f.arg4 = 0;
-        match dispatch_linux_with_frame(&mut f) {
-            Some(v) if v == -i64::from(errno::ESRCH) => {}
-            other => {
-                serial_println!(
-                    "[syscall/linux]   FAIL: clone CLONE_SETTLS tls=0 → {:?} (expected -ESRCH)",
-                    other
-                );
-                return Err(KernelError::InternalError);
-            }
-        }
-    }
+    // (13) dispatch_linux_with_frame routing (READ/EXECVE/FORK/CLONE
+    // gate ladder, incl. CLONE_SETTLS canonical-address EPERM gate).
+    // Extracted to self_test_dispatch_with_frame_routing (TD4).
+    self_test_dispatch_with_frame_routing()?;
 
     // CLONE_VFORK accept / CLONE_PARENT reject:
     //   - clone(SIGCHLD | CLONE_VFORK, 0, ...) reaches linux_fork

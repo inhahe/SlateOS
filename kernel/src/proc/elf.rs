@@ -1757,6 +1757,288 @@ pub fn build_linux_fork_execve_wait_test_elf(path_nul: &[u8]) -> alloc::vec::Vec
     buf
 }
 
+/// Build a minimal **Linux-ABI** `ET_EXEC` test ELF that writes a single
+/// `byte` to **stdout (fd 1)** and then `exit`s with that same value:
+///
+/// ```text
+///   sub  rsp, 16
+///   mov  byte [rsp], byte   ; C6 04 24 ib  — stash the byte on the stack
+///   mov  edi, 1             ; fd = 1 (stdout)
+///   mov  rsi, rsp           ; buf = &byte
+///   mov  edx, 1             ; count = 1
+///   mov  eax, 1             ; SYS_write
+///   syscall
+///   mov  edi, byte          ; exit(byte)
+///   mov  eax, 60            ; SYS_exit
+///   syscall
+///   int3                    ; unreachable trap
+/// ```
+///
+/// This is the **producer** end of the shell-pipeline integration test
+/// ([`crate::proc::spawn::self_test_linux_pipe_fork_dup2_exec`]): a child
+/// `dup2`s a pipe's write end onto fd 1 and `execve`s this image, so the
+/// `byte` lands in the pipe for the parent to `read` back.  Tagged
+/// `ELFOSABI_GNU` so the loader gives it the SysV stack + Linux ABI.
+///
+/// The PT_LOAD is `R+X` only: the byte is written to the loader-provided
+/// (separately mapped, writable) SysV stack, not into this segment.
+#[must_use]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
+pub fn build_linux_write_byte_exit_elf(byte: u8) -> alloc::vec::Vec<u8> {
+    use alloc::vec;
+
+    let phdr_offset: u64 = 64;
+    let code_offset: u64 = 120;
+    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+
+    let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    // sub rsp, 16
+    code.extend_from_slice(&[0x48, 0x83, 0xEC, 0x10]);
+    // mov byte [rsp], byte
+    code.extend_from_slice(&[0xC6, 0x04, 0x24, byte]);
+    // write(1, rsp, 1)
+    code.extend_from_slice(&[0xBF, 0x01, 0x00, 0x00, 0x00]); // mov edi, 1
+    code.extend_from_slice(&[0x48, 0x89, 0xE6]); // mov rsi, rsp
+    code.extend_from_slice(&[0xBA, 0x01, 0x00, 0x00, 0x00]); // mov edx, 1
+    code.extend_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,1; syscall
+    // exit(byte)
+    code.extend_from_slice(&[0xBF, byte, 0x00, 0x00, 0x00]); // mov edi, byte
+    code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,60; syscall
+    code.push(0xCC); // int3
+
+    let code_len = code.len();
+    let file_size = code_offset as usize + code_len;
+    let mut buf = vec![0u8; file_size];
+
+    buf[0] = 0x7F;
+    buf[1] = b'E';
+    buf[2] = b'L';
+    buf[3] = b'F';
+    buf[EI_CLASS] = ELFCLASS64;
+    buf[EI_DATA] = ELFDATA2LSB;
+    buf[EI_VERSION] = EV_CURRENT;
+    buf[EI_OSABI] = ELFOSABI_GNU;
+    write_u16(&mut buf, 16, ET_EXEC);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr); // e_entry
+    write_u64(&mut buf, 32, phdr_offset); // e_phoff
+    write_u64(&mut buf, 40, 0);
+    write_u32(&mut buf, 48, 0);
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, 1);
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0);
+    write_u16(&mut buf, 62, 0);
+
+    let ph = phdr_offset as usize;
+    write_u32(&mut buf, ph, PT_LOAD);
+    write_u32(&mut buf, ph + 4, PF_R | PF_X);
+    write_u64(&mut buf, ph + 8, code_offset);
+    write_u64(&mut buf, ph + 16, load_vaddr);
+    write_u64(&mut buf, ph + 24, 0);
+    write_u64(&mut buf, ph + 32, code_len as u64);
+    write_u64(&mut buf, ph + 40, code_len as u64);
+    write_u64(&mut buf, ph + 48, 0x1000);
+
+    buf[code_offset as usize..file_size].copy_from_slice(&code);
+    buf
+}
+
+/// Build a **Linux-ABI** `ET_EXEC` launcher ELF that exercises the canonical
+/// **shell-pipeline** primitive end to end: `pipe2` + `fork` + `dup2` +
+/// `execve` + blocking `read`.
+///
+/// ```text
+///   sub  rsp, 32                 ; [rsp+0]=fds[0] [rsp+4]=fds[1]
+///                                ; [rsp+8]=status [rsp+12]=read buf
+///   pipe2(&fds, 0) ; test rax,rax ; js pipe_fail
+///   fork           ; test rax,rax ; jz child
+///   parent: read(fds[0], &buf, 1) ; test rax,rax ; jle parent_fail
+///           wait4(-1, &status, 0, NULL)
+///           exit(buf[0])         ; movzx edi, byte [rsp+12]
+///   parent_fail: exit(0xA3)      ; read returned <= 0 (no byte / error)
+///   pipe_fail:   exit(0xA4)      ; pipe2 returned < 0
+///   child:  dup2(fds[1], 1)      ; redirect the pipe write end onto stdout
+///           execve(path, argv=[path,NULL], envp=[NULL])
+///           exit(0xE7)           ; only if execve returned (failed)
+/// ```
+///
+/// The exec target is staged by the harness as
+/// [`build_linux_write_byte_exit_elf`]`(sentinel)`: it writes `sentinel` to
+/// fd 1 (which `dup2` aliased to the pipe's write end) and exits.  A clean
+/// parent `exit(sentinel)` therefore proves the full chain:
+///
+///   * `pipe2` allocated a read/write fd pair in the launcher's table;
+///   * `fork` cloned the **fd table** into the child (the child uses
+///     `fds[1]`, inherited across the CoW fork, to feed `dup2`);
+///   * `dup2` aliased the inherited write end onto a fixed fd (1) that the
+///     `execve`'d target — which knows nothing of the dynamic pipe fds —
+///     can write to;
+///   * `execve` replaced the child image **without** disturbing the fd table
+///     (fd 1 survives the exec);
+///   * the byte traversed the pipe IPC path and the parent's blocking `read`
+///     woke and returned it.
+///
+/// Self-diagnosing sentinels: `0xA4` = `pipe2` failed, `0xA3` = parent
+/// `read` returned `<= 0`, `0xE7` = child `execve` failed.  `path_nul` must
+/// be NUL-terminated.  Tagged `ELFOSABI_GNU` for the SysV stack + Linux ABI.
+#[must_use]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
+pub fn build_linux_pipe_fork_dup2_exec_test_elf(path_nul: &[u8]) -> alloc::vec::Vec<u8> {
+    use alloc::vec;
+
+    let phdr_offset: u64 = 64;
+    let code_offset: u64 = 120; // 64 (ehdr) + 56 (one phdr)
+    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+
+    let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+
+    // sub rsp, 32  (fds[0], fds[1], status, read buf)
+    code.extend_from_slice(&[0x48, 0x83, 0xEC, 0x20]);
+    // pipe2(&fds, 0): rdi = rsp, rsi = 0
+    code.extend_from_slice(&[0x48, 0x89, 0xE7]); // mov rdi, rsp
+    code.extend_from_slice(&[0x31, 0xF6]); // xor esi, esi
+    code.extend_from_slice(&[0xB8, 0x25, 0x01, 0x00, 0x00, 0x0F, 0x05]); // mov eax,293; syscall
+    code.extend_from_slice(&[0x48, 0x85, 0xC0]); // test rax, rax
+    code.extend_from_slice(&[0x78, 0x00]); // js pipe_fail (rel8)
+    let js_rel = code.len() - 1;
+
+    // fork
+    code.extend_from_slice(&[0xB8, 0x39, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,57; syscall
+    code.extend_from_slice(&[0x48, 0x85, 0xC0]); // test rax, rax
+    code.extend_from_slice(&[0x74, 0x00]); // jz child (rel8)
+    let jz_rel = code.len() - 1;
+
+    // parent: read(fds[0], &buf, 1)
+    code.extend_from_slice(&[0x8B, 0x3C, 0x24]); // mov edi, [rsp]      (fds[0])
+    code.extend_from_slice(&[0x48, 0x8D, 0x74, 0x24, 0x0C]); // lea rsi, [rsp+12]  (&buf)
+    code.extend_from_slice(&[0xBA, 0x01, 0x00, 0x00, 0x00]); // mov edx, 1
+    code.extend_from_slice(&[0xB8, 0x00, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,0; syscall
+    code.extend_from_slice(&[0x48, 0x85, 0xC0]); // test rax, rax
+    code.extend_from_slice(&[0x7E, 0x00]); // jle parent_fail (rel8)
+    let jle_rel = code.len() - 1;
+    // wait4(-1, &status, 0, NULL)
+    code.extend_from_slice(&[0xBF, 0xFF, 0xFF, 0xFF, 0xFF]); // mov edi, -1
+    code.extend_from_slice(&[0x48, 0x8D, 0x74, 0x24, 0x08]); // lea rsi, [rsp+8] (&status)
+    code.extend_from_slice(&[0x31, 0xD2]); // xor edx, edx
+    code.extend_from_slice(&[0x45, 0x31, 0xD2]); // xor r10d, r10d
+    code.extend_from_slice(&[0xB8, 0x3D, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,61; syscall
+    // exit(buf[0])
+    code.extend_from_slice(&[0x0F, 0xB6, 0x7C, 0x24, 0x0C]); // movzx edi, byte [rsp+12]
+    code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,60; syscall
+
+    // parent_fail: exit(0xA3) — read returned <= 0
+    let parent_fail = code.len();
+    code.extend_from_slice(&[0xBF, 0xA3, 0x00, 0x00, 0x00]); // mov edi, 0xA3
+    code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,60; syscall
+
+    // pipe_fail: exit(0xA4) — pipe2 returned < 0
+    let pipe_fail = code.len();
+    code.extend_from_slice(&[0xBF, 0xA4, 0x00, 0x00, 0x00]); // mov edi, 0xA4
+    code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,60; syscall
+
+    // child: dup2(fds[1], 1)
+    let child = code.len();
+    code.extend_from_slice(&[0x8B, 0x7C, 0x24, 0x04]); // mov edi, [rsp+4] (oldfd = fds[1])
+    code.extend_from_slice(&[0xBE, 0x01, 0x00, 0x00, 0x00]); // mov esi, 1       (newfd = 1)
+    code.extend_from_slice(&[0xB8, 0x21, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,33; syscall
+    // execve(path, argv, envp)
+    code.extend_from_slice(&[0x48, 0xBF]); // movabs rdi, &path
+    let path_imm = code.len();
+    code.extend_from_slice(&[0u8; 8]);
+    code.extend_from_slice(&[0x48, 0xBE]); // movabs rsi, &argv
+    let argv_imm = code.len();
+    code.extend_from_slice(&[0u8; 8]);
+    code.extend_from_slice(&[0x48, 0xBA]); // movabs rdx, &envp
+    let envp_imm = code.len();
+    code.extend_from_slice(&[0u8; 8]);
+    code.extend_from_slice(&[0xB8, 0x3B, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,59; syscall
+    // execve_fail: exit(0xE7)
+    code.extend_from_slice(&[0xBF, 0xE7, 0x00, 0x00, 0x00]); // mov edi, 0xE7
+    code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,60; syscall
+    code.push(0xCC); // int3 — unreachable trap
+
+    // Patch the three forward rel8 jumps (disp measured from byte after disp).
+    let js_disp = (pipe_fail as isize) - (js_rel as isize + 1);
+    let jz_disp = (child as isize) - (jz_rel as isize + 1);
+    let jle_disp = (parent_fail as isize) - (jle_rel as isize + 1);
+    code[js_rel] = js_disp as u8;
+    code[jz_rel] = jz_disp as u8;
+    code[jle_rel] = jle_disp as u8;
+
+    // --- Data layout (same PT_LOAD, after the code) ---
+    let code_len = code.len();
+    let data_base = code_offset as usize + code_len;
+    let path_off = data_base;
+    let path_end = path_off + path_nul.len();
+    let argv_off = (path_end + 7) & !7usize;
+    let envp_off = argv_off + 2 * 8;
+    let file_size = envp_off + 8;
+
+    let vaddr_of = |fo: usize| -> u64 { load_vaddr + (fo as u64 - code_offset) };
+    let path_vaddr = vaddr_of(path_off);
+    let argv_vaddr = vaddr_of(argv_off);
+    let envp_vaddr = vaddr_of(envp_off);
+    code[path_imm..path_imm + 8].copy_from_slice(&path_vaddr.to_le_bytes());
+    code[argv_imm..argv_imm + 8].copy_from_slice(&argv_vaddr.to_le_bytes());
+    code[envp_imm..envp_imm + 8].copy_from_slice(&envp_vaddr.to_le_bytes());
+
+    // --- File image ---
+    let seg_len = file_size - code_offset as usize;
+    let mut buf = vec![0u8; file_size];
+
+    buf[0] = 0x7F;
+    buf[1] = b'E';
+    buf[2] = b'L';
+    buf[3] = b'F';
+    buf[EI_CLASS] = ELFCLASS64;
+    buf[EI_DATA] = ELFDATA2LSB;
+    buf[EI_VERSION] = EV_CURRENT;
+    buf[EI_OSABI] = ELFOSABI_GNU;
+    write_u16(&mut buf, 16, ET_EXEC);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr); // e_entry
+    write_u64(&mut buf, 32, phdr_offset); // e_phoff
+    write_u64(&mut buf, 40, 0);
+    write_u32(&mut buf, 48, 0);
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, 1);
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0);
+    write_u16(&mut buf, 62, 0);
+
+    // PT_LOAD R+W+X: W keeps argv/envp on a writable page; X for the code.
+    let ph = phdr_offset as usize;
+    write_u32(&mut buf, ph, PT_LOAD);
+    write_u32(&mut buf, ph + 4, PF_R | PF_W | PF_X);
+    write_u64(&mut buf, ph + 8, code_offset);
+    write_u64(&mut buf, ph + 16, load_vaddr);
+    write_u64(&mut buf, ph + 24, 0);
+    write_u64(&mut buf, ph + 32, seg_len as u64);
+    write_u64(&mut buf, ph + 40, seg_len as u64);
+    write_u64(&mut buf, ph + 48, 0x1000);
+
+    buf[code_offset as usize..code_offset as usize + code_len].copy_from_slice(&code);
+    buf[path_off..path_end].copy_from_slice(path_nul);
+    write_u64(&mut buf, argv_off, path_vaddr); // argv[0] = path
+    write_u64(&mut buf, argv_off + 8, 0); // argv[1] = NULL
+    write_u64(&mut buf, envp_off, 0); // envp[0] = NULL
+
+    buf
+}
+
 /// Build a minimal **Linux-ABI** `ET_EXEC` test ELF that simply calls
 /// `exit(exit_code)`:
 ///

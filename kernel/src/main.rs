@@ -1302,6 +1302,18 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 end-to-end test of the canonical shell-pipeline primitive
+    // (cmd1 | cmd2): pipe2 + fork + dup2 + execve + blocking read.  Proves
+    // fd-table inheritance across fork, dup2 onto stdout, execve preserving
+    // the fd, and the pipe IPC path all compose end to end.  Same bounded,
+    // hang-safe harness.
+    if let Err(e) = proc::spawn::self_test_linux_pipe_fork_dup2_exec() {
+        serial_println!(
+            "WARNING: Linux pipe2()+fork()+dup2()+execve()+read() (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 end-to-end test of execveat(2) in both forms: a real Linux-ABI
     // launcher execs a target by path (AT_FDCWD) and by open-fd
     // (AT_EMPTY_PATH / fexecve), proving execveat replaces the image and

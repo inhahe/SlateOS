@@ -2880,6 +2880,123 @@ pub fn self_test_linux_fork_execve_wait() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the canonical **shell-pipeline** primitive:
+/// `pipe2` + `fork` + `dup2` + `execve` + blocking `read`.
+///
+/// This is the `cmd1 | cmd2` skeleton.  The launcher
+/// ([`elf::build_linux_pipe_fork_dup2_exec_test_elf`]) creates a pipe, forks,
+/// and in the child `dup2`s the pipe's **write end** onto fd 1 before
+/// `execve`ing a staged producer ([`elf::build_linux_write_byte_exit_elf`])
+/// that writes `SENTINEL` to fd 1 and exits.  The parent blocks in `read` on
+/// the pipe's read end, gets the byte, reaps the child, and `exit`s with the
+/// byte — so a clean `exit_code == SENTINEL` proves the entire chain:
+///
+///   * `pipe2` allocated a read/write fd pair;
+///   * `fork` cloned the fd table (the child uses the inherited write end);
+///   * `dup2` aliased that write end onto fd 1, which `execve` preserved
+///     across the image replacement;
+///   * the byte traversed the pipe and woke the parent's blocking `read`.
+///
+/// This is the first test of fd-table inheritance + `dup2` + the pipe IPC
+/// path composed end to end under the Linux ABI from ring 3 (prior pipe
+/// coverage was kernel-context only; see `ipc/pipe.rs`).
+///
+/// Self-diagnosing sentinels (parent exit when something upstream failed):
+/// `0xA4` = `pipe2` failed, `0xA3` = parent `read` returned `<= 0`,
+/// `0xE7` = child `execve` failed.  Skips gracefully (`Ok`) if the VFS write
+/// fails.  Must run **after** filesystem initialization (see `main.rs`).
+pub fn self_test_linux_pipe_fork_dup2_exec() -> KernelResult<()> {
+    const TGT_PATH: &str = "/slateos-test-pipe-exec-tgt";
+    const TGT_PATH_NUL: &[u8] = b"/slateos-test-pipe-exec-tgt\0";
+    // Producer byte / parent exit — distinct from the other launchers'
+    // failure sentinels (0xA2/0xA3/0xA4/0xE7) and prior target codes.
+    const SENTINEL: i32 = 0x6B; // 107
+    const MAX_YIELDS: usize = 256;
+
+    serial_println!(
+        "[spawn] Running Linux pipe2()+fork()+dup2()+execve()+read() (ring 3) pipeline test..."
+    );
+
+    // Stage the producer: a Linux-ABI ELF that writes SENTINEL to fd 1.
+    let tgt_elf = elf::build_linux_write_byte_exit_elf(SENTINEL as u8);
+    if let Err(e) = crate::fs::Vfs::write_file(TGT_PATH, &tgt_elf) {
+        serial_println!(
+            "[spawn]   Linux pipe2()+fork()+dup2()+execve()+read() (ring 3): SKIP (VFS write \
+             failed: {:?})",
+            e
+        );
+        return Ok(());
+    }
+
+    let exe_elf = elf::build_linux_pipe_fork_dup2_exec_test_elf(TGT_PATH_NUL);
+    let argv: &[&[u8]] = &[b"spawn-test-linux-pipe-exec"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-pipe-exec",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = crate::fs::Vfs::remove(TGT_PATH);
+            serial_println!("[spawn]   FAIL: pipe-fork-dup2-exec spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Drive the scheduler: parent pipe2s, forks, blocks in read → child
+    // dup2s + execve's the producer → producer writes the byte (waking the
+    // parent's read) and exits → parent reaps and exits with the byte.
+    for _ in 0..MAX_YIELDS {
+        crate::sched::yield_now();
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            break;
+        }
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(TGT_PATH);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: pipe2()+fork()+dup2()+execve()+read() (ring 3) — parent not a \
+             zombie after {} yields, got {:?} (parent still blocked in read, or the child \
+             never dup2'd/execve'd/wrote)",
+            MAX_YIELDS, state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(SENTINEL) {
+        serial_println!(
+            "[spawn]   FAIL: pipe2()+fork()+dup2()+execve()+read() (ring 3) — expected parent \
+             exit {} (the byte read back from the pipe), got {:?} (0xA4/164 = pipe2 failed; \
+             0xA3/163 = parent read returned <= 0; 0xE7/231 = child execve failed)",
+            SENTINEL, exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   Linux pipe2()+fork()+dup2()+execve()+read() (ring 3: child piped a byte to \
+         the parent via dup2'd stdout across execve, parent read back == {}): OK",
+        SENTINEL
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the Linux `execveat(2)` syscall.
 ///
 /// `execveat` is exercised in **both** of its forms by spawning a real

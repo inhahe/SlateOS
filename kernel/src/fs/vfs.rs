@@ -2033,6 +2033,25 @@ impl Vfs {
     ///
     /// Both paths must be on the same mount point.
     pub fn rename(from: &str, to: &str) -> KernelResult<()> {
+        Self::rename_inner(from, to, false)
+    }
+
+    /// Atomic no-replace rename (Linux `renameat2(RENAME_NOREPLACE)`).
+    ///
+    /// Identical to [`rename`](Self::rename) but fails with
+    /// [`KernelError::AlreadyExists`] (EEXIST) if `to` already exists. For the
+    /// common same-mount case the destination-existence check is performed
+    /// under the *same* `VFS` lock that guards the underlying filesystem
+    /// rename, so there is no TOCTOU window: no concurrent creator can slip a
+    /// file into `to` between the check and the rename. (The cross-mount
+    /// copy+delete path — itself a SlateOS convenience that Linux rejects with
+    /// EXDEV — cannot be made atomic and keeps a documented best-effort
+    /// pre-check; see the comment in the cross-mount branch.)
+    pub fn rename_noreplace(from: &str, to: &str) -> KernelResult<()> {
+        Self::rename_inner(from, to, true)
+    }
+
+    fn rename_inner(from: &str, to: &str, noreplace: bool) -> KernelResult<()> {
         let from = Self::resolve_no_follow(from)?;
         let to = Self::resolve_no_follow(to)?;
         check_file_tags(&from)?;
@@ -2057,12 +2076,34 @@ impl Vfs {
             let (_mp_from, rel_from) = find_mount(&mut vfs, &from)?;
             let rel_from_owned = String::from(rel_from);
             let (mp_to, rel_to) = find_mount(&mut vfs, &to)?;
+            if noreplace {
+                // Atomic RENAME_NOREPLACE: the destination-existence check and
+                // the rename below execute under the same held `VFS.lock()`,
+                // closing the TOCTOU window a separate pre-check would leave.
+                match mp_to.fs.stat(rel_to) {
+                    Ok(_) => return Err(KernelError::AlreadyExists),
+                    Err(KernelError::NotFound) => {}
+                    Err(e) => return Err(e),
+                }
+            }
             mp_to.fs.rename(&rel_from_owned, rel_to)?;
         } else {
             // Cross-mount rename: copy + delete.  This is the only way to
             // "move" files between different filesystems (like Linux's mv).
             // We first stat the source to verify it exists and check type.
             let stat = Self::stat(&from)?;
+
+            if noreplace {
+                // Best-effort: the cross-mount copy+delete is inherently
+                // non-atomic (multiple lock acquisitions), so a documented
+                // TOCTOU remains here regardless. Linux itself returns EXDEV
+                // for cross-mount rename; this branch is a SlateOS convenience.
+                match Self::stat(&to) {
+                    Ok(_) => return Err(KernelError::AlreadyExists),
+                    Err(KernelError::NotFound) => {}
+                    Err(e) => return Err(e),
+                }
+            }
 
             if stat.entry_type == EntryType::Directory {
                 // Cross-mount directory rename is not supported (would need

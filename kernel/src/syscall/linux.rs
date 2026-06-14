@@ -16790,12 +16790,12 @@ fn sys_unlinkat(args: &SyscallArgs) -> SyscallResult {
 /// `dirfd`), check the File-WRITE capability, then rename via the native VFS
 /// (which emits `IN_MOVED_FROM`/`IN_MOVED_TO` to any watcher).
 ///
-/// `noreplace` adds a best-effort destination-exists pre-check returning
-/// `EEXIST` (Linux `RENAME_NOREPLACE`).  The native VFS exposes no atomic
-/// noreplace variant, so a concurrent creator slipping in between the stat and
-/// the rename could still be clobbered — a documented TOCTOU that is acceptable
-/// until the FS layer grows an atomic noreplace rename.  (The boot self-test
-/// is single-threaded, so the window is not observable there.)
+/// `noreplace` routes to `Vfs::rename_noreplace`, which returns `EEXIST`
+/// (Linux `RENAME_NOREPLACE`) if the destination already exists. For the
+/// common same-mount case the check is atomic — performed under the same VFS
+/// lock as the rename — so no concurrent creator can be clobbered. (The
+/// cross-mount copy+delete convenience keeps a documented best-effort
+/// pre-check; Linux returns EXDEV for cross-mount rename anyway.)
 fn rename_common(
     old_dirfd: i32,
     old_ptr: u64,
@@ -16814,14 +16814,12 @@ fn rename_common(
     if let Err(r) = require_fs_write() {
         return r;
     }
-    if noreplace {
-        match crate::fs::Vfs::stat(&new) {
-            Ok(_) => return linux_err(errno::EEXIST),
-            Err(KernelError::NotFound) => {}
-            Err(e) => return linux_err(linux_errno_for(e)),
-        }
-    }
-    match crate::fs::Vfs::rename(&old, &new) {
+    let result = if noreplace {
+        crate::fs::Vfs::rename_noreplace(&old, &new)
+    } else {
+        crate::fs::Vfs::rename(&old, &new)
+    };
+    match result {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => linux_err(linux_errno_for(e)),
     }
@@ -39670,6 +39668,114 @@ fn caller_pid() -> Option<u64> {
 }
 
 // ---------------------------------------------------------------------------
+// Atomic RENAME_NOREPLACE self-test (VFS-dependent)
+// ---------------------------------------------------------------------------
+
+/// End-to-end test of `Vfs::rename_noreplace` and the Linux-ABI
+/// `renameat2(RENAME_NOREPLACE)` path that routes through it.
+///
+/// Runs after the `/tmp` memfs is mounted (so writes succeed) rather than in
+/// [`self_test`], which precedes VFS init and therefore only sees a read-only
+/// root — the in-`self_test` rename round-trip skips there. Uses `/tmp` paths
+/// so the writable memfs exercises the same-mount (atomic) branch of
+/// `rename_inner`.
+///
+/// Coverage:
+///  1. no-replace rename onto a FREE destination → succeeds, src gone, dst present;
+///  2. no-replace rename onto an EXISTING destination → `AlreadyExists` (EEXIST),
+///     and the destination is left untouched (original survivor content);
+///  3. the same EEXIST result via the `renameat2` syscall with `RENAME_NOREPLACE`.
+pub fn self_test_rename_noreplace() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+    use crate::serial_println;
+
+    const SRC: &str = "/tmp/__rn_nr_src__";
+    const DST: &str = "/tmp/__rn_nr_dst__";
+
+    // Clean slate (ignore absence).
+    let _ = crate::fs::Vfs::remove(SRC);
+    let _ = crate::fs::Vfs::remove(DST);
+
+    // Stage the source; if /tmp is not writable, skip cleanly.
+    if crate::fs::Vfs::write_file(SRC, b"payload").is_err() {
+        serial_println!(
+            "[syscall/linux]   rename_noreplace self-test skipped (/tmp not writable)"
+        );
+        return Ok(());
+    }
+
+    // (1) NOREPLACE onto a free destination succeeds and moves src -> dst.
+    if let Err(e) = crate::fs::Vfs::rename_noreplace(SRC, DST) {
+        serial_println!(
+            "[syscall/linux]   FAIL: rename_noreplace onto free dst -> {:?} (expected Ok)", e);
+        let _ = crate::fs::Vfs::remove(SRC);
+        let _ = crate::fs::Vfs::remove(DST);
+        return Err(KernelError::InternalError);
+    }
+    if crate::fs::Vfs::stat(SRC).is_ok() || crate::fs::Vfs::stat(DST).is_err() {
+        serial_println!("[syscall/linux]   FAIL: rename_noreplace did not move src->dst");
+        let _ = crate::fs::Vfs::remove(SRC);
+        let _ = crate::fs::Vfs::remove(DST);
+        return Err(KernelError::InternalError);
+    }
+
+    // (2) NOREPLACE onto an existing destination -> AlreadyExists, dst untouched.
+    if crate::fs::Vfs::write_file(SRC, b"second").is_ok() {
+        match crate::fs::Vfs::rename_noreplace(SRC, DST) {
+            Err(KernelError::AlreadyExists) => {}
+            other => {
+                serial_println!(
+                    "[syscall/linux]   FAIL: rename_noreplace onto existing dst -> {:?} (expected AlreadyExists)", other);
+                let _ = crate::fs::Vfs::remove(SRC);
+                let _ = crate::fs::Vfs::remove(DST);
+                return Err(KernelError::InternalError);
+            }
+        }
+        // Destination must retain its ORIGINAL content (the move, not "second").
+        match crate::fs::Vfs::read_file(DST) {
+            Ok(c) if c == b"payload" => {}
+            other => {
+                serial_println!(
+                    "[syscall/linux]   FAIL: rename_noreplace clobbered existing dst ({:?})", other.map(|c| c.len()));
+                let _ = crate::fs::Vfs::remove(SRC);
+                let _ = crate::fs::Vfs::remove(DST);
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // (3) Same EEXIST via the renameat2 syscall with RENAME_NOREPLACE=1.
+        // Build NUL-terminated path buffers and pin them across the call.
+        let src_buf = b"/tmp/__rn_nr_src__\0";
+        let dst_buf = b"/tmp/__rn_nr_dst__\0";
+        core::hint::black_box(&src_buf);
+        core::hint::black_box(&dst_buf);
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: src_buf.as_ptr() as u64,
+            arg2: 0,
+            arg3: dst_buf.as_ptr() as u64,
+            arg4: 1,
+            arg5: 0,
+        };
+        let v = dispatch_linux(nr::RENAMEAT2, &a).value;
+        if v != -i64::from(errno::EEXIST) {
+            serial_println!(
+                "[syscall/linux]   FAIL: renameat2(NOREPLACE,existing) -> {} (expected EEXIST)", v);
+            let _ = crate::fs::Vfs::remove(SRC);
+            let _ = crate::fs::Vfs::remove(DST);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    let _ = crate::fs::Vfs::remove(SRC);
+    let _ = crate::fs::Vfs::remove(DST);
+    serial_println!(
+        "[syscall/linux]   rename_noreplace (atomic same-mount: free-dst move, existing-dst EEXIST, renameat2 EEXIST): OK"
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // File-backed mmap self-test (VFS-dependent)
 // ---------------------------------------------------------------------------
 
@@ -58118,8 +58224,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         // renameat2 valid flag (RENAME_NOREPLACE=1), absent->absent2 ->
-        // ENOENT (noreplace pre-check stats absent2 -> NotFound, proceeds,
-        // then Vfs::rename sees the missing source).
+        // ENOENT (rename_noreplace stats absent2 -> NotFound under the VFS
+        // lock, proceeds, then the FS rename sees the missing source).
         let a = SyscallArgs { arg0: 0, arg1: absent_ptr, arg2: 0,
             arg3: absent2_ptr, arg4: 1, arg5: 0 };
         if dispatch_linux(nr::RENAMEAT2, &a).value

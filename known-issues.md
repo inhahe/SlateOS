@@ -904,9 +904,9 @@ accepted-but-ignored control bits. Linux FS mutation syscalls
 now route through the native VFS (`Vfs::mkdir`/`rmdir`/`remove`/`rename`), so
 inotify events DO flow from Linux-ABI filesystem operations — including
 `IN_MOVED_FROM`/`IN_MOVED_TO` for renames. `renameat2` honours `RENAME_NOREPLACE`
-(best-effort destination pre-check → `EEXIST`; documented TOCTOU since the FS has
-no atomic noreplace variant) and rejects `RENAME_EXCHANGE`/`RENAME_WHITEOUT` with
-`EINVAL` (the native VFS rename implements neither).
+(atomic for the common same-mount case — see below — and rejects
+`RENAME_EXCHANGE`/`RENAME_WHITEOUT` with `EINVAL` since the native VFS rename
+implements neither).
 
 **Impact:** low — the common "watch a dir for create/delete/modify/move/open/close"
 file-manager/build-tool idiom is fully covered, now including the `IN_ISDIR`
@@ -944,12 +944,25 @@ and Opened + ClosedWrite for writable), the inotify boot self-test (a dir-create
 event asserting `IN_CREATE | IN_ISDIR`), and the posix `test_translate_isdir_or_in`
 host unit test (dir vs file subject, and IN_IGNORED never tagged).
 
-**Remaining fix:** all Linux-ABI mutation syscalls (mkdir/rmdir/unlink/rename
-family) now route through the native VFS (2026-06-14, via `resolve_at_path` +
-`require_fs_write` + `Vfs::mkdir`/`rmdir`/`remove`/`rename`), so the only items
-left are: (a) switch watch identity to inode if/when stable inode numbers are
-available; (b) an atomic `RENAME_NOREPLACE` (currently a best-effort stat
-pre-check with a documented TOCTOU); (c) `RENAME_EXCHANGE`/`RENAME_WHITEOUT`
+**Progress (2026-06-14): atomic `RENAME_NOREPLACE`.** Gap (b) is resolved for the
+common same-mount case. New `Vfs::rename_noreplace` (kernel/src/fs/vfs.rs) shares
+a private `rename_inner(from, to, noreplace)` with `Vfs::rename`; in the same-mount
+branch the destination-existence check (`mp_to.fs.stat(rel_to)` → EEXIST if
+present) executes under the **same held `VFS.lock()`** as the underlying
+`mp_to.fs.rename`, so there is no TOCTOU window — no concurrent creator can slip a
+file into the destination between the check and the rename. The Linux-ABI
+`rename_common` (kernel/src/syscall/linux.rs) now calls `Vfs::rename_noreplace`
+when the `RENAME_NOREPLACE` flag is set instead of doing a separate
+`Vfs::stat`-then-`Vfs::rename` pre-check. The cross-mount copy+delete convenience
+path (which Linux rejects outright with EXDEV) keeps a documented best-effort
+destination pre-check, since multiple lock acquisitions make it inherently
+non-atomic. Covered by the existing `syscall::linux::self_test` rename round-trip
+(EEXIST onto an existing destination through `renameat2`) plus a new VFS-level
+assertion that `rename_noreplace` onto a *free* destination succeeds and moves
+src→dst.
+
+**Remaining fix:** the items left are: (a) switch watch identity to inode if/when
+stable inode numbers are available; (c) `RENAME_EXCHANGE`/`RENAME_WHITEOUT`
 support (currently `EINVAL`).
 
 ### TD16. epoll fd readiness not reported when an epoll is nested in poll/select/epoll — RESOLVED 2026-06-14

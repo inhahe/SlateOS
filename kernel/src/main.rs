@@ -1200,6 +1200,13 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: Linux dynamic-interpreter self-test failed: {:?}", e);
     }
 
+    // Atomic RENAME_NOREPLACE test (needs the writable /tmp memfs to exercise
+    // the same-mount branch, so it runs here rather than in
+    // syscall::linux::self_test() which only sees a read-only root).
+    if let Err(e) = syscall::linux::self_test_rename_noreplace() {
+        serial_println!("WARNING: rename_noreplace self-test failed: {:?}", e);
+    }
+
     // File-backed Linux mmap test (needs a writable VFS to stage a file, so
     // it runs here rather than in syscall::linux::self_test() which precedes
     // VFS init).  Exercises the path ld.so uses to map shared objects.

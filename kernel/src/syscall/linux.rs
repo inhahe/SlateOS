@@ -54586,6 +54586,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_fadvise_readahead()?;
+
+    #[inline(never)]
+    fn self_test_fadvise_readahead() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // fadvise64 / readahead — advice validation.
     {
         // Bad advice (7) -> EINVAL.
@@ -54693,6 +54698,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   readahead non-regular-file EINVAL gate (Linux gate 2): OK"
         );
+    }
+        Ok(())
     }
 
     // close_range — argument validation.

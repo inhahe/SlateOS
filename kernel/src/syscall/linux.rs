@@ -50897,6 +50897,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_prctl_set_ptracer()?;
+
+    #[inline(never)]
+    fn self_test_prctl_set_ptracer() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // Batch 98: prctl(PR_SET_PTRACER = 0x5961_6d61) — Yama LSM's
     // per-process pin of which PID may ptrace this task.
     // gdb-attach, lldb-server, strace, perf-record, and Chromium's
@@ -50998,6 +51003,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 return Err(KernelError::InternalError);
             }
         }
+    }
+        Ok(())
     }
 
     // personality dispatch validation.

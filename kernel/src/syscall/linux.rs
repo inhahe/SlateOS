@@ -40298,6 +40298,220 @@ fn self_test_openat_dirfd() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+/// TD4 extraction: get_mempolicy UMA-faithful behaviour (self_test group
+/// 9e). Exercises the single-node answer, MEMS_ALLOWED nodemask write,
+/// flag-combination validation, F_NODE/F_ADDR resolution, and the
+/// copy_nodes_to_user maxnode bounds — all self-contained. See
+/// [`self_test_errno_mapping`] for the TD4 rationale.
+#[inline(never)]
+fn self_test_get_mempolicy() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+
+    const MPOL_F_NODE: u64 = 1;
+    const MPOL_F_ADDR: u64 = 2;
+    const MPOL_F_MEMS_ALLOWED: u64 = 4;
+
+    // Case 1: no flags, no addr, no buffers.  Must return 0 (we
+    // wrote nothing because both pointers are NULL — Linux
+    // accepts this as a "just verify NUMA is supported" probe).
+    let a = SyscallArgs {
+        arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::GET_MEMPOLICY, &a);
+    if r.value != 0 {
+        serial_println!(
+            "[syscall/linux]   FAIL: get_mempolicy(NULL,NULL,0,0,0) -> {} (expected 0)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 2: MPOL_F_MEMS_ALLOWED with a kernel-resident u64
+    // nodemask of width 64.  Must write bit 0 (our single node).
+    let mut mask: u64 = 0xdead_beef_dead_beef;
+    let a = SyscallArgs {
+        arg0: 0,
+        arg1: (&raw mut mask).addr() as u64,
+        arg2: 64,
+        arg3: 0,
+        arg4: MPOL_F_MEMS_ALLOWED,
+        arg5: 0,
+    };
+    let r = dispatch_linux(nr::GET_MEMPOLICY, &a);
+    if r.value != 0 {
+        serial_println!(
+            "[syscall/linux]   FAIL: get_mempolicy(MEMS_ALLOWED) -> {} (expected 0)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+    if mask != 0x1 {
+        serial_println!(
+            "[syscall/linux]   FAIL: MEMS_ALLOWED mask {:#x} (expected 0x1)",
+            mask,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 3 (batch 550): MPOL_F_NODE without MPOL_F_ADDR -> -EINVAL.
+    // do_get_mempolicy's MPOL_F_NODE arm only succeeds for an INTERLEAVE
+    // task policy (or with MPOL_F_ADDR via lookup_node); for our
+    // default_policy it falls into the `else { err = -EINVAL; }` branch.
+    // Pre-batch this returned node 0 / ret 0, which was wrong.
+    let mut mode: i32 = -1;
+    let a = SyscallArgs {
+        arg0: (&raw mut mode).addr() as u64,
+        arg1: 0, arg2: 0, arg3: 0,
+        arg4: MPOL_F_NODE, arg5: 0,
+    };
+    let r = dispatch_linux(nr::GET_MEMPOLICY, &a);
+    if r.value != i64::from(errno::EINVAL).wrapping_neg() {
+        serial_println!(
+            "[syscall/linux]   FAIL: get_mempolicy(F_NODE alone) -> {} (expected -EINVAL)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 4: no flags, asking for both mode and mask.
+    // Expect MPOL_DEFAULT (0) in mode and an all-zero nodemask
+    // (default policy has no node binding).
+    mode = -1;
+    mask = 0xdead_beef_dead_beef;
+    let a = SyscallArgs {
+        arg0: (&raw mut mode).addr() as u64,
+        arg1: (&raw mut mask).addr() as u64,
+        arg2: 64,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let r = dispatch_linux(nr::GET_MEMPOLICY, &a);
+    if r.value != 0 || mode != 0 || mask != 0 {
+        serial_println!(
+            "[syscall/linux]   FAIL: get_mempolicy(default) -> ret {} mode {} mask {:#x}",
+            r.value, mode, mask,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 5: flag combination MEMS_ALLOWED | F_NODE -> -EINVAL.
+    let a = SyscallArgs {
+        arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+        arg4: MPOL_F_MEMS_ALLOWED | MPOL_F_NODE, arg5: 0,
+    };
+    let r = dispatch_linux(nr::GET_MEMPOLICY, &a);
+    if r.value != -i64::from(errno::EINVAL) {
+        serial_println!(
+            "[syscall/linux]   FAIL: get_mempolicy(MEMS_ALLOWED|F_NODE) -> {} (expected -EINVAL)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 6: unknown flag bit -> -EINVAL.
+    let a = SyscallArgs {
+        arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+        arg4: 0x10, arg5: 0,
+    };
+    let r = dispatch_linux(nr::GET_MEMPOLICY, &a);
+    if r.value != -i64::from(errno::EINVAL) {
+        serial_println!(
+            "[syscall/linux]   FAIL: get_mempolicy(bogus flag) -> {} (expected -EINVAL)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 7: MPOL_F_ADDR with NULL addr -> -EFAULT.
+    let a = SyscallArgs {
+        arg0: 0, arg1: 0, arg2: 0, arg3: 0,
+        arg4: MPOL_F_ADDR, arg5: 0,
+    };
+    let r = dispatch_linux(nr::GET_MEMPOLICY, &a);
+    if r.value != -i64::from(errno::EFAULT) {
+        serial_println!(
+            "[syscall/linux]   FAIL: get_mempolicy(F_ADDR,NULL) -> {} (expected -EFAULT)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 8 (batch 550): MPOL_F_NODE | MPOL_F_ADDR over a valid mapped
+    // address resolves lookup_node -> node 0 on UMA, ret 0 / mode 0.
+    // Use the address of a stack local as a guaranteed-mapped page.
+    let probe: u64 = 0;
+    let mut node: i32 = -1;
+    let a = SyscallArgs {
+        arg0: (&raw mut node).addr() as u64,
+        arg1: 0, arg2: 0,
+        arg3: (&raw const probe).addr() as u64,
+        arg4: MPOL_F_NODE | MPOL_F_ADDR, arg5: 0,
+    };
+    let r = dispatch_linux(nr::GET_MEMPOLICY, &a);
+    if r.value != 0 || node != 0 {
+        serial_println!(
+            "[syscall/linux]   FAIL: get_mempolicy(F_NODE|F_ADDR) -> ret {} node {} (expected 0/0)",
+            r.value, node,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 9 (batch 550): a non-zero addr WITHOUT MPOL_F_ADDR -> -EINVAL
+    // (`else if (addr) return -EINVAL`).
+    let a = SyscallArgs {
+        arg0: 0, arg1: 0, arg2: 0,
+        arg3: (&raw const probe).addr() as u64,
+        arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::GET_MEMPOLICY, &a);
+    if r.value != i64::from(errno::EINVAL).wrapping_neg() {
+        serial_println!(
+            "[syscall/linux]   FAIL: get_mempolicy(addr w/o F_ADDR) -> {} (expected -EINVAL)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 10 (batch 550): non-NULL nmask with maxnode == 0 -> -EINVAL
+    // (kernel_get_mempolicy: `maxnode < nr_node_ids`, nr_node_ids == 1).
+    let mut sink: u64 = 0;
+    let a = SyscallArgs {
+        arg0: 0,
+        arg1: (&raw mut sink).addr() as u64,
+        arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::GET_MEMPOLICY, &a);
+    if r.value != i64::from(errno::EINVAL).wrapping_neg() {
+        serial_println!(
+            "[syscall/linux]   FAIL: get_mempolicy(nmask,maxnode=0) -> {} (expected -EINVAL)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 11 (batch 550): maxnode over the PAGE_SIZE*BITS_PER_BYTE cap
+    // (32769+ => copy > PAGE_SIZE) -> -EINVAL from copy_nodes_to_user.
+    let a = SyscallArgs {
+        arg0: 0,
+        arg1: (&raw mut sink).addr() as u64,
+        arg2: 32770, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::GET_MEMPOLICY, &a);
+    if r.value != i64::from(errno::EINVAL).wrapping_neg() {
+        serial_println!(
+            "[syscall/linux]   FAIL: get_mempolicy(maxnode over cap) -> {} (expected -EINVAL)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[syscall/linux]   get_mempolicy faithful do_get_mempolicy/copy_nodes_to_user (batch 550): OK"
+    );
+    Ok(())
+}
+
 pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
@@ -40384,211 +40598,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
     // (9e) Batch 101: get_mempolicy returns a single-node UMA answer
     // instead of -ENOSYS.  libnuma, jemalloc, tcmalloc, and glibc's
-    // NUMA tunable parser probe this at startup.
-    {
-        const MPOL_F_NODE: u64 = 1;
-        const MPOL_F_ADDR: u64 = 2;
-        const MPOL_F_MEMS_ALLOWED: u64 = 4;
-
-        // Case 1: no flags, no addr, no buffers.  Must return 0 (we
-        // wrote nothing because both pointers are NULL — Linux
-        // accepts this as a "just verify NUMA is supported" probe).
-        let a = SyscallArgs {
-            arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::GET_MEMPOLICY, &a);
-        if r.value != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: get_mempolicy(NULL,NULL,0,0,0) -> {} (expected 0)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 2: MPOL_F_MEMS_ALLOWED with a kernel-resident u64
-        // nodemask of width 64.  Must write bit 0 (our single node).
-        let mut mask: u64 = 0xdead_beef_dead_beef;
-        let a = SyscallArgs {
-            arg0: 0,
-            arg1: (&raw mut mask).addr() as u64,
-            arg2: 64,
-            arg3: 0,
-            arg4: MPOL_F_MEMS_ALLOWED,
-            arg5: 0,
-        };
-        let r = dispatch_linux(nr::GET_MEMPOLICY, &a);
-        if r.value != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: get_mempolicy(MEMS_ALLOWED) -> {} (expected 0)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-        if mask != 0x1 {
-            serial_println!(
-                "[syscall/linux]   FAIL: MEMS_ALLOWED mask {:#x} (expected 0x1)",
-                mask,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 3 (batch 550): MPOL_F_NODE without MPOL_F_ADDR -> -EINVAL.
-        // do_get_mempolicy's MPOL_F_NODE arm only succeeds for an INTERLEAVE
-        // task policy (or with MPOL_F_ADDR via lookup_node); for our
-        // default_policy it falls into the `else { err = -EINVAL; }` branch.
-        // Pre-batch this returned node 0 / ret 0, which was wrong.
-        let mut mode: i32 = -1;
-        let a = SyscallArgs {
-            arg0: (&raw mut mode).addr() as u64,
-            arg1: 0, arg2: 0, arg3: 0,
-            arg4: MPOL_F_NODE, arg5: 0,
-        };
-        let r = dispatch_linux(nr::GET_MEMPOLICY, &a);
-        if r.value != i64::from(errno::EINVAL).wrapping_neg() {
-            serial_println!(
-                "[syscall/linux]   FAIL: get_mempolicy(F_NODE alone) -> {} (expected -EINVAL)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 4: no flags, asking for both mode and mask.
-        // Expect MPOL_DEFAULT (0) in mode and an all-zero nodemask
-        // (default policy has no node binding).
-        mode = -1;
-        mask = 0xdead_beef_dead_beef;
-        let a = SyscallArgs {
-            arg0: (&raw mut mode).addr() as u64,
-            arg1: (&raw mut mask).addr() as u64,
-            arg2: 64,
-            arg3: 0,
-            arg4: 0,
-            arg5: 0,
-        };
-        let r = dispatch_linux(nr::GET_MEMPOLICY, &a);
-        if r.value != 0 || mode != 0 || mask != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: get_mempolicy(default) -> ret {} mode {} mask {:#x}",
-                r.value, mode, mask,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 5: flag combination MEMS_ALLOWED | F_NODE -> -EINVAL.
-        let a = SyscallArgs {
-            arg0: 0, arg1: 0, arg2: 0, arg3: 0,
-            arg4: MPOL_F_MEMS_ALLOWED | MPOL_F_NODE, arg5: 0,
-        };
-        let r = dispatch_linux(nr::GET_MEMPOLICY, &a);
-        if r.value != -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: get_mempolicy(MEMS_ALLOWED|F_NODE) -> {} (expected -EINVAL)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 6: unknown flag bit -> -EINVAL.
-        let a = SyscallArgs {
-            arg0: 0, arg1: 0, arg2: 0, arg3: 0,
-            arg4: 0x10, arg5: 0,
-        };
-        let r = dispatch_linux(nr::GET_MEMPOLICY, &a);
-        if r.value != -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: get_mempolicy(bogus flag) -> {} (expected -EINVAL)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 7: MPOL_F_ADDR with NULL addr -> -EFAULT.
-        let a = SyscallArgs {
-            arg0: 0, arg1: 0, arg2: 0, arg3: 0,
-            arg4: MPOL_F_ADDR, arg5: 0,
-        };
-        let r = dispatch_linux(nr::GET_MEMPOLICY, &a);
-        if r.value != -i64::from(errno::EFAULT) {
-            serial_println!(
-                "[syscall/linux]   FAIL: get_mempolicy(F_ADDR,NULL) -> {} (expected -EFAULT)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 8 (batch 550): MPOL_F_NODE | MPOL_F_ADDR over a valid mapped
-        // address resolves lookup_node -> node 0 on UMA, ret 0 / mode 0.
-        // Use the address of a stack local as a guaranteed-mapped page.
-        let probe: u64 = 0;
-        let mut node: i32 = -1;
-        let a = SyscallArgs {
-            arg0: (&raw mut node).addr() as u64,
-            arg1: 0, arg2: 0,
-            arg3: (&raw const probe).addr() as u64,
-            arg4: MPOL_F_NODE | MPOL_F_ADDR, arg5: 0,
-        };
-        let r = dispatch_linux(nr::GET_MEMPOLICY, &a);
-        if r.value != 0 || node != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: get_mempolicy(F_NODE|F_ADDR) -> ret {} node {} (expected 0/0)",
-                r.value, node,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 9 (batch 550): a non-zero addr WITHOUT MPOL_F_ADDR -> -EINVAL
-        // (`else if (addr) return -EINVAL`).
-        let a = SyscallArgs {
-            arg0: 0, arg1: 0, arg2: 0,
-            arg3: (&raw const probe).addr() as u64,
-            arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::GET_MEMPOLICY, &a);
-        if r.value != i64::from(errno::EINVAL).wrapping_neg() {
-            serial_println!(
-                "[syscall/linux]   FAIL: get_mempolicy(addr w/o F_ADDR) -> {} (expected -EINVAL)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 10 (batch 550): non-NULL nmask with maxnode == 0 -> -EINVAL
-        // (kernel_get_mempolicy: `maxnode < nr_node_ids`, nr_node_ids == 1).
-        let mut sink: u64 = 0;
-        let a = SyscallArgs {
-            arg0: 0,
-            arg1: (&raw mut sink).addr() as u64,
-            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::GET_MEMPOLICY, &a);
-        if r.value != i64::from(errno::EINVAL).wrapping_neg() {
-            serial_println!(
-                "[syscall/linux]   FAIL: get_mempolicy(nmask,maxnode=0) -> {} (expected -EINVAL)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 11 (batch 550): maxnode over the PAGE_SIZE*BITS_PER_BYTE cap
-        // (32769+ => copy > PAGE_SIZE) -> -EINVAL from copy_nodes_to_user.
-        let a = SyscallArgs {
-            arg0: 0,
-            arg1: (&raw mut sink).addr() as u64,
-            arg2: 32770, arg3: 0, arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::GET_MEMPOLICY, &a);
-        if r.value != i64::from(errno::EINVAL).wrapping_neg() {
-            serial_println!(
-                "[syscall/linux]   FAIL: get_mempolicy(maxnode over cap) -> {} (expected -EINVAL)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        serial_println!(
-            "[syscall/linux]   get_mempolicy faithful do_get_mempolicy/copy_nodes_to_user (batch 550): OK"
-        );
-    }
+    // NUMA tunable parser probe this at startup.  Extracted to
+    // self_test_get_mempolicy (TD4).
+    self_test_get_mempolicy()?;
 
     // (9f) Batch 102: set_mempolicy upgraded from -ENOSYS stub to a
     // real UMA-aware accept/reject decision.  Mirrors what libnuma's

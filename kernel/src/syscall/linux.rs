@@ -73147,6 +73147,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_sendto_recvfrom()?;
+
+    #[inline(never)]
+    fn self_test_sendto_recvfrom() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // Batch 436: sendto / recvfrom — fd lookup gates BETWEEN buf
     // and addr.  Linux's __sys_sendto / __sys_recvfrom in
     // net/socket.c run BUF → FD → ADDR (import_ubuf before
@@ -73281,6 +73286,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   sendto/recvfrom fd lookup ordered BETWEEN buf and addr (Linux: import_ubuf → sockfd_lookup_light → move_addr_to_kernel/user; bad fd with valid buf and bad addr → EBADF instead of EFAULT/EINVAL): OK"
         );
+    }
+        Ok(())
     }
 
     // Batch 437: sendmsg / recvmsg — fd lookup gates BEFORE msghdr

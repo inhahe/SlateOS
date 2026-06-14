@@ -40512,6 +40512,176 @@ fn self_test_get_mempolicy() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+/// TD4 extraction: set_mempolicy UMA-aware accept/reject (self_test group
+/// 9f). Exercises DEFAULT/PREFERRED/BIND/LOCAL/INTERLEAVE modes, empty-mask
+/// and node-existence validation, and the MPOL_F_STATIC_NODES mode flag —
+/// all self-contained. See [`self_test_errno_mapping`] for the TD4 rationale.
+#[inline(never)]
+fn self_test_set_mempolicy() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+
+    const MPOL_DEFAULT: u64 = 0;
+    const MPOL_PREFERRED: u64 = 1;
+    const MPOL_BIND: u64 = 2;
+    const MPOL_INTERLEAVE: u64 = 3;
+    const MPOL_LOCAL: u64 = 4;
+    const MPOL_F_STATIC_NODES: u64 = 1 << 15;
+
+    // Case 1: MPOL_DEFAULT with no mask -> 0.
+    let a = SyscallArgs {
+        arg0: MPOL_DEFAULT, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
+    if r.value != 0 {
+        serial_println!(
+            "[syscall/linux]   FAIL: set_mempolicy(DEFAULT,NULL,0) -> {} (expected 0)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 2: MPOL_PREFERRED with node-0 mask -> 0.
+    let mask: u64 = 0x1;
+    let a = SyscallArgs {
+        arg0: MPOL_PREFERRED,
+        arg1: (&raw const mask).addr() as u64,
+        arg2: 64,
+        arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
+    if r.value != 0 {
+        serial_println!(
+            "[syscall/linux]   FAIL: set_mempolicy(PREFERRED,{{0}},64) -> {} (expected 0)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 3: MPOL_BIND with node-0 mask -> 0.
+    let a = SyscallArgs {
+        arg0: MPOL_BIND,
+        arg1: (&raw const mask).addr() as u64,
+        arg2: 64,
+        arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
+    if r.value != 0 {
+        serial_println!(
+            "[syscall/linux]   FAIL: set_mempolicy(BIND,{{0}},64) -> {} (expected 0)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 4: MPOL_BIND with empty mask -> -EINVAL.
+    let a = SyscallArgs {
+        arg0: MPOL_BIND, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
+    if r.value != -i64::from(errno::EINVAL) {
+        serial_println!(
+            "[syscall/linux]   FAIL: set_mempolicy(BIND,NULL,0) -> {} (expected -EINVAL)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 5: MPOL_DEFAULT with node-0 mask -> -EINVAL (DEFAULT
+    // requires an empty mask).
+    let a = SyscallArgs {
+        arg0: MPOL_DEFAULT,
+        arg1: (&raw const mask).addr() as u64,
+        arg2: 64,
+        arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
+    if r.value != -i64::from(errno::EINVAL) {
+        serial_println!(
+            "[syscall/linux]   FAIL: set_mempolicy(DEFAULT,{{0}},64) -> {} (expected -EINVAL)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 6: bogus mode (> 5) -> -EINVAL.
+    let a = SyscallArgs {
+        arg0: 99, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
+    if r.value != -i64::from(errno::EINVAL) {
+        serial_println!(
+            "[syscall/linux]   FAIL: set_mempolicy(99,NULL,0) -> {} (expected -EINVAL)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 7: MPOL_BIND with bit 1 set (= node 1, which does not
+    // exist) -> -EINVAL.
+    let bad_mask: u64 = 0x2;
+    let a = SyscallArgs {
+        arg0: MPOL_BIND,
+        arg1: (&raw const bad_mask).addr() as u64,
+        arg2: 64,
+        arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
+    if r.value != -i64::from(errno::EINVAL) {
+        serial_println!(
+            "[syscall/linux]   FAIL: set_mempolicy(BIND,{{1}},64) -> {} (expected -EINVAL)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 8: MPOL_LOCAL with non-empty mask -> -EINVAL.
+    let a = SyscallArgs {
+        arg0: MPOL_LOCAL,
+        arg1: (&raw const mask).addr() as u64,
+        arg2: 64,
+        arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
+    if r.value != -i64::from(errno::EINVAL) {
+        serial_println!(
+            "[syscall/linux]   FAIL: set_mempolicy(LOCAL,{{0}},64) -> {} (expected -EINVAL)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 9: MPOL_LOCAL with empty mask -> 0.
+    let a = SyscallArgs {
+        arg0: MPOL_LOCAL, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
+    if r.value != 0 {
+        serial_println!(
+            "[syscall/linux]   FAIL: set_mempolicy(LOCAL,NULL,0) -> {} (expected 0)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 10: MPOL_INTERLEAVE with mode-flag MPOL_F_STATIC_NODES
+    // and node-0 mask -> 0 (mode flag is accepted on UMA).
+    let a = SyscallArgs {
+        arg0: MPOL_INTERLEAVE | MPOL_F_STATIC_NODES,
+        arg1: (&raw const mask).addr() as u64,
+        arg2: 64,
+        arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
+    if r.value != 0 {
+        serial_println!(
+            "[syscall/linux]   FAIL: set_mempolicy(INTERLEAVE|STATIC,{{0}},64) -> {} (expected 0)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+    Ok(())
+}
+
 pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
@@ -40605,167 +40775,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // (9f) Batch 102: set_mempolicy upgraded from -ENOSYS stub to a
     // real UMA-aware accept/reject decision.  Mirrors what libnuma's
     // numa_set_preferred / numa_set_bind_policy emit at startup.
-    {
-        const MPOL_DEFAULT: u64 = 0;
-        const MPOL_PREFERRED: u64 = 1;
-        const MPOL_BIND: u64 = 2;
-        const MPOL_INTERLEAVE: u64 = 3;
-        const MPOL_LOCAL: u64 = 4;
-        const MPOL_F_STATIC_NODES: u64 = 1 << 15;
-
-        // Case 1: MPOL_DEFAULT with no mask -> 0.
-        let a = SyscallArgs {
-            arg0: MPOL_DEFAULT, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
-        if r.value != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: set_mempolicy(DEFAULT,NULL,0) -> {} (expected 0)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 2: MPOL_PREFERRED with node-0 mask -> 0.
-        let mask: u64 = 0x1;
-        let a = SyscallArgs {
-            arg0: MPOL_PREFERRED,
-            arg1: (&raw const mask).addr() as u64,
-            arg2: 64,
-            arg3: 0, arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
-        if r.value != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: set_mempolicy(PREFERRED,{{0}},64) -> {} (expected 0)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 3: MPOL_BIND with node-0 mask -> 0.
-        let a = SyscallArgs {
-            arg0: MPOL_BIND,
-            arg1: (&raw const mask).addr() as u64,
-            arg2: 64,
-            arg3: 0, arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
-        if r.value != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: set_mempolicy(BIND,{{0}},64) -> {} (expected 0)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 4: MPOL_BIND with empty mask -> -EINVAL.
-        let a = SyscallArgs {
-            arg0: MPOL_BIND, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
-        if r.value != -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: set_mempolicy(BIND,NULL,0) -> {} (expected -EINVAL)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 5: MPOL_DEFAULT with node-0 mask -> -EINVAL (DEFAULT
-        // requires an empty mask).
-        let a = SyscallArgs {
-            arg0: MPOL_DEFAULT,
-            arg1: (&raw const mask).addr() as u64,
-            arg2: 64,
-            arg3: 0, arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
-        if r.value != -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: set_mempolicy(DEFAULT,{{0}},64) -> {} (expected -EINVAL)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 6: bogus mode (> 5) -> -EINVAL.
-        let a = SyscallArgs {
-            arg0: 99, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
-        if r.value != -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: set_mempolicy(99,NULL,0) -> {} (expected -EINVAL)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 7: MPOL_BIND with bit 1 set (= node 1, which does not
-        // exist) -> -EINVAL.
-        let bad_mask: u64 = 0x2;
-        let a = SyscallArgs {
-            arg0: MPOL_BIND,
-            arg1: (&raw const bad_mask).addr() as u64,
-            arg2: 64,
-            arg3: 0, arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
-        if r.value != -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: set_mempolicy(BIND,{{1}},64) -> {} (expected -EINVAL)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 8: MPOL_LOCAL with non-empty mask -> -EINVAL.
-        let a = SyscallArgs {
-            arg0: MPOL_LOCAL,
-            arg1: (&raw const mask).addr() as u64,
-            arg2: 64,
-            arg3: 0, arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
-        if r.value != -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: set_mempolicy(LOCAL,{{0}},64) -> {} (expected -EINVAL)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 9: MPOL_LOCAL with empty mask -> 0.
-        let a = SyscallArgs {
-            arg0: MPOL_LOCAL, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
-        if r.value != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: set_mempolicy(LOCAL,NULL,0) -> {} (expected 0)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 10: MPOL_INTERLEAVE with mode-flag MPOL_F_STATIC_NODES
-        // and node-0 mask -> 0 (mode flag is accepted on UMA).
-        let a = SyscallArgs {
-            arg0: MPOL_INTERLEAVE | MPOL_F_STATIC_NODES,
-            arg1: (&raw const mask).addr() as u64,
-            arg2: 64,
-            arg3: 0, arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
-        if r.value != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: set_mempolicy(INTERLEAVE|STATIC,{{0}},64) -> {} (expected 0)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-    }
+    // Extracted to self_test_set_mempolicy (TD4).
+    self_test_set_mempolicy()?;
 
     // (9g) Batch 103: mbind upgraded from -ENOSYS stub to UMA-aware
     // accept/reject decision.  Per-VMA equivalent of batch 102.

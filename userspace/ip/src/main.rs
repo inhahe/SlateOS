@@ -32,6 +32,13 @@ use std::process;
 
 const SYS_NET_IOCTL: u64 = 810;
 
+/// Read-only interface-info query syscall (`kernel/src/syscall/number.rs`,
+/// `SYS_NET_IF_INFO`). Returns a fixed 24-byte record describing the default
+/// network interface. This is the live read source: the kernel does not yet
+/// populate `/sys/class/net/`, `/proc/net/dev`, or `/proc/net/route`, so the
+/// show paths fall back to this syscall (TD18 read-path wiring).
+const SYS_NET_IF_INFO: u64 = 842;
+
 // IOCTL sub-commands for network configuration.
 const NET_IF_UP: u64 = 1;
 const NET_IF_DOWN: u64 = 2;
@@ -70,6 +77,143 @@ unsafe fn syscall4(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
 fn net_ioctl(cmd: u64, iface: &str, arg: u64) -> i64 {
     let name = format!("{iface}\0");
     unsafe { syscall4(SYS_NET_IOCTL, cmd, name.as_ptr() as u64, arg, 0) }
+}
+
+// ============================================================================
+// Kernel interface-info query (SYS_NET_IF_INFO, read-only)
+// ============================================================================
+
+/// Size of the `SYS_NET_IF_INFO` record (must match the kernel's `INFO_SIZE`).
+const NET_IF_INFO_SIZE: usize = 24;
+
+/// Decoded form of the kernel's 24-byte `SYS_NET_IF_INFO` record.
+///
+/// Layout (see `kernel/src/syscall/handlers.rs::sys_net_if_info`):
+/// `[0..4]` IPv4 address, `[4..8]` subnet mask, `[8..12]` gateway,
+/// `[12..16]` DNS server, `[16..22]` MAC, `[22]` up flag, `[23]` reserved.
+struct NetIfInfo {
+    ip: [u8; 4],
+    mask: [u8; 4],
+    gateway: [u8; 4],
+    mac: [u8; 6],
+    up: bool,
+}
+
+/// Decode a raw `SYS_NET_IF_INFO` record. Pure (no syscall) so it is unit-test
+/// friendly on the host.
+fn parse_net_if_info(rec: &[u8; NET_IF_INFO_SIZE]) -> NetIfInfo {
+    let mut ip = [0u8; 4];
+    ip.copy_from_slice(&rec[0..4]);
+    let mut mask = [0u8; 4];
+    mask.copy_from_slice(&rec[4..8]);
+    let mut gateway = [0u8; 4];
+    gateway.copy_from_slice(&rec[8..12]);
+    let mut mac = [0u8; 6];
+    mac.copy_from_slice(&rec[16..22]);
+    NetIfInfo {
+        ip,
+        mask,
+        gateway,
+        mac,
+        up: rec[22] != 0,
+    }
+}
+
+/// True if a 4-byte address is all zeros (i.e. unconfigured).
+fn is_zero4(addr: [u8; 4]) -> bool {
+    addr == [0, 0, 0, 0]
+}
+
+/// Format a 4-byte address as a dotted quad.
+fn fmt_ipv4(addr: [u8; 4]) -> String {
+    format!("{}.{}.{}.{}", addr[0], addr[1], addr[2], addr[3])
+}
+
+/// Format a 6-byte MAC address as colon-separated lowercase hex.
+fn fmt_mac(mac: [u8; 6]) -> String {
+    format!(
+        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+    )
+}
+
+/// Compute the directed broadcast address for an `ip`/`mask` pair:
+/// `(ip & mask) | !mask`.
+fn compute_broadcast(ip: [u8; 4], mask: [u8; 4]) -> [u8; 4] {
+    [
+        (ip[0] & mask[0]) | !mask[0],
+        (ip[1] & mask[1]) | !mask[1],
+        (ip[2] & mask[2]) | !mask[2],
+        (ip[3] & mask[3]) | !mask[3],
+    ]
+}
+
+/// Synthesize an [`InterfaceInfo`] for the default interface from a decoded
+/// kernel record. The kernel record carries no name or byte counters, so we use
+/// the conventional `eth0` name and leave the counters at zero rather than
+/// fabricating traffic statistics.
+fn interface_from_net_if_info(info: &NetIfInfo) -> InterfaceInfo {
+    let has_ip = !is_zero4(info.ip);
+    InterfaceInfo {
+        name: "eth0".to_string(),
+        state: if info.up { "up" } else { "down" }.to_string(),
+        mac: fmt_mac(info.mac),
+        mtu: 1500,
+        ip_addr: if has_ip { fmt_ipv4(info.ip) } else { String::new() },
+        netmask: if has_ip {
+            fmt_ipv4(info.mask)
+        } else {
+            String::new()
+        },
+        broadcast: if has_ip {
+            fmt_ipv4(compute_broadcast(info.ip, info.mask))
+        } else {
+            String::new()
+        },
+        rx_bytes: 0,
+        rx_packets: 0,
+        rx_errors: 0,
+        tx_bytes: 0,
+        tx_packets: 0,
+        tx_errors: 0,
+    }
+}
+
+/// Synthesize the default route from a decoded kernel record. Returns `None`
+/// when no gateway is configured (no default route to report).
+fn route_from_net_if_info(info: &NetIfInfo) -> Option<RouteEntry> {
+    if is_zero4(info.gateway) {
+        return None;
+    }
+    Some(RouteEntry {
+        destination: "0.0.0.0".to_string(),
+        gateway: fmt_ipv4(info.gateway),
+        mask: "0.0.0.0".to_string(),
+        iface: "eth0".to_string(),
+        metric: 0,
+        flags: String::new(),
+    })
+}
+
+/// Query the kernel for the default interface's configuration via
+/// `SYS_NET_IF_INFO`. Returns `None` if the syscall fails.
+fn query_net_if_info() -> Option<NetIfInfo> {
+    let mut buf = [0u8; NET_IF_INFO_SIZE];
+    // SAFETY: `buf` is exactly NET_IF_INFO_SIZE bytes, satisfying the kernel's
+    // minimum-length contract; the kernel writes at most that many bytes.
+    let ret = unsafe {
+        syscall4(
+            SYS_NET_IF_INFO,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+            0,
+            0,
+        )
+    };
+    if ret < 0 {
+        return None;
+    }
+    Some(parse_net_if_info(&buf))
 }
 
 // ============================================================================
@@ -192,6 +336,16 @@ fn read_interfaces() -> Vec<InterfaceInfo> {
             }
         }
 
+    // Last resort: query the kernel directly. The kernel does not yet populate
+    // /sys/class/net/ or /proc/net/dev, so without this the show paths would
+    // report no interfaces. SYS_NET_IF_INFO yields the default interface's live
+    // configuration (TD18 read-path wiring).
+    if interfaces.is_empty()
+        && let Some(info) = query_net_if_info()
+    {
+        interfaces.push(interface_from_net_if_info(&info));
+    }
+
     interfaces.sort_by(|a, b| a.name.cmp(&b.name));
     interfaces
 }
@@ -292,6 +446,16 @@ fn read_routes() -> Vec<RouteEntry> {
                 }
             }
         }
+
+    // Last resort: synthesize the default route from the kernel's interface
+    // record. /proc/net/route(s) are not populated, so this is the only live
+    // source for the default gateway (TD18 read-path wiring).
+    if routes.is_empty()
+        && let Some(info) = query_net_if_info()
+        && let Some(route) = route_from_net_if_info(&info)
+    {
+        routes.push(route);
+    }
 
     routes
 }
@@ -786,5 +950,139 @@ fn main() {
             eprintln!("Run 'ip help' for usage.");
             process::exit(1);
         }
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_net_if_info_full() {
+        // 10.0.2.15 / 255.255.255.0, gw 10.0.2.2, mac 52:54:00:12:34:56, up.
+        let rec: [u8; NET_IF_INFO_SIZE] = [
+            10, 0, 2, 15, // ip
+            255, 255, 255, 0, // mask
+            10, 0, 2, 2, // gateway
+            10, 0, 2, 3, // dns
+            0x52, 0x54, 0x00, 0x12, 0x34, 0x56, // mac
+            1,    // up
+            0,    // reserved
+        ];
+        let info = parse_net_if_info(&rec);
+        assert_eq!(info.ip, [10, 0, 2, 15]);
+        assert_eq!(info.mask, [255, 255, 255, 0]);
+        assert_eq!(info.gateway, [10, 0, 2, 2]);
+        assert_eq!(info.mac, [0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
+        assert!(info.up);
+    }
+
+    #[test]
+    fn test_parse_net_if_info_down_unconfigured() {
+        let rec = [0u8; NET_IF_INFO_SIZE];
+        let info = parse_net_if_info(&rec);
+        assert!(is_zero4(info.ip));
+        assert!(is_zero4(info.gateway));
+        assert!(!info.up);
+    }
+
+    #[test]
+    fn test_fmt_ipv4() {
+        assert_eq!(fmt_ipv4([10, 0, 2, 15]), "10.0.2.15");
+        assert_eq!(fmt_ipv4([0, 0, 0, 0]), "0.0.0.0");
+        assert_eq!(fmt_ipv4([255, 255, 255, 255]), "255.255.255.255");
+    }
+
+    #[test]
+    fn test_fmt_mac() {
+        assert_eq!(
+            fmt_mac([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]),
+            "52:54:00:12:34:56"
+        );
+        assert_eq!(fmt_mac([0, 0, 0, 0, 0, 0]), "00:00:00:00:00:00");
+    }
+
+    #[test]
+    fn test_is_zero4() {
+        assert!(is_zero4([0, 0, 0, 0]));
+        assert!(!is_zero4([0, 0, 0, 1]));
+    }
+
+    #[test]
+    fn test_compute_broadcast() {
+        assert_eq!(
+            compute_broadcast([10, 0, 2, 15], [255, 255, 255, 0]),
+            [10, 0, 2, 255]
+        );
+        assert_eq!(
+            compute_broadcast([192, 168, 5, 7], [255, 255, 0, 0]),
+            [192, 168, 255, 255]
+        );
+    }
+
+    #[test]
+    fn test_interface_from_net_if_info_up() {
+        let info = NetIfInfo {
+            ip: [10, 0, 2, 15],
+            mask: [255, 255, 255, 0],
+            gateway: [10, 0, 2, 2],
+            mac: [0x52, 0x54, 0x00, 0x12, 0x34, 0x56],
+            up: true,
+        };
+        let iface = interface_from_net_if_info(&info);
+        assert_eq!(iface.name, "eth0");
+        assert_eq!(iface.state, "up");
+        assert_eq!(iface.ip_addr, "10.0.2.15");
+        assert_eq!(iface.netmask, "255.255.255.0");
+        assert_eq!(iface.broadcast, "10.0.2.255");
+        assert_eq!(iface.mac, "52:54:00:12:34:56");
+    }
+
+    #[test]
+    fn test_interface_from_net_if_info_down_unconfigured() {
+        let info = NetIfInfo {
+            ip: [0, 0, 0, 0],
+            mask: [0, 0, 0, 0],
+            gateway: [0, 0, 0, 0],
+            mac: [0, 0, 0, 0, 0, 0],
+            up: false,
+        };
+        let iface = interface_from_net_if_info(&info);
+        assert_eq!(iface.state, "down");
+        assert!(iface.ip_addr.is_empty());
+        assert!(iface.netmask.is_empty());
+        assert!(iface.broadcast.is_empty());
+    }
+
+    #[test]
+    fn test_route_from_net_if_info_with_gateway() {
+        let info = NetIfInfo {
+            ip: [10, 0, 2, 15],
+            mask: [255, 255, 255, 0],
+            gateway: [10, 0, 2, 2],
+            mac: [0, 0, 0, 0, 0, 0],
+            up: true,
+        };
+        let route = route_from_net_if_info(&info).expect("default route");
+        assert_eq!(route.destination, "0.0.0.0");
+        assert_eq!(route.gateway, "10.0.2.2");
+        assert_eq!(route.mask, "0.0.0.0");
+        assert_eq!(route.iface, "eth0");
+    }
+
+    #[test]
+    fn test_route_from_net_if_info_no_gateway() {
+        let info = NetIfInfo {
+            ip: [10, 0, 2, 15],
+            mask: [255, 255, 255, 0],
+            gateway: [0, 0, 0, 0],
+            mac: [0, 0, 0, 0, 0, 0],
+            up: true,
+        };
+        assert!(route_from_net_if_info(&info).is_none());
     }
 }

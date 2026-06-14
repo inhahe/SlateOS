@@ -26,6 +26,16 @@ use std::process;
 
 const SYS_NET_IOCTL: u64 = 810;
 
+/// Read-only interface-info query syscall (`kernel/src/syscall/number.rs`,
+/// `SYS_NET_IF_INFO`). Returns a fixed 24-byte record describing the default
+/// network interface. The kernel does not populate `/proc/net/route`,
+/// `/sys/net/routes`, or `/proc/net/if_inet`, so the routing table is
+/// synthesized from this syscall (TD18 read-path wiring).
+const SYS_NET_IF_INFO: u64 = 842;
+
+/// Size of the `SYS_NET_IF_INFO` record (must match the kernel's `INFO_SIZE`).
+const NET_IF_INFO_SIZE: usize = 24;
+
 // Route ioctl sub-commands.
 const ROUTE_ADD: u64 = 10;
 const ROUTE_DEL: u64 = 11;
@@ -185,6 +195,78 @@ fn flags_to_string(flags: u16) -> String {
 }
 
 // ============================================================================
+// Kernel interface-info query (SYS_NET_IF_INFO, read-only)
+// ============================================================================
+
+/// Decoded subset of the kernel's 24-byte `SYS_NET_IF_INFO` record needed to
+/// synthesize the routing table.
+///
+/// Layout (see `kernel/src/syscall/handlers.rs::sys_net_if_info`):
+/// `[0..4]` IPv4 address, `[4..8]` subnet mask, `[8..12]` gateway.
+/// Addresses are stored big-endian as host `u32` to match the rest of this
+/// tool's representation.
+struct NetIfInfo {
+    ip: u32,
+    mask: u32,
+    gateway: u32,
+}
+
+/// Decode a raw `SYS_NET_IF_INFO` record. Pure (no syscall) so it is unit-test
+/// friendly on the host.
+fn parse_net_if_info(rec: &[u8; NET_IF_INFO_SIZE]) -> NetIfInfo {
+    NetIfInfo {
+        ip: u32::from_be_bytes([rec[0], rec[1], rec[2], rec[3]]),
+        mask: u32::from_be_bytes([rec[4], rec[5], rec[6], rec[7]]),
+        gateway: u32::from_be_bytes([rec[8], rec[9], rec[10], rec[11]]),
+    }
+}
+
+/// Synthesize routing-table entries from a decoded interface record: the
+/// directly-connected network route (if an IP/mask is configured) and the
+/// default route via the gateway (if one is configured).
+fn synth_routes_from_net_if_info(info: &NetIfInfo) -> Vec<RouteEntry> {
+    let mut routes = Vec::new();
+    if info.ip != 0 && info.mask != 0 {
+        routes.push(RouteEntry {
+            destination: info.ip & info.mask,
+            gateway: 0,
+            genmask: info.mask,
+            flags: RTF_UP,
+            metric: 0,
+            refcnt: 0,
+            use_count: 0,
+            iface: "eth0".to_string(),
+        });
+    }
+    if info.gateway != 0 {
+        routes.push(RouteEntry {
+            destination: 0,
+            gateway: info.gateway,
+            genmask: 0,
+            flags: RTF_UP | RTF_GATEWAY,
+            metric: 0,
+            refcnt: 0,
+            use_count: 0,
+            iface: "eth0".to_string(),
+        });
+    }
+    routes
+}
+
+/// Query the kernel for the default interface's configuration via
+/// `SYS_NET_IF_INFO`. Returns `None` if the syscall fails.
+fn query_net_if_info() -> Option<NetIfInfo> {
+    let mut buf = [0u8; NET_IF_INFO_SIZE];
+    // SAFETY: `buf` is exactly NET_IF_INFO_SIZE bytes, satisfying the kernel's
+    // minimum-length contract; the kernel writes at most that many bytes.
+    let ret = unsafe { syscall3(SYS_NET_IF_INFO, buf.as_mut_ptr() as u64, buf.len() as u64, 0) };
+    if ret < 0 {
+        return None;
+    }
+    Some(parse_net_if_info(&buf))
+}
+
+// ============================================================================
 // Read routing table
 // ============================================================================
 
@@ -302,6 +384,16 @@ fn read_routes() -> Vec<RouteEntry> {
                 }
             }
         }
+    }
+
+    // Final fallback: synthesize routes from the kernel's interface record.
+    // /proc/net/route(s) and /proc/net/if_inet are not populated, so this
+    // syscall is the only live source for the connected and default routes
+    // (TD18 read-path wiring).
+    if routes.is_empty()
+        && let Some(info) = query_net_if_info()
+    {
+        routes.extend(synth_routes_from_net_if_info(&info));
     }
 
     routes
@@ -792,5 +884,69 @@ mod tests {
         assert_eq!(flags_to_string(RTF_UP | RTF_GATEWAY | RTF_HOST), "UGH");
         assert_eq!(flags_to_string(RTF_REJECT), "!");
         assert_eq!(flags_to_string(0), "-");
+    }
+
+    // --- SYS_NET_IF_INFO record decoding + route synthesis ---
+
+    #[test]
+    fn test_parse_net_if_info() {
+        // 10.0.2.15 / 255.255.255.0, gateway 10.0.2.2.
+        let rec: [u8; NET_IF_INFO_SIZE] = [
+            10, 0, 2, 15, // ip
+            255, 255, 255, 0, // mask
+            10, 0, 2, 2, // gateway
+            10, 0, 2, 3, // dns
+            0x52, 0x54, 0x00, 0x12, 0x34, 0x56, // mac
+            1,    // up
+            0,    // reserved
+        ];
+        let info = parse_net_if_info(&rec);
+        assert_eq!(info.ip, 0x0A00020F);
+        assert_eq!(info.mask, 0xFFFFFF00);
+        assert_eq!(info.gateway, 0x0A000202);
+    }
+
+    #[test]
+    fn test_synth_routes_connected_and_default() {
+        let info = NetIfInfo {
+            ip: 0x0A00020F,     // 10.0.2.15
+            mask: 0xFFFFFF00,   // /24
+            gateway: 0x0A000202, // 10.0.2.2
+        };
+        let routes = synth_routes_from_net_if_info(&info);
+        assert_eq!(routes.len(), 2);
+        // Connected network route 10.0.2.0/24, no gateway.
+        assert_eq!(routes[0].destination, 0x0A000200);
+        assert_eq!(routes[0].genmask, 0xFFFFFF00);
+        assert_eq!(routes[0].gateway, 0);
+        assert_eq!(routes[0].flags, RTF_UP);
+        // Default route via 10.0.2.2.
+        assert_eq!(routes[1].destination, 0);
+        assert_eq!(routes[1].genmask, 0);
+        assert_eq!(routes[1].gateway, 0x0A000202);
+        assert_eq!(routes[1].flags, RTF_UP | RTF_GATEWAY);
+    }
+
+    #[test]
+    fn test_synth_routes_no_gateway() {
+        let info = NetIfInfo {
+            ip: 0x0A00020F,
+            mask: 0xFFFFFF00,
+            gateway: 0,
+        };
+        let routes = synth_routes_from_net_if_info(&info);
+        // Only the connected route; no default route without a gateway.
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].gateway, 0);
+    }
+
+    #[test]
+    fn test_synth_routes_unconfigured() {
+        let info = NetIfInfo {
+            ip: 0,
+            mask: 0,
+            gateway: 0,
+        };
+        assert!(synth_routes_from_net_if_info(&info).is_empty());
     }
 }

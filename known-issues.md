@@ -735,8 +735,8 @@ client-side number correction:
 **Impact:** these specific tools are non-functional (no-op at best). They are not
 on any critical path, so nothing currently blocks on them.
 
-**Read-path wiring — IN PROGRESS 2026-06-14.** The decision-free near-term win
-below is being applied incrementally:
+**Read-path wiring — DONE 2026-06-14.** The decision-free near-term win below
+has been applied to all three read-path tools (`ifconfig`, `ip`, `route`):
 - **`ifconfig` (no-args / `-a` / `-s` / `ifconfig <iface>`) — DONE 2026-06-14.**
   Display mode previously read `/sys/class/net/` and `/proc/net/dev`, neither of
   which the kernel populates (sysfs only serves `kernel`/`params`/`devices`;
@@ -750,17 +750,28 @@ below is being applied incrementally:
   ifconfig` 32 pass). The **write** paths (`up`/`down`/`set ip`/…) still issue
   the non-existent `SYS_NET_IOCTL` and remain no-ops (unchanged — that half
   needs the operator ABI decision below).
-- **`ip addr show`, `route -n` — still TODO** (same `SYS_NET_IF_INFO` wiring).
+- **`ip` (`ip addr show`, `ip link`, `ip route`, `ip stats`) — DONE 2026-06-14.**
+  Same dead read paths (`/sys/class/net/`, `/proc/net/dev`, `/proc/net/route`).
+  `read_interfaces` now falls back to `SYS_NET_IF_INFO` to synthesize the `eth0`
+  interface, and `read_routes` synthesizes the default route from the record's
+  gateway field. 10 new host tests (`cargo test -p ip`: 10 pass). Write paths
+  (`ip link set`, `ip addr add/del`, `ip route add/del`) unchanged — still
+  no-ops via `SYS_NET_IOCTL`.
+- **`route` (`route`, `route -n`, `route -v`) — DONE 2026-06-14.** Its
+  `/proc/net/route`, `/sys/net/routes`, and `/proc/net/if_inet` sources are all
+  unpopulated; `read_routes` now synthesizes the connected network route and the
+  default route from `SYS_NET_IF_INFO`. 4 new host tests (`cargo test -p route`:
+  10 pass). Write paths (`route add/del/flush`) unchanged.
 
 **Proper fix:** this is an **operator design decision**, not a mechanical fix —
 the kernel must first grow the missing ABI, and the *shape* of that ABI is a
 fork: a native net-config syscall family vs. a network-manager IPC daemon for
 the net tools; a real mount/umount + fs-admin (format/verify/repair) syscall set;
-and a process-credential + fs-root ABI for chroot. A partial near-term win that
-needs no decision: wire the net tools' **read** paths (`ifconfig` no-args — DONE;
-`ip addr show`, `route -n` — TODO) to `NET_IF_INFO=842`. Trigger to revisit: when
-the matching kernel syscalls land (track via roadmap net-config / mount / fs-admin
-tasks). Related: `sys_clock_settime`/`sys_clock_adjtime` now enforce
+and a process-credential + fs-root ABI for chroot. The partial near-term win
+that needed no decision — wiring the net tools' **read** paths (`ifconfig`, `ip`,
+`route`) to `NET_IF_INFO=842` — is now DONE (see above); only the **write** paths
+remain blocked on the ABI fork. Trigger to revisit: when the matching kernel
+syscalls land (track via roadmap net-config / mount / fs-admin tasks). Related: `sys_clock_settime`/`sys_clock_adjtime` now enforce
 `require_clock_authority()` keyed on `uid==0`; revisit to key off a real
 per-process `CAP_SYS_TIME` bit when the PCB gains a POSIX capability set (today
 `ProcessCredentials` is only uid/gid/groups).

@@ -1171,7 +1171,22 @@ verification before changing the stored errno.
 against v6.6, then store `-ENODEV` for out-of-range / no-memory nodes and
 `-EACCES` for valid-but-disallowed nodes, and update Case 4's expectation.
 
-### TD4. Monolithic `syscall::linux::self_test()` has an unbounded boot-stack frame — OPEN 2026-06-12
+### TD4. Monolithic `syscall::linux::self_test()` has an unbounded boot-stack frame — IN PROGRESS 2026-06-13
+
+**Progress (2026-06-13):** Began the incremental `#[inline(never)]` split. The
+two leading self-contained check groups were extracted into standalone
+functions — `self_test_errno_mapping()` (errno round-trips + the `check_errno!`
+macro, used nowhere else) and `self_test_native_translation()` (the
+`linux_from_native` round-trips). Both are guaranteed behaviour-preserving:
+their locals never escape the extracted region. `self_test()` now calls them
+via `?`. This establishes the repeatable extraction pattern (cut a contiguous
+region whose locals don't cross the boundary, lift to an `#[inline(never)] fn
+… -> KernelResult<()>`, replace inline with a `?` call, build+boot-test).
+Continue opportunistically: the safe cut points are regions that don't share a
+reused local (e.g. the early checks share `args`/`r`, so a larger contiguous
+run ending at the last use of those must be lifted as one unit). Remaining
+work is the bulk of the ~40 k-line body.
+
 
 **What:** `kernel/src/syscall/linux.rs::self_test()` is a single ~1.4 MB
 function (~39 k lines, opens near line 35858, closes near line 75298) whose

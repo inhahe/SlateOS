@@ -39434,12 +39434,18 @@ pub fn self_test_file_mmap() -> crate::error::KernelResult<()> {
 ///
 /// Returns `Ok(())` on success or panics with a diagnostic on the
 /// first failure (matching the dispatch self-test convention).
-pub fn self_test() -> crate::error::KernelResult<()> {
+/// TD4 extraction: errno-mapping round-trips (self_test check group 1).
+///
+/// Split out of [`self_test`] as part of TD4 (capping the monolithic
+/// self-test's boot-stack frame). This group is fully self-contained: the
+/// `check_errno!` macro and its locals never escape, so extraction is
+/// behaviour-preserving. Marked `#[inline(never)]` so its frame is allocated
+/// and freed around the call rather than summed into the caller's frame at
+/// `opt-level=0`.
+#[inline(never)]
+fn self_test_errno_mapping() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
-    serial_println!("[syscall/linux] Running translation self-test...");
-
-    // (1) errno mapping round-trips for every variant in the table.
     macro_rules! check_errno {
         ($variant:ident, $expected:expr) => {{
             let mapped = linux_errno_for(KernelError::$variant);
@@ -39468,6 +39474,15 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     check_errno!(IsADirectory, errno::EISDIR);
     check_errno!(InvalidHandle, errno::EBADF);
     check_errno!(TooManyOpenFiles, errno::EMFILE);
+    Ok(())
+}
+
+/// TD4 extraction: `linux_from_native` translation round-trips (self_test
+/// check groups 2 and 3). Self-contained: all locals are consumed within.
+/// See [`self_test_errno_mapping`] for the TD4 rationale.
+#[inline(never)]
+fn self_test_native_translation() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
 
     // (2) linux_from_native: a native error encoding (signed kernel code
     //     in `value`) gets remapped to -errno on the way out.
@@ -39488,6 +39503,19 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!("[syscall/linux]   FAIL: success passthrough");
         return Err(KernelError::InternalError);
     }
+    Ok(())
+}
+
+pub fn self_test() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+
+    serial_println!("[syscall/linux] Running translation self-test...");
+
+    // (1) errno mapping round-trips for every variant in the table.
+    self_test_errno_mapping()?;
+
+    // (2)-(3) native↔Linux result translation round-trips.
+    self_test_native_translation()?;
 
     // (4) Unknown Linux numbers return -ENOSYS through dispatch_linux.
     let args = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };

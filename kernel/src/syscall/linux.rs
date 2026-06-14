@@ -56758,6 +56758,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_statx()?;
+
+    #[inline(never)]
+    fn self_test_statx() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // statx — input validation and AT_EMPTY_PATH success.
     {
         // Bogus flag bit -> EINVAL.
@@ -56974,6 +56979,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
 
         serial_println!("[syscall/linux]   statx int flags truncation: OK");
+    }
+        Ok(())
     }
 
     // mkdir / mkdirat / rmdir / unlink / unlinkat / rename family —

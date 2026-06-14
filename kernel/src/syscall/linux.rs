@@ -71117,6 +71117,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_bsd_socket_family()?;
+
+    #[inline(never)]
+    fn self_test_bsd_socket_family() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // -----------------------------------------------------------------
     // BSD-socket family
     // -----------------------------------------------------------------
@@ -71472,6 +71477,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: shutdown valid not EBADF");
             return Err(KernelError::InternalError);
         }
+    }
+        Ok(())
     }
 
     // -----------------------------------------------------------------

@@ -68,6 +68,7 @@
 //! before the lock is taken), so it never participates in a lock-ordering cycle.
 
 use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
@@ -227,6 +228,17 @@ struct TimerFd {
     /// blocked-forever case depends on this slot, and concurrent blocking
     /// readers on one shared timerfd are vanishingly rare.
     reader_waiter: Option<TaskId>,
+    /// Whether this timer was armed with `TFD_TIMER_CANCEL_ON_SET` (only
+    /// honoured for an absolute `CLOCK_REALTIME` timer — see [`settime`]).
+    /// While true, a discontinuous step of the realtime clock cancels the
+    /// next read with `ECANCELED`.  Cleared whenever the timer is re-armed
+    /// without the flag, or disarmed.
+    cancel_on_set: bool,
+    /// Snapshot of [`crate::timekeeping::realtime_generation`] captured when
+    /// the timer was armed with `cancel_on_set`.  A read/poll observing a
+    /// newer generation means the realtime clock was stepped since arming,
+    /// so the timer is "cancelled".
+    armed_gen: u64,
 }
 
 impl TimerFd {
@@ -237,6 +249,8 @@ impl TimerFd {
             interval_ns: 0,
             refcount: 1,
             reader_waiter: None,
+            cancel_on_set: false,
+            armed_gen: 0,
         }
     }
 }
@@ -331,6 +345,12 @@ pub fn clockid(handle: TimerFdHandle) -> Option<i32> {
 /// the interval that was in effect — exactly what Linux writes back through the
 /// `old_value` pointer.
 ///
+/// `cancel_on_set` requests `TFD_TIMER_CANCEL_ON_SET` semantics.  The caller
+/// must already have validated the Linux preconditions (only honoured for an
+/// **absolute** `CLOCK_REALTIME` timer); when those hold and the timer is being
+/// armed, a subsequent discontinuous step of the realtime clock cancels the
+/// next read with `ECANCELED`.
+///
 /// # Errors
 ///
 /// [`KernelError::InvalidHandle`] if `handle` is not a live instance.
@@ -339,11 +359,16 @@ pub fn settime(
     abstime: bool,
     value_ns: u64,
     interval_ns: u64,
+    cancel_on_set: bool,
 ) -> KernelResult<(u64, u64)> {
     // Read the clock *before* taking the lock (leaf-lock discipline: no foreign
     // calls while holding TIMERFD_TABLE).
     let cid = clockid(handle).ok_or(KernelError::InvalidHandle)?;
     let now = now_for_clock(cid);
+    // Snapshot the realtime-clock-step generation before the lock (same leaf-
+    // lock discipline): an armed cancel-on-set timer remembers it to detect a
+    // later step.
+    let gen_now = crate::timekeeping::realtime_generation();
 
     let waiter;
     let old;
@@ -361,9 +386,10 @@ pub fn settime(
         if value_ns == 0 {
             // Disarm.  Record the interval (harmless while disarmed) to match
             // Linux, which keeps it_interval in the ctx even when it_value is
-            // zeroed.
+            // zeroed.  A disarmed timer cannot be cancelled.
             tfd.expiry_ns = 0;
             tfd.interval_ns = interval_ns;
+            tfd.cancel_on_set = false;
         } else {
             tfd.expiry_ns = if abstime {
                 value_ns
@@ -371,6 +397,11 @@ pub fn settime(
                 now.saturating_add(value_ns)
             };
             tfd.interval_ns = interval_ns;
+            // Re-arming resets the cancel-on-set state: honour the flag only
+            // when set on this call, snapshotting the current generation so a
+            // step *after* this arm (not a step that predated it) cancels.
+            tfd.cancel_on_set = cancel_on_set;
+            tfd.armed_gen = gen_now;
         }
 
         // Re-arming changes the deadline a blocked reader is waiting on; wake it
@@ -385,6 +416,57 @@ pub fn settime(
     }
 
     Ok(old)
+}
+
+/// If this timerfd was armed with `TFD_TIMER_CANCEL_ON_SET` and the realtime
+/// clock has been discontinuously stepped since it was armed, consume and
+/// report the cancellation, returning `true`.  Reporting resyncs the armed
+/// generation to the current one, so a single clock step is reported exactly
+/// once (the timer otherwise stays armed at its absolute expiry, now
+/// interpreted against the new clock — matching Linux's `ECANCELED`-then-
+/// resume behaviour).  Returns `false` for a timer without the flag, a timer
+/// armed after the most recent step, or a stale handle.
+#[must_use]
+pub fn take_cancellation(handle: TimerFdHandle) -> bool {
+    // Leaf-lock discipline: read the generation before taking the lock.
+    let gen_now = crate::timekeeping::realtime_generation();
+    let mut table = TIMERFD_TABLE.lock();
+    match table.get_mut(&handle.id()) {
+        Some(tfd) if tfd.cancel_on_set && tfd.armed_gen != gen_now => {
+            tfd.armed_gen = gen_now;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Notify timerfd that the realtime clock was discontinuously stepped
+/// (`clock_settime`/`settimeofday`/`ADJ_SETOFFSET`).  Wakes any reader parked
+/// in a blocking `read()` on a `TFD_TIMER_CANCEL_ON_SET` timer so it can
+/// re-check and return `ECANCELED` promptly instead of sleeping until the
+/// timer's absolute expiry.  Poll/epoll readiness is level-triggered
+/// ([`is_readable`] consults the generation directly), so pollers need no
+/// explicit wake here.
+///
+/// Called from the `clock_settime` / `clock_adjtime` syscall handlers *after*
+/// the step (and thus the generation bump) has been applied.
+pub fn clock_was_set() {
+    let gen_now = crate::timekeeping::realtime_generation();
+    let mut waiters: Vec<TaskId> = Vec::new();
+    {
+        let mut table = TIMERFD_TABLE.lock();
+        for tfd in table.values_mut() {
+            if tfd.cancel_on_set && tfd.armed_gen != gen_now {
+                if let Some(tid) = tfd.reader_waiter.take() {
+                    waiters.push(tid);
+                }
+            }
+        }
+    }
+    // Wake outside the table lock (leaf-lock discipline).
+    for tid in waiters {
+        sched::wake(tid);
+    }
 }
 
 /// Query a timerfd without consuming expirations: `(it_value, it_interval)`.
@@ -433,6 +515,17 @@ fn timerfd_wake(tid: u64) {
     }
 }
 
+/// Outcome of a blocking timerfd read ([`read_expirations_blocking`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockingRead {
+    /// `n` (> 0) expirations are ready to deliver to the reader.
+    Expirations(u64),
+    /// The timer was armed with `TFD_TIMER_CANCEL_ON_SET` and the realtime
+    /// clock was stepped while the reader waited (or before it entered the
+    /// read): the read must return `ECANCELED`.
+    Cancelled,
+}
+
 /// Blocking variant of [`read_expirations`]: park the caller until at least one
 /// expiration is pending, then consume and return the count (always `> 0`).
 ///
@@ -446,15 +539,21 @@ fn timerfd_wake(tid: u64) {
 /// exactly as Linux blocks an unarmed-timerfd reader until it is armed and
 /// fires.
 ///
+/// A `TFD_TIMER_CANCEL_ON_SET` timer cancelled by a realtime-clock step
+/// returns `Ok(BlockingRead::Cancelled)` (the syscall layer maps this to
+/// `ECANCELED`); the reader is woken promptly by [`clock_was_set`] rather than
+/// sleeping until the absolute expiry.
+///
 /// # Errors
 ///
 /// [`KernelError::InvalidHandle`] if the handle becomes stale (e.g. the last
 /// reference is closed) while blocked.
-pub fn read_expirations_blocking(handle: TimerFdHandle) -> KernelResult<u64> {
+pub fn read_expirations_blocking(handle: TimerFdHandle) -> KernelResult<BlockingRead> {
     loop {
         // Read the clock before taking the lock (leaf-lock discipline).
         let cid = clockid(handle).ok_or(KernelError::InvalidHandle)?;
         let now = now_for_clock(cid);
+        let gen_now = crate::timekeeping::realtime_generation();
 
         // Relative ns to the next expiry to arm a wakeup for; `None` = disarmed
         // (block until `settime` wakes us).
@@ -465,12 +564,21 @@ pub fn read_expirations_blocking(handle: TimerFdHandle) -> KernelResult<u64> {
                 .get_mut(&handle.id())
                 .ok_or(KernelError::InvalidHandle)?;
 
+            // Cancellation takes priority over an ordinary expiration: a
+            // CANCEL_ON_SET timer whose generation is stale must report
+            // ECANCELED.  Resync the generation so the cancel is reported once.
+            if tfd.cancel_on_set && tfd.armed_gen != gen_now {
+                tfd.armed_gen = gen_now;
+                tfd.reader_waiter = None;
+                return Ok(BlockingRead::Cancelled);
+            }
+
             let (count, new_expiry) = advance(tfd.expiry_ns, tfd.interval_ns, now);
             if count > 0 {
                 tfd.expiry_ns = new_expiry;
                 // We are returning, not parking — clear any stale registration.
                 tfd.reader_waiter = None;
-                return Ok(count);
+                return Ok(BlockingRead::Expirations(count));
             }
 
             // Not yet due — register as the parked reader and capture the
@@ -501,10 +609,13 @@ pub fn read_expirations_blocking(handle: TimerFdHandle) -> KernelResult<u64> {
     }
 }
 
-/// Is the timerfd readable right now (at least one expiration pending)?
+/// Is the timerfd readable right now?
 ///
-/// Non-consuming — used by the `poll`/`select`/`epoll` readiness engine.
-/// `false` for a stale handle.
+/// Readable when at least one expiration is pending, **or** when a
+/// `TFD_TIMER_CANCEL_ON_SET` timer has been cancelled by a realtime-clock
+/// step (in which case the read returns `ECANCELED`, which Linux signals as
+/// `POLLIN` readiness, not `POLLERR`).  Non-consuming — used by the
+/// `poll`/`select`/`epoll` readiness engine.  `false` for a stale handle.
 #[must_use]
 pub fn is_readable(handle: TimerFdHandle) -> bool {
     let cid = match clockid(handle) {
@@ -512,9 +623,14 @@ pub fn is_readable(handle: TimerFdHandle) -> bool {
         None => return false,
     };
     let now = now_for_clock(cid);
+    let gen_now = crate::timekeeping::realtime_generation();
     let table = TIMERFD_TABLE.lock();
     match table.get(&handle.id()) {
-        Some(tfd) => tfd.expiry_ns != 0 && now >= tfd.expiry_ns,
+        Some(tfd) => {
+            let expired = tfd.expiry_ns != 0 && now >= tfd.expiry_ns;
+            let cancelled = tfd.cancel_on_set && tfd.armed_gen != gen_now;
+            expired || cancelled
+        }
         None => false,
     }
 }
@@ -611,7 +727,7 @@ pub fn self_test() -> KernelResult<()> {
 
     // Arm a one-shot far in the future (relative); old value should be (0, 0).
     let far = 1_000_000_000_000u64; // ~1000s out — won't fire during the test.
-    match settime(t, false, far, 0) {
+    match settime(t, false, far, 0, false) {
         Ok((0, 0)) => {}
         other => {
             serial_println!("[timerfd]   FAIL: settime(arm) old != (0,0): {:?}", other);
@@ -641,7 +757,7 @@ pub fn self_test() -> KernelResult<()> {
     }
 
     // Re-arm with an absolute expiry in the past -> immediately readable.
-    match settime(t, true, 1, 0) {
+    match settime(t, true, 1, 0, false) {
         Ok((old, 0)) if old <= far => {}
         other => {
             serial_println!("[timerfd]   FAIL: settime(abs-past) old wrong: {:?}", other);
@@ -672,14 +788,14 @@ pub fn self_test() -> KernelResult<()> {
     // parking path is exercised only by real userspace (a blocked reader needs
     // another runnable task to wake it) and is verified by construction against
     // the battle-tested sched/hrtimer primitives it reuses.
-    settime(t, true, 1, 0)?; // abs expiry in the past → immediately pending.
+    settime(t, true, 1, 0, false)?; // abs expiry in the past → immediately pending.
     if !is_readable(t) {
         serial_println!("[timerfd]   FAIL: re-armed past one-shot not readable");
         close(t);
         return Err(KernelError::InternalError);
     }
     match read_expirations_blocking(t) {
-        Ok(1) => {}
+        Ok(BlockingRead::Expirations(1)) => {}
         other => {
             serial_println!("[timerfd]   FAIL: blocking read fast path = {:?}", other);
             close(t);
@@ -702,7 +818,7 @@ pub fn self_test() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     // Arm through t2 (abs past) — visible through t.
-    settime(t2, true, 1, 0)?;
+    settime(t2, true, 1, 0, false)?;
     if !is_readable(t) {
         serial_println!("[timerfd]   FAIL: armed state not shared across dup");
         close(t);
@@ -743,7 +859,7 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[timerfd]   FAIL: clockid on stale handle not None");
         return Err(KernelError::InternalError);
     }
-    if settime(t, false, 1, 0).err() != Some(KernelError::InvalidHandle) {
+    if settime(t, false, 1, 0, false).err() != Some(KernelError::InvalidHandle) {
         serial_println!("[timerfd]   FAIL: settime on stale handle not InvalidHandle");
         return Err(KernelError::InternalError);
     }
@@ -754,6 +870,50 @@ pub fn self_test() -> KernelResult<()> {
     // close() on a stale handle must be a harmless no-op.
     close(t);
 
+    // 6. TFD_TIMER_CANCEL_ON_SET (TD15): an absolute CLOCK_REALTIME timer armed
+    // with cancel_on_set is "cancelled" when the realtime clock is stepped
+    // discontinuously.  We simulate a step with `adjust_realtime(0)`, which bumps
+    // the realtime-clock-step generation without actually moving the clock value.
+    let tc = create(CLOCK_REALTIME);
+    // Arm far in the future (absolute) so it does NOT expire on its own; the only
+    // readiness we expect must come from the clock-step cancellation, not expiry.
+    let abs_far = crate::timekeeping::clock_realtime().saturating_add(1_000_000_000_000);
+    settime(tc, true, abs_far, 0, true)?;
+    if is_readable(tc) || take_cancellation(tc) {
+        serial_println!("[timerfd]   FAIL: cancel-on-set timer ready before clock step");
+        close(tc);
+        return Err(KernelError::InternalError);
+    }
+    // Step the realtime clock (discontinuity).
+    crate::timekeeping::adjust_realtime(0);
+    if !is_readable(tc) {
+        serial_println!("[timerfd]   FAIL: cancel-on-set timer not readable after clock step");
+        close(tc);
+        return Err(KernelError::InternalError);
+    }
+    if !take_cancellation(tc) {
+        serial_println!("[timerfd]   FAIL: take_cancellation false after clock step");
+        close(tc);
+        return Err(KernelError::InternalError);
+    }
+    // Cancellation is one-shot per step: after consuming it the timer resyncs to
+    // the current generation, so it is neither cancelled nor (yet) expired.
+    if take_cancellation(tc) || is_readable(tc) {
+        serial_println!("[timerfd]   FAIL: cancellation re-reported after consume");
+        close(tc);
+        return Err(KernelError::InternalError);
+    }
+    // A re-armed timer WITHOUT cancel_on_set must ignore a subsequent clock step.
+    settime(tc, true, abs_far, 0, false)?;
+    crate::timekeeping::adjust_realtime(0);
+    if take_cancellation(tc) || is_readable(tc) {
+        serial_println!("[timerfd]   FAIL: non-cancel-on-set timer affected by clock step");
+        close(tc);
+        return Err(KernelError::InternalError);
+    }
+    close(tc);
+
     serial_println!("[timerfd]   timerfd instance object (create/arm/read/dup/close): OK");
+    serial_println!("[timerfd]   TFD_TIMER_CANCEL_ON_SET (TD15): OK");
     Ok(())
 }

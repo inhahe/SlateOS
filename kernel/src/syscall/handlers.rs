@@ -4562,6 +4562,9 @@ pub fn sys_clock_settime(args: &SyscallArgs) -> SyscallResult {
 
     let target_epoch_ns = args.arg0;
     crate::timekeeping::set_realtime(target_epoch_ns);
+    // The realtime clock was discontinuously stepped: wake any timerfd reader
+    // parked on a TFD_TIMER_CANCEL_ON_SET timer so it returns ECANCELED.
+    crate::ipc::timerfd::clock_was_set();
 
     SyscallResult::ok(0)
 }
@@ -4598,6 +4601,9 @@ pub fn sys_clock_adjtime(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_wrap)]
     let delta_ns = args.arg0 as i64;
     crate::timekeeping::adjust_realtime(delta_ns);
+    // A relative step (ADJ_SETOFFSET) is a clock discontinuity too: notify
+    // timerfd so CANCEL_ON_SET readers are woken to return ECANCELED.
+    crate::ipc::timerfd::clock_was_set();
 
     SyscallResult::ok(0)
 }

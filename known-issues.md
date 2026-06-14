@@ -801,24 +801,35 @@ process with a pipe → inner epoll E1 (watches pipe read) → outer epoll E0
 (watches E1), asserting both E1 and the nested E0 are not-ready on an empty pipe,
 both ready after a write, and not-ready when evaluated with `owner_pid = None`.
 
-### TD15. timerfd `TFD_TIMER_CANCEL_ON_SET` is a silent no-op — DEBT 2026-06-12
+### TD15. timerfd `TFD_TIMER_CANCEL_ON_SET` is a silent no-op — RESOLVED 2026-06-14
 
-**Where:** `timerfd_settime` in `kernel/src/syscall/linux.rs`.
+**Where:** `kernel/src/timekeeping.rs` (generation counter), `kernel/src/ipc/timerfd.rs`
+(stamp/check/wake), `kernel/src/syscall/linux.rs` (`sys_timerfd_settime`,
+`dispatch_timerfd_read`), `kernel/src/syscall/handlers.rs` (`sys_clock_settime`,
+`sys_clock_adjtime`).
 
-**What it is:** `timerfd_settime` accepts the `TFD_TIMER_CANCEL_ON_SET` flag
-(bit 1) without error, but the cancel-on-clock-step behavior is NOT implemented.
+**What it was:** `timerfd_settime` accepted the `TFD_TIMER_CANCEL_ON_SET` flag
+(bit 1) without error, but the cancel-on-clock-step behavior was NOT implemented.
 On Linux, a `CLOCK_REALTIME` timerfd armed with an absolute expiry and this flag is
-"cancelled" (read returns `ECANCELED`, poll reports `EPOLLERR`) if the system
-realtime clock is discontinuously changed (settimeofday/clock_settime/NTP step).
-We have no clock-step notification hook, so the flag is silently a no-op.
+"cancelled" (read returns `ECANCELED`, poll reports `POLLIN` readiness — *not*
+`POLLERR`, contrary to the original note here) if the system realtime clock is
+discontinuously changed (settimeofday/clock_settime/NTP step).
 
-**Impact:** very low — the flag exists mainly for libc internals (glibc's absolute
-`CLOCK_REALTIME` condvar waits) to detect clock jumps; few apps depend on it, and
-this kernel rarely steps the realtime clock at runtime.
-
-**Proper fix:** maintain a generation counter bumped on every realtime-clock step;
-stamp it into the timerfd at settime when `CANCEL_ON_SET` is set; on read/poll, if
-the counter advanced, return `ECANCELED`/`EPOLLERR` and disarm.
+**Fix (implemented):** `timekeeping` now keeps a `REALTIME_GENERATION` counter,
+bumped on every discontinuous realtime-clock step (`set_realtime`,
+`adjust_realtime`); a smooth TSC advance does NOT bump it. `sys_timerfd_settime`
+honours `TFD_TIMER_CANCEL_ON_SET` only for an absolute `CLOCK_REALTIME` timer,
+snapshotting the generation into the timerfd at arm time (`armed_gen`). On read,
+`take_cancellation` / `BlockingRead::Cancelled` return `ECANCELED` once per step
+(resyncing `armed_gen`); on poll, `is_readable` reports readiness while the
+generation is stale (level-triggered, no explicit poll wake needed). A blocked
+reader is woken promptly by `clock_was_set()`, called from the `clock_settime` /
+`clock_adjtime` handlers after the step. Boot self-test added to
+`timerfd::self_test` ("TFD_TIMER_CANCEL_ON_SET (TD15): OK"): arms an absolute
+`CLOCK_REALTIME` cancel-on-set timer far in the future, steps the clock via
+`adjust_realtime(0)` (bumps the generation without moving the clock value),
+asserts the timer becomes readable / `take_cancellation` returns true exactly
+once, and that a re-armed timer *without* the flag is unaffected by a step.
 
 ### TD14. Per-process CPU-time / fault / ctxsw accounting — RESOLVED 2026-06-13 (time + page-fault + context-switch counters all done)
 

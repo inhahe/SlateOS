@@ -77,6 +77,20 @@ static ADJUSTMENT_NS: AtomicI64 = AtomicI64::new(0);
 static INITIALIZED: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
+/// Monotonically-increasing counter bumped on every *discontinuous* step
+/// of the realtime clock — `clock_settime`/`settimeofday` (via
+/// [`set_realtime`]) and the `ADJ_SETOFFSET` step of `adjtimex` (via
+/// [`adjust_realtime`]).  It is **not** bumped by the smooth TSC-based
+/// advance of `clock_realtime()`.
+///
+/// This mirrors Linux's "the realtime clock was set" notification
+/// (`timekeeping`'s `clock_was_set()`), which `timerfd` consumes to
+/// implement `TFD_TIMER_CANCEL_ON_SET`: an absolute `CLOCK_REALTIME`
+/// timerfd armed with that flag is cancelled when this counter advances
+/// past the value captured when it was armed.  See
+/// `crate::ipc::timerfd`.
+static REALTIME_GENERATION: AtomicU64 = AtomicU64::new(0);
+
 // ---------------------------------------------------------------------------
 // Initialization
 // ---------------------------------------------------------------------------
@@ -204,6 +218,18 @@ pub fn is_initialized() -> bool {
 /// Used by NTP or manual `date --set` commands.
 pub fn adjust_realtime(delta_ns: i64) {
     ADJUSTMENT_NS.fetch_add(delta_ns, Ordering::Relaxed);
+    // A relative step (ADJ_SETOFFSET) is a discontinuity: bump the
+    // realtime-clock-step generation so CANCEL_ON_SET timerfds notice.
+    REALTIME_GENERATION.fetch_add(1, Ordering::Relaxed);
+}
+
+/// The current realtime-clock-step generation.  See [`REALTIME_GENERATION`].
+///
+/// `timerfd` snapshots this when arming a `TFD_TIMER_CANCEL_ON_SET` timer
+/// and compares against it on read/poll to detect a clock step.
+#[must_use]
+pub fn realtime_generation() -> u64 {
+    REALTIME_GENERATION.load(Ordering::Relaxed)
 }
 
 /// Set the realtime clock to a specific Unix epoch timestamp.
@@ -214,6 +240,9 @@ pub fn set_realtime(target_epoch_ns: u64) {
     let current = clock_realtime();
     let diff = target_epoch_ns as i64 - current as i64;
     ADJUSTMENT_NS.store(diff, Ordering::Relaxed);
+    // An absolute set is a discontinuity: bump the realtime-clock-step
+    // generation so CANCEL_ON_SET timerfds notice.
+    REALTIME_GENERATION.fetch_add(1, Ordering::Relaxed);
 }
 
 // ---------------------------------------------------------------------------

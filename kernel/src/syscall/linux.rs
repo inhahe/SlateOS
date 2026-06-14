@@ -3036,14 +3036,23 @@ fn dispatch_timerfd_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
     let handle = crate::ipc::timerfd::TimerFdHandle::from_raw(entry.raw_handle);
     let nonblock = (entry.status_flags & oflags::O_NONBLOCK) != 0;
     let count = if nonblock {
+        // A CANCEL_ON_SET timer cancelled by a realtime-clock step reports
+        // ECANCELED before any expiration count (Linux timerfd_read).
+        if crate::ipc::timerfd::take_cancellation(handle) {
+            return linux_err(errno::ECANCELED);
+        }
         match crate::ipc::timerfd::read_expirations(handle) {
             Some(c) => c,
             None => return linux_err(errno::EBADF),
         }
     } else {
-        // Blocking read: park until at least one expiration is pending.
+        // Blocking read: park until at least one expiration is pending, or a
+        // realtime-clock step cancels a CANCEL_ON_SET timer.
         match crate::ipc::timerfd::read_expirations_blocking(handle) {
-            Ok(c) => c,
+            Ok(crate::ipc::timerfd::BlockingRead::Expirations(c)) => c,
+            Ok(crate::ipc::timerfd::BlockingRead::Cancelled) => {
+                return linux_err(errno::ECANCELED);
+            }
             Err(_) => return linux_err(errno::EBADF),
         }
     };
@@ -18321,8 +18330,20 @@ fn sys_timerfd_settime(args: &SyscallArgs) -> SyscallResult {
     let abstime = flags & 1 != 0; // TFD_TIMER_ABSTIME
 
     let handle = crate::ipc::timerfd::TimerFdHandle::from_raw(entry.raw_handle);
+
+    // TFD_TIMER_CANCEL_ON_SET (bit 1) is honoured only for an *absolute*
+    // CLOCK_REALTIME timer, mirroring Linux's timerfd_setup: the flag arms the
+    // timer to be cancelled (read -> ECANCELED) if the realtime clock is
+    // discontinuously stepped.  On any other clock (CLOCK_MONOTONIC /
+    // CLOCK_BOOTTIME — the alarm clocks are rejected at create), or a relative
+    // timer, Linux silently ignores it — so do we.  (CLOCK_REALTIME_ALARM
+    // would also qualify, but timerfd_create rejects it here.)
+    let cancel_on_set = (flags & 2 != 0)
+        && abstime
+        && crate::ipc::timerfd::clockid(handle) == Some(crate::ipc::timerfd::CLOCK_REALTIME);
+
     let (old_value_ns, old_interval_ns) =
-        match crate::ipc::timerfd::settime(handle, abstime, value_ns, interval_ns) {
+        match crate::ipc::timerfd::settime(handle, abstime, value_ns, interval_ns, cancel_on_set) {
             Ok(old) => old,
             Err(e) => return linux_err(linux_errno_for(e)),
         };

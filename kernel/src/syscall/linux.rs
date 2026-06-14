@@ -50624,6 +50624,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_ioctl_fionbio()?;
+
+    #[inline(never)]
+    fn self_test_ioctl_fionbio() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // Batch 96: ioctl(FIONBIO = 0x5421) — toggle O_NONBLOCK via the
     // legacy BSD ioctl path.  `arg` is a pointer to int (non-zero
     // sets O_NONBLOCK, zero clears it).  Apache, dovecot, OpenSSH's
@@ -50739,6 +50744,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
 
         pcb::destroy(test_pid);
+    }
+        Ok(())
     }
 
     // Batch 97: prctl(PR_SET_VMA = 0x5356_4d41) — Android-derived

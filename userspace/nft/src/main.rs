@@ -8,8 +8,12 @@
 //!
 //! The active personality is determined by `argv[0]`.
 //!
-//! Rules are submitted to the kernel via `SYS_NET_IOCTL` (syscall 810)
-//! with firewall sub-commands, and persisted through `/proc/net/nftables`.
+//! Rules are persisted through `/proc/net/nftables`. Slate OS has no
+//! nftables-control syscall yet; the kernel-submission path is not wired up
+//! (the earlier `SYS_NET_IOCTL=810` plumbing was dead code that, had it been
+//! called, would have aliased `SYS_UDP_BIND` and leaked UDP sockets — it has
+//! been removed). The `NFT_*` sub-command numbers below are retained as
+//! documentation of the control ABI the kernel will eventually expose.
 
 #![cfg_attr(not(test), no_main)]
 #![deny(clippy::all)]
@@ -26,14 +30,14 @@ use std::fmt;
 use std::io::{self, Write};
 
 // ============================================================================
-// Syscall interface
+// Control ABI sub-commands (documentation only)
 // ============================================================================
+//
+// Slate OS has no nftables-control syscall yet, so none of these are issued.
+// They are retained to document the command set the kernel will eventually
+// accept once the firewall-control ABI is defined. See the module-level docs.
 
-/// Syscall number for network IOCTL.
-#[allow(dead_code)]
-const SYS_NET_IOCTL: u64 = 810;
-
-// nftables sub-commands for SYS_NET_IOCTL.
+// nftables sub-commands for the (future) firewall-control syscall.
 #[allow(dead_code)]
 const NFT_TABLE_ADD: u64 = 200;
 #[allow(dead_code)]
@@ -62,40 +66,6 @@ const NFT_SET_ADD: u64 = 230;
 const NFT_MAP_ADD: u64 = 240;
 #[allow(dead_code)]
 const NFT_COUNTER_ADD: u64 = 250;
-
-/// Issue a 4-argument syscall on x86_64.
-///
-/// # Safety
-///
-/// Caller must ensure all arguments are valid for the given syscall number.
-#[cfg(all(target_arch = "x86_64", not(test)))]
-unsafe fn syscall4(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
-    let ret: i64;
-    // SAFETY: Arguments validated by caller; standard x86_64 Slate OS syscall ABI.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            inlateout("rax") nr as i64 => ret,
-            in("rdi") a1,
-            in("rsi") a2,
-            in("rdx") a3,
-            in("r10") a4,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    ret
-}
-
-/// Send a nftables command with a serialized buffer to the kernel.
-#[cfg(all(target_arch = "x86_64", not(test)))]
-#[allow(dead_code)]
-fn nft_ioctl_buf(cmd: u64, buf: &[u8]) -> i64 {
-    // SAFETY: buf is a valid slice; pointer and length are passed as
-    // arg1 and arg2.  The kernel reads at most `len` bytes synchronously.
-    unsafe { syscall4(SYS_NET_IOCTL, cmd, buf.as_ptr() as u64, buf.len() as u64, 0) }
-}
 
 // ============================================================================
 // Address family

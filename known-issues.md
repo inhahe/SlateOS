@@ -810,9 +810,32 @@ the fabricated `SYS_NET_IOCTL` constant from all three; `net_ioctl` now returns
 an honest failure + non-zero exit until the net-config ABI lands. The read-only
 `SYS_NET_IF_INFO`/`SYS_ARP_TABLE` query wrappers (`syscall3`/`syscall4`) are
 retained and still used. All three still cross-compile for `x86_64-slateos` and
-pass clippy + host tests (ifconfig 32, ip 14, route 10). NOTE: `dhcpcd`, `fw`,
-and `nft` still contain the same latent `SYS_NET_IOCTL=810` misuse and should get
-the same neutering treatment (not yet done).
+pass clippy + host tests (ifconfig 32, ip 14, route 10).
+
+**Write-path safety fix extended to `dhcpcd`/`fw`/`nft` — DONE 2026-06-14.** The
+same `SYS_NET_IOCTL=810` misuse lived in the remaining net-config tools:
+- **`dhcpcd`** issued `net_ioctl(NET_IF_{SET_IP,SET_MASK,UP,SET_GW}, …)` after
+  acquiring a lease — each binding+leaking a UDP socket on port 3/4/1/5 and
+  reporting a non-negative "success". `net_ioctl` now returns `-38` without any
+  syscall (its only `syscall4` user, so `syscall4` was removed); DHCP transport
+  itself is unaffected (it uses `std::net::UdpSocket`). 107 host tests pass.
+- **`fw`** was the worst case: besides the write commands, its *read* path
+  `fw_ioctl(FW_GET_STATUS)` decoded the leaked UDP socket **handle as firewall
+  status bits**, fabricating bogus enabled/logging/policy state. Both `fw_ioctl`
+  and `fw_ioctl_buf` now return `-38` (no syscall); the dead direct-`syscall4`
+  `load_rules_from_kernel` path and the now-dead kernel-status branch in `load()`
+  were removed, so status reads fall back to `/proc/net/firewall` → saved rules
+  file → defaults. 40 host tests pass.
+- **`nft`** never actually called its `nft_ioctl_buf`/`syscall4` (all dead code
+  behind `#[allow(dead_code)]`), so there was no live bug — but the dangerous
+  `SYS_NET_IOCTL=810` plumbing was removed outright; the `NFT_*` sub-command
+  numbers are kept as documentation of the future control ABI. 102 host tests
+  pass.
+
+All three cross-compile for `x86_64-slateos` and pass clippy. With this, **no
+remaining userspace tool defines or issues `SYS_NET_IOCTL`/`810` for net-config**
+(verified by grep). Only the legitimate `SYS_UDP_BIND=810` users (`dig`, `nc`,
+`inetd`, …) reference the number now.
 
 **Proper fix:** this is an **operator design decision**, not a mechanical fix —
 the kernel must first grow the missing ABI, and the *shape* of that ABI is a

@@ -1,9 +1,11 @@
 //! Slate OS Firewall Management CLI (`fw`)
 //!
 //! Manages the kernel's packet-filtering firewall rules.  Rules are persisted
-//! to `/etc/fw.rules` and applied via `SYS_NET_IOCTL` (syscall 810) with
-//! firewall-specific sub-commands, or through the `/proc/net/firewall`
-//! interface when the procfs path is available.
+//! to `/etc/fw.rules` and read from the `/proc/net/firewall` interface when the
+//! procfs path is available. Slate OS has no firewall-control syscall yet, so
+//! the kernel apply/query path (`fw_ioctl`) returns `ENOSYS` — see the note on
+//! `fw_ioctl` for why the previous `SYS_NET_IOCTL=810` calls were actively
+//! harmful (they bound and leaked UDP sockets).
 //!
 //! # Usage
 //!
@@ -39,12 +41,12 @@ use std::process;
 const RULES_PATH: &str = "/etc/fw.rules";
 const PROC_FIREWALL: &str = "/proc/net/firewall";
 
-/// Syscall number for network IOCTL (from the net zone, numbers 800-999).
-const SYS_NET_IOCTL: u64 = 810;
-
-// Firewall sub-commands for SYS_NET_IOCTL.
+// Firewall sub-commands. Retained as documentation of the control ABI the
+// kernel will eventually expose; today every one resolves to `fw_ioctl`, which
+// returns `ENOSYS` (see below) because no firewall-control syscall exists.
 const FW_ENABLE: u64 = 100;
 const FW_DISABLE: u64 = 101;
+#[allow(dead_code)] // Read path is served by /proc/net/firewall, not a syscall.
 const FW_GET_STATUS: u64 = 102;
 const FW_ADD_RULE: u64 = 103;
 const FW_DEL_RULE: u64 = 104;
@@ -52,51 +54,32 @@ const FW_SET_POLICY: u64 = 105;
 const FW_SET_LOG: u64 = 106;
 #[allow(dead_code)] // Will be used when kernel wires up bulk flush.
 const FW_FLUSH: u64 = 107;
+#[allow(dead_code)] // Read path is served by /proc/net/firewall, not a syscall.
 const FW_GET_RULES: u64 = 108;
 
 // ============================================================================
 // Syscall interface
 // ============================================================================
 
-/// Issue a 4-argument syscall on x86_64.
+/// Send a firewall control command to the kernel.
 ///
-/// # Safety
-///
-/// Caller must ensure all arguments are valid for the given syscall number.
-#[cfg(target_arch = "x86_64")]
-unsafe fn syscall4(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
-    let ret: i64;
-    // SAFETY: Arguments validated by caller; this is the standard x86_64
-    // Linux/SlateOS syscall ABI.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            inlateout("rax") nr as i64 => ret,
-            in("rdi") a1,
-            in("rsi") a2,
-            in("rdx") a3,
-            in("r10") a4,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    ret
+/// Slate OS has no firewall-control syscall. The earlier implementation issued
+/// `syscall(810, cmd, ...)` with the firewall sub-command (`FW_ENABLE`,
+/// `FW_GET_STATUS`, ...) as arg0, but `810` is `SYS_UDP_BIND` whose arg0 is a
+/// *port*: each call bound a UDP socket to port 100/101/102/..., leaked the
+/// handle, and returned a non-negative value. For writes that masqueraded as
+/// success; for `FW_GET_STATUS` the leaked socket handle was even decoded as
+/// firewall status *bits*, fabricating bogus enabled/logging/policy state.
+/// Until the firewall-control ABI is defined this returns `ENOSYS` without
+/// issuing any syscall, so reads fall back to `/proc/net/firewall` / the saved
+/// rules file and writes honestly fail.
+fn fw_ioctl(_cmd: u64, _arg1: u64, _arg2: u64) -> i64 {
+    -38 // ENOSYS — firewall-control syscall ABI not yet defined (see note above).
 }
 
-/// Send a firewall command to the kernel.
-fn fw_ioctl(cmd: u64, arg1: u64, arg2: u64) -> i64 {
-    // SAFETY: cmd is a known firewall sub-command, arg1/arg2 are value
-    // parameters (not pointers that could be dangling).
-    unsafe { syscall4(SYS_NET_IOCTL, cmd, arg1, arg2, 0) }
-}
-
-/// Send a firewall command that passes a buffer pointer.
-fn fw_ioctl_buf(cmd: u64, buf: &[u8]) -> i64 {
-    // SAFETY: buf is a valid slice; pointer and length are passed as
-    // arg1 and arg2.  The kernel reads at most `len` bytes from the
-    // buffer during the syscall (synchronous; buffer outlives the call).
-    unsafe { syscall4(SYS_NET_IOCTL, cmd, buf.as_ptr() as u64, buf.len() as u64, 0) }
+/// Send a firewall command that would pass a buffer pointer. See `fw_ioctl`.
+fn fw_ioctl_buf(_cmd: u64, _buf: &[u8]) -> i64 {
+    -38 // ENOSYS — firewall-control syscall ABI not yet defined (see fw_ioctl).
 }
 
 // ============================================================================
@@ -299,22 +282,8 @@ impl Firewall {
             return state;
         }
 
-        // Try the kernel syscall to query status.
-        let ret = fw_ioctl(FW_GET_STATUS, 0, 0);
-        if ret >= 0 {
-            let enabled = (ret & 1) != 0;
-            let logging = (ret & 2) != 0;
-            let policy = if (ret & 4) != 0 { Action::Deny } else { Action::Allow };
-            let rules = Self::load_rules_from_kernel().unwrap_or_default();
-            return Self {
-                enabled,
-                default_policy: policy,
-                logging,
-                rules,
-            };
-        }
-
-        // Fallback: load from saved rules file.
+        // No firewall-query syscall exists (see `fw_ioctl`); fall back to the
+        // saved rules file, or built-in defaults if it is absent.
         Self::from_file().unwrap_or_else(Self::defaults)
     }
 
@@ -364,38 +333,6 @@ impl Firewall {
         }
 
         Some(Self { enabled, default_policy: policy, logging, rules })
-    }
-
-    /// Load rules from the kernel via syscall.
-    fn load_rules_from_kernel() -> Option<Vec<Rule>> {
-        // Request the kernel to write rules into a buffer.
-        let mut buf = vec![0u8; 8192];
-        let ret = unsafe {
-            syscall4(
-                SYS_NET_IOCTL,
-                FW_GET_RULES,
-                buf.as_mut_ptr() as u64,
-                buf.len() as u64,
-                0,
-            )
-        };
-        if ret <= 0 {
-            return None;
-        }
-
-        let len = ret as usize;
-        if len > buf.len() {
-            return None;
-        }
-
-        let text = String::from_utf8_lossy(&buf[..len]);
-        let mut rules = Vec::new();
-        for line in text.lines() {
-            if let Some(rule) = Rule::from_line(line) {
-                rules.push(rule);
-            }
-        }
-        Some(rules)
     }
 
     /// Load from the saved rules file.

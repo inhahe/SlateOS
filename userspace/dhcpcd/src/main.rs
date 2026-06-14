@@ -93,10 +93,9 @@ const DEFAULT_TIMEOUT: u64 = 30;
 /// Maximum retries before giving up.
 const MAX_RETRIES: u32 = 5;
 
-/// Syscall number for network IOCTLs.
-const SYS_NET_IOCTL: u64 = 810;
-
-/// Network IOCTL sub-commands.
+/// Network IOCTL sub-commands. Retained as documentation of the operations the
+/// DHCP client *would* apply once a real net-config ABI exists; currently every
+/// one resolves to `net_ioctl`, which returns `ENOSYS` (see below).
 const NET_IF_UP: u64 = 1;
 const NET_IF_SET_IP: u64 = 3;
 const NET_IF_SET_MASK: u64 = 4;
@@ -1091,31 +1090,17 @@ fn apply_config_file(cfg: &mut Config, file_result: &ConfigFileResult) {
 // Syscall helpers
 // ============================================================================
 
-#[cfg(target_arch = "x86_64")]
-unsafe fn syscall4(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
-    let ret: i64;
-    // SAFETY: Caller ensures arguments are valid for the given syscall number.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            inlateout("rax") nr as i64 => ret,
-            in("rdi") a1,
-            in("rsi") a2,
-            in("rdx") a3,
-            in("r10") a4,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    ret
-}
-
-/// Issue a network IOCTL syscall for the named interface.
-fn net_ioctl(cmd: u64, iface: &str, arg: u64) -> i64 {
-    let name = format!("{iface}\0");
-    // SAFETY: We pass a valid NUL-terminated interface name and a numeric arg.
-    unsafe { syscall4(SYS_NET_IOCTL, cmd, name.as_ptr() as u64, arg, 0) }
+/// Apply a network interface-configuration change for the named interface.
+///
+/// Slate OS has no net-config write syscall. The earlier implementation issued
+/// `syscall(810, cmd, ...)` with `cmd` (up/set-ip/set-mask/set-gw) as arg0, but
+/// `810` is `SYS_UDP_BIND` whose arg0 is a *port*: the call bound a UDP socket
+/// to port 1/3/4/5, leaked the handle, and returned a non-negative value that
+/// looked like success. Until the net-config ABI is defined this is a hard
+/// `ENOSYS` so the DHCP client honestly reports that it could not apply the
+/// lease rather than silently leaking sockets and claiming success.
+fn net_ioctl(_cmd: u64, _iface: &str, _arg: u64) -> i64 {
+    -38 // ENOSYS — net-config syscall ABI not yet defined (see note above).
 }
 
 // ============================================================================

@@ -75741,6 +75741,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_remap_ioprio_futex2()?;
+
+    #[inline(never)]
+    fn self_test_remap_ioprio_futex2() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // -----------------------------------------------------------------
     // remap_file_pages / ioprio / io_pgetevents / mount_setattr /
     // fchmodat2 / futex2
@@ -77055,6 +77060,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   futex2_requeue valid/EAGAIN/NULL-EINVAL + nr<0 benign: OK"
         );
+    }
+        Ok(())
     }
 
     // -----------------------------------------------------------------

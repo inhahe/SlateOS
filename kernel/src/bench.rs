@@ -3222,15 +3222,15 @@ fn bench_vfs_stat_3comp() {
 fn bench_vfs_throughput_16k() {
     use crate::fs::vfs::Vfs;
 
-    // 16 KiB of pattern data (one full page).
-    let data: [u8; 16384] = {
-        let mut buf = [0u8; 16384];
-        for (i, b) in buf.iter_mut().enumerate() {
-            #[allow(clippy::cast_possible_truncation)]
-            { *b = ((i * 7 + 13) & 0xFF) as u8; }
-        }
-        buf
-    };
+    // 16 KiB of pattern data (one full page).  Heap-allocated rather than a
+    // `[u8; 16384]` stack array: this benchmark runs in the deferred bench
+    // task, whose 64 KiB kernel stack is marginal (see B-DF1), and a 16 KiB
+    // stack frame here needlessly cuts headroom for an ill-timed interrupt.
+    let mut data = alloc::vec![0u8; 16384];
+    for (i, b) in data.iter_mut().enumerate() {
+        #[allow(clippy::cast_possible_truncation)]
+        { *b = ((i * 7 + 13) & 0xFF) as u8; }
+    }
 
     let path = "/bench_throughput_16k.tmp";
 

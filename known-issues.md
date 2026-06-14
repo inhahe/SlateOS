@@ -79,6 +79,18 @@ autonomously.
 runs through `compress`, `context_switch`, `pick_next`, `ipc`, `vfs`, all
 `http_*` incl. both `http_gzip_*`, then #DFs entering `dashboard_api_status`.
 
+**Large-stack-array audit (2026-06-14).** I scanned the kernel for fixed-size
+stack arrays ≥ 8 KiB that could contribute to the same overflow class. Findings:
+`bench.rs::bench_vfs_throughput_16k` held a `[u8; 16384]` (16 KiB) in the bench
+task — moved to a heap `Vec` (committed). Remaining latent (lower-risk, not the
+immediate trigger, left as tech-debt): `audio_notify.rs::self_test` `[u8; 8192]`
+(boot self-test path), `syscall/linux.rs` ~line 53451 `drain [u8; 8192]`, plus
+several `[u8; 4096]` buffers in `rng`/`smp`/`virtio/sound`/`linux.rs` self-tests.
+Note these arrays are **not** the immediate dashboard double fault: the
+`dashboard_api_status` overflow has **no** large array — it is pure debug-built
+`core::fmt` call-chain depth — so reducing stack arrays will not by itself make
+`BENCH_OK` appear; only the Q7 IRQ-stack / stack-size decision will.
+
 **Impact:** `BENCH_OK` and the last benchmarks (dashboard API, ISR latency,
 scorecard) still don't complete. Does **not** affect normal operation: the
 default `BOOT_OK` boot test passes (the deferred bench suite runs only after

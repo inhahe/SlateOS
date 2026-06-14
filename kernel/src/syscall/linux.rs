@@ -65710,6 +65710,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_poll_select_epoll()?;
+
+    #[inline(never)]
+    fn self_test_poll_select_epoll() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // -----------------------------------------------------------------
     // poll / ppoll / select / pselect6 + epoll family
     // -----------------------------------------------------------------
@@ -66440,6 +66445,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   epoll_pwait2 timespec value gating: OK"
         );
+    }
+        Ok(())
     }
 
     // -----------------------------------------------------------------

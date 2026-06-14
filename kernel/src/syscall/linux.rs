@@ -52384,7 +52384,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
     }
+        Ok(())
+    }
 
+    self_test_sched_policy_dispatch()?;
+
+    #[inline(never)]
+    fn self_test_sched_policy_dispatch() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // Scheduler-policy / priority dispatch validation.
     //   - sched_getscheduler(0) -> 0 (SCHED_OTHER).
     //   - sched_get_priority_max/min on known policies match Linux.

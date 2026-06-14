@@ -70657,6 +70657,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_rtsig_posix_timer()?;
+
+    #[inline(never)]
+    fn self_test_rtsig_posix_timer() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // -----------------------------------------------------------------
     // rt_sigsuspend / rt_sigtimedwait / rt_sigqueueinfo /
     // rt_tgsigqueueinfo / rt_sigreturn / POSIX timer family
@@ -71108,6 +71113,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: timer_getoverrun not EINVAL");
             return Err(KernelError::InternalError);
         }
+    }
+        Ok(())
     }
 
     // -----------------------------------------------------------------

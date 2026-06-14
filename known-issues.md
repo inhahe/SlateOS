@@ -85,15 +85,31 @@ interacts with the scheduler's yield/pick path and anti-starvation boost in
 `kernel/src/sched/mod.rs`.  Driven from the background `deferred_bench_task`
 spawned at the end of `kernel/src/main.rs` boot.
 
-**Symptom:** With `scripts/boot-test.sh --bench`, the deferred benchmark suite
-runs cleanly through `page_alloc`, `heap`, `compress`, `rdtsc`, `hpet`, and
-`context_switch_rt`, then **stalls** entering `bench_pick_next`: the four nop
-helper tasks (e.g. tids 119–122) spawn but do not exit for the remainder of
-the run, no `[bench] sched_pick_next_4tasks: …` line is ever printed, and the
-serial log fills with continuous `[sched] Anti-starvation: boosted N tasks to
-priority 0`.  `BENCH_OK` therefore never arrives and `--bench` times out at
-300s.  The default `BOOT_OK` boot test is unaffected (it stops at `BOOT_OK`,
-long before the benchmarks run).
+**Symptom:** With `scripts/boot-test.sh --bench --timeout=600`, the deferred
+benchmark suite runs cleanly through `page_alloc`, `heap`, `compress`,
+`rdtsc`, `hpet`, and `context_switch_rt`, then **stalls** at/after
+`bench_pick_next`: no `[bench] sched_pick_next_4tasks: …` line is ever
+printed, `BENCH_OK` never arrives, and the serial log fills with continuous
+`[sched] Anti-starvation: boosted N tasks to priority 0` (N = 1–2).  The
+default `BOOT_OK` boot test is unaffected (it stops at `BOOT_OK`, long before
+the benchmarks run).
+
+**CORRECTION 2026-06-14 — the four nop helpers DO exit (original
+"never exit" claim falsified).** A 600 s-timeout run captured all four
+`bench-pn` nop helper tasks (tids **119, 120, 121, 122**) printing
+`[sched] Task N exiting` *after* `context_switch_rt`'s result line — i.e. they
+spawn AND drain to `task_exit` successfully.  So the nop helpers are **not**
+the livelocking tasks, and `bench_pick_next`'s task-draining works.  The hang
+is therefore **after** the helpers exit: either `run("sched_pick_next_4tasks",
+500, yield_now)` not returning on the lone driver task (tid 114) once the
+helpers are gone, a *later* benchmark stage that the driver enters silently, or
+genuine starvation of 1–2 **other** Ready tasks (background daemons / the
+workqueue worker tid 104 at prio 18) behind the busy prio-18 driver — those
+are what the perpetual "boosted 1–2 tasks" lines refer to, NOT the nop
+helpers.  Next diagnosis must localize where tid 114 actually gets stuck after
+the helpers drain (add a marker after `run()` returns in `bench_pick_next` and
+at the start of `bench_syscall_dispatch`), rather than assuming the nop helpers
+are the culprit.
 
 **Assessment:** Independent of the F15 sleep-queue leak — it reproduced
 identically *before* the F15 fix (when it could have been blamed on
@@ -131,15 +147,31 @@ reset `ready_since_tick`) multiplied the duplicates without bound.  Fix:
 (b) the booster now resets each boosted task's `ready_since_tick` so it is not
 re-boosted before being dispatched.  This is a real, system-wide fix (the
 corruption could happen to any starved task, not just benchmark tasks).
-**However, it did NOT resolve W2:** with the fix in place, `--bench` still
-stalls at the same point (last printed line `heap_raw_alloc_free_4096`, no
-`sched_pick_next_4tasks`, `BENCH_OK` never arrives), boot remains clean (0
-self-test failures, 0 sleep-queue spin warnings), and the booster still fires
-(11 boost lines observed — now without duplicating entries).  So the duplicate
-enqueue was an *amplifier* of the thrash, not the trigger: the benchmark nop
-helpers still genuinely starve >2 s at priority 0 without running to
-`task_exit`.  The deeper root trigger (why four `yield_now()`-only tasks at
-priorities 8/12/16/20 never drain) is still uncharacterised.
+**However, it did NOT resolve W2:** with the fix in place the suite still
+stalls entering `bench_pick_next` (no `sched_pick_next_4tasks` line, `BENCH_OK`
+never arrives), boot remains clean (0 self-test failures, 0 sleep-queue spin
+warnings), and the booster still fires (now without duplicating entries).  So
+the duplicate enqueue was an *amplifier* of the thrash, not the trigger: the
+benchmark nop helpers still genuinely fail to run to `task_exit`.
+
+**Timeout calibration (corrected — the original stall-point stands).** A first
+post-fix run with the default 300 s timeout appeared to stall right after
+`heap_raw_alloc_free_4096`, suggesting the hang had moved earlier.  That was a
+**timeout artifact, not a regression**: a 600 s re-run showed the suite *does*
+still progress cleanly through `compress`, `rdtsc`, `hpet`, and
+`context_switch_rt`, then stalls entering `bench_pick_next` — exactly the
+original symptom.  The 300 s budget simply expired *inside* the
+`compress_repeating` benchmark, which is savagely slow under QEMU/TCG:
+mean ≈ 1.01 s per iteration × 200 iters ≈ **~202 s for that one benchmark
+alone** (max single iter ≈ 22 s).  Because `bench_pick_next`'s own work is
+trivial (~110 ms for all 500 yields at the measured ~220 µs/round-trip), its
+failure to complete within the remaining multi-hundred-second budget confirms a
+**genuine stall**, not mere slowness.  Practical note: reproduce W2 with
+`scripts/boot-test.sh --bench --timeout=600` (the default 300 s no longer
+reaches the stall point because the compress benchmarks eat the budget first).
+
+The deeper root trigger (why four `yield_now()`-only tasks at priorities
+8/12/16/20 never drain past `bench_pick_next`) is still uncharacterised.
 
 **Next step:** Add finer-grained serial markers inside `bench_pick_next`
 (before/after spawn, before/after the `run()` loop, per-iteration sampling)

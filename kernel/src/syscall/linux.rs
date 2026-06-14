@@ -54818,6 +54818,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_statfs_fstatfs()?;
+
+    #[inline(never)]
+    fn self_test_statfs_fstatfs() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // statfs / fstatfs — NULL pointer validation.
     //   - statfs(NULL, buf) -> EFAULT.
     //   - fstatfs(fd, NULL) -> EFAULT.
@@ -54842,6 +54847,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+    }
+        Ok(())
     }
 
     // clock_settime / clock_adjtime / adjtimex — Linux gate order:

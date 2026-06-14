@@ -1266,6 +1266,14 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: Linux brk(2) heap (ring 3) self-test failed: {:?}", e);
     }
 
+    // Ring-3 end-to-end test of execveat(2) in both forms: a real Linux-ABI
+    // launcher execs a target by path (AT_FDCWD) and by open-fd
+    // (AT_EMPTY_PATH / fexecve), proving execveat replaces the image and
+    // transfers control to the target (which exits with a sentinel).
+    if let Err(e) = proc::spawn::self_test_linux_execveat() {
+        serial_println!("WARNING: Linux execveat(2) (ring 3) self-test failed: {:?}", e);
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

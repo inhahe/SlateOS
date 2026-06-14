@@ -1238,6 +1238,312 @@ pub fn build_linux_argc_exit_test_elf() -> alloc::vec::Vec<u8> {
     buf
 }
 
+/// Build a minimal **Linux-ABI** `ET_EXEC` test ELF that simply calls
+/// `exit(exit_code)`:
+///
+/// ```text
+///   mov edi, exit_code   ; BF <imm32>
+///   mov eax, 60          ; Linux SYS_exit
+///   syscall
+///   int3                 ; unreachable trap
+/// ```
+///
+/// Tagged `ELFOSABI_GNU` so [`ElfFile::detect_linux_abi`] reports true and
+/// `spawn_process`/`exec_process` route it through the Linux ABI.  Handy as
+/// the *target* of an `execve`/`execveat` test: the resulting zombie's exit
+/// code is exactly `exit_code`, proving control reached this image.
+#[must_use]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
+pub fn build_linux_exit_elf(exit_code: u8) -> alloc::vec::Vec<u8> {
+    use alloc::vec;
+
+    let phdr_offset: u64 = 64;
+    let code_offset: u64 = 120;
+    let code_size: u64 = 16;
+    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+
+    let mut buf = vec![0u8; (code_offset + code_size) as usize];
+
+    // --- ELF header ---
+    buf[0] = 0x7F;
+    buf[1] = b'E';
+    buf[2] = b'L';
+    buf[3] = b'F';
+    buf[EI_CLASS] = ELFCLASS64;
+    buf[EI_DATA] = ELFDATA2LSB;
+    buf[EI_VERSION] = EV_CURRENT;
+    buf[EI_OSABI] = ELFOSABI_GNU; // tag Linux/GNU so detect_linux_abi() is true
+
+    write_u16(&mut buf, 16, ET_EXEC);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr); // e_entry
+    write_u64(&mut buf, 32, phdr_offset); // e_phoff
+    write_u64(&mut buf, 40, 0); // e_shoff
+    write_u32(&mut buf, 48, 0); // e_flags
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, 1); // e_phnum
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0);
+    write_u16(&mut buf, 62, 0);
+
+    // --- Program header (PT_LOAD: R+X) ---
+    let ph = phdr_offset as usize;
+    write_u32(&mut buf, ph, PT_LOAD);
+    write_u32(&mut buf, ph + 4, PF_R | PF_X);
+    write_u64(&mut buf, ph + 8, code_offset);
+    write_u64(&mut buf, ph + 16, load_vaddr);
+    write_u64(&mut buf, ph + 24, 0);
+    write_u64(&mut buf, ph + 32, code_size);
+    write_u64(&mut buf, ph + 40, code_size);
+    write_u64(&mut buf, ph + 48, 0x1000);
+
+    // --- Code: exit(exit_code). ---
+    let cs = code_offset as usize;
+    for byte in &mut buf[cs..(cs + code_size as usize)] {
+        *byte = 0xCC; // INT3 trap padding.
+    }
+    // mov edi, exit_code  (BF <imm32>)
+    buf[cs] = 0xBF;
+    buf[cs + 1] = exit_code;
+    buf[cs + 2] = 0x00;
+    buf[cs + 3] = 0x00;
+    buf[cs + 4] = 0x00;
+    // mov eax, 60  (B8 3C 00 00 00) — Linux SYS_exit
+    buf[cs + 5] = 0xB8;
+    buf[cs + 6] = 0x3C;
+    buf[cs + 7] = 0x00;
+    buf[cs + 8] = 0x00;
+    buf[cs + 9] = 0x00;
+    // syscall  (0F 05)
+    buf[cs + 10] = 0x0F;
+    buf[cs + 11] = 0x05;
+
+    buf
+}
+
+/// Build a **Linux-ABI** `ET_EXEC` launcher ELF that `execveat(2)`s a target
+/// program, used to test the `execveat` exec path end-to-end from ring 3.
+///
+/// Two forms are produced, selected by `fexecve`:
+///
+/// - `fexecve == false` (path form):
+///   ```text
+///     mov   rdi, -100              ; AT_FDCWD
+///     movabs rsi, &path            ; pathname
+///     movabs rdx, &argv            ; argv = [&path, NULL]
+///     movabs r10, &envp            ; envp = [NULL]
+///     xor   r8d, r8d               ; flags = 0
+///     mov   eax, 322               ; SYS_execveat
+///     syscall
+///     mov   edi, 0xEE              ; (only reached if exec failed)
+///     mov   eax, 60                ; SYS_exit
+///     syscall
+///   ```
+///
+/// - `fexecve == true` (`AT_EMPTY_PATH` form, glibc's `fexecve`):
+///   ```text
+///     movabs rdi, &path            ; open(path, O_RDONLY, 0)
+///     xor   esi, esi
+///     xor   edx, edx
+///     mov   eax, 2                 ; SYS_open
+///     syscall                      ; rax = fd
+///     mov   rdi, rax               ; dirfd = fd
+///     movabs rsi, &empty           ; pathname = "" (AT_EMPTY_PATH)
+///     movabs rdx, &argv
+///     movabs r10, &envp
+///     mov   r8d, 0x1000            ; flags = AT_EMPTY_PATH
+///     mov   eax, 322               ; SYS_execveat
+///     syscall
+///     mov   edi, 0xEE
+///     mov   eax, 60
+///     syscall
+///   ```
+///
+/// On success control transfers to the target image (which should `exit`
+/// with a sentinel); on failure the launcher exits `0xEE`, so the test can
+/// distinguish "execveat worked" from "execveat returned an error".
+///
+/// `path_nul` must be NUL-terminated.
+#[must_use]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
+pub fn build_linux_execveat_test_elf(fexecve: bool, path_nul: &[u8]) -> alloc::vec::Vec<u8> {
+    use alloc::vec;
+
+    let phdr_offset: u64 = 64;
+    let code_offset: u64 = 120; // 64 (ehdr) + 56 (one phdr)
+    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+
+    // --- Assemble the code, recording the byte offsets of the 8-byte
+    //     movabs immediates so they can be patched with absolute vaddrs
+    //     once the data layout (which follows the code) is known. ---
+    let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    // Patch slots (index into `code` of the imm64 start), filled below.
+    let path_imm: usize;
+    let empty_imm: usize;
+    let argv_imm: usize;
+    let envp_imm: usize;
+
+    // Helper: push `movabs <reg-prefix bytes>, imm64` with a zero
+    // placeholder and return the imm's start offset.
+    if fexecve {
+        // movabs rdi, &path        (48 BF <8>)
+        code.extend_from_slice(&[0x48, 0xBF]);
+        path_imm = code.len();
+        code.extend_from_slice(&[0u8; 8]);
+        // xor esi, esi             (31 F6)  O_RDONLY
+        code.extend_from_slice(&[0x31, 0xF6]);
+        // xor edx, edx             (31 D2)  mode
+        code.extend_from_slice(&[0x31, 0xD2]);
+        // mov eax, 2               (B8 02 00 00 00)  SYS_open
+        code.extend_from_slice(&[0xB8, 0x02, 0x00, 0x00, 0x00]);
+        // syscall                  (0F 05)
+        code.extend_from_slice(&[0x0F, 0x05]);
+        // mov rdi, rax             (48 89 C7)  dirfd = fd
+        code.extend_from_slice(&[0x48, 0x89, 0xC7]);
+        // movabs rsi, &empty       (48 BE <8>)
+        code.extend_from_slice(&[0x48, 0xBE]);
+        empty_imm = code.len();
+        code.extend_from_slice(&[0u8; 8]);
+        // movabs rdx, &argv        (48 BA <8>)
+        code.extend_from_slice(&[0x48, 0xBA]);
+        argv_imm = code.len();
+        code.extend_from_slice(&[0u8; 8]);
+        // movabs r10, &envp        (49 BA <8>)
+        code.extend_from_slice(&[0x49, 0xBA]);
+        envp_imm = code.len();
+        code.extend_from_slice(&[0u8; 8]);
+        // mov r8d, 0x1000          (41 B8 00 10 00 00)  AT_EMPTY_PATH
+        code.extend_from_slice(&[0x41, 0xB8, 0x00, 0x10, 0x00, 0x00]);
+    } else {
+        // mov rdi, -100            (48 C7 C7 9C FF FF FF)  AT_FDCWD
+        code.extend_from_slice(&[0x48, 0xC7, 0xC7, 0x9C, 0xFF, 0xFF, 0xFF]);
+        // movabs rsi, &path        (48 BE <8>)
+        code.extend_from_slice(&[0x48, 0xBE]);
+        path_imm = code.len();
+        code.extend_from_slice(&[0u8; 8]);
+        empty_imm = usize::MAX; // unused in the path form
+        // movabs rdx, &argv        (48 BA <8>)
+        code.extend_from_slice(&[0x48, 0xBA]);
+        argv_imm = code.len();
+        code.extend_from_slice(&[0u8; 8]);
+        // movabs r10, &envp        (49 BA <8>)
+        code.extend_from_slice(&[0x49, 0xBA]);
+        envp_imm = code.len();
+        code.extend_from_slice(&[0u8; 8]);
+        // xor r8d, r8d             (45 31 C0)  flags = 0
+        code.extend_from_slice(&[0x45, 0x31, 0xC0]);
+    }
+    // Common tail (both forms):
+    // mov eax, 322                 (B8 42 01 00 00)  SYS_execveat
+    code.extend_from_slice(&[0xB8, 0x42, 0x01, 0x00, 0x00]);
+    // syscall                      (0F 05)
+    code.extend_from_slice(&[0x0F, 0x05]);
+    // -- failure path (only reached if execveat returned) --
+    // mov edi, 0xEE                (BF EE 00 00 00)
+    code.extend_from_slice(&[0xBF, 0xEE, 0x00, 0x00, 0x00]);
+    // mov eax, 60                  (B8 3C 00 00 00)  SYS_exit
+    code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00]);
+    // syscall                      (0F 05)
+    code.extend_from_slice(&[0x0F, 0x05]);
+    // int3                         (CC) — unreachable safety net
+    code.push(0xCC);
+
+    // --- Data layout (placed in the same PT_LOAD, after the code) ---
+    // file offset f maps to vaddr load_vaddr + (f - code_offset).
+    let code_len = code.len();
+    let data_base = code_offset as usize + code_len; // file offset of data
+    // path string
+    let path_off = data_base;
+    let path_end = path_off + path_nul.len();
+    // empty string (single NUL) — always present; cheap and keeps offsets
+    // uniform between the two forms.
+    let empty_off = path_end;
+    let after_empty = empty_off + 1;
+    // 8-align the argv array.
+    let argv_off = (after_empty + 7) & !7usize;
+    let envp_off = argv_off + 16; // argv = [ptr, NULL]
+    let file_size = envp_off + 8; // envp = [NULL]
+
+    let vaddr_of = |file_off: usize| -> u64 {
+        load_vaddr + (file_off as u64 - code_offset)
+    };
+    let path_vaddr = vaddr_of(path_off);
+    let empty_vaddr = vaddr_of(empty_off);
+    let argv_vaddr = vaddr_of(argv_off);
+    let envp_vaddr = vaddr_of(envp_off);
+
+    // Patch the movabs immediates.
+    code[path_imm..path_imm + 8].copy_from_slice(&path_vaddr.to_le_bytes());
+    if empty_imm != usize::MAX {
+        code[empty_imm..empty_imm + 8].copy_from_slice(&empty_vaddr.to_le_bytes());
+    }
+    code[argv_imm..argv_imm + 8].copy_from_slice(&argv_vaddr.to_le_bytes());
+    code[envp_imm..envp_imm + 8].copy_from_slice(&envp_vaddr.to_le_bytes());
+
+    // --- Build the file image ---
+    let seg_len = file_size - code_offset as usize; // bytes from code_offset
+    let mut buf = vec![0u8; file_size];
+
+    // ELF header
+    buf[0] = 0x7F;
+    buf[1] = b'E';
+    buf[2] = b'L';
+    buf[3] = b'F';
+    buf[EI_CLASS] = ELFCLASS64;
+    buf[EI_DATA] = ELFDATA2LSB;
+    buf[EI_VERSION] = EV_CURRENT;
+    buf[EI_OSABI] = ELFOSABI_GNU;
+    write_u16(&mut buf, 16, ET_EXEC);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr); // e_entry
+    write_u64(&mut buf, 32, phdr_offset); // e_phoff
+    write_u64(&mut buf, 40, 0);
+    write_u32(&mut buf, 48, 0);
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, 1);
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0);
+    write_u16(&mut buf, 62, 0);
+
+    // Program header: PT_LOAD R+W+X covering code + data (the launcher
+    // never writes, but R+W keeps argv/envp on a writable page like a
+    // real loader's data segment; X is needed for the code).
+    let ph = phdr_offset as usize;
+    write_u32(&mut buf, ph, PT_LOAD);
+    write_u32(&mut buf, ph + 4, PF_R | PF_W | PF_X);
+    write_u64(&mut buf, ph + 8, code_offset);
+    write_u64(&mut buf, ph + 16, load_vaddr);
+    write_u64(&mut buf, ph + 24, 0);
+    write_u64(&mut buf, ph + 32, seg_len as u64);
+    write_u64(&mut buf, ph + 40, seg_len as u64);
+    write_u64(&mut buf, ph + 48, 0x1000);
+
+    // Code
+    buf[code_offset as usize..code_offset as usize + code_len].copy_from_slice(&code);
+    // path string
+    buf[path_off..path_end].copy_from_slice(path_nul);
+    // empty string is already a zero byte at empty_off.
+    // argv = [path_vaddr, NULL]
+    write_u64(&mut buf, argv_off, path_vaddr);
+    write_u64(&mut buf, argv_off + 8, 0);
+    // envp = [NULL]
+    write_u64(&mut buf, envp_off, 0);
+
+    buf
+}
+
 /// Build a **Linux-ABI** test ELF that exercises the file-backed `mmap(2)`
 /// path end-to-end from ring 3.
 ///

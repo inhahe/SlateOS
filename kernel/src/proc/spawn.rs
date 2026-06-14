@@ -2495,6 +2495,129 @@ pub fn self_test_linux_brk() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the Linux `execveat(2)` syscall.
+///
+/// `execveat` is exercised in **both** of its forms by spawning a real
+/// Linux-ABI launcher that issues the syscall itself and then `exit`s `0xEE`
+/// only if it returns (i.e. exec failed):
+///
+///   - **Path form** (`dirfd = AT_FDCWD`, non-empty pathname): the launcher
+///     resolves the target by path, just like `execve`.
+///   - **fexecve form** (`AT_EMPTY_PATH`, empty pathname, `dirfd` from an
+///     `open(2)`): the launcher opens the target read-only and execs the open
+///     file descriptor.  This is the genuinely-new capability `execveat`
+///     adds over `execve` — glibc's `fexecve(3)` is built on exactly this.
+///
+/// The target is [`elf::build_linux_exit_elf`] which `exit`s with `SENTINEL`.
+/// A clean zombie with `exit_code == SENTINEL` proves `execveat` replaced the
+/// launcher's image and transferred control to the target; `0xEE` would mean
+/// `execveat` returned an error and the launcher ran its failure tail.
+///
+/// Skips gracefully (`Ok`) if the VFS write fails.  Must run **after**
+/// filesystem initialization (see `main.rs`).
+pub fn self_test_linux_execveat() -> KernelResult<()> {
+    const TGT_PATH: &str = "/slateos-test-execveat-tgt";
+    const TGT_PATH_NUL: &[u8] = b"/slateos-test-execveat-tgt\0";
+    const SENTINEL: u8 = 0x3A; // 58 — distinct from interp(42)/mmap(91)/brk(109)
+
+    serial_println!("[spawn] Running Linux execveat(2) (ring 3) integration test...");
+
+    // Step 1: stage the execveat *target* — a Linux-ABI ELF that exit()s
+    // with the sentinel.  If control reaches it, execveat worked.
+    let tgt_elf = elf::build_linux_exit_elf(SENTINEL);
+    if let Err(e) = crate::fs::Vfs::write_file(TGT_PATH, &tgt_elf) {
+        serial_println!(
+            "[spawn]   Linux execveat (ring 3): SKIP (VFS write failed: {:?})",
+            e
+        );
+        return Ok(());
+    }
+
+    // `run_one` spawns a launcher that execveat()s the target, lets it run to
+    // completion, and asserts it exited with SENTINEL (proving execveat
+    // replaced the image).  The launcher holds a File capability because the
+    // fexecve form must open(2) the target first; the path form ignores it.
+    // Returns Err on failure; the caller removes the staged target file.
+    let run_one = |launcher_elf: &[u8], label: &str| -> KernelResult<()> {
+        let argv: &[&[u8]] = &[b"execveatprog"];
+        let envp: &[&[u8]] = &[b"PATH=/bin"];
+        let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+        let options = SpawnOptions {
+            name: "spawn-test-linux-execveat",
+            parent: 0,
+            priority: DEFAULT_PRIORITY,
+            capabilities: &caps,
+            fd_map: &[],
+            argv,
+            envp,
+            exe_path: None,
+        };
+
+        let result = match spawn_process(launcher_elf, &options) {
+            Ok(r) => r,
+            Err(e) => {
+                serial_println!("[spawn]   FAIL: execveat-test ({label}) spawn returned {:?}", e);
+                return Err(e);
+            }
+        };
+
+        // Let the launcher run: (open →) execveat → target exit(SENTINEL).
+        // execveat replaces the image in-place, so a few yields cover both the
+        // launcher's syscalls and the target's exit.
+        crate::sched::yield_now();
+        crate::sched::yield_now();
+        crate::sched::yield_now();
+        crate::sched::yield_now();
+
+        let state = pcb::state(result.pid);
+        let exit_code = pcb::exit_code(result.pid);
+
+        thread::on_thread_exit(result.task_id);
+        pcb::destroy(result.pid);
+
+        if state != Some(pcb::ProcessState::Zombie) {
+            serial_println!(
+                "[spawn]   FAIL: execveat (ring 3, {label}) — expected Zombie, got {:?}",
+                state
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        if exit_code != Some(i32::from(SENTINEL)) {
+            serial_println!(
+                "[spawn]   FAIL: execveat (ring 3, {label}) — expected exit {} (target ran), \
+                 got {:?} (0xEE = execveat returned an error; launcher ran its failure tail)",
+                SENTINEL, exit_code
+            );
+            return Err(KernelError::InternalError);
+        }
+        Ok(())
+    };
+
+    // Case A: path form — execveat(AT_FDCWD, "/…/tgt", …, flags=0).
+    let elf_path = elf::build_linux_execveat_test_elf(false, TGT_PATH_NUL);
+    // Case B: fexecve form — open(target) then execveat(fd, "", …, AT_EMPTY_PATH).
+    let elf_fexecve = elf::build_linux_execveat_test_elf(true, TGT_PATH_NUL);
+
+    let res_a = run_one(&elf_path, "path form (AT_FDCWD)");
+    let res_b = if res_a.is_ok() {
+        run_one(&elf_fexecve, "fexecve form (AT_EMPTY_PATH)")
+    } else {
+        Ok(())
+    };
+
+    let _ = crate::fs::Vfs::remove(TGT_PATH);
+    res_a?;
+    res_b?;
+
+    serial_println!(
+        "[spawn]   Linux execveat(2) (ring 3: path form + fexecve/AT_EMPTY_PATH, \
+         target exit == {}): OK",
+        SENTINEL
+    );
+    Ok(())
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

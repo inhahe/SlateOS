@@ -40685,8 +40685,11 @@ pub(crate) const USER_FS_BASE_MAX: u64 = 1u64 << 47;
 ///
 /// ARCH_SET_FS writes IA32_FS_BASE (MSR 0xC000_0100).  ARCH_GET_FS
 /// reads it and stores it via the user pointer.
-/// ARCH_SET_GS / ARCH_GET_GS use IA32_KERNEL_GS_BASE (the post-SWAPGS
-/// userspace value).  ARCH_GET_CPUID / ARCH_SET_CPUID query and
+/// ARCH_SET_GS / ARCH_GET_GS use the active IA32_GS_BASE (MSR
+/// 0xC000_0101) — Slate's entry stub swaps GS back before running the
+/// handler, so the userspace %gs base is the active register, symmetric
+/// to %fs (see the IA32_GS_BASE const doc inside the function).
+/// ARCH_GET_CPUID / ARCH_SET_CPUID query and
 /// install the per-thread CPUID-disable bit — we never disable
 /// CPUID, so GET returns 1 and SET accepts 1, rejecting 0 with
 /// -ENODEV (exactly what a Linux kernel without
@@ -40711,16 +40714,21 @@ fn sys_arch_prctl(args: &SyscallArgs) -> SyscallResult {
     const ARCH_REQ_XCOMP_PERM: u64 = 0x1023;
 
     const IA32_FS_BASE: u32 = 0xC000_0100;
-    /// On x86_64 Linux, ARCH_SET_GS writes the userspace GS base
-    /// into `MSR_KERNEL_GS_BASE` (not `MSR_GS_BASE`).  The reason:
-    /// while a syscall is in flight the kernel has already done
-    /// `SWAPGS`, so the userspace value lives in `KERNEL_GS_BASE`
-    /// and the per-CPU pointer is in `GS_BASE`.  Writing
-    /// `KERNEL_GS_BASE` here is what `SYSRETQ`'s trailing `SWAPGS`
-    /// will swap into `GS_BASE` on the return to userspace,
-    /// becoming the new userspace GS.  Mirrors
-    /// `arch/x86/kernel/process_64.c::do_arch_prctl_64`.
-    const IA32_KERNEL_GS_BASE: u32 = 0xC000_0102;
+    /// On x86_64 Linux, `ARCH_SET_GS` writes the userspace GS base into
+    /// `MSR_KERNEL_GS_BASE` because Linux runs syscall handlers with the
+    /// per-CPU pointer *active* in `GS_BASE` (one `SWAPGS` at entry, one at
+    /// exit) and parks the userspace value in `KERNEL_GS_BASE`.
+    ///
+    /// **Slate's syscall entry stub uses the inverted convention**: it does a
+    /// second `SWAPGS` *back* before calling the Rust handler
+    /// (`kernel/src/syscall/entry.rs`), so a handler runs with the userspace
+    /// `%gs` base *active* in `IA32_GS_BASE` and the per-CPU pointer resting in
+    /// `KERNEL_GS_BASE`.  Interrupts never `SWAPGS` at all.  Therefore — unlike
+    /// stock Linux — the userspace `%gs` base is simply the active
+    /// `IA32_GS_BASE` here, exactly symmetric to `%fs`/`IA32_FS_BASE`; writing
+    /// `KERNEL_GS_BASE` would instead clobber the per-CPU pointer and crash the
+    /// next `gs:`-relative access in the entry stub.
+    const IA32_GS_BASE: u32 = 0xC000_0101;
 
     // Linux signature:
     //   `SYSCALL_DEFINE2(arch_prctl, int, option, unsigned long, arg2)`
@@ -40786,32 +40794,30 @@ fn sys_arch_prctl(args: &SyscallArgs) -> SyscallResult {
             if addr >= USER_FS_BASE_MAX {
                 return linux_err(errno::EPERM);
             }
-            // SAFETY: IA32_KERNEL_GS_BASE is a documented
-            // architectural MSR.  In a syscall context the kernel
-            // already executed SWAPGS at entry, so KERNEL_GS_BASE
-            // currently holds the userspace value; writing here
-            // installs the new userspace value, which SYSRETQ's
-            // SWAPGS will swap into the active GS_BASE on return.
-            // `addr` is canonical (< 1 << 47) so WRMSR will not
-            // raise #GP.
-            //
-            // NOTE: if invoked from kernel context (no SWAPGS has
-            // happened), this overwrites the kernel's per-CPU
-            // pointer stash and any subsequent syscall trampoline
-            // will load garbage into GS_BASE — that is why the
-            // boot-time self-test below brackets a successful
-            // call with rdmsr/wrmsr save+restore.
-            unsafe { crate::cpu::wrmsr(IA32_KERNEL_GS_BASE, addr); }
+            // SAFETY: IA32_GS_BASE is a documented architectural MSR.  Under
+            // Slate's entry-stub convention (see the IA32_GS_BASE const doc
+            // above) the userspace %gs base is the *active* GS_BASE during a
+            // syscall handler — writing it installs the new userspace value
+            // directly, exactly as ARCH_SET_FS does for %fs, and leaves the
+            // per-CPU pointer in KERNEL_GS_BASE untouched.  `addr` is canonical
+            // (< 1 << 47) so WRMSR will not raise #GP.
+            unsafe { crate::cpu::wrmsr(IA32_GS_BASE, addr); }
+            // Persist on the current Task so the scheduler restores it on
+            // switch-in.  IA32_GS_BASE is a global CPU register not saved in
+            // the GP Context; without this, a context switch would leave this
+            // thread's %gs base clobbered (or leak it to another task) when it
+            // next runs.
+            crate::sched::set_current_task_gs_base(addr);
             SyscallResult::ok(0)
         }
         ARCH_GET_GS => {
             if addr == 0 {
                 return linux_err(errno::EFAULT);
             }
-            // SAFETY: reading IA32_KERNEL_GS_BASE is side-effect-
-            // free; in syscall context this is the userspace GS
-            // base parked there by SWAPGS at entry.
-            let v = unsafe { crate::cpu::rdmsr(IA32_KERNEL_GS_BASE) };
+            // SAFETY: reading IA32_GS_BASE is side-effect-free; under Slate's
+            // entry-stub convention this active register holds the userspace
+            // %gs base while a syscall handler runs.
+            let v = unsafe { crate::cpu::rdmsr(IA32_GS_BASE) };
             // SAFETY: copy_to_user validates.
             let r = unsafe {
                 crate::mm::user::copy_to_user(
@@ -43450,29 +43456,27 @@ fn self_test_arch_prctl_cpuid() -> crate::error::KernelResult<()> {
 }
 
 /// TD4 extraction: arch_prctl ARCH_SET_GS / ARCH_GET_GS validation matrix
-/// (self_test group 9b). Mirrors the FS matrix but on IA32_KERNEL_GS_BASE;
-/// `saved_kgs` is sampled and restored on every exit path (a successful
-/// ARCH_SET_GS clobbers the per-CPU pointer). Self-contained. See
-/// [`self_test_errno_mapping`] for the TD4 rationale.
+/// (self_test group 9b). Mirrors the FS matrix; under Slate's entry-stub
+/// convention the userspace %gs base is the active IA32_GS_BASE (0xC000_0101),
+/// symmetric to %fs. `saved_gs` is sampled and restored on every exit path so
+/// a successful ARCH_SET_GS does not leak a sentinel into later code.
+/// Self-contained. See [`self_test_errno_mapping`] for the TD4 rationale.
 #[inline(never)]
 fn self_test_arch_prctl_set_gs() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
-    // batch 85.  Mirrors the FS validation matrix exactly except
-    // it writes/reads IA32_KERNEL_GS_BASE instead, because that is
-    // where the userspace GS lives in a syscall context (post-
-    // SWAPGS).  CAVEAT: in this boot-time self-test no SWAPGS has
-    // run, so KERNEL_GS_BASE currently holds the kernel's per-CPU
-    // pointer (set during syscall::entry::init).  Successful
-    // ARCH_SET_GS would overwrite that and the next syscall
-    // trampoline would dereference garbage — so we read/restore
-    // around every successful call.
+    // batch 85.  Mirrors the FS validation matrix exactly, on IA32_GS_BASE —
+    // the active %gs register, which under Slate's entry-stub convention holds
+    // the userspace GS base during a syscall handler (the stub swaps GS back
+    // before calling Rust; the per-CPU pointer rests in KERNEL_GS_BASE).  We
+    // still sample and restore the register around the matrix so a successful
+    // ARCH_SET_GS does not leave a sentinel in the active %gs for later code.
     const ARCH_SET_GS_CODE: u64 = 0x1001;
     const ARCH_GET_GS_CODE: u64 = 0x1004;
-    const IA32_KERNEL_GS_BASE_MSR: u32 = 0xC000_0102;
-    // SAFETY: RDMSR on IA32_KERNEL_GS_BASE is side-effect-free
+    const IA32_GS_BASE_MSR: u32 = 0xC000_0101;
+    // SAFETY: RDMSR on IA32_GS_BASE is side-effect-free
     // and the MSR is architecturally defined on every x86_64 CPU.
-    let saved_kgs = unsafe { crate::cpu::rdmsr(IA32_KERNEL_GS_BASE_MSR) };
+    let saved_gs = unsafe { crate::cpu::rdmsr(IA32_GS_BASE_MSR) };
 
     // ARCH_SET_GS at the boundary -> EPERM.
     let set_gs_boundary = SyscallArgs {
@@ -43481,8 +43485,8 @@ fn self_test_arch_prctl_set_gs() -> crate::error::KernelResult<()> {
     };
     let r = dispatch_linux(nr::ARCH_PRCTL, &set_gs_boundary);
     if r.value != -(errno::EPERM as i64) {
-        // SAFETY: restoring saved KERNEL_GS_BASE.
-        unsafe { crate::cpu::wrmsr(IA32_KERNEL_GS_BASE_MSR, saved_kgs); }
+        // SAFETY: restoring saved IA32_GS_BASE.
+        unsafe { crate::cpu::wrmsr(IA32_GS_BASE_MSR, saved_gs); }
         serial_println!(
             "[syscall/linux]   FAIL: arch_prctl(ARCH_SET_GS, 1<<47) → {} (expected -EPERM)",
             r.value
@@ -43497,8 +43501,8 @@ fn self_test_arch_prctl_set_gs() -> crate::error::KernelResult<()> {
     };
     let r = dispatch_linux(nr::ARCH_PRCTL, &set_gs_kernel);
     if r.value != -(errno::EPERM as i64) {
-        // SAFETY: restoring saved KERNEL_GS_BASE.
-        unsafe { crate::cpu::wrmsr(IA32_KERNEL_GS_BASE_MSR, saved_kgs); }
+        // SAFETY: restoring saved IA32_GS_BASE.
+        unsafe { crate::cpu::wrmsr(IA32_GS_BASE_MSR, saved_gs); }
         serial_println!(
             "[syscall/linux]   FAIL: arch_prctl(ARCH_SET_GS, kernel-addr) → {} (expected -EPERM)",
             r.value
@@ -43514,8 +43518,8 @@ fn self_test_arch_prctl_set_gs() -> crate::error::KernelResult<()> {
     };
     let r = dispatch_linux(nr::ARCH_PRCTL, &set_gs_top);
     if r.value != -(errno::EPERM as i64) {
-        // SAFETY: restoring saved KERNEL_GS_BASE.
-        unsafe { crate::cpu::wrmsr(IA32_KERNEL_GS_BASE_MSR, saved_kgs); }
+        // SAFETY: restoring saved IA32_GS_BASE.
+        unsafe { crate::cpu::wrmsr(IA32_GS_BASE_MSR, saved_gs); }
         serial_println!(
             "[syscall/linux]   FAIL: arch_prctl(ARCH_SET_GS, u64::MAX) → {} (expected -EPERM)",
             r.value
@@ -43532,19 +43536,19 @@ fn self_test_arch_prctl_set_gs() -> crate::error::KernelResult<()> {
     };
     let r = dispatch_linux(nr::ARCH_PRCTL, &set_gs_ok);
     if r.value != 0 {
-        // SAFETY: restoring saved KERNEL_GS_BASE.
-        unsafe { crate::cpu::wrmsr(IA32_KERNEL_GS_BASE_MSR, saved_kgs); }
+        // SAFETY: restoring saved IA32_GS_BASE.
+        unsafe { crate::cpu::wrmsr(IA32_GS_BASE_MSR, saved_gs); }
         serial_println!(
             "[syscall/linux]   FAIL: arch_prctl(ARCH_SET_GS, valid) → {} (expected 0)",
             r.value
         );
         return Err(KernelError::InternalError);
     }
-    // SAFETY: RDMSR on IA32_KERNEL_GS_BASE is side-effect-free.
-    let observed = unsafe { crate::cpu::rdmsr(IA32_KERNEL_GS_BASE_MSR) };
+    // SAFETY: RDMSR on IA32_GS_BASE is side-effect-free.
+    let observed = unsafe { crate::cpu::rdmsr(IA32_GS_BASE_MSR) };
     if observed != GS_TEST_VAL {
-        // SAFETY: restoring saved KERNEL_GS_BASE.
-        unsafe { crate::cpu::wrmsr(IA32_KERNEL_GS_BASE_MSR, saved_kgs); }
+        // SAFETY: restoring saved IA32_GS_BASE.
+        unsafe { crate::cpu::wrmsr(IA32_GS_BASE_MSR, saved_gs); }
         serial_println!(
             "[syscall/linux]   FAIL: ARCH_SET_GS wrote {:#x}, expected {:#x}",
             observed, GS_TEST_VAL
@@ -43559,8 +43563,8 @@ fn self_test_arch_prctl_set_gs() -> crate::error::KernelResult<()> {
     };
     let r = dispatch_linux(nr::ARCH_PRCTL, &get_gs_null);
     if r.value != -(errno::EFAULT as i64) {
-        // SAFETY: restoring saved KERNEL_GS_BASE.
-        unsafe { crate::cpu::wrmsr(IA32_KERNEL_GS_BASE_MSR, saved_kgs); }
+        // SAFETY: restoring saved IA32_GS_BASE.
+        unsafe { crate::cpu::wrmsr(IA32_GS_BASE_MSR, saved_gs); }
         serial_println!(
             "[syscall/linux]   FAIL: arch_prctl(ARCH_GET_GS, NULL) → {} (expected -EFAULT)",
             r.value
@@ -43568,10 +43572,10 @@ fn self_test_arch_prctl_set_gs() -> crate::error::KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
-    // Restore IA32_KERNEL_GS_BASE before any future syscall path
-    // can swapgs and dereference it as the per-CPU pointer.
+    // Restore the active IA32_GS_BASE so the boot-time sentinel does not
+    // linger in %gs for later code.
     // SAFETY: writing back the exact value we sampled above.
-    unsafe { crate::cpu::wrmsr(IA32_KERNEL_GS_BASE_MSR, saved_kgs); }
+    unsafe { crate::cpu::wrmsr(IA32_GS_BASE_MSR, saved_gs); }
     Ok(())
 }
 

@@ -88,6 +88,94 @@ deny — are now fixed; see F8 and F9.)_
 
 ## Fixed Bugs
 
+### F14. `arch_prctl(ARCH_SET_GS)` wrote `KERNEL_GS_BASE` (Linux convention) but Slate's entry stub uses the inverted GS convention → first syscall after SET_GS faulted on per-CPU access — FIXED 2026-06-14
+
+**Where:** `kernel/src/syscall/linux.rs` `sys_arch_prctl` (ARCH_SET_GS /
+ARCH_GET_GS arms); the userspace `%gs`-base context-switch restore in
+`kernel/src/sched/mod.rs` (both switch sites); the `execve` `%gs` reset in
+`kernel/src/proc/spawn.rs`.
+
+**Symptom:** Latent until exercised. The new two-process `%gs`-base
+context-switch regression test (`self_test_linux_gs_tls_switch`) reliably
+triggered it: a ring-3 process that issued `arch_prctl(ARCH_SET_GS, sentinel)`
+and then made *any* further syscall took an unrecoverable kernel `#PF` writing
+to `sentinel + 8` — i.e. the syscall entry stub's `mov gs:[8], rsp` was
+dereferencing the user's `%gs` sentinel as if it were the per-CPU base. With
+no real ring-3 caller ever issuing ARCH_SET_GS before this test, the bug had
+shipped undetected.
+
+**Root cause — two self-consistent GS conventions, mixed:**
+- **Linux convention:** syscall handlers run with the per-CPU pointer *active*
+  in `GS_BASE` (one `SWAPGS` at entry, one at exit) and the userspace value
+  parked in `KERNEL_GS_BASE`. So Linux's `ARCH_SET_GS` writes `KERNEL_GS_BASE`.
+- **Slate's actual entry stub** (`kernel/src/syscall/entry.rs`) does a *second*
+  `SWAPGS` back before calling the Rust handler, so a handler runs with the
+  userspace `%gs` base *active* in `IA32_GS_BASE` and the per-CPU pointer
+  resting in `KERNEL_GS_BASE`. Phase 4 swaps again for per-CPU stack access on
+  the way out. Interrupts never `SWAPGS` at all. The invariant is therefore
+  "**`KERNEL_GS_BASE` always holds the per-CPU pointer while in the kernel**,"
+  and the userspace `%gs` base is simply the active `IA32_GS_BASE` — fully
+  symmetric to `%fs`/`IA32_FS_BASE`.
+
+  The pre-existing `ARCH_SET_GS` was copied from the *Linux* convention
+  (writing `KERNEL_GS_BASE`), which under Slate's stub clobbers the per-CPU
+  pointer mid-handler; phase 4's `mov gs:[8], …` (after its `SWAPGS` brings the
+  now-corrupted `KERNEL_GS_BASE` into the active slot) then faults.
+
+  A first attempt at the context-switch restore made the same wrong assumption
+  in the other direction — it tried to fall back to a "live per-CPU base" read
+  from `IA32_GS_BASE` when a task had no custom `%gs`. But inside a syscall
+  handler `IA32_GS_BASE` holds the *user's* base (0 for a never-set task), so
+  that read yielded 0 and the next `SWAPGS` loaded `GS_BASE = 0`, faulting per-CPU
+  access on the *first* ring-3 process spawned.
+
+**Fix:** Treat the userspace `%gs` base exactly like `%fs` — it is the active
+`IA32_GS_BASE`. `ARCH_SET_GS`/`ARCH_GET_GS` now write/read `IA32_GS_BASE`
+(0xC000_0101), not `KERNEL_GS_BASE`; the scheduler restores
+`wrmsr(IA32_GS_BASE, task.gs_base)` on switch-in for user tasks (0 = no custom
+`%gs`, the default — correct to restore directly); `execve` resets
+`IA32_GS_BASE = 0`. `KERNEL_GS_BASE` is now written in exactly one place
+(`syscall::entry::init`, the per-CPU pointer) and never touched again, making
+the invariant trivially true. The TD4 `arch_prctl` GS validation self-test was
+updated to bracket `IA32_GS_BASE` instead of `KERNEL_GS_BASE`. Verified: build
++ clippy (0 errors) + boot-test green; both the `%fs` and `%gs` two-process
+context-switch regression tests print OK and there are no panics.
+
+**Lesson:** When two layers each encode a CPU-state convention (the asm entry
+stub vs. the syscall handler), they must agree explicitly. The FS/GS-base
+handling is the canonical example; both are now documented as "active-register,
+symmetric to %fs" on `cpu::IA32_GS_BASE`, `Task::gs_base`, and the
+`sys_arch_prctl` const doc.
+
+### F13. Userspace `%fs` (TLS) base and `%gs` base were not saved/restored per task across context switches — FIXED 2026-06-14
+
+**Where:** `kernel/src/sched/mod.rs` context-switch path (both switch sites);
+`kernel/src/sched/task.rs` (`fs_base`/`gs_base` fields);
+`kernel/src/syscall/linux.rs` `sys_arch_prctl`; `kernel/src/proc/{fork,
+thread_clone,spawn}.rs`.
+
+**Symptom:** Latent for single-process workloads; fatal for any multi-process
+glibc workload (a real toolchain: gcc/ld/make/bash). `IA32_FS_BASE` is glibc's
+thread-local-storage pointer (`%fs` base) and is a global CPU register *not*
+part of the saved GP `Context`. With two concurrent glibc processes, a context
+switch left the incoming process running on the outgoing process's TLS pointer
+— silently corrupting `errno`, the stack-protector canary, and every `__thread`
+variable. The `%gs` base (see F14) is the sibling register with the same flaw.
+
+**Root cause:** The scheduler swapped CR3, FPU state, and the GP register
+`Context` on a switch, but never the per-thread segment-base MSRs. `CR4.FSGSBASE`
+is off, so userspace can only change these via `arch_prctl`/`CLONE_SETTLS`,
+making a kernel-stored per-task field authoritative.
+
+**Fix:** Added authoritative per-`Task` `fs_base`/`gs_base` fields, restored on
+switch-in for user tasks (`pml4_phys != 0`), kept in sync at
+`arch_prctl(ARCH_SET_FS/SET_GS)`, inherited across `fork`/`clone`, and reset on
+`execve`. Two two-process ring-3 regression tests
+(`self_test_linux_fs_tls_switch`, `self_test_linux_gs_tls_switch`) install
+distinct sentinel bases in concurrent processes and assert each survives
+cooperative yields; both print OK at boot. (See F14 for the `%gs`-specific
+convention subtlety that the GS half of this work uncovered.)
+
 ### F12. ALSA PCM `hw_params` leaked a mixer slot under concurrent calls on a shared fd — FIXED 2026-06-13
 
 **Where:** `kernel/src/ipc/alsa_pcm.rs` `hw_params` (the slot-reservation

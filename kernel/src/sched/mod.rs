@@ -1140,6 +1140,41 @@ pub fn set_task_fs_base(task_id: TaskId, fs_base: u64) {
     }
 }
 
+/// Record the current task's **userspace `%gs` base** (the value
+/// `arch_prctl(ARCH_SET_GS)` installs into the active `IA32_GS_BASE` under
+/// Slate's entry-stub convention).
+///
+/// The switch path restores [`Task::gs_base`] into `IA32_GS_BASE` for user
+/// tasks on switch-in (0 = no custom `%gs`).  See [`Task::gs_base`].
+pub fn set_current_task_gs_base(gs_base: u64) {
+    let task_id = load_current_task();
+    let mut state = SCHED.lock();
+    if let Some(task) = state.tasks.get_mut(&task_id) {
+        task.gs_base = gs_base;
+    }
+}
+
+/// Record the userspace `%gs` base for a specific task.
+///
+/// Used by `fork`/`clone` so the new task inherits the creator's `%gs`
+/// base **before** it is first scheduled.  No-op if the task is gone.
+pub fn set_task_gs_base(task_id: TaskId, gs_base: u64) {
+    let mut state = SCHED.lock();
+    if let Some(task) = state.tasks.get_mut(&task_id) {
+        task.gs_base = gs_base;
+    }
+}
+
+/// Read the current task's saved userspace `%gs` base (the authoritative
+/// [`Task::gs_base`] field, `0` if unset).  Used by `fork`/`clone` to
+/// propagate the creator's `%gs` base to the new task.
+#[must_use]
+pub fn current_task_gs_base() -> u64 {
+    let task_id = load_current_task();
+    let state = SCHED.lock();
+    state.tasks.get(&task_id).map_or(0, |task| task.gs_base)
+}
+
 /// Get the cgroup ID of the current task (non-blocking).
 ///
 /// Returns `ROOT_CGROUP` if the scheduler lock is contended or the
@@ -3516,6 +3551,7 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
     let new_pml4: u64;
     let new_stack_top: u64;
     let new_fs_base: u64;
+    let new_gs_base: u64;
     let next_id: TaskId;
 
     {
@@ -3699,9 +3735,9 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                             (&raw mut t.context, &raw mut t.fpu_state, t.pml4_phys)
                         });
                     let new_data = s.tasks.get(&ready_id)
-                        .map(|t| (&raw const t.context, &raw const t.fpu_state, t.pml4_phys, t.stack_bottom, t.fs_base));
+                        .map(|t| (&raw const t.context, &raw const t.fpu_state, t.pml4_phys, t.stack_bottom, t.fs_base, t.gs_base));
 
-                    if let (Some((old_p, old_fpu, o_pml4)), Some((new_p, new_fpu, n_pml4, n_sb, n_fs_base))) =
+                    if let (Some((old_p, old_fpu, o_pml4)), Some((new_p, new_fpu, n_pml4, n_sb, n_fs_base, n_gs_base))) =
                         (old_data, new_data)
                     {
                         // Account CPU cycles to the outgoing task (idle fallback path).
@@ -3741,6 +3777,22 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                             // stored it, so WRMSR cannot #GP.
                             unsafe {
                                 crate::cpu::wrmsr(crate::cpu::IA32_FS_BASE, n_fs_base);
+                            }
+                            // Restore this user thread's userspace %gs base.
+                            // Like %fs, the userspace %gs base is the active
+                            // IA32_GS_BASE during kernel execution: the syscall
+                            // entry stub swaps GS back before calling Rust
+                            // (so the handler runs with active GS = user %gs,
+                            // KERNEL_GS_BASE = per-CPU), and interrupts never
+                            // SWAPGS — so this CPU's per-CPU pointer always
+                            // rests in KERNEL_GS_BASE and the active register
+                            // is the value the task sees in ring 3.  0 = no
+                            // custom %gs (the default).
+                            // SAFETY: n_gs_base was validated < 1<<47 (canonical
+                            // user addr) when arch_prctl/clone stored it, so
+                            // WRMSR cannot #GP.
+                            unsafe {
+                                crate::cpu::wrmsr(crate::cpu::IA32_GS_BASE, n_gs_base);
                             }
                         }
 
@@ -3855,9 +3907,9 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                 (&raw mut t.context, &raw mut t.fpu_state, t.pml4_phys)
             });
         let new_data = state.tasks.get(&next_id)
-            .map(|t| (&raw const t.context, &raw const t.fpu_state, t.pml4_phys, t.stack_bottom, t.fs_base));
+            .map(|t| (&raw const t.context, &raw const t.fpu_state, t.pml4_phys, t.stack_bottom, t.fs_base, t.gs_base));
 
-        if let (Some((old, old_fpu, o_pml4)), Some((new, new_fpu, n_pml4, n_stack_bottom, n_fs_base))) =
+        if let (Some((old, old_fpu, o_pml4)), Some((new, new_fpu, n_pml4, n_stack_bottom, n_fs_base, n_gs_base))) =
             (old_data, new_data)
         {
             old_ctx_ptr = old;
@@ -3867,6 +3919,7 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
             old_pml4 = o_pml4;
             new_pml4 = n_pml4;
             new_fs_base = n_fs_base;
+            new_gs_base = n_gs_base;
             #[allow(clippy::arithmetic_side_effects)]
             {
                 new_stack_top = if n_stack_bottom != 0 {
@@ -3919,6 +3972,17 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
         // when arch_prctl/clone stored it, so WRMSR cannot #GP.
         unsafe {
             crate::cpu::wrmsr(crate::cpu::IA32_FS_BASE, new_fs_base);
+        }
+        // Restore the userspace %gs base.  Like %fs, this is the active
+        // IA32_GS_BASE during kernel execution: the syscall entry stub swaps
+        // GS back before calling Rust (handler runs with active GS = user %gs,
+        // KERNEL_GS_BASE = per-CPU) and interrupts never SWAPGS, so the per-CPU
+        // pointer always rests in KERNEL_GS_BASE.  0 = no custom %gs.  See
+        // Task::gs_base.
+        // SAFETY: new_gs_base was validated < 1<<47 (canonical user addr) when
+        // arch_prctl/clone stored it, so WRMSR cannot #GP.
+        unsafe {
+            crate::cpu::wrmsr(crate::cpu::IA32_GS_BASE, new_gs_base);
         }
     }
 

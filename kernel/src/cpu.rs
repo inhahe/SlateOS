@@ -696,6 +696,28 @@ pub fn delay_ns(ns: u64) {
 /// would read each other's TLS.  See `sched::mod`'s switch path.
 pub const IA32_FS_BASE: u32 = 0xC000_0100;
 
+/// `IA32_GS_BASE` MSR (0xC000_0101) — the base address of the **active**
+/// `%gs` segment, and (in Slate) the thread's **userspace `%gs` base**.
+///
+/// Slate's syscall entry stub does a second `SWAPGS` *back* before calling the
+/// Rust handler, so while the kernel runs on a thread's behalf the active
+/// `%gs` base is the thread's userspace value and the per-CPU pointer rests in
+/// [`IA32_KERNEL_GS_BASE`]; interrupts never `SWAPGS` at all.  The userspace
+/// `%gs` base is therefore exactly symmetric to `%fs`/[`IA32_FS_BASE`]: it is
+/// the active register, set by `arch_prctl(ARCH_SET_GS)` and restored by the
+/// scheduler on switch-in for user tasks (0 = no custom `%gs`, the default).
+pub const IA32_GS_BASE: u32 = 0xC000_0101;
+
+/// `IA32_KERNEL_GS_BASE` MSR (0xC000_0102) — the *inactive* `%gs` base that
+/// `SWAPGS` exchanges with [`IA32_GS_BASE`].  In Slate this **always holds the
+/// per-CPU data pointer** (set once during `syscall::entry::init`): a user
+/// thread in ring 3 keeps it here so `SWAPGS` on syscall entry makes per-CPU
+/// data reachable, and because the entry stub swaps `%gs` back before the Rust
+/// handler runs, it still holds the per-CPU pointer throughout kernel
+/// execution.  The scheduler never writes it (the userspace base lives in the
+/// active [`IA32_GS_BASE`]); only `syscall::entry` does, at init.
+pub const IA32_KERNEL_GS_BASE: u32 = 0xC000_0102;
+
 /// Read a Model-Specific Register (MSR).
 ///
 /// # Safety

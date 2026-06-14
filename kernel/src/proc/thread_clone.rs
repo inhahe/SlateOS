@@ -470,6 +470,10 @@ pub fn clone_thread(
         unsafe { crate::cpu::rdmsr(crate::cpu::IA32_FS_BASE) }
     };
     crate::sched::set_task_fs_base(task_id, child_fs);
+    // clone() has no "set GS" flag, so the new thread inherits the calling
+    // thread's userspace %gs base (the authoritative Task field, 0 if unset).
+    let child_gs = crate::sched::current_task_gs_base();
+    crate::sched::set_task_gs_base(task_id, child_gs);
 
     // The task may already be running by the time we get here, but
     // for CLONE_PARENT_SETTID Linux promises that the parent's TID

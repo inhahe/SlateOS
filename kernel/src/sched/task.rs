@@ -339,6 +339,31 @@ pub struct Task {
     /// ring 3), so this field never goes stale behind the kernel's back.
     pub fs_base: u64,
 
+    /// Saved **userspace** `%gs` base for this thread — the value
+    /// `arch_prctl(ARCH_SET_GS)` installs (rarely used by glibc, which uses
+    /// `%fs` for TLS, but valid and used by some runtimes/sanitizers).
+    ///
+    /// Fully symmetric to [`fs_base`](Self::fs_base): the userspace `%gs` base
+    /// is the **active `IA32_GS_BASE`** while the kernel runs on this thread's
+    /// behalf.  Slate's syscall entry stub swaps `%gs` *back* before calling
+    /// the Rust handler (so a handler runs with the userspace value active and
+    /// the per-CPU pointer resting in `KERNEL_GS_BASE`), and interrupts never
+    /// `SWAPGS` — so unlike stock Linux the userspace base is simply the active
+    /// register, not `KERNEL_GS_BASE`.  Like `%fs` it is a per-thread global
+    /// register absent from the saved [`Context`], so the scheduler restores it
+    /// (`wrmsr(IA32_GS_BASE, gs_base)`) on switch-in for user tasks
+    /// (`pml4_phys != 0`).
+    ///
+    /// **Sentinel:** `0` means "this thread has not set a user `%gs` base," and
+    /// restoring 0 is exactly correct — ring 3 simply runs with a zero `%gs`
+    /// base (the default).  The per-CPU pointer lives in `KERNEL_GS_BASE`,
+    /// which the scheduler never touches, so the first `SWAPGS` of a fresh
+    /// task's first syscall still finds it.
+    ///
+    /// Authoritative copy: updated by `arch_prctl(ARCH_SET_GS)`, inherited
+    /// across `fork`/`clone`, reset to 0 on `execve`.
+    pub gs_base: u64,
+
     // --- Interactive task detection fields ---
 
     /// Number of timer ticks the task has run in the current burst.
@@ -784,6 +809,7 @@ impl Task {
             planted_canary: 0, // No allocated stack — canary never checked.
             pml4_phys: 0, // Kernel address space.
             fs_base: 0,   // Kernel task — never reads %fs.
+            gs_base: 0,   // Kernel task — never sets a userspace %gs base.
             burst_ticks: 0,
             avg_burst_x8: 0,
             interactive: false,
@@ -865,6 +891,7 @@ impl Task {
             planted_canary: 0, // No allocated stack — canary never checked.
             pml4_phys: 0,      // Kernel address space.
             fs_base: 0,        // Kernel task — never reads %fs.
+            gs_base: 0,        // Kernel task — never sets a userspace %gs base.
             burst_ticks: 0,
             avg_burst_x8: 0,
             interactive: false,
@@ -1004,6 +1031,10 @@ impl Task {
             // arch_prctl(ARCH_SET_FS) in its _start, fork copies the
             // parent's, and clone(CLONE_SETTLS) overrides it.
             fs_base: 0,
+            // Userspace %gs base; 0 = "unset" (resting KERNEL_GS_BASE is the
+            // per-CPU base).  Set via arch_prctl(ARCH_SET_GS); copied by
+            // fork/clone; reset on execve.
+            gs_base: 0,
             burst_ticks: 0,
             avg_burst_x8: 0,
             interactive: false,

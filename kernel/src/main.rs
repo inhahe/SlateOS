@@ -1327,6 +1327,18 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Sibling regression test for the userspace %gs base (the active
+    // IA32_GS_BASE under Slate's entry-stub convention, installed by
+    // arch_prctl(ARCH_SET_GS)): two concurrent Linux procs install distinct
+    // %gs bases and assert they survive cooperative yields.  Without per-task
+    // %gs-base save/restore they'd clobber each other's GS base.
+    if let Err(e) = proc::spawn::self_test_linux_gs_tls_switch() {
+        serial_println!(
+            "WARNING: Linux %gs-base context-switch self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 end-to-end test of execveat(2) in both forms: a real Linux-ABI
     // launcher execs a target by path (AT_FDCWD) and by open-fd
     // (AT_EMPTY_PATH / fexecve), proving execveat replaces the image and

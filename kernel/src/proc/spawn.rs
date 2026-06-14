@@ -1078,6 +1078,16 @@ pub fn exec_process(
     // SAFETY: writing 0 to IA32_FS_BASE is canonical and cannot #GP.
     unsafe { crate::cpu::wrmsr(crate::cpu::IA32_FS_BASE, 0); }
     crate::sched::set_current_task_fs_base(0);
+    // Likewise reset the userspace %gs base to 0.  Like %fs, the userspace
+    // %gs base is the active IA32_GS_BASE (the entry stub swaps GS back before
+    // calling Rust, so the handler runs with active GS = user %gs and the
+    // per-CPU pointer rests in KERNEL_GS_BASE).  Clearing it both in the live
+    // MSR and on the Task field ensures the new image starts with no stale
+    // %gs base before its glibc _start optionally re-installs one via
+    // arch_prctl(ARCH_SET_GS).
+    // SAFETY: writing 0 to IA32_GS_BASE is canonical and cannot #GP.
+    unsafe { crate::cpu::wrmsr(crate::cpu::IA32_GS_BASE, 0); }
+    crate::sched::set_current_task_gs_base(0);
 
     // Step 5: Allocate and map a fresh user stack.
     let mut user_rsp = match setup_user_stack(pml4_phys) {
@@ -3120,6 +3130,119 @@ pub fn self_test_linux_fs_tls_switch() -> KernelResult<()> {
     serial_println!(
         "[spawn]   Linux %fs/TLS-base context-switch persistence (ring 3: two concurrent \
          Linux procs kept distinct FS bases across cooperative yields): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 regression test that the **userspace `%gs` base is saved/restored
+/// across context switches** between two concurrent Linux processes — the
+/// sibling of [`self_test_linux_fs_tls_switch`].
+///
+/// `arch_prctl(ARCH_SET_GS)` installs the userspace `%gs` base.  Under Slate's
+/// entry-stub convention this is the active `IA32_GS_BASE` (MSR 0xC000_0101) —
+/// the stub swaps `%gs` back before the Rust handler runs, so the userspace
+/// value is active during kernel execution and the per-CPU pointer rests in
+/// `KERNEL_GS_BASE`; interrupts never `SWAPGS`.  The `%gs` base is thus a
+/// **global CPU register** absent from the saved GP `Context`, fully symmetric
+/// to `%fs`.  Without per-task save/restore, two concurrent processes that
+/// each set a `%gs` base clobber each other's.
+///
+/// Two [`elf::build_linux_gs_tls_test_elf`] processes are spawned with
+/// distinct sentinel GS bases; each installs its sentinel via
+/// `arch_prctl(ARCH_SET_GS)` then loops `sched_yield` + `arch_prctl
+/// (ARCH_GET_GS)` asserting the value is unchanged.  Both exiting `0` proves
+/// the per-task GS base is correctly restored on switch-in; `0xF2`/242 means a
+/// process observed a clobbered GS base.
+pub fn self_test_linux_gs_tls_switch() -> KernelResult<()> {
+    // Two distinct canonical user-address sentinels (< 1 << 47, non-zero),
+    // distinct from the FS test's so a mix-up would be obvious.  Never
+    // dereferenced — they only round-trip through IA32_GS_BASE.
+    const SENTINEL_A: u64 = 0x0000_2233_4400_0000;
+    const SENTINEL_B: u64 = 0x0000_6677_8800_0000;
+    const MAX_YIELDS: usize = 1024;
+
+    serial_println!(
+        "[spawn] Running Linux %gs-base context-switch persistence test (ring 3, 2 procs)..."
+    );
+
+    let spawn_one = |sentinel: u64, name: &'static str| -> KernelResult<SpawnResult> {
+        let elf_img = elf::build_linux_gs_tls_test_elf(sentinel);
+        let argv: &[&[u8]] = &[name.as_bytes()];
+        let envp: &[&[u8]] = &[b"PATH=/bin"];
+        let options = SpawnOptions {
+            name,
+            parent: 0,
+            priority: DEFAULT_PRIORITY,
+            capabilities: &[],
+            fd_map: &[],
+            argv,
+            envp,
+            exe_path: None,
+        };
+        spawn_process(&elf_img, &options)
+    };
+
+    let a = match spawn_one(SENTINEL_A, "spawn-test-gs-tls-a") {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: gs-tls proc A spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let b = match spawn_one(SENTINEL_B, "spawn-test-gs-tls-b") {
+        Ok(r) => r,
+        Err(e) => {
+            // A was spawned; tear it down before bailing.
+            thread::on_thread_exit(a.task_id);
+            pcb::destroy(a.pid);
+            serial_println!("[spawn]   FAIL: gs-tls proc B spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Drive the scheduler until both processes have exited (or we hit the
+    // yield ceiling).  Both must reach Zombie for the test to conclude.
+    for _ in 0..MAX_YIELDS {
+        crate::sched::yield_now();
+        let a_done = pcb::state(a.pid) == Some(pcb::ProcessState::Zombie);
+        let b_done = pcb::state(b.pid) == Some(pcb::ProcessState::Zombie);
+        if a_done && b_done {
+            break;
+        }
+    }
+
+    let a_state = pcb::state(a.pid);
+    let b_state = pcb::state(b.pid);
+    let a_exit = pcb::exit_code(a.pid);
+    let b_exit = pcb::exit_code(b.pid);
+
+    thread::on_thread_exit(a.task_id);
+    thread::on_thread_exit(b.task_id);
+    pcb::destroy(a.pid);
+    pcb::destroy(b.pid);
+
+    if a_state != Some(pcb::ProcessState::Zombie) || b_state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: %gs test — not both zombie after {} yields (A={:?}, B={:?})",
+            MAX_YIELDS, a_state, b_state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // exit(0) = GS base held across every yield; exit(0xF2)=242 = clobbered.
+    if a_exit != Some(0) || b_exit != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: %gs test — a process saw a clobbered GS base (A exit={:?}, \
+             B exit={:?}; 0xF2/242 = GS base changed across a context switch — the scheduler \
+             is not saving/restoring the userspace %gs base per task)",
+            a_exit, b_exit
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   Linux %gs-base context-switch persistence (ring 3: two concurrent \
+         Linux procs kept distinct GS bases across cooperative yields): OK"
     );
     Ok(())
 }

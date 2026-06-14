@@ -2072,12 +2072,48 @@ pub fn build_linux_pipe_fork_dup2_exec_test_elf(path_nul: &[u8]) -> alloc::vec::
 /// `R+X` only (the out slot lives on the loader-provided writable SysV
 /// stack).  Tagged `ELFOSABI_GNU` for the Linux ABI + SysV stack.
 #[must_use]
+pub fn build_linux_fs_tls_test_elf(sentinel: u64) -> alloc::vec::Vec<u8> {
+    // ARCH_SET_FS = 0x1002, ARCH_GET_FS = 0x1003; fail with 0xF1.
+    build_linux_seg_base_test_elf(0x1002, 0x1003, sentinel, 0xF1)
+}
+
+/// Build a **Linux-ABI** `ET_EXEC` test ELF that verifies the **userspace
+/// `%gs` base survives context switches** — the `%gs` analogue of
+/// [`build_linux_fs_tls_test_elf`].
+///
+/// Installs `sentinel` via `arch_prctl(ARCH_SET_GS)`, then loops
+/// `sched_yield` + `arch_prctl(ARCH_GET_GS)` asserting the value is
+/// unchanged; `exit(0)` on success, `exit(0xF2)` if the base was clobbered.
+/// Used by [`crate::proc::spawn::self_test_linux_gs_tls_switch`] with two
+/// distinct sentinels.  Under Slate's entry-stub convention the userspace
+/// `%gs` base is the active `IA32_GS_BASE` (symmetric to `%fs`); this test
+/// exercises `arch_prctl(ARCH_SET_GS/GET_GS)` and the scheduler's switch-in
+/// restore of that MSR.  `sentinel` must be a canonical user address
+/// (`< 1 << 47`, non-zero).
+#[must_use]
+pub fn build_linux_gs_tls_test_elf(sentinel: u64) -> alloc::vec::Vec<u8> {
+    // ARCH_SET_GS = 0x1001, ARCH_GET_GS = 0x1004; fail with 0xF2.
+    build_linux_seg_base_test_elf(0x1001, 0x1004, sentinel, 0xF2)
+}
+
+/// Shared body for the `%fs`/`%gs` segment-base context-switch tests.
+///
+/// Emits: install `sentinel` via `arch_prctl(set_code, sentinel)`, then loop
+/// 50× `{ sched_yield(); arch_prctl(get_code, &slot); if slot != sentinel
+/// goto fail }`; `exit(0)` on success, `exit(fail_code)` on mismatch.  The
+/// two arch_prctl `code` immediates and the failure exit code are the only
+/// things that differ between the FS and GS variants.
 #[allow(
     clippy::indexing_slicing,
     clippy::arithmetic_side_effects,
     clippy::cast_possible_truncation
 )]
-pub fn build_linux_fs_tls_test_elf(sentinel: u64) -> alloc::vec::Vec<u8> {
+fn build_linux_seg_base_test_elf(
+    set_code: u32,
+    get_code: u32,
+    sentinel: u64,
+    fail_code: u8,
+) -> alloc::vec::Vec<u8> {
     use alloc::vec;
 
     let phdr_offset: u64 = 64;
@@ -2086,11 +2122,12 @@ pub fn build_linux_fs_tls_test_elf(sentinel: u64) -> alloc::vec::Vec<u8> {
 
     let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
 
-    // sub rsp, 16  (ARCH_GET_FS output slot at [rsp+0])
+    // sub rsp, 16  (arch_prctl GET output slot at [rsp+0])
     code.extend_from_slice(&[0x48, 0x83, 0xEC, 0x10]);
-    // arch_prctl(ARCH_SET_FS=0x1002, sentinel)
+    // arch_prctl(set_code, sentinel): eax=158, edi=set_code, rsi=sentinel
     code.extend_from_slice(&[0xB8, 0x9E, 0x00, 0x00, 0x00]); // mov eax, 158
-    code.extend_from_slice(&[0xBF, 0x02, 0x10, 0x00, 0x00]); // mov edi, 0x1002
+    code.push(0xBF); // mov edi, set_code
+    code.extend_from_slice(&set_code.to_le_bytes());
     code.extend_from_slice(&[0x48, 0xBE]); // movabs rsi, sentinel
     let set_imm = code.len();
     code.extend_from_slice(&[0u8; 8]);
@@ -2102,9 +2139,10 @@ pub fn build_linux_fs_tls_test_elf(sentinel: u64) -> alloc::vec::Vec<u8> {
     let loop_top = code.len();
     // sched_yield()
     code.extend_from_slice(&[0xB8, 0x18, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,24; syscall
-    // arch_prctl(ARCH_GET_FS=0x1003, &slot)
+    // arch_prctl(get_code, &slot): eax=158, edi=get_code, rsi=rsp
     code.extend_from_slice(&[0xB8, 0x9E, 0x00, 0x00, 0x00]); // mov eax, 158
-    code.extend_from_slice(&[0xBF, 0x03, 0x10, 0x00, 0x00]); // mov edi, 0x1003
+    code.push(0xBF); // mov edi, get_code
+    code.extend_from_slice(&get_code.to_le_bytes());
     code.extend_from_slice(&[0x48, 0x89, 0xE6]); // mov rsi, rsp
     code.extend_from_slice(&[0x0F, 0x05]); // syscall
     // cmp [rsp], sentinel
@@ -2125,9 +2163,9 @@ pub fn build_linux_fs_tls_test_elf(sentinel: u64) -> alloc::vec::Vec<u8> {
     code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,60; syscall
     code.push(0xCC); // int3
 
-    // fail: exit(0xF1)
+    // fail: exit(fail_code)
     let fail = code.len();
-    code.extend_from_slice(&[0xBF, 0xF1, 0x00, 0x00, 0x00]); // mov edi, 0xF1
+    code.extend_from_slice(&[0xBF, fail_code, 0x00, 0x00, 0x00]); // mov edi, fail_code
     code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,60; syscall
     code.push(0xCC); // int3
 

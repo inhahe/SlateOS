@@ -515,6 +515,11 @@ pub fn fork_process(parent_pid: ProcessId, frame: &SyscallFrame) -> KernelResult
     // onto the child Task for the scheduler to restore on switch-in.
     // SAFETY: reading IA32_FS_BASE is side-effect-free.
     let parent_fs = unsafe { crate::cpu::rdmsr(crate::cpu::IA32_FS_BASE) };
+    // The child also inherits the parent's userspace %gs base.  Read the
+    // authoritative Task field (rather than the live IA32_GS_BASE MSR) so the
+    // inherited value is unambiguous regardless of switch context; 0 means the
+    // parent never set a custom %gs.
+    let parent_gs = crate::sched::current_task_gs_base();
 
     match thread::spawn(
         child_pid,
@@ -525,6 +530,7 @@ pub fn fork_process(parent_pid: ProcessId, frame: &SyscallFrame) -> KernelResult
     ) {
         Ok(task_id) => {
             crate::sched::set_task_fs_base(task_id, parent_fs);
+            crate::sched::set_task_gs_base(task_id, parent_gs);
             Ok(child_pid)
         }
         Err(e) => {

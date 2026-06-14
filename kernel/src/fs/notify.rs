@@ -148,6 +148,12 @@ pub struct FsEvent {
     pub path: String,
     /// For rename events: the new path.
     pub new_path: Option<String>,
+    /// Whether the subject of this event is a directory (as opposed to a
+    /// regular file).  The Linux-ABI inotify adapter ORs `IN_ISDIR` into the
+    /// reported event mask when this is set.  Defaults to `false` for the
+    /// common file-event path; directory-aware emitters (mkdir/rmdir, the
+    /// directory-handle close) set it true.
+    pub is_dir: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -433,6 +439,7 @@ pub fn read_events(watch_id: u64, max: usize) -> KernelResult<Vec<FsEvent>> {
             event_type: FsEventType::Overflow,
             path: String::new(),
             new_path: None,
+            is_dir: false,
         });
         watch.overflowed = false;
     }
@@ -545,8 +552,29 @@ fn path_matches(watch_path: &str, recursive: bool, candidate: &str) -> bool {
 /// Checks all active watches and queues the event for matching ones.
 ///
 /// This is on the hot path — must be fast when no watches exist.
-#[allow(clippy::arithmetic_side_effects)]
+///
+/// The subject is reported as a regular file (`is_dir = false`).  Callers
+/// operating on directories use [`emit_dir`] (or the `*_dir` convenience
+/// wrappers) so the inotify adapter can OR in `IN_ISDIR`.
+#[inline]
 pub fn emit(event_type: FsEventType, path: &str, new_path: Option<&str>) {
+    emit_inner(event_type, path, new_path, false);
+}
+
+/// Emit a filesystem change event whose subject is a **directory**.
+///
+/// Identical to [`emit`] but tags the queued [`FsEvent`] with `is_dir = true`
+/// so the Linux-ABI inotify adapter ORs `IN_ISDIR` into the reported mask.
+#[inline]
+pub fn emit_dir(event_type: FsEventType, path: &str, new_path: Option<&str>) {
+    emit_inner(event_type, path, new_path, true);
+}
+
+/// Core event-emission path shared by [`emit`] and [`emit_dir`].
+///
+/// This is on the hot path — must be fast when no watches exist.
+#[allow(clippy::arithmetic_side_effects)]
+fn emit_inner(event_type: FsEventType, path: &str, new_path: Option<&str>, is_dir: bool) {
     // Lock-free fast path: if no live watch is interested in this event type,
     // there is nothing to queue — skip without ever taking the `WATCHES` lock.
     // (Internal `Overflow` events have an empty mask and are never emitted this
@@ -609,6 +637,7 @@ pub fn emit(event_type: FsEventType, path: &str, new_path: Option<&str>) {
             event_type,
             path: String::from(path),
             new_path: new_path.map(String::from),
+            is_dir,
         });
         if watch.owner_token != 0 {
             woke_tokens.push(watch.owner_token);
@@ -629,10 +658,24 @@ pub fn emit_created(path: &str) {
     emit(FsEventType::Created, path, None);
 }
 
+/// Convenience: emit a "created" event whose subject is a directory
+/// (e.g. `mkdir`).  Surfaces as inotify `IN_CREATE | IN_ISDIR`.
+#[inline]
+pub fn emit_created_dir(path: &str) {
+    emit_dir(FsEventType::Created, path, None);
+}
+
 /// Convenience: emit a "deleted" event.
 #[inline]
 pub fn emit_deleted(path: &str) {
     emit(FsEventType::Deleted, path, None);
+}
+
+/// Convenience: emit a "deleted" event whose subject is a directory
+/// (e.g. `rmdir`).  Surfaces as inotify `IN_DELETE | IN_ISDIR`.
+#[inline]
+pub fn emit_deleted_dir(path: &str) {
+    emit_dir(FsEventType::Deleted, path, None);
 }
 
 /// Convenience: emit a "modified" event.
@@ -680,16 +723,17 @@ pub fn emit_opened(path: &str) {
 ///
 /// `was_writable` selects between `ClosedWrite` (the handle was opened for
 /// writing → inotify `IN_CLOSE_WRITE`) and `ClosedNoWrite` (read-only →
-/// `IN_CLOSE_NOWRITE`). Emitted from the file-handle final-close path; opt-in,
-/// gated by the matching interest count.
+/// `IN_CLOSE_NOWRITE`). `is_dir` tags the event so the inotify adapter ORs in
+/// `IN_ISDIR` for directory-handle closes. Emitted from the file-handle
+/// final-close path; opt-in, gated by the matching interest count.
 #[inline]
-pub fn emit_closed(path: &str, was_writable: bool) {
+pub fn emit_closed(path: &str, was_writable: bool, is_dir: bool) {
     let ty = if was_writable {
         FsEventType::ClosedWrite
     } else {
         FsEventType::ClosedNoWrite
     };
-    emit(ty, path, None);
+    emit_inner(ty, path, None, is_dir);
 }
 
 // ---------------------------------------------------------------------------

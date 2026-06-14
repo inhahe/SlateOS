@@ -5809,6 +5809,13 @@ pub fn sys_fs_watch_read(args: &SyscallArgs) -> SyscallResult {
                     // Write event type (bytes 520..524).
                     let type_ptr = base.add(520) as *mut u32;
                     core::ptr::write(type_ptr, event.event_type as u32);
+
+                    // Write is_dir flag (byte 524): 1 if the subject is a
+                    // directory.  The buffer was zero-filled above, so a
+                    // non-directory event leaves this 0 without an extra write.
+                    if event.is_dir {
+                        core::ptr::write(base.add(524), 1u8);
+                    }
                 }
             }
 

@@ -747,7 +747,7 @@ tasks). Related: `sys_clock_settime`/`sys_clock_adjtime` now enforce
 per-process `CAP_SYS_TIME` bit when the PCB gains a POSIX capability set (today
 `ProcessCredentials` is only uid/gid/groups).
 
-### TD17. inotify event coverage is limited to native-derived events — PARTIAL 2026-06-14 (was DEBT 2026-06-12)
+### TD17. inotify event coverage is limited to native-derived events — PARTIAL 2026-06-14 (IN_ISDIR added; was DEBT 2026-06-12)
 
 **Where:** `kernel/src/ipc/inotify.rs` (Linux-ABI adapter) backed 1:1 by
 `kernel/src/fs/notify.rs` native watches.
@@ -757,9 +757,11 @@ the reportable event set is exactly what the native layer produces:
 `IN_CREATE`/`IN_DELETE`/`IN_MODIFY`/`IN_ATTRIB`/`IN_MOVED_FROM`/`IN_MOVED_TO`
 (Renamed→pair)/`IN_DELETE_SELF`/`IN_MOVE_SELF`/`IN_ACCESS`/`IN_OPEN`/
 `IN_CLOSE_WRITE`/`IN_CLOSE_NOWRITE`, plus synthetic `IN_Q_OVERFLOW` and
-`IN_IGNORED`. STILL NOT observable (silently dropped from the interest mask):
-`IN_ISDIR` (FsEvent carries no dir flag, so open/close/etc. on a directory is
-reported without the dir-flag bit). Watches are NON-RECURSIVE and keyed by
+`IN_IGNORED`. `IN_ISDIR` is now OR'd into the reported mask whenever the event
+subject is a directory (mkdir/rmdir, directory-handle close, a renamed
+subdirectory) — `FsEvent` carries an `is_dir` flag threaded through both the
+kernel inotify adapter and the native fs_watch ABI (byte 524) into the posix
+inotify shim. Watches are NON-RECURSIVE and keyed by
 NORMALIZED PATH STRING, not inode — re-adding the same path returns the same wd
 (mask replaced, or OR-combined under `IN_MASK_ADD`); a watched path deleted and
 recreated keeps the same wd. `IN_ONESHOT`/`IN_DONT_FOLLOW`/`IN_EXCL_UNLINK` are
@@ -768,9 +770,9 @@ accepted-but-ignored control bits. Linux FS-mutation syscalls
 native-VFS / native file-handle activity, not from Linux-ABI file operations.
 
 **Impact:** low — the common "watch a dir for create/delete/modify/move/open/close"
-file-manager/build-tool idiom is fully covered. Remaining gaps bite only apps that
-need the dir-flag bit (`IN_ISDIR`) or inode-identity semantics across
-delete+recreate (rare).
+file-manager/build-tool idiom is fully covered, now including the `IN_ISDIR`
+dir-flag. Remaining gaps bite only apps that need inode-identity semantics across
+delete+recreate (rare) or inotify events from Linux-ABI mutation syscalls.
 
 **Progress (2026-06-14): IN_ACCESS, then IN_OPEN / IN_CLOSE_WRITE /
 IN_CLOSE_NOWRITE now implemented.** All three are gated by the lock-free
@@ -786,18 +788,24 @@ and stay excluded from `ALL_CHANGES`.
 - `IN_CLOSE_*`: `fs::handle::close` emits `FsEventType::ClosedWrite` /
   `ClosedNoWrite` on the final (refcount→0) close, discriminated by the handle's
   write-mode, after dropping the `OPEN_FILES` lock (keeps the
-  `OPEN_FILES → WATCHES` lock order one-directional). Directory handles are
-  skipped pending `IN_ISDIR`.
+  `OPEN_FILES → WATCHES` lock order one-directional). Directory handles now emit
+  their close too, tagged `is_dir` so the adapter ORs in `IN_ISDIR`.
+- `IN_ISDIR` (2026-06-14): `FsEvent` gained an `is_dir` flag. `emit_dir` /
+  `emit_created_dir` / `emit_deleted_dir` set it; `Vfs::mkdir`/`rmdir` and the
+  directory-handle close use them. The kernel inotify adapter ORs `IN_ISDIR` into
+  every directory-subject record (create/delete/close/renamed-subdir, never the
+  synthetic `IN_IGNORED`/`IN_Q_OVERFLOW`). The native fs_watch syscall ABI carries
+  it in record byte 524 (reserved padding before), and the posix inotify shim
+  (`epoll.rs::translate_kernel_event`) ORs `IN_ISDIR` the same way.
 Covered by `fs::notify::self_test` (interest-gate create/close, synthetic emit,
 mask-filtering, end-to-end `Vfs::read_file` ACCESS hook, and an end-to-end
 open/close through the handle layer asserting Opened + ClosedNoWrite for read-only
-and Opened + ClosedWrite for writable), plus the updated inotify mask-translation
-assertions.
+and Opened + ClosedWrite for writable), the inotify boot self-test (a dir-create
+event asserting `IN_CREATE | IN_ISDIR`), and the posix `test_translate_isdir_or_in`
+host unit test (dir vs file subject, and IN_IGNORED never tagged).
 
-**Remaining fix:** (a) add an `is_dir` flag on `FsEvent` so directory
-open/close/access can report `IN_ISDIR` (and re-enable the directory-handle close
-emit skipped above); (b) route the Linux-ABI mutation syscalls through the native
-VFS so they generate `fs::notify` events; (c) switch watch identity to inode
+**Remaining fix:** (a) route the Linux-ABI mutation syscalls through the native
+VFS so they generate `fs::notify` events; (b) switch watch identity to inode
 if/when stable inode numbers are available.
 
 ### TD16. epoll fd readiness not reported when an epoll is nested in poll/select/epoll — RESOLVED 2026-06-14

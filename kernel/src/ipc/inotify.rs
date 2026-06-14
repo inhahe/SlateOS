@@ -154,11 +154,12 @@ const REPORTABLE_EVENTS: u32 = IN_ACCESS
 
 /// Translate a Linux inotify interest mask into the native event mask.
 ///
-/// `IN_ISDIR` is still not observable (the native layer carries no dir flag),
-/// so a caller that asks only for it gets an empty mask; the caller handles
-/// that by registering a watch with no backing native watch (see
-/// [`add_watch`]).  `IN_OPEN` / `IN_CLOSE_WRITE` / `IN_CLOSE_NOWRITE` are now
-/// observable via the file-handle open/close hooks.
+/// `IN_ISDIR` is an *output-only* flag in the inotify ABI — it is OR'd into a
+/// reported event's mask when the subject is a directory, never something a
+/// caller sets in an add-watch interest mask.  It therefore maps to no native
+/// interest bit here (an empty mask); the native `FsEvent::is_dir` flag drives
+/// the OR-in at read time (see `refill`).  `IN_OPEN` / `IN_CLOSE_WRITE` /
+/// `IN_CLOSE_NOWRITE` are observable via the file-handle open/close hooks.
 #[must_use]
 pub fn to_native_mask(in_mask: u32) -> FsEventMask {
     let mut bits = 0u32;
@@ -377,8 +378,15 @@ impl Inotify {
                 Err(_) => continue,
             };
             for ev in events {
+                // inotify ORs IN_ISDIR into the event mask whenever the
+                // subject is a directory (mkdir/rmdir, directory-handle close,
+                // a renamed subdirectory, ...).  The native FsEvent carries
+                // this as a dedicated flag so we never have to re-stat.
+                let isdir_bit = if ev.is_dir { IN_ISDIR } else { 0 };
                 match ev.event_type {
                     FsEventType::Overflow => {
+                        // IN_Q_OVERFLOW is a synthetic wd=-1 event and never
+                        // carries IN_ISDIR.
                         self.pending.push_back(InotifyEventOut {
                             wd: -1,
                             mask: IN_Q_OVERFLOW,
@@ -398,7 +406,7 @@ impl Inotify {
                         if watch.in_mask & IN_MOVED_FROM != 0 {
                             self.pending.push_back(InotifyEventOut {
                                 wd,
-                                mask: IN_MOVED_FROM,
+                                mask: IN_MOVED_FROM | isdir_bit,
                                 cookie,
                                 name: old_name,
                             });
@@ -408,7 +416,7 @@ impl Inotify {
                                 let new_name = Self::basename_for(&watch.path_norm, np);
                                 self.pending.push_back(InotifyEventOut {
                                     wd,
-                                    mask: IN_MOVED_TO,
+                                    mask: IN_MOVED_TO | isdir_bit,
                                     cookie,
                                     name: new_name,
                                 });
@@ -424,7 +432,7 @@ impl Inotify {
                         let name = Self::basename_for(&watch.path_norm, &ev.path);
                         self.pending.push_back(InotifyEventOut {
                             wd,
-                            mask: bit,
+                            mask: bit | isdir_bit,
                             cookie: 0,
                             name,
                         });
@@ -757,7 +765,8 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!("[inotify] Running inotify instance self-test...");
 
     // 1. Mask translation sanity.  IN_OPEN / IN_CLOSE_* are now observable
-    //    (file-handle open/close hooks); IN_ISDIR remains unmapped.
+    //    (file-handle open/close hooks); IN_ISDIR is output-only so it maps
+    //    to no native interest bit (it is OR'd in at read time per is_dir).
     if to_native_mask(IN_CREATE).0 != FsEventMask::CREATE.0
         || to_native_mask(IN_MODIFY).0 != FsEventMask::MODIFY.0
         || to_native_mask(IN_OPEN).0 != FsEventMask::OPEN.0
@@ -811,6 +820,23 @@ pub fn self_test() -> KernelResult<()> {
     }
     if events[1].mask != IN_MODIFY {
         serial_println!("[inotify]   FAIL: event[1] mask={:#x}", events[1].mask);
+        close(ino);
+        return Err(KernelError::InternalError);
+    }
+
+    // 4b. IN_ISDIR: a directory-subject event (mkdir) ORs IN_ISDIR into the
+    //     reported mask, while a file-subject event of the same type does not.
+    notify::emit_created_dir("/INOTIFY_SELFTEST/subdir");
+    let events = read_into(ino, 4096)?;
+    if events.len() != 1
+        || events[0].mask != (IN_CREATE | IN_ISDIR)
+        || events[0].name != b"subdir"
+    {
+        serial_println!(
+            "[inotify]   FAIL: dir-create event mask={:#x} name={:?} (want IN_CREATE|IN_ISDIR 'subdir')",
+            events.first().map_or(0, |e| e.mask),
+            events.first().map(|e| core::str::from_utf8(&e.name)),
+        );
         close(ino);
         return Err(KernelError::InternalError);
     }

@@ -1869,7 +1869,7 @@ impl Vfs {
         // this path (or children) didn't exist.  Positive entries are
         // unaffected — existing path resolutions remain valid.
         VFS_DCACHE.lock().invalidate_negative_prefix(&path);
-        super::notify::emit_created(&path);
+        super::notify::emit_created_dir(&path);
         super::index::on_file_changed(&path);
         super::journal::record(super::journal::JournalEventType::Created, &path);
         super::audit::log_ok(super::audit::AuditOp::Mkdir, 0, &path);
@@ -1939,7 +1939,7 @@ impl Vfs {
         super::quota::release_inode(0, 0);
         // Removing a directory invalidates any cached paths through it.
         VFS_DCACHE.lock().invalidate_prefix(&path);
-        super::notify::emit_deleted(&path);
+        super::notify::emit_deleted_dir(&path);
         super::index::on_file_deleted(&path);
         super::journal::record(super::journal::JournalEventType::Deleted, &path);
         super::audit::log_ok(super::audit::AuditOp::Rmdir, 0, &path);

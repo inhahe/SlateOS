@@ -361,13 +361,10 @@ pub fn close(handle: u64) -> KernelResult<()> {
         let _ = crate::fs::Vfs::funlock(p, handle);
 
         // inotify IN_CLOSE_WRITE / IN_CLOSE_NOWRITE on the final close of the
-        // open file description.  Directory handles are deferred (they need
-        // the not-yet-implemented IN_ISDIR flag to be reported correctly), so
-        // only regular files emit a close event.  Gated lock-free on the
-        // matching CLOSE interest count.
-        if !is_dir {
-            crate::fs::notify::emit_closed(p, writable);
-        }
+        // open file description.  Directory handles report the close too and
+        // are tagged `is_dir` so the inotify adapter ORs in IN_ISDIR.  Gated
+        // lock-free on the matching CLOSE interest count.
+        crate::fs::notify::emit_closed(p, writable, is_dir);
     }
 
     Ok(())

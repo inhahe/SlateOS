@@ -2173,6 +2173,14 @@ pub const SYS_FS_WATCH_READ: u64 = 623;
 pub const SYS_FS_WATCH_CLOSE: u64 = 624;
 
 /// Size of a watch event as returned by `SYS_FS_WATCH_READ`.
+///
+/// Record layout (528 bytes):
+/// - `[0..256]`   affected path (NUL-padded)
+/// - `[256..512]` new path for renames (NUL-padded)
+/// - `[512..520]` watch id (`u64`, LE)
+/// - `[520..524]` event type (`u32`, LE — the `FsEventType` discriminant)
+/// - `[524]`      `is_dir` flag (`u8`: 1 if the subject is a directory, else 0)
+/// - `[525..528]` reserved (zero)
 pub const FS_WATCH_EVENT_SIZE: usize = 528;
 
 // -- Change journal syscalls (625–626) --

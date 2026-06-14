@@ -13574,10 +13574,11 @@ fn cmd_fswatch(args: &str) {
                                 notify::FsEventType::ClosedNoWrite => "CLOSE_NW",
                                 notify::FsEventType::Overflow => "OVERFLOW",
                             };
+                            let dirtag = if ev.is_dir { " [dir]" } else { "" };
                             if let Some(ref new) = ev.new_path {
-                                shell_println!("  {:8} {} -> {}", kind, ev.path, new);
+                                shell_println!("  {:8} {} -> {}{}", kind, ev.path, new, dirtag);
                             } else {
-                                shell_println!("  {:8} {}", kind, ev.path);
+                                shell_println!("  {:8} {}{}", kind, ev.path, dirtag);
                             }
                         }
                     }

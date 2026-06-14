@@ -1704,6 +1704,9 @@ pub const IN_Q_OVERFLOW: u32 = 0x0000_4000;
 /// Watch was auto-removed (file deleted, mount unmounted, or
 /// `inotify_rm_watch` called).
 pub const IN_IGNORED: u32 = 0x0000_8000;
+/// Output-only flag OR'd into an event's mask when the subject is a
+/// directory (matches `<sys/inotify.h>`).
+pub const IN_ISDIR: u32 = 0x4000_0000;
 
 // ---------------------------------------------------------------------------
 // Instance / watch tables
@@ -1893,6 +1896,8 @@ const KMASK_ACCESS: u32 = 0x20;
 const KEV_NEWPATH_OFF: usize = 256;
 const KEV_TYPE_OFF: usize = 520;
 const KEV_TYPE_END: usize = 524;
+// Byte 524: is_dir flag (1 = the event subject is a directory).
+const KEV_ISDIR_OFF: usize = 524;
 
 /// Number of kernel events drained per `SYS_FS_WATCH_READ` call.
 const KWATCH_READ_BATCH: usize = 16;
@@ -2141,6 +2146,7 @@ fn rel_self_or_child(r: Rel<'_>) -> Option<&[u8]> {
 /// `affected` / `new_path` are the kernel-supplied paths (already
 /// NUL-stripped).  `cookie` is a non-zero pairing cookie for renames
 /// (ignored for other event types).
+#[allow(clippy::fn_params_excessive_bools)]
 fn translate_kernel_event(
     watched: &[u8],
     inotify_mask: u32,
@@ -2149,27 +2155,32 @@ fn translate_kernel_event(
     affected: &[u8],
     new_path: &[u8],
     cookie: u32,
+    is_dir: bool,
 ) -> Translation {
     let mut t = TRANSLATION_EMPTY;
+    // inotify ORs IN_ISDIR into the reported mask of any event whose subject
+    // is a directory.  It is never added to the synthetic IN_IGNORED /
+    // IN_Q_OVERFLOW housekeeping events.
+    let isdir = if is_dir { IN_ISDIR } else { 0 };
     match event_type {
         KEV_CREATED => {
             if inotify_mask & IN_CREATE != 0
                 && let Rel::Child(name) = relative_name(watched, affected)
             {
-                push_tr(&mut t, make_event(wd, IN_CREATE, name));
+                push_tr(&mut t, make_event(wd, IN_CREATE | isdir, name));
             }
         }
         KEV_DELETED => match relative_name(watched, affected) {
             Rel::SelfPath => {
                 if inotify_mask & IN_DELETE_SELF != 0 {
-                    push_tr(&mut t, make_event(wd, IN_DELETE_SELF, &[]));
+                    push_tr(&mut t, make_event(wd, IN_DELETE_SELF | isdir, &[]));
                 }
                 push_tr(&mut t, make_event(wd, IN_IGNORED, &[]));
                 t.disarm = true;
             }
             Rel::Child(name) => {
                 if inotify_mask & IN_DELETE != 0 {
-                    push_tr(&mut t, make_event(wd, IN_DELETE, name));
+                    push_tr(&mut t, make_event(wd, IN_DELETE | isdir, name));
                 }
             }
             Rel::NotMatched => {}
@@ -2178,7 +2189,7 @@ fn translate_kernel_event(
             if inotify_mask & IN_MODIFY != 0
                 && let Some(name) = rel_self_or_child(relative_name(watched, affected))
             {
-                push_tr(&mut t, make_event(wd, IN_MODIFY, name));
+                push_tr(&mut t, make_event(wd, IN_MODIFY | isdir, name));
             }
         }
         KEV_RENAMED => {
@@ -2187,18 +2198,18 @@ fn translate_kernel_event(
             // `new_path`.  Self-rename of the watched path → IN_MOVE_SELF.
             if matches!(relative_name(watched, affected), Rel::SelfPath) {
                 if inotify_mask & IN_MOVE_SELF != 0 {
-                    push_tr(&mut t, make_event(wd, IN_MOVE_SELF, &[]));
+                    push_tr(&mut t, make_event(wd, IN_MOVE_SELF | isdir, &[]));
                 }
             } else {
                 if inotify_mask & IN_MOVED_FROM != 0
                     && let Rel::Child(name) = relative_name(watched, affected)
                 {
-                    push_tr(&mut t, pending_with_cookie(wd, IN_MOVED_FROM, cookie, name));
+                    push_tr(&mut t, pending_with_cookie(wd, IN_MOVED_FROM | isdir, cookie, name));
                 }
                 if inotify_mask & IN_MOVED_TO != 0
                     && let Rel::Child(name) = relative_name(watched, new_path)
                 {
-                    push_tr(&mut t, pending_with_cookie(wd, IN_MOVED_TO, cookie, name));
+                    push_tr(&mut t, pending_with_cookie(wd, IN_MOVED_TO | isdir, cookie, name));
                 }
             }
         }
@@ -2206,14 +2217,14 @@ fn translate_kernel_event(
             if inotify_mask & IN_ATTRIB != 0
                 && let Some(name) = rel_self_or_child(relative_name(watched, affected))
             {
-                push_tr(&mut t, make_event(wd, IN_ATTRIB, name));
+                push_tr(&mut t, make_event(wd, IN_ATTRIB | isdir, name));
             }
         }
         KEV_ACCESSED => {
             if inotify_mask & IN_ACCESS != 0
                 && let Some(name) = rel_self_or_child(relative_name(watched, affected))
             {
-                push_tr(&mut t, make_event(wd, IN_ACCESS, name));
+                push_tr(&mut t, make_event(wd, IN_ACCESS | isdir, name));
             }
         }
         KEV_OVERFLOW => {
@@ -2279,12 +2290,14 @@ fn pump_one_watch(idx: u64, wd: i32, kernel_id: u64, mask: u32, watched: &[u8]) 
             let affected = strip_nul(affected_raw);
             let new_path = strip_nul(new_raw);
             let etype = u32::from_le_bytes(<[u8; 4]>::try_from(type_raw).unwrap_or([0u8; 4]));
+            let is_dir = rec.get(KEV_ISDIR_OFF).is_some_and(|&b| b != 0);
             let cookie = if etype == KEV_RENAMED {
                 next_cookie()
             } else {
                 0
             };
-            let tr = translate_kernel_event(watched, mask, wd, etype, affected, new_path, cookie);
+            let tr =
+                translate_kernel_event(watched, mask, wd, etype, affected, new_path, cookie, is_dir);
             let _ = with_inotify_mut(idx, |inst| {
                 for k in 0..tr.count {
                     if let Some(ev) = tr.events.get(k) {
@@ -3802,7 +3815,7 @@ mod tests {
 
     #[test]
     fn test_translate_created_child() {
-        let t = translate_kernel_event(b"/w", IN_CREATE, 7, KEV_CREATED, b"/w/new", b"", 0);
+        let t = translate_kernel_event(b"/w", IN_CREATE, 7, KEV_CREATED, b"/w/new", b"", 0, false);
         assert_eq!(t.count, 1);
         assert!(!t.disarm);
         let ev = t.events[0];
@@ -3814,13 +3827,13 @@ mod tests {
     #[test]
     fn test_translate_created_masked_off() {
         // Mask doesn't request IN_CREATE → no event.
-        let t = translate_kernel_event(b"/w", IN_DELETE, 7, KEV_CREATED, b"/w/new", b"", 0);
+        let t = translate_kernel_event(b"/w", IN_DELETE, 7, KEV_CREATED, b"/w/new", b"", 0, false);
         assert_eq!(t.count, 0);
     }
 
     #[test]
     fn test_translate_delete_self_disarms() {
-        let t = translate_kernel_event(b"/w", IN_DELETE_SELF, 3, KEV_DELETED, b"/w", b"", 0);
+        let t = translate_kernel_event(b"/w", IN_DELETE_SELF, 3, KEV_DELETED, b"/w", b"", 0, false);
         assert!(t.disarm);
         // IN_DELETE_SELF then IN_IGNORED.
         assert_eq!(t.count, 2);
@@ -3832,7 +3845,7 @@ mod tests {
     fn test_translate_delete_self_ignored_only_when_unmasked() {
         // Even if IN_DELETE_SELF wasn't requested, IN_IGNORED still fires
         // and the watch is disarmed.
-        let t = translate_kernel_event(b"/w", IN_CREATE, 3, KEV_DELETED, b"/w", b"", 0);
+        let t = translate_kernel_event(b"/w", IN_CREATE, 3, KEV_DELETED, b"/w", b"", 0, false);
         assert!(t.disarm);
         assert_eq!(t.count, 1);
         assert_eq!(t.events[0].mask, IN_IGNORED);
@@ -3840,7 +3853,7 @@ mod tests {
 
     #[test]
     fn test_translate_delete_child() {
-        let t = translate_kernel_event(b"/w", IN_DELETE, 3, KEV_DELETED, b"/w/gone", b"", 0);
+        let t = translate_kernel_event(b"/w", IN_DELETE, 3, KEV_DELETED, b"/w/gone", b"", 0, false);
         assert!(!t.disarm);
         assert_eq!(t.count, 1);
         assert_eq!(t.events[0].mask, IN_DELETE);
@@ -3849,7 +3862,7 @@ mod tests {
 
     #[test]
     fn test_translate_modify_self_empty_name() {
-        let t = translate_kernel_event(b"/w/f", IN_MODIFY, 5, KEV_MODIFIED, b"/w/f", b"", 0);
+        let t = translate_kernel_event(b"/w/f", IN_MODIFY, 5, KEV_MODIFIED, b"/w/f", b"", 0, false);
         assert_eq!(t.count, 1);
         assert_eq!(t.events[0].mask, IN_MODIFY);
         assert_eq!(t.events[0].name_len, 0);
@@ -3865,6 +3878,7 @@ mod tests {
             b"/w/old",
             b"/w/new",
             0x1234,
+            false,
         );
         assert_eq!(t.count, 2);
         assert_eq!(t.events[0].mask, IN_MOVED_FROM);
@@ -3885,6 +3899,7 @@ mod tests {
             b"/w",
             b"/elsewhere",
             0x55,
+            false,
         );
         assert_eq!(t.count, 1);
         assert_eq!(t.events[0].mask, IN_MOVE_SELF);
@@ -3892,27 +3907,49 @@ mod tests {
 
     #[test]
     fn test_translate_metadata_and_access() {
-        let t = translate_kernel_event(b"/w/f", IN_ATTRIB, 2, KEV_METADATA, b"/w/f", b"", 0);
+        let t = translate_kernel_event(b"/w/f", IN_ATTRIB, 2, KEV_METADATA, b"/w/f", b"", 0, false);
         assert_eq!(t.count, 1);
         assert_eq!(t.events[0].mask, IN_ATTRIB);
 
-        let t = translate_kernel_event(b"/w/f", IN_ACCESS, 2, KEV_ACCESSED, b"/w/f", b"", 0);
+        let t = translate_kernel_event(b"/w/f", IN_ACCESS, 2, KEV_ACCESSED, b"/w/f", b"", 0, false);
         assert_eq!(t.count, 1);
         assert_eq!(t.events[0].mask, IN_ACCESS);
     }
 
     #[test]
     fn test_translate_overflow() {
-        let t = translate_kernel_event(b"/w", 0, 0, KEV_OVERFLOW, b"", b"", 0);
+        let t = translate_kernel_event(b"/w", 0, 0, KEV_OVERFLOW, b"", b"", 0, false);
         assert_eq!(t.count, 1);
         assert_eq!(t.events[0].wd, -1);
         assert_eq!(t.events[0].mask, IN_Q_OVERFLOW);
     }
 
     #[test]
+    fn test_translate_isdir_or_in() {
+        // A directory-subject create ORs IN_ISDIR into the reported mask.
+        let t = translate_kernel_event(b"/w", IN_CREATE, 7, KEV_CREATED, b"/w/sub", b"", 0, true);
+        assert_eq!(t.count, 1);
+        assert_eq!(t.events[0].mask, IN_CREATE | IN_ISDIR);
+        assert_eq!(&t.events[0].name[..t.events[0].name_len as usize], b"sub");
+
+        // The matching file-subject create does NOT set IN_ISDIR.
+        let t = translate_kernel_event(b"/w", IN_CREATE, 7, KEV_CREATED, b"/w/f", b"", 0, false);
+        assert_eq!(t.count, 1);
+        assert_eq!(t.events[0].mask, IN_CREATE);
+
+        // IN_IGNORED (synthetic housekeeping) is never tagged IN_ISDIR even when
+        // the deleted subject is a directory.
+        let t = translate_kernel_event(b"/w", IN_DELETE_SELF, 3, KEV_DELETED, b"/w", b"", 0, true);
+        assert!(t.disarm);
+        assert_eq!(t.count, 2);
+        assert_eq!(t.events[0].mask, IN_DELETE_SELF | IN_ISDIR);
+        assert_eq!(t.events[1].mask, IN_IGNORED);
+    }
+
+    #[test]
     fn test_translate_grandchild_ignored() {
         // A create deep under the watch must not surface (non-recursive).
-        let t = translate_kernel_event(b"/w", IN_CREATE, 1, KEV_CREATED, b"/w/sub/deep", b"", 0);
+        let t = translate_kernel_event(b"/w", IN_CREATE, 1, KEV_CREATED, b"/w/sub/deep", b"", 0, false);
         assert_eq!(t.count, 0);
     }
 

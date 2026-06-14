@@ -226,13 +226,9 @@ pub fn walk(root: &str, opts: &WalkOptions) -> KernelResult<WalkResult> {
     let effective_limit = if opts.limit > 0 { opts.limit.min(MAX_RESULTS) } else { MAX_RESULTS };
 
     // Verify root exists and is a directory.
-    match Vfs::metadata(root) {
-        Ok(meta) => {
-            if meta.entry_type != EntryType::Directory {
-                return Err(KernelError::NotADirectory);
-            }
-        }
-        Err(e) => return Err(e),
+    let meta = Vfs::metadata(root)?;
+    if meta.entry_type != EntryType::Directory {
+        return Err(KernelError::NotADirectory);
     }
 
     // Include root directory itself if requested.
@@ -351,13 +347,9 @@ where
     let mut stats = WalkStats::new();
 
     // Verify root.
-    match Vfs::metadata(root) {
-        Ok(meta) => {
-            if meta.entry_type != EntryType::Directory {
-                return Err(KernelError::NotADirectory);
-            }
-        }
-        Err(e) => return Err(e),
+    let meta = Vfs::metadata(root)?;
+    if meta.entry_type != EntryType::Directory {
+        return Err(KernelError::NotADirectory);
     }
 
     if opts.include_root {

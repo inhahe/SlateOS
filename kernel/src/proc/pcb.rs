@@ -1615,7 +1615,7 @@ pub fn fork_create(
     if credentials.uid != 0 && nproc_soft != RLIM_INFINITY {
         let target_uid = credentials.uid;
         let mut count: u64 = 0;
-        for (_, p) in table.iter() {
+        for p in table.values() {
             // Count only live processes (not Zombie/Exited): a zombie
             // still occupies a PID slot until reaped, but Linux
             // includes them in RLIMIT_NPROC since they still hold the

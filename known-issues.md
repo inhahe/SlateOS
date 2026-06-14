@@ -1753,7 +1753,16 @@ Build clean; QEMU boot test green.
 itself).  No sibling instances exist in `net`, `proc`, `ipc`, `mm`, or
 any other subsystem, so the footgun is fully contained and closed.
 
-### TD2. Clippy `clippy::all` deny-level errors not yet zeroed — RESOLVED 2026-06-10
+### TD2. Clippy `clippy::all` deny-level errors not yet zeroed — RESOLVED 2026-06-10 (regressed + re-fixed 2026-06-14)
+
+**REGRESSION RE-FIX (2026-06-14):** 7 deny-level `clippy::all` errors had crept
+back in since the original resolution — `byte_char_slices` (`drm/edid.rs:604`,
+`fs/compress.rs:1956`), `question_mark` (`fs/fswalk.rs:229`+`:354`,
+`fs/hotkeys.rs:134`), and `for_kv_map` (`fs/history.rs:435`, `proc/pcb.rs:1618`).
+All fixed mechanically (byte-string literals, `?` operator, `.values()` map
+iteration); `cargo clippy -p kernel` is back to **0 deny-level errors**, build +
+QEMU boot test green. Lesson: the deny-level gate is only green between sweeps —
+it needs to actually run in CI to stay zeroed (no CI exists yet).
 
 **RESOLUTION (2026-06-10):** `cargo clippy -p kernel` now reports
 **0 deny-level errors** (down from 451) and ~17,297 warn-level warnings.

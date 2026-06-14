@@ -131,10 +131,7 @@ impl KeyCombo {
             let lower = to_lower(part);
             if i < parts.len() - 1 {
                 // All but last should be modifiers.
-                match Modifier::from_str(&lower) {
-                    Some(m) => modifiers.push(m),
-                    None => return None,
-                }
+                modifiers.push(Modifier::from_str(&lower)?);
             } else {
                 // Last part is the key.
                 key = Some(String::from(*part));

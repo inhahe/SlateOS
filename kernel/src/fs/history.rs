@@ -432,7 +432,7 @@ pub fn clear_file(path: &str) {
 /// Clear all history for all files.
 pub fn clear_all() {
     let mut inner = HISTORY.lock();
-    for (_path, fh) in inner.files.iter() {
+    for fh in inner.files.values() {
         for v in &fh.versions {
             crate::fs::cas::release(&v.hash).ok();
         }

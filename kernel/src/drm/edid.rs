@@ -601,7 +601,7 @@ pub(crate) fn self_test() -> KernelResult<()> {
     let info = parse(&edid)?;
 
     // 2. Manufacturer ID should decode correctly.
-    if info.manufacturer != [b'T', b'S', b'T'] {
+    if info.manufacturer != *b"TST" {
         serial_println!(
             "[drm]   FAIL: EDID manufacturer mismatch: {:?}",
             info.manufacturer

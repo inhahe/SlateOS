@@ -1953,7 +1953,7 @@ pub fn self_test() -> KernelResult<()> {
         for i in 0..8192usize {
             let b = if i % 100 < 60 {
                 // 60% comes from a 4-byte repeating pattern.
-                [b'A', b'B', b'C', b'D'][i % 4]
+                (*b"ABCD")[i % 4]
             } else {
                 // 40% pseudo-random.
                 (i.wrapping_mul(7).wrapping_add(13) % 256) as u8

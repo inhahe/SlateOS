@@ -73467,6 +73467,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_legacy_x86_kexec_lsm()?;
+
+    #[inline(never)]
+    fn self_test_legacy_x86_kexec_lsm() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // -----------------------------------------------------------------
     // Legacy x86 + kexec + mount-query + LSM family
     // -----------------------------------------------------------------
@@ -74476,6 +74481,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   lsm_list_modules unsigned-int truncation (high-half ignored): OK"
         );
+    }
+        Ok(())
     }
 
     // -----------------------------------------------------------------

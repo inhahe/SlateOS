@@ -2,12 +2,17 @@
 # boot-test.sh — Build the kernel, boot it in QEMU, verify BOOT_OK.
 #
 # Exit codes:
-#   0 — BOOT_OK detected AND no self-test failures
+#   0 — success marker detected AND no self-test failures
 #   1 — Timeout, PANIC, or a non-fatal self-test failure detected
 #
 # Usage:
-#   ./scripts/boot-test.sh              # full build + test
+#   ./scripts/boot-test.sh              # full build + test (waits for BOOT_OK)
 #   ./scripts/boot-test.sh --no-build   # skip build
+#   ./scripts/boot-test.sh --bench      # wait for BENCH_OK and print benchmark
+#                                       # numbers (the micro-benchmarks run in a
+#                                       # deferred background task AFTER BOOT_OK,
+#                                       # so the default fast path never sees
+#                                       # them — use this to catch perf regressions)
 
 set -euo pipefail
 
@@ -58,14 +63,39 @@ ESP_DIR_WIN="$(to_win_path "$ESP_DIR")"
 SERIAL_FILE_WIN="$(to_win_path "$SERIAL_FILE")"
 TIMEOUT=300
 NO_BUILD=0
+BENCH=0
+# Which serial marker the wait loop treats as "boot finished".  Default is
+# BOOT_OK (the fast path); --bench switches it to BENCH_OK so we wait for the
+# deferred micro-benchmark task to finish and can scrape its numbers.
+WAIT_MARKER="BOOT_OK"
 
 # Parse args
 for arg in "$@"; do
     case "$arg" in
         --no-build) NO_BUILD=1 ;;
+        --bench) BENCH=1; WAIT_MARKER="BENCH_OK" ;;
         --timeout=*) TIMEOUT="${arg#*=}" ;;
     esac
 done
+
+# Print the micro-benchmark result lines from the serial log.  The kernel emits
+# them as "[bench] <name>: <number>" plus PASS / "ABOVE TARGET" verdicts from a
+# background task that runs AFTER BOOT_OK.  We surface an "ABOVE TARGET" verdict
+# as a soft PERF NOTE rather than a hard failure: under QEMU's TCG interpreter
+# the absolute cycle counts are noisy and routinely exceed the bare-metal
+# targets, so a slow run here is not by itself a regression signal — it's a
+# prompt to compare against the previous run's numbers.
+print_bench_results() {
+    local file="$1"
+    [ -f "$file" ] || return 0
+    echo "=== Benchmark results ==="
+    grep -E '^\[bench\]' "$file" || echo "(no [bench] lines found)"
+    if grep -q "ABOVE TARGET" "$file"; then
+        echo "PERF NOTE: one or more benchmarks reported ABOVE TARGET."
+        echo "  (QEMU/TCG cycle counts are noisy; compare against prior runs"
+        echo "   rather than treating this as a hard regression.)"
+    fi
+}
 
 # Find QEMU
 QEMU=""
@@ -181,14 +211,15 @@ while kill -0 "$QEMU_PID" 2>/dev/null && [ "$ELAPSED" -lt "$TIMEOUT" ]; do
     sleep 1
     ELAPSED=$((ELAPSED + 1))
 
-    if [ -f "$SERIAL_FILE" ] && grep -q "BOOT_OK" "$SERIAL_FILE" 2>/dev/null; then
-        echo "BOOT_OK detected after ${ELAPSED}s!"
+    if [ -f "$SERIAL_FILE" ] && grep -q "$WAIT_MARKER" "$SERIAL_FILE" 2>/dev/null; then
+        echo "$WAIT_MARKER detected after ${ELAPSED}s!"
         kill "$QEMU_PID" 2>/dev/null || true
         wait "$QEMU_PID" 2>/dev/null || true
         if ! check_selftest_failures "$SERIAL_FILE"; then
-            echo "=== Boot test FAILED (BOOT_OK reached but a self-test failed) ==="
+            echo "=== Boot test FAILED ($WAIT_MARKER reached but a self-test failed) ==="
             exit 1
         fi
+        [ "$BENCH" -eq 1 ] && print_bench_results "$SERIAL_FILE"
         echo "=== Boot test PASSED ==="
         exit 0
     fi
@@ -200,12 +231,13 @@ wait "$QEMU_PID" 2>/dev/null || true
 
 # Check final output
 if [ -f "$SERIAL_FILE" ]; then
-    if grep -q "BOOT_OK" "$SERIAL_FILE"; then
-        echo "BOOT_OK found."
+    if grep -q "$WAIT_MARKER" "$SERIAL_FILE"; then
+        echo "$WAIT_MARKER found."
         if ! check_selftest_failures "$SERIAL_FILE"; then
-            echo "=== Boot test FAILED (BOOT_OK reached but a self-test failed) ==="
+            echo "=== Boot test FAILED ($WAIT_MARKER reached but a self-test failed) ==="
             exit 1
         fi
+        [ "$BENCH" -eq 1 ] && print_bench_results "$SERIAL_FILE"
         echo "=== Boot test PASSED ==="
         exit 0
     elif grep -q "PANIC\|FATAL" "$SERIAL_FILE"; then
@@ -216,6 +248,20 @@ if [ -f "$SERIAL_FILE" ]; then
     fi
 fi
 
-echo "BOOT_OK not found within ${TIMEOUT}s."
+# In --bench mode, BENCH_OK is not currently reachable: the deferred
+# benchmark task livelocks in bench_pick_next (see known-issues.md "deferred
+# benchmark suite hangs after context_switch").  So even on timeout, surface
+# whatever benchmark numbers DID get captured — they are still useful for
+# spotting regressions in the early benchmarks — before reporting failure.
+if [ "$BENCH" -eq 1 ] && [ -f "$SERIAL_FILE" ] && grep -q "BOOT_OK" "$SERIAL_FILE"; then
+    echo "Note: BOOT_OK reached but $WAIT_MARKER did not arrive within ${TIMEOUT}s."
+    echo "      (Known issue: the deferred benchmark suite hangs in bench_pick_next."
+    echo "       Partial benchmark numbers captured up to the hang are shown below.)"
+    print_bench_results "$SERIAL_FILE"
+    echo "=== Boot test FAILED ($WAIT_MARKER not reached) ==="
+    exit 1
+fi
+
+echo "$WAIT_MARKER not found within ${TIMEOUT}s."
 echo "=== Boot test FAILED ==="
 exit 1

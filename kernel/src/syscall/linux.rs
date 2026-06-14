@@ -54755,6 +54755,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // getrlimit; the unconditional EFAULT-first order for setrlimit).
     // No probes here.
 
+    self_test_getcpu()?;
+
+    #[inline(never)]
+    fn self_test_getcpu() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // getcpu — both pointers NULL is allowed and returns 0.
     {
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
@@ -54809,6 +54814,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "[syscall/linux]   getcpu both-writes accumulate-EFAULT \
              (batch 552): OK"
         );
+    }
+        Ok(())
     }
 
     // statfs / fstatfs — NULL pointer validation.

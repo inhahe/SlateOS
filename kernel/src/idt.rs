@@ -1215,6 +1215,29 @@ extern "C" fn handle_double_fault(frame: &InterruptStackFrame, error: u64) {
         }
     }
 
+    // Independent guard-page check against the kstack region.  This does NOT
+    // depend on `sched_info` (whose `stack_bottom` is 0 whenever the scheduler
+    // lock can't be acquired in the #DF path — common, since a #DF often
+    // happens with a lock held), so it diagnoses kernel stack overflow even
+    // when the per-task data above is unavailable.  `is_guard_page` /
+    // `is_kstack_region` are pure address arithmetic (no locks).  This was
+    // added after B-DF1, where a benchmark overflowed its 64 KiB kernel stack
+    // into a kstack guard page and the only clue was a bare `atomic_load` PC.
+    if crate::mm::kstack::is_guard_page(frame.rsp) {
+        serial_println!(
+            "  RSP {:#x} is in a kstack GUARD PAGE — KERNEL STACK OVERFLOW confirmed",
+            frame.rsp
+        );
+    } else if crate::mm::kstack::is_kstack_region(frame.rsp) {
+        // In a kstack slot but not (yet) the guard page — still worth noting,
+        // since a #DF here usually means an interrupt frame push ran the stack
+        // off the end during delivery.
+        serial_println!(
+            "  RSP {:#x} is within the kstack region (possible stack exhaustion)",
+            frame.rsp
+        );
+    }
+
     // Print stack backtrace for crash diagnostics.
     crate::backtrace::print_current();
 

@@ -53448,7 +53448,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
 
         // Drain the pipe so closing later doesn't strand bytes.
-        let mut drain = [0u8; 8192];
+        // Heap-allocate: this self-test runs during boot and an 8 KiB stack frame
+        // adds to kernel-stack pressure (see B-DF1 in known-issues.md).
+        let mut drain = alloc::vec![0u8; 8192];
         let _ = crate::ipc::pipe::try_read(rh, &mut drain);
 
         // F_GETPIPE_SZ / F_SETPIPE_SZ against a non-pipe fd return

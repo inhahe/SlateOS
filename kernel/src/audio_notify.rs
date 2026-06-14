@@ -383,7 +383,11 @@ pub fn self_test() {
     serial_println!("[notify] Running self-test...");
 
     // Test 1: Generate PCM for each event type.
-    let mut buf = [0u8; 8192];
+    // Heap-allocate rather than placing 8 KiB on the stack: this self-test runs
+    // during boot, and an IRQ frame pushed onto a near-full kernel task stack can
+    // overflow the guard page (see B-DF1 in known-issues.md). Keep boot-time stack
+    // frames small.
+    let mut buf = alloc::vec![0u8; 8192];
     let events = [
         (NotifySound::Error, "Error"),
         (NotifySound::Warning, "Warning"),

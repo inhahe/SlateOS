@@ -40,7 +40,13 @@ pub mod stream_socket;
 pub mod timer;
 pub mod timerfd;
 
-// TODO: Splice/vmsplice for pipes.
+// Pipe splice/tee/vmsplice: the syscall-level transfers (sys_splice,
+// sys_tee, sys_vmsplice in syscall/linux.rs) are implemented against the
+// pipe primitives in `pipe` (read/write/try_*/peek_at/wait_readable).
+// They are currently *copy*-based; the remaining work is a true zero-copy
+// buffer-move path (Linux's reference-counted `pipe_buffer` model) so
+// splice transfers page ownership instead of copying — tracked in
+// known-issues.md TD21 (pipe->pipe data-loss race + zero-copy fix).
 
 use crate::cap::ResourceType;
 

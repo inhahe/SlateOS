@@ -39506,6 +39506,148 @@ fn self_test_native_translation() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+/// TD4 extraction: pipe2 flag-mask gate ordering (self_test check group 7b).
+///
+/// Verifies the pipe2 flag-validation gate precedes the fildes pointer
+/// access (Linux `__do_pipe_flags`: EINVAL before `copy_to_user`).
+/// Self-contained — references only module-level items. See
+/// [`self_test_errno_mapping`] for the TD4 rationale.
+#[inline(never)]
+fn self_test_pipe2_flag_gate() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+
+    // A: bad-flag mask, NULL fildes.
+    let a = SyscallArgs {
+        arg0: 0, arg1: 0xFFFFFFFF, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    if dispatch_linux(nr::PIPE2, &a).value != -i64::from(errno::EINVAL) {
+        serial_println!(
+            "[syscall/linux]   FAIL: pipe2(NULL, 0xFFFFFFFF) not EINVAL"
+        );
+        return Err(KernelError::InternalError);
+    }
+    // B: single-bit bad flag (high bit), NULL fildes.
+    let a = SyscallArgs {
+        arg0: 0, arg1: 0x80000000, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    if dispatch_linux(nr::PIPE2, &a).value != -i64::from(errno::EINVAL) {
+        serial_println!(
+            "[syscall/linux]   FAIL: pipe2(NULL, 0x80000000) not EINVAL"
+        );
+        return Err(KernelError::InternalError);
+    }
+    // C: O_DIRECT (0x4000) — Linux accepts, we reject.  NULL
+    // fildes; the EINVAL still fires because our gate 1a mask
+    // doesn't include O_DIRECT (documented translator
+    // limitation).
+    let a = SyscallArgs {
+        arg0: 0, arg1: 0x4000, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    if dispatch_linux(nr::PIPE2, &a).value != -i64::from(errno::EINVAL) {
+        serial_println!(
+            "[syscall/linux]   FAIL: pipe2(NULL, O_DIRECT) not EINVAL"
+        );
+        return Err(KernelError::InternalError);
+    }
+    // D: O_CLOEXEC (0o2_000_000 = 0x80000), NULL fildes —
+    // valid flag passes gate 1a; NULL gate 1b surfaces EFAULT.
+    let a = SyscallArgs {
+        arg0: 0, arg1: 0o2_000_000, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    if dispatch_linux(nr::PIPE2, &a).value != -i64::from(errno::EFAULT) {
+        serial_println!(
+            "[syscall/linux]   FAIL: pipe2(NULL, O_CLOEXEC) not EFAULT"
+        );
+        return Err(KernelError::InternalError);
+    }
+    // E: zero flags, NULL fildes — both gates fire correctly.
+    let a = SyscallArgs {
+        arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    if dispatch_linux(nr::PIPE2, &a).value != -i64::from(errno::EFAULT) {
+        serial_println!(
+            "[syscall/linux]   FAIL: pipe2(NULL, 0) not EFAULT"
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[syscall/linux]   pipe2 flag-mask check precedes fildes pointer access (Linux __do_pipe_flags: EINVAL before copy_to_user): OK"
+    );
+    Ok(())
+}
+
+/// TD4 extraction: openat dirfd resolution (self_test check group 7c, batch
+/// 40). Self-contained — references only module-level items. See
+/// [`self_test_errno_mapping`] for the TD4 rationale.
+#[inline(never)]
+fn self_test_openat_dirfd() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+
+    // (7c1) openat(dirfd=7, path=NULL) → -EFAULT.  Explicit NULL
+    // check runs before the fd lookup.
+    let a = SyscallArgs { arg0: 7, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+    let r = dispatch_linux(nr::OPENAT, &a);
+    if r.value != -(errno::EFAULT as i64) {
+        serial_println!(
+            "[syscall/linux]   FAIL: openat(7, NULL) → {} (expected -EFAULT)", r.value
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // (7c2) openat(dirfd=7, path="/...") → absolute paths bypass the
+    // dirfd lookup entirely.  We use a guaranteed-nonexistent path
+    // so the request flows into `open_common`, succeeds the cap
+    // check, then surfaces ENOENT from the underlying VFS open
+    // (proving the dirfd was never looked up — otherwise we'd see
+    // EBADF first).
+    let abs: &[u8] = b"/__openat_b40_abs_probe_nonexistent__\0";
+    let a = SyscallArgs {
+        arg0: 7, arg1: abs.as_ptr() as u64,
+        arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::OPENAT, &a);
+    if r.value != -(errno::ENOENT as i64) {
+        serial_println!(
+            "[syscall/linux]   FAIL: openat(7, \"/__nonexistent__\") → {} (expected -ENOENT — absolute path must skip dirfd lookup)", r.value
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // (7c3) openat(dirfd=AT_FDCWD, path="") → -ENOENT (open_common
+    // path).  Confirms the AT_FDCWD branch routes through the
+    // existing relative-path handling.
+    let empty: &[u8] = b"\0";
+    let a = SyscallArgs {
+        arg0: AT_FDCWD as u64, arg1: empty.as_ptr() as u64,
+        arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::OPENAT, &a);
+    if r.value != -(errno::ENOENT as i64) {
+        serial_println!(
+            "[syscall/linux]   FAIL: openat(AT_FDCWD, \"\") → {} (expected -ENOENT)", r.value
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // (7c4) openat(dirfd=7, path="relative") → -EBADF.  Relative
+    // paths under a non-AT_FDCWD dirfd require the kernel to look
+    // the dirfd up in the caller's fd table.  Kernel context has
+    // no fd table, so lookup_caller_fd returns -EBADF.
+    let rel: &[u8] = b"relative_probe\0";
+    let a = SyscallArgs {
+        arg0: 7, arg1: rel.as_ptr() as u64,
+        arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::OPENAT, &a);
+    if r.value != -(errno::EBADF as i64) {
+        serial_println!(
+            "[syscall/linux]   FAIL: openat(7, \"relative\") → {} (expected -EBADF)", r.value
+        );
+        return Err(KernelError::InternalError);
+    }
+    Ok(())
+}
+
 pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
@@ -39643,65 +39785,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     //      surfaces as before).
     //   E. Regression: pipe2(NULL, 0) -> EFAULT  (already
     //      tested by 7b1 but include for gate-order coverage).
-    {
-        // A: bad-flag mask, NULL fildes.
-        let a = SyscallArgs {
-            arg0: 0, arg1: 0xFFFFFFFF, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-        };
-        if dispatch_linux(nr::PIPE2, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: pipe2(NULL, 0xFFFFFFFF) not EINVAL"
-            );
-            return Err(KernelError::InternalError);
-        }
-        // B: single-bit bad flag (high bit), NULL fildes.
-        let a = SyscallArgs {
-            arg0: 0, arg1: 0x80000000, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-        };
-        if dispatch_linux(nr::PIPE2, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: pipe2(NULL, 0x80000000) not EINVAL"
-            );
-            return Err(KernelError::InternalError);
-        }
-        // C: O_DIRECT (0x4000) — Linux accepts, we reject.  NULL
-        // fildes; the EINVAL still fires because our gate 1a mask
-        // doesn't include O_DIRECT (documented translator
-        // limitation).
-        let a = SyscallArgs {
-            arg0: 0, arg1: 0x4000, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-        };
-        if dispatch_linux(nr::PIPE2, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: pipe2(NULL, O_DIRECT) not EINVAL"
-            );
-            return Err(KernelError::InternalError);
-        }
-        // D: O_CLOEXEC (0o2_000_000 = 0x80000), NULL fildes —
-        // valid flag passes gate 1a; NULL gate 1b surfaces EFAULT.
-        let a = SyscallArgs {
-            arg0: 0, arg1: 0o2_000_000, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-        };
-        if dispatch_linux(nr::PIPE2, &a).value != -i64::from(errno::EFAULT) {
-            serial_println!(
-                "[syscall/linux]   FAIL: pipe2(NULL, O_CLOEXEC) not EFAULT"
-            );
-            return Err(KernelError::InternalError);
-        }
-        // E: zero flags, NULL fildes — both gates fire correctly.
-        let a = SyscallArgs {
-            arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-        };
-        if dispatch_linux(nr::PIPE2, &a).value != -i64::from(errno::EFAULT) {
-            serial_println!(
-                "[syscall/linux]   FAIL: pipe2(NULL, 0) not EFAULT"
-            );
-            return Err(KernelError::InternalError);
-        }
-        serial_println!(
-            "[syscall/linux]   pipe2 flag-mask check precedes fildes pointer access (Linux __do_pipe_flags: EINVAL before copy_to_user): OK"
-        );
-    }
+    self_test_pipe2_flag_gate()?;
 
     // (7c) openat dirfd resolution (batch 40).
     //
@@ -39710,70 +39794,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // than panicking or falling into ENOSYS.  Absolute paths and the
     // explicit error checks (NULL path, empty path) must short-circuit
     // before the fd lookup.
-    {
-        // (7c1) openat(dirfd=7, path=NULL) → -EFAULT.  Explicit NULL
-        // check runs before the fd lookup.
-        let a = SyscallArgs { arg0: 7, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        let r = dispatch_linux(nr::OPENAT, &a);
-        if r.value != -(errno::EFAULT as i64) {
-            serial_println!(
-                "[syscall/linux]   FAIL: openat(7, NULL) → {} (expected -EFAULT)", r.value
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // (7c2) openat(dirfd=7, path="/...") → absolute paths bypass the
-        // dirfd lookup entirely.  We use a guaranteed-nonexistent path
-        // so the request flows into `open_common`, succeeds the cap
-        // check, then surfaces ENOENT from the underlying VFS open
-        // (proving the dirfd was never looked up — otherwise we'd see
-        // EBADF first).
-        let abs: &[u8] = b"/__openat_b40_abs_probe_nonexistent__\0";
-        let a = SyscallArgs {
-            arg0: 7, arg1: abs.as_ptr() as u64,
-            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::OPENAT, &a);
-        if r.value != -(errno::ENOENT as i64) {
-            serial_println!(
-                "[syscall/linux]   FAIL: openat(7, \"/__nonexistent__\") → {} (expected -ENOENT — absolute path must skip dirfd lookup)", r.value
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // (7c3) openat(dirfd=AT_FDCWD, path="") → -ENOENT (open_common
-        // path).  Confirms the AT_FDCWD branch routes through the
-        // existing relative-path handling.
-        let empty: &[u8] = b"\0";
-        let a = SyscallArgs {
-            arg0: AT_FDCWD as u64, arg1: empty.as_ptr() as u64,
-            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::OPENAT, &a);
-        if r.value != -(errno::ENOENT as i64) {
-            serial_println!(
-                "[syscall/linux]   FAIL: openat(AT_FDCWD, \"\") → {} (expected -ENOENT)", r.value
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // (7c4) openat(dirfd=7, path="relative") → -EBADF.  Relative
-        // paths under a non-AT_FDCWD dirfd require the kernel to look
-        // the dirfd up in the caller's fd table.  Kernel context has
-        // no fd table, so lookup_caller_fd returns -EBADF.
-        let rel: &[u8] = b"relative_probe\0";
-        let a = SyscallArgs {
-            arg0: 7, arg1: rel.as_ptr() as u64,
-            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::OPENAT, &a);
-        if r.value != -(errno::EBADF as i64) {
-            serial_println!(
-                "[syscall/linux]   FAIL: openat(7, \"relative\") → {} (expected -EBADF)", r.value
-            );
-            return Err(KernelError::InternalError);
-        }
-    }
+    self_test_openat_dirfd()?;
 
     // (7d) translate_open_flags exhaustive cases.
     {

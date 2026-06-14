@@ -50473,6 +50473,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_ioctl_fioclex()?;
+
+    #[inline(never)]
+    fn self_test_ioctl_fioclex() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // Batch 95: ioctl(FIOCLEX = 0x5451) / ioctl(FIONCLEX = 0x5450).
     // Linux's FIOCLEX / FIONCLEX are the original fd-control ioctls,
     // predating fcntl(F_SETFD): set / clear the per-fd FD_CLOEXEC bit.
@@ -50615,6 +50620,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
 
         pcb::destroy(test_pid);
+    }
+        Ok(())
     }
 
     // Batch 96: ioctl(FIONBIO = 0x5421) — toggle O_NONBLOCK via the

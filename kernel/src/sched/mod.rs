@@ -3453,14 +3453,72 @@ pub fn sleep_us(us: u64) {
     sleep_ns(us.saturating_mul(1_000));
 }
 
+/// Outcome of attempting to retire an expired sleep-queue entry.
+enum SleeperWake {
+    /// The sleep is over (task woken, already awake, or gone): release the slot.
+    Release,
+    /// The scheduler lock was contended: leave the slot and retry next tick.
+    Retry,
+}
+
+/// Retire one expired sleep-queue entry, telling the caller whether the
+/// slot may now be released.
+///
+/// This is deliberately *not* `try_wake`: `try_wake` returns a bare bool
+/// that conflates "lock contended" (transient — retry) with "task isn't
+/// blocked / no longer exists" (terminal — the timed sleep is over).  The
+/// sleep queue must release the slot in the terminal cases; only genuine
+/// lock contention warrants keeping the slot for a retry.  Collapsing the
+/// two led to permanent slot leaks: a task that slept and was then woken
+/// early (channel/futex/eventfd) or destroyed before its deadline left an
+/// entry whose `try_wake` could never again succeed, so the slot was never
+/// reclaimed.  Once all `MAX_SLEEPERS` slots leaked, every subsequent
+/// sleeper fell back to busy-spinning (see `sleep_until_tick`), pinning a
+/// CPU and starving lower-priority tasks.
+fn wake_expired_sleeper(task_id: TaskId) -> SleeperWake {
+    let Some(mut state) = SCHED.try_lock() else {
+        // Lock contended — this is the only case that should retry.
+        return SleeperWake::Retry;
+    };
+    match state.tasks.get_mut(&task_id) {
+        Some(task) if task.state == TaskState::Blocked => {
+            // Normal case: the task is still blocked on its timed sleep.
+            task.mark_ready(crate::apic::tick_count());
+            task.burst_ticks = 0;
+            let prio = task.effective_priority();
+            let target_cpu = choose_cpu_for_task(task);
+            task.last_cpu = target_cpu;
+            PER_CPU_SCHED.enqueue(task_id, prio, target_cpu);
+            drop(state);
+            signal_cpu(target_cpu);
+            SleeperWake::Release
+        }
+        Some(task) => {
+            // Task exists but isn't blocked: it was already woken by another
+            // path before its deadline.  The timed sleep is satisfied, so the
+            // slot must be released; record a pending wake to match the
+            // existing `try_wake` semantics in case it blocks again.
+            task.pending_wake = true;
+            SleeperWake::Release
+        }
+        None => {
+            // Task was destroyed (exited/killed) while its sleep slot was
+            // still registered.  Release the slot so it can be reused —
+            // otherwise the queue leaks an entry permanently.
+            SleeperWake::Release
+        }
+    }
+}
+
 /// Scan the sleep queue and wake tasks whose sleep deadline has passed.
 ///
 /// Called from the APIC timer ISR on every tick.  Must be lock-free
 /// in the fast path (only atomic loads/stores, no mutexes).
 ///
-/// Uses [`try_wake`] to safely wake tasks even from interrupt context.
-/// If `try_wake` fails (scheduler lock contended), the entry stays in
-/// the queue and will be retried on the next tick.
+/// Uses [`wake_expired_sleeper`] to safely wake tasks even from interrupt
+/// context.  An expired slot is released once the scheduler lock has been
+/// acquired and the wake has been resolved, regardless of the task's state;
+/// only genuine lock contention keeps the slot for a retry on the next tick.
 pub fn process_sleep_wakeups() {
     let now = crate::apic::tick_count();
 
@@ -3475,14 +3533,12 @@ pub fn process_sleep_wakeups() {
             continue;
         }
 
-        // Deadline passed.  Try to wake the task.
+        // Deadline passed.  Resolve the wake and release the slot unless the
+        // scheduler lock was contended (in which case retry next tick).
         let task_id = entry.task_id.load(Ordering::Acquire);
-        if try_wake(task_id) {
-            // Woken successfully — clear the slot.
+        if let SleeperWake::Release = wake_expired_sleeper(task_id) {
             entry.wake_tick.store(0, Ordering::Release);
         }
-        // If try_wake fails (lock contended), we leave the entry
-        // and will retry on the next tick.
     }
 }
 

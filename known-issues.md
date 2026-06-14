@@ -76,7 +76,53 @@ truncation; given two recorded recurrences now, a finer-grained marker
 pass around the `mm::oom::self_test()` / `sysctl::set` lock window
 (per the F1/F4 method) is the priority diagnostic when next observed.
 
-_(No other active bugs.  The two prior watchlist items — accounting
+### W2. Deferred benchmark suite livelocks in `bench_pick_next` after `context_switch` → `BENCH_OK` never prints — OPEN 2026-06-14
+
+**Where:** `kernel/src/bench.rs` `bench_pick_next()` (the
+`run("sched_pick_next_4tasks", 500, || sched::yield_now())` loop, run after
+the four `bench_nop_task` helpers at priorities 8/12/16/20 are spawned);
+interacts with the scheduler's yield/pick path and anti-starvation boost in
+`kernel/src/sched/mod.rs`.  Driven from the background `deferred_bench_task`
+spawned at the end of `kernel/src/main.rs` boot.
+
+**Symptom:** With `scripts/boot-test.sh --bench`, the deferred benchmark suite
+runs cleanly through `page_alloc`, `heap`, `compress`, `rdtsc`, `hpet`, and
+`context_switch_rt`, then **stalls** entering `bench_pick_next`: the four nop
+helper tasks (e.g. tids 119–122) spawn but do not exit for the remainder of
+the run, no `[bench] sched_pick_next_4tasks: …` line is ever printed, and the
+serial log fills with continuous `[sched] Anti-starvation: boosted N tasks to
+priority 0`.  `BENCH_OK` therefore never arrives and `--bench` times out at
+300s.  The default `BOOT_OK` boot test is unaffected (it stops at `BOOT_OK`,
+long before the benchmarks run).
+
+**Assessment:** Independent of the F15 sleep-queue leak — it reproduced
+identically *before* the F15 fix (when it could have been blamed on
+kswapd/workqueue spin-starvation) and *after* it (0 `sleep queue full`
+warnings).  `run()` is a plain non-blocking loop and the task-exit path
+(`task_finished` → `task_exit` → `schedule_inner(false, Uncounted)`) is clean,
+so the hang is a scheduler-level livelock among several equal-/mixed-priority
+tasks that only `yield_now()` (no sleeping, no I/O).  The persistent
+anti-starvation boosting suggests the scheduler is thrashing — repeatedly
+boosting starved tasks to priority 0 without the nop helpers ever being
+scheduled through to completion.  Not yet root-caused.
+
+**Impact:** The deferred micro-benchmark suite cannot complete past
+`context_switch`, so `BENCH_OK` and the later benchmarks (pick_next, syscall
+dispatch, IPC, VFS, net, crypto, HTTP, ISR latency, scorecard) never run in
+normal operation.  Early-benchmark perf tracking still works:
+`boot-test.sh --bench` prints the captured numbers up to the hang even on
+timeout.
+
+**Next step:** Add finer-grained serial markers inside `bench_pick_next`
+(before/after spawn, before/after the `run()` loop, per-iteration sampling)
+and instrument the scheduler's pick/yield path to capture *which* task is
+selected each switch during the stall.  Determine whether the nop helpers are
+never picked, or are picked but never run to their `task_exit`.  Likely a
+priority/round-robin or anti-starvation interaction; treat as a real
+scheduler-correctness bug, not merely a benchmark quirk.  Risky to change the
+scheduler blindly, so diagnose before patching.
+
+_(The two prior watchlist items — accounting
 self-test hang and invariant self-test hang — went 90 consecutive
 boot tests with zero recurrence after F4/F5 and have been closed as
 "likely cured incidentally," and as of 2026-06-10 a further 38 clean
@@ -87,6 +133,57 @@ deny — are now fixed; see F8 and F9.)_
 ---
 
 ## Fixed Bugs
+
+### F15. Sleep-queue slot leak: an expired entry was only freed when `try_wake` returned `true`, so tasks woken early / destroyed before their deadline leaked a slot permanently — daemons then busy-spun and starved low-priority work — FIXED 2026-06-14
+
+**Where:** `kernel/src/sched/mod.rs` — `process_sleep_wakeups()` and the new
+`wake_expired_sleeper()` helper; the fixed-size `SLEEP_QUEUE` (`MAX_SLEEPERS`
+= 256) and the `sleep_until_tick()` busy-spin fallback.
+
+**Symptom:** Surfaced while adding a `--bench` mode to `scripts/boot-test.sh`
+(which waits for the deferred `BENCH_OK` instead of stopping at `BOOT_OK`).
+During the post-boot benchmark phase the serial log filled with **688**
+`[sched] WARNING: sleep queue full, task <N> falling back to spin` lines —
+tasks 103 (kswapd) and 104 (the workqueue worker), both long-lived daemons
+that sleep between work, could no longer register a sleep, so they fell back
+to the `yield_now()` busy-spin loop in `sleep_until_tick()`. That pinned a CPU
+and starved the low-priority deferred-benchmark task. The default boot test
+never saw this because it kills QEMU at `BOOT_OK`, before the daemons have
+looped enough to exhaust the queue.
+
+**Root cause:** `process_sleep_wakeups()` (timer-ISR tick handler) cleared an
+expired slot only when `try_wake(task_id)` returned `true`. But `try_wake`
+returns `false` in two fundamentally different situations:
+1. **Lock contended** (`SCHED.try_lock()` failed) — transient; retrying next
+   tick is correct.
+2. **Task not `Blocked` / no longer in the table** — terminal. A task that
+   slept and was then woken early through another path (channel/futex/eventfd
+   wake), or that was destroyed before its deadline, is no longer `Blocked`,
+   so `try_wake` can *never* succeed for that slot again.
+The code conflated the two and kept the slot in both cases. In the terminal
+case the slot was retained forever — a permanent leak. As short-lived
+boot/self-test/benchmark tasks slept-then-exited, slots leaked one by one
+until all 256 were gone, after which every subsequent sleeper busy-spun.
+
+**Fix:** Split the two failure modes with a dedicated `wake_expired_sleeper()`
+that returns `SleeperWake::{Release, Retry}`. It acquires the scheduler lock
+itself: on `try_lock` failure it returns `Retry` (keep the slot — genuine
+contention); otherwise it inspects the task and returns `Release` in **all**
+non-contention cases — task still `Blocked` (wake it, as before), task present
+but already awake (record `pending_wake`, release), or task gone (release).
+`process_sleep_wakeups()` now clears the slot whenever it gets `Release`, so an
+expired slot is reclaimed at its deadline at the latest, bounding occupancy to
+"tasks with un-expired deadlines" instead of leaking permanently. Verified by
+re-running `scripts/boot-test.sh --bench --no-build`: the
+`sleep queue full` warning count dropped from **688 to 0**, with the benchmark
+numbers up to `context_switch_rt` captured cleanly.
+
+**Residual (separate, pre-existing):** `BENCH_OK` is still not reached — the
+deferred benchmark suite livelocks later, in `bench_pick_next` (logged
+separately under Active Bugs as the "deferred benchmark suite hangs after
+`context_switch`" item). That hang reproduced identically *before* this fix
+(when it was masked by the spin-starvation) and *after* it (0 spin warnings),
+confirming it is independent of the slot leak.
 
 ### F14. `arch_prctl(ARCH_SET_GS)` wrote `KERNEL_GS_BASE` (Linux convention) but Slate's entry stub uses the inverted GS convention → first syscall after SET_GS faulted on per-CPU access — FIXED 2026-06-14
 

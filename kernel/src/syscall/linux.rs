@@ -57565,6 +57565,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_readlink_chmod_chown_family()?;
+
+    #[inline(never)]
+    fn self_test_readlink_chmod_chown_family() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // readlink / readlinkat / chmod family / chown family / truncate /
     // ftruncate / symlink / link / utime family — pointer validation
     // plus principled errno.
@@ -58722,6 +58727,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   utime family empty-path -> ENOENT (batch 489): OK"
         );
+    }
+        Ok(())
     }
 
     // signalfd / timerfd / inotify / fanotify — input validation and

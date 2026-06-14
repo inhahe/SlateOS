@@ -1026,6 +1026,25 @@ self-contained follow-up. STATUS is also only a convenience overlay: a
 conforming ALSA-lib client learns `hw_ptr`/`appl_ptr` from SYNC_PTR (now
 handled), so STATUS-on-ENOTTY does not block the playback hot path.
 
+**Empirical confirmation of the fork (2026-06-14):** the upstream
+`struct snd_pcm_status` declares its trailing pad as
+`unsigned char reserved[64 - 5*sizeof(struct timespec) - 5*sizeof(int)]`
+(older kernels: `reserved[52 - 4*sizeof(struct timespec)]`). With a
+**16-byte** 64-bit `struct timespec` that pad size goes **negative**,
+which cannot compile — proof that the mainline kernel never uses a single
+struct with a 64-bit timespec here. Instead it maintains **two distinct
+ABI structs**: a legacy `snd_pcm_status` built on a 32-bit
+`old_timespec32` (used by the `SNDRV_PCM_IOCTL_STATUS`/`STATUS_EXT`
+request numbers compiled for a 32-bit timespec) and a separate
+`snd_pcm_status` / time64 path (`__SNDRV_PCM_IOCTL_STATUS_EXT64` etc.)
+built on `__kernel_timespec`. The two carry **different `_IOR` request
+numbers** because their `sizeof` differs. Consequently we cannot just
+"pin the timespec layout" — implementing STATUS means deciding *which*
+alsa-lib variant our userspace targets and answering the matching request
+number(s). Until that target is fixed, emitting one guessed number risks
+silently mismatching the client's other variant. This is the concrete
+reason STATUS stays deferred rather than being a quick add.
+
 **Impact:** low. SYNC_PTR (the per-period pointer exchange ALSA-lib's
 kernel plugin actually relies on) works; only the `snd_pcm_status()`
 convenience query falls back to ENOTTY.

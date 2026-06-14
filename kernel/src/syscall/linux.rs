@@ -49002,6 +49002,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_fcntl_owner_sig()?;
+
+    #[inline(never)]
+    fn self_test_fcntl_owner_sig() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // ------------------------------------------------------------------
     // Batch 86: fcntl(F_GETOWN / F_SETOWN / F_GETSIG / F_SETSIG)
     // per-fd async-I/O delivery target round-trip.
@@ -49170,6 +49175,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 return Err(KernelError::InternalError);
             }
         }
+    }
+        Ok(())
     }
 
     // ------------------------------------------------------------------

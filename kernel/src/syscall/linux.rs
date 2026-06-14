@@ -39506,6 +39506,86 @@ fn self_test_native_translation() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+/// TD4 extraction: translate_open_flags exhaustive cases (self_test group
+/// 7d). Self-contained bare block. See [`self_test_errno_mapping`] for the
+/// TD4 rationale.
+#[inline(never)]
+fn self_test_translate_open_flags() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+    use crate::fs::handle::OpenFlags;
+    let f = translate_open_flags(oflags::O_RDONLY);
+    if f & OpenFlags::READ.bits() == 0 || f & OpenFlags::WRITE.bits() != 0 {
+        serial_println!("[syscall/linux]   FAIL: O_RDONLY → {:#x}", f);
+        return Err(KernelError::InternalError);
+    }
+    let f = translate_open_flags(oflags::O_WRONLY | oflags::O_CREAT | oflags::O_TRUNC);
+    if f & OpenFlags::WRITE.bits() == 0
+        || f & OpenFlags::CREATE.bits() == 0
+        || f & OpenFlags::TRUNCATE.bits() == 0
+    {
+        serial_println!("[syscall/linux]   FAIL: O_WRONLY|O_CREAT|O_TRUNC → {:#x}", f);
+        return Err(KernelError::InternalError);
+    }
+    let f = translate_open_flags(oflags::O_RDWR | oflags::O_APPEND);
+    if f & OpenFlags::READ.bits() == 0
+        || f & OpenFlags::WRITE.bits() == 0
+        || f & OpenFlags::APPEND.bits() == 0
+    {
+        serial_println!("[syscall/linux]   FAIL: O_RDWR|O_APPEND → {:#x}", f);
+        return Err(KernelError::InternalError);
+    }
+    Ok(())
+}
+
+/// TD4 extraction: clock_gettime clockid validation (self_test groups
+/// 8–8b — bad clockid EINVAL, ALARM/TAI accept-path EFAULT, SGI_CYCLE
+/// reject). Self-contained. See [`self_test_errno_mapping`] for the TD4
+/// rationale.
+#[inline(never)]
+fn self_test_clock_gettime_clockids() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+
+    // (8) clock_gettime with bad clockid → -EINVAL.
+    let bad_clk = SyscallArgs { arg0: 999, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+    let r = dispatch_linux(nr::CLOCK_GETTIME, &bad_clk);
+    if r.value != -(errno::EINVAL as i64) {
+        serial_println!(
+            "[syscall/linux]   FAIL: clock_gettime(999) → {} (expected -EINVAL)", r.value
+        );
+        return Err(KernelError::InternalError);
+    }
+    // (8a) clock_gettime ALARM/TAI clocks were rejected pre-batch with
+    // EINVAL but Linux fills them in.  Validate the new accept path:
+    // REALTIME_ALARM(8), BOOTTIME_ALARM(9), TAI(11) all need to fall
+    // through the match and reach write_timespec.  We pass a NULL tp
+    // so write_timespec returns EFAULT — confirming the clockid is no
+    // longer rejected as EINVAL.  Pre-batch return: EINVAL.
+    for clockid in [8u64, 9, 11] {
+        let a = SyscallArgs { arg0: clockid, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::CLOCK_GETTIME, &a).value;
+        if v != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: clock_gettime({}, NULL) -> {} (expected -EFAULT)",
+                clockid, v
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    // (8b) clock_gettime SGI_CYCLE(10) -> EINVAL.  No k_clock entry
+    // for it in Linux's posix_clocks[].
+    let a = SyscallArgs { arg0: 10, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+    if dispatch_linux(nr::CLOCK_GETTIME, &a).value != -i64::from(errno::EINVAL) {
+        serial_println!(
+            "[syscall/linux]   FAIL: clock_gettime(SGI_CYCLE) not EINVAL"
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[syscall/linux]   clock_gettime ALARM/TAI accept + SGI_CYCLE reject: OK"
+    );
+    Ok(())
+}
+
 /// TD4 extraction: basic dispatch sanity (self_test check groups 4–7b2).
 ///
 /// Covers unknown-nr → ENOSYS, sched_yield success, bad-fd write/writev,
@@ -39814,69 +39894,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     self_test_openat_dirfd()?;
 
     // (7d) translate_open_flags exhaustive cases.
-    {
-        use crate::fs::handle::OpenFlags;
-        let f = translate_open_flags(oflags::O_RDONLY);
-        if f & OpenFlags::READ.bits() == 0 || f & OpenFlags::WRITE.bits() != 0 {
-            serial_println!("[syscall/linux]   FAIL: O_RDONLY → {:#x}", f);
-            return Err(KernelError::InternalError);
-        }
-        let f = translate_open_flags(oflags::O_WRONLY | oflags::O_CREAT | oflags::O_TRUNC);
-        if f & OpenFlags::WRITE.bits() == 0
-            || f & OpenFlags::CREATE.bits() == 0
-            || f & OpenFlags::TRUNCATE.bits() == 0
-        {
-            serial_println!("[syscall/linux]   FAIL: O_WRONLY|O_CREAT|O_TRUNC → {:#x}", f);
-            return Err(KernelError::InternalError);
-        }
-        let f = translate_open_flags(oflags::O_RDWR | oflags::O_APPEND);
-        if f & OpenFlags::READ.bits() == 0
-            || f & OpenFlags::WRITE.bits() == 0
-            || f & OpenFlags::APPEND.bits() == 0
-        {
-            serial_println!("[syscall/linux]   FAIL: O_RDWR|O_APPEND → {:#x}", f);
-            return Err(KernelError::InternalError);
-        }
-    }
+    self_test_translate_open_flags()?;
 
-    // (8) clock_gettime with bad clockid → -EINVAL.
-    let bad_clk = SyscallArgs { arg0: 999, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-    let r = dispatch_linux(nr::CLOCK_GETTIME, &bad_clk);
-    if r.value != -(errno::EINVAL as i64) {
-        serial_println!(
-            "[syscall/linux]   FAIL: clock_gettime(999) → {} (expected -EINVAL)", r.value
-        );
-        return Err(KernelError::InternalError);
-    }
-    // (8a) clock_gettime ALARM/TAI clocks were rejected pre-batch with
-    // EINVAL but Linux fills them in.  Validate the new accept path:
-    // REALTIME_ALARM(8), BOOTTIME_ALARM(9), TAI(11) all need to fall
-    // through the match and reach write_timespec.  We pass a NULL tp
-    // so write_timespec returns EFAULT — confirming the clockid is no
-    // longer rejected as EINVAL.  Pre-batch return: EINVAL.
-    for clockid in [8u64, 9, 11] {
-        let a = SyscallArgs { arg0: clockid, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        let v = dispatch_linux(nr::CLOCK_GETTIME, &a).value;
-        if v != -i64::from(errno::EFAULT) {
-            serial_println!(
-                "[syscall/linux]   FAIL: clock_gettime({}, NULL) -> {} (expected -EFAULT)",
-                clockid, v
-            );
-            return Err(KernelError::InternalError);
-        }
-    }
-    // (8b) clock_gettime SGI_CYCLE(10) -> EINVAL.  No k_clock entry
-    // for it in Linux's posix_clocks[].
-    let a = SyscallArgs { arg0: 10, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-    if dispatch_linux(nr::CLOCK_GETTIME, &a).value != -i64::from(errno::EINVAL) {
-        serial_println!(
-            "[syscall/linux]   FAIL: clock_gettime(SGI_CYCLE) not EINVAL"
-        );
-        return Err(KernelError::InternalError);
-    }
-    serial_println!(
-        "[syscall/linux]   clock_gettime ALARM/TAI accept + SGI_CYCLE reject: OK"
-    );
+    // (8)-(8b) clock_gettime clockid validation.
+    self_test_clock_gettime_clockids()?;
 
     // (9) arch_prctl with an unknown code → -EINVAL.
     let bad_prctl = SyscallArgs { arg0: 0x42, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };

@@ -747,7 +747,7 @@ tasks). Related: `sys_clock_settime`/`sys_clock_adjtime` now enforce
 per-process `CAP_SYS_TIME` bit when the PCB gains a POSIX capability set (today
 `ProcessCredentials` is only uid/gid/groups).
 
-### TD17. inotify event coverage is limited to native-derived events — DEBT 2026-06-12
+### TD17. inotify event coverage is limited to native-derived events — PARTIAL 2026-06-14 (was DEBT 2026-06-12)
 
 **Where:** `kernel/src/ipc/inotify.rs` (Linux-ABI adapter) backed 1:1 by
 `kernel/src/fs/notify.rs` native watches.
@@ -755,10 +755,10 @@ per-process `CAP_SYS_TIME` bit when the PCB gains a POSIX capability set (today
 **What it is:** inotify watches are backed 1:1 by native `fs::notify` watches, so
 the reportable event set is exactly what the native layer produces:
 `IN_CREATE`/`IN_DELETE`/`IN_MODIFY`/`IN_ATTRIB`/`IN_MOVED_FROM`/`IN_MOVED_TO`
-(Renamed→pair)/`IN_DELETE_SELF`/`IN_MOVE_SELF`, plus synthetic `IN_Q_OVERFLOW`
-and `IN_IGNORED`. NOT observable (silently dropped from the interest mask):
-`IN_OPEN`, `IN_ACCESS`, `IN_CLOSE_WRITE`, `IN_CLOSE_NOWRITE` (the native layer has
-no open/close hooks) and `IN_ISDIR` (FsEvent carries no dir flag). Watches are
+(Renamed→pair)/`IN_DELETE_SELF`/`IN_MOVE_SELF`/`IN_ACCESS`, plus synthetic
+`IN_Q_OVERFLOW` and `IN_IGNORED`. STILL NOT observable (silently dropped from the
+interest mask): `IN_OPEN`, `IN_CLOSE_WRITE`, `IN_CLOSE_NOWRITE` (the native layer
+has no open/close hooks) and `IN_ISDIR` (FsEvent carries no dir flag). Watches are
 NON-RECURSIVE and keyed by NORMALIZED PATH STRING, not inode — re-adding the same
 path returns the same wd (mask replaced, or OR-combined under `IN_MASK_ADD`); a
 watched path deleted and recreated keeps the same wd. `IN_ONESHOT`/
@@ -766,13 +766,24 @@ watched path deleted and recreated keeps the same wd. `IN_ONESHOT`/
 FS-mutation syscalls (mkdir/unlink/rename/...) are still stubs, so inotify events
 flow ONLY from native-VFS activity, not from Linux-ABI file operations.
 
-**Impact:** moderate for apps relying on open/close/access notifications (rare) or
+**Impact:** moderate for apps relying on open/close notifications (rare) or
 on inode-identity semantics across delete+recreate (rarer); low for the common
 "watch a dir for create/delete/modify/move" file-manager/build-tool idiom.
 
-**Proper fix:** (a) add open/close/access hooks to the VFS and an `is_dir` flag to
-`FsEvent` to widen coverage; (b) route the Linux-ABI mutation syscalls through the
-native VFS so they generate `fs::notify` events; (c) switch watch identity to
+**Progress (2026-06-14): IN_ACCESS now implemented.** `Vfs::read_file` /
+`Vfs::read_at` emit `FsEventType::Accessed` after dropping the VFS lock, gated on a
+new lock-free per-event-bit interest counter (`fs::notify::INTEREST_COUNTS` /
+`interest_includes`): watch create/close adjust the counts, and `emit()` plus the
+read hooks early-out with a few relaxed atomic loads before touching the `WATCHES`
+lock unless a live watch actually requests that bit. ACCESS stays excluded from
+`ALL_CHANGES` so the read hot path pays nothing by default. Covered by
+`fs::notify::self_test` (interest-gate create/close, synthetic Accessed emit,
+mask-filtering, end-to-end `Vfs::read_file` hook).
+
+**Remaining fix:** (a) add open/close hooks (in the handle/fd layer, since the
+native VFS is path-based/stateless) for `IN_OPEN`/`IN_CLOSE_*`, plus an `is_dir`
+flag on `FsEvent` for `IN_ISDIR`; (b) route the Linux-ABI mutation syscalls through
+the native VFS so they generate `fs::notify` events; (c) switch watch identity to
 inode if/when stable inode numbers are available.
 
 ### TD16. epoll fd readiness not reported when an epoll is nested in poll/select/epoll — RESOLVED 2026-06-14

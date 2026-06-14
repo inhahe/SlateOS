@@ -43538,6 +43538,134 @@ fn self_test_io_swap_membarrier_truncation() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+#[inline(never)]
+fn self_test_module_archprctl_truncation() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+    // Batch 302 — sys_finit_module + sys_delete_module
+    // int / unsigned-int flag truncation audit.
+    //
+    // Pre-batch reads:
+    //   sys_finit_module: `args.arg2 & !VALID_FLAGS != 0` checked
+    //     against raw u64, so a probe with flags=0x1_0000_0000
+    //     (truncates to 0) hit EINVAL where Linux truncates to 0,
+    //     passes the flag-mask gate, the fd validation (kernel-context
+    //     no-op), the uargs validation (NULL skipped), and reaches
+    //     the terminal EPERM.
+    //   sys_delete_module: same shape with unsigned int instead of
+    //     int and with VALID_FLAGS = O_NONBLOCK|O_TRUNC = 0o5000.
+    {
+        // (a) finit_module(fd=0, uargs=0, flags=0x1_0000_0000).
+        //     Pre-batch: 0x1_0000_0000 & !7 = 0x1_0000_0000 != 0 ->
+        //     EINVAL.  Post-batch: flags truncates to 0, passes the
+        //     flag-mask gate, validate_linux_fd is a kernel-context
+        //     no-op (caller_pid()==None), uargs=0 skips the user-read
+        //     gate, terminal EPERM.
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: 0,
+            arg2: 0x1_0000_0000,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        let v = dispatch_linux(nr::FINIT_MODULE, &a).value;
+        if v != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: finit_module high-half flags -> {} (expected -EPERM)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) delete_module(name=&buf, flags=0x1_0000_0000).
+        //     Pre-batch: 0x1_0000_0000 & !0o5000 = 0x1_0000_0000 != 0
+        //     -> EINVAL.  Post-batch: flags truncates to 0, passes the
+        //     flag-mask gate, args.arg0 != 0 (skips EFAULT),
+        //     validate_user_read is a kernel-context no-op, terminal
+        //     EPERM.
+        let name_buf = [b'm'; 4];
+        let name_ptr = name_buf.as_ptr() as u64;
+        let a = SyscallArgs {
+            arg0: name_ptr,
+            arg1: 0x1_0000_0000,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        let v = dispatch_linux(nr::DELETE_MODULE, &a).value;
+        if v != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: delete_module high-half flags -> {} (expected -EPERM)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   finit_module/delete_module int/unsigned-int flag truncation: OK"
+        );
+    }
+
+    // Batch 303 — sys_arch_prctl int code truncation audit.
+    //
+    // Pre-batch read: `let code = args.arg0;` raw u64 against u64-
+    // typed ARCH_* constants (ARCH_GET_CPUID=0x1011, etc.).  Probes
+    // with code=0x1_0000_1011 (truncates to ARCH_GET_CPUID) missed
+    // every arm and fell to `_ => EINVAL`.  Post-batch: code
+    // truncates to 0x1011 and returns the CPUID-enabled answer.
+    {
+        // (a) arch_prctl(code=0x1_0000_1011, addr=0).  Pre-batch:
+        //     raw 0x1_0000_1011 didn't match ARCH_GET_CPUID=0x1011
+        //     -> `_ => EINVAL`.  Post-batch: code truncates to
+        //     0x1011, takes the ARCH_GET_CPUID arm and returns 1
+        //     (we never disable CPUID).
+        let a = SyscallArgs {
+            arg0: 0x1_0000_1011,
+            arg1: 0,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        let v = dispatch_linux(nr::ARCH_PRCTL, &a).value;
+        if v != 1 {
+            serial_println!(
+                "[syscall/linux]   FAIL: arch_prctl high-half ARCH_GET_CPUID -> {} (expected 1)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) arch_prctl(code=0x1_0000_1021 ARCH_GET_XCOMP_SUPP,
+        //     addr=0).  Pre-batch: raw 0x1_0000_1021 != 0x1021
+        //     -> EINVAL.  Post-batch: code truncates to 0x1021,
+        //     takes the SUPP|PERM arm, hits the addr==0 -> EFAULT
+        //     gate before any user write.
+        let a = SyscallArgs {
+            arg0: 0x1_0000_1021,
+            arg1: 0,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        let v = dispatch_linux(nr::ARCH_PRCTL, &a).value;
+        if v != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: arch_prctl high-half ARCH_GET_XCOMP_SUPP -> {} (expected -EFAULT)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   arch_prctl int code truncation: OK"
+        );
+    }
+    Ok(())
+}
+
 pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
@@ -43814,128 +43942,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
     self_test_io_swap_membarrier_truncation()?;
 
-    // Batch 302 — sys_finit_module + sys_delete_module
-    // int / unsigned-int flag truncation audit.
-    //
-    // Pre-batch reads:
-    //   sys_finit_module: `args.arg2 & !VALID_FLAGS != 0` checked
-    //     against raw u64, so a probe with flags=0x1_0000_0000
-    //     (truncates to 0) hit EINVAL where Linux truncates to 0,
-    //     passes the flag-mask gate, the fd validation (kernel-context
-    //     no-op), the uargs validation (NULL skipped), and reaches
-    //     the terminal EPERM.
-    //   sys_delete_module: same shape with unsigned int instead of
-    //     int and with VALID_FLAGS = O_NONBLOCK|O_TRUNC = 0o5000.
-    {
-        // (a) finit_module(fd=0, uargs=0, flags=0x1_0000_0000).
-        //     Pre-batch: 0x1_0000_0000 & !7 = 0x1_0000_0000 != 0 ->
-        //     EINVAL.  Post-batch: flags truncates to 0, passes the
-        //     flag-mask gate, validate_linux_fd is a kernel-context
-        //     no-op (caller_pid()==None), uargs=0 skips the user-read
-        //     gate, terminal EPERM.
-        let a = SyscallArgs {
-            arg0: 0,
-            arg1: 0,
-            arg2: 0x1_0000_0000,
-            arg3: 0,
-            arg4: 0,
-            arg5: 0,
-        };
-        let v = dispatch_linux(nr::FINIT_MODULE, &a).value;
-        if v != -i64::from(errno::EPERM) {
-            serial_println!(
-                "[syscall/linux]   FAIL: finit_module high-half flags -> {} (expected -EPERM)",
-                v
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // (b) delete_module(name=&buf, flags=0x1_0000_0000).
-        //     Pre-batch: 0x1_0000_0000 & !0o5000 = 0x1_0000_0000 != 0
-        //     -> EINVAL.  Post-batch: flags truncates to 0, passes the
-        //     flag-mask gate, args.arg0 != 0 (skips EFAULT),
-        //     validate_user_read is a kernel-context no-op, terminal
-        //     EPERM.
-        let name_buf = [b'm'; 4];
-        let name_ptr = name_buf.as_ptr() as u64;
-        let a = SyscallArgs {
-            arg0: name_ptr,
-            arg1: 0x1_0000_0000,
-            arg2: 0,
-            arg3: 0,
-            arg4: 0,
-            arg5: 0,
-        };
-        let v = dispatch_linux(nr::DELETE_MODULE, &a).value;
-        if v != -i64::from(errno::EPERM) {
-            serial_println!(
-                "[syscall/linux]   FAIL: delete_module high-half flags -> {} (expected -EPERM)",
-                v
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        serial_println!(
-            "[syscall/linux]   finit_module/delete_module int/unsigned-int flag truncation: OK"
-        );
-    }
-
-    // Batch 303 — sys_arch_prctl int code truncation audit.
-    //
-    // Pre-batch read: `let code = args.arg0;` raw u64 against u64-
-    // typed ARCH_* constants (ARCH_GET_CPUID=0x1011, etc.).  Probes
-    // with code=0x1_0000_1011 (truncates to ARCH_GET_CPUID) missed
-    // every arm and fell to `_ => EINVAL`.  Post-batch: code
-    // truncates to 0x1011 and returns the CPUID-enabled answer.
-    {
-        // (a) arch_prctl(code=0x1_0000_1011, addr=0).  Pre-batch:
-        //     raw 0x1_0000_1011 didn't match ARCH_GET_CPUID=0x1011
-        //     -> `_ => EINVAL`.  Post-batch: code truncates to
-        //     0x1011, takes the ARCH_GET_CPUID arm and returns 1
-        //     (we never disable CPUID).
-        let a = SyscallArgs {
-            arg0: 0x1_0000_1011,
-            arg1: 0,
-            arg2: 0,
-            arg3: 0,
-            arg4: 0,
-            arg5: 0,
-        };
-        let v = dispatch_linux(nr::ARCH_PRCTL, &a).value;
-        if v != 1 {
-            serial_println!(
-                "[syscall/linux]   FAIL: arch_prctl high-half ARCH_GET_CPUID -> {} (expected 1)",
-                v
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // (b) arch_prctl(code=0x1_0000_1021 ARCH_GET_XCOMP_SUPP,
-        //     addr=0).  Pre-batch: raw 0x1_0000_1021 != 0x1021
-        //     -> EINVAL.  Post-batch: code truncates to 0x1021,
-        //     takes the SUPP|PERM arm, hits the addr==0 -> EFAULT
-        //     gate before any user write.
-        let a = SyscallArgs {
-            arg0: 0x1_0000_1021,
-            arg1: 0,
-            arg2: 0,
-            arg3: 0,
-            arg4: 0,
-            arg5: 0,
-        };
-        let v = dispatch_linux(nr::ARCH_PRCTL, &a).value;
-        if v != -i64::from(errno::EFAULT) {
-            serial_println!(
-                "[syscall/linux]   FAIL: arch_prctl high-half ARCH_GET_XCOMP_SUPP -> {} (expected -EFAULT)",
-                v
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        serial_println!(
-            "[syscall/linux]   arch_prctl int code truncation: OK"
-        );
-    }
+    self_test_module_archprctl_truncation()?;
 
     // Batch 304 — sys_getitimer + sys_setitimer int which
     // truncation audit.

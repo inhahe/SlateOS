@@ -627,21 +627,23 @@ read bridge into the userspace fd table) so `/proc/<pid>/fd` works uniformly.
 sendfile — model the trailing `put_user(pos)` write-back when the sendfile data
 path is actually implemented.
 
-### TD20. Userspace crate verification & lint-cleanup gaps — DEBT 2026-06-13
+### TD20. Userspace crate verification & lint-cleanup gaps — coreutils RESOLVED 2026-06-14; guitk pedantic still DEBT 2026-06-13
 
-**Where:** `userspace/coreutils/` (and any userspace crate whose *test* code uses
-`std::os::unix`), and `gui/toolkit/` (guitk).
+**Where:** `gui/toolkit/` (guitk). (The coreutils half is resolved — see below.)
 
 **What it is:** two low-priority verification/lint gaps in userspace crates:
-- **coreutils host-test gap (2026-05-31):** coreutils unit tests cannot compile on
-  the Windows dev host (`x86_64-pc-windows-gnu`) because bins like `test.rs`/
-  `tar.rs` use `std::os::unix::fs::{PermissionsExt, MetadataExt}` (mode/uid/gid/
-  mtime), which only exist on unix-family targets. The slateos target (os=linux)
-  *has* them, so production compiles fine (`cargo build -p coreutils` for slateos
-  is clean), but slateos test binaries can't be *run* on this Windows box — so
-  coreutils' verification path is the slateos build, not host `cargo test`. Not a
-  code bug; a cross-platform host-testing gap that applies to any userspace crate
-  using `std::os::unix` in its test code.
+- **coreutils host-test gap (2026-05-31) — RESOLVED 2026-06-14.** The affected
+  bins (`stat`, `du`, `chown`, `chmod`, `tar`, `test`, `ln`) now follow the
+  `stat.rs` pattern: every `std::os::unix` import and the unix-only logic sit
+  behind `#[cfg(unix)]`, a `#[cfg(not(unix))]` stub `main` keeps the non-unix
+  host compile-clean, and the pure formatting/parsing helpers live outside the
+  gate with host-runnable unit tests. Verified 2026-06-14:
+  `cargo test -p coreutils --target x86_64-pc-windows-gnu` compiles and runs
+  green on the Windows dev host (20 test binaries, ~480 tests, 0 failures), so
+  the host `cargo test` path now works alongside the slateos build. (Originally:
+  coreutils unit tests couldn't compile on the Windows dev host because bins
+  used `std::os::unix::fs::{PermissionsExt, MetadataExt}`, which only exist on
+  unix-family targets.)
 - **guitk pedantic deferral (2026-06-03):** guitk does not yet enable
   `#![deny(clippy::pedantic)]`; a pedantic run emits ~1,232 warnings,
   overwhelmingly doc-style (`missing_panics_doc`, `missing_errors_doc`,
@@ -654,11 +656,10 @@ path is actually implemented.
 
 **Impact:** low — neither blocks feature work; both crates build for slateos.
 
-**Proper fix:** coreutils — gate the `std::os::unix` test code behind `#[cfg(unix)]`
-with inert host stubs (the pattern already used by `stat`/`stty`) so host
-`cargo test` at least compiles, or stand up a slateos test runner. guitk — a
-dedicated pedantic-cleanup sweep once the core ABI stabilizes, resolved together
-with the TD19 lint-policy decision.
+**Proper fix:** coreutils — DONE (the `#[cfg(unix)]` gating + `not(unix)` stub
+`main` pattern is now applied across the affected bins; host `cargo test`
+compiles and passes). guitk — a dedicated pedantic-cleanup sweep once the core
+ABI stabilizes, resolved together with the TD19 lint-policy decision.
 
 ### TD19. Crate-root `#![deny(clippy::pedantic)]` overrides the workspace lint allow-list — DEBT 2026-06-13 (needs operator policy call)
 

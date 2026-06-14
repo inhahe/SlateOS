@@ -1068,6 +1068,17 @@ pub fn exec_process(
         pcb::set_brk_region(pid, 0);
     }
 
+    // execve replaces the address space, so the old TLS block is gone.
+    // Reset the FS (TLS) base to 0 both in the live MSR and on the
+    // persistent Task field, so no stale TLS pointer survives into the
+    // new image before its glibc _start re-installs one via
+    // arch_prctl(ARCH_SET_FS).  Without this reset, a faulting access
+    // through %fs early in the new program would read the previous
+    // image's (now-unmapped) TLS address.
+    // SAFETY: writing 0 to IA32_FS_BASE is canonical and cannot #GP.
+    unsafe { crate::cpu::wrmsr(crate::cpu::IA32_FS_BASE, 0); }
+    crate::sched::set_current_task_fs_base(0);
+
     // Step 5: Allocate and map a fresh user stack.
     let mut user_rsp = match setup_user_stack(pml4_phys) {
         Ok(rsp) => rsp,
@@ -2993,6 +3004,122 @@ pub fn self_test_linux_pipe_fork_dup2_exec() -> KernelResult<()> {
         "[spawn]   Linux pipe2()+fork()+dup2()+execve()+read() (ring 3: child piped a byte to \
          the parent via dup2'd stdout across execve, parent read back == {}): OK",
         SENTINEL
+    );
+    Ok(())
+}
+
+/// Ring-3 regression test that the **`%fs` (TLS) base is saved/restored
+/// across context switches** between two concurrent Linux processes.
+///
+/// `IA32_FS_BASE` is the glibc thread-local-storage pointer (`%fs` base),
+/// a **global CPU register** that is **not** part of the saved GP
+/// `Context`.  Before this test's accompanying fix, the scheduler never
+/// swapped it on a context switch, so any two concurrent glibc processes
+/// would clobber each other's TLS pointer — silently corrupting
+/// `errno`, the stack-protector canary, and every `__thread` variable.
+/// That is fatal for running a real toolchain (gcc/ld/make/bash are all
+/// glibc, all multi-process), so it's on the critical path.
+///
+/// Two [`elf::build_linux_fs_tls_test_elf`] processes are spawned with
+/// **distinct** sentinel FS bases.  Each installs its sentinel via
+/// `arch_prctl(ARCH_SET_FS)`, then loops `sched_yield` + `arch_prctl
+/// (ARCH_GET_FS)` asserting the value is unchanged.  The self-tests run
+/// **single-CPU** (before `smp::init()`), so the two processes time-share
+/// CPU 0 through the cooperative yields and interleave deterministically:
+/// without the fix, the first process to resume after the other's yield
+/// reads the *other's* sentinel and `exit`s `0xF1`.  Both processes
+/// exiting `0` proves the per-task FS base is correctly restored on
+/// switch-in.
+pub fn self_test_linux_fs_tls_switch() -> KernelResult<()> {
+    // Two distinct canonical user-address sentinels (< 1 << 47, non-zero).
+    // These are never dereferenced — they only need to round-trip through
+    // the IA32_FS_BASE MSR across context switches.
+    const SENTINEL_A: u64 = 0x0000_1234_5600_0000;
+    const SENTINEL_B: u64 = 0x0000_5566_7700_0000;
+    const MAX_YIELDS: usize = 1024;
+
+    serial_println!(
+        "[spawn] Running Linux %fs/TLS-base context-switch persistence test (ring 3, 2 procs)..."
+    );
+
+    let spawn_one = |sentinel: u64, name: &'static str| -> KernelResult<SpawnResult> {
+        let elf_img = elf::build_linux_fs_tls_test_elf(sentinel);
+        let argv: &[&[u8]] = &[name.as_bytes()];
+        let envp: &[&[u8]] = &[b"PATH=/bin"];
+        let options = SpawnOptions {
+            name,
+            parent: 0,
+            priority: DEFAULT_PRIORITY,
+            capabilities: &[],
+            fd_map: &[],
+            argv,
+            envp,
+            exe_path: None,
+        };
+        spawn_process(&elf_img, &options)
+    };
+
+    let a = match spawn_one(SENTINEL_A, "spawn-test-fs-tls-a") {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: fs-tls proc A spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let b = match spawn_one(SENTINEL_B, "spawn-test-fs-tls-b") {
+        Ok(r) => r,
+        Err(e) => {
+            // A was spawned; tear it down before bailing.
+            thread::on_thread_exit(a.task_id);
+            pcb::destroy(a.pid);
+            serial_println!("[spawn]   FAIL: fs-tls proc B spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Drive the scheduler until both processes have exited (or we hit the
+    // yield ceiling).  Both must reach Zombie for the test to conclude.
+    for _ in 0..MAX_YIELDS {
+        crate::sched::yield_now();
+        let a_done = pcb::state(a.pid) == Some(pcb::ProcessState::Zombie);
+        let b_done = pcb::state(b.pid) == Some(pcb::ProcessState::Zombie);
+        if a_done && b_done {
+            break;
+        }
+    }
+
+    let a_state = pcb::state(a.pid);
+    let b_state = pcb::state(b.pid);
+    let a_exit = pcb::exit_code(a.pid);
+    let b_exit = pcb::exit_code(b.pid);
+
+    thread::on_thread_exit(a.task_id);
+    thread::on_thread_exit(b.task_id);
+    pcb::destroy(a.pid);
+    pcb::destroy(b.pid);
+
+    if a_state != Some(pcb::ProcessState::Zombie) || b_state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: %fs/TLS test — not both zombie after {} yields (A={:?}, B={:?})",
+            MAX_YIELDS, a_state, b_state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // exit(0) = FS base held across every yield; exit(0xF1)=241 = clobbered.
+    if a_exit != Some(0) || b_exit != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: %fs/TLS test — a process saw a clobbered FS base (A exit={:?}, \
+             B exit={:?}; 0xF1/241 = FS base changed across a context switch — the scheduler \
+             is not saving/restoring IA32_FS_BASE per task)",
+            a_exit, b_exit
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   Linux %fs/TLS-base context-switch persistence (ring 3: two concurrent \
+         Linux procs kept distinct FS bases across cooperative yields): OK"
     );
     Ok(())
 }

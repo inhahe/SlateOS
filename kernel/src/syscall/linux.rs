@@ -40751,6 +40751,12 @@ fn sys_arch_prctl(args: &SyscallArgs) -> SyscallResult {
             // strictly below 1 << 47, so it is a canonical user
             // address and `WRMSR` will not raise #GP.
             unsafe { crate::cpu::wrmsr(IA32_FS_BASE, addr); }
+            // Persist the FS base on the current Task so the scheduler
+            // restores it on every switch-in.  IA32_FS_BASE is a global
+            // CPU register not saved in the GP Context; without this, a
+            // context switch to another Linux thread would leave this
+            // thread's TLS pointer clobbered when it next runs.
+            crate::sched::set_current_task_fs_base(addr);
             SyscallResult::ok(0)
         }
         ARCH_GET_FS => {

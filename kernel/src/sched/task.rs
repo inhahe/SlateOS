@@ -321,6 +321,24 @@ pub struct Task {
     /// this PML4 via `write_cr3` on context switch.
     pub pml4_phys: u64,
 
+    /// Saved `%fs` base (the `IA32_FS_BASE` MSR) for this thread — the
+    /// Linux/glibc thread-local-storage pointer.
+    ///
+    /// `IA32_FS_BASE` is a global CPU register that is **not** part of the
+    /// saved [`Context`], so without a per-thread copy two concurrent
+    /// Linux processes (or two threads with different TLS) would clobber
+    /// each other's `%fs` base across a context switch.  The scheduler
+    /// restores this value into the MSR when switching **in** a user task
+    /// (`pml4_phys != 0`); kernel tasks never read `%fs`, so it stays 0
+    /// for them and they are skipped.
+    ///
+    /// Authoritative copy: updated by `arch_prctl(ARCH_SET_FS)`,
+    /// `clone(CLONE_SETTLS)`, inherited across `fork`, and reset to 0 on
+    /// `execve`.  Userspace cannot change `IA32_FS_BASE` by any other
+    /// route because `CR4.FSGSBASE` is not enabled (WRFSBASE `#UD`s in
+    /// ring 3), so this field never goes stale behind the kernel's back.
+    pub fs_base: u64,
+
     // --- Interactive task detection fields ---
 
     /// Number of timer ticks the task has run in the current burst.
@@ -765,6 +783,7 @@ impl Task {
             stack_bottom: 0,
             planted_canary: 0, // No allocated stack — canary never checked.
             pml4_phys: 0, // Kernel address space.
+            fs_base: 0,   // Kernel task — never reads %fs.
             burst_ticks: 0,
             avg_burst_x8: 0,
             interactive: false,
@@ -845,6 +864,7 @@ impl Task {
             stack_bottom: 0,   // Externally allocated (AP trampoline stack).
             planted_canary: 0, // No allocated stack — canary never checked.
             pml4_phys: 0,      // Kernel address space.
+            fs_base: 0,        // Kernel task — never reads %fs.
             burst_ticks: 0,
             avg_burst_x8: 0,
             interactive: false,
@@ -980,6 +1000,10 @@ impl Task {
             stack_bottom,
             planted_canary,
             pml4_phys,
+            // TLS base starts at 0; a Linux process sets it via
+            // arch_prctl(ARCH_SET_FS) in its _start, fork copies the
+            // parent's, and clone(CLONE_SETTLS) overrides it.
+            fs_base: 0,
             burst_ticks: 0,
             avg_burst_x8: 0,
             interactive: false,

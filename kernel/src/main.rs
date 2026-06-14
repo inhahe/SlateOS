@@ -1314,6 +1314,19 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 regression test that IA32_FS_BASE (the glibc %fs/TLS pointer) is
+    // saved/restored per task across context switches.  Two concurrent Linux
+    // procs install distinct FS bases and assert they survive cooperative
+    // yields; without per-task FS-base save/restore they'd clobber each
+    // other's TLS (fatal for any multi-process glibc workload, e.g. a real
+    // toolchain).  Same bounded, hang-safe harness.
+    if let Err(e) = proc::spawn::self_test_linux_fs_tls_switch() {
+        serial_println!(
+            "WARNING: Linux %fs/TLS-base context-switch self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 end-to-end test of execveat(2) in both forms: a real Linux-ABI
     // launcher execs a target by path (AT_FDCWD) and by open-fd
     // (AT_EMPTY_PATH / fexecve), proving execveat replaces the image and

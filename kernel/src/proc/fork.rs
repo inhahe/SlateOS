@@ -507,6 +507,15 @@ pub fn fork_process(parent_pid: ProcessId, frame: &SyscallFrame) -> KernelResult
     let priority = crate::sched::get_effective_priority(crate::sched::current_task_id())
         .unwrap_or(crate::sched::task::DEFAULT_PRIORITY);
 
+    // Capture the parent thread's live %fs (TLS) base so the child can
+    // inherit it.  fork() duplicates the address space, so the child's
+    // glibc TLS block lives at the same virtual address; the child must
+    // resume with the same FS base.  IA32_FS_BASE is a global CPU
+    // register not in the saved Context, so it must be seeded explicitly
+    // onto the child Task for the scheduler to restore on switch-in.
+    // SAFETY: reading IA32_FS_BASE is side-effect-free.
+    let parent_fs = unsafe { crate::cpu::rdmsr(crate::cpu::IA32_FS_BASE) };
+
     match thread::spawn(
         child_pid,
         b"forked",
@@ -514,7 +523,10 @@ pub fn fork_process(parent_pid: ProcessId, frame: &SyscallFrame) -> KernelResult
         fork_child_trampoline,
         image_raw,
     ) {
-        Ok(_task_id) => Ok(child_pid),
+        Ok(task_id) => {
+            crate::sched::set_task_fs_base(task_id, parent_fs);
+            Ok(child_pid)
+        }
         Err(e) => {
             // The trampoline never ran, so it never freed the image —
             // reclaim and drop it here to avoid a leak.

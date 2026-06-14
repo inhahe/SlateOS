@@ -686,6 +686,16 @@ pub fn delay_ns(ns: u64) {
 // Model-Specific Register (MSR) access
 // ---------------------------------------------------------------------------
 
+/// `IA32_FS_BASE` MSR (0xC000_0100) — the base address of the `%fs`
+/// segment, used by Linux/glibc as the thread-local-storage pointer
+/// (`arch_prctl(ARCH_SET_FS, …)` / `clone(CLONE_SETTLS)` write it).
+///
+/// It is a global CPU register that is **not** part of the saved
+/// general-purpose context, so the scheduler must swap it per user
+/// thread on context switch — otherwise two concurrent Linux processes
+/// would read each other's TLS.  See `sched::mod`'s switch path.
+pub const IA32_FS_BASE: u32 = 0xC000_0100;
+
 /// Read a Model-Specific Register (MSR).
 ///
 /// # Safety

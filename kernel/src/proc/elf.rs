@@ -2039,6 +2039,147 @@ pub fn build_linux_pipe_fork_dup2_exec_test_elf(path_nul: &[u8]) -> alloc::vec::
     buf
 }
 
+/// Build a **Linux-ABI** `ET_EXEC` test ELF that verifies the **`%fs`
+/// (TLS) base survives context switches**.  The process installs a
+/// caller-chosen `sentinel` FS base, then in a loop yields the CPU and
+/// re-reads its FS base, asserting it is unchanged on every iteration:
+///
+/// ```text
+///   sub  rsp, 16                       ; [rsp+0] = ARCH_GET_FS out slot
+///   arch_prctl(ARCH_SET_FS, sentinel)  ; install our TLS base
+///   mov  r15d, 50                      ; loop counter
+/// loop_top:
+///   sched_yield()                      ; give the other process the CPU
+///   arch_prctl(ARCH_GET_FS, &slot)     ; read FS base back (live MSR)
+///   cmp  [rsp], sentinel ; jne fail    ; must equal what we set
+///   dec  r15d ; jnz loop_top
+///   exit(0)                            ; success
+/// fail:
+///   exit(0xF1)                         ; FS base was clobbered
+/// ```
+///
+/// The harness ([`crate::proc::spawn::self_test_linux_fs_tls_switch`])
+/// spawns **two** of these with **distinct** sentinels.  The self-tests
+/// run single-CPU before `smp::init()`, so the two processes time-share
+/// CPU 0 via the cooperative `sched_yield`, interleaving deterministically.
+/// `IA32_FS_BASE` is a global CPU register **not** part of the saved GP
+/// `Context`; if the scheduler fails to swap it on switch-in, process A
+/// resuming after B's yield would read B's sentinel and `exit(0xF1)`.
+/// Both processes exiting 0 proves the per-task FS base is restored.
+///
+/// `sentinel` must be a canonical user address (`< 1 << 47`) and non-zero,
+/// matching the `arch_prctl(ARCH_SET_FS)` validation.  The PT_LOAD is
+/// `R+X` only (the out slot lives on the loader-provided writable SysV
+/// stack).  Tagged `ELFOSABI_GNU` for the Linux ABI + SysV stack.
+#[must_use]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
+pub fn build_linux_fs_tls_test_elf(sentinel: u64) -> alloc::vec::Vec<u8> {
+    use alloc::vec;
+
+    let phdr_offset: u64 = 64;
+    let code_offset: u64 = 120;
+    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+
+    let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+
+    // sub rsp, 16  (ARCH_GET_FS output slot at [rsp+0])
+    code.extend_from_slice(&[0x48, 0x83, 0xEC, 0x10]);
+    // arch_prctl(ARCH_SET_FS=0x1002, sentinel)
+    code.extend_from_slice(&[0xB8, 0x9E, 0x00, 0x00, 0x00]); // mov eax, 158
+    code.extend_from_slice(&[0xBF, 0x02, 0x10, 0x00, 0x00]); // mov edi, 0x1002
+    code.extend_from_slice(&[0x48, 0xBE]); // movabs rsi, sentinel
+    let set_imm = code.len();
+    code.extend_from_slice(&[0u8; 8]);
+    code.extend_from_slice(&[0x0F, 0x05]); // syscall
+    // mov r15d, 50  (loop counter)
+    code.extend_from_slice(&[0x41, 0xBF, 0x32, 0x00, 0x00, 0x00]);
+
+    // loop_top:
+    let loop_top = code.len();
+    // sched_yield()
+    code.extend_from_slice(&[0xB8, 0x18, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,24; syscall
+    // arch_prctl(ARCH_GET_FS=0x1003, &slot)
+    code.extend_from_slice(&[0xB8, 0x9E, 0x00, 0x00, 0x00]); // mov eax, 158
+    code.extend_from_slice(&[0xBF, 0x03, 0x10, 0x00, 0x00]); // mov edi, 0x1003
+    code.extend_from_slice(&[0x48, 0x89, 0xE6]); // mov rsi, rsp
+    code.extend_from_slice(&[0x0F, 0x05]); // syscall
+    // cmp [rsp], sentinel
+    code.extend_from_slice(&[0x48, 0x8B, 0x04, 0x24]); // mov rax, [rsp]
+    code.extend_from_slice(&[0x48, 0xB9]); // movabs rcx, sentinel
+    let cmp_imm = code.len();
+    code.extend_from_slice(&[0u8; 8]);
+    code.extend_from_slice(&[0x48, 0x39, 0xC8]); // cmp rax, rcx
+    code.extend_from_slice(&[0x75, 0x00]); // jne fail (rel8)
+    let jne_rel = code.len() - 1;
+    // dec r15d ; jnz loop_top
+    code.extend_from_slice(&[0x41, 0xFF, 0xCF]); // dec r15d
+    code.extend_from_slice(&[0x75, 0x00]); // jnz loop_top (rel8, backward)
+    let jnz_rel = code.len() - 1;
+
+    // success: exit(0)
+    code.extend_from_slice(&[0x31, 0xFF]); // xor edi, edi
+    code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,60; syscall
+    code.push(0xCC); // int3
+
+    // fail: exit(0xF1)
+    let fail = code.len();
+    code.extend_from_slice(&[0xBF, 0xF1, 0x00, 0x00, 0x00]); // mov edi, 0xF1
+    code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,60; syscall
+    code.push(0xCC); // int3
+
+    // Patch jumps (disp measured from the byte after the disp byte).
+    let jne_disp = (fail as isize) - (jne_rel as isize + 1);
+    let jnz_disp = (loop_top as isize) - (jnz_rel as isize + 1);
+    code[jne_rel] = jne_disp as u8;
+    code[jnz_rel] = jnz_disp as u8;
+    // Patch the two sentinel imm64 slots.
+    code[set_imm..set_imm + 8].copy_from_slice(&sentinel.to_le_bytes());
+    code[cmp_imm..cmp_imm + 8].copy_from_slice(&sentinel.to_le_bytes());
+
+    let code_len = code.len();
+    let file_size = code_offset as usize + code_len;
+    let mut buf = vec![0u8; file_size];
+
+    buf[0] = 0x7F;
+    buf[1] = b'E';
+    buf[2] = b'L';
+    buf[3] = b'F';
+    buf[EI_CLASS] = ELFCLASS64;
+    buf[EI_DATA] = ELFDATA2LSB;
+    buf[EI_VERSION] = EV_CURRENT;
+    buf[EI_OSABI] = ELFOSABI_GNU;
+    write_u16(&mut buf, 16, ET_EXEC);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr); // e_entry
+    write_u64(&mut buf, 32, phdr_offset); // e_phoff
+    write_u64(&mut buf, 40, 0);
+    write_u32(&mut buf, 48, 0);
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, 1);
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0);
+    write_u16(&mut buf, 62, 0);
+
+    let ph = phdr_offset as usize;
+    write_u32(&mut buf, ph, PT_LOAD);
+    write_u32(&mut buf, ph + 4, PF_R | PF_X);
+    write_u64(&mut buf, ph + 8, code_offset);
+    write_u64(&mut buf, ph + 16, load_vaddr);
+    write_u64(&mut buf, ph + 24, 0);
+    write_u64(&mut buf, ph + 32, code_len as u64);
+    write_u64(&mut buf, ph + 40, code_len as u64);
+    write_u64(&mut buf, ph + 48, 0x1000);
+
+    buf[code_offset as usize..file_size].copy_from_slice(&code);
+    buf
+}
+
 /// Build a minimal **Linux-ABI** `ET_EXEC` test ELF that simply calls
 /// `exit(exit_code)`:
 ///

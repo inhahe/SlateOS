@@ -456,6 +456,21 @@ pub fn clone_thread(
         }
     };
 
+    // Seed the new thread's persistent FS (TLS) base so the scheduler
+    // restores it on every switch-in.  IA32_FS_BASE is a global CPU
+    // register not saved in the GP Context; the trampoline's one-shot
+    // WRMSR only sets it for the first run, so without this the base
+    // would be lost the first time the thread is preempted and resumed.
+    // CLONE_SETTLS (new_tls != 0) gives the thread its own TLS block;
+    // otherwise it inherits the calling thread's current FS base.
+    let child_fs = if args.new_tls != 0 {
+        args.new_tls
+    } else {
+        // SAFETY: reading IA32_FS_BASE is side-effect-free.
+        unsafe { crate::cpu::rdmsr(crate::cpu::IA32_FS_BASE) }
+    };
+    crate::sched::set_task_fs_base(task_id, child_fs);
+
     // The task may already be running by the time we get here, but
     // for CLONE_PARENT_SETTID Linux promises that the parent's TID
     // store is observable BEFORE the parent's own return from

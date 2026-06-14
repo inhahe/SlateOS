@@ -57351,6 +57351,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_renameat2_exchange()?;
+
+    #[inline(never)]
+    fn self_test_renameat2_exchange() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // Batch 347 — sys_renameat2 EXCHANGE mutual-exclusion gate
     // (gate 2) and WHITEOUT CAP_MKNOD gate (gate 3).  Linux's
     // fs/namei.c::do_renameat2 rejects EXCHANGE combined with
@@ -57438,6 +57443,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   renameat2 EXCHANGE mutex + WHITEOUT CAP gates: OK"
         );
+    }
+        Ok(())
     }
 
     // Batch 348 — sys_lseek whence int truncation in File arm.

@@ -23,10 +23,70 @@ Format for each entry:
 
 ---
 
-No open questions remain. All deferred operator decisions (Q1–Q6) have been
-resolved — see the "Recently resolved" list below and `design-decisions.md` for
-full rationale. New decisions that genuinely need the operator should be appended
-below this line as `## Q7 …`.
+## Q7. How to prevent kernel-task-stack overflow when an interrupt fires on a near-full stack? (B-DF1) — OPEN 2026-06-14
+
+**Question.** Hardware IRQs currently run on the *current* kernel task stack
+(IDT IST index 0 for all of vectors 32–56; only #DF uses an IST). In-kernel
+heavy code (gzip, `format!`-heavy JSON, crypto) on a 64 KiB kernel task stack
+can come close to `stack_bottom`; the next timer/mouse IRQ then pushes its frame
+into the guard page → double fault. The 16 KiB gzip stack array was already
+fixed (B-DF1, committed), but the underlying "IRQ frame overflows a near-full
+kernel stack" problem is systemic. How should we fix it?
+
+**Options.**
+
+- **A. Dedicated per-CPU IRQ stack (x86 IST).** Route IRQ vectors to a separate
+  per-CPU stack so handlers never consume the interrupted task's stack (Linux's
+  IRQ-stack model).
+  - *Pros:* textbook-correct; bounds interrupt stack use independently of task
+    stack depth; fixes the whole class of bug, not one benchmark.
+  - *Cons:* the timer handler re-enables interrupts mid-handler (`apic.rs:1162`,
+    `sti` after EOI, for preemption), so IRQs nest — a single shared IRQ IST
+    would be clobbered by a nested IRQ resetting RSP to the IST top. A correct
+    implementation must support nesting (manual stack-switch in the entry stub
+    with a per-CPU "depth" check, switching only on the outermost IRQ) or move
+    the `sti`/preemption work off the IST. Careful change to the hottest,
+    most safety-critical path.
+- **B. Increase kernel task stack size (e.g. 64 KiB → 128 KiB).**
+  - *Pros:* trivial, low-risk; immediate headroom for debug-built heavy code.
+  - *Cons:* band-aid — an interrupt can still overflow a sufficiently deep
+    stack; costs +64 KiB committed per kernel task; masks rather than fixes.
+- **C. Keep heavy code out of the kernel (microkernel-pure).** Move gzip /
+  dashboard / crypto to userspace services with demand-grown stacks.
+  - *Pros:* aligns with the microkernel design; userspace stacks grow on demand.
+  - *Cons:* large effort; these modules are currently in-kernel and benchmarked
+    in-kernel; doesn't help other legitimately-deep in-kernel paths.
+- **D. Release-build the kernel for boot tests.** Debug builds inflate `core::fmt`
+  stack use enormously; release frames are far smaller.
+  - *Pros:* may sidestep the overflow without code changes.
+  - *Cons:* doesn't fix the real bug (an interrupt can still overflow a near-full
+    stack); diverges test build from the debug workflow.
+
+**Claude's recommendation.** **A (per-CPU IRQ IST stack with nesting support)**
+is the proper, production-grade fix and should be done eventually — but it is a
+careful change to the hottest path and deserves explicit go-ahead given the
+project's "scheduler/interrupt is the most safety-critical path, validate
+carefully" stance. As a *cheap immediate mitigation that is independently
+reasonable*, **B** (bump to 128 KiB) would unblock `BENCH_OK` now; I have **not**
+applied it autonomously because per-task memory cost and "is 64 KiB the right
+kernel-stack size?" is itself a tradeoff the operator may want to own. In the
+meantime the bug is contained: it only triggers in the post-`BOOT_OK` benchmark
+suite and does **not** affect normal operation (default boot test passes).
+
+**Where it bites.** `kernel/src/idt.rs` (IDT IST assignment for vectors 32–56;
+`init()` ~line 1762), `kernel/src/apic.rs:1162` (timer `sti`), TSS/IST setup
+(per-CPU IST stacks), `kernel/src/sched/task.rs` `TASK_STACK_SIZE` /
+`kernel/src/mm/kstack.rs` `STACK_SIZE` (option B). Symptom in
+`kernel/src/bench.rs` deferred suite (`dashboard_api_status` onward).
+
+**Status.** OPEN.
+
+---
+
+No further open questions remain. All earlier deferred operator decisions
+(Q1–Q6) have been resolved — see the "Recently resolved" list below and
+`design-decisions.md` for full rationale. New decisions that genuinely need the
+operator should be appended above this line as `## Q8 …`.
 
 ---
 

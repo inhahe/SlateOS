@@ -247,8 +247,11 @@ pub fn resolve(fault_addr: u64, error_code: u64) -> KernelResult<()> {
 
     let virt = VirtAddr::new(fault_addr);
 
-    // Only handle kernel-space faults for now.  User-space fault
-    // resolution will be added when process support is implemented.
+    // This resolver handles kernel-space faults only.  User-space faults
+    // are resolved on a separate path in the #PF handler (idt.rs):
+    // `proc::pcb::try_resolve_fault` (per-process address space, CoW,
+    // demand paging) and `try_grow_user_stack` (auto-growing stacks).
+    // Returning here lets that path take over.
     if virt.is_user() {
         return Err(KernelError::PageFault);
     }

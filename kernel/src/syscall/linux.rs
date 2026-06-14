@@ -51080,6 +51080,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_getrusage_sysinfo_times()?;
+
+    #[inline(never)]
+    fn self_test_getrusage_sysinfo_times() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // getrusage / sysinfo / times dispatch validation.
     //   - NULL user pointer -> EFAULT (early gate before validate_user_*).
     //   - times(NULL) is the documented "return-value only" case and
@@ -52318,6 +52323,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
             pcb::destroy(test_pid);
         }
+    }
+        Ok(())
     }
 
     // capget / capset dispatch validation.

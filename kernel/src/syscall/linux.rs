@@ -40889,6 +40889,122 @@ fn self_test_mbind() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+/// TD4 extraction: sanitize_mpol_flags fidelity (self_test group 9g-545).
+/// Verifies MPOL_F_NUMA_BALANCING (bit 13) is a recognised flag legal only
+/// with MPOL_BIND, and STATIC/RELATIVE node flags are mutually exclusive —
+/// across both set_mempolicy and mbind. Self-contained. See
+/// [`self_test_errno_mapping`] for the TD4 rationale.
+#[inline(never)]
+fn self_test_sanitize_mpol_flags() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+
+    const MPOL_BIND: u64 = 2;
+    const MPOL_INTERLEAVE: u64 = 3;
+    const MPOL_F_RELATIVE_NODES: u64 = 1 << 14;
+    const MPOL_F_STATIC_NODES: u64 = 1 << 15;
+    const MPOL_F_NUMA_BALANCING: u64 = 1 << 13;
+    let mask: u64 = 0x1; // node {0}
+
+    // set_mempolicy(BIND | NUMA_BALANCING, {0}, 64) -> 0.
+    // NUMA_BALANCING is now a recognised flag and legal with BIND;
+    // pre-batch this returned -EINVAL.
+    let a = SyscallArgs {
+        arg0: MPOL_BIND | MPOL_F_NUMA_BALANCING,
+        arg1: (&raw const mask).addr() as u64,
+        arg2: 64, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
+    if r.value != 0 {
+        serial_println!(
+            "[syscall/linux]   FAIL: set_mempolicy(BIND|NUMA_BALANCING,{{0}}) -> {} (expected 0)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // set_mempolicy(INTERLEAVE | NUMA_BALANCING, {0}, 64) -> -EINVAL.
+    // NUMA_BALANCING demands MPOL_BIND.
+    let a = SyscallArgs {
+        arg0: MPOL_INTERLEAVE | MPOL_F_NUMA_BALANCING,
+        arg1: (&raw const mask).addr() as u64,
+        arg2: 64, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
+    if r.value != i64::from(errno::EINVAL).wrapping_neg() {
+        serial_println!(
+            "[syscall/linux]   FAIL: set_mempolicy(INTERLEAVE|NUMA_BALANCING) -> {} (expected -EINVAL)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // set_mempolicy(BIND | STATIC | RELATIVE, {0}, 64) -> -EINVAL.
+    // STATIC and RELATIVE node flags are mutually exclusive.
+    let a = SyscallArgs {
+        arg0: MPOL_BIND | MPOL_F_STATIC_NODES | MPOL_F_RELATIVE_NODES,
+        arg1: (&raw const mask).addr() as u64,
+        arg2: 64, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
+    if r.value != i64::from(errno::EINVAL).wrapping_neg() {
+        serial_println!(
+            "[syscall/linux]   FAIL: set_mempolicy(BIND|STATIC|RELATIVE) -> {} (expected -EINVAL)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // mbind(BIND | NUMA_BALANCING, {0}) over a 4 KiB range -> 0.
+    let a = SyscallArgs {
+        arg0: 0x1000, arg1: 0x1000,
+        arg2: MPOL_BIND | MPOL_F_NUMA_BALANCING,
+        arg3: (&raw const mask).addr() as u64, arg4: 64, arg5: 0,
+    };
+    let r = dispatch_linux(nr::MBIND, &a);
+    if r.value != 0 {
+        serial_println!(
+            "[syscall/linux]   FAIL: mbind(BIND|NUMA_BALANCING,{{0}}) -> {} (expected 0)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // mbind(INTERLEAVE | NUMA_BALANCING, ...) -> -EINVAL.
+    let a = SyscallArgs {
+        arg0: 0x1000, arg1: 0x1000,
+        arg2: MPOL_INTERLEAVE | MPOL_F_NUMA_BALANCING,
+        arg3: (&raw const mask).addr() as u64, arg4: 64, arg5: 0,
+    };
+    let r = dispatch_linux(nr::MBIND, &a);
+    if r.value != i64::from(errno::EINVAL).wrapping_neg() {
+        serial_println!(
+            "[syscall/linux]   FAIL: mbind(INTERLEAVE|NUMA_BALANCING) -> {} (expected -EINVAL)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // mbind(BIND | STATIC | RELATIVE, ...) -> -EINVAL.
+    let a = SyscallArgs {
+        arg0: 0x1000, arg1: 0x1000,
+        arg2: MPOL_BIND | MPOL_F_STATIC_NODES | MPOL_F_RELATIVE_NODES,
+        arg3: (&raw const mask).addr() as u64, arg4: 64, arg5: 0,
+    };
+    let r = dispatch_linux(nr::MBIND, &a);
+    if r.value != i64::from(errno::EINVAL).wrapping_neg() {
+        serial_println!(
+            "[syscall/linux]   FAIL: mbind(BIND|STATIC|RELATIVE) -> {} (expected -EINVAL)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[syscall/linux]   sanitize_mpol_flags NUMA_BALANCING bit + static/relative mutual-exclusion + numa-balancing-requires-BIND (batch 545): OK"
+    );
+    Ok(())
+}
+
 pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
@@ -40996,116 +41112,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // (bit 13) alongside STATIC_NODES (15) and RELATIVE_NODES (14) — and
     // enforces three rules in order: residual mode < MPOL_MAX, STATIC and
     // RELATIVE are mutually exclusive, and NUMA_BALANCING is only legal
-    // with MPOL_BIND.  Pre-batch our mask omitted bit 13, so a perfectly
-    // valid `MPOL_BIND | MPOL_F_NUMA_BALANCING` was rejected with EINVAL
-    // (bit 13 looked like a stray high bit), and the static/relative and
-    // numa-balancing-mode rules were absent entirely.
-    {
-        const MPOL_BIND: u64 = 2;
-        const MPOL_INTERLEAVE: u64 = 3;
-        const MPOL_F_RELATIVE_NODES: u64 = 1 << 14;
-        const MPOL_F_STATIC_NODES: u64 = 1 << 15;
-        const MPOL_F_NUMA_BALANCING: u64 = 1 << 13;
-        let mask: u64 = 0x1; // node {0}
-
-        // set_mempolicy(BIND | NUMA_BALANCING, {0}, 64) -> 0.
-        // NUMA_BALANCING is now a recognised flag and legal with BIND;
-        // pre-batch this returned -EINVAL.
-        let a = SyscallArgs {
-            arg0: MPOL_BIND | MPOL_F_NUMA_BALANCING,
-            arg1: (&raw const mask).addr() as u64,
-            arg2: 64, arg3: 0, arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
-        if r.value != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: set_mempolicy(BIND|NUMA_BALANCING,{{0}}) -> {} (expected 0)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // set_mempolicy(INTERLEAVE | NUMA_BALANCING, {0}, 64) -> -EINVAL.
-        // NUMA_BALANCING demands MPOL_BIND.
-        let a = SyscallArgs {
-            arg0: MPOL_INTERLEAVE | MPOL_F_NUMA_BALANCING,
-            arg1: (&raw const mask).addr() as u64,
-            arg2: 64, arg3: 0, arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
-        if r.value != i64::from(errno::EINVAL).wrapping_neg() {
-            serial_println!(
-                "[syscall/linux]   FAIL: set_mempolicy(INTERLEAVE|NUMA_BALANCING) -> {} (expected -EINVAL)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // set_mempolicy(BIND | STATIC | RELATIVE, {0}, 64) -> -EINVAL.
-        // STATIC and RELATIVE node flags are mutually exclusive.
-        let a = SyscallArgs {
-            arg0: MPOL_BIND | MPOL_F_STATIC_NODES | MPOL_F_RELATIVE_NODES,
-            arg1: (&raw const mask).addr() as u64,
-            arg2: 64, arg3: 0, arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
-        if r.value != i64::from(errno::EINVAL).wrapping_neg() {
-            serial_println!(
-                "[syscall/linux]   FAIL: set_mempolicy(BIND|STATIC|RELATIVE) -> {} (expected -EINVAL)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // mbind(BIND | NUMA_BALANCING, {0}) over a 4 KiB range -> 0.
-        let a = SyscallArgs {
-            arg0: 0x1000, arg1: 0x1000,
-            arg2: MPOL_BIND | MPOL_F_NUMA_BALANCING,
-            arg3: (&raw const mask).addr() as u64, arg4: 64, arg5: 0,
-        };
-        let r = dispatch_linux(nr::MBIND, &a);
-        if r.value != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: mbind(BIND|NUMA_BALANCING,{{0}}) -> {} (expected 0)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // mbind(INTERLEAVE | NUMA_BALANCING, ...) -> -EINVAL.
-        let a = SyscallArgs {
-            arg0: 0x1000, arg1: 0x1000,
-            arg2: MPOL_INTERLEAVE | MPOL_F_NUMA_BALANCING,
-            arg3: (&raw const mask).addr() as u64, arg4: 64, arg5: 0,
-        };
-        let r = dispatch_linux(nr::MBIND, &a);
-        if r.value != i64::from(errno::EINVAL).wrapping_neg() {
-            serial_println!(
-                "[syscall/linux]   FAIL: mbind(INTERLEAVE|NUMA_BALANCING) -> {} (expected -EINVAL)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // mbind(BIND | STATIC | RELATIVE, ...) -> -EINVAL.
-        let a = SyscallArgs {
-            arg0: 0x1000, arg1: 0x1000,
-            arg2: MPOL_BIND | MPOL_F_STATIC_NODES | MPOL_F_RELATIVE_NODES,
-            arg3: (&raw const mask).addr() as u64, arg4: 64, arg5: 0,
-        };
-        let r = dispatch_linux(nr::MBIND, &a);
-        if r.value != i64::from(errno::EINVAL).wrapping_neg() {
-            serial_println!(
-                "[syscall/linux]   FAIL: mbind(BIND|STATIC|RELATIVE) -> {} (expected -EINVAL)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        serial_println!(
-            "[syscall/linux]   sanitize_mpol_flags NUMA_BALANCING bit + static/relative mutual-exclusion + numa-balancing-requires-BIND (batch 545): OK"
-        );
-    }
+    // with MPOL_BIND.  Extracted to self_test_sanitize_mpol_flags (TD4).
+    self_test_sanitize_mpol_flags()?;
 
     // (9g-546) Batch 546: get_nodes + mpol_new fidelity for mbind /
     // set_mempolicy.  Three verbatim corrections vs Linux v6.6

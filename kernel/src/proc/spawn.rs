@@ -409,10 +409,10 @@ pub fn spawn_process(
 
     // Choose the executable's load bias.  ET_EXEC binaries load at their
     // absolute link-time vaddrs (bias 0); ET_DYN/PIE binaries are
-    // position-independent, so we place them at a fixed base (no ASLR yet
-    // — known-issues.md TD9).  The bias shifts every PT_LOAD segment, the
+    // position-independent, so we place them at an ASLR-randomised base
+    // (known-issues.md TD9).  The bias shifts every PT_LOAD segment, the
     // entry point, and the AT_ENTRY/AT_PHDR auxv values uniformly.
-    let exec_load_bias: u64 = if elf_file.is_pie() { LINUX_PIE_BASE } else { 0 };
+    let exec_load_bias: u64 = choose_exec_load_bias(elf_file.is_pie());
     let raw_entry = elf_file.entry_point();
     let entry_point = raw_entry.checked_add(exec_load_bias).ok_or_else(|| {
         serial_println!("[spawn] executable entry point overflowed load bias");
@@ -906,11 +906,12 @@ pub fn exec_process(
         return Err(KernelError::InvalidExecutable);
     }
 
-    // Choose the executable's load bias (0 for ET_EXEC, LINUX_PIE_BASE
-    // for ET_DYN/PIE) and bias the entry point accordingly.  Computed
-    // before the old address space is torn down so a malformed bias/entry
-    // combination still bails out with the old image intact.
-    let exec_load_bias: u64 = if elf_file.is_pie() { LINUX_PIE_BASE } else { 0 };
+    // Choose the executable's load bias (0 for ET_EXEC, an ASLR-randomised
+    // base ≥ LINUX_PIE_BASE for ET_DYN/PIE) and bias the entry point
+    // accordingly.  Computed before the old address space is torn down so a
+    // malformed bias/entry combination still bails out with the old image
+    // intact.
+    let exec_load_bias: u64 = choose_exec_load_bias(elf_file.is_pie());
     let raw_entry = elf_file.entry_point();
     let entry_point = raw_entry.checked_add(exec_load_bias).ok_or_else(|| {
         serial_println!("[exec] executable entry point overflowed load bias");
@@ -1300,24 +1301,68 @@ fn apply_aslr_base(fixed_base: u64, rand_pages: u64) -> u64 {
     fixed_base.saturating_add(offset)
 }
 
-/// Fixed load base for a position-independent (`ET_DYN`/PIE) main
-/// executable.
+/// Load base for a position-independent (`ET_DYN`/PIE) main executable —
+/// the **low edge** of the PIE ASLR window (Linux's `ELF_ET_DYN_BASE`,
+/// used as the minimum, with randomisation added upward; see
+/// [`PIE_ASLR_BITS`] / [`choose_exec_load_bias`]).
 ///
 /// Modern Linux executables are PIE: their `PT_LOAD` segments use small
 /// link-time vaddrs (often starting at 0), and the kernel must place the
 /// image at a chosen base.  Loading at bias 0 would map the null page and
 /// hand out an `AT_ENTRY`/`AT_PHDR` of essentially 0 — both wrong.  We
-/// load PIE executables at this fixed base (no ASLR yet — known-issues.md
-/// TD9) and report `e_entry + base` / `phdr_vaddr + base` through the
-/// auxv via [`crate::proc::linux_stack`]'s `exec_load_bias`.
+/// load PIE executables at a randomised base ≥ this floor and report
+/// `e_entry + base` / `phdr_vaddr + base` through the auxv via
+/// [`crate::proc::linux_stack`]'s `exec_load_bias`.
 ///
-/// `0x0000_5555_5555_4000` is the classic Linux no-ASLR PIE base
+/// `0x0000_5555_5555_4000` is the classic Linux PIE base floor
 /// (`ELF_ET_DYN_BASE`-derived).  It is 16 KiB-aligned (low 14 bits zero,
 /// so each `bias + p_vaddr` preserves page-offset congruence), sits far
-/// below the interpreter base (`LINUX_INTERP_BASE = 0x7000_0000_0000`)
-/// and the stack — a PIE image plus its brk/mmap growth has ample room
-/// before colliding with either.
+/// *above* the general mmap window (`USER_MMAP_BASE = 0x60_0000_0000` ..
+/// `0x70_0000_0000`) and far *below* the interpreter window
+/// (`LINUX_INTERP_BASE = 0x7000_0000_0000`).  The ~26.7 TiB gap up to the
+/// interpreter floor leaves room for the full ASLR window plus a PIE image
+/// and its brk growth before colliding with either neighbour.
 const LINUX_PIE_BASE: u64 = 0x0000_5555_5555_4000;
+
+/// ASLR entropy applied to the PIE main-executable base, in bits at
+/// 16 KiB-page granularity.
+///
+/// `28` matches Linux x86_64's default `mmap_rnd_bits` (28 bits of
+/// layout entropy), applied here in 16 KiB page units → a 4 TiB window
+/// added upward from [`LINUX_PIE_BASE`].  The highest possible PIE base,
+/// `LINUX_PIE_BASE + (2^28 - 1) * 16 KiB ≈ 0x5955_5555_0000`, leaves
+/// ~22 TiB of headroom below the interpreter floor
+/// (`LINUX_INTERP_BASE = 0x7000_0000_0000`) for the image and brk growth,
+/// so a randomised PIE base cannot collide with the interpreter window
+/// above, the mmap window far below, or the stack.  (`spawn::self_test`'s
+/// `test_pie_aslr_window` asserts this headroom invariant.)
+const PIE_ASLR_BITS: u32 = 28;
+
+/// Number of distinct 16 KiB-aligned PIE bases = `2^PIE_ASLR_BITS`.
+/// The random page index is drawn unbiased from `[0, PIE_ASLR_SPAN_PAGES)`
+/// via [`crate::rng::next_bounded`].
+const PIE_ASLR_SPAN_PAGES: u64 = 1u64 << PIE_ASLR_BITS;
+
+/// Choose the main executable's load bias: `0` for an `ET_EXEC` binary
+/// (absolute link-time vaddrs), or an ASLR-randomised base ≥
+/// [`LINUX_PIE_BASE`] for an `ET_DYN`/PIE binary.
+///
+/// The bias uniformly shifts every `PT_LOAD` segment, the entry point, and
+/// the `AT_ENTRY`/`AT_PHDR` auxv values, so callers compute it once and
+/// thread it through [`elf::load_segments_with_bias`] and the SysV stack
+/// builder.  Randomisation is applied only once the CSPRNG is seeded;
+/// before that (very early boot, before any PIE process can spawn in
+/// practice) it falls back to the fixed floor.  See known-issues.md TD9.
+fn choose_exec_load_bias(is_pie: bool) -> u64 {
+    if !is_pie {
+        return 0;
+    }
+    if crate::rng::is_initialized() {
+        apply_aslr_base(LINUX_PIE_BASE, crate::rng::next_bounded(PIE_ASLR_SPAN_PAGES))
+    } else {
+        LINUX_PIE_BASE
+    }
+}
 
 /// Where a loaded program interpreter was placed and where to enter it.
 struct LoadedInterp {
@@ -1667,7 +1712,59 @@ pub fn self_test() -> KernelResult<()> {
     test_load_interpreter_fallbacks()?;
     test_exec_comm_basename()?;
     test_apply_aslr_base()?;
+    test_pie_aslr_window()?;
 
+    Ok(())
+}
+
+/// Test: the PIE ASLR window stays 16 KiB-aligned and leaves ample
+/// headroom below the interpreter floor for the image + brk growth (the
+/// collision-safety invariant the PIE half of TD9 relies on).
+fn test_pie_aslr_window() -> KernelResult<()> {
+    const FRAME_MASK: u64 = (crate::mm::frame::FRAME_SIZE as u64) - 1;
+    // Minimum clearance required between the highest PIE base and the
+    // interpreter floor, for the PIE image plus future brk growth. 1 TiB
+    // is far larger than any realistic PIE image + heap; the real gap is
+    // ~22 TiB. This guards against a future PIE_ASLR_BITS increase silently
+    // eating the headroom.
+    const PIE_MIN_HEADROOM: u64 = 0x100_0000_0000; // 1 TiB
+
+    // The PIE floor must itself be 16 KiB-aligned.
+    if LINUX_PIE_BASE & FRAME_MASK != 0 {
+        serial_println!("[spawn]   FAIL: LINUX_PIE_BASE not 16 KiB-aligned");
+        return Err(KernelError::InternalError);
+    }
+
+    let max_index = PIE_ASLR_SPAN_PAGES.saturating_sub(1);
+    for pages in [1u64, 99, 65535, max_index] {
+        let b = apply_aslr_base(LINUX_PIE_BASE, pages);
+        if b & FRAME_MASK != 0 {
+            serial_println!("[spawn]   FAIL: PIE ASLR base not 16 KiB-aligned");
+            return Err(KernelError::InternalError);
+        }
+        // Every base must sit strictly above the device mmap window and
+        // strictly below the interpreter floor.
+        if b <= LINUX_INTERP_BASE.saturating_sub(PIE_MIN_HEADROOM) {
+            continue;
+        }
+        serial_println!(
+            "[spawn]   FAIL: PIE ASLR base {:#x} too close to interpreter floor {:#x}",
+            b, LINUX_INTERP_BASE
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Explicitly assert the worst case: highest base + headroom < floor.
+    let max_base = apply_aslr_base(LINUX_PIE_BASE, max_index);
+    if LINUX_INTERP_BASE.saturating_sub(max_base) < PIE_MIN_HEADROOM {
+        serial_println!(
+            "[spawn]   FAIL: PIE ASLR window headroom {:#x} < required {:#x}",
+            LINUX_INTERP_BASE.saturating_sub(max_base), PIE_MIN_HEADROOM
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[spawn]   PIE ASLR window: aligned + ≥1 TiB headroom below interp OK");
     Ok(())
 }
 

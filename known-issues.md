@@ -1444,7 +1444,55 @@ and only the mixer's native 48 kHz / S16_LE / stereo format (non-native
 configs are rejected by HW_PARAMS rather than resampled/converted).
 Resampling + format conversion + an mmap transfer path are future work.
 
-### TD9. Linux program interpreter (ld.so) loaded at a fixed base — no ASLR — INTERPRETER ASLR DONE 2026-06-14; PIE-executable base still fixed (PARTIAL)
+### TD9. Linux program interpreter (ld.so) + PIE executable loaded at a fixed base — no ASLR — RESOLVED 2026-06-14
+
+**Resolution (PIE-executable base, 2026-06-14):** the main `ET_DYN`/PIE
+executable base is now randomised too. A new `choose_exec_load_bias(is_pie)`
+helper (`kernel/src/proc/spawn.rs`) returns `0` for `ET_EXEC` and, for PIE,
+an ASLR base ≥ `LINUX_PIE_BASE` drawn via `apply_aslr_base(LINUX_PIE_BASE,
+rng::next_bounded(PIE_ASLR_SPAN_PAGES))` (28 bits of entropy, 16 KiB-page
+units, falling back to the fixed floor before the CSPRNG is seeded). It is
+computed once per spawn/exec at the two `exec_load_bias` sites
+(`spawn_process` + `exec_process`) and already threads uniformly through
+`load_segments_with_bias`, the biased entry point, and the SysV stack
+builder's `AT_ENTRY`/`AT_PHDR`, so the whole image relocates consistently.
+The highest PIE base (`≈0x5955_5555_0000`) leaves ~22 TiB below the
+interpreter floor (`0x7000_0000_0000`) for the image + brk growth, and the
+PIE floor sits far above the mmap window (`0x60_0000_0000`), so no
+collision is possible. `sys_brk` is currently a no-op stub (returns the
+requested break without mapping; programs fall through to mmap), so there is
+no real heap above the PIE image today — when a real brk region lands it
+will grow into that 22 TiB headroom. Covered by `spawn::self_test`'s
+`test_pie_aslr_window` (alignment + ≥1 TiB interpreter-floor headroom).
+Both halves of TD9 are now done; entropy/always-on policy is in
+design-decisions.md #20.
+
+**Resolution (interpreter base, 2026-06-14):** `load_interpreter` in
+`kernel/src/proc/spawn.rs` now draws a per-exec randomised base from the
+`LINUX_INTERP_BASE` window instead of using the fixed constant. A new pure
+helper `apply_aslr_base(fixed_base, rand_pages)` adds `rand_pages *
+FRAME_SIZE` (saturating) to the low edge; the page index is drawn unbiased
+from `[0, 2^INTERP_ASLR_BITS)` via `rng::next_bounded`. `INTERP_ASLR_BITS =
+28` mirrors Linux x86_64's default `mmap_rnd_bits` (28 bits of layout
+entropy), applied in our 16 KiB page units → a 4 TiB window whose top
+(`≈0x73FF_FFFF_C000`) stays far below `USER_STACK_GUARD`, so a randomised
+base can never collide with the stack, the low-loaded executable, the brk
+heap, or the general mmap window (`0x0060_…`); the interpreter image is the
+window's sole occupant, so intra-window collisions are impossible too.
+`AT_BASE` already carried whatever base was chosen, so ld.so relocation is
+unaffected. Before the CSPRNG is seeded (very early boot, before any Linux
+process can spawn in practice) it falls back to the fixed low edge.
+Covered by `spawn::self_test`'s `test_apply_aslr_base` (alignment +
+in-window + stack-clearance + saturation) and the existing
+`self_test_linux_dynamic_interp` end-to-end launch (the test interpreter's
+exit code is register-only/position-independent, so it runs correctly at
+any randomised base; verified loading at e.g. 0x701e77808000, not the fixed
+0x700000000000). The entropy-bits choice is recorded in
+design-decisions.md.
+
+---
+
+
 
 **Resolution (interpreter base, 2026-06-14):** `load_interpreter` in
 `kernel/src/proc/spawn.rs` now draws a per-exec randomised base from the

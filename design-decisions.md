@@ -1474,13 +1474,14 @@ back through a find-only helper + `add_vma`; drop `reserve_unmapped_area`
 and the `reserved` flag. (Doing so re-introduces all three original defects
 and the SMP race, so this is not advised.)
 
-## 20. Interpreter ASLR — 28 bits of entropy, always-on when the CSPRNG is seeded (no personality opt-out yet)
+## 20. Interpreter + PIE-executable ASLR — 28 bits of entropy each, always-on when the CSPRNG is seeded (no personality opt-out yet)
 
-**Date:** 2026-06-14
+**Date:** 2026-06-14 (interpreter); 2026-06-14 (PIE base)
 **Decided by:** Claude (autonomous) — reversible; the operator may overrule. This
-resolves the interpreter half of known-issues.md TD9, whose documented "proper
-fix" was always to randomise the load base; the only genuine choices were *how
-much entropy* and *whether to honour an opt-out*.
+fully resolves known-issues.md TD9, whose documented "proper fix" was always to
+randomise the load bases; the only genuine choices were *how much entropy* and
+*whether to honour an opt-out*. Both load bases (ld.so interpreter and the PIE
+main executable) are now randomised under the same policy.
 
 **Problem:**
 `load_interpreter` (`kernel/src/proc/spawn.rs`) loaded ld.so at the fixed
@@ -1516,13 +1517,29 @@ work was purely the randomisation policy. Two sub-decisions had real tradeoffs.
   from the mmap window (`0x0060_…`) by design (TD9 note), and randomising
   within its own dedicated, collision-free window is simpler and lower-risk
   than threading interpreter placement through the general allocator.
-- *Also randomise the PIE-executable base in the same change.* Deferred: the
-  brk heap grows immediately above the PIE image, so PIE ASLR needs a window
-  chosen to leave brk-growth headroom — a separate, more delicate change. Left
-  as remaining TD9 debt.
+- *Match Linux's byte-range for the PIE base.* Same rejection as the
+  interpreter: entropy is the metric. The PIE window reuses the 28-bit policy.
 
-**How to reverse:** set the base back to the `LINUX_INTERP_BASE` constant in
-`load_interpreter` (drop the `is_initialized()`/`apply_aslr_base` block) and
-remove `test_apply_aslr_base`. To instead make it opt-out-able, gate the
-randomisation on a per-process "no randomise" flag fed from
+**PIE-executable base (second half of TD9):**
+The PIE main-executable base previously loaded at the fixed
+`LINUX_PIE_BASE = 0x5555_5555_4000` (Linux's `ELF_ET_DYN_BASE`). `exec_load_bias`
+is computed once per spawn/exec and threaded through `load_segments_with_bias`,
+the biased entry point, and the AT_ENTRY/AT_PHDR auxv, so a single helper
+suffices: `choose_exec_load_bias(is_pie)` returns `0` for ET_EXEC, and for PIE
+returns `apply_aslr_base(LINUX_PIE_BASE, next_bounded(2^28))` when the CSPRNG is
+seeded (fixed `LINUX_PIE_BASE` fallback otherwise) — the *same* `apply_aslr_base`
+helper and 28-bit entropy (`PIE_ASLR_BITS = 28`) as the interpreter. The 4 TiB
+PIE window sits far above the mmap window (`0x0060_…`) and far below the
+interpreter window (`0x7000_…`), leaving ≥1 TiB of headroom below the
+interpreter floor (asserted by `test_pie_aslr_window` in `spawn::self_test`). The
+brk heap is a stub today (sys_brk returns the requested value without allocating;
+programs fall through to mmap-based allocators), so the historical "brk grows
+above the PIE image" headroom concern is not yet binding; when a real brk region
+lands it must reserve growth space within this window's headroom.
+
+**How to reverse:** set the bases back to the `LINUX_INTERP_BASE` /
+`LINUX_PIE_BASE` constants in `load_interpreter` / `choose_exec_load_bias` (drop
+the `is_initialized()`/`apply_aslr_base` blocks) and remove
+`test_apply_aslr_base` / `test_pie_aslr_window`. To instead make it opt-out-able,
+gate the randomisation on a per-process "no randomise" flag fed from
 `personality(ADDR_NO_RANDOMIZE)`.

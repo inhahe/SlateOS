@@ -77064,6 +77064,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_legacy_deprecated_syscalls()?;
+
+    #[inline(never)]
+    fn self_test_legacy_deprecated_syscalls() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // -----------------------------------------------------------------
     // Batch 34: legacy / deprecated / never-implemented syscalls
     // -----------------------------------------------------------------
@@ -80742,6 +80747,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   futimesat tv_usec value gating: OK"
         );
+    }
+        Ok(())
     }
 
     // (DRM) KMS enumeration conversion helpers map every native enum variant

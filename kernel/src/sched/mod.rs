@@ -69,6 +69,7 @@ use alloc::collections::BTreeMap;
 use crate::cpu;
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
+use crate::serial_print;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use spin::Mutex;
 
@@ -2025,11 +2026,25 @@ fn check_starvation() {
     }
     drop(relock);
 
-    serial_println!(
-        "[sched] Anti-starvation: boosted {} task{} to priority 0",
+    // Log the boosted task IDs (and their base priorities) so a perpetual
+    // starvation loop can be attributed to specific tasks.  Printed
+    // incrementally to avoid any heap allocation on this path.
+    serial_print!(
+        "[sched] Anti-starvation: cur={} boosted {} task{} to priority 0: [",
+        load_current_task(),
         boost_count,
         if boost_count == 1 { "" } else { "s" }
     );
+    for i in 0..boost_count {
+        #[allow(clippy::indexing_slicing)]
+        let (id, prio, _cpu) = boost_list[i];
+        if i == 0 {
+            serial_print!("{}(p{})", id, prio);
+        } else {
+            serial_print!(",{}(p{})", id, prio);
+        }
+    }
+    serial_println!("]");
 }
 
 /// Number of anti-starvation boosts since boot (diagnostic).

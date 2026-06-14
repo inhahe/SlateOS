@@ -643,6 +643,22 @@ extern "C" fn cursor_task_entry(_arg: u64) {
     // Show the cursor initially.
     crate::fb::show_cursor();
 
+    // Idle poll interval when the event buffer is empty.  At priority 16 the
+    // cursor task outranks most background work (e.g. p18 service/worker
+    // tasks), so it must *block* — not busy-`yield_now()` — when idle.
+    //
+    // `yield_now()` here was a starvation bug: yield re-enqueues the task at
+    // its own priority and the scheduler immediately re-picks it (it is still
+    // the highest-priority Ready task), so the "yield to avoid spinning" loop
+    // never actually relinquished the CPU to lower-priority tasks.  It pinned
+    // a core, forcing every p>=17 task (services, workqueue worker, deferred
+    // benchmarks) to rely on the ~1s anti-starvation booster just to make
+    // glacial progress.  Sleeping instead removes the task from the run queue
+    // entirely (an hrtimer wakes it), so lower-priority work runs freely while
+    // idle.  8 ms ~= 125 Hz keeps the cursor responsive; active movement still
+    // drains events tightly (the sleep only happens once the buffer empties).
+    const IDLE_POLL_MS: u64 = 8;
+
     loop {
         let mut processed = false;
 
@@ -653,8 +669,8 @@ extern "C" fn cursor_task_entry(_arg: u64) {
         }
 
         if !processed {
-            // No events — yield to avoid spinning.
-            crate::sched::yield_now();
+            // No events — sleep briefly so lower-priority tasks can run.
+            crate::sched::sleep_ms(IDLE_POLL_MS);
         }
     }
 }

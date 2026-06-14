@@ -14,6 +14,64 @@ work that should be done now."
 
 ## Active Bugs
 
+### B-DF1. Double fault in the deferred benchmark suite during a late `http_gzip` stage — OPEN 2026-06-14
+
+**Where:** late in the `deferred_bench_task` suite (`kernel/src/bench.rs`),
+around the `http_gzip_8KiB` benchmark. Only reachable now that W2 (mouse-cursor
+busy-yield starvation) is fixed — previously the suite never ran this far, so
+this is a **pre-existing latent bug unmasked by the W2 fix**, not caused by it.
+
+**Symptom (exact serial output):**
+```
+EXCEPTION: Double Fault (#DF) at 0xffffffff812fe288, error=0x0
+  CS=0x8 RFLAGS=0x86 RSP=0xffffc1000003ffb8 SS=0x10
+  Task: 115 (""), priority 0, cpu 0
+  Backtrace (2 frames):
+    # 0: 0xffffffff81277c91
+    # 1: 0xffffffff8126cdfd
+FATAL: Double fault is unrecoverable. Halting.
+```
+
+**Symbolization (against `build/nm-sorted.txt`):**
+- Fault PC `0x812fe288` is inside `core::sync::atomic::atomic_load` (symbol at
+  `0x812fe280`, +8). So the faulting context was executing an atomic load (a
+  `mov` from memory) when a fault occurred that could not be delivered → #DF.
+- The two backtrace frames are **the double-fault handler's own IST stack**,
+  not the faulting code: `0x81277c91` is inside `handle_double_fault`
+  (`0x81277690`) and `0x8126cdfd` is inside `isr_double_fault` (`0x8126cdd4`).
+  `backtrace::print_current()` walked the #DF IST stack, so those frames are
+  uninformative — ignore them. (An earlier note mis-symbolized these as
+  `handle_general_protection`/`isr_irq12`; that was wrong — corrected here.)
+- Task 115 is the `deferred_bench_task` driver, shown at **priority 0** because
+  the anti-starvation booster had boosted it.
+
+**Leading hypotheses (not yet confirmed):**
+1. The atomic load faulted because its operand pointer was bad/unmapped (a
+   #PF/#GP whose delivery then double-faulted). Reported `RSP=0xffffc1000003ffb8`
+   sits very near the *top* of a 64 KiB task kernel stack
+   (`TASK_STACK_SIZE = 4 * 16 KiB`), so a classic deep-recursion stack overflow
+   is **not** the obvious cause (stack looks shallow) — unless RSP itself is the
+   corrupted value (pointing into an unmapped region), in which case any
+   exception delivery would fault on the push → #DF.
+2. A corrupted/dangling atomic operand in the gzip/deflate benchmark path
+   (e.g., an `Atomic*` living in a structure that was freed/reused).
+
+**Reproduce:** `bash scripts/boot-test.sh --bench --timeout=600` and let the
+suite run past `context_switch`/`pick_next`/`ipc`/`vfs` into `http_gzip`.
+Expensive: `compress_repeating` alone eats ~200 s under QEMU/TCG.
+
+**Next step:** symbolize precisely which `atomic_load` instantiation lives at
+`0x812fe280` (match the mangled hash via `nm`/`objdump -d` of the kernel ELF)
+to identify the type being loaded; disassemble around `0x812fe288` to see the
+operand register; and add a guard/log in the `http_gzip` bench setup to dump the
+atomic's address before the load. Determine whether RSP is corrupt (compare to
+task 115's real stack range) vs. the operand pointer is corrupt.
+
+**Impact:** `BENCH_OK` and the post-`http_gzip` benchmarks (ISR latency,
+scorecard) still don't complete — but for a *different, deeper* reason than W2.
+Does not affect normal operation: the default `BOOT_OK` boot test passes
+(the deferred bench suite runs only after BOOT_OK).
+
 ### W1. Intermittent boot-test hang recurred once at the OOM self-test — WATCHLIST 2026-06-10
 
 **Where:** boot self-test sequence; serial output (`build/serial-test.txt`)
@@ -76,7 +134,56 @@ truncation; given two recorded recurrences now, a finer-grained marker
 pass around the `mm::oom::self_test()` / `sysctl::set` lock window
 (per the F1/F4 method) is the priority diagnostic when next observed.
 
-### W2. Deferred benchmark suite livelocks in `bench_pick_next` after `context_switch` → `BENCH_OK` never prints — OPEN 2026-06-14
+### W2. Deferred benchmark suite livelocks in `bench_pick_next` after `context_switch` → `BENCH_OK` never prints — ROOT-CAUSED & FIXED 2026-06-14
+
+**RESOLUTION 2026-06-14 — root cause was the mouse cursor task busy-yielding,
+NOT a benchmark or backend bug.** The livelock was never about the nop helpers
+or `bench_pick_next` per se; it was a **system-wide priority-starvation bug**
+that the long bench suite merely exposed first. `cursor_task_entry`
+(`kernel/src/mouse.rs`, spawned at priority **16**) polled a lock-free mouse
+event ring and, when the buffer was empty, called `crate::sched::yield_now()`
+in a tight loop "to avoid spinning." But `yield_now()` re-enqueues the current
+task at *its own* priority and then picks the highest-priority Ready task — and
+the cursor task, at p16, was *still the highest-priority Ready task*, so it was
+immediately re-picked. The "yield" loop therefore **never relinquished the CPU
+to any task of priority > 16** (it only ever ceded to something strictly
+higher-priority, of which there usually was none). This pinned a core, so every
+p≥17 task — the p18 `deferred_bench_task` driver, the p18 workqueue worker,
+background daemons — could make progress *only* via the ~1 s anti-starvation
+booster (one or two tasks nudged to priority 0 each pass, hence the perpetual
+`[sched] Anti-starvation: boosted N tasks` spam). `bench_pick_next` "stalled"
+because its driver only got a sliver of CPU per second.
+
+**Diagnosis chain:** markers proved `run()` never returned even though the nop
+helpers *did* exit → so the lone driver itself was starving, not the helpers →
+boost-ID logging (`cur=<current task> boosted <ids>`) showed the boosted/starved
+tasks were tids 115 (bench driver) + 103 (workqueue worker), and that the task
+hogging the CPU (`cur=`) was the **mouse cursor task** → reading
+`cursor_task_entry` revealed the idle `yield_now()` busy-loop.
+
+**Fix:** in the idle branch the cursor task now `sleep_ms(8)` (~125 Hz) instead
+of `yield_now()`. `sleep_ms` (≤100 ms ⇒ hrtimer path) *removes* the task from
+the run queue entirely until an hrtimer wakes it, so lower-priority work runs
+freely while the cursor is idle; active mouse movement still drains events
+tightly (the sleep only triggers once the ring empties). Verified: with this
+fix the `--bench` suite runs from `page_alloc` all the way through `compress`,
+`context_switch`, `pick_next`, `syscall_dispatch`, `ipc`, `vfs`, and into the
+`http_gzip` benchmarks — vastly further than ever before (previously it never
+passed `context_switch`). The default `BOOT_OK` boot test still passes
+(BOOT_OK after 29 s), confirming no regression to normal operation. (Fixing W2
+unmasked a separate latent double fault in a late bench stage — see B-DF1
+below.)
+
+**General lesson:** `yield_now()` is NOT a valid "idle until work arrives"
+primitive for any task that is not the lowest priority on its core. A task that
+yields at its own priority and is the highest-priority Ready task will be
+re-picked immediately and spin. Idle waiting must *block* (sleep, or wait on a
+waitqueue/futex), removing the task from the run queue. Audit other drivers for
+the same `yield_now()`-when-idle antipattern.
+
+---
+
+**Original investigation notes (retained for history):**
 
 **Where:** `kernel/src/bench.rs` `bench_pick_next()` (the
 `run("sched_pick_next_4tasks", 500, || sched::yield_now())` loop, run after

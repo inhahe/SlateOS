@@ -1590,6 +1590,173 @@ pub fn build_linux_fork_wait_test_elf() -> alloc::vec::Vec<u8> {
     buf
 }
 
+/// Build a **Linux-ABI** `ET_EXEC` test ELF that exercises the full
+/// `fork(2)` → child `execve(2)` → parent `wait4(2)` reap cycle in ring 3
+/// and exits with the **exec target's** `WEXITSTATUS`.
+///
+/// This is the exact subprocess pattern a real toolchain runs: `make`
+/// `fork`s, the child `execve`s `gcc` (replacing its image), and the parent
+/// blocks in `wait4` until the tool exits, then reads its status.  The
+/// simpler [`build_linux_fork_wait_test_elf`] has the child `exit` directly;
+/// here the child instead `execve`s `path_nul`, so a correct parent
+/// `WEXITSTATUS` proves the *whole* fork→exec→wait chain end to end:
+///
+///   * the forked child resumes and reads its `execve` arguments (path,
+///     argv, envp) out of its **copy-on-write** post-fork memory (read path);
+///   * `execve` tears down the CoW clone and loads a fresh image in place
+///     (same PID), which then `exit`s the target sentinel;
+///   * the parent, blocked in `wait4`, is woken by the child's exit and
+///     writes the status word back through a pointer on its **own** CoW
+///     stack (the write path that the `validate_user_write` CoW-break fix
+///     unblocked).
+///
+/// Layout (offsets = bytes from segment start):
+/// ```text
+///   sub rsp,16 ; fork ; test rax,rax ; jz child
+///   parent: wait4(-1,&status,0,NULL) ; jle parent_fail
+///           movzx edi,[rsp+1] ; exit(WEXITSTATUS)
+///   parent_fail: exit(0xA2)             ; wait4 returned <= 0
+///   child:  execve(path, argv=[path,NULL], envp=[NULL])
+///           exit(0xE7)                  ; only if execve returned (failed)
+/// ```
+///
+/// The exec target is staged by the harness as
+/// [`build_linux_exit_elf`]`(sentinel)`, so the reaped `WEXITSTATUS` equals
+/// that sentinel.  Tagged `ELFOSABI_GNU` for the SysV stack + Linux ABI.
+#[must_use]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
+pub fn build_linux_fork_execve_wait_test_elf(path_nul: &[u8]) -> alloc::vec::Vec<u8> {
+    use alloc::vec;
+
+    let phdr_offset: u64 = 64;
+    let code_offset: u64 = 120; // 64 (ehdr) + 56 (one phdr)
+    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+
+    // --- Assemble the code linearly, recording label positions and the
+    //     rel8/imm64 patch slots; resolve them once all offsets are known. ---
+    let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+
+    // sub rsp, 16  (reserve a 4-byte status slot)
+    code.extend_from_slice(&[0x48, 0x83, 0xEC, 0x10]);
+    // mov eax, 57 (SYS_fork); syscall
+    code.extend_from_slice(&[0xB8, 0x39, 0x00, 0x00, 0x00, 0x0F, 0x05]);
+    // test rax, rax
+    code.extend_from_slice(&[0x48, 0x85, 0xC0]);
+    // jz child (rel8 patched below)
+    code.extend_from_slice(&[0x74, 0x00]);
+    let jz_rel = code.len() - 1;
+
+    // parent: blocking wait4(-1, &status, 0, NULL)
+    code.extend_from_slice(&[0xBF, 0xFF, 0xFF, 0xFF, 0xFF]); // mov edi, -1
+    code.extend_from_slice(&[0x48, 0x89, 0xE6]); // mov rsi, rsp (&status)
+    code.extend_from_slice(&[0x31, 0xD2]); // xor edx, edx (options = 0)
+    code.extend_from_slice(&[0x45, 0x31, 0xD2]); // xor r10d, r10d (rusage = NULL)
+    code.extend_from_slice(&[0xB8, 0x3D, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,61; syscall
+    code.extend_from_slice(&[0x48, 0x85, 0xC0]); // test rax, rax
+    // jle parent_fail (rel8 patched below)
+    code.extend_from_slice(&[0x7E, 0x00]);
+    let jle_rel = code.len() - 1;
+    code.extend_from_slice(&[0x0F, 0xB6, 0x7C, 0x24, 0x01]); // movzx edi, byte [rsp+1]
+    code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,60; syscall
+
+    // parent_fail: exit(0xA2) — wait4 returned <= 0 (no child reaped / error)
+    let parent_fail = code.len();
+    code.extend_from_slice(&[0xBF, 0xA2, 0x00, 0x00, 0x00]); // mov edi, 0xA2
+    code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,60; syscall
+
+    // child: execve(path, argv, envp)
+    let child = code.len();
+    code.extend_from_slice(&[0x48, 0xBF]); // movabs rdi, &path
+    let path_imm = code.len();
+    code.extend_from_slice(&[0u8; 8]);
+    code.extend_from_slice(&[0x48, 0xBE]); // movabs rsi, &argv
+    let argv_imm = code.len();
+    code.extend_from_slice(&[0u8; 8]);
+    code.extend_from_slice(&[0x48, 0xBA]); // movabs rdx, &envp
+    let envp_imm = code.len();
+    code.extend_from_slice(&[0u8; 8]);
+    code.extend_from_slice(&[0xB8, 0x3B, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,59 (SYS_execve); syscall
+    // execve_fail: exit(0xE7) — only reached if execve returned (failed)
+    code.extend_from_slice(&[0xBF, 0xE7, 0x00, 0x00, 0x00]); // mov edi, 0xE7
+    code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,60; syscall
+    code.push(0xCC); // int3 — unreachable trap
+
+    // Patch the two forward rel8 jumps.  rel8 is measured from the byte
+    // following the displacement (instruction end = rel_off + 1).
+    let jz_disp = (child as isize) - (jz_rel as isize + 1);
+    let jle_disp = (parent_fail as isize) - (jle_rel as isize + 1);
+    code[jz_rel] = jz_disp as u8;
+    code[jle_rel] = jle_disp as u8;
+
+    // --- Data layout (same PT_LOAD, after the code) ---
+    let code_len = code.len();
+    let data_base = code_offset as usize + code_len;
+    let path_off = data_base;
+    let path_end = path_off + path_nul.len();
+    // 8-align argv; argv = [path, NULL], envp = [NULL].
+    let argv_off = (path_end + 7) & !7usize;
+    let envp_off = argv_off + 2 * 8;
+    let file_size = envp_off + 8;
+
+    let vaddr_of = |fo: usize| -> u64 { load_vaddr + (fo as u64 - code_offset) };
+    let path_vaddr = vaddr_of(path_off);
+    let argv_vaddr = vaddr_of(argv_off);
+    let envp_vaddr = vaddr_of(envp_off);
+    code[path_imm..path_imm + 8].copy_from_slice(&path_vaddr.to_le_bytes());
+    code[argv_imm..argv_imm + 8].copy_from_slice(&argv_vaddr.to_le_bytes());
+    code[envp_imm..envp_imm + 8].copy_from_slice(&envp_vaddr.to_le_bytes());
+
+    // --- File image ---
+    let seg_len = file_size - code_offset as usize;
+    let mut buf = vec![0u8; file_size];
+
+    buf[0] = 0x7F;
+    buf[1] = b'E';
+    buf[2] = b'L';
+    buf[3] = b'F';
+    buf[EI_CLASS] = ELFCLASS64;
+    buf[EI_DATA] = ELFDATA2LSB;
+    buf[EI_VERSION] = EV_CURRENT;
+    buf[EI_OSABI] = ELFOSABI_GNU;
+    write_u16(&mut buf, 16, ET_EXEC);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr); // e_entry
+    write_u64(&mut buf, 32, phdr_offset); // e_phoff
+    write_u64(&mut buf, 40, 0);
+    write_u32(&mut buf, 48, 0);
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, 1);
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0);
+    write_u16(&mut buf, 62, 0);
+
+    // PT_LOAD R+W+X: W keeps argv/envp + the parent's status slot on a
+    // writable page; X for the code.
+    let ph = phdr_offset as usize;
+    write_u32(&mut buf, ph, PT_LOAD);
+    write_u32(&mut buf, ph + 4, PF_R | PF_W | PF_X);
+    write_u64(&mut buf, ph + 8, code_offset);
+    write_u64(&mut buf, ph + 16, load_vaddr);
+    write_u64(&mut buf, ph + 24, 0);
+    write_u64(&mut buf, ph + 32, seg_len as u64);
+    write_u64(&mut buf, ph + 40, seg_len as u64);
+    write_u64(&mut buf, ph + 48, 0x1000);
+
+    buf[code_offset as usize..code_offset as usize + code_len].copy_from_slice(&code);
+    buf[path_off..path_end].copy_from_slice(path_nul);
+    write_u64(&mut buf, argv_off, path_vaddr); // argv[0] = path
+    write_u64(&mut buf, argv_off + 8, 0); // argv[1] = NULL
+    write_u64(&mut buf, envp_off, 0); // envp[0] = NULL
+
+    buf
+}
+
 /// Build a minimal **Linux-ABI** `ET_EXEC` test ELF that simply calls
 /// `exit(exit_code)`:
 ///

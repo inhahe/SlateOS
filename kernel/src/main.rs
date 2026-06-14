@@ -1291,6 +1291,17 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: Linux fork()+wait4() (ring 3) self-test failed: {:?}", e);
     }
 
+    // Ring-3 end-to-end test of the full fork → child execve → parent wait4
+    // subprocess cycle (the make/gcc pattern): the child execs a staged target
+    // and the parent reaps the *target's* exit status.  Same bounded, hang-safe
+    // harness as the fork+wait4 test above.
+    if let Err(e) = proc::spawn::self_test_linux_fork_execve_wait() {
+        serial_println!(
+            "WARNING: Linux fork()+execve()+wait4() (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 end-to-end test of execveat(2) in both forms: a real Linux-ABI
     // launcher execs a target by path (AT_FDCWD) and by open-fd
     // (AT_EMPTY_PATH / fexecve), proving execveat replaces the image and

@@ -2762,6 +2762,124 @@ pub fn self_test_linux_fork_wait() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the full `fork(2)` → child `execve(2)` →
+/// parent `wait4(2)` subprocess cycle — the exact pattern `make`/`gcc`/the
+/// shell use to run a tool and collect its exit status.
+///
+/// A launcher forks; the child `execve`s a staged target ELF
+/// ([`elf::build_linux_exit_elf`]`(SENTINEL)`) instead of exiting directly,
+/// so the status the parent reaps is the *target's* exit code.  This proves
+/// the whole chain works together: the forked child reads its `execve`
+/// arguments out of copy-on-write post-fork memory, `execve` replaces the
+/// image in place (same PID), the target runs and exits, and the parent —
+/// blocked in `wait4` — is woken and writes the status word through a
+/// pointer on its own CoW stack.  A parent zombie with `exit_code ==
+/// SENTINEL` confirms all of it.
+///
+/// Distinct exit sentinels make a failure self-diagnosing:
+///   * `SENTINEL` (0x53/83) — success: target ran and the parent decoded
+///     its `WEXITSTATUS`.
+///   * `0xE7` (231) — the child's `execve` *returned* (exec failed); the
+///     child ran its failure tail.
+///   * `0xA2` (162) — the parent's `wait4` returned `<= 0` (no child reaped
+///     / error).
+///
+/// Skips gracefully (`Ok`) if the VFS target write fails.  Must run **after**
+/// filesystem initialization (see `main.rs`).  Hang-safe for the same reason
+/// as [`self_test_linux_fork_wait`]: the harness pumps the scheduler with a
+/// bounded `yield_now` loop and force-destroys the launcher on timeout.
+pub fn self_test_linux_fork_execve_wait() -> KernelResult<()> {
+    const TGT_PATH: &str = "/slateos-test-fork-execve-tgt";
+    const TGT_PATH_NUL: &[u8] = b"/slateos-test-fork-execve-tgt\0";
+    // Target exit sentinel — distinct from interp(42)/mmap(91)/brk(109)/
+    // execveat(58)/argv0(81)/envp0(77)/fork-wait child(75)/wait4-error(161).
+    const SENTINEL: i32 = 0x53; // 83
+    const MAX_YIELDS: usize = 256;
+
+    serial_println!(
+        "[spawn] Running Linux fork()+execve()+wait4() (ring 3) integration test..."
+    );
+
+    // Stage the exec target: a Linux-ABI ELF that exit()s with SENTINEL.
+    let tgt_elf = elf::build_linux_exit_elf(SENTINEL as u8);
+    if let Err(e) = crate::fs::Vfs::write_file(TGT_PATH, &tgt_elf) {
+        serial_println!(
+            "[spawn]   Linux fork()+execve()+wait4() (ring 3): SKIP (VFS write failed: {:?})",
+            e
+        );
+        return Ok(());
+    }
+
+    let exe_elf = elf::build_linux_fork_execve_wait_test_elf(TGT_PATH_NUL);
+    let argv: &[&[u8]] = &[b"spawn-test-linux-fork-execve"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // The child's execve resolves the target by VFS path; grant a File
+    // capability like the execveat path-form launcher does.
+    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-fork-execve",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = crate::fs::Vfs::remove(TGT_PATH);
+            serial_println!("[spawn]   FAIL: fork-execve-wait spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Drive the scheduler: parent forks → blocks in wait4 → child runs and
+    // execve's the target → target exits → child-exit wakes the parent →
+    // parent reaps and exits.  Bounded, never blocks the harness.
+    for _ in 0..MAX_YIELDS {
+        crate::sched::yield_now();
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            break;
+        }
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(TGT_PATH);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fork()+execve()+wait4() (ring 3) — parent not a zombie after {} \
+             yields, got {:?} (parent still blocked in wait4, or the child never execve'd/exited)",
+            MAX_YIELDS, state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(SENTINEL) {
+        serial_println!(
+            "[spawn]   FAIL: fork()+execve()+wait4() (ring 3) — expected parent exit {} \
+             (exec target's WEXITSTATUS), got {:?} (0xE7/231 = child's execve failed; \
+             0xA2/162 = parent's wait4 returned an error)",
+            SENTINEL, exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   Linux fork()+execve()+wait4() (ring 3: child execve'd a staged target, \
+         parent reaped it, decoded target WEXITSTATUS == {}): OK",
+        SENTINEL
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the Linux `execveat(2)` syscall.
 ///
 /// `execveat` is exercised in **both** of its forms by spawning a real

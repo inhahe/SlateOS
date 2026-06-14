@@ -51918,7 +51918,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             assert_eq!(pcb::set_nice(test_pid, 0), None);
         }
     }
+        Ok(())
+    }
 
+    self_test_credential_setters()?;
+
+    #[inline(never)]
+    fn self_test_credential_setters() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // Credential setters dispatch + setuid/setgid semantics (batch 52).
     //
     // setuid/setgid now actually update credentials.uid/gid when

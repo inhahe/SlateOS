@@ -1253,13 +1253,52 @@ pub fn exec_process(
 /// `AT_BASE` auxv entry so ld.so can relocate itself and then the
 /// program.
 ///
-/// The base is **fixed (no ASLR) for now** — documented as a known
-/// limitation.  It sits well clear of both the executable (loaded low,
-/// around `0x40_0000_0000`) and the user stack region (top
-/// `USER_STACK_TOP` = `0x0000_7FFF_FFFF_0000`, growing down by at most
-/// `MAX_STACK_SIZE`).  A typical ld.so image is a few hundred KiB, so
-/// the gap above this base to the stack guard is ample.
+/// This is the **low edge** of the interpreter load window; the actual
+/// per-exec base is `LINUX_INTERP_BASE + (random page index) * FRAME_SIZE`
+/// (see [`apply_aslr_base`] / [`INTERP_ASLR_BITS`]) once the CSPRNG is
+/// seeded.  It sits well clear of both the executable (loaded low, around
+/// `0x40_0000_0000`) and the user stack region (top `USER_STACK_TOP` =
+/// `0x0000_7FFF_FFFF_0000`, growing down by at most `MAX_STACK_SIZE`).  A
+/// typical ld.so image is a few hundred KiB, so the gap above this base to
+/// the stack guard is ample even at the top of the ASLR window.
 const LINUX_INTERP_BASE: u64 = 0x0000_7000_0000_0000;
+
+/// ASLR entropy applied to the Linux program-interpreter load base,
+/// expressed in bits at 16 KiB-page granularity.
+///
+/// `28` matches Linux x86_64's default `mmap_rnd_bits` (28) — i.e. 2^28
+/// equally-likely load bases, the same layout entropy Linux provides for
+/// the mmap region the interpreter is mapped into — applied here in our
+/// 16 KiB page units.  2^28 pages × 16 KiB = a 4 TiB window, which sits
+/// entirely inside the ~15 TiB gap between [`LINUX_INTERP_BASE`]
+/// (`0x7000_0000_0000`) and the user-stack region
+/// (`USER_STACK_TOP` = `0x7FFF_FFFF_0000`).  The highest possible base,
+/// `LINUX_INTERP_BASE + (2^28 - 1) * 16 KiB ≈ 0x73FF_FFFF_C000`, is far
+/// below [`USER_STACK_GUARD`], so a randomised interpreter base can never
+/// collide with the stack, the executable (loaded low), the brk heap, or
+/// the general mmap window (`0x0060_…`).  The interpreter image is the
+/// sole occupant of this window, so intra-window collisions are
+/// impossible.  (`spawn::self_test` asserts this clearance invariant.)
+const INTERP_ASLR_BITS: u32 = 28;
+
+/// Number of distinct 16 KiB-aligned interpreter bases = `2^INTERP_ASLR_BITS`.
+/// Evaluated at compile time; the random page index is drawn unbiased from
+/// `[0, INTERP_ASLR_SPAN_PAGES)` via [`crate::rng::next_bounded`].
+const INTERP_ASLR_SPAN_PAGES: u64 = 1u64 << INTERP_ASLR_BITS;
+
+/// Apply a page-granular ASLR offset to a fixed ELF load base.
+///
+/// `rand_pages` is a random page index in `[0, 2^INTERP_ASLR_BITS)` (drawn
+/// by the caller via [`crate::rng::next_bounded`]).  The returned base is
+/// `fixed_base + rand_pages * FRAME_SIZE`, computed with saturating
+/// arithmetic so a pathological input can never wrap past the top of the
+/// address space.  Because the offset is a whole number of 16 KiB pages
+/// and `fixed_base` is 16 KiB-aligned, the result preserves the
+/// page-offset congruence that [`elf::load_segments_with_bias`] requires.
+fn apply_aslr_base(fixed_base: u64, rand_pages: u64) -> u64 {
+    let offset = rand_pages.saturating_mul(crate::mm::frame::FRAME_SIZE as u64);
+    fixed_base.saturating_add(offset)
+}
 
 /// Fixed load base for a position-independent (`ET_DYN`/PIE) main
 /// executable.
@@ -1295,7 +1334,8 @@ struct LoadedInterp {
 /// If `elf_file` has no `PT_INTERP` segment it is a static executable
 /// and this returns `Ok(None)`.  For a dynamically-linked executable it
 /// resolves the interpreter path, reads the interpreter image from the
-/// VFS, parses it, loads its `PT_LOAD` segments at [`LINUX_INTERP_BASE`]
+/// VFS, parses it, loads its `PT_LOAD` segments at an ASLR-randomised base
+/// (drawn from the [`LINUX_INTERP_BASE`] window — see [`apply_aslr_base`])
 /// via [`elf::load_segments_with_bias`], and returns the base plus the
 /// entry point `base + interp.e_entry`.
 ///
@@ -1361,9 +1401,23 @@ unsafe fn load_interpreter(
         }
     };
 
-    let base = LINUX_INTERP_BASE;
+    // ASLR: randomise the interpreter load base per-exec once the CSPRNG
+    // is seeded.  `AT_BASE` (reported below via `LoadedInterp.base`)
+    // carries whatever base we choose, so ld.so relocates itself correctly
+    // regardless of placement.  Before the RNG is initialised (very early
+    // boot, before any Linux process can be spawned in practice) we fall
+    // back to the fixed low edge — deterministic, but only reachable when
+    // no entropy exists yet.  See known-issues.md TD9.
+    let base = if crate::rng::is_initialized() {
+        apply_aslr_base(
+            LINUX_INTERP_BASE,
+            crate::rng::next_bounded(INTERP_ASLR_SPAN_PAGES),
+        )
+    } else {
+        LINUX_INTERP_BASE
+    };
 
-    // Load the interpreter's PT_LOAD segments at the fixed base.
+    // Load the interpreter's PT_LOAD segments at the chosen base.
     //
     // SAFETY: forwarded from this function's contract — `pml4_phys` is
     // the process's private address space and no other CPU uses it yet.
@@ -1612,7 +1666,59 @@ pub fn self_test() -> KernelResult<()> {
     test_spawn_linux_sysv_stack()?;
     test_load_interpreter_fallbacks()?;
     test_exec_comm_basename()?;
+    test_apply_aslr_base()?;
 
+    Ok(())
+}
+
+/// Test: `apply_aslr_base` produces page-aligned, in-window, non-wrapping
+/// interpreter bases, and the whole `INTERP_ASLR_BITS` window stays clear
+/// of the user stack guard (the collision-safety invariant TD9 relies on).
+fn test_apply_aslr_base() -> KernelResult<()> {
+    // 16 KiB page mask for the alignment check (FRAME_SIZE is a power of 2,
+    // so `& mask == 0` is the alignment test). Const sub is compile-time.
+    const FRAME: u64 = crate::mm::frame::FRAME_SIZE as u64;
+    const FRAME_MASK: u64 = FRAME - 1;
+
+    // Zero offset returns the fixed low edge unchanged.
+    if apply_aslr_base(LINUX_INTERP_BASE, 0) != LINUX_INTERP_BASE {
+        serial_println!("[spawn]   FAIL: apply_aslr_base(_, 0) changed the base");
+        return Err(KernelError::InternalError);
+    }
+
+    // Offset is page-granular and additive: index 3 -> base + 3 pages.
+    let expect3 = LINUX_INTERP_BASE.saturating_add(3u64.saturating_mul(FRAME));
+    if apply_aslr_base(LINUX_INTERP_BASE, 3) != expect3 {
+        serial_println!("[spawn]   FAIL: apply_aslr_base(_, 3) not base + 3*FRAME");
+        return Err(KernelError::InternalError);
+    }
+
+    // Every page index in the window yields a 16 KiB-aligned base that
+    // stays strictly below the user stack guard (no stack collision).
+    let max_index = INTERP_ASLR_SPAN_PAGES.saturating_sub(1);
+    for pages in [1u64, 7, 1234, max_index] {
+        let b = apply_aslr_base(LINUX_INTERP_BASE, pages);
+        if b & FRAME_MASK != 0 {
+            serial_println!("[spawn]   FAIL: apply_aslr_base result not 16 KiB-aligned");
+            return Err(KernelError::InternalError);
+        }
+        if b >= USER_STACK_GUARD {
+            serial_println!(
+                "[spawn]   FAIL: ASLR window reaches the stack guard ({:#x} >= {:#x})",
+                b, USER_STACK_GUARD
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Saturation: a pathological huge index can never wrap past the top of
+    // the address space (defence in depth — the caller bounds the index).
+    if apply_aslr_base(u64::MAX.saturating_sub(1), u64::MAX) != u64::MAX {
+        serial_println!("[spawn]   FAIL: apply_aslr_base did not saturate");
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[spawn]   apply_aslr_base: aligned + in-window + saturating OK");
     Ok(())
 }
 

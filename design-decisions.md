@@ -1473,3 +1473,56 @@ allocator dependency now exists; only the randomisation policy remains).
 back through a find-only helper + `add_vma`; drop `reserve_unmapped_area`
 and the `reserved` flag. (Doing so re-introduces all three original defects
 and the SMP race, so this is not advised.)
+
+## 20. Interpreter ASLR — 28 bits of entropy, always-on when the CSPRNG is seeded (no personality opt-out yet)
+
+**Date:** 2026-06-14
+**Decided by:** Claude (autonomous) — reversible; the operator may overrule. This
+resolves the interpreter half of known-issues.md TD9, whose documented "proper
+fix" was always to randomise the load base; the only genuine choices were *how
+much entropy* and *whether to honour an opt-out*.
+
+**Problem:**
+`load_interpreter` (`kernel/src/proc/spawn.rs`) loaded ld.so at the fixed
+`LINUX_INTERP_BASE = 0x7000_0000_0000` every exec, removing the ASLR defence.
+With the VMA-aware mmap allocator now in place (decision #19), the remaining
+work was purely the randomisation policy. Two sub-decisions had real tradeoffs.
+
+**Decision:**
+1. **Entropy = 28 bits, in 16 KiB-page units** (`INTERP_ASLR_BITS = 28`). The
+   per-exec base is `LINUX_INTERP_BASE + next_bounded(2^28) * FRAME_SIZE`
+   (saturating), via the pure `apply_aslr_base` helper. 28 mirrors Linux
+   x86_64's default `mmap_rnd_bits` (28) — i.e. the same *number of equally
+   likely bases* (2^28), which is the security-relevant metric, even though our
+   16 KiB pages make the byte-range (4 TiB) differ from Linux's (1 TiB at 4 KiB
+   pages). The 4 TiB window's top (`≈0x73FF_FFFF_C000`) stays far below
+   `USER_STACK_GUARD`, so collisions with the stack/executable/brk/mmap-window
+   are impossible (the interpreter is the window's sole occupant). A
+   `spawn::self_test` assertion guards this clearance invariant against future
+   bit-count changes.
+2. **Always-on when seeded; fixed-base fallback before the CSPRNG is seeded.**
+   No `personality(ADDR_NO_RANDOMIZE)` / `setarch -R` opt-out yet (our
+   `sys_personality` accepts but does not honour bits — see todo.txt). ASLR is
+   a pure hardening win and every modern OS defaults it on, so always-on is the
+   right default; a per-process opt-out can be wired through personality later
+   if a debugger needs deterministic addresses.
+
+**Alternatives considered:**
+- *Match Linux's byte-range (1 TiB) by using ~26 bits.* Rejected: entropy (bit
+  count), not byte span, is the ASLR security metric; matching Linux's 28-bit
+  entropy is the principled choice, and our window has ample room for it.
+- *Fold the interpreter into the general mmap region and let the gap allocator
+  place it.* Rejected for now: the interpreter window (`0x7000_…`) is disjoint
+  from the mmap window (`0x0060_…`) by design (TD9 note), and randomising
+  within its own dedicated, collision-free window is simpler and lower-risk
+  than threading interpreter placement through the general allocator.
+- *Also randomise the PIE-executable base in the same change.* Deferred: the
+  brk heap grows immediately above the PIE image, so PIE ASLR needs a window
+  chosen to leave brk-growth headroom — a separate, more delicate change. Left
+  as remaining TD9 debt.
+
+**How to reverse:** set the base back to the `LINUX_INTERP_BASE` constant in
+`load_interpreter` (drop the `is_initialized()`/`apply_aslr_base` block) and
+remove `test_apply_aslr_base`. To instead make it opt-out-able, gate the
+randomisation on a per-process "no randomise" flag fed from
+`personality(ADDR_NO_RANDOMIZE)`.

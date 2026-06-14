@@ -1444,7 +1444,41 @@ and only the mixer's native 48 kHz / S16_LE / stereo format (non-native
 configs are rejected by HW_PARAMS rather than resampled/converted).
 Resampling + format conversion + an mmap transfer path are future work.
 
-### TD9. Linux program interpreter (ld.so) loaded at a fixed base — no ASLR — DEBT 2026-06-12
+### TD9. Linux program interpreter (ld.so) loaded at a fixed base — no ASLR — INTERPRETER ASLR DONE 2026-06-14; PIE-executable base still fixed (PARTIAL)
+
+**Resolution (interpreter base, 2026-06-14):** `load_interpreter` in
+`kernel/src/proc/spawn.rs` now draws a per-exec randomised base from the
+`LINUX_INTERP_BASE` window instead of using the fixed constant. A new pure
+helper `apply_aslr_base(fixed_base, rand_pages)` adds `rand_pages *
+FRAME_SIZE` (saturating) to the low edge; the page index is drawn unbiased
+from `[0, 2^INTERP_ASLR_BITS)` via `rng::next_bounded`. `INTERP_ASLR_BITS =
+28` mirrors Linux x86_64's default `mmap_rnd_bits` (28 bits of layout
+entropy), applied in our 16 KiB page units → a 4 TiB window whose top
+(`≈0x73FF_FFFF_C000`) stays far below `USER_STACK_GUARD`, so a randomised
+base can never collide with the stack, the low-loaded executable, the brk
+heap, or the general mmap window (`0x0060_…`); the interpreter image is the
+window's sole occupant, so intra-window collisions are impossible too.
+`AT_BASE` already carried whatever base was chosen, so ld.so relocation is
+unaffected. Before the CSPRNG is seeded (very early boot, before any Linux
+process can spawn in practice) it falls back to the fixed low edge.
+Covered by `spawn::self_test`'s `test_apply_aslr_base` (alignment +
+in-window + stack-clearance + saturation) and the existing
+`self_test_linux_dynamic_interp` end-to-end launch (the test interpreter's
+exit code is register-only/position-independent, so it runs correctly at
+any randomised base). The entropy-bits choice is recorded in
+design-decisions.md.
+
+**What remains (PIE-executable base — still DEBT):** the position-independent
+*main* executable is still loaded at the fixed `LINUX_PIE_BASE =
+0x5555_5555_4000`. Randomising it is more delicate than the interpreter
+because the brk heap grows immediately above the PIE image, so the PIE
+ASLR window must be chosen to leave room for brk growth without colliding
+with the mmap window below or the interpreter window above. Deferred as a
+separate follow-up. Original debt write-up follows.
+
+---
+
+
 
 **What:** The Linux dynamic-linker load path (`load_interpreter` in
 `kernel/src/proc/spawn.rs`) maps the program interpreter (ld.so) at a

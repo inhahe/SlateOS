@@ -523,12 +523,14 @@ pub fn spawn_process(
         // Step 3c (Linux ABI): establish the `brk`/`sbrk` heap floor at the
         // page-aligned end of the main executable's last loadable segment
         // (Linux `set_brk` semantics — the break starts immediately above
-        // the data/BSS).  The interpreter lives in its own high window and
-        // does not affect the heap floor.  `brk(2)` grows the heap upward
-        // from here.  A degenerate image (no loadable segments) yields 0,
-        // i.e. "no heap"; brk(2) then behaves as a pure query.
+        // the data/BSS), shifted up by a random ASLR gap (Linux
+        // `arch_randomize_brk`, see `choose_brk_start`).  The interpreter
+        // lives in its own high window and does not affect the heap floor.
+        // `brk(2)` grows the heap upward from here.  A degenerate image (no
+        // loadable segments) yields 0, i.e. "no heap"; brk(2) then behaves
+        // as a pure query.
         match elf::image_end(&elf_file, exec_load_bias) {
-            Ok(brk_start) => pcb::set_brk_region(pid, brk_start),
+            Ok(brk_start) => pcb::set_brk_region(pid, choose_brk_start(brk_start)),
             Err(e) => {
                 serial_println!("[spawn] Failed to compute brk start: {:?}", e);
                 pcb::destroy(pid);
@@ -1047,11 +1049,12 @@ pub fn exec_process(
         }
 
         // Re-establish the `brk` heap floor for the new image (Linux
-        // `set_brk`), replacing whatever heap the old image had.  The old
-        // heap's frames and VMAs were already torn down with the rest of
-        // the user address space above.
+        // `set_brk` + `arch_randomize_brk`, see `choose_brk_start`),
+        // replacing whatever heap the old image had.  The old heap's frames
+        // and VMAs were already torn down with the rest of the user address
+        // space above.
         match elf::image_end(&elf_file, exec_load_bias) {
-            Ok(brk_start) => pcb::set_brk_region(pid, brk_start),
+            Ok(brk_start) => pcb::set_brk_region(pid, choose_brk_start(brk_start)),
             Err(e) => {
                 serial_println!("[exec] Failed to compute brk start: {:?}", e);
                 let _ = pcb::set_exit_code(pid, KILLED_EXIT_CODE);
@@ -1395,6 +1398,51 @@ fn choose_exec_load_bias(is_pie: bool) -> u64 {
         apply_aslr_base(LINUX_PIE_BASE, crate::rng::next_bounded(PIE_ASLR_SPAN_PAGES))
     } else {
         LINUX_PIE_BASE
+    }
+}
+
+/// ASLR entropy applied to the `brk` heap floor (Linux `arch_randomize_brk`),
+/// in bits at 16 KiB-page granularity.
+///
+/// `13` mirrors Linux x86_64's `arch_randomize_brk`, which calls
+/// `randomize_page(mm->brk, 0x02000000)` — a 32 MiB range that, at Linux's
+/// 4 KiB page size, yields `0x02000000 >> 12 = 8192 = 2^13` distinct page
+/// positions.  Per design-decision #20, the ASLR security metric is the
+/// *number of equally-likely positions* (entropy bits), not the byte span, so
+/// we match Linux's 13 bits rather than its 32 MiB span; at our 16 KiB pages
+/// that is a `2^13 * 16 KiB = 128 MiB` maximum gap between the executable's
+/// data segment and the heap floor.  This gap is dwarfed by the smallest heap
+/// window (a low-loaded ET_EXEC has ~hundreds of GiB up to `USER_MMAP_BASE`),
+/// so randomising the floor never meaningfully reduces the room available for
+/// `brk` growth and can never push the floor across its `brk_ceiling`.
+const BRK_ASLR_BITS: u32 = 13;
+
+/// Number of distinct 16 KiB-aligned heap-floor positions = `2^BRK_ASLR_BITS`.
+/// The random page index is drawn unbiased from `[0, BRK_ASLR_SPAN_PAGES)`
+/// via [`crate::rng::next_bounded`].
+const BRK_ASLR_SPAN_PAGES: u64 = 1u64 << BRK_ASLR_BITS;
+
+/// Choose the `brk` heap floor for a Linux image: the page-aligned image end
+/// shifted up by a random ASLR gap (Linux `arch_randomize_brk`).
+///
+/// `image_end` is [`elf::image_end`]'s page-aligned top of the last loadable
+/// segment.  A degenerate image (no loadable segments) yields `0`, which means
+/// "no heap" — we must preserve that exactly (adding a gap to `0` would
+/// erroneously enable a heap at a random low address), so `image_end == 0`
+/// returns `0` unchanged.  Otherwise, once the CSPRNG is seeded, the floor is
+/// `image_end + next_bounded(2^BRK_ASLR_BITS) * FRAME_SIZE` (via the same pure
+/// [`apply_aslr_base`] helper used for the load bases); before the CSPRNG is
+/// seeded (very early boot, before any Linux process can spawn in practice) it
+/// falls back to `image_end` with no gap.  The result stays 16 KiB-aligned
+/// (image_end is page-aligned and the gap is a whole number of pages).
+fn choose_brk_start(image_end: u64) -> u64 {
+    if image_end == 0 {
+        return 0;
+    }
+    if crate::rng::is_initialized() {
+        apply_aslr_base(image_end, crate::rng::next_bounded(BRK_ASLR_SPAN_PAGES))
+    } else {
+        image_end
     }
 }
 
@@ -1747,7 +1795,69 @@ pub fn self_test() -> KernelResult<()> {
     test_exec_comm_basename()?;
     test_apply_aslr_base()?;
     test_pie_aslr_window()?;
+    test_brk_aslr_gap()?;
 
+    Ok(())
+}
+
+/// Test: `choose_brk_start` (Linux `arch_randomize_brk`) preserves the
+/// "no heap" sentinel, keeps the floor 16 KiB-aligned, and keeps it within
+/// `[image_end, image_end + 2^BRK_ASLR_BITS pages)` — regardless of whether
+/// the CSPRNG is seeded (the fallback returns `image_end`, the low edge of
+/// that half-open range, so both branches satisfy the bound).
+fn test_brk_aslr_gap() -> KernelResult<()> {
+    const FRAME: u64 = crate::mm::frame::FRAME_SIZE as u64;
+    const FRAME_MASK: u64 = FRAME - 1;
+
+    // A degenerate image (image_end == 0 → "no heap") must stay 0 — adding a
+    // gap would erroneously enable a heap at a random low address.
+    if choose_brk_start(0) != 0 {
+        serial_println!("[spawn]   FAIL: choose_brk_start(0) enabled a heap");
+        return Err(KernelError::InternalError);
+    }
+
+    // The maximum gap (in bytes) the window can add.
+    let span_bytes = BRK_ASLR_SPAN_PAGES.saturating_mul(FRAME);
+
+    // Sample several plausible page-aligned image ends (low ET_EXEC link base,
+    // our test-ELF base, and a high PIE-style base) and verify the chosen
+    // floor is aligned and in range for each.  Drawn multiple times so a
+    // seeded CSPRNG exercises several random gaps.
+    for &image_end in &[
+        0x0000_0000_0040_0000u64, // 4 MiB — classic x86_64 ET_EXEC link base
+        0x0000_0040_0000_0000u64, // 256 GiB — our build_*_test_elf base
+        0x0000_5555_5555_4000u64, // PIE floor
+    ] {
+        for _ in 0..8 {
+            let floor = choose_brk_start(image_end);
+            if floor & FRAME_MASK != 0 {
+                serial_println!(
+                    "[spawn]   FAIL: choose_brk_start({:#x}) not 16 KiB-aligned: {:#x}",
+                    image_end, floor
+                );
+                return Err(KernelError::InternalError);
+            }
+            if floor < image_end {
+                serial_println!(
+                    "[spawn]   FAIL: choose_brk_start({:#x}) below image end: {:#x}",
+                    image_end, floor
+                );
+                return Err(KernelError::InternalError);
+            }
+            // Strictly below image_end + full span (gap index is in
+            // [0, SPAN_PAGES), so max gap is (SPAN_PAGES-1) pages).
+            let ceiling = image_end.saturating_add(span_bytes);
+            if floor >= ceiling {
+                serial_println!(
+                    "[spawn]   FAIL: choose_brk_start({:#x}) gap exceeds window: {:#x} >= {:#x}",
+                    image_end, floor, ceiling
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+    }
+
+    serial_println!("[spawn]   brk ASLR gap (arch_randomize_brk): aligned + in-window OK");
     Ok(())
 }
 

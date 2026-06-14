@@ -1576,12 +1576,21 @@ policy.
    a successful `brk` grow reserves the address space against RLIMIT_AS
    immediately; shrink refunds it. The alternative (charge per faulted frame)
    would be overcommit and is rejected by the design spec.
-3. **No `arch_randomize_brk` gap yet** — `brk_start` is the exact page-aligned
-   image end. Linux inserts a small random gap (up to 32 MiB on x86_64) between
-   the data segment and the heap floor to ASLR the heap base. Omitting it is
-   *correct* (a fixed gap of 0 is legal and glibc copes), just weaker hardening;
-   deferred as a documented follow-up (todo.txt) rather than blocking the heap on
-   it.
+3. **`arch_randomize_brk` gap — 13 bits of entropy (added 2026-06-14).** The
+   heap floor is the page-aligned image end shifted up by a random gap, mirroring
+   Linux x86_64's `arch_randomize_brk` (`randomize_page(mm->brk, 0x02000000)` =
+   8192 = 2^13 distinct positions at 4 KiB pages). Per the entropy-is-the-metric
+   principle of decision #20, we match Linux's **13 bits** rather than its 32 MiB
+   byte span; at our 16 KiB pages that is a 128 MiB max gap. Implemented as
+   `spawn::choose_brk_start(image_end)` reusing the same pure `apply_aslr_base`
+   helper as the load bases, always-on when the CSPRNG is seeded with an
+   `image_end`-no-gap fallback before seeding (and `image_end == 0` "no heap"
+   preserved exactly). The gap is dwarfed by the smallest heap window (a
+   low-loaded ET_EXEC has hundreds of GiB up to `USER_MMAP_BASE`), so it never
+   meaningfully reduces brk growth room or pushes the floor across `brk_ceiling`.
+   Covered by `spawn::self_test`'s `test_brk_aslr_gap` (alignment + in-window over
+   ET_EXEC/test/PIE bases) and exercised end-to-end by the ring-3
+   `self_test_linux_brk` (which grows/writes/reads against the randomized floor).
 
 **Alternatives considered:**
 - *A single fixed ceiling for all images.* Rejected: ET_EXEC and PIE images sit
@@ -1591,9 +1600,9 @@ policy.
 - *Per-faulted-frame RLIMIT_AS accounting (lazy charge).* Rejected: that is
   overcommit, which the design spec forbids. Up-front committed charging is the
   principled choice here.
-- *Implement `arch_randomize_brk` now.* Deferred, not rejected: it's a pure
-  hardening add with no correctness impact, and bundling it would widen the
-  change; tracked in todo.txt with the exact call sites.
+- *Match Linux's 32 MiB byte span for the brk gap (→ 11 bits at 16 KiB pages).*
+  Rejected for the same reason as the load bases: entropy (position count), not
+  byte span, is the ASLR metric, so 13 bits is the principled match.
 
 **Tests:** `syscall::linux::self_test_brk_logic` (pure: `brk_round_up`
 boundary/overflow, `brk_ceiling` ET_EXEC/PIE/ordering) and the ring-3
@@ -1607,5 +1616,7 @@ to 0 (as native images do) makes `sys_brk` a permanent "cannot extend" that
 returns the unchanged break, so reverting to stub-like behaviour is a one-line
 change at the `set_brk_region` call sites. To change the accounting policy, swap
 the `linux_as_charge(added)` call for a per-fault charge in the `VmaKind::Brk`
-fault resolver. To add the randomisation gap, advance `image_end` by a bounded
-random page count before `set_brk_region` (see todo.txt).
+fault resolver. To disable the randomisation gap, replace the `choose_brk_start`
+calls with the bare `image_end` (and drop `BRK_ASLR_BITS`/`choose_brk_start`/
+`test_brk_aslr_gap`); to make it opt-out-able, gate it on the same per-process
+"no randomise" flag as the load-base ASLR.

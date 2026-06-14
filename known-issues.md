@@ -1619,11 +1619,15 @@ process queries its break, grows 32 KiB, writes a sentinel into the
 proves the grow + demand-paging of multiple frames works; both verified in
 the boot-test serial log).
 
-**Remaining (minor, documented in todo.txt):** `brk_start` is the exact
-page-aligned image end — Linux's `arch_randomize_brk` adds a small random
-gap (up to 32 MiB on x86_64) between the data segment and the heap floor.
-Harmless to omit (a fixed gap of 0 is valid), but it weakens heap ASLR; a
-future enhancement.
+**Update (2026-06-14): `arch_randomize_brk` gap now implemented.** The heap
+floor is the page-aligned image end shifted up by a random gap
+(`spawn::choose_brk_start`), mirroring Linux x86_64's `arch_randomize_brk`
+with 13 bits of entropy (matching Linux's position count per the
+entropy-is-the-metric policy of design-decisions #20; 128 MiB max gap at our
+16 KiB pages). Always-on when the CSPRNG is seeded, no-gap fallback before
+seeding, "no heap" (`image_end == 0`) preserved. Covered by
+`test_brk_aslr_gap` and exercised end-to-end by `self_test_linux_brk`. No
+remaining gaps on the brk heap.
 
 ### TD8. `membarrier` PRIVATE_EXPEDITED issue without prior REGISTER returns 0 where Linux returns `-EPERM` — RESOLVED 2026-06-14
 

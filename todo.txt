@@ -9025,17 +9025,13 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##   4. Honour brk properly — RESOLVED 2026-06-14.  brk is now a real
 ##      demand-paged heap (VmaKind::Brk), not a no-op.  See
 ##      known-issues.md TD25.
-##      Future enhancement: Linux arch_randomize_brk.  Our brk_start
-##      is the exact page-aligned image end; Linux inserts a small
-##      random gap (CONFIG default: up to 32 MiB on x86_64) between
-##      the data segment and the heap floor so the heap base is
-##      ASLR'd.  Omitting it is correct (a fixed gap of 0 is legal)
-##      but weakens heap ASLR.  To add: in spawn::spawn_process /
-##      exec_process, before set_brk_region, advance the computed
-##      image_end by `rng::next_bounded(BRK_RND_PAGES)*FRAME_SIZE`
-##      (and keep it below brk_ceiling).  Where: kernel/src/proc/
-##      spawn.rs (set_brk_region call sites), kernel/src/syscall/
-##      linux.rs (brk_ceiling already bounds it).
+##      arch_randomize_brk — DONE 2026-06-14.  spawn::choose_brk_start
+##      shifts the heap floor up by a random gap (13 bits of entropy,
+##      128 MiB max at 16 KiB pages, mirroring Linux x86_64 per
+##      design-decisions #20/#21), wired into both set_brk_region call
+##      sites; always-on when seeded, no-gap fallback before seeding.
+##      Covered by spawn::test_brk_aslr_gap + the ring-3
+##      self_test_linux_brk.
 ##   4b. sigaction sa_mask / sa_flags / SA_RESTART — STORAGE DONE.
 ##      kernel/src/syscall/linux.rs now keeps a per-process per-signal
 ##      table (linux_sigaction_table) of the full Linux struct sigaction

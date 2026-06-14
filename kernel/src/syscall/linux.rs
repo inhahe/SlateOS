@@ -56362,6 +56362,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_getitimer_setitimer()?;
+
+    #[inline(never)]
+    fn self_test_getitimer_setitimer() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // getitimer / setitimer / alarm / pause — input validation.
     {
         // getitimer(which=3, _) -> EINVAL.
@@ -56472,6 +56477,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: pause not ENOSYS");
             return Err(KernelError::InternalError);
         }
+    }
+        Ok(())
     }
 
     // access / faccessat / faccessat2 — input validation, then ENOENT.

@@ -49500,6 +49500,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_fcntl_owner_ex()?;
+
+    #[inline(never)]
+    fn self_test_fcntl_owner_ex() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // Batch 90: fcntl(F_GETOWN_EX / F_SETOWN_EX) — thread/process/
     // process-group targeted SIGIO ownership.  Pre-batch the two
     // commands fell into the catch-all returning EINVAL, which made
@@ -49787,6 +49792,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         crate::ipc::pipe::close(rh);
         crate::ipc::pipe::close(wh);
         pcb::destroy(test_pid);
+    }
+        Ok(())
     }
 
     // Batch 91: fcntl(F_GETLEASE / F_SETLEASE) — file-lease query /

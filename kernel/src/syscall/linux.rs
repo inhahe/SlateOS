@@ -45792,6 +45792,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_rt_sigpending_dispatch()?;
+
+    #[inline(never)]
+    fn self_test_rt_sigpending_dispatch() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // rt_sigpending dispatch validation (batch 356 — structural fix).
     //
     // Linux's `SYSCALL_DEFINE2(rt_sigpending, ...)` rejects only
@@ -45921,6 +45926,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         // Cleanup seeded state.
         crate::proc::signal::remove(0);
+    }
+        Ok(())
     }
 
     // tkill / tgkill dispatch validation:

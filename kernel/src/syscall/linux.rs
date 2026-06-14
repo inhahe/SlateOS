@@ -16585,10 +16585,7 @@ fn resolve_at_path(dirfd: i32, path_ptr: u64) -> Result<alloc::string::String, S
         }
         if first != b'/' {
             // Relative path: resolve dirfd to a directory path and prepend.
-            let entry = match lookup_caller_fd(dirfd) {
-                Ok(e) => e,
-                Err(r) => return Err(r),
-            };
+            let entry = lookup_caller_fd(dirfd)?;
             if entry.kind != HandleKind::File {
                 return Err(linux_err(errno::ENOTDIR));
             }

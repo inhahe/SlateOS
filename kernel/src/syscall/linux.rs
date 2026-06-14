@@ -52327,6 +52327,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_capget_capset()?;
+
+    #[inline(never)]
+    fn self_test_capget_capset() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // capget / capset dispatch validation.
     //   - hdrp == NULL -> EFAULT.
     //   - We can't exercise the version path easily without staging a
@@ -53472,6 +53477,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             }
             pcb::destroy(test_pid);
         }
+    }
+        Ok(())
     }
 
     // sched_get/setaffinity dispatch validation.

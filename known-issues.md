@@ -904,9 +904,10 @@ accepted-but-ignored control bits. Linux FS mutation syscalls
 now route through the native VFS (`Vfs::mkdir`/`rmdir`/`remove`/`rename`), so
 inotify events DO flow from Linux-ABI filesystem operations — including
 `IN_MOVED_FROM`/`IN_MOVED_TO` for renames. `renameat2` honours `RENAME_NOREPLACE`
-(atomic for the common same-mount case — see below — and rejects
-`RENAME_EXCHANGE`/`RENAME_WHITEOUT` with `EINVAL` since the native VFS rename
-implements neither).
+(atomic for the common same-mount case — see below) and `RENAME_EXCHANGE`
+(atomic same-mount swap on filesystems that implement it — memfs does; ext4/FAT
+return `EINVAL`). `RENAME_WHITEOUT` is rejected with `EINVAL` (overlayfs whiteout
+device nodes are unsupported).
 
 **Impact:** low — the common "watch a dir for create/delete/modify/move/open/close"
 file-manager/build-tool idiom is fully covered, now including the `IN_ISDIR`
@@ -961,9 +962,30 @@ non-atomic. Covered by the existing `syscall::linux::self_test` rename round-tri
 assertion that `rename_noreplace` onto a *free* destination succeeds and moves
 src→dst.
 
+**Progress (2026-06-14): `RENAME_EXCHANGE`.** Gap (c)'s exchange half is resolved
+for filesystems that implement it. New `FileSystem::rename_exchange` trait method
+(default `NotSupported`) with a real memfs implementation (atomically detaches
+both entries and re-attaches them swapped, all-or-nothing with rollback if the
+second operand is missing; self-exchange is a no-op; both operands must exist or
+`NotFound`). `Vfs::rename_exchange` (kernel/src/fs/vfs.rs) resolves both paths,
+checks tags/writability/intercept, and delegates the swap to the FS under the held
+`VFS.lock()` — atomic w.r.t. the FS — requiring the **same mount** (cross-mount
+exchange → `NotSupported`, since no atomic cross-FS swap exists). The Linux-ABI
+`sys_renameat2` now routes `RENAME_EXCHANGE` to a new `rename_exchange_common`
+(kernel/src/syscall/linux.rs) instead of the old blanket gate-4 `EINVAL`; a
+filesystem lacking exchange support **and** cross-mount requests both surface as
+`EINVAL` (matching Linux's per-flag rename error — though Linux uses `EXDEV` for
+the cross-mount case specifically; minor fidelity gap, documented). The
+mutual-exclusion gates (EXCHANGE+NOREPLACE/WHITEOUT → EINVAL) and the WHITEOUT
+CAP/unsupported gates are unchanged. Covered by the post-`/tmp`
+`self_test_rename_noreplace` (now also asserts an EXCHANGE swap of two existing
+files' contents and a missing-operand `ENOENT` that leaves the survivor intact),
+verified at boot.
+
 **Remaining fix:** the items left are: (a) switch watch identity to inode if/when
-stable inode numbers are available; (c) `RENAME_EXCHANGE`/`RENAME_WHITEOUT`
-support (currently `EINVAL`).
+stable inode numbers are available; (c-whiteout) `RENAME_WHITEOUT` support
+(currently `EINVAL`); and the cross-mount `RENAME_EXCHANGE` `EXDEV`-vs-`EINVAL`
+nicety noted above.
 
 ### TD16. epoll fd readiness not reported when an epoll is nested in poll/select/epoll — RESOLVED 2026-06-14
 

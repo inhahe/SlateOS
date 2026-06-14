@@ -830,6 +830,79 @@ impl FileSystem for MemFs {
         Ok(())
     }
 
+    fn rename_exchange(&mut self, a: &str, b: &str) -> KernelResult<()> {
+        // Atomically swap two existing entries. Like rename(), the final
+        // component is NOT followed for either path; intermediate components
+        // ARE resolved through symlinks. Both entries must exist.
+        let a_comps = Self::path_components(a);
+        let b_comps = Self::path_components(b);
+        if a_comps.is_empty() || b_comps.is_empty() {
+            return Err(KernelError::InvalidArgument);
+        }
+
+        let a_name = String::from(a_comps[a_comps.len() - 1]);
+        let b_name = String::from(b_comps[b_comps.len() - 1]);
+
+        let a_parent_path = Self::parent_path_of(&a_comps);
+        let b_parent_path = Self::parent_path_of(&b_comps);
+
+        let resolved_a_parent = self.resolve_path_str(&a_parent_path, true)?;
+        let resolved_b_parent = self.resolve_path_str(&b_parent_path, true)?;
+
+        // Exchanging an entry with itself is a no-op (but the entry must
+        // still exist, else ENOENT).
+        if resolved_a_parent == resolved_b_parent && a_name == b_name {
+            let parent = self.walk(&resolved_a_parent)?;
+            let children = parent.children().ok_or(KernelError::NotADirectory)?;
+            if !children.contains_key(&*a_name) {
+                return Err(KernelError::NotFound);
+            }
+            return Ok(());
+        }
+
+        // Detach a's node (must exist).
+        let node_a = {
+            let parent = self.walk_mut(&resolved_a_parent)?;
+            let children = parent.children_mut().ok_or(KernelError::NotADirectory)?;
+            children.remove(&*a_name).ok_or(KernelError::NotFound)?
+        };
+
+        // Detach b's node; if it does not exist, restore a and fail so the
+        // exchange is all-or-nothing.
+        let node_b_result = match self.walk_mut(&resolved_b_parent) {
+            Ok(parent) => match parent.children_mut() {
+                Some(children) => children.remove(&*b_name).ok_or(KernelError::NotFound),
+                None => Err(KernelError::NotADirectory),
+            },
+            Err(e) => Err(e),
+        };
+        let node_b = match node_b_result {
+            Ok(n) => n,
+            Err(e) => {
+                // Roll back the detach of a (its parent existed a moment ago).
+                if let Ok(parent) = self.walk_mut(&resolved_a_parent) {
+                    if let Some(children) = parent.children_mut() {
+                        children.insert(a_name, node_a);
+                    }
+                }
+                return Err(e);
+            }
+        };
+
+        // Re-attach swapped: b's node at a's location, a's node at b's.
+        {
+            let parent_a = self.walk_mut(&resolved_a_parent)?;
+            let children = parent_a.children_mut().ok_or(KernelError::NotADirectory)?;
+            children.insert(a_name, node_b);
+        }
+        {
+            let parent_b = self.walk_mut(&resolved_b_parent)?;
+            let children = parent_b.children_mut().ok_or(KernelError::NotADirectory)?;
+            children.insert(b_name, node_a);
+        }
+        Ok(())
+    }
+
     fn debug_stats(&self) -> String {
         fn count_nodes(node: &MemFsNode) -> (usize, usize, usize, u64) {
             match &node.kind {

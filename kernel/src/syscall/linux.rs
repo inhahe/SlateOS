@@ -16909,17 +16909,22 @@ fn sys_renameat2(args: &SyscallArgs) -> SyscallResult {
             }
         }
     }
-    // Gate 4: the native VFS rename has no atomic exchange and no whiteout
-    // support, so any caller that passes those flags (and, for WHITEOUT,
-    // cleared the CAP gate above) gets EINVAL — the standard errno a Linux
-    // filesystem returns when its ->rename does not implement the requested
-    // RENAME_* flag.  RENAME_NOREPLACE is supported via rename_common's
-    // best-effort destination pre-check.
-    if (flags & (RENAME_EXCHANGE | RENAME_WHITEOUT)) != 0 {
+    // Gate 4: WHITEOUT has no native support (it creates an overlayfs whiteout
+    // device node), so a caller that cleared the CAP gate above still gets
+    // EINVAL — the standard errno a Linux filesystem returns when its ->rename
+    // does not implement the requested RENAME_* flag.
+    if (flags & RENAME_WHITEOUT) != 0 {
         return linux_err(errno::EINVAL);
     }
     let old_dirfd = args.arg0 as i32;
     let new_dirfd = args.arg2 as i32;
+    // RENAME_EXCHANGE routes to the atomic same-mount swap; filesystems that
+    // do not implement it (and cross-mount exchange) surface as EINVAL.
+    if (flags & RENAME_EXCHANGE) != 0 {
+        return rename_exchange_common(old_dirfd, args.arg1, new_dirfd, args.arg3);
+    }
+    // RENAME_NOREPLACE is supported via rename_common's atomic
+    // (same-mount) destination check.
     rename_common(
         old_dirfd,
         args.arg1,
@@ -16927,6 +16932,37 @@ fn sys_renameat2(args: &SyscallArgs) -> SyscallResult {
         args.arg3,
         flags & RENAME_NOREPLACE != 0,
     )
+}
+
+/// `renameat2(..., RENAME_EXCHANGE)` back-end: atomically swap two existing
+/// entries via [`crate::fs::Vfs::rename_exchange`]. A filesystem lacking
+/// exchange support (or a cross-mount request) returns `NotSupported`, which
+/// is mapped to `EINVAL` here — matching Linux, whose `->rename` returns
+/// `EINVAL` when it cannot honour the `RENAME_EXCHANGE` flag.
+fn rename_exchange_common(
+    old_dirfd: i32,
+    old_ptr: u64,
+    new_dirfd: i32,
+    new_ptr: u64,
+) -> SyscallResult {
+    let old = match resolve_at_path(old_dirfd, old_ptr) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let new = match resolve_at_path(new_dirfd, new_ptr) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    if let Err(r) = require_fs_write() {
+        return r;
+    }
+    match crate::fs::Vfs::rename_exchange(&old, &new) {
+        Ok(()) => SyscallResult::ok(0),
+        // NotSupported (unsupported FS or cross-mount) -> EINVAL, not the
+        // default ENOSYS, to mirror Linux's per-flag rename error.
+        Err(KernelError::NotSupported) => linux_err(errno::EINVAL),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -39671,20 +39707,23 @@ fn caller_pid() -> Option<u64> {
 // Atomic RENAME_NOREPLACE self-test (VFS-dependent)
 // ---------------------------------------------------------------------------
 
-/// End-to-end test of `Vfs::rename_noreplace` and the Linux-ABI
-/// `renameat2(RENAME_NOREPLACE)` path that routes through it.
+/// End-to-end test of `Vfs::rename_noreplace` / `Vfs::rename_exchange` and the
+/// Linux-ABI `renameat2(RENAME_NOREPLACE | RENAME_EXCHANGE)` paths that route
+/// through them.
 ///
 /// Runs after the `/tmp` memfs is mounted (so writes succeed) rather than in
 /// [`self_test`], which precedes VFS init and therefore only sees a read-only
 /// root — the in-`self_test` rename round-trip skips there. Uses `/tmp` paths
-/// so the writable memfs exercises the same-mount (atomic) branch of
-/// `rename_inner`.
+/// so the writable memfs exercises the same-mount (atomic) branches.
 ///
 /// Coverage:
 ///  1. no-replace rename onto a FREE destination → succeeds, src gone, dst present;
 ///  2. no-replace rename onto an EXISTING destination → `AlreadyExists` (EEXIST),
 ///     and the destination is left untouched (original survivor content);
-///  3. the same EEXIST result via the `renameat2` syscall with `RENAME_NOREPLACE`.
+///  3. the same EEXIST result via the `renameat2` syscall with `RENAME_NOREPLACE`;
+///  4. `RENAME_EXCHANGE` atomically swaps two existing entries' contents;
+///  5. `RENAME_EXCHANGE` with a missing operand → `NotFound` (ENOENT), leaving
+///     the surviving entry untouched (all-or-nothing).
 pub fn self_test_rename_noreplace() -> crate::error::KernelResult<()> {
     use crate::error::KernelError;
     use crate::serial_println;
@@ -39765,12 +39804,61 @@ pub fn self_test_rename_noreplace() -> crate::error::KernelResult<()> {
             let _ = crate::fs::Vfs::remove(DST);
             return Err(KernelError::InternalError);
         }
+
+        // (4) RENAME_EXCHANGE: SRC="second", DST="payload" at this point.
+        // Atomically swap them; afterwards SRC must hold "payload" and DST
+        // "second". Drive it through the renameat2 syscall (flags=2).
+        const RENAME_EXCHANGE: u64 = 2;
+        let a = SyscallArgs {
+            arg0: 0,
+            arg1: src_buf.as_ptr() as u64,
+            arg2: 0,
+            arg3: dst_buf.as_ptr() as u64,
+            arg4: RENAME_EXCHANGE,
+            arg5: 0,
+        };
+        let v = dispatch_linux(nr::RENAMEAT2, &a).value;
+        if v != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: renameat2(EXCHANGE) -> {} (expected 0)", v);
+            let _ = crate::fs::Vfs::remove(SRC);
+            let _ = crate::fs::Vfs::remove(DST);
+            return Err(KernelError::InternalError);
+        }
+        let src_ok = matches!(crate::fs::Vfs::read_file(SRC), Ok(ref c) if c == b"payload");
+        let dst_ok = matches!(crate::fs::Vfs::read_file(DST), Ok(ref c) if c == b"second");
+        if !src_ok || !dst_ok {
+            serial_println!(
+                "[syscall/linux]   FAIL: renameat2(EXCHANGE) did not swap contents");
+            let _ = crate::fs::Vfs::remove(SRC);
+            let _ = crate::fs::Vfs::remove(DST);
+            return Err(KernelError::InternalError);
+        }
+
+        // (5) EXCHANGE with a missing operand -> ENOENT (both must exist).
+        let _ = crate::fs::Vfs::remove(SRC);
+        match crate::fs::Vfs::rename_exchange(SRC, DST) {
+            Err(KernelError::NotFound) => {}
+            other => {
+                serial_println!(
+                    "[syscall/linux]   FAIL: rename_exchange(missing src) -> {:?} (expected NotFound)", other);
+                let _ = crate::fs::Vfs::remove(DST);
+                return Err(KernelError::InternalError);
+            }
+        }
+        // The surviving operand must be untouched by the failed exchange.
+        if !matches!(crate::fs::Vfs::read_file(DST), Ok(ref c) if c == b"second") {
+            serial_println!(
+                "[syscall/linux]   FAIL: failed rename_exchange disturbed surviving entry");
+            let _ = crate::fs::Vfs::remove(DST);
+            return Err(KernelError::InternalError);
+        }
     }
 
     let _ = crate::fs::Vfs::remove(SRC);
     let _ = crate::fs::Vfs::remove(DST);
     serial_println!(
-        "[syscall/linux]   rename_noreplace (atomic same-mount: free-dst move, existing-dst EEXIST, renameat2 EEXIST): OK"
+        "[syscall/linux]   rename_noreplace/exchange (atomic same-mount: free-dst move, existing-dst EEXIST, EXCHANGE swap, missing-operand ENOENT): OK"
     );
     Ok(())
 }
@@ -58410,24 +58498,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         core::hint::black_box(&absent_buf);
         core::hint::black_box(&absent2_buf);
 
-        // (e) renameat2 RENAME_EXCHANGE alone (flags=2) -> EINVAL.
-        //     Gate 2 does not fire (neither NOREPLACE nor WHITEOUT set),
-        //     but gate 4 rejects EXCHANGE because the native VFS rename has
-        //     no atomic exchange — the standard errno a Linux filesystem
-        //     returns when its ->rename does not implement the flag.
-        //     (Batch 488: previously fell through to the ENOENT stub.)
-        let a = SyscallArgs {
-            arg0: 0, arg1: absent_ptr, arg2: 0, arg3: absent2_ptr,
-            arg4: 2, arg5: 0,
-        };
-        let v = dispatch_linux(nr::RENAMEAT2, &a).value;
-        if v != -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: renameat2(EXCHANGE alone) -> {} (expected -EINVAL)",
-                v
-            );
-            return Err(KernelError::InternalError);
-        }
+        // (e) renameat2 RENAME_EXCHANGE alone (flags=2) is now a SUPPORTED
+        //     atomic same-mount swap (see Vfs::rename_exchange), so it no
+        //     longer hits a blanket gate-4 rejection. Its positive behaviour
+        //     (successful swap, missing-operand ENOENT, content preserved) is
+        //     covered by `self_test_rename_noreplace`, which runs after the
+        //     writable /tmp memfs is mounted — this `self_test` only sees a
+        //     read-only root, where a write/exchange terminal is environment-
+        //     coupled (EROFS vs ENOENT) and therefore not asserted here.
 
         // (f) renameat2 EXCHANGE|NOREPLACE (flags=3) -> EINVAL via
         //     gate 2 (mutual-exclusion, before gate 4).

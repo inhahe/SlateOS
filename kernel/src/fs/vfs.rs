@@ -534,6 +534,20 @@ pub trait FileSystem: Send {
         Err(KernelError::NotSupported)
     }
 
+    /// Atomically exchange two existing entries (Linux
+    /// `renameat2(RENAME_EXCHANGE)`).
+    ///
+    /// Both `a` and `b` are paths relative to the filesystem root and BOTH
+    /// must already exist (else `NotFound`); on success the entries swap
+    /// places. The operation is atomic with respect to the filesystem's own
+    /// locking. Default implementation returns `NotSupported` — the VFS maps
+    /// that to `EINVAL` at the syscall boundary, matching how a Linux
+    /// filesystem whose `->rename` lacks `RENAME_EXCHANGE` support responds.
+    fn rename_exchange(&mut self, a: &str, b: &str) -> KernelResult<()> {
+        let _ = (a, b);
+        Err(KernelError::NotSupported)
+    }
+
     /// Return optional debug/statistics information.
     ///
     /// Default returns an empty string.  Filesystem implementations
@@ -2134,6 +2148,59 @@ impl Vfs {
         super::index::on_file_renamed(&from, &to);
         super::journal::record_rename(&from, &to);
         super::audit::log_ok(super::audit::AuditOp::Rename, 0, &from);
+        Ok(())
+    }
+
+    /// Atomically exchange two existing entries (Linux
+    /// `renameat2(RENAME_EXCHANGE)`).
+    ///
+    /// Both paths must exist and reside on the **same mount** — the swap is
+    /// delegated to that filesystem's [`rename_exchange`](FileSystem::rename_exchange)
+    /// under the held `VFS` lock, so it is atomic with respect to the FS's own
+    /// state. Cross-mount exchange returns [`KernelError::NotSupported`]
+    /// (no atomic cross-filesystem swap is possible; Linux rejects it with
+    /// `EXDEV`). A filesystem lacking exchange support also returns
+    /// `NotSupported`; the syscall layer maps both to `EINVAL`.
+    pub fn rename_exchange(a: &str, b: &str) -> KernelResult<()> {
+        let a = Self::resolve_no_follow(a)?;
+        let b = Self::resolve_no_follow(b)?;
+        check_file_tags(&a)?;
+        check_file_tags(&b)?;
+        check_writable(&a)?;
+        check_writable(&b)?;
+        // Intercept: let pre-operation handlers approve/deny (treat as a
+        // rename touching both paths).
+        super::intercept::pre_rename(&a, &b)?;
+
+        {
+            let mut vfs = VFS.lock();
+            let (mp_a, rel_a) = find_mount(&mut vfs, &a)?;
+            let a_mount = mp_a.path.clone();
+            let rel_a_owned = String::from(rel_a);
+            let (mp_b, rel_b) = find_mount(&mut vfs, &b)?;
+            if mp_b.path != a_mount {
+                // Cross-mount exchange: no atomic cross-FS swap exists.
+                return Err(KernelError::NotSupported);
+            }
+            // Same FS — perform the atomic swap under the held lock.
+            mp_b.fs.rename_exchange(&rel_a_owned, rel_b)?;
+        }
+
+        // Both entries moved: invalidate caches and notify for each.
+        {
+            let mut dcache = VFS_DCACHE.lock();
+            dcache.invalidate_prefix(&a);
+            dcache.invalidate_prefix(&b);
+        }
+        super::notify::emit_renamed(&a, &b);
+        super::notify::emit_renamed(&b, &a);
+        // Exchange leaves BOTH paths present (with swapped contents), so use
+        // the "changed" hook rather than "renamed" (which would drop a path
+        // the indexer still needs to track).
+        super::index::on_file_changed(&a);
+        super::index::on_file_changed(&b);
+        super::journal::record_rename(&a, &b);
+        super::audit::log_ok(super::audit::AuditOp::Rename, 0, &a);
         Ok(())
     }
 

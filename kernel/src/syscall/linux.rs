@@ -1015,6 +1015,7 @@ pub const fn linux_errno_for(e: KernelError) -> i32 {
         KernelError::ReadOnlyFilesystem => errno::EROFS,
         KernelError::TooManyOpenFiles => errno::EMFILE,
         KernelError::FileTooLarge => errno::EFBIG,
+        KernelError::CrossDevice => errno::EXDEV,
         KernelError::IoError => errno::EIO,
         KernelError::NoSuchDevice => errno::ENODEV,
         KernelError::DeviceBusy => errno::EBUSY,
@@ -1084,6 +1085,7 @@ pub const fn kernel_error_from_code(code: i32) -> Option<KernelError> {
         -509 => Some(KernelError::ReadOnlyFilesystem),
         -510 => Some(KernelError::TooManyOpenFiles),
         -511 => Some(KernelError::FileTooLarge),
+        -512 => Some(KernelError::CrossDevice),
         -600 => Some(KernelError::IoError),
         -601 => Some(KernelError::NoSuchDevice),
         -602 => Some(KernelError::DeviceBusy),
@@ -16936,9 +16938,10 @@ fn sys_renameat2(args: &SyscallArgs) -> SyscallResult {
 
 /// `renameat2(..., RENAME_EXCHANGE)` back-end: atomically swap two existing
 /// entries via [`crate::fs::Vfs::rename_exchange`]. A filesystem lacking
-/// exchange support (or a cross-mount request) returns `NotSupported`, which
-/// is mapped to `EINVAL` here — matching Linux, whose `->rename` returns
-/// `EINVAL` when it cannot honour the `RENAME_EXCHANGE` flag.
+/// exchange support returns `NotSupported`, mapped to `EINVAL` here — matching
+/// Linux, whose `->rename` returns `EINVAL` when it cannot honour the
+/// `RENAME_EXCHANGE` flag. A cross-mount request returns `CrossDevice`, mapped
+/// to `EXDEV` (via `linux_errno_for`), also matching Linux.
 fn rename_exchange_common(
     old_dirfd: i32,
     old_ptr: u64,
@@ -41028,10 +41031,61 @@ pub fn self_test_rename_noreplace() -> crate::error::KernelResult<()> {
         }
     }
 
+    // (6) Cross-mount EXCHANGE -> CrossDevice (EXDEV), not EINVAL.
+    // In the boot-test, vda carries no FAT, so "/" is a writable memfs and
+    // "/tmp" is a second writable memfs — two distinct mounts. check_writable
+    // runs before the cross-mount check, so a read-only on-disk root in a
+    // different config would surface EROFS instead; skip cleanly in that case.
+    const XDEV_ROOT: &str = "/__rn_xdev_root__";
+    const XDEV_TMP: &str = "/tmp/__rn_xdev_tmp__";
+    let _ = crate::fs::Vfs::remove(XDEV_ROOT);
+    let _ = crate::fs::Vfs::remove(XDEV_TMP);
+    if crate::fs::Vfs::write_file(XDEV_ROOT, b"root").is_ok() {
+        if crate::fs::Vfs::write_file(XDEV_TMP, b"tmp").is_ok() {
+            match crate::fs::Vfs::rename_exchange(XDEV_ROOT, XDEV_TMP) {
+                Err(KernelError::CrossDevice) => {}
+                other => {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: cross-mount rename_exchange -> {:?} (expected CrossDevice)", other);
+                    let _ = crate::fs::Vfs::remove(XDEV_ROOT);
+                    let _ = crate::fs::Vfs::remove(XDEV_TMP);
+                    let _ = crate::fs::Vfs::remove(SRC);
+                    let _ = crate::fs::Vfs::remove(DST);
+                    return Err(KernelError::InternalError);
+                }
+            }
+            // The syscall must map CrossDevice -> EXDEV (not EINVAL).
+            let root_buf = b"/__rn_xdev_root__\0";
+            let tmp_buf = b"/tmp/__rn_xdev_tmp__\0";
+            core::hint::black_box(&root_buf);
+            core::hint::black_box(&tmp_buf);
+            let a = SyscallArgs {
+                arg0: 0,
+                arg1: root_buf.as_ptr() as u64,
+                arg2: 0,
+                arg3: tmp_buf.as_ptr() as u64,
+                arg4: 2, // RENAME_EXCHANGE
+                arg5: 0,
+            };
+            let v = dispatch_linux(nr::RENAMEAT2, &a).value;
+            if v != -i64::from(errno::EXDEV) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: renameat2(EXCHANGE, cross-mount) -> {} (expected EXDEV)", v);
+                let _ = crate::fs::Vfs::remove(XDEV_ROOT);
+                let _ = crate::fs::Vfs::remove(XDEV_TMP);
+                let _ = crate::fs::Vfs::remove(SRC);
+                let _ = crate::fs::Vfs::remove(DST);
+                return Err(KernelError::InternalError);
+            }
+            let _ = crate::fs::Vfs::remove(XDEV_TMP);
+        }
+        let _ = crate::fs::Vfs::remove(XDEV_ROOT);
+    }
+
     let _ = crate::fs::Vfs::remove(SRC);
     let _ = crate::fs::Vfs::remove(DST);
     serial_println!(
-        "[syscall/linux]   rename_noreplace/exchange (atomic same-mount: free-dst move, existing-dst EEXIST, EXCHANGE swap, missing-operand ENOENT): OK"
+        "[syscall/linux]   rename_noreplace/exchange (atomic same-mount: free-dst move, existing-dst EEXIST, EXCHANGE swap, missing-operand ENOENT; cross-mount EXCHANGE EXDEV): OK"
     );
     Ok(())
 }

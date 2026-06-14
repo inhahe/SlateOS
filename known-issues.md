@@ -1103,20 +1103,29 @@ checks tags/writability/intercept, and delegates the swap to the FS under the he
 `VFS.lock()` — atomic w.r.t. the FS — requiring the **same mount** (cross-mount
 exchange → `NotSupported`, since no atomic cross-FS swap exists). The Linux-ABI
 `sys_renameat2` now routes `RENAME_EXCHANGE` to a new `rename_exchange_common`
-(kernel/src/syscall/linux.rs) instead of the old blanket gate-4 `EINVAL`; a
-filesystem lacking exchange support **and** cross-mount requests both surface as
-`EINVAL` (matching Linux's per-flag rename error — though Linux uses `EXDEV` for
-the cross-mount case specifically; minor fidelity gap, documented). The
+(kernel/src/syscall/linux.rs) instead of the old blanket gate-4 `EINVAL`. The
 mutual-exclusion gates (EXCHANGE+NOREPLACE/WHITEOUT → EINVAL) and the WHITEOUT
 CAP/unsupported gates are unchanged. Covered by the post-`/tmp`
 `self_test_rename_noreplace` (now also asserts an EXCHANGE swap of two existing
 files' contents and a missing-operand `ENOENT` that leaves the survivor intact),
 verified at boot.
 
+**Progress (2026-06-14): cross-mount `RENAME_EXCHANGE` now returns `EXDEV`, not
+`EINVAL`.** Previously a filesystem lacking exchange support *and* a cross-mount
+request both surfaced as `EINVAL`, where Linux uses `EXDEV` specifically for the
+cross-mount case. Added a `KernelError::CrossDevice` variant (code `-512`, in the
+FS range) mapping to `EXDEV` in `linux_errno_for`/`kernel_error_from_code`;
+`Vfs::rename_exchange`'s cross-mount branch now returns `CrossDevice` (FS-lacking-
+support still returns `NotSupported` → `EINVAL`), so `rename_exchange_common`'s
+generic `Err(e) => linux_errno_for(e)` arm yields `EXDEV` for cross-mount. The
+`self_test_rename_noreplace` boot test gained case (6): with the boot-test's
+writable memfs root + memfs `/tmp` (two distinct mounts), it asserts
+`Vfs::rename_exchange` across them returns `CrossDevice` and that `renameat2`
+maps it to `-EXDEV` (skips cleanly if the root is read-only in another config).
+
 **Remaining fix:** the items left are: (a) switch watch identity to inode if/when
-stable inode numbers are available; (c-whiteout) `RENAME_WHITEOUT` support
-(currently `EINVAL`); and the cross-mount `RENAME_EXCHANGE` `EXDEV`-vs-`EINVAL`
-nicety noted above.
+stable inode numbers are available; and (c-whiteout) `RENAME_WHITEOUT` support
+(currently `EINVAL`).
 
 ### TD16. epoll fd readiness not reported when an epoll is nested in poll/select/epoll — RESOLVED 2026-06-14
 

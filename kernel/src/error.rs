@@ -99,6 +99,10 @@ pub enum KernelError {
     TooManyOpenFiles = -510,
     /// File size exceeds the allowed limit (EFBIG).
     FileTooLarge = -511,
+    /// An operation that requires both operands on the same filesystem was
+    /// attempted across a mount boundary (e.g. `RENAME_EXCHANGE` or a hard
+    /// link spanning two mounts).  Maps to `EXDEV`.
+    CrossDevice = -512,
 
     // --- Device / I/O (600 - 699) ---
     /// An I/O operation failed at the hardware level.
@@ -151,6 +155,7 @@ impl KernelError {
             Self::ReadOnlyFilesystem => "read-only filesystem",
             Self::TooManyOpenFiles => "too many open files",
             Self::FileTooLarge => "file too large",
+            Self::CrossDevice => "cross-device operation not permitted",
             Self::IoError => "I/O error",
             Self::NoSuchDevice => "no such device",
             Self::DeviceBusy => "device busy",

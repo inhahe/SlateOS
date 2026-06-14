@@ -2157,10 +2157,12 @@ impl Vfs {
     /// Both paths must exist and reside on the **same mount** — the swap is
     /// delegated to that filesystem's [`rename_exchange`](FileSystem::rename_exchange)
     /// under the held `VFS` lock, so it is atomic with respect to the FS's own
-    /// state. Cross-mount exchange returns [`KernelError::NotSupported`]
-    /// (no atomic cross-filesystem swap is possible; Linux rejects it with
-    /// `EXDEV`). A filesystem lacking exchange support also returns
-    /// `NotSupported`; the syscall layer maps both to `EINVAL`.
+    /// state. Cross-mount exchange returns [`KernelError::CrossDevice`]
+    /// (no atomic cross-filesystem swap is possible) which the syscall layer
+    /// maps to `EXDEV`, matching Linux. A filesystem lacking exchange support
+    /// returns [`KernelError::NotSupported`], which the syscall layer maps to
+    /// `EINVAL` (mirroring Linux's `->rename` returning `EINVAL` when it
+    /// cannot honour the flag).
     pub fn rename_exchange(a: &str, b: &str) -> KernelResult<()> {
         let a = Self::resolve_no_follow(a)?;
         let b = Self::resolve_no_follow(b)?;
@@ -2180,7 +2182,9 @@ impl Vfs {
             let (mp_b, rel_b) = find_mount(&mut vfs, &b)?;
             if mp_b.path != a_mount {
                 // Cross-mount exchange: no atomic cross-FS swap exists.
-                return Err(KernelError::NotSupported);
+                // Linux returns EXDEV here (not EINVAL); surface it as
+                // CrossDevice so the syscall layer maps it correctly.
+                return Err(KernelError::CrossDevice);
             }
             // Same FS — perform the atomic swap under the held lock.
             mp_b.fs.rename_exchange(&rel_a_owned, rel_b)?;

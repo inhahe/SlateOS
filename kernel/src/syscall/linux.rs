@@ -56290,6 +56290,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_ftruncate()?;
+
+    #[inline(never)]
+    fn self_test_ftruncate() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // ftruncate — Linux gate ladder fidelity (batch 448).
     //
     // Linux's ftruncate runs `length<0 → fdget → !S_ISREG → write-mode
@@ -56353,6 +56358,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   ftruncate Linux gate ladder (EINVAL/EROFS terminal, rlim dead under RO): OK"
         );
+    }
+        Ok(())
     }
 
     // getitimer / setitimer / alarm / pause — input validation.

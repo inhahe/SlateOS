@@ -50748,6 +50748,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_prctl_set_vma()?;
+
+    #[inline(never)]
+    fn self_test_prctl_set_vma() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // Batch 97: prctl(PR_SET_VMA = 0x5356_4d41) — Android-derived
     // anonymous-VMA naming.  Linux 5.17+ accepts sub-op
     // PR_SET_VMA_ANON_NAME (0) with (start, size, name_ptr).  Bionic,
@@ -50888,6 +50893,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+    }
+        Ok(())
     }
 
     // Batch 98: prctl(PR_SET_PTRACER = 0x5961_6d61) — Yama LSM's

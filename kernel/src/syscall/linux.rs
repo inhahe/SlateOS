@@ -42975,6 +42975,197 @@ fn self_test_wstatus_encoding() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+#[inline(never)]
+fn self_test_wait4_dispatch() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+    // wait4 dispatch validation via dispatch_linux:
+    //   - unknown option bits -> EINVAL (before any reap attempt).
+    //   - wait-any from a contextless test task (caller_pid resolves to 0):
+    //     either ECHILD (no children of kernel) or some other -ENOSYS-
+    //     adjacent error path, but NEVER -EINVAL (proves routing reached
+    //     the wait core, not the options validator).
+    //   - wait-specific for a pid that almost-certainly doesn't exist
+    //     (0xDEAD_BEEF) returns -ECHILD (the "not a child of caller"
+    //     path).  Must NOT be -EINVAL.
+    {
+        // Unknown option bit (WNOHANG | unknown bit 4 = 0x10).  Bit 4
+        // is not in Linux 6.x's wait4 accept-mask
+        //   {WNOHANG, WUNTRACED, WCONTINUED, __WNOTHREAD, __WCLONE, __WALL}
+        // = 0xE000_000b, so EINVAL is required.  (Note: pre-batch 442
+        // this probe used 0x4000_0000 as the "bogus" bit — but that is
+        // __WALL, which Linux accepts.  Updated to 0x10 to remain
+        // genuinely invalid under the corrected gate.)
+        let a = SyscallArgs { arg0: u64::MAX /* -1 = wait any */, arg1: 0,
+            arg2: 1 | 0x10 /* WNOHANG + truly bogus bit */, arg3: 0,
+            arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::WAIT4, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: wait4 bad options not EINVAL");
+            return Err(KernelError::InternalError);
+        }
+
+        // Batch 442: __WNOTHREAD / __WCLONE / __WALL are valid Linux
+        // wait4 options.  Each combined with WNOHANG must NOT trigger
+        // EINVAL — the call should reach the wait core (and surface
+        // ECHILD or similar in kernel context).
+        for (label, bit) in &[
+            ("__WNOTHREAD", 0x2000_0000u64),
+            ("__WALL", 0x4000_0000u64),
+            ("__WCLONE", 0x8000_0000u64),
+        ] {
+            let a = SyscallArgs { arg0: u64::MAX, arg1: 0,
+                arg2: 1 | *bit /* WNOHANG | <flag> */, arg3: 0,
+                arg4: 0, arg5: 0 };
+            let v = dispatch_linux(nr::WAIT4, &a).value;
+            if v == -i64::from(errno::EINVAL) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: wait4 {} | WNOHANG -> EINVAL", label
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // Batch 442: INT_MIN pid -> ESRCH (Linux defensive check: -INT_MIN
+        // is UB in two's complement, so kernel/exit.c short-circuits with
+        // ESRCH before any kill_pgrp_info / try_reap call).  Pre-batch
+        // we routed INT_MIN to the wait-any path (i64::from(INT_MIN) < 0)
+        // and returned ECHILD.
+        let a = SyscallArgs {
+            arg0: i32::MIN as u32 as u64,  /* sign-extended bits trimmed by ABI */
+            arg1: 0,
+            arg2: 1 /* WNOHANG, irrelevant — INT_MIN gate is checked after options gate */,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let v = dispatch_linux(nr::WAIT4, &a).value;
+        if v != -i64::from(errno::ESRCH) {
+            serial_println!(
+                "[syscall/linux]   FAIL: wait4 INT_MIN pid != ESRCH (got {})", v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // wait-any WNOHANG from contextless test task.  parent_pid
+        // resolves to 0 (kernel) which has no children registered, so
+        // set_wait_any_task returns ECHILD.  The crucial assertion is
+        // that the call did NOT return -EINVAL or panic.
+        let a = SyscallArgs { arg0: u64::MAX, arg1: 0, arg2: 1 /* WNOHANG */,
+            arg3: 0, arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::WAIT4, &a).value;
+        if v == -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: wait4 wait-any WNOHANG -> EINVAL");
+            return Err(KernelError::InternalError);
+        }
+
+        // wait-specific WNOHANG for a fake pid — ECHILD (or some other
+        // non-EINVAL negative).  Must not block (WNOHANG guarantees
+        // non-blocking) and must not panic.
+        let a = SyscallArgs { arg0: 0xDEAD_BEEF, arg1: 0, arg2: 1,
+            arg3: 0, arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::WAIT4, &a).value;
+        if v == -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: wait4 wait-specific WNOHANG -> EINVAL");
+            return Err(KernelError::InternalError);
+        }
+        if v >= 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: wait4 fake pid succeeded ({})", v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // NOTE: we deliberately don't test bad wstatus / rusage pointers
+        // here.  validate_user_write has a documented kernel-context
+        // bypass (returns Ok unconditionally for tasks with no owning
+        // process), which makes EFAULT impossible to observe from the
+        // boot self-test.  The validation logic itself is shared
+        // infrastructure exercised by every other syscall — it WILL
+        // EFAULT on bad pointers from real userspace.
+
+        // Batch 298: x86_64 syscall ABI register truncation for
+        // wait4's `pid_t pid` and `int options` args.
+
+        // (a) options = 0x1_0000_0001 (bit 32 + WNOHANG), pid = -1
+        //     (wait-any).  Linux truncates options to WNOHANG, no
+        //     children -> ECHILD via set_wait_any_task.  Pre-batch:
+        //     EINVAL because bit 32 was outside VALID_OPTIONS.
+        //     The test only requires non-EINVAL — set_wait_any_task
+        //     in kernel context surfaces ECHILD (parent_pid=0 has
+        //     no children registered).
+        let a = SyscallArgs {
+            arg0: u64::MAX,
+            arg1: 0,
+            arg2: 0x1_0000_0001,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        let v = dispatch_linux(nr::WAIT4, &a).value;
+        if v == -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: wait4 options high-half not truncated"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) options = 0x1_0000_0000 (bit 32 only), pid = -1.  Linux
+        //     truncates options to 0 (no WNOHANG, would block on a
+        //     real run).  In kernel context the wait-any path enters
+        //     set_wait_any_task first which fails with ECHILD before
+        //     any blocking, so the syscall returns immediately
+        //     -ECHILD.  Pre-batch: EINVAL via the unknown-bit gate.
+        let a = SyscallArgs {
+            arg0: u64::MAX,
+            arg1: 0,
+            arg2: 0x1_0000_0000,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        let v = dispatch_linux(nr::WAIT4, &a).value;
+        if v == -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: wait4 options=high-half-only triggered EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (c) pid = 0x1_0000_0000 (bit 32 only), options = WNOHANG.
+        //     Linux truncates pid_t to 0 -> wait-any path.  Pre-batch
+        //     pid_arg as i64 was a large positive number, so we
+        //     entered the wait-specific path for that bogus pid.
+        //     Both paths return -ECHILD in kernel context (specific:
+        //     try_reap -> NoSuchProcess -> ECHILD; any:
+        //     set_wait_any_task -> ECHILD).  Externally indistinct
+        //     but the code path is now Linux-correct.  Assert
+        //     non-EINVAL.
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0000,
+            arg1: 0,
+            arg2: 1,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        let v = dispatch_linux(nr::WAIT4, &a).value;
+        if v == -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: wait4 pid high-half triggered EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        if v >= 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: wait4 pid high-half succeeded ({})", v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   wait4 pid_t/int options truncation: OK"
+        );
+    }
+    Ok(())
+}
+
 pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
@@ -43243,191 +43434,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
     self_test_wstatus_encoding()?;
 
-    // wait4 dispatch validation via dispatch_linux:
-    //   - unknown option bits -> EINVAL (before any reap attempt).
-    //   - wait-any from a contextless test task (caller_pid resolves to 0):
-    //     either ECHILD (no children of kernel) or some other -ENOSYS-
-    //     adjacent error path, but NEVER -EINVAL (proves routing reached
-    //     the wait core, not the options validator).
-    //   - wait-specific for a pid that almost-certainly doesn't exist
-    //     (0xDEAD_BEEF) returns -ECHILD (the "not a child of caller"
-    //     path).  Must NOT be -EINVAL.
-    {
-        // Unknown option bit (WNOHANG | unknown bit 4 = 0x10).  Bit 4
-        // is not in Linux 6.x's wait4 accept-mask
-        //   {WNOHANG, WUNTRACED, WCONTINUED, __WNOTHREAD, __WCLONE, __WALL}
-        // = 0xE000_000b, so EINVAL is required.  (Note: pre-batch 442
-        // this probe used 0x4000_0000 as the "bogus" bit — but that is
-        // __WALL, which Linux accepts.  Updated to 0x10 to remain
-        // genuinely invalid under the corrected gate.)
-        let a = SyscallArgs { arg0: u64::MAX /* -1 = wait any */, arg1: 0,
-            arg2: 1 | 0x10 /* WNOHANG + truly bogus bit */, arg3: 0,
-            arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::WAIT4, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: wait4 bad options not EINVAL");
-            return Err(KernelError::InternalError);
-        }
-
-        // Batch 442: __WNOTHREAD / __WCLONE / __WALL are valid Linux
-        // wait4 options.  Each combined with WNOHANG must NOT trigger
-        // EINVAL — the call should reach the wait core (and surface
-        // ECHILD or similar in kernel context).
-        for (label, bit) in &[
-            ("__WNOTHREAD", 0x2000_0000u64),
-            ("__WALL", 0x4000_0000u64),
-            ("__WCLONE", 0x8000_0000u64),
-        ] {
-            let a = SyscallArgs { arg0: u64::MAX, arg1: 0,
-                arg2: 1 | *bit /* WNOHANG | <flag> */, arg3: 0,
-                arg4: 0, arg5: 0 };
-            let v = dispatch_linux(nr::WAIT4, &a).value;
-            if v == -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: wait4 {} | WNOHANG -> EINVAL", label
-                );
-                return Err(KernelError::InternalError);
-            }
-        }
-
-        // Batch 442: INT_MIN pid -> ESRCH (Linux defensive check: -INT_MIN
-        // is UB in two's complement, so kernel/exit.c short-circuits with
-        // ESRCH before any kill_pgrp_info / try_reap call).  Pre-batch
-        // we routed INT_MIN to the wait-any path (i64::from(INT_MIN) < 0)
-        // and returned ECHILD.
-        let a = SyscallArgs {
-            arg0: i32::MIN as u32 as u64,  /* sign-extended bits trimmed by ABI */
-            arg1: 0,
-            arg2: 1 /* WNOHANG, irrelevant — INT_MIN gate is checked after options gate */,
-            arg3: 0, arg4: 0, arg5: 0,
-        };
-        let v = dispatch_linux(nr::WAIT4, &a).value;
-        if v != -i64::from(errno::ESRCH) {
-            serial_println!(
-                "[syscall/linux]   FAIL: wait4 INT_MIN pid != ESRCH (got {})", v
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // wait-any WNOHANG from contextless test task.  parent_pid
-        // resolves to 0 (kernel) which has no children registered, so
-        // set_wait_any_task returns ECHILD.  The crucial assertion is
-        // that the call did NOT return -EINVAL or panic.
-        let a = SyscallArgs { arg0: u64::MAX, arg1: 0, arg2: 1 /* WNOHANG */,
-            arg3: 0, arg4: 0, arg5: 0 };
-        let v = dispatch_linux(nr::WAIT4, &a).value;
-        if v == -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: wait4 wait-any WNOHANG -> EINVAL");
-            return Err(KernelError::InternalError);
-        }
-
-        // wait-specific WNOHANG for a fake pid — ECHILD (or some other
-        // non-EINVAL negative).  Must not block (WNOHANG guarantees
-        // non-blocking) and must not panic.
-        let a = SyscallArgs { arg0: 0xDEAD_BEEF, arg1: 0, arg2: 1,
-            arg3: 0, arg4: 0, arg5: 0 };
-        let v = dispatch_linux(nr::WAIT4, &a).value;
-        if v == -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: wait4 wait-specific WNOHANG -> EINVAL");
-            return Err(KernelError::InternalError);
-        }
-        if v >= 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: wait4 fake pid succeeded ({})", v
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // NOTE: we deliberately don't test bad wstatus / rusage pointers
-        // here.  validate_user_write has a documented kernel-context
-        // bypass (returns Ok unconditionally for tasks with no owning
-        // process), which makes EFAULT impossible to observe from the
-        // boot self-test.  The validation logic itself is shared
-        // infrastructure exercised by every other syscall — it WILL
-        // EFAULT on bad pointers from real userspace.
-
-        // Batch 298: x86_64 syscall ABI register truncation for
-        // wait4's `pid_t pid` and `int options` args.
-
-        // (a) options = 0x1_0000_0001 (bit 32 + WNOHANG), pid = -1
-        //     (wait-any).  Linux truncates options to WNOHANG, no
-        //     children -> ECHILD via set_wait_any_task.  Pre-batch:
-        //     EINVAL because bit 32 was outside VALID_OPTIONS.
-        //     The test only requires non-EINVAL — set_wait_any_task
-        //     in kernel context surfaces ECHILD (parent_pid=0 has
-        //     no children registered).
-        let a = SyscallArgs {
-            arg0: u64::MAX,
-            arg1: 0,
-            arg2: 0x1_0000_0001,
-            arg3: 0,
-            arg4: 0,
-            arg5: 0,
-        };
-        let v = dispatch_linux(nr::WAIT4, &a).value;
-        if v == -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: wait4 options high-half not truncated"
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // (b) options = 0x1_0000_0000 (bit 32 only), pid = -1.  Linux
-        //     truncates options to 0 (no WNOHANG, would block on a
-        //     real run).  In kernel context the wait-any path enters
-        //     set_wait_any_task first which fails with ECHILD before
-        //     any blocking, so the syscall returns immediately
-        //     -ECHILD.  Pre-batch: EINVAL via the unknown-bit gate.
-        let a = SyscallArgs {
-            arg0: u64::MAX,
-            arg1: 0,
-            arg2: 0x1_0000_0000,
-            arg3: 0,
-            arg4: 0,
-            arg5: 0,
-        };
-        let v = dispatch_linux(nr::WAIT4, &a).value;
-        if v == -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: wait4 options=high-half-only triggered EINVAL"
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // (c) pid = 0x1_0000_0000 (bit 32 only), options = WNOHANG.
-        //     Linux truncates pid_t to 0 -> wait-any path.  Pre-batch
-        //     pid_arg as i64 was a large positive number, so we
-        //     entered the wait-specific path for that bogus pid.
-        //     Both paths return -ECHILD in kernel context (specific:
-        //     try_reap -> NoSuchProcess -> ECHILD; any:
-        //     set_wait_any_task -> ECHILD).  Externally indistinct
-        //     but the code path is now Linux-correct.  Assert
-        //     non-EINVAL.
-        let a = SyscallArgs {
-            arg0: 0x1_0000_0000,
-            arg1: 0,
-            arg2: 1,
-            arg3: 0,
-            arg4: 0,
-            arg5: 0,
-        };
-        let v = dispatch_linux(nr::WAIT4, &a).value;
-        if v == -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: wait4 pid high-half triggered EINVAL"
-            );
-            return Err(KernelError::InternalError);
-        }
-        if v >= 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: wait4 pid high-half succeeded ({})", v
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        serial_println!(
-            "[syscall/linux]   wait4 pid_t/int options truncation: OK"
-        );
-    }
+    self_test_wait4_dispatch()?;
 
     // Batch 299 — clock_gettime / clock_nanosleep clockid_t (int) and
     // clock_nanosleep flags (int) x86_64 register-truncation audit.

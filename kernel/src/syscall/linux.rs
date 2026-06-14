@@ -50270,6 +50270,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_fcntl_rw_hint()?;
+
+    #[inline(never)]
+    fn self_test_fcntl_rw_hint() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // Batch 92: fcntl(F_GET_RW_HINT / F_SET_RW_HINT /
     // F_GET_FILE_RW_HINT / F_SET_FILE_RW_HINT) — per-open-fd and
     // per-file write-life hints used by rocksdb / postgres / leveldb
@@ -50353,6 +50358,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         ] {
             assert_eq!(set_hint_policy(bad_hint), Err(errno::EINVAL));
         }
+    }
+        Ok(())
     }
 
     // Batch 93: prctl(PR_SCHED_CORE) — Chromium / runc / Java tenant

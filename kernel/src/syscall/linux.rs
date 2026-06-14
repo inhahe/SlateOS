@@ -45930,6 +45930,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_tkill_tgkill_dispatch()?;
+
+    #[inline(never)]
+    fn self_test_tkill_tgkill_dispatch() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // tkill / tgkill dispatch validation:
     //   - Non-existent tid (post-truncation valid positive int) ->
     //     ESRCH (no owning process).
@@ -46034,6 +46039,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[syscall/linux]   tkill/tgkill pid_t int truncation: OK");
+    }
+        Ok(())
     }
 
     // umask dispatch validation (batch 51 — per-process umask storage).

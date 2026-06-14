@@ -42884,6 +42884,97 @@ fn self_test_madvise_validation() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+#[inline(never)]
+fn self_test_wstatus_encoding() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+    // wait4 wstatus encoding (pure function — no real reaped child
+    // needed).  Three branches: normal exit, signaled, crashed.
+    //
+    // Linux's <sys/wait.h> macros:
+    //   WIFEXITED(s)    -> (s & 0x7f) == 0
+    //   WEXITSTATUS(s)  -> (s >> 8) & 0xff
+    //   WIFSIGNALED(s)  -> ((s & 0x7f) + 1) >> 1 > 0   ≡ low7 in 1..=126
+    //   WTERMSIG(s)     -> s & 0x7f
+    {
+        use crate::proc::pcb::ExitInfo;
+        // Normal exit with code 42 — WIFEXITED + WEXITSTATUS==42.
+        let s = encode_linux_wstatus(&ExitInfo { exit_code: 42, crash: None });
+        if (s & 0x7f) != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: wstatus normal exit not WIFEXITED ({})", s
+            );
+            return Err(KernelError::InternalError);
+        }
+        if ((s >> 8) & 0xff) != 42 {
+            serial_println!(
+                "[syscall/linux]   FAIL: wstatus normal exit WEXITSTATUS != 42 ({})", s
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Killed by SIGTERM (15) — kernel exit_code convention 128+sig.
+        let s = encode_linux_wstatus(&ExitInfo { exit_code: 128 + 15, crash: None });
+        let low7 = s & 0x7f;
+        if low7 != 15 {
+            serial_println!(
+                "[syscall/linux]   FAIL: wstatus SIGTERM WTERMSIG != 15 ({})", s
+            );
+            return Err(KernelError::InternalError);
+        }
+        // WIFSIGNALED check: ((low7 + 1) >> 1) > 0 — true for 1..=126.
+        if ((low7 + 1) >> 1) == 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: wstatus SIGTERM not WIFSIGNALED ({})", s
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Crash (any crash_info present) synthesises SIGSEGV (11).
+        let crash = crate::proc::pcb::CrashInfo {
+            exception_code: 14, // page fault
+            faulting_rip: 0xDEAD_BEEF,
+            aux: 0,
+            thread_id: 0,
+        };
+        let s = encode_linux_wstatus(&ExitInfo { exit_code: -14, crash: Some(crash) });
+        if (s & 0x7f) != 11 {
+            serial_println!(
+                "[syscall/linux]   FAIL: wstatus crash != SIGSEGV ({})", s
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Job-control wstatus encoding (WIFSTOPPED / WIFCONTINUED):
+    //   WIFSTOPPED(s)   -> (s & 0xff) == 0x7f
+    //   WSTOPSIG(s)     -> (s >> 8) & 0xff
+    //   WIFCONTINUED(s) -> s == 0xffff
+    {
+        use crate::proc::pcb::JobControlEvent;
+        // Stopped by SIGTSTP (20).
+        let s = encode_jc_wstatus(&JobControlEvent::Stopped(20));
+        if (s & 0xff) != 0x7f {
+            serial_println!(
+                "[syscall/linux]   FAIL: jc wstatus stop not WIFSTOPPED ({})", s
+            );
+            return Err(KernelError::InternalError);
+        }
+        if ((s >> 8) & 0xff) != 20 {
+            serial_println!(
+                "[syscall/linux]   FAIL: jc wstatus WSTOPSIG != 20 ({})", s
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Continued.
+        let s = encode_jc_wstatus(&JobControlEvent::Continued);
+        if s != 0xffff {
+            serial_println!(
+                "[syscall/linux]   FAIL: jc wstatus continued != 0xffff ({})", s
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    Ok(())
+}
+
 pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
@@ -43150,91 +43241,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
     self_test_madvise_validation()?;
 
-    // wait4 wstatus encoding (pure function — no real reaped child
-    // needed).  Three branches: normal exit, signaled, crashed.
-    //
-    // Linux's <sys/wait.h> macros:
-    //   WIFEXITED(s)    -> (s & 0x7f) == 0
-    //   WEXITSTATUS(s)  -> (s >> 8) & 0xff
-    //   WIFSIGNALED(s)  -> ((s & 0x7f) + 1) >> 1 > 0   ≡ low7 in 1..=126
-    //   WTERMSIG(s)     -> s & 0x7f
-    {
-        use crate::proc::pcb::ExitInfo;
-        // Normal exit with code 42 — WIFEXITED + WEXITSTATUS==42.
-        let s = encode_linux_wstatus(&ExitInfo { exit_code: 42, crash: None });
-        if (s & 0x7f) != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: wstatus normal exit not WIFEXITED ({})", s
-            );
-            return Err(KernelError::InternalError);
-        }
-        if ((s >> 8) & 0xff) != 42 {
-            serial_println!(
-                "[syscall/linux]   FAIL: wstatus normal exit WEXITSTATUS != 42 ({})", s
-            );
-            return Err(KernelError::InternalError);
-        }
-        // Killed by SIGTERM (15) — kernel exit_code convention 128+sig.
-        let s = encode_linux_wstatus(&ExitInfo { exit_code: 128 + 15, crash: None });
-        let low7 = s & 0x7f;
-        if low7 != 15 {
-            serial_println!(
-                "[syscall/linux]   FAIL: wstatus SIGTERM WTERMSIG != 15 ({})", s
-            );
-            return Err(KernelError::InternalError);
-        }
-        // WIFSIGNALED check: ((low7 + 1) >> 1) > 0 — true for 1..=126.
-        if ((low7 + 1) >> 1) == 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: wstatus SIGTERM not WIFSIGNALED ({})", s
-            );
-            return Err(KernelError::InternalError);
-        }
-        // Crash (any crash_info present) synthesises SIGSEGV (11).
-        let crash = crate::proc::pcb::CrashInfo {
-            exception_code: 14, // page fault
-            faulting_rip: 0xDEAD_BEEF,
-            aux: 0,
-            thread_id: 0,
-        };
-        let s = encode_linux_wstatus(&ExitInfo { exit_code: -14, crash: Some(crash) });
-        if (s & 0x7f) != 11 {
-            serial_println!(
-                "[syscall/linux]   FAIL: wstatus crash != SIGSEGV ({})", s
-            );
-            return Err(KernelError::InternalError);
-        }
-    }
-
-    // Job-control wstatus encoding (WIFSTOPPED / WIFCONTINUED):
-    //   WIFSTOPPED(s)   -> (s & 0xff) == 0x7f
-    //   WSTOPSIG(s)     -> (s >> 8) & 0xff
-    //   WIFCONTINUED(s) -> s == 0xffff
-    {
-        use crate::proc::pcb::JobControlEvent;
-        // Stopped by SIGTSTP (20).
-        let s = encode_jc_wstatus(&JobControlEvent::Stopped(20));
-        if (s & 0xff) != 0x7f {
-            serial_println!(
-                "[syscall/linux]   FAIL: jc wstatus stop not WIFSTOPPED ({})", s
-            );
-            return Err(KernelError::InternalError);
-        }
-        if ((s >> 8) & 0xff) != 20 {
-            serial_println!(
-                "[syscall/linux]   FAIL: jc wstatus WSTOPSIG != 20 ({})", s
-            );
-            return Err(KernelError::InternalError);
-        }
-        // Continued.
-        let s = encode_jc_wstatus(&JobControlEvent::Continued);
-        if s != 0xffff {
-            serial_println!(
-                "[syscall/linux]   FAIL: jc wstatus continued != 0xffff ({})", s
-            );
-            return Err(KernelError::InternalError);
-        }
-    }
+    self_test_wstatus_encoding()?;
 
     // wait4 dispatch validation via dispatch_linux:
     //   - unknown option bits -> EINVAL (before any reap attempt).

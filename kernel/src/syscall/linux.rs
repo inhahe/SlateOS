@@ -49796,6 +49796,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_fcntl_lease()?;
+
+    #[inline(never)]
+    fn self_test_fcntl_lease() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // Batch 91: fcntl(F_GETLEASE / F_SETLEASE) — file-lease query /
     // install.  Pre-batch the two commands (cmd numbers 1025 / 1024)
     // fell into the catch-all -> EINVAL.  Samba (CIFS oplock
@@ -49906,6 +49911,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         crate::ipc::pipe::close(rh);
         crate::ipc::pipe::close(wh);
         pcb::destroy(test_pid);
+    }
+        Ok(())
     }
 
     // Batch 128: fcntl(F_ADD_SEALS / F_GET_SEALS) — memfd sealing API.

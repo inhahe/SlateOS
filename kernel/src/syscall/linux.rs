@@ -61043,6 +61043,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_bpf_perf_keyring()?;
+
+    #[inline(never)]
+    fn self_test_bpf_perf_keyring() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // BPF / perf_event_open / keyring / userfaultfd / memfd / pidfd /
     // process_vm — input validation plus principled errno.
     {
@@ -62778,6 +62783,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // contract from the function header — see the doc comment
         // above sys_process_mrelease for the Linux source citation.
         serial_println!("[syscall/linux]   process_mrelease terminal EINVAL (batch 496): OK");
+    }
+        Ok(())
     }
 
     // Batch 113: fcntl(F_GETLK / F_SETLK / F_SETLKW) and OFD

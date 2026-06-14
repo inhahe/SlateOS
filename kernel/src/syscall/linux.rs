@@ -72701,6 +72701,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_validate_sockaddr_out()?;
+
+    #[inline(never)]
+    fn self_test_validate_sockaddr_out() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // Batch 465: validate_sockaddr_out — accept / accept4 / recvfrom
     // honour Linux's `if (upeer_sockaddr / addr) { move_addr_to_user
     // }` skip.  When the sockaddr pointer is NULL the entire move
@@ -72846,6 +72851,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   accept/accept4/recvfrom sockaddr-out skip on NULL addr (Linux do_accept / __sys_recvfrom: `if (addr) move_addr_to_user`; NULL_sa skips ulen access, valid_sa + NULL_ulen → EFAULT not EINVAL; getsockname/getpeername unaffected — no skip): OK"
         );
+    }
+        Ok(())
     }
 
     // Batch 435: bind / connect — fd lookup gates BEFORE pointer

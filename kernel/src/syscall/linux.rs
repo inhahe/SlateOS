@@ -50412,6 +50412,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_fcntl_dupfd_query()?;
+
+    #[inline(never)]
+    fn self_test_fcntl_dupfd_query() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // Batch 94: fcntl(F_DUPFD_QUERY = 1027) — Linux 6.10+ query of
     // whether two fds refer to the same open file description.
     // io_uring fd-table validation, Tracy / VTune introspection,
@@ -50464,6 +50469,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+    }
+        Ok(())
     }
 
     // Batch 95: ioctl(FIOCLEX = 0x5451) / ioctl(FIONCLEX = 0x5450).

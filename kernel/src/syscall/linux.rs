@@ -51547,7 +51547,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "[syscall/linux]   setpgid existence + gate order: OK"
         );
     }
+        Ok(())
+    }
 
+    self_test_priority_dispatch()?;
+
+    #[inline(never)]
+    fn self_test_priority_dispatch() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // Priority dispatch validation (batch 48):
     //   - getpriority(PRIO_PROCESS, 0) returns 20 (= 20 - nice with
     //     nice=0), the Linux kernel-ABI return convention.

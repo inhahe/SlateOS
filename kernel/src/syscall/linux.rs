@@ -9040,6 +9040,20 @@ const fn securebits_change_allowed(cur: u32, new_val: u32) -> bool {
     (new_val & locked_flag_mask) == (cur & locked_flag_mask)
 }
 
+/// Returns `true` if `PR_CAP_AMBIENT_RAISE` may add a capability to the
+/// ambient set given the caller's current `securebits`.  Linux's
+/// `PR_CAP_AMBIENT_RAISE` (kernel/sys.c) returns `-EPERM` when
+/// `SECURE_NO_CAP_AMBIENT_RAISE` (bit 6) is set — a hardened process can
+/// permanently block ambient-cap escalation.  (Linux also requires the cap
+/// to be in both the permitted and inheritable sets; we do not model those,
+/// so every process effectively holds all caps and the securebit is the only
+/// gate we can honour — and now that `PR_SET_SECUREBITS` stores it, we do.)
+///
+/// Pure function so the gate is unit-testable without a caller PCB.
+const fn ambient_raise_allowed(securebits: u32) -> bool {
+    securebits & pcb::LINUX_SECBIT_NO_CAP_AMBIENT_RAISE == 0
+}
+
 fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
     // Linux signature (kernel/sys.c):
     //   SYSCALL_DEFINE5(prctl, int, option,
@@ -10148,10 +10162,13 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
         //
         // Our stance: we have no capability enforcement, so every
         // process effectively has all caps in both permitted and
-        // inheritable.  RAISE succeeds.  We do not yet model
-        // securebits either, so the SECURE_NO_CAP_AMBIENT_RAISE
-        // check is a no-op — track in todo.txt for when securebits
-        // land.
+        // inheritable.  But securebits ARE now modelled and stored
+        // per-PCB (PR_SET_SECUREBITS), so RAISE honours the
+        // `SECURE_NO_CAP_AMBIENT_RAISE` gate: it returns EPERM when
+        // that bit is set in the caller's securebits (see the pure
+        // `ambient_raise_allowed`).  Kernel context (no PCB) has no
+        // securebits, so the bit is never set there and RAISE
+        // succeeds.
         //
         // The ambient set is round-tripped per-PCB so probes work
         // (IS_SET after RAISE returns 1) and exec preserves the
@@ -10183,6 +10200,10 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
                     }
                     let cap = args.arg2 as u32;
                     if let Some(pid) = caller_pid() {
+                        // Linux: EPERM if SECURE_NO_CAP_AMBIENT_RAISE is set.
+                        if !ambient_raise_allowed(pcb::get_securebits(pid).unwrap_or(0)) {
+                            return linux_err(errno::EPERM);
+                        }
                         let _ = pcb::raise_ambient_cap(pid, cap);
                     }
                     SyscallResult::ok(0)
@@ -51857,6 +51878,25 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             assert_eq!(pcb::raise_ambient_cap(test_pid, 0), None);
             assert_eq!(pcb::lower_ambient_cap(test_pid, 0), None);
             assert_eq!(pcb::is_ambient_cap_set(test_pid, 0), None);
+
+            // PR_CAP_AMBIENT_RAISE securebits gate (Linux kernel/sys.c):
+            // EPERM iff SECURE_NO_CAP_AMBIENT_RAISE is set.  Tested via the
+            // pure helper — the EPERM path is unreachable from this
+            // kernel-context self-test (no caller PCB to set the bit).
+            assert!(ambient_raise_allowed(0));
+            assert!(ambient_raise_allowed(pcb::LINUX_SECBIT_KEEP_CAPS));
+            assert!(ambient_raise_allowed(pcb::LINUX_SECBIT_NOROOT));
+            assert!(!ambient_raise_allowed(pcb::LINUX_SECBIT_NO_CAP_AMBIENT_RAISE));
+            // The gate keys only on bit 6, regardless of unrelated bits.
+            assert!(!ambient_raise_allowed(
+                pcb::LINUX_SECBIT_NO_CAP_AMBIENT_RAISE
+                    | pcb::LINUX_SECBIT_NOROOT
+                    | pcb::LINUX_SECBIT_KEEP_CAPS
+            ));
+            serial_println!(
+                "[syscall/linux]   PR_CAP_AMBIENT_RAISE securebits gate \
+                 (Linux: EPERM when SECURE_NO_CAP_AMBIENT_RAISE set): OK"
+            );
         }
 
         // Batch 83: PR_GET_SECUREBITS (27) / PR_SET_SECUREBITS (28)

@@ -14051,10 +14051,18 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##           inheritable — when the capability framework
 ##           lands, this surface MUST verify the cap is in
 ##           both sets and return EPERM otherwise.
-##        2. We do not model securebits, so we do not
-##           enforce SECURE_NO_CAP_AMBIENT_RAISE.  When
-##           securebits land (likely paired with PR_GET/SET
-##           SECUREBITS), this check must gate RAISE too.
+##        2. [RESOLVED 2026-06-14] SECURE_NO_CAP_AMBIENT_RAISE
+##           is now enforced.  Securebits landed (batch 83,
+##           PR_GET/SET_SECUREBITS, stored per-PCB), so
+##           PR_CAP_AMBIENT_RAISE now returns EPERM when bit 6
+##           (SECBIT_NO_CAP_AMBIENT_RAISE) is set in the
+##           caller's securebits — via the pure, unit-tested
+##           ambient_raise_allowed(securebits) helper
+##           (mirrors kernel/sys.c PR_CAP_AMBIENT_RAISE).
+##           The permitted/inheritable half of Linux's RAISE
+##           check (limitation 1) is still not enforced because
+##           we don't model those sets; the securebit is the
+##           only gate we can honour and now do.
 ##        3. The stored ambient mask has no effect on
 ##           anything yet — it's pure round-trip.  When
 ##           capability enforcement lands, every privilege-

@@ -417,6 +417,17 @@ impl DeadlineScheduler {
         false
     }
 
+    /// Remove a task by id regardless of priority level.
+    ///
+    /// The deadline scheduler keys its run queue by absolute deadline + id, so
+    /// `dequeue` already locates the task purely by id and ignores the
+    /// `_priority` argument.  This wrapper satisfies the
+    /// `SchedulerBackend::dequeue_any` dispatch used by the anti-starvation
+    /// booster; it is a priority-agnostic `dequeue`.
+    pub fn dequeue_any(&mut self, id: TaskId) -> bool {
+        self.dequeue(id, 0)
+    }
+
     /// Handle a timer tick.
     ///
     /// For deadline tasks: decrements budget and throttles if exhausted.

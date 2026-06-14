@@ -1982,13 +1982,48 @@ fn check_starvation() {
     }
 
     // Re-enqueue starved tasks at priority 0.
+    //
+    // Two correctness points here, both guarding against duplicate run-queue
+    // entries (the same task ID appearing twice in the priority-0 queue):
+    //
+    // 1. We use `dequeue_any` instead of `dequeue(id, old_prio, cpu)`. A task
+    //    that was already boosted on a previous pass physically sits in
+    //    priority-queue 0, but `old_prio = effective_priority()` reports its
+    //    BASE priority, so a level-targeted dequeue would scan the wrong queue,
+    //    fail to remove it, and the following enqueue would duplicate the
+    //    entry. `dequeue_any` scans every level and removes ALL occurrences of
+    //    the id, so the subsequent single enqueue leaves exactly one queue-0
+    //    entry.
+    //
+    // 2. We reset each boosted task's `ready_since_tick` to "now". Without this
+    //    a task boosted on this pass but not yet dispatched would still satisfy
+    //    `waited >= threshold` on the very next check_starvation() pass and be
+    //    boosted again. The reset gives it a fresh starvation clock so it is
+    //    only re-boosted if it genuinely starves at priority 0 too.
+    //
+    // Together these close the anti-starvation duplicate-enqueue bug (the W2
+    // bench_pick_next-livelock amplifier).
+    let now_boost = crate::apic::tick_count();
+    let mut relock = SCHED.try_lock();
     for i in 0..boost_count {
         #[allow(clippy::indexing_slicing)]
-        let (id, old_prio, cpu) = boost_list[i];
-        PER_CPU_SCHED.dequeue(id, old_prio, cpu);
+        let (id, _old_prio, cpu) = boost_list[i];
+        // Remove every existing copy of this task from all priority levels,
+        // then place a single entry at priority 0.
+        PER_CPU_SCHED.dequeue_any(id, cpu);
         PER_CPU_SCHED.enqueue(id, 0, cpu);
         STARVATION_BOOSTS.fetch_add(1, Ordering::Relaxed);
+        // Reset the starvation clock so the task is not re-boosted before it
+        // has had a chance to be dispatched from priority 0. If we could not
+        // re-acquire the scheduler lock this pass, skip the reset: the worst
+        // case is a redundant boost next pass, which `dequeue_any` makes safe.
+        if let Some(state) = relock.as_mut() {
+            if let Some(task) = state.tasks.get_mut(&id) {
+                task.ready_since_tick = now_boost;
+            }
+        }
     }
+    drop(relock);
 
     serial_println!(
         "[sched] Anti-starvation: boosted {} task{} to priority 0",

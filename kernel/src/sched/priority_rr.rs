@@ -374,6 +374,44 @@ impl PriorityRoundRobin {
         false
     }
 
+    /// Remove a task from whatever priority queue(s) it currently sits in,
+    /// scanning every level.  Returns `true` if at least one entry was
+    /// removed.
+    ///
+    /// Unlike [`dequeue`], the caller does not need to know the task's
+    /// current queue level.  This is required by the anti-starvation
+    /// booster, which moves a task to priority 0 without changing its
+    /// `priority` field: a subsequent `dequeue(id, base_priority)` would
+    /// scan the wrong level, fail to find the task (it is in queue 0), and
+    /// leave a stale entry behind while a fresh enqueue created a duplicate.
+    /// `dequeue_any` removes the task wherever it is and also sweeps up any
+    /// pre-existing duplicate entries, keeping the run queue consistent.
+    pub fn dequeue_any(&mut self, id: TaskId) -> bool {
+        let mut removed = false;
+        for level in 0..NUM_PRIORITIES {
+            let Some(queue) = self.queues.get_mut(level) else {
+                continue;
+            };
+            // Remove *all* occurrences at this level (defensive: clears any
+            // duplicates that an earlier wrong-level enqueue may have left).
+            let mut found_here = false;
+            while let Some(pos) = queue.iter().position(|&tid| tid == id) {
+                queue.remove(pos);
+                found_here = true;
+            }
+            if found_here {
+                removed = true;
+                if queue.is_empty() {
+                    #[allow(clippy::cast_possible_truncation)]
+                    {
+                        self.bitmap &= !(1u32 << (level as u32));
+                    }
+                }
+            }
+        }
+        removed
+    }
+
     /// Handle a timer tick for the current task.
     ///
     /// Decrements the remaining time slice.  Returns `true` if the
@@ -650,6 +688,19 @@ impl PerCpuScheduler {
         let target = cpu.min(n.saturating_sub(1));
         self.queues.get(target)
             .is_some_and(|q| q.lock().dequeue(id, priority))
+    }
+
+    /// Dequeue a task from the specified CPU's run queue regardless of which
+    /// priority level it currently sits in.  See
+    /// [`PriorityQueue::dequeue_any`] — used by the anti-starvation booster,
+    /// which must remove a task whose live queue level no longer matches its
+    /// base `priority` field.
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn dequeue_any(&self, id: super::task::TaskId, cpu: usize) -> bool {
+        let n = self.num_cpus.load(Ordering::Relaxed);
+        let target = cpu.min(n.saturating_sub(1));
+        self.queues.get(target)
+            .is_some_and(|q| q.lock().dequeue_any(id))
     }
 
     /// Handle a timer tick for the given CPU.

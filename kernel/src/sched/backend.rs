@@ -196,6 +196,23 @@ impl SchedulerBackend {
         }
     }
 
+    /// Remove a task from the run queue regardless of which priority level it
+    /// currently sits in, sweeping up any duplicate entries.
+    ///
+    /// Used by the anti-starvation booster, which relocates a task to priority
+    /// 0 without updating its base `priority` field — so a level-targeted
+    /// `dequeue(id, base_priority)` would scan the wrong level and leave the
+    /// task (and any stale duplicate) behind.  See
+    /// [`PriorityRoundRobin::dequeue_any`].
+    #[inline]
+    pub fn dequeue_any(&mut self, id: TaskId) -> bool {
+        match self {
+            Self::PriorityRR(s) => s.dequeue_any(id),
+            Self::Eevdf(s) => s.dequeue_any(id),
+            Self::Deadline(s) => s.dequeue_any(id),
+        }
+    }
+
     /// Timer tick.  Returns `true` if the current task's time slice expired.
     #[inline]
     pub fn tick(&mut self) -> bool {

@@ -113,6 +113,34 @@ normal operation.  Early-benchmark perf tracking still works:
 `boot-test.sh --bench` prints the captured numbers up to the hang even on
 timeout.
 
+**Update 2026-06-14 (anti-starvation duplicate-enqueue fix — ruled OUT as the
+root cause):** While investigating, I found and fixed a genuine
+scheduler-correctness bug in the anti-starvation booster
+(`check_starvation()` in `kernel/src/sched/mod.rs`): it boosted a starved
+Ready task by `PER_CPU_SCHED.dequeue(id, effective_priority(), cpu)` followed
+by `enqueue(id, 0, cpu)`.  Because `effective_priority()` returns the task's
+*base* priority while an already-boosted task physically sits in priority
+queue 0, the level-targeted dequeue scanned the wrong queue, removed nothing,
+and the enqueue created a **duplicate** run-queue entry — the same task id
+present twice in queue 0.  Re-boosting on every ~1 s pass (the booster never
+reset `ready_since_tick`) multiplied the duplicates without bound.  Fix:
+(a) added `dequeue_any(id)` to `PriorityRoundRobin`/EEVDF/Deadline +
+`SchedulerBackend`/`PerCpuScheduler`, which removes *all* copies of a task at
+*any* level and clears the bitmap bit when a level empties; the booster now
+`dequeue_any` then single-`enqueue` at 0, leaving exactly one entry; and
+(b) the booster now resets each boosted task's `ready_since_tick` so it is not
+re-boosted before being dispatched.  This is a real, system-wide fix (the
+corruption could happen to any starved task, not just benchmark tasks).
+**However, it did NOT resolve W2:** with the fix in place, `--bench` still
+stalls at the same point (last printed line `heap_raw_alloc_free_4096`, no
+`sched_pick_next_4tasks`, `BENCH_OK` never arrives), boot remains clean (0
+self-test failures, 0 sleep-queue spin warnings), and the booster still fires
+(11 boost lines observed — now without duplicating entries).  So the duplicate
+enqueue was an *amplifier* of the thrash, not the trigger: the benchmark nop
+helpers still genuinely starve >2 s at priority 0 without running to
+`task_exit`.  The deeper root trigger (why four `yield_now()`-only tasks at
+priorities 8/12/16/20 never drain) is still uncharacterised.
+
 **Next step:** Add finer-grained serial markers inside `bench_pick_next`
 (before/after spawn, before/after the `run()` loop, per-iteration sampling)
 and instrument the scheduler's pick/yield path to capture *which* task is

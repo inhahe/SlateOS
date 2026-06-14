@@ -39506,6 +39506,142 @@ fn self_test_native_translation() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+/// TD4 extraction: arch_prctl XSAVE dynamic-permission interface
+/// (self_test group 9d): ARCH_GET_XCOMP_SUPP (0x1021), ARCH_GET_XCOMP_PERM
+/// (0x1022), ARCH_REQ_XCOMP_PERM (0x1023). SUPP/PERM write the CPU's
+/// advertised xcr0_supported mask; REQ_PERM accepts advertised bits and
+/// rejects unadvertised / out-of-range bits with EINVAL. Self-contained.
+/// See [`self_test_errno_mapping`] for the TD4 rationale.
+#[inline(never)]
+fn self_test_arch_prctl_xcomp() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+
+    const ARCH_GET_XCOMP_SUPP_CODE: u64 = 0x1021;
+    const ARCH_GET_XCOMP_PERM_CODE: u64 = 0x1022;
+    const ARCH_REQ_XCOMP_PERM_CODE: u64 = 0x1023;
+
+    // Sanity: constants compile to the expected magic numbers
+    // (no endianness convention here — these are just opcode
+    // IDs in the 0x10xx arch_prctl space).
+    const _: () = assert!(ARCH_GET_XCOMP_SUPP_CODE == 0x1021);
+    const _: () = assert!(ARCH_GET_XCOMP_PERM_CODE == 0x1022);
+    const _: () = assert!(ARCH_REQ_XCOMP_PERM_CODE == 0x1023);
+
+    // SUPP and PERM both write the supported XSAVE-state mask.
+    // The mask depends on host CPU features — on the default
+    // QEMU `qemu64` CPU model XSAVE is not advertised at all,
+    // so the kernel correctly returns 0 (same as Linux on a
+    // no-XSAVE CPU).  On real Intel/AMD hardware at least bits
+    // 0 (x87) and 1 (SSE) will be set.  We accept both.
+    let mut got_supp: u64 = 0;
+    let a = SyscallArgs {
+        arg0: ARCH_GET_XCOMP_SUPP_CODE,
+        arg1: (&raw mut got_supp).addr() as u64,
+        arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::ARCH_PRCTL, &a);
+    if r.value != 0 {
+        serial_println!(
+            "[syscall/linux]   FAIL: arch_prctl(ARCH_GET_XCOMP_SUPP) -> {} (expected 0)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+    // Cross-check: the value returned must match what the CPU
+    // module advertises in xcr0_supported (or 0 if the feature
+    // table is not yet populated).
+    let expected_supp: u64 = crate::cpu::features()
+        .map_or(0, |f| f.xcr0_supported);
+    if got_supp != expected_supp {
+        serial_println!(
+            "[syscall/linux]   FAIL: ARCH_GET_XCOMP_SUPP {:#x} != cpu::features().xcr0_supported {:#x}",
+            got_supp, expected_supp,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    let mut got_perm: u64 = 0;
+    let a = SyscallArgs {
+        arg0: ARCH_GET_XCOMP_PERM_CODE,
+        arg1: (&raw mut got_perm).addr() as u64,
+        arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::ARCH_PRCTL, &a);
+    if r.value != 0 {
+        serial_println!(
+            "[syscall/linux]   FAIL: arch_prctl(ARCH_GET_XCOMP_PERM) -> {} (expected 0)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+    // We don't withhold any state component, so PERM mirrors SUPP.
+    if got_perm != got_supp {
+        serial_println!(
+            "[syscall/linux]   FAIL: ARCH_GET_XCOMP_PERM {:#x} != SUPP {:#x}",
+            got_perm, got_supp,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // NULL destination -> -EFAULT for both SUPP and PERM.
+    for code in [ARCH_GET_XCOMP_SUPP_CODE, ARCH_GET_XCOMP_PERM_CODE] {
+        let a = SyscallArgs {
+            arg0: code, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::ARCH_PRCTL, &a);
+        if r.value != -i64::from(errno::EFAULT) {
+            serial_println!(
+                "[syscall/linux]   FAIL: arch_prctl({:#x}, NULL) -> {} (expected -EFAULT)",
+                code, r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // ARCH_REQ_XCOMP_PERM behaviour depends on what the CPU
+    // advertises.  For every bit advertised in the supported
+    // mask we expect 0 (already permitted); for every bit NOT
+    // advertised (within the 0..63 valid range) we expect
+    // -EINVAL.  Bit indices >= 63 are always -EINVAL.
+    for b in 0u64..63 {
+        let a = SyscallArgs {
+            arg0: ARCH_REQ_XCOMP_PERM_CODE, arg1: b,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::ARCH_PRCTL, &a);
+        let want = if got_supp & (1u64 << b) != 0 {
+            0_i64
+        } else {
+            -i64::from(errno::EINVAL)
+        };
+        if r.value != want {
+            serial_println!(
+                "[syscall/linux]   FAIL: arch_prctl(ARCH_REQ_XCOMP_PERM, {}) -> {} (expected {})",
+                b, r.value, want,
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // ARCH_REQ_XCOMP_PERM for bit indices >= 63 -> -EINVAL
+    // (cannot fit in the XCR0 u64 mask).
+    for bad_bit in [63u64, 64, 100, u64::MAX] {
+        let a = SyscallArgs {
+            arg0: ARCH_REQ_XCOMP_PERM_CODE, arg1: bad_bit,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::ARCH_PRCTL, &a);
+        if r.value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: arch_prctl(ARCH_REQ_XCOMP_PERM, {}) -> {} (expected -EINVAL)",
+                bad_bit, r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    Ok(())
+}
+
 /// TD4 extraction: arch_prctl ARCH_GET_CPUID / ARCH_SET_CPUID emulation
 /// (self_test group 9c). GET always returns 1; SET accepts 1 (idempotent),
 /// rejects 0 with ENODEV, other values with EINVAL — as a CPU without
@@ -40243,134 +40379,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // pessimised their feature mask.  We surface the CPU's
     // advertised xcr0_supported mask (CPUID leaf 0xD subleaf 0)
     // and reject bit-index requests for components the CPU does
-    // not advertise — exactly what Linux returns on a CPU without
-    // AMX (the only mainstream component currently gated behind
-    // dynamic permission).
-    {
-        const ARCH_GET_XCOMP_SUPP_CODE: u64 = 0x1021;
-        const ARCH_GET_XCOMP_PERM_CODE: u64 = 0x1022;
-        const ARCH_REQ_XCOMP_PERM_CODE: u64 = 0x1023;
-
-        // Sanity: constants compile to the expected magic numbers
-        // (no endianness convention here — these are just opcode
-        // IDs in the 0x10xx arch_prctl space).
-        const _: () = assert!(ARCH_GET_XCOMP_SUPP_CODE == 0x1021);
-        const _: () = assert!(ARCH_GET_XCOMP_PERM_CODE == 0x1022);
-        const _: () = assert!(ARCH_REQ_XCOMP_PERM_CODE == 0x1023);
-
-        // SUPP and PERM both write the supported XSAVE-state mask.
-        // The mask depends on host CPU features — on the default
-        // QEMU `qemu64` CPU model XSAVE is not advertised at all,
-        // so the kernel correctly returns 0 (same as Linux on a
-        // no-XSAVE CPU).  On real Intel/AMD hardware at least bits
-        // 0 (x87) and 1 (SSE) will be set.  We accept both.
-        let mut got_supp: u64 = 0;
-        let a = SyscallArgs {
-            arg0: ARCH_GET_XCOMP_SUPP_CODE,
-            arg1: (&raw mut got_supp).addr() as u64,
-            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::ARCH_PRCTL, &a);
-        if r.value != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: arch_prctl(ARCH_GET_XCOMP_SUPP) -> {} (expected 0)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-        // Cross-check: the value returned must match what the CPU
-        // module advertises in xcr0_supported (or 0 if the feature
-        // table is not yet populated).
-        let expected_supp: u64 = crate::cpu::features()
-            .map_or(0, |f| f.xcr0_supported);
-        if got_supp != expected_supp {
-            serial_println!(
-                "[syscall/linux]   FAIL: ARCH_GET_XCOMP_SUPP {:#x} != cpu::features().xcr0_supported {:#x}",
-                got_supp, expected_supp,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        let mut got_perm: u64 = 0;
-        let a = SyscallArgs {
-            arg0: ARCH_GET_XCOMP_PERM_CODE,
-            arg1: (&raw mut got_perm).addr() as u64,
-            arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::ARCH_PRCTL, &a);
-        if r.value != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: arch_prctl(ARCH_GET_XCOMP_PERM) -> {} (expected 0)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-        // We don't withhold any state component, so PERM mirrors SUPP.
-        if got_perm != got_supp {
-            serial_println!(
-                "[syscall/linux]   FAIL: ARCH_GET_XCOMP_PERM {:#x} != SUPP {:#x}",
-                got_perm, got_supp,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // NULL destination -> -EFAULT for both SUPP and PERM.
-        for code in [ARCH_GET_XCOMP_SUPP_CODE, ARCH_GET_XCOMP_PERM_CODE] {
-            let a = SyscallArgs {
-                arg0: code, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-            };
-            let r = dispatch_linux(nr::ARCH_PRCTL, &a);
-            if r.value != -i64::from(errno::EFAULT) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: arch_prctl({:#x}, NULL) -> {} (expected -EFAULT)",
-                    code, r.value,
-                );
-                return Err(KernelError::InternalError);
-            }
-        }
-
-        // ARCH_REQ_XCOMP_PERM behaviour depends on what the CPU
-        // advertises.  For every bit advertised in the supported
-        // mask we expect 0 (already permitted); for every bit NOT
-        // advertised (within the 0..63 valid range) we expect
-        // -EINVAL.  Bit indices >= 63 are always -EINVAL.
-        for b in 0u64..63 {
-            let a = SyscallArgs {
-                arg0: ARCH_REQ_XCOMP_PERM_CODE, arg1: b,
-                arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-            };
-            let r = dispatch_linux(nr::ARCH_PRCTL, &a);
-            let want = if got_supp & (1u64 << b) != 0 {
-                0_i64
-            } else {
-                -i64::from(errno::EINVAL)
-            };
-            if r.value != want {
-                serial_println!(
-                    "[syscall/linux]   FAIL: arch_prctl(ARCH_REQ_XCOMP_PERM, {}) -> {} (expected {})",
-                    b, r.value, want,
-                );
-                return Err(KernelError::InternalError);
-            }
-        }
-
-        // ARCH_REQ_XCOMP_PERM for bit indices >= 63 -> -EINVAL
-        // (cannot fit in the XCR0 u64 mask).
-        for bad_bit in [63u64, 64, 100, u64::MAX] {
-            let a = SyscallArgs {
-                arg0: ARCH_REQ_XCOMP_PERM_CODE, arg1: bad_bit,
-                arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-            };
-            let r = dispatch_linux(nr::ARCH_PRCTL, &a);
-            if r.value != -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: arch_prctl(ARCH_REQ_XCOMP_PERM, {}) -> {} (expected -EINVAL)",
-                    bad_bit, r.value,
-                );
-                return Err(KernelError::InternalError);
-            }
-        }
-    }
+    // not advertise.  Extracted to self_test_arch_prctl_xcomp (TD4).
+    self_test_arch_prctl_xcomp()?;
 
     // (9e) Batch 101: get_mempolicy returns a single-node UMA answer
     // instead of -ENOSYS.  libnuma, jemalloc, tcmalloc, and glibc's

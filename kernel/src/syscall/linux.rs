@@ -75341,6 +75341,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_flock_getdents_waitid()?;
+
+    #[inline(never)]
+    fn self_test_flock_getdents_waitid() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // -----------------------------------------------------------------
     // flock / getdents / getdents64 / waitid / preadv* / pwritev*
     // -----------------------------------------------------------------
@@ -75732,6 +75737,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: pwritev2 valid not EBADF (kernel ctx)");
             return Err(KernelError::InternalError);
         }
+    }
+        Ok(())
     }
 
     // -----------------------------------------------------------------

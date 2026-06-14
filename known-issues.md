@@ -1764,6 +1764,17 @@ iteration); `cargo clippy -p kernel` is back to **0 deny-level errors**, build +
 QEMU boot test green. Lesson: the deny-level gate is only green between sweeps —
 it needs to actually run in CI to stay zeroed (no CI exists yet).
 
+**Sweep extended to all default-members (2026-06-14):** since the kernel was
+not the only crate that could regress, `cargo clippy` was run on the other two
+default-member crates. `posix` had **1** deny-level regression —
+`too_many_arguments` (8/7) at `epoll.rs:2150`, `translate_kernel_event`,
+introduced when the `is_dir` param was added for IN_ISDIR (TD17). Fixed with a
+justified `#[allow(clippy::too_many_arguments)]` (commit `8acddca0c`); the 8
+params are the distinct fields of one kernel watch event and a struct would only
+add indirection to a pure host-tested translator. `toolchain/stubs`
+(`slateos-stubs`) was already clean. All three default-members now report **0
+deny-level errors**; posix's 19972 host tests still pass.
+
 **RESOLUTION (2026-06-10):** `cargo clippy -p kernel` now reports
 **0 deny-level errors** (down from 451) and ~17,297 warn-level warnings.
 The deny-level `clippy::all` gate is green and can be used as CI.  The

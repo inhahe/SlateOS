@@ -39506,6 +39506,111 @@ fn self_test_native_translation() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+/// TD4 extraction: arch_prctl unknown-code reject + ARCH_SET_FS address
+/// validation matrix (self_test groups 9–9a). The ARCH_SET_FS tests clobber
+/// IA32_FS_BASE, so the original value is sampled and restored on every exit
+/// path. Self-contained — `saved_fs` and the MSR consts never escape. See
+/// [`self_test_errno_mapping`] for the TD4 rationale.
+#[inline(never)]
+fn self_test_arch_prctl_set_fs() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+
+    // (9) arch_prctl with an unknown code → -EINVAL.
+    let bad_prctl = SyscallArgs { arg0: 0x42, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+    let r = dispatch_linux(nr::ARCH_PRCTL, &bad_prctl);
+    if r.value != -(errno::EINVAL as i64) {
+        serial_println!(
+            "[syscall/linux]   FAIL: arch_prctl(0x42) → {} (expected -EINVAL)", r.value
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // (9a) arch_prctl(ARCH_SET_FS, addr) validates the address against the
+    // x86_64 user-space ceiling (1 << 47).  We test the three rejection
+    // boundaries (exactly at, kernel half, top of 64-bit space) AND a
+    // valid mid-range user address.  Because a successful ARCH_SET_FS
+    // call clobbers the IA32_FS_BASE MSR — which the kernel may rely on
+    // for FS-relative kernel data — we read the current FS base before
+    // the test and restore it after.  This is the same RDMSR/WRMSR pair
+    // used by sys_arch_prctl itself.
+    const ARCH_SET_FS_CODE: u64 = 0x1002;
+    const IA32_FS_BASE_MSR: u32 = 0xC000_0100;
+    // SAFETY: RDMSR on IA32_FS_BASE is side-effect-free and the MSR is
+    // architecturally defined on every x86_64 CPU we boot on.
+    let saved_fs = unsafe { crate::cpu::rdmsr(IA32_FS_BASE_MSR) };
+
+    // Address exactly at the boundary: must be rejected with -EPERM.
+    let set_fs_boundary = SyscallArgs {
+        arg0: ARCH_SET_FS_CODE, arg1: 1u64 << 47, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::ARCH_PRCTL, &set_fs_boundary);
+    if r.value != -(errno::EPERM as i64) {
+        // SAFETY: restoring the value we read above.
+        unsafe { crate::cpu::wrmsr(IA32_FS_BASE_MSR, saved_fs); }
+        serial_println!(
+            "[syscall/linux]   FAIL: arch_prctl(ARCH_SET_FS, 1<<47) → {} (expected -EPERM)",
+            r.value
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // High-canonical kernel address: must be rejected.
+    let set_fs_kernel = SyscallArgs {
+        arg0: ARCH_SET_FS_CODE, arg1: 0xffff_ffff_8000_0000, arg2: 0,
+        arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::ARCH_PRCTL, &set_fs_kernel);
+    if r.value != -(errno::EPERM as i64) {
+        // SAFETY: restoring saved value.
+        unsafe { crate::cpu::wrmsr(IA32_FS_BASE_MSR, saved_fs); }
+        serial_println!(
+            "[syscall/linux]   FAIL: arch_prctl(ARCH_SET_FS, kernel-addr) → {} (expected -EPERM)",
+            r.value
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Top of the 64-bit address space (non-canonical): must be rejected
+    // before reaching WRMSR (where it would #GP).
+    let set_fs_top = SyscallArgs {
+        arg0: ARCH_SET_FS_CODE, arg1: u64::MAX, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::ARCH_PRCTL, &set_fs_top);
+    if r.value != -(errno::EPERM as i64) {
+        // SAFETY: restoring saved value.
+        unsafe { crate::cpu::wrmsr(IA32_FS_BASE_MSR, saved_fs); }
+        serial_println!(
+            "[syscall/linux]   FAIL: arch_prctl(ARCH_SET_FS, u64::MAX) → {} (expected -EPERM)",
+            r.value
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Just below the boundary: valid canonical user address, must succeed.
+    let set_fs_just_below = SyscallArgs {
+        arg0: ARCH_SET_FS_CODE, arg1: (1u64 << 47) - 0x1000, arg2: 0,
+        arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::ARCH_PRCTL, &set_fs_just_below);
+    if r.value != 0 {
+        // SAFETY: restoring saved value.
+        unsafe { crate::cpu::wrmsr(IA32_FS_BASE_MSR, saved_fs); }
+        serial_println!(
+            "[syscall/linux]   FAIL: arch_prctl(ARCH_SET_FS, (1<<47)-0x1000) → {} (expected 0)",
+            r.value
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Restore the original FS base before continuing the rest of the
+    // self-test sequence — anything FS-relative the kernel touches
+    // between here and a real context switch would otherwise read
+    // garbage.
+    // SAFETY: writing back the exact value we sampled above.
+    unsafe { crate::cpu::wrmsr(IA32_FS_BASE_MSR, saved_fs); }
+    Ok(())
+}
+
 /// TD4 extraction: translate_open_flags exhaustive cases (self_test group
 /// 7d). Self-contained bare block. See [`self_test_errno_mapping`] for the
 /// TD4 rationale.
@@ -39899,99 +40004,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // (8)-(8b) clock_gettime clockid validation.
     self_test_clock_gettime_clockids()?;
 
-    // (9) arch_prctl with an unknown code → -EINVAL.
-    let bad_prctl = SyscallArgs { arg0: 0x42, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-    let r = dispatch_linux(nr::ARCH_PRCTL, &bad_prctl);
-    if r.value != -(errno::EINVAL as i64) {
-        serial_println!(
-            "[syscall/linux]   FAIL: arch_prctl(0x42) → {} (expected -EINVAL)", r.value
-        );
-        return Err(KernelError::InternalError);
-    }
-
-    // (9a) arch_prctl(ARCH_SET_FS, addr) validates the address against the
-    // x86_64 user-space ceiling (1 << 47).  We test the three rejection
-    // boundaries (exactly at, kernel half, top of 64-bit space) AND a
-    // valid mid-range user address.  Because a successful ARCH_SET_FS
-    // call clobbers the IA32_FS_BASE MSR — which the kernel may rely on
-    // for FS-relative kernel data — we read the current FS base before
-    // the test and restore it after.  This is the same RDMSR/WRMSR pair
-    // used by sys_arch_prctl itself.
-    const ARCH_SET_FS_CODE: u64 = 0x1002;
-    const IA32_FS_BASE_MSR: u32 = 0xC000_0100;
-    // SAFETY: RDMSR on IA32_FS_BASE is side-effect-free and the MSR is
-    // architecturally defined on every x86_64 CPU we boot on.
-    let saved_fs = unsafe { crate::cpu::rdmsr(IA32_FS_BASE_MSR) };
-
-    // Address exactly at the boundary: must be rejected with -EPERM.
-    let set_fs_boundary = SyscallArgs {
-        arg0: ARCH_SET_FS_CODE, arg1: 1u64 << 47, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-    };
-    let r = dispatch_linux(nr::ARCH_PRCTL, &set_fs_boundary);
-    if r.value != -(errno::EPERM as i64) {
-        // SAFETY: restoring the value we read above.
-        unsafe { crate::cpu::wrmsr(IA32_FS_BASE_MSR, saved_fs); }
-        serial_println!(
-            "[syscall/linux]   FAIL: arch_prctl(ARCH_SET_FS, 1<<47) → {} (expected -EPERM)",
-            r.value
-        );
-        return Err(KernelError::InternalError);
-    }
-
-    // High-canonical kernel address: must be rejected.
-    let set_fs_kernel = SyscallArgs {
-        arg0: ARCH_SET_FS_CODE, arg1: 0xffff_ffff_8000_0000, arg2: 0,
-        arg3: 0, arg4: 0, arg5: 0,
-    };
-    let r = dispatch_linux(nr::ARCH_PRCTL, &set_fs_kernel);
-    if r.value != -(errno::EPERM as i64) {
-        // SAFETY: restoring saved value.
-        unsafe { crate::cpu::wrmsr(IA32_FS_BASE_MSR, saved_fs); }
-        serial_println!(
-            "[syscall/linux]   FAIL: arch_prctl(ARCH_SET_FS, kernel-addr) → {} (expected -EPERM)",
-            r.value
-        );
-        return Err(KernelError::InternalError);
-    }
-
-    // Top of the 64-bit address space (non-canonical): must be rejected
-    // before reaching WRMSR (where it would #GP).
-    let set_fs_top = SyscallArgs {
-        arg0: ARCH_SET_FS_CODE, arg1: u64::MAX, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-    };
-    let r = dispatch_linux(nr::ARCH_PRCTL, &set_fs_top);
-    if r.value != -(errno::EPERM as i64) {
-        // SAFETY: restoring saved value.
-        unsafe { crate::cpu::wrmsr(IA32_FS_BASE_MSR, saved_fs); }
-        serial_println!(
-            "[syscall/linux]   FAIL: arch_prctl(ARCH_SET_FS, u64::MAX) → {} (expected -EPERM)",
-            r.value
-        );
-        return Err(KernelError::InternalError);
-    }
-
-    // Just below the boundary: valid canonical user address, must succeed.
-    let set_fs_just_below = SyscallArgs {
-        arg0: ARCH_SET_FS_CODE, arg1: (1u64 << 47) - 0x1000, arg2: 0,
-        arg3: 0, arg4: 0, arg5: 0,
-    };
-    let r = dispatch_linux(nr::ARCH_PRCTL, &set_fs_just_below);
-    if r.value != 0 {
-        // SAFETY: restoring saved value.
-        unsafe { crate::cpu::wrmsr(IA32_FS_BASE_MSR, saved_fs); }
-        serial_println!(
-            "[syscall/linux]   FAIL: arch_prctl(ARCH_SET_FS, (1<<47)-0x1000) → {} (expected 0)",
-            r.value
-        );
-        return Err(KernelError::InternalError);
-    }
-
-    // Restore the original FS base before continuing the rest of the
-    // self-test sequence — anything FS-relative the kernel touches
-    // between here and a real context switch would otherwise read
-    // garbage.
-    // SAFETY: writing back the exact value we sampled above.
-    unsafe { crate::cpu::wrmsr(IA32_FS_BASE_MSR, saved_fs); }
+    // (9)-(9a) arch_prctl unknown-code reject + ARCH_SET_FS bounds matrix.
+    self_test_arch_prctl_set_fs()?;
 
     // (9b) arch_prctl(ARCH_SET_GS / ARCH_GET_GS) — newly wired in
     // batch 85.  Mirrors the FS validation matrix exactly except

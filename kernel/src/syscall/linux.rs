@@ -41545,6 +41545,89 @@ fn self_test_move_pages() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+/// TD4 extraction: LinuxTimespec conversion, kernel_error_from_code, and
+/// execve user-marshalling NULL handling (self_test groups 10-12b). Pure
+/// translation helpers with no calling-process requirement. Self-contained.
+/// See [`self_test_errno_mapping`] for the TD4 rationale.
+#[inline(never)]
+fn self_test_timespec_and_marshalling() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+
+    // (10) LinuxTimespec round-trip.
+    let ts = LinuxTimespec { tv_sec: 5, tv_nsec: 123_456_789 };
+    let ns = ts.to_nanos();
+    if ns != 5_123_456_789 {
+        serial_println!("[syscall/linux]   FAIL: timespec→ns {}", ns);
+        return Err(KernelError::InternalError);
+    }
+    let round = LinuxTimespec::from_nanos(ns);
+    if round != ts {
+        serial_println!("[syscall/linux]   FAIL: timespec round-trip");
+        return Err(KernelError::InternalError);
+    }
+
+    // (11) LinuxTimespec rejects malformed values (negative ns, nsec ≥ 1e9).
+    let bad1 = LinuxTimespec { tv_sec: 0, tv_nsec: -1 };
+    let bad2 = LinuxTimespec { tv_sec: 0, tv_nsec: 1_000_000_000 };
+    let bad3 = LinuxTimespec { tv_sec: -1, tv_nsec: 0 };
+    if bad1.to_nanos() != 0 || bad2.to_nanos() != 0 || bad3.to_nanos() != 0 {
+        serial_println!("[syscall/linux]   FAIL: malformed timespec accepted");
+        return Err(KernelError::InternalError);
+    }
+
+    // (12) kernel_error_from_code round-trips.
+    let codes = [
+        (-2_i32, KernelError::NotSupported),
+        (-3, KernelError::InvalidArgument),
+        (-500, KernelError::NotFound),
+        (-505, KernelError::InvalidHandle),
+    ];
+    for (code, expected) in codes {
+        match kernel_error_from_code(code) {
+            Some(e) if e == expected => {}
+            other => {
+                serial_println!(
+                    "[syscall/linux]   FAIL: code {} → {:?}, expected {:?}",
+                    code, other, expected,
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+    }
+    // Unknown codes return None.
+    if kernel_error_from_code(-9999).is_some() {
+        serial_println!("[syscall/linux]   FAIL: unknown code mapped to Some(_)");
+        return Err(KernelError::InternalError);
+    }
+
+    // (12b) execve user-marshalling helpers (NULL handling).
+    //
+    // These do not require a calling process — read_user_cstr returns
+    // EFAULT on a NULL pointer before touching userspace, and
+    // read_user_ptr_array returns an empty array on NULL (which is
+    // how glibc passes argv/envp for a program with no args).
+    match read_user_cstr(0, 16) {
+        Err(e) if e == errno::EFAULT => {}
+        other => {
+            serial_println!(
+                "[syscall/linux]   FAIL: read_user_cstr(NULL) → {:?}", other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    match read_user_ptr_array(0, 16) {
+        Ok(v) if v.is_empty() => {}
+        other => {
+            serial_println!(
+                "[syscall/linux]   FAIL: read_user_ptr_array(NULL) → {:?}",
+                other.as_ref().map(alloc::vec::Vec::len)
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    Ok(())
+}
+
 pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
@@ -41675,78 +41758,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // self_test_move_pages (TD4).
     self_test_move_pages()?;
 
-    // (10) LinuxTimespec round-trip.
-    let ts = LinuxTimespec { tv_sec: 5, tv_nsec: 123_456_789 };
-    let ns = ts.to_nanos();
-    if ns != 5_123_456_789 {
-        serial_println!("[syscall/linux]   FAIL: timespec→ns {}", ns);
-        return Err(KernelError::InternalError);
-    }
-    let round = LinuxTimespec::from_nanos(ns);
-    if round != ts {
-        serial_println!("[syscall/linux]   FAIL: timespec round-trip");
-        return Err(KernelError::InternalError);
-    }
-
-    // (11) LinuxTimespec rejects malformed values (negative ns, nsec ≥ 1e9).
-    let bad1 = LinuxTimespec { tv_sec: 0, tv_nsec: -1 };
-    let bad2 = LinuxTimespec { tv_sec: 0, tv_nsec: 1_000_000_000 };
-    let bad3 = LinuxTimespec { tv_sec: -1, tv_nsec: 0 };
-    if bad1.to_nanos() != 0 || bad2.to_nanos() != 0 || bad3.to_nanos() != 0 {
-        serial_println!("[syscall/linux]   FAIL: malformed timespec accepted");
-        return Err(KernelError::InternalError);
-    }
-
-    // (12) kernel_error_from_code round-trips.
-    let codes = [
-        (-2_i32, KernelError::NotSupported),
-        (-3, KernelError::InvalidArgument),
-        (-500, KernelError::NotFound),
-        (-505, KernelError::InvalidHandle),
-    ];
-    for (code, expected) in codes {
-        match kernel_error_from_code(code) {
-            Some(e) if e == expected => {}
-            other => {
-                serial_println!(
-                    "[syscall/linux]   FAIL: code {} → {:?}, expected {:?}",
-                    code, other, expected,
-                );
-                return Err(KernelError::InternalError);
-            }
-        }
-    }
-    // Unknown codes return None.
-    if kernel_error_from_code(-9999).is_some() {
-        serial_println!("[syscall/linux]   FAIL: unknown code mapped to Some(_)");
-        return Err(KernelError::InternalError);
-    }
-
-    // (12b) execve user-marshalling helpers (NULL handling).
-    //
-    // These do not require a calling process — read_user_cstr returns
-    // EFAULT on a NULL pointer before touching userspace, and
-    // read_user_ptr_array returns an empty array on NULL (which is
-    // how glibc passes argv/envp for a program with no args).
-    match read_user_cstr(0, 16) {
-        Err(e) if e == errno::EFAULT => {}
-        other => {
-            serial_println!(
-                "[syscall/linux]   FAIL: read_user_cstr(NULL) → {:?}", other
-            );
-            return Err(KernelError::InternalError);
-        }
-    }
-    match read_user_ptr_array(0, 16) {
-        Ok(v) if v.is_empty() => {}
-        other => {
-            serial_println!(
-                "[syscall/linux]   FAIL: read_user_ptr_array(NULL) → {:?}",
-                other.as_ref().map(alloc::vec::Vec::len)
-            );
-            return Err(KernelError::InternalError);
-        }
-    }
+    // (10)-(12b) LinuxTimespec round-trip + malformed rejection,
+    // kernel_error_from_code round-trips, and execve user-marshalling
+    // NULL handling (read_user_cstr / read_user_ptr_array).  Extracted
+    // to self_test_timespec_and_marshalling (TD4).
+    self_test_timespec_and_marshalling()?;
 
     // (13) dispatch_linux_with_frame routing.
     //

@@ -59649,6 +59649,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_sendfile_splice_aio()?;
+
+    #[inline(never)]
+    fn self_test_sendfile_splice_aio() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // sendfile / splice / tee / vmsplice / copy_file_range / AIO /
     // io_uring — input validation plus principled errno.
     {
@@ -61034,6 +61039,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   io_uring_register opcode cap = IORING_REGISTER_LAST=26 (batch 499): OK"
         );
+    }
+        Ok(())
     }
 
     // BPF / perf_event_open / keyring / userfaultfd / memfd / pidfd /

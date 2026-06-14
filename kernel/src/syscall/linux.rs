@@ -73290,6 +73290,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_sendmsg_recvmsg()?;
+
+    #[inline(never)]
+    fn self_test_sendmsg_recvmsg() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // Batch 437: sendmsg / recvmsg — fd lookup gates BEFORE msghdr
     // pointer validation, matching Linux's __sys_sendmsg /
     // __sys_recvmsg in net/socket.c (sockfd_lookup_light runs before
@@ -73348,6 +73353,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   sendmsg/recvmsg fd lookup ordered before msghdr validation (Linux: sockfd_lookup_light fires before copy_msghdr_from_user; bad fd → EBADF regardless of msghdr pointer validity): OK"
         );
+    }
+        Ok(())
     }
 
     // Batch 438: sendmmsg / recvmmsg — fd lookup gates BEFORE

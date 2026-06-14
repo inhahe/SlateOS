@@ -72450,6 +72450,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_getsockname_getpeername()?;
+
+    #[inline(never)]
+    fn self_test_getsockname_getpeername() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // Batch 433: getsockname / getpeername — fd lookup gates BEFORE
     // pointer validation, matching Linux's `__sys_getsockname` /
     // `__sys_getpeername` in net/socket.c (sockfd_lookup_light runs
@@ -72554,6 +72559,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   getsockname/getpeername fd lookup ordered before pointer validation (Linux: sockfd_lookup_light fires before move_addr_to_user; bad fd → EBADF regardless of pointer validity): OK"
         );
+    }
+        Ok(())
     }
 
     // Batch 434: accept / accept4 — fd lookup gates BEFORE pointer

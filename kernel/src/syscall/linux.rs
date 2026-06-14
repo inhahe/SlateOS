@@ -41904,6 +41904,121 @@ fn self_test_clone_vfork_parent() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+/// TD4 extraction: kill() ESRCH-before-EINVAL gate-order self-test.
+///
+/// Verifies that target resolution runs before signal-number validation
+/// (Linux `kill_something_info` → `find_vpid` precedes `valid_signal`):
+/// probing the nonexistent PROBE_PID with assorted sig values (0, 65,
+/// u64::MAX, truncating 0x1_0000_0000 / 0x1_0000_0009 / 0x8000_0000, and
+/// the valid 9/15/17/64) always yields -ESRCH and never -EINVAL. Guards
+/// against a regression that would restore the sig-first check.
+/// Self-contained — references only module-level items. See
+/// [`self_test_errno_mapping`] for the TD4 rationale.
+#[inline(never)]
+fn self_test_kill_gate_order() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+    const PROBE_PID: u64 = 0xDEAD_BEEF;
+    // sig=0 (existence probe): not EINVAL.
+    let a = SyscallArgs { arg0: PROBE_PID, arg1: 0,
+        arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+    let v = dispatch_linux(nr::KILL, &a).value;
+    if v == -i64::from(errno::EINVAL) {
+        serial_println!("[syscall/linux]   FAIL: kill sig=0 -> EINVAL");
+        return Err(KernelError::InternalError);
+    }
+    // sig=65 (NSIG+1): expect ESRCH (target resolution wins
+    // over sig validation per Linux gate order).
+    let a = SyscallArgs { arg0: PROBE_PID, arg1: 65,
+        arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+    let v = dispatch_linux(nr::KILL, &a).value;
+    if v != -i64::from(errno::ESRCH) {
+        serial_println!(
+            "[syscall/linux]   FAIL: kill sig=65 want ESRCH, got {}", v
+        );
+        return Err(KernelError::InternalError);
+    }
+    // sig=u64::MAX: expect ESRCH.
+    let a = SyscallArgs { arg0: PROBE_PID, arg1: u64::MAX,
+        arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+    let v = dispatch_linux(nr::KILL, &a).value;
+    if v != -i64::from(errno::ESRCH) {
+        serial_println!(
+            "[syscall/linux]   FAIL: kill sig=u64::MAX want ESRCH, got {}", v
+        );
+        return Err(KernelError::InternalError);
+    }
+    // sig=9 (SIGKILL), 15 (SIGTERM), 17 (SIGCHLD), 64 (NSIG):
+    // none should be rejected by the signal-number gate (the
+    // result is ESRCH from the pid gate, never EINVAL).
+    for sig in [9u64, 15, 17, 64] {
+        let a = SyscallArgs { arg0: PROBE_PID, arg1: sig,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::KILL, &a).value;
+        if v == -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: kill sig={} rejected as EINVAL",
+                sig
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Batch 288/358: sig truncation to int + gate-order.  Linux's
+    // `SYSCALL_DEFINE2(kill, pid_t, pid, int, sig)` truncates
+    // args.arg1 to its low 32 bits, then runs target resolution
+    // before sig validation.
+    //
+    // sig = 0x1_0000_0000 truncates to (int)0 → existence probe
+    // against the (nonexistent) PROBE_PID → ESRCH.  Pre-batch we
+    // held sig as raw u64, so this missed the sig==0 path and
+    // went to signal_send, which rejected it as EINVAL
+    // (sig > NSIG).  Post-truncation-batch this was already
+    // ESRCH; post-gate-order-batch it remains ESRCH.
+    let a = SyscallArgs { arg0: PROBE_PID, arg1: 0x1_0000_0000,
+        arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+    let v = dispatch_linux(nr::KILL, &a).value;
+    if v != -i64::from(errno::ESRCH) {
+        serial_println!(
+            "[syscall/linux]   FAIL: kill(PROBE,0x1_0000_0000) want ESRCH, got {}",
+            v
+        );
+        return Err(KernelError::InternalError);
+    }
+    // sig = 0x1_0000_0009 truncates to (int)9 = SIGKILL.  Must
+    // NOT be EINVAL — pre-truncation-batch sig was 0x1_0000_0009
+    // > NSIG → EINVAL; post-truncation-batch the sig gate accepts
+    // 9; post-gate-order-batch the target gate fires first with
+    // ESRCH.  Either way, never EINVAL.
+    let a = SyscallArgs { arg0: PROBE_PID, arg1: 0x1_0000_0009,
+        arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+    let v = dispatch_linux(nr::KILL, &a).value;
+    if v == -i64::from(errno::EINVAL) {
+        serial_println!(
+            "[syscall/linux]   FAIL: kill(PROBE,0x1_0000_0009) rejected EINVAL"
+        );
+        return Err(KernelError::InternalError);
+    }
+    // sig = 0x0000_0000_8000_0000 truncates to (int)INT_MIN < 0.
+    // Pre-batch the explicit lower-bound `if sig < 0` gate fired
+    // with EINVAL.  Post-batch (358) target resolution runs first
+    // and PROBE_PID (negative i32) returns ESRCH before sig is
+    // ever inspected.  This probe guards the gate order itself —
+    // a regression that restored the sig-first check would
+    // surface EINVAL here.
+    let a = SyscallArgs { arg0: PROBE_PID, arg1: 0x0000_0000_8000_0000,
+        arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+    let v = dispatch_linux(nr::KILL, &a).value;
+    if v != -i64::from(errno::ESRCH) {
+        serial_println!(
+            "[syscall/linux]   FAIL: kill(PROBE,0x8000_0000) want ESRCH (gate order), got {}",
+            v
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[syscall/linux]   kill ESRCH-before-EINVAL gate order: OK");
+    Ok(())
+}
+
 pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
@@ -42083,107 +42198,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     //     existence probe path with the same nonexistent pid).
     //   - sig = 0x1_0000_0009 (truncates to 9 = SIGKILL): not
     //     EINVAL — post-batch ESRCH via the pid gate.
-    {
-        const PROBE_PID: u64 = 0xDEAD_BEEF;
-        // sig=0 (existence probe): not EINVAL.
-        let a = SyscallArgs { arg0: PROBE_PID, arg1: 0,
-            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        let v = dispatch_linux(nr::KILL, &a).value;
-        if v == -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: kill sig=0 -> EINVAL");
-            return Err(KernelError::InternalError);
-        }
-        // sig=65 (NSIG+1): expect ESRCH (target resolution wins
-        // over sig validation per Linux gate order).
-        let a = SyscallArgs { arg0: PROBE_PID, arg1: 65,
-            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        let v = dispatch_linux(nr::KILL, &a).value;
-        if v != -i64::from(errno::ESRCH) {
-            serial_println!(
-                "[syscall/linux]   FAIL: kill sig=65 want ESRCH, got {}", v
-            );
-            return Err(KernelError::InternalError);
-        }
-        // sig=u64::MAX: expect ESRCH.
-        let a = SyscallArgs { arg0: PROBE_PID, arg1: u64::MAX,
-            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        let v = dispatch_linux(nr::KILL, &a).value;
-        if v != -i64::from(errno::ESRCH) {
-            serial_println!(
-                "[syscall/linux]   FAIL: kill sig=u64::MAX want ESRCH, got {}", v
-            );
-            return Err(KernelError::InternalError);
-        }
-        // sig=9 (SIGKILL), 15 (SIGTERM), 17 (SIGCHLD), 64 (NSIG):
-        // none should be rejected by the signal-number gate (the
-        // result is ESRCH from the pid gate, never EINVAL).
-        for sig in [9u64, 15, 17, 64] {
-            let a = SyscallArgs { arg0: PROBE_PID, arg1: sig,
-                arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-            let v = dispatch_linux(nr::KILL, &a).value;
-            if v == -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: kill sig={} rejected as EINVAL",
-                    sig
-                );
-                return Err(KernelError::InternalError);
-            }
-        }
-
-        // Batch 288/358: sig truncation to int + gate-order.  Linux's
-        // `SYSCALL_DEFINE2(kill, pid_t, pid, int, sig)` truncates
-        // args.arg1 to its low 32 bits, then runs target resolution
-        // before sig validation.
-        //
-        // sig = 0x1_0000_0000 truncates to (int)0 → existence probe
-        // against the (nonexistent) PROBE_PID → ESRCH.  Pre-batch we
-        // held sig as raw u64, so this missed the sig==0 path and
-        // went to signal_send, which rejected it as EINVAL
-        // (sig > NSIG).  Post-truncation-batch this was already
-        // ESRCH; post-gate-order-batch it remains ESRCH.
-        let a = SyscallArgs { arg0: PROBE_PID, arg1: 0x1_0000_0000,
-            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        let v = dispatch_linux(nr::KILL, &a).value;
-        if v != -i64::from(errno::ESRCH) {
-            serial_println!(
-                "[syscall/linux]   FAIL: kill(PROBE,0x1_0000_0000) want ESRCH, got {}",
-                v
-            );
-            return Err(KernelError::InternalError);
-        }
-        // sig = 0x1_0000_0009 truncates to (int)9 = SIGKILL.  Must
-        // NOT be EINVAL — pre-truncation-batch sig was 0x1_0000_0009
-        // > NSIG → EINVAL; post-truncation-batch the sig gate accepts
-        // 9; post-gate-order-batch the target gate fires first with
-        // ESRCH.  Either way, never EINVAL.
-        let a = SyscallArgs { arg0: PROBE_PID, arg1: 0x1_0000_0009,
-            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        let v = dispatch_linux(nr::KILL, &a).value;
-        if v == -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: kill(PROBE,0x1_0000_0009) rejected EINVAL"
-            );
-            return Err(KernelError::InternalError);
-        }
-        // sig = 0x0000_0000_8000_0000 truncates to (int)INT_MIN < 0.
-        // Pre-batch the explicit lower-bound `if sig < 0` gate fired
-        // with EINVAL.  Post-batch (358) target resolution runs first
-        // and PROBE_PID (negative i32) returns ESRCH before sig is
-        // ever inspected.  This probe guards the gate order itself —
-        // a regression that restored the sig-first check would
-        // surface EINVAL here.
-        let a = SyscallArgs { arg0: PROBE_PID, arg1: 0x0000_0000_8000_0000,
-            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        let v = dispatch_linux(nr::KILL, &a).value;
-        if v != -i64::from(errno::ESRCH) {
-            serial_println!(
-                "[syscall/linux]   FAIL: kill(PROBE,0x8000_0000) want ESRCH (gate order), got {}",
-                v
-            );
-            return Err(KernelError::InternalError);
-        }
-        serial_println!("[syscall/linux]   kill ESRCH-before-EINVAL gate order: OK");
-    }
+    self_test_kill_gate_order()?;
 
     // Batch 359: kill() pid-truncation propagation.
     //

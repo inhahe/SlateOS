@@ -1207,6 +1207,14 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: rename_noreplace self-test failed: {:?}", e);
     }
 
+    // sendfile(2) data-transfer test (needs a writable VFS to stage files;
+    // the syscall entry can't run in kernel context since it dereferences the
+    // per-process Linux fd table, so this drives the sendfile_core copy path
+    // against kernel-opened handles directly).
+    if let Err(e) = syscall::linux::self_test_sendfile() {
+        serial_println!("WARNING: sendfile self-test failed: {:?}", e);
+    }
+
     // File-backed Linux mmap test (needs a writable VFS to stage a file, so
     // it runs here rather than in syscall::linux::self_test() which precedes
     // VFS init).  Exercises the path ld.so uses to map shared objects.

@@ -598,12 +598,12 @@ is logged for operator input in `open-questions.md`.
 
 ---
 
-### TD21. Minor Linux-ABI fidelity gaps — procfs fd visibility for native processes; sendfile pos write-back — APPROXIMATION 2026-06-13
+### TD21. Minor Linux-ABI fidelity gap — procfs fd visibility for native processes — APPROXIMATION 2026-06-13; sendfile transfer IMPLEMENTED 2026-06-14
 
 **Where:** `kernel/src/fs/procfs` (`/proc/<pid>/fd[info]`, `linux_fd_list`) and
 `kernel/src/syscall/linux.rs` (`sys_sendfile`). Both are documented in-code.
 
-**What it is:** two small, deliberate Linux-ABI approximations:
+**What it is:** one remaining deliberate Linux-ABI approximation:
 - **`/proc/<pid>/fd/` and `/fdinfo/` are EMPTY for *native* processes.** Native
   processes keep their fd table in userspace (`posix/src/fdtable.rs`), which is
   not kernel-visible, so `linux_fd_list` returns `None` and the readdir yields
@@ -611,21 +611,34 @@ is logged for operator input in `open-questions.md`.
   kernel-side `KernelFdTable`) get a populated `fd/`. Same honesty stance as the
   fdinfo `mnt_id:`/`ino:` omission — printing fabricated fds would mislead
   introspection tools.
-- **sendfile `put_user(pos, offset)` write-back EFAULT is not modelled.** In Linux
-  this write-back runs unconditionally after the transfer and can override a
-  success/EBADF result; we don't model it because the sendfile transfer itself is
-  unimplemented (the call terminates EINVAL). The leading `validate_user_read`
-  already rejects a wholly-unmapped offset pointer, matching the dominant failure
-  mode.
+
+**Progress (2026-06-14) — sendfile data transfer implemented.** `sys_sendfile`
+previously validated its front gates and then terminated `EINVAL` (no transfer).
+It now performs a real in-kernel copy via `sendfile_core`: a 64 KiB bounce-buffer
+loop reads from the source fd at an absolute byte offset (`fs::handle::read_at` /
+`memfd::read_at`, never advancing the open-file cursor) and writes to the
+destination fd (`fs::handle::write` / `memfd::write` / `pipe::write|try_write` /
+console). Source must be a seekable byte container (File/MemFd — the kinds that
+back Linux's sendfile splice_read); destination may be File/MemFd/Pipe/Console.
+Position semantics match Linux: with a NULL `offset` the source's file position is
+read-from and advanced; with a non-NULL `offset` the read starts at `*offset`, the
+file position is untouched, and the post-transfer position is written back via
+`put_user` (which — as on Linux — can override a successful copy with EFAULT if the
+offset slot became unwritable). `count` is clamped to `MAX_RW_COUNT` (0x7fff_f000);
+the transfer stops at source EOF or a short destination write; a pipe whose reader
+has gone yields EPIPE. Error semantics follow `do_sendfile`: a first-byte error
+propagates, a later error returns the partial count. Tested end-to-end by the
+post-`/tmp` boot self-test `self_test_sendfile` (File→File whole-file, offset+count
+slice, count-clamp-to-remaining, EOF→0, File→MemFd and MemFd→File cross-kind). The
+gate-only `self_test_sendfile_splice_aio` batch-538 checks still pass (kernel-context
+callers have no fd table, so the syscall still terminates `EINVAL` before the
+transfer). The `put_user(pos)` write-back EFAULT noted previously is now modelled.
 
 **Impact:** low — native-process fd introspection via `/proc` is unavailable
-(tools must use the native fd API); the sendfile gap only matters once sendfile
-transfer is implemented.
+(tools must use the native fd API).
 
 **Proper fix:** procfs fd — expose a kernel-visible view of native fd tables (or a
 read bridge into the userspace fd table) so `/proc/<pid>/fd` works uniformly.
-sendfile — model the trailing `put_user(pos)` write-back when the sendfile data
-path is actually implemented.
 
 ### TD20. Userspace crate verification & lint-cleanup gaps — coreutils RESOLVED 2026-06-14; guitk pedantic still DEBT 2026-06-13
 

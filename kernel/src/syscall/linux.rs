@@ -19335,32 +19335,228 @@ fn validate_linux_fd(fd: i32) -> Result<(), SyscallResult> {
     }
 }
 
-/// `sendfile(out_fd, in_fd, offset, count)`.
+/// Bytes sendfile moves in a single call at most, matching Linux's
+/// `MAX_RW_COUNT` (`INT_MAX` rounded down to a page boundary).  Larger
+/// requests are silently clamped; userspace loops for the remainder.
+const SENDFILE_MAX_COUNT: u64 = 0x7fff_f000;
+
+/// Bounce-buffer chunk size for the sendfile copy loop.  64 KiB amortises
+/// the per-iteration VFS/handle locking against the heap allocation cost.
+const SENDFILE_CHUNK: usize = 64 * 1024;
+
+/// Read up to `buf.len()` bytes of the source fd's data at absolute byte
+/// offset `pos`, WITHOUT advancing the open-file cursor.  Sendfile sources
+/// must be seekable byte containers (regular file / memfd); other kinds are
+/// rejected by the caller before reaching here.  Returns 0 at EOF.
+fn sendfile_src_read_at(
+    kind: crate::proc::linux_fd::HandleKind,
+    handle: u64,
+    pos: u64,
+    buf: &mut [u8],
+) -> crate::error::KernelResult<usize> {
+    use crate::proc::linux_fd::HandleKind;
+    match kind {
+        HandleKind::File => crate::fs::handle::read_at(handle, pos, buf),
+        HandleKind::MemFd => {
+            let h = crate::ipc::memfd::MemFdHandle::from_raw(handle);
+            crate::ipc::memfd::read_at(h, pos, buf)
+        }
+        _ => Err(crate::error::KernelError::InvalidArgument),
+    }
+}
+
+/// Current open-file cursor of a sendfile source (File / MemFd).
+fn sendfile_src_pos(
+    kind: crate::proc::linux_fd::HandleKind,
+    handle: u64,
+) -> crate::error::KernelResult<u64> {
+    use crate::proc::linux_fd::HandleKind;
+    match kind {
+        HandleKind::File => crate::fs::handle::current_offset(handle),
+        HandleKind::MemFd => {
+            crate::ipc::memfd::offset(crate::ipc::memfd::MemFdHandle::from_raw(handle))
+        }
+        _ => Err(crate::error::KernelError::InvalidArgument),
+    }
+}
+
+/// Advance a sendfile source's open-file cursor to `pos` (used when the
+/// caller passed a NULL `offset`, so the transfer consumes from and updates
+/// the file position rather than a user-supplied offset variable).
+fn sendfile_src_set_pos(
+    kind: crate::proc::linux_fd::HandleKind,
+    handle: u64,
+    pos: u64,
+) -> crate::error::KernelResult<()> {
+    use crate::proc::linux_fd::HandleKind;
+    match kind {
+        HandleKind::File => {
+            crate::fs::handle::seek(handle, crate::fs::handle::SeekFrom::Start(pos))?;
+            Ok(())
+        }
+        HandleKind::MemFd => {
+            // whence = SEEK_SET (0).
+            #[allow(clippy::cast_possible_wrap)]
+            crate::ipc::memfd::seek(
+                crate::ipc::memfd::MemFdHandle::from_raw(handle),
+                pos as i64,
+                0,
+            )?;
+            Ok(())
+        }
+        _ => Err(crate::error::KernelError::InvalidArgument),
+    }
+}
+
+/// Write `data` to a sendfile destination fd at its current cursor,
+/// advancing it.  Returns bytes accepted (a pipe may take fewer than
+/// `data.len()`).  `nonblock` selects the pipe non-blocking path.
+fn sendfile_dst_write(
+    kind: crate::proc::linux_fd::HandleKind,
+    handle: u64,
+    data: &[u8],
+    nonblock: bool,
+) -> crate::error::KernelResult<usize> {
+    use crate::proc::linux_fd::HandleKind;
+    match kind {
+        HandleKind::File => crate::fs::handle::write(handle, data),
+        HandleKind::MemFd => {
+            let h = crate::ipc::memfd::MemFdHandle::from_raw(handle);
+            crate::ipc::memfd::write(h, data)
+        }
+        HandleKind::Pipe => {
+            let h = crate::ipc::pipe::PipeHandle::from_raw(handle);
+            if nonblock {
+                crate::ipc::pipe::try_write(h, data)
+            } else {
+                crate::ipc::pipe::write(h, data)
+            }
+        }
+        HandleKind::Console => {
+            // Mirror sys_console_write: UTF-8 fast path, else per-byte.
+            match core::str::from_utf8(data) {
+                Ok(s) => crate::console::write_str(s),
+                Err(_) => {
+                    for &b in data {
+                        crate::console::putchar(b);
+                    }
+                }
+            }
+            Ok(data.len())
+        }
+        _ => Err(crate::error::KernelError::InvalidArgument),
+    }
+}
+
+/// Core sendfile transfer: move up to `count` bytes from a source fd
+/// (File / MemFd) starting at absolute byte `start_pos` into a destination
+/// fd, via a kernel bounce buffer.  Stops at source EOF or a short
+/// destination write.  Returns `(bytes_moved, new_pos)` where `new_pos =
+/// start_pos + bytes_moved`.
 ///
-/// Gate ordering and errno selection mirror Linux v6.6
-/// `SYSCALL_DEFINE4(sendfile64)` + `do_sendfile()` (fs/read_write.c) exactly:
+/// Error semantics mirror Linux `do_sendfile`: an error on the very first
+/// transferred byte propagates; once any byte has moved, a later error is
+/// swallowed and the partial count is returned (the caller surfaces the
+/// progress, not the error).
+///
+/// Factored out of [`sys_sendfile`] so the boot self-test can exercise the
+/// real copy path against kernel-opened handles (there is no per-process fd
+/// table in kernel boot context to drive the syscall entry point).
+fn sendfile_core(
+    in_kind: crate::proc::linux_fd::HandleKind,
+    in_handle: u64,
+    out_kind: crate::proc::linux_fd::HandleKind,
+    out_handle: u64,
+    start_pos: u64,
+    count: u64,
+    out_nonblock: bool,
+) -> crate::error::KernelResult<(u64, u64)> {
+    let clamped = count.min(SENDFILE_MAX_COUNT);
+    let mut total: u64 = 0;
+    let mut pos = start_pos;
+    if clamped == 0 {
+        return Ok((0, pos));
+    }
+    let mut buf = alloc::vec![0u8; SENDFILE_CHUNK];
+    while total < clamped {
+        #[allow(clippy::cast_possible_truncation)]
+        let want = clamped.saturating_sub(total).min(SENDFILE_CHUNK as u64) as usize;
+        let slice = match buf.get_mut(..want) {
+            Some(s) => s,
+            None => break,
+        };
+        let n = match sendfile_src_read_at(in_kind, in_handle, pos, slice) {
+            Ok(0) => break, // source EOF
+            Ok(n) => n,
+            Err(e) => {
+                if total == 0 {
+                    return Err(e);
+                }
+                break;
+            }
+        };
+        // Drain the chunk to the destination, looping over short writes.
+        let mut written = 0usize;
+        while written < n {
+            let chunk = match buf.get(written..n) {
+                Some(s) => s,
+                None => break,
+            };
+            match sendfile_dst_write(out_kind, out_handle, chunk, out_nonblock) {
+                Ok(0) => break, // destination accepted nothing more
+                Ok(w) => written = written.saturating_add(w),
+                Err(e) => {
+                    if total == 0 && written == 0 {
+                        return Err(e);
+                    }
+                    total = total.saturating_add(written as u64);
+                    pos = pos.saturating_add(written as u64);
+                    return Ok((total, pos));
+                }
+            }
+        }
+        total = total.saturating_add(written as u64);
+        pos = pos.saturating_add(written as u64);
+        if written < n {
+            break; // partial destination write — stop here
+        }
+    }
+    Ok((total, pos))
+}
+
+/// `sendfile(out_fd, in_fd, offset, count)` — copy `count` bytes from
+/// `in_fd` to `out_fd` entirely within the kernel.
+///
+/// Front-gate ordering and errno selection mirror Linux v6.6
+/// `SYSCALL_DEFINE4(sendfile64)` + `do_sendfile()` (fs/read_write.c):
 ///   1. If `offset` is non-NULL, `copy_from_user(&pos, offset, 8)` runs in the
 ///      syscall wrapper BEFORE `do_sendfile`, so an unreadable offset pointer
-///      yields EFAULT ahead of every fd check. (Linux reads the offset here;
-///      we model it as a `validate_user_read` since the access is a read.)
+///      yields EFAULT ahead of every fd check.
 ///   2. `fdget(in_fd)` -> EBADF if absent.
 ///   3. `!(in->f_mode & FMODE_READ)` -> EBADF.
 ///   4. `if (ppos) !(in->f_mode & FMODE_PREAD)` -> ESPIPE (only when offset given).
 ///   5. `fdget(out_fd)` -> EBADF if absent.
 ///   6. `!(out->f_mode & FMODE_WRITE)` -> EBADF.
 ///
-/// LIMITATION: Linux also runs `put_user(pos, offset)` *unconditionally* after
-/// the transfer, so a write-unmappable offset pointer can override a later
-/// success/error with EFAULT. We do not implement the data transfer, so that
-/// terminal write-back EFAULT is not modelled; the syscall returns EINVAL once
-/// all the front gates pass. The leading `validate_user_read` already rejects a
-/// wholly-unmapped offset pointer, matching the dominant Linux failure mode.
+/// Then the data path: the source must be a seekable byte container (regular
+/// file / memfd — the kinds that back Linux's splice_read for sendfile);
+/// anything else is EINVAL (a non-seekable source WITH an offset already took
+/// the ESPIPE exit at gate 4).  The destination may be a file, memfd, pipe, or
+/// the console; other writable kinds are EINVAL.  Position semantics match
+/// Linux:
+///   * NULL offset    — read from (and advance) `in_fd`'s file position.
+///   * non-NULL offset — read from `*offset`, leave the file position alone,
+///     and write the post-transfer position back via `put_user(pos, offset)`.
+///     That trailing write-back can override a successful transfer with EFAULT
+///     if the offset slot became unwritable, exactly as Linux does.
 fn sys_sendfile(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::linux_fd::HandleKind;
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let out_fd = args.arg0 as i32;
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let in_fd = args.arg1 as i32;
     let offset_ptr = args.arg2;
+    let count = args.arg3;
 
     // Gate 1: copy_from_user(&pos, offset, 8) in the wrapper, before do_sendfile.
     if offset_ptr != 0 {
@@ -19374,35 +19570,120 @@ fn sys_sendfile(args: &SyscallArgs) -> SyscallResult {
         return r;
     }
 
-    // Gates 3/4: in_fd FMODE_READ -> EBADF; if offset given, FMODE_PREAD -> ESPIPE.
-    if let Some(pid) = caller_pid() {
-        use crate::proc::linux_fd::HandleKind;
-        if let Some(ein) = pcb::linux_fd_lookup(pid, in_fd) {
-            if !fd_access_is_readable(ein.status_flags) {
-                return linux_err(errno::EBADF);
-            }
-            // FMODE_PREAD is set for seekable regular files; pipes/streams lack it.
-            if offset_ptr != 0 && !matches!(ein.kind, HandleKind::File | HandleKind::MemFd) {
-                return linux_err(errno::ESPIPE);
-            }
-        }
+    // The data path needs the actual fd entries.  Kernel-context callers
+    // (no pid) have no Linux fd table; sendfile is a userspace ABI, so a
+    // pid-less caller cannot name fds — fall through to EINVAL after the
+    // no-op front gates, preserving the historical kernel-context terminal.
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => return linux_err(errno::EINVAL),
+    };
+
+    let in_entry = match pcb::linux_fd_lookup(pid, in_fd) {
+        Some(e) => e,
+        None => return linux_err(errno::EBADF),
+    };
+    // Gate 3: in_fd FMODE_READ -> EBADF.
+    if !fd_access_is_readable(in_entry.status_flags) {
+        return linux_err(errno::EBADF);
+    }
+    // Gate 4: with an explicit offset, a non-seekable source lacks FMODE_PREAD
+    // -> ESPIPE.  FMODE_PREAD is set for seekable regular files; pipes/streams
+    // lack it.
+    let in_seekable = matches!(in_entry.kind, HandleKind::File | HandleKind::MemFd);
+    if offset_ptr != 0 && !in_seekable {
+        return linux_err(errno::ESPIPE);
     }
 
     // Gate 5: fdget(out_fd) -> EBADF.
-    if let Err(r) = validate_linux_fd(out_fd) {
-        return r;
-    }
-
+    let out_entry = match pcb::linux_fd_lookup(pid, out_fd) {
+        Some(e) => e,
+        None => return linux_err(errno::EBADF),
+    };
     // Gate 6: out_fd FMODE_WRITE -> EBADF.
-    if let Some(pid) = caller_pid() {
-        if let Some(eout) = pcb::linux_fd_lookup(pid, out_fd) {
-            if !fd_access_is_writable(eout.status_flags) {
-                return linux_err(errno::EBADF);
-            }
-        }
+    if !fd_access_is_writable(out_entry.status_flags) {
+        return linux_err(errno::EBADF);
     }
 
-    linux_err(errno::EINVAL)
+    // do_splice_direct prologue: the source must be an mmap-able byte
+    // container.  A non-seekable source without an offset reaches here (the
+    // offset+non-seekable case already exited at gate 4) and is unsupported.
+    if !in_seekable {
+        return linux_err(errno::EINVAL);
+    }
+    // The destination must be a byte sink we can push a kernel buffer into.
+    if !matches!(
+        out_entry.kind,
+        HandleKind::File | HandleKind::MemFd | HandleKind::Pipe | HandleKind::Console
+    ) {
+        return linux_err(errno::EINVAL);
+    }
+
+    // Resolve the starting source position.
+    let start_pos = if offset_ptr != 0 {
+        let mut b = [0u8; 8];
+        // SAFETY: gate 1 validated [offset_ptr, +8) as readable; copy_from_user
+        // re-checks under SMAP.
+        let r = unsafe { crate::mm::user::copy_from_user(offset_ptr, b.as_mut_ptr(), 8) };
+        if let Err(e) = r {
+            return linux_err(linux_errno_for(e));
+        }
+        let p = u64::from_le_bytes(b);
+        // Linux rejects a negative loff_t offset with EINVAL.
+        #[allow(clippy::cast_possible_wrap)]
+        if (p as i64) < 0 {
+            return linux_err(errno::EINVAL);
+        }
+        p
+    } else {
+        match sendfile_src_pos(in_entry.kind, in_entry.raw_handle) {
+            Ok(p) => p,
+            Err(e) => return linux_err(linux_errno_for(e)),
+        }
+    };
+
+    let out_nonblock = (out_entry.status_flags & oflags::O_NONBLOCK) != 0;
+    let (moved, new_pos) = match sendfile_core(
+        in_entry.kind,
+        in_entry.raw_handle,
+        out_entry.kind,
+        out_entry.raw_handle,
+        start_pos,
+        count,
+        out_nonblock,
+    ) {
+        Ok(v) => v,
+        Err(crate::error::KernelError::ChannelClosed) => {
+            // Writing to a pipe whose reader has gone — write(2) semantics: EPIPE.
+            return linux_err(errno::EPIPE);
+        }
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+
+    // Position bookkeeping.
+    if offset_ptr != 0 {
+        // Linux runs put_user(pos, offset) unconditionally after the transfer;
+        // an unwritable offset slot turns even a successful copy into EFAULT.
+        if let Err(e) = crate::mm::user::validate_user_write(offset_ptr, 8) {
+            return linux_err(linux_errno_for(e));
+        }
+        let b = new_pos.to_le_bytes();
+        // SAFETY: validated [offset_ptr, +8) as writable directly above.
+        let r = unsafe { crate::mm::user::copy_to_user(b.as_ptr(), offset_ptr, 8) };
+        if let Err(e) = r {
+            return linux_err(linux_errno_for(e));
+        }
+    } else {
+        // NULL offset: advance the source's open-file cursor past the bytes
+        // consumed.  Discarding the Result is safe — the handle was just used
+        // successfully for the read, so set_pos can only fail on an internal
+        // bug; the bytes have already moved, and Linux likewise returns the
+        // transferred count regardless of any post-update bookkeeping.
+        let _ = sendfile_src_set_pos(in_entry.kind, in_entry.raw_handle, new_pos);
+    }
+
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(moved as i64)
 }
 
 /// `splice(fd_in, off_in, fd_out, off_out, len, flags)`.
@@ -39859,6 +40140,204 @@ pub fn self_test_rename_noreplace() -> crate::error::KernelResult<()> {
     let _ = crate::fs::Vfs::remove(DST);
     serial_println!(
         "[syscall/linux]   rename_noreplace/exchange (atomic same-mount: free-dst move, existing-dst EEXIST, EXCHANGE swap, missing-operand ENOENT): OK"
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// sendfile(2) data-transfer self-test (VFS-dependent)
+// ---------------------------------------------------------------------------
+
+/// End-to-end test of the `sendfile(2)` copy path — [`sendfile_core`] and the
+/// File/MemFd source helpers it drives.
+///
+/// Runs after the `/tmp` memfs mount so it can stage real files.  The syscall
+/// entry point ([`sys_sendfile`]) cannot be exercised from kernel boot context
+/// — it dereferences the per-process Linux fd table, which only exists for a
+/// running userspace task — so the test opens kernel handles directly
+/// (`fs::handle::open`, `ipc::memfd`) and calls `sendfile_core`, covering the
+/// exact byte-moving logic the syscall wraps.
+///
+/// Coverage:
+///  1. File → File whole-file copy (NULL-offset semantics: read from byte 0).
+///  2. Offset + count: copy a 5-byte slice from the middle of the source.
+///  3. `count` larger than the bytes remaining → clamps to what is left.
+///  4. `start_pos` at EOF → 0 bytes moved, destination stays empty.
+///  5. File → MemFd (cross-kind destination).
+///  6. MemFd → File (cross-kind source).
+pub fn self_test_sendfile() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+    use crate::fs::handle::{self, OpenFlags};
+    use crate::proc::linux_fd::HandleKind;
+    use crate::serial_println;
+
+    const SRC: &str = "/tmp/__sf_src__";
+    const DST: &str = "/tmp/__sf_dst__";
+    // "Hello, sendfile world!" — 22 bytes.
+    const PAYLOAD: &[u8] = b"Hello, sendfile world!";
+    let len = PAYLOAD.len() as u64;
+
+    let _ = crate::fs::Vfs::remove(SRC);
+    let _ = crate::fs::Vfs::remove(DST);
+
+    // Stage the source; skip cleanly if /tmp is not writable.
+    if crate::fs::Vfs::write_file(SRC, PAYLOAD).is_err() {
+        serial_println!("[syscall/linux]   sendfile self-test skipped (/tmp not writable)");
+        return Ok(());
+    }
+
+    let out_flags = OpenFlags::WRITE
+        .union(OpenFlags::CREATE)
+        .union(OpenFlags::TRUNCATE);
+
+    // (1) File -> File whole-file copy.
+    {
+        let in_h = handle::open(SRC, OpenFlags::READ)?;
+        let out_h = handle::open(DST, out_flags)?;
+        let r = sendfile_core(HandleKind::File, in_h, HandleKind::File, out_h, 0, 1u64 << 20, false);
+        let _ = handle::close(in_h);
+        let _ = handle::close(out_h);
+        let (moved, new_pos) = r?;
+        if moved != len || new_pos != len {
+            serial_println!(
+                "[syscall/linux]   FAIL: sendfile File->File moved {} new_pos {} (expected {})",
+                moved, new_pos, len);
+            let _ = crate::fs::Vfs::remove(SRC);
+            let _ = crate::fs::Vfs::remove(DST);
+            return Err(KernelError::InternalError);
+        }
+        if !matches!(crate::fs::Vfs::read_file(DST), Ok(ref c) if c.as_slice() == PAYLOAD) {
+            serial_println!("[syscall/linux]   FAIL: sendfile File->File content mismatch");
+            let _ = crate::fs::Vfs::remove(SRC);
+            let _ = crate::fs::Vfs::remove(DST);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // (2) Offset + count: 5 bytes from offset 7 ("sendf").
+    {
+        let in_h = handle::open(SRC, OpenFlags::READ)?;
+        let out_h = handle::open(DST, out_flags)?;
+        let r = sendfile_core(HandleKind::File, in_h, HandleKind::File, out_h, 7, 5, false);
+        let _ = handle::close(in_h);
+        let _ = handle::close(out_h);
+        let (moved, new_pos) = r?;
+        let expect = PAYLOAD.get(7..12);
+        if moved != 5 || new_pos != 12 {
+            serial_println!(
+                "[syscall/linux]   FAIL: sendfile offset+count moved {} new_pos {} (expected 5/12)",
+                moved, new_pos);
+            let _ = crate::fs::Vfs::remove(SRC);
+            let _ = crate::fs::Vfs::remove(DST);
+            return Err(KernelError::InternalError);
+        }
+        if !matches!(crate::fs::Vfs::read_file(DST), Ok(ref c) if Some(c.as_slice()) == expect) {
+            serial_println!("[syscall/linux]   FAIL: sendfile offset+count slice mismatch");
+            let _ = crate::fs::Vfs::remove(SRC);
+            let _ = crate::fs::Vfs::remove(DST);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // (3) count larger than the remaining bytes -> clamps to 3 ("ld!").
+    {
+        let in_h = handle::open(SRC, OpenFlags::READ)?;
+        let out_h = handle::open(DST, out_flags)?;
+        let r = sendfile_core(HandleKind::File, in_h, HandleKind::File, out_h, 19, 100, false);
+        let _ = handle::close(in_h);
+        let _ = handle::close(out_h);
+        let (moved, _) = r?;
+        if moved != 3 {
+            serial_println!("[syscall/linux]   FAIL: sendfile count-clamp moved {} (expected 3)", moved);
+            let _ = crate::fs::Vfs::remove(SRC);
+            let _ = crate::fs::Vfs::remove(DST);
+            return Err(KernelError::InternalError);
+        }
+        if !matches!(crate::fs::Vfs::read_file(DST), Ok(ref c) if Some(c.as_slice()) == PAYLOAD.get(19..22)) {
+            serial_println!("[syscall/linux]   FAIL: sendfile count-clamp tail mismatch");
+            let _ = crate::fs::Vfs::remove(SRC);
+            let _ = crate::fs::Vfs::remove(DST);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // (4) start_pos at EOF -> 0 moved, destination empty.
+    {
+        let in_h = handle::open(SRC, OpenFlags::READ)?;
+        let out_h = handle::open(DST, out_flags)?;
+        let r = sendfile_core(HandleKind::File, in_h, HandleKind::File, out_h, len, 100, false);
+        let _ = handle::close(in_h);
+        let _ = handle::close(out_h);
+        let (moved, new_pos) = r?;
+        if moved != 0 || new_pos != len {
+            serial_println!(
+                "[syscall/linux]   FAIL: sendfile EOF moved {} new_pos {} (expected 0/{})",
+                moved, new_pos, len);
+            let _ = crate::fs::Vfs::remove(SRC);
+            let _ = crate::fs::Vfs::remove(DST);
+            return Err(KernelError::InternalError);
+        }
+        if !matches!(crate::fs::Vfs::read_file(DST), Ok(ref c) if c.is_empty()) {
+            serial_println!("[syscall/linux]   FAIL: sendfile EOF wrote to destination");
+            let _ = crate::fs::Vfs::remove(SRC);
+            let _ = crate::fs::Vfs::remove(DST);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // (5) File -> MemFd (cross-kind destination).
+    {
+        let mf = crate::ipc::memfd::create_with_flags(b"sf-dst".to_vec(), false);
+        let in_h = handle::open(SRC, OpenFlags::READ)?;
+        let r = sendfile_core(HandleKind::File, in_h, HandleKind::MemFd, mf.raw(), 0, 1u64 << 20, false);
+        let _ = handle::close(in_h);
+        let (moved, _) = match r {
+            Ok(v) => v,
+            Err(e) => {
+                crate::ipc::memfd::close(mf);
+                let _ = crate::fs::Vfs::remove(SRC);
+                let _ = crate::fs::Vfs::remove(DST);
+                return Err(e);
+            }
+        };
+        let mut rb = alloc::vec![0u8; PAYLOAD.len()];
+        let n = crate::ipc::memfd::read_at(mf, 0, &mut rb).unwrap_or(0);
+        crate::ipc::memfd::close(mf);
+        if moved != len || n != PAYLOAD.len() || rb.as_slice() != PAYLOAD {
+            serial_println!("[syscall/linux]   FAIL: sendfile File->MemFd mismatch (moved {} n {})", moved, n);
+            let _ = crate::fs::Vfs::remove(SRC);
+            let _ = crate::fs::Vfs::remove(DST);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // (6) MemFd -> File (cross-kind source).
+    {
+        let mf = crate::ipc::memfd::create_with_flags(b"sf-src".to_vec(), false);
+        if crate::ipc::memfd::write_at(mf, 0, PAYLOAD).is_err() {
+            crate::ipc::memfd::close(mf);
+            serial_println!("[syscall/linux]   FAIL: sendfile MemFd->File staging write failed");
+            let _ = crate::fs::Vfs::remove(SRC);
+            let _ = crate::fs::Vfs::remove(DST);
+            return Err(KernelError::InternalError);
+        }
+        let out_h = handle::open(DST, out_flags)?;
+        let r = sendfile_core(HandleKind::MemFd, mf.raw(), HandleKind::File, out_h, 0, 1u64 << 20, false);
+        let _ = handle::close(out_h);
+        crate::ipc::memfd::close(mf);
+        let (moved, _) = r?;
+        if moved != len || !matches!(crate::fs::Vfs::read_file(DST), Ok(ref c) if c.as_slice() == PAYLOAD) {
+            serial_println!("[syscall/linux]   FAIL: sendfile MemFd->File mismatch (moved {})", moved);
+            let _ = crate::fs::Vfs::remove(SRC);
+            let _ = crate::fs::Vfs::remove(DST);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    let _ = crate::fs::Vfs::remove(SRC);
+    let _ = crate::fs::Vfs::remove(DST);
+    serial_println!(
+        "[syscall/linux]   sendfile (File<->File/MemFd copy, offset+count slice, count-clamp, EOF, cross-kind): OK"
     );
     Ok(())
 }

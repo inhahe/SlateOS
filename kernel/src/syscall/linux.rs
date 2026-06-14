@@ -71481,6 +71481,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_eventfd_futex_pkey()?;
+
+    #[inline(never)]
+    fn self_test_eventfd_futex_pkey() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // -----------------------------------------------------------------
     // eventfd / futex_waitv / pkey / get_robust_list /
     // set_mempolicy_home_node
@@ -72441,6 +72446,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   getrandom large-buffer fill (Linux: no per-call cap; pre-batch capped at 256 bytes): OK"
         );
+    }
+        Ok(())
     }
 
     // Batch 433: getsockname / getpeername — fd lookup gates BEFORE

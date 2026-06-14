@@ -64246,6 +64246,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_sysv_ipc_mqueue()?;
+
+    #[inline(never)]
+    fn self_test_sysv_ipc_mqueue() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // SysV IPC and POSIX message queues — input validation plus
     // principled errno.
     {
@@ -65701,6 +65706,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   mq_getsetattr mq_flags & ~O_NONBLOCK: OK"
         );
+    }
+        Ok(())
     }
 
     // -----------------------------------------------------------------

@@ -2243,6 +2243,17 @@ _Keyboard layouts: Dvorak (+ left-hand, right-hand, programmer variants), Colema
 
 _WSL-style Linux distro support: built from compat layer + ext4 + container namespaces. Management layer for distro images. Syscall translation first, lightweight VM fallback if needed._
 
+#### 6.1a WSL2-style Linux VM (OPTIONAL — consider only after everything else is done)
+
+_Operator note (2026-06-14): a true VM-backed Linux environment, in the spirit of WSL2, as a **fallback/alternative** to the syscall-translation layer (§6.1) — not a replacement for it. The translation layer (Linuxulator approach) remains the primary path because it runs Linux binaries as first-class Slate processes (shared scheduler, IPC, page cache, no second kernel). The VM is for the long tail the translation layer can't reach: programs needing a real Linux kernel (custom kernel modules, exotic ioctls/netfilter, kernel-version-specific behaviour). Deferred until the core OS is otherwise complete; recorded here so the idea isn't lost._
+
+- [ ] Type-2/lightweight hypervisor on our microkernel (WHPX/KVM-style HW virtualization; we already run *under* Hyper-V/WHPX per the bench harness, and already activate hypervisor guest features — see Phase 1 "VMware tools equivalent")
+- [ ] Run a real upstream Linux kernel image in the guest (like WSL2's bundled kernel)
+- [ ] Deep host/guest integration (the WSL2 value proposition): share the **filesystem** (9p/virtio-fs-style bridge to the host VFS), **clipboard**, **window manager / display** (guest X11/Wayland clients composited into the host compositor, à la WSLg), **GPU driver** (paravirtual GPU passthrough for accelerated guest rendering), and network namespace
+- [ ] Per-distro image management (download/import/export distro rootfs, à la `wsl --import`)
+- [ ] Study: Windows Hyper-V architecture, VMware/VirtualBox device models, QEMU/KVM (QEMU-TCG is slow because it's pure emulation; with KVM/WHPX acceleration it is fast — the relevant comparison is accelerated, not TCG)
+- [ ] Decision deferred: own minimal VMM vs. porting an existing one (crosvm/QEMU). crosvm (Rust, Chrome OS) is the closest fit to our stack
+
 ### 6.2 Additional Filesystems
 
 - [ ] Port Btrfs (CoW, snapshots, checksums)

@@ -53481,6 +53481,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_sched_affinity()?;
+
+    #[inline(never)]
+    fn self_test_sched_affinity() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // sched_get/setaffinity dispatch validation.
     //   - getaffinity(0, 0, mask) -> EINVAL (cpusetsize too small).
     //   - getaffinity(0, big, NULL) -> EFAULT.
@@ -53802,6 +53807,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 return Err(KernelError::InternalError);
             }
         }
+    }
+        Ok(())
     }
 
     // sethostname / setdomainname validation.

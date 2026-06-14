@@ -552,6 +552,53 @@ pub fn alloc_pt_page() -> KernelResult<u64> {
     PT_PAGE_POOL.lock().alloc()
 }
 
+/// Return a 4 KiB page-table page (previously obtained from
+/// [`alloc_pt_page`]) to the pool.
+///
+/// Counterpart to [`alloc_pt_page`], used by callers that build their own
+/// page-table hierarchies outside the CPU MMU path — chiefly the IOMMU
+/// second-level page tables, which must reclaim their structure pages when
+/// a DMA remapping domain is destroyed.
+///
+/// # Safety
+///
+/// - `page_phys` must be a 4 KiB-aligned physical address previously
+///   returned by [`alloc_pt_page`].
+/// - The page must no longer be referenced by any page table entry, and no
+///   hardware (CPU MMU or IOMMU) walk may still reach it.
+pub unsafe fn free_pt_page(page_phys: u64) {
+    let mut pool = PT_PAGE_POOL.lock();
+    // SAFETY: the caller guarantees the page is pool-owned (from
+    // alloc_pt_page) and is no longer referenced by any table entry or
+    // in-flight hardware walk.
+    unsafe {
+        pool._free(page_phys);
+    }
+}
+
+/// Number of free pages currently held in the page-table page pool's
+/// free list.
+///
+/// Diagnostic helper for tests that need to assert structure pages are
+/// reclaimed (e.g. IOMMU DMA-domain teardown): a `free_pt_page` call
+/// increments this count by one, so the delta across a teardown equals
+/// the number of structure pages freed.  Walks the intrusive free list,
+/// so it is O(free pages) — for diagnostics only, not a hot path.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn pt_pool_free_count() -> usize {
+    let pool = PT_PAGE_POOL.lock();
+    let mut n = 0usize;
+    let mut cur = pool.head;
+    while cur != 0 {
+        n += 1;
+        let virt = (cur + pool.hhdm_offset) as *const u64;
+        // SAFETY: `cur` is a pool-owned 4 KiB page whose first 8 bytes
+        // hold the physical address of the next free page (0 terminates).
+        cur = unsafe { ptr::read(virt) };
+    }
+    n
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------

@@ -492,22 +492,53 @@ pub fn create_domain() -> KernelResult<DomainId> {
 ///
 /// Fails if devices are still attached.
 pub fn destroy_domain(domain_id: DomainId) -> KernelResult<()> {
-    let mut domains = DOMAINS.lock();
-    let slot = domain_id as usize;
+    // Phase 1: validate and detach the page table from the domain table
+    // under the DOMAINS lock.  Marking the domain inactive here makes every
+    // subsequent map_dma / attach_device reject it, so no thread can add a
+    // new mapping while we walk and free the tree in phase 2.  We capture
+    // the root and release the lock *before* freeing, both to keep the
+    // critical section short and to avoid holding DOMAINS across the
+    // PT_PAGE_POOL lock taken by free_pt_page.
+    let pml4_phys = {
+        let mut domains = DOMAINS.lock();
+        let slot = domain_id as usize;
 
-    if slot >= MAX_DOMAINS || !domains[slot].active {
-        return Err(KernelError::InvalidArgument);
+        if slot >= MAX_DOMAINS || !domains[slot].active {
+            return Err(KernelError::InvalidArgument);
+        }
+        if domains[slot].device_count > 0 {
+            return Err(KernelError::DeviceBusy);
+        }
+
+        let pml4 = domains[slot].pml4_phys;
+        domains[slot].active = false;
+        domains[slot].mapped_pages = 0;
+        domains[slot].pml4_phys = 0;
+        pml4
+    };
+
+    // Phase 2: reclaim the domain's entire second-level page-table
+    // structure (PML4 through PT).  The caller-owned DMA target frames
+    // mapped by the PT leaves are not touched — only the structure pages
+    // this domain allocated.  We can only walk the tree once the HHDM is
+    // available; without it the structure pages are unreachable, so we leak
+    // them rather than risk a bad access (this only happens before MM init,
+    // which never destroys domains in practice).
+    if pml4_phys != 0 {
+        if let Some(hhdm) = page_table::hhdm() {
+            // The domain is inactive with no devices attached, so no IOMMU
+            // hardware walk and no concurrent map_dma can race this teardown.
+            // SAFETY: pml4_phys was returned by alloc_pt_page in
+            // create_domain and is now detached from the domain table.
+            unsafe { free_slpt(pml4_phys, hhdm); }
+        } else {
+            serial_println!(
+                "[iommu_remap] WARNING: HHDM unavailable; leaking SLPT pages for domain {}",
+                domain_id
+            );
+        }
     }
 
-    if domains[slot].device_count > 0 {
-        return Err(KernelError::DeviceBusy);
-    }
-
-    // TODO: Walk and free all page table pages in the domain's SLPT.
-    // For now, we leak the page table pages.  This is acceptable during
-    // initial development since domains are long-lived (one per driver).
-
-    domains[slot].active = false;
     serial_println!("[iommu_remap] Destroyed domain {}", domain_id);
     Ok(())
 }
@@ -873,6 +904,88 @@ fn walk_existing(table_phys: u64, index: usize, hhdm: u64) -> Option<u64> {
     }
 }
 
+/// Read the raw SLPTE at `index` in the table at `table_phys`.
+fn read_slpte(table_phys: u64, index: usize, hhdm: u64) -> u64 {
+    // SAFETY: callers pass a valid 4 KiB table page and index < 512; the
+    // HHDM maps the physical page.  An 8-byte read at an 8-byte-aligned
+    // offset within a 4 KiB-aligned page is well-formed.
+    unsafe {
+        let virt = (table_phys + hhdm) as *const u64;
+        core::ptr::read(virt.add(index))
+    }
+}
+
+/// Decode an intermediate SLPTE into the physical address of the
+/// next-level table it points to, or `None` if the entry is absent or is
+/// a leaf (super-page) mapping rather than a pointer to a lower table.
+///
+/// A present entry with the [`slpte::SUPER_PAGE`] bit set is a large-page
+/// leaf that maps caller-owned DMA memory directly — it does **not** point
+/// to a table page we allocated, so it is skipped (neither recursed into
+/// nor freed).  Our `map_4k_slpt` never creates super-pages, but the guard
+/// keeps the teardown correct if that ever changes.
+fn slpte_table_addr(entry: u64) -> Option<u64> {
+    if entry & (slpte::READ | slpte::WRITE) == 0 {
+        return None;
+    }
+    if entry & slpte::SUPER_PAGE != 0 {
+        return None;
+    }
+    Some(entry & PHYS_ADDR_MASK)
+}
+
+/// Walk a domain's second-level page table and return every structure page
+/// (PML4, PDPT, PD, PT) to the page-table page pool.
+///
+/// The leaf entries of the PT level point to **caller-owned** DMA target
+/// frames (the physical pages a driver asked to be DMA-visible); those are
+/// *not* freed here — only the four levels of SLPT structure pages the
+/// domain allocated via [`walk_or_create`] are reclaimed.  This is the
+/// proper fix for the prior leak where `destroy_domain` dropped the whole
+/// tree on the floor.
+///
+/// # Safety
+///
+/// The domain must be inactive with no devices attached and no in-flight
+/// DMA, so no IOMMU hardware page-table walk can race this teardown.  After
+/// this call every structure page is back in the pool and must not be
+/// touched through the freed `pml4_phys`.
+unsafe fn free_slpt(pml4_phys: u64, hhdm: u64) {
+    // Level 4 (PML4) → level 3 (PDPT) → level 2 (PD) → level 1 (PT).
+    for i4 in 0..ENTRIES_PER_TABLE {
+        let pdpt = match slpte_table_addr(read_slpte(pml4_phys, i4, hhdm)) {
+            Some(p) => p,
+            None => continue,
+        };
+        for i3 in 0..ENTRIES_PER_TABLE {
+            let pd = match slpte_table_addr(read_slpte(pdpt, i3, hhdm)) {
+                Some(p) => p,
+                None => continue,
+            };
+            for i2 in 0..ENTRIES_PER_TABLE {
+                let pt = match slpte_table_addr(read_slpte(pd, i2, hhdm)) {
+                    Some(p) => p,
+                    None => continue,
+                };
+                // PT-level leaf entries map caller-owned data frames, which
+                // we must not free; only the PT page itself is ours.
+                // SAFETY: `pt` is a structure page we allocated via
+                // walk_or_create and is no longer referenced once the PD
+                // entry above is dropped with the PD page below.
+                unsafe { page_table::free_pt_page(pt); }
+            }
+            // SAFETY: `pd` is a domain-owned structure page; all its PT
+            // children were just freed and nothing else references it.
+            unsafe { page_table::free_pt_page(pd); }
+        }
+        // SAFETY: `pdpt` is a domain-owned structure page; all its PD
+        // children were just freed.
+        unsafe { page_table::free_pt_page(pdpt); }
+    }
+    // SAFETY: the PML4 root is domain-owned; all lower levels are freed.
+    unsafe { page_table::free_pt_page(pml4_phys); }
+}
+
 // ---------------------------------------------------------------------------
 // Context table helpers
 // ---------------------------------------------------------------------------
@@ -1233,6 +1346,42 @@ pub fn self_test() -> KernelResult<()> {
     assert_eq!(DmaPerms::WRITE.to_pte_flags(), slpte::WRITE);
     assert_eq!(DmaPerms::READ_WRITE.to_pte_flags(), slpte::READ | slpte::WRITE);
     serial_println!("[iommu_remap]   Permissions: OK");
+
+    // Test 9: SLPT structure pages are reclaimed on domain destroy.
+    //
+    // A fresh domain owns exactly one PML4 page (allocated by
+    // create_domain).  Mapping a single page at a bus address that no
+    // existing entry covers allocates exactly three more structure pages
+    // — PDPT, PD, PT — so destroying the domain must return PML4 + PDPT +
+    // PD + PT = 4 pages to the pool.  The leaf points at a caller-owned
+    // DMA frame, which must NOT be freed; verifying the delta is exactly 4
+    // (not 5) proves we free the structure but leave the data frame alone.
+    {
+        let d = create_domain()?;
+        // 0x40000000 (1 GiB) sits in its own PML4/PDPT/PD/PT chain,
+        // distinct from the bus addresses used by earlier tests on other
+        // (now-destroyed) domains, so this mapping creates a full fresh
+        // 3-level structure under the domain's PML4.
+        map_dma(d, 0x4000_0000, 0x500000, IOMMU_PAGE_SIZE, DmaPerms::READ_WRITE)?;
+        let before = page_table::pt_pool_free_count();
+        destroy_domain(d)?;
+        let after = page_table::pt_pool_free_count();
+        assert_eq!(
+            after - before,
+            4,
+            "destroy_domain must reclaim PML4+PDPT+PD+PT (4 pages), not the data frame"
+        );
+        // The domain slot is now inactive and its root detached.
+        {
+            let domains = DOMAINS.lock();
+            assert!(!domains[d as usize].active, "domain marked inactive");
+            assert_eq!(domains[d as usize].pml4_phys, 0, "root detached");
+        }
+        serial_println!(
+            "[iommu_remap]   SLPT teardown reclaim: OK (+{} pages)",
+            after - before
+        );
+    }
 
     serial_println!("[iommu_remap] Self-test PASSED");
     Ok(())

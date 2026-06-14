@@ -2595,9 +2595,9 @@ pub fn self_test_linux_execveat() -> KernelResult<()> {
     };
 
     // Case A: path form — execveat(AT_FDCWD, "/…/tgt", …, flags=0).
-    let elf_path = elf::build_linux_execveat_test_elf(false, 0, TGT_PATH_NUL);
+    let elf_path = elf::build_linux_execveat_test_elf(false, 0, 1, TGT_PATH_NUL);
     // Case B: fexecve form — open(target) then execveat(fd, "", …, AT_EMPTY_PATH).
-    let elf_fexecve = elf::build_linux_execveat_test_elf(true, 0, TGT_PATH_NUL);
+    let elf_fexecve = elf::build_linux_execveat_test_elf(true, 0, 1, TGT_PATH_NUL);
 
     let res_a = run_one(&elf_path, "path form (AT_FDCWD)");
     let res_b = if res_a.is_ok() {
@@ -2643,7 +2643,7 @@ pub fn self_test_linux_execveat() -> KernelResult<()> {
     }
 
     let elf_nofollow =
-        elf::build_linux_execveat_test_elf(false, AT_SYMLINK_NOFOLLOW, LINK_PATH_NUL);
+        elf::build_linux_execveat_test_elf(false, AT_SYMLINK_NOFOLLOW, 1, LINK_PATH_NUL);
     let argv: &[&[u8]] = &[b"execveatprog"];
     let envp: &[&[u8]] = &[b"PATH=/bin"];
     let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
@@ -2703,6 +2703,82 @@ pub fn self_test_linux_execveat() -> KernelResult<()> {
     serial_println!(
         "[spawn]   Linux execveat(2) AT_SYMLINK_NOFOLLOW (ring 3: symlink target \
          refused with ELOOP): OK"
+    );
+
+    // Case D: argv propagation.  execve must rebuild the new image's initial
+    // SysV stack with the argv *it was passed*, not the launcher's original
+    // argv.  The launcher passes argv of `ARGC` entries; the target
+    // (build_linux_argc_exit_test_elf) reads argc from [rsp] and exits with
+    // it.  A clean exit == ARGC proves execveat constructed the new argc/argv
+    // — the path gcc/make rely on (gcc invokes cc1/as/ld with many args).
+    const ARGC_TGT_PATH: &str = "/slateos-test-execveat-argc";
+    const ARGC_TGT_PATH_NUL: &[u8] = b"/slateos-test-execveat-argc\0";
+    // Paired so the launcher's argv length (usize) and the expected exit code
+    // (i32) stay in lock-step without a usize→i32 cast in the comparison.
+    const ARGC: usize = 3;
+    const ARGC_EXIT: i32 = 3;
+
+    let argc_tgt_elf = elf::build_linux_argc_exit_test_elf();
+    if crate::fs::Vfs::write_file(ARGC_TGT_PATH, &argc_tgt_elf).is_err() {
+        serial_println!("[spawn]   Linux execveat(2) argv propagation: SKIP (VFS write failed)");
+        return Ok(());
+    }
+
+    let elf_argv = elf::build_linux_execveat_test_elf(false, 0, ARGC, ARGC_TGT_PATH_NUL);
+    let argv: &[&[u8]] = &[b"execveatprog"]; // launcher's own argv (argc 1) — irrelevant
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-execveat-argv",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+    };
+
+    let (state_d, exit_d) = match spawn_process(&elf_argv, &options) {
+        Ok(r) => {
+            crate::sched::yield_now();
+            crate::sched::yield_now();
+            crate::sched::yield_now();
+            crate::sched::yield_now();
+            let st = pcb::state(r.pid);
+            let ec = pcb::exit_code(r.pid);
+            thread::on_thread_exit(r.task_id);
+            pcb::destroy(r.pid);
+            (st, ec)
+        }
+        Err(e) => {
+            let _ = crate::fs::Vfs::remove(ARGC_TGT_PATH);
+            serial_println!("[spawn]   FAIL: execveat-argv spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let _ = crate::fs::Vfs::remove(ARGC_TGT_PATH);
+
+    if state_d != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: execveat argv propagation — expected Zombie, got {:?}",
+            state_d
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_d != Some(ARGC_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: execveat argv propagation — expected exit {} (argc passed to \
+             execveat), got {:?} (1 would mean the launcher's original argv leaked through)",
+            ARGC_EXIT, exit_d
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   Linux execveat(2) argv propagation (ring 3: target sees argc == {}): OK",
+        ARGC
     );
     Ok(())
 }

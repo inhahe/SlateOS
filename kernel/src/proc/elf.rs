@@ -1336,7 +1336,7 @@ pub fn build_linux_exit_elf(exit_code: u8) -> alloc::vec::Vec<u8> {
 ///   ```text
 ///     mov   rdi, -100              ; AT_FDCWD
 ///     movabs rsi, &path            ; pathname
-///     movabs rdx, &argv            ; argv = [&path, NULL]
+///     movabs rdx, &argv            ; argv = [&path; argc] ++ [NULL]
 ///     movabs r10, &envp            ; envp = [NULL]
 ///     mov   r8d, flags_extra       ; flags (0, or e.g. AT_SYMLINK_NOFOLLOW)
 ///     mov   eax, 322               ; SYS_execveat
@@ -1370,6 +1370,11 @@ pub fn build_linux_exit_elf(exit_code: u8) -> alloc::vec::Vec<u8> {
 /// `AT_SYMLINK_NOFOLLOW` (0x100) to test that `execveat` refuses a symlink
 /// target (the launcher then exits `0xEE` because execveat returns `ELOOP`).
 ///
+/// `argc` (clamped to ≥1) sets how many entries the passed `argv` holds (all
+/// pointing at the path string). Pair with [`build_linux_argc_exit_test_elf`]
+/// as the target to verify `execve` rebuilds the new image's initial stack
+/// with the *passed* argv: the target then exits with `argc`.
+///
 /// On success control transfers to the target image (which should `exit`
 /// with a sentinel); on failure the launcher exits `0xEE`, so the test can
 /// distinguish "execveat worked" from "execveat returned an error".
@@ -1384,6 +1389,7 @@ pub fn build_linux_exit_elf(exit_code: u8) -> alloc::vec::Vec<u8> {
 pub fn build_linux_execveat_test_elf(
     fexecve: bool,
     flags_extra: u32,
+    argc: usize,
     path_nul: &[u8],
 ) -> alloc::vec::Vec<u8> {
     use alloc::vec;
@@ -1480,9 +1486,12 @@ pub fn build_linux_execveat_test_elf(
     // uniform between the two forms.
     let empty_off = path_end;
     let after_empty = empty_off + 1;
-    // 8-align the argv array.
+    // 8-align the argv array.  argv holds `argc` pointers (all → the path
+    // string, which is a valid NUL-terminated string the SysV stack builder
+    // copies) plus a NULL terminator, so the exec'd image sees this argc.
+    let argc = argc.max(1); // a real exec always has argv[0]
     let argv_off = (after_empty + 7) & !7usize;
-    let envp_off = argv_off + 16; // argv = [ptr, NULL]
+    let envp_off = argv_off + (argc + 1) * 8; // argc ptrs + NULL
     let file_size = envp_off + 8; // envp = [NULL]
 
     let vaddr_of = |file_off: usize| -> u64 {
@@ -1546,9 +1555,11 @@ pub fn build_linux_execveat_test_elf(
     // path string
     buf[path_off..path_end].copy_from_slice(path_nul);
     // empty string is already a zero byte at empty_off.
-    // argv = [path_vaddr, NULL]
-    write_u64(&mut buf, argv_off, path_vaddr);
-    write_u64(&mut buf, argv_off + 8, 0);
+    // argv = [path_vaddr; argc] followed by NULL.
+    for i in 0..argc {
+        write_u64(&mut buf, argv_off + i * 8, path_vaddr);
+    }
+    write_u64(&mut buf, argv_off + argc * 8, 0);
     // envp = [NULL]
     write_u64(&mut buf, envp_off, 0);
 

@@ -42125,6 +42125,46 @@ fn self_test_kill_pid_truncation() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+/// TD4 extraction: rt_sigreturn defensive-alignment self-test.
+///
+/// A misaligned user_rsp makes both candidate SignalContext addresses
+/// fail the alignment gate, so rt_sigreturn returns -EFAULT without any
+/// unsafe dereference (necessary because validate_user_read has a
+/// kernel-context bypass that would otherwise deref garbage during boot
+/// self-tests), and frame.user_rip is left untouched on the failure
+/// path. Self-contained. See [`self_test_errno_mapping`] for the TD4
+/// rationale.
+#[inline(never)]
+fn self_test_rt_sigreturn() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+    use crate::syscall::entry::SyscallFrame;
+    let mut f = SyscallFrame {
+        syscall_nr: nr::RT_SIGRETURN,
+        arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        rbx: 0, rbp: 0, r12: 0, r13: 0, r14: 0, r15: 0,
+        user_rip: 0xCAFE_BABE_DEAD_BEEF,
+        user_rsp: 1, // misaligned; both candidates (9, 1) fail
+        user_rflags: 0x202,
+    };
+    let pre_rip = f.user_rip;
+    match dispatch_linux_with_frame(&mut f) {
+        Some(v) if v == -i64::from(errno::EFAULT) => {}
+        other => {
+            serial_println!(
+                "[syscall/linux]   FAIL: rt_sigreturn EFAULT → {:?}", other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    if f.user_rip != pre_rip {
+        serial_println!(
+            "[syscall/linux]   FAIL: rt_sigreturn EFAULT mutated user_rip"
+        );
+        return Err(KernelError::InternalError);
+    }
+    Ok(())
+}
+
 pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
@@ -42333,33 +42373,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     //   - frame.user_rip must be left untouched on the failure path
     //     so a userspace program can debug the EFAULT without losing
     //     control.
-    {
-        use crate::syscall::entry::SyscallFrame;
-        let mut f = SyscallFrame {
-            syscall_nr: nr::RT_SIGRETURN,
-            arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-            rbx: 0, rbp: 0, r12: 0, r13: 0, r14: 0, r15: 0,
-            user_rip: 0xCAFE_BABE_DEAD_BEEF,
-            user_rsp: 1, // misaligned; both candidates (9, 1) fail
-            user_rflags: 0x202,
-        };
-        let pre_rip = f.user_rip;
-        match dispatch_linux_with_frame(&mut f) {
-            Some(v) if v == -i64::from(errno::EFAULT) => {}
-            other => {
-                serial_println!(
-                    "[syscall/linux]   FAIL: rt_sigreturn EFAULT → {:?}", other
-                );
-                return Err(KernelError::InternalError);
-            }
-        }
-        if f.user_rip != pre_rip {
-            serial_println!(
-                "[syscall/linux]   FAIL: rt_sigreturn EFAULT mutated user_rip"
-            );
-            return Err(KernelError::InternalError);
-        }
-    }
+    self_test_rt_sigreturn()?;
 
     // Linux-sigaction table — round-trip + edge cases.
     //   Operates directly on the table (not via dispatch_linux),

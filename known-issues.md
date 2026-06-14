@@ -573,7 +573,7 @@ lscpu's existing reader lights up automatically with real data.
 range files and `topology/` subtree). Tracked as the follow-up to the
 CPU-enumeration sysfs work.
 
-### TD22. File-backed `mmap` — Phase 1 (demand-paged `MAP_PRIVATE`) DONE; page cache + shared write-back still DEBT — PARTIAL 2026-06-14
+### TD22. File-backed `mmap` — Phase 1 (demand-paged `MAP_PRIVATE`) DONE; Phase 2 (page cache + writable `MAP_SHARED`) WON'T-FIX by operator decision — CLOSED 2026-06-14
 
 **Where:** `kernel/src/mm/vma.rs` (`VmaKind::FileBacked`), `kernel/src/proc/pcb.rs`
 (`try_resolve_fault` FileBacked arm, `vma_release_backing`, `remove_vma`,
@@ -619,13 +619,22 @@ loader, so demand paging buys little there.
 - The fault handler reads the file **synchronously via the VFS** inside the
   page-fault path; a page cache would serve hits without re-reading.
 
-**Proper fix (Phase 2):** introduce a unified page cache shared between the VFS
-read path and mmap. Resolve `MAP_SHARED` faults to the shared cache page (mapped
-writable for `PROT_WRITE`), add dirty-page tracking + `msync`/unmap write-back,
-and switch `MAP_PRIVATE` to map the cache page CoW (copy only on write) instead
-of read-copying into a fresh frame. This is a foundational architectural fork
-(it touches the VFS, the frame allocator's ownership model, and writeback) and
-is logged for operator input in `open-questions.md`.
+**Phase 2 — WON'T-FIX (operator decision 2026-06-14).** The operator declined the
+unified-page-cache fork (Q5 option C) as too large/hard-to-reverse for a
+native-first OS that does not target full Linux support — see
+`design-decisions.md` §22. **Writable `MAP_SHARED` of a regular file stays
+`ENOSYS` indefinitely**, and there is no unified VFS/mmap page cache. This is a
+deliberate, accepted limitation, not outstanding debt.
+
+If a concrete future consumer ever needs writable shared file maps or
+cross-process file-map coherence, the proper fix would be: a unified page cache
+shared between the VFS read path and mmap (resolve `MAP_SHARED` faults to the
+shared cache page mapped writable for `PROT_WRITE`; dirty-tracking +
+`msync`/unmap write-back; switch `MAP_PRIVATE` to CoW the cache page). It needs a
+stable VFS file-identity (`FileMeta.ino` is 0 for memfs/FAT) and a
+double-cache-vs-unify call against `fs/cache.rs`. The Phase-1 `VmaKind::FileBacked`
+fault-path shape is already the right foundation. Reopen via `design-decisions.md`
+§22 if revisited.
 
 ---
 

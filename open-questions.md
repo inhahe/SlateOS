@@ -23,22 +23,10 @@ Format for each entry:
 
 ---
 
-Two low-stakes confirmations are outstanding (from the Q1/Q2 follow-ups — full
-reasoning in `operator-answers-2026-06-13.md`; neither blocks anything, both are
-already the shipped behavior, so these are "say so if you want them changed"):
-
-- **Q1 confirm:** keep returning success (option A) for the NUMA mempolicy
-  syscalls on our single-node hardware? (recommended)
-- **Q2 confirm:** keep the shipped commit-policy defaults — native
-  strict-commit, Linux lazy/overcommit? (recommended)
-
-One substantive question is **partially** open below: **Q5** — how far to take
-the proper fix for file-backed `mmap`. Its first half (demand-paged
-`MAP_PRIVATE`, option B) was built autonomously on 2026-06-14 (TD22 Phase 1);
-what remains open for the operator is the **unified page cache + writable
-`MAP_SHARED`** fork (option C). It does **not** block Path Z (demand-paged
-`MAP_PRIVATE` + the eager-copy fallback already serve the dynamic-linker + data-
-map cases), so work continues on other unblocked tasks meanwhile.
+One substantive design discussion remains open below: **Q6** — the
+authorization model for cross-process memory introspection. The operator has
+indicated a direction (capability model) but raised a refinement worth settling
+before implementation (see Q6).
 
 ---
 
@@ -46,117 +34,24 @@ Recently resolved (see `design-decisions.md` for the full rationale):
 
 - The coreutils "which set is canonical?" question — resolved 2026-06-12;
   standalone per-tool crates are canonical (§8).
-- Q1 `set_mempolicy_home_node` / NUMA mempolicy on UMA — resolved 2026-06-13;
-  keep the UMA no-op returning 0, option A (§10).
+- Q1 `set_mempolicy_home_node` / NUMA mempolicy on UMA — resolved 2026-06-13,
+  **operator-confirmed 2026-06-14**; keep the UMA no-op returning 0, option A
+  (§10).
 - Q2 `/proc/sys/vm/overcommit_memory` & memory-commit policy — resolved
-  2026-06-13; keep `vm/` omitted now, build the configurable both-strategies
-  model (Option 5) as the end-state; do not add `CAP_SYS_ADMIN` as a native
-  capability — map it to fine-grained native caps (new `admin.memory_policy`
-  for the system-wide overcommit knob) (§11).
+  2026-06-13, **operator-confirmed 2026-06-14** (keep the shipped defaults:
+  native strict/committed, Linux lazy/overcommit; both configurable); build the
+  both-strategies model (Option 5); map the system-wide overcommit knob to a
+  fine-grained native cap (`admin.memory_policy`), not `CAP_SYS_ADMIN` (§11).
 - Q3 next major initiative — resolved 2026-06-13; terminal/dev before GUI,
   GCC/CMake/Make toolchain first, CPython then fastpy (§9).
 - Q4 toolchain on Slate OS: run-prebuilt-Linux vs native-port — resolved
   2026-06-13; **Path Z** (run prebuilt Linux toolchain binaries on the Linux-ABI
   layer now, native-port selectively later), native-first/no-leak kept
   inviolate, clang green-lit for install (§12).
-
----
-
-## Q5 — File-backed `mmap`: keep the eager private-copy model, or build demand paging + a unified page cache? — OPEN (2026-06-13)
-
-**Background.** File-backed `mmap(2)` (`linux_file_mmap` in
-`kernel/src/syscall/linux.rs`) currently uses an **eager private-copy** model:
-at map time every 16 KiB frame is allocated, the file bytes are `read_at`-copied
-in, and the frame is mapped (a `VmaKind::Fixed` VMA is registered). This works
-for `ld.so` shared-object loading and ordinary `MAP_PRIVATE` data maps — the
-Path X/Z target — and is fully tested (ring-3 end-to-end, offset 0 + nonzero
-offset). Two gaps remain (tracked as **known-issues.md TD22**):
-
-1. **No lazy population** — a large or sparse map allocates+copies the whole
-   span up front (memory cost + latency).
-2. **Writable `MAP_SHARED` returns `ENOSYS`** — we never write modified pages
-   back, and two processes mapping the same file get independent private copies
-   (no shared coherence).
-
-**Question.** How far do we take the proper fix, and with what architecture?
-The two gaps have very different cost/benefit, and the implementation of gap 1
-is **coupled** to the architecture chosen for gap 2 (see "Where it bites").
-
-**Options.**
-
-- **A. Leave it as eager private-copy (status quo).**
-  - *Pros:* already works for the dynamic-linker + data-map cases that Path X/Z
-    needs; simplest; no MM/FS-boundary churn; no new lifetime hazards.
-  - *Cons:* wastes memory on big maps; writable `MAP_SHARED` programs (some
-    databases, `mmap`-based logging/IPC) fail with `ENOSYS`.
-
-- **B. Demand-page `MAP_PRIVATE` only (gap 1), no shared cache.**
-  Add a `VmaKind::FileBacked` + a per-process VMA→backing table holding a
-  `dup_shared`'d `fs::handle` + file offset; resolve faults by reading one page
-  on demand; keep `MAP_SHARED`-writable as `ENOSYS`.
-  - *Pros:* fixes the memory/latency gap; clearly correct (MAP_PRIVATE may
-    legitimately not observe later file writes); reversible.
-  - *Cons:* laborious + security-sensitive: the backing handle must be
-    refcount-tracked through `remove_vma_range` VMA splits (ld.so overlays
-    `MAP_FIXED` onto sub-ranges, splitting a file-backed reservation), `fork`,
-    and process teardown — a handle leak or double-close here runs for every
-    dynamically-linked process. Does **not** fix writable `MAP_SHARED`.
-
-- **C. Full unified page cache + demand paging + writeback (gap 1 + gap 2).**
-  Introduce a file-level page cache keyed by a stable file identity, consulted
-  by the fault handler (CoW for private, shared for shared) and by the VFS
-  read/write path; add dirty tracking + `msync`/`munmap` writeback.
-  - *Pros:* the real Linux model; fixes both gaps; enables true cross-process
-    shared maps and write-back; dedups frames across processes.
-  - *Cons:* large multi-subsystem effort. **Requires a stable per-file identity
-    the VFS does not yet provide** (`FileMeta.ino` is 0 for memfs/FAT, so it
-    can't key a cache) — a precursor refactor touching every filesystem. Also
-    forces a decision on the page-cache ↔ existing block buffer cache
-    (`fs/cache.rs`) relationship: **double-cache** (file cache above FS,
-    independent — simpler, reversible) vs **unify** (single cache, block cache
-    as a view — memory-efficient, complex, hard to reverse).
-
-**UPDATE 2026-06-14 — option B (Phase 1) was built autonomously.** The original
-recommendation here was "B now, C later, but don't build B until the operator
-settles C" (rework risk: C might replace B's raw per-VMA handle with a
-page-cache reference). I re-evaluated that risk and judged it **low enough to
-proceed with B**, because:
-  - B's fault-path *shape* (a `VmaKind::FileBacked` VMA, lazily populated by the
-    fault handler) is exactly what C needs too — C only changes the *source* of
-    the page (page cache vs direct `read_at`) and the private/shared policy.
-  - The only piece C might discard is the small, localized handle-refcount
-    lifecycle (mmap/fork/split/exit). That code is ~60 lines and isolated in
-    `pcb.rs`; rewriting it under C is cheap, and meanwhile B is a strict
-    improvement (no more eager whole-span copy) and fully reversible.
-  - B is independently correct: `MAP_PRIVATE` may legitimately not observe later
-    file writes, so demand-reading at fault time is *more* faithful than the
-    eager snapshot, not a temporary hack.
-So B shipped (see `design-decisions.md`, "Decided by: Claude (autonomous)") and
-**known-issues.md TD22** is now PARTIAL. **If the operator disagrees with making
-this call without them, B is easy to revert** (drop the `FileBacked` arm and
-re-point `linux_file_mmap`'s `MAP_PRIVATE` path at the eager loop).
-
-**What's still genuinely OPEN here is C only** — the page-cache fork. The
-decisions I still need from the operator:
-  1. Is gap 2 (writable `MAP_SHARED` + cross-process coherence) worth building
-     at all for the Path Z target, or is `ENOSYS` acceptable indefinitely?
-  2. If yes to a page cache: **double-cache vs unify** with the block buffer
-     cache (`fs/cache.rs`)?
-  3. Endorse adding a stable VFS file-identity (the precursor C needs —
-     `FileMeta.ino` is 0 for memfs/FAT, so it can't key a cache today)?
-
-In the meantime I am **not** starting C; I'm working other unblocked tasks.
-
-**Where it bites.** `kernel/src/syscall/linux.rs` (`linux_file_mmap`,
-`unmap_user_range`, `linux_file_mmap_rollback`); `kernel/src/mm/vma.rs`
-(`VmaKind`); `kernel/src/proc/pcb.rs` (`remove_vma_range`, `try_resolve_fault`,
-the VMA list + a new backing table, fork clone, teardown); `kernel/src/fs/vfs.rs`
-(`FileMeta.ino` / a new stable file-identity); `kernel/src/fs/cache.rs` (the
-block buffer cache C would relate to).
-
-**Status:** PARTIAL — option **B (demand-paged `MAP_PRIVATE`)** built
-autonomously 2026-06-14 (TD22 Phase 1). Option **C (unified page cache +
-writable `MAP_SHARED`)** remains **OPEN** for the operator.
+- Q5 file-backed `mmap` — how far to take the fix — resolved 2026-06-14;
+  operator declined the unified-page-cache fork (option C); keep the shipped
+  demand-paged `MAP_PRIVATE` (option B), writable `MAP_SHARED` stays `ENOSYS`
+  indefinitely (§22).
 
 ---
 
@@ -218,10 +113,61 @@ the capability-based design. I am **not** opening cross-process access
 autonomously — silently granting any process the ability to read/write any other
 process's memory would be a serious regression and contradicts the core design.
 
+**Operator direction (2026-06-14) — capability model (B), with a clarifying
+distinction Claude proposes.** The operator endorsed the capability model (B)
+but raised a real question: should a *debug* capability be the only thing that
+governs cross-process memory access, given that cross-process memory *sharing*
+is generally useful for IPC? The operator floated (a) processes A and B
+negotiating through the OS over which spans to share, with what r/w rights and
+which sync/consistency primitives, or (b) authorizing a limited shared span via
+another IPC mechanism — while a *debug* capability would go further and read a
+whole process's memory without any negotiation.
+
+**Claude's synthesis (proposed resolution — please confirm).** These are two
+*different* mechanisms and should stay separate; conflating them is exactly the
+trap to avoid:
+
+1. **Consensual / cooperative memory sharing** (the operator's negotiation idea)
+   is **not** `process_vm_readv`/`ptrace` territory at all — it is ordinary IPC,
+   and Slate OS **already has the right primitives for it**: the channel IPC
+   (capability transfer) and the shared-memory object (`kernel/src/ipc/`). Two
+   cooperating processes that *both consent* establish a shared mapping by one
+   creating a shared-memory object and handing the other an unforgeable handle
+   over a channel, with the rights (R / R+W) encoded in the handle; concurrency
+   is then the participants' responsibility via futexes/atomics. This is the
+   "A and B negotiate what to share" path, done the capability way, with **no
+   need to widen `process_vm_readv` at all**. If anything is missing here it's a
+   thin convenience wrapper, not a new authority.
+2. **Unilateral introspection** — reading/writing a target's *entire* address
+   space **without the target's cooperation** — is what `process_vm_readv`/
+   `writev` and `ptrace` are for (debuggers, CRIU, profilers). *This* is the one
+   that must be gated by a **debug/introspect capability the caller holds over
+   the specific target** (option B), obtained by explicit grant (parent→child,
+   or a privileged debugger broker) — never by ambient PID/uid authority.
+
+So the answer to "should the debug capability be the *only* thing governing
+cross-process access?" is: **yes for the non-consensual introspection path**
+(that path *is* the debug capability and nothing else unlocks it), but
+**consensual sharing is a separate, already-supported path** that never touches
+this code — so there's no redundancy and no need for a second introspection
+capability. A debugger uses the debug cap; cooperating IPC peers use
+shared-memory handles. The two never overlap.
+
+**Focused remaining question for the operator:** does this two-mechanism split
+match your intent — (1) consensual sharing stays on the existing channel +
+shared-memory IPC (no change to `process_vm_*`), and (2) `process_vm_readv`/
+`writev` + `ptrace` are unlocked *only* by an explicit per-target debug
+capability? If yes, Q6 is resolved as **B scoped to introspection only**, and I
+can record it and wire it when a debugger consumer actually exists (no concrete
+consumer today, so this is not blocking anything).
+
 **Where it bites.** `kernel/src/syscall/linux.rs` (`process_vm_impl` — the
 `if !same_addr_space { return ESRCH }` arm; `sys_ptrace`); `kernel/src/mm/user.rs`
 (`copy_from_user_as`/`copy_to_user_as` — the mechanism, already built);
-`kernel/src/proc/pcb.rs` (`get_pml4`); and whatever process-capability type a
-choice of **B** would introduce (`kernel/src/cap/`).
+`kernel/src/proc/pcb.rs` (`get_pml4`); the process-capability + debug right that
+choice **B** introduces (`kernel/src/cap/`); and, for the consensual path, the
+existing shared-memory + channel IPC (`kernel/src/ipc/`).
 
-**Status:** OPEN — mechanism exists; authorization model is the operator's call.
+**Status:** OPEN (narrowed) — operator endorsed the capability model (B); awaiting
+confirmation of the consensual-sharing-vs-debug-capability split above before
+recording. No concrete consumer exists yet, so nothing is blocked meanwhile.

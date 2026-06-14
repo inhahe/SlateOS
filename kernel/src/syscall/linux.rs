@@ -53811,6 +53811,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_sethostname_setdomainname()?;
+
+    #[inline(never)]
+    fn self_test_sethostname_setdomainname() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // sethostname / setdomainname validation.
     //   - len > 64 -> EINVAL.
     //   - NULL pointer with non-zero len -> EFAULT.
@@ -54316,6 +54321,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   set{{host,domain}}name CAP_SYS_ADMIN gate-first (Linux gate 1 fires before len/NULL/copy): OK"
         );
+    }
+        Ok(())
     }
 
     // mlock / munlock / mlockall / munlockall.

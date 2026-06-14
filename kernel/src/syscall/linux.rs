@@ -54325,6 +54325,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_mlock_family()?;
+
+    #[inline(never)]
+    fn self_test_mlock_family() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // mlock / munlock / mlockall / munlockall.
     //   - zero len succeeds without touching memory.
     //   - mlockall with zero flags -> EINVAL; valid bits -> 0; bad bit -> EINVAL.
@@ -54464,6 +54469,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   mlock PAGE_ALIGN(len+offset_in_page) / wrap-to-zero / end<start: OK"
         );
+    }
+        Ok(())
     }
 
     // msync flag/alignment validation.

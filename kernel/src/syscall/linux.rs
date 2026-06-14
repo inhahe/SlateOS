@@ -39506,6 +39506,93 @@ fn self_test_native_translation() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+/// TD4 extraction: arch_prctl ARCH_GET_CPUID / ARCH_SET_CPUID emulation
+/// (self_test group 9c). GET always returns 1; SET accepts 1 (idempotent),
+/// rejects 0 with ENODEV, other values with EINVAL — as a CPU without
+/// X86_FEATURE_CPUID_FAULT behaves. Self-contained. See
+/// [`self_test_errno_mapping`] for the TD4 rationale.
+#[inline(never)]
+fn self_test_arch_prctl_cpuid() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+
+    const ARCH_GET_CPUID_CODE: u64 = 0x1011;
+    const ARCH_SET_CPUID_CODE: u64 = 0x1012;
+
+    // ARCH_GET_CPUID -> 1 (always enabled).
+    let a = SyscallArgs {
+        arg0: ARCH_GET_CPUID_CODE, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::ARCH_PRCTL, &a);
+    if r.value != 1 {
+        serial_println!(
+            "[syscall/linux]   FAIL: arch_prctl(ARCH_GET_CPUID) -> {} (expected 1)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // ARCH_GET_CPUID ignores arg1 — Linux does not police it.
+    // Confirm garbage arg1 still returns 1 (the GET arm reads
+    // no addr).
+    let a = SyscallArgs {
+        arg0: ARCH_GET_CPUID_CODE, arg1: 0xdead_beef, arg2: 0,
+        arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::ARCH_PRCTL, &a);
+    if r.value != 1 {
+        serial_println!(
+            "[syscall/linux]   FAIL: arch_prctl(ARCH_GET_CPUID, garbage) -> {} (expected 1)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // ARCH_SET_CPUID(1) -> 0 (idempotent: already enabled).
+    let a = SyscallArgs {
+        arg0: ARCH_SET_CPUID_CODE, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::ARCH_PRCTL, &a);
+    if r.value != 0 {
+        serial_println!(
+            "[syscall/linux]   FAIL: arch_prctl(ARCH_SET_CPUID, 1) -> {} (expected 0)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // ARCH_SET_CPUID(0) -> -ENODEV (we cannot disable CPUID;
+    // matches CPUs without X86_FEATURE_CPUID_FAULT).
+    let a = SyscallArgs {
+        arg0: ARCH_SET_CPUID_CODE, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::ARCH_PRCTL, &a);
+    if r.value != -i64::from(errno::ENODEV) {
+        serial_println!(
+            "[syscall/linux]   FAIL: arch_prctl(ARCH_SET_CPUID, 0) -> {} (expected -ENODEV)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // ARCH_SET_CPUID(2) and (u64::MAX) -> -EINVAL (Linux
+    // rejects any value outside {0, 1} with EINVAL).
+    for bad in [2u64, 42, u64::MAX] {
+        let a = SyscallArgs {
+            arg0: ARCH_SET_CPUID_CODE, arg1: bad, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0,
+        };
+        let r = dispatch_linux(nr::ARCH_PRCTL, &a);
+        if r.value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: arch_prctl(ARCH_SET_CPUID, {}) -> {} (expected -EINVAL)",
+                bad, r.value,
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    Ok(())
+}
+
 /// TD4 extraction: arch_prctl ARCH_SET_GS / ARCH_GET_GS validation matrix
 /// (self_test group 9b). Mirrors the FS matrix but on IA32_KERNEL_GS_BASE;
 /// `saved_kgs` is sampled and restored on every exit path (a successful
@@ -40145,83 +40232,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // supported CPU would: GET always returns 1, SET accepts 1
     // (idempotent), rejects 0 with -ENODEV, and other values with
     // -EINVAL.  No MSR or PCB state needs to change.
-    {
-        const ARCH_GET_CPUID_CODE: u64 = 0x1011;
-        const ARCH_SET_CPUID_CODE: u64 = 0x1012;
-
-        // ARCH_GET_CPUID -> 1 (always enabled).
-        let a = SyscallArgs {
-            arg0: ARCH_GET_CPUID_CODE, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::ARCH_PRCTL, &a);
-        if r.value != 1 {
-            serial_println!(
-                "[syscall/linux]   FAIL: arch_prctl(ARCH_GET_CPUID) -> {} (expected 1)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // ARCH_GET_CPUID ignores arg1 — Linux does not police it.
-        // Confirm garbage arg1 still returns 1 (the GET arm reads
-        // no addr).
-        let a = SyscallArgs {
-            arg0: ARCH_GET_CPUID_CODE, arg1: 0xdead_beef, arg2: 0,
-            arg3: 0, arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::ARCH_PRCTL, &a);
-        if r.value != 1 {
-            serial_println!(
-                "[syscall/linux]   FAIL: arch_prctl(ARCH_GET_CPUID, garbage) -> {} (expected 1)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // ARCH_SET_CPUID(1) -> 0 (idempotent: already enabled).
-        let a = SyscallArgs {
-            arg0: ARCH_SET_CPUID_CODE, arg1: 1, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::ARCH_PRCTL, &a);
-        if r.value != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: arch_prctl(ARCH_SET_CPUID, 1) -> {} (expected 0)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // ARCH_SET_CPUID(0) -> -ENODEV (we cannot disable CPUID;
-        // matches CPUs without X86_FEATURE_CPUID_FAULT).
-        let a = SyscallArgs {
-            arg0: ARCH_SET_CPUID_CODE, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::ARCH_PRCTL, &a);
-        if r.value != -i64::from(errno::ENODEV) {
-            serial_println!(
-                "[syscall/linux]   FAIL: arch_prctl(ARCH_SET_CPUID, 0) -> {} (expected -ENODEV)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // ARCH_SET_CPUID(2) and (u64::MAX) -> -EINVAL (Linux
-        // rejects any value outside {0, 1} with EINVAL).
-        for bad in [2u64, 42, u64::MAX] {
-            let a = SyscallArgs {
-                arg0: ARCH_SET_CPUID_CODE, arg1: bad, arg2: 0,
-                arg3: 0, arg4: 0, arg5: 0,
-            };
-            let r = dispatch_linux(nr::ARCH_PRCTL, &a);
-            if r.value != -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: arch_prctl(ARCH_SET_CPUID, {}) -> {} (expected -EINVAL)",
-                    bad, r.value,
-                );
-                return Err(KernelError::InternalError);
-            }
-        }
-    }
+    self_test_arch_prctl_cpuid()?;
 
     // (9d) Batch 100: arch_prctl(ARCH_GET_XCOMP_SUPP = 0x1021),
     // ARCH_GET_XCOMP_PERM (0x1022), ARCH_REQ_XCOMP_PERM (0x1023).

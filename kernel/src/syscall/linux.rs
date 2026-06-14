@@ -43375,6 +43375,169 @@ fn self_test_seccomp_quotactl_truncation() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+#[inline(never)]
+fn self_test_io_swap_membarrier_truncation() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+    // Batch 301 — sys_io_setup + sys_swapon + sys_membarrier
+    // unsigned-int / int truncation audit.
+    //
+    // Pre-batch reads:
+    //   sys_io_setup: `args.arg0 == 0` checked against raw u64, so a
+    //     probe with nr_events = 0x1_0000_0000 (truncates to 0) bypassed
+    //     the EINVAL gate and fell to ENOSYS.
+    //   sys_swapon: `args.arg1 & !SWAP_FLAGS_VALID != 0` checked against
+    //     raw u64, so a probe with swap_flags = 0x1_0000_0000 hit
+    //     EINVAL where Linux truncates to 0 and reaches EPERM.
+    //   sys_membarrier: cmd / flags matched against u64-typed bit
+    //     constants, so high-half-set inputs missed every arm and
+    //     surfaced EINVAL where Linux truncates and runs the fence.
+    {
+        // (a) io_setup(nr_events=0x1_0000_0000, ctxp=&zero_ctx).
+        //     Pre-batch: ctxp read OK (ctx=0), then raw nr_events !=
+        //     0 -> falls through past the EINVAL gate to ENOSYS.
+        //     Post-batch: nr_events truncates to 0, hits the
+        //     `nr_events == 0` EINVAL gate (Linux's answer).
+        let zero_ctx: u64 = 0;
+        let ctx_ptr = (&raw const zero_ctx) as u64;
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0000,
+            arg1: ctx_ptr,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        let v = dispatch_linux(nr::IO_SETUP, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: io_setup high-half nr_events -> {} (expected -EINVAL)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (b) swapon(specialfile=&buf, swap_flags=0x1_0000_0000).
+        //     Pre-batch: raw 0x1_0000_0000 & !0x7_FFFF != 0 -> EINVAL.
+        //     Post-batch: truncates to 0, passes flag-mask gate,
+        //     validate_user_read is a kernel-context no-op, and we
+        //     reach the terminal EPERM (no CAP_SYS_ADMIN).
+        let path_buf = [b'/'; 4];
+        let path_ptr = path_buf.as_ptr() as u64;
+        let a = SyscallArgs {
+            arg0: path_ptr,
+            arg1: 0x1_0000_0000,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        let v = dispatch_linux(nr::SWAPON, &a).value;
+        if v != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: swapon high-half swap_flags -> {} (expected -EPERM)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (c) membarrier(cmd=0x1_0000_0001, flags=0, cpu_id=0).
+        //     Pre-batch: raw cmd 0x1_0000_0001 didn't match any arm
+        //     (MEMBARRIER_CMD_GLOBAL=1 etc. are u64 constants whose
+        //     full 64-bit value differs) -> terminal EINVAL.
+        //     Post-batch: cmd truncates to 1 (GLOBAL), runs the
+        //     fence path and returns 0.
+        let a = SyscallArgs {
+            arg0: 0x1_0000_0001,
+            arg1: 0,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        let v = dispatch_linux(nr::MEMBARRIER, &a).value;
+        if v != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: membarrier high-half cmd -> {} (expected 0)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // (d) membarrier(cmd=1 GLOBAL, flags=0x1_0000_0000, cpu_id=0).
+        //     Pre-batch: raw flags 0x1_0000_0000 & !FLAG_CPU(1) =
+        //     0x1_0000_0000 != 0 -> EINVAL.  Post-batch: flags
+        //     truncates to 0, passes the flag-mask gate, runs the
+        //     fence and returns 0.
+        let a = SyscallArgs {
+            arg0: 1,
+            arg1: 0x1_0000_0000,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        let v = dispatch_linux(nr::MEMBARRIER, &a).value;
+        if v != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: membarrier high-half flags -> {} (expected 0)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[syscall/linux]   io_setup/swapon/membarrier unsigned-int/int truncation: OK"
+        );
+
+        // membarrier cpu_id int-truncation (batch 330): Linux's third
+        // arg is C `int cpu_id`.  The QUERY arm rejects nonzero cpu_id
+        // with EINVAL; high-half garbage with low=0 must truncate and
+        // advance to the QUERY bitmask return.
+        // (a) cpu_id=0x1_0000_0000 (high-only) -> 0x3FF (QUERY succeeds).
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0x1_0000_0000, arg3: 0, arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::MEMBARRIER, &a).value;
+        if v != 0x3FF {
+            serial_println!(
+                "[syscall/linux]   FAIL: membarrier QUERY high-half cpu_id -> {} (expected 0x3FF)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (b) cpu_id=0x1_0000_0001 (high|bad-low 1) -> EINVAL.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0x1_0000_0001, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MEMBARRIER, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: membarrier QUERY high|bad-low cpu_id not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (c) cpu_id=0xFFFF_FFFF_0000_0000 (all-high, low=0) -> 0x3FF.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0xFFFF_FFFF_0000_0000, arg3: 0, arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::MEMBARRIER, &a).value;
+        if v != 0x3FF {
+            serial_println!(
+                "[syscall/linux]   FAIL: membarrier QUERY all-high cpu_id -> {} (expected 0x3FF)",
+                v
+            );
+            return Err(KernelError::InternalError);
+        }
+        // (d) cpu_id=0xFFFF_FFFF_0000_0001 (all-high|low=1) -> EINVAL.
+        //     Confirms the mask still trips the gate when the low 32
+        //     bits are nonzero, regardless of high-half pattern.
+        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0xFFFF_FFFF_0000_0001, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MEMBARRIER, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: membarrier QUERY all-high|bad-low cpu_id not EINVAL"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   membarrier cpu_id int-truncation (high-half ignored): OK"
+        );
+    }
+    Ok(())
+}
+
 pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
@@ -43649,163 +43812,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
     self_test_seccomp_quotactl_truncation()?;
 
-    // Batch 301 — sys_io_setup + sys_swapon + sys_membarrier
-    // unsigned-int / int truncation audit.
-    //
-    // Pre-batch reads:
-    //   sys_io_setup: `args.arg0 == 0` checked against raw u64, so a
-    //     probe with nr_events = 0x1_0000_0000 (truncates to 0) bypassed
-    //     the EINVAL gate and fell to ENOSYS.
-    //   sys_swapon: `args.arg1 & !SWAP_FLAGS_VALID != 0` checked against
-    //     raw u64, so a probe with swap_flags = 0x1_0000_0000 hit
-    //     EINVAL where Linux truncates to 0 and reaches EPERM.
-    //   sys_membarrier: cmd / flags matched against u64-typed bit
-    //     constants, so high-half-set inputs missed every arm and
-    //     surfaced EINVAL where Linux truncates and runs the fence.
-    {
-        // (a) io_setup(nr_events=0x1_0000_0000, ctxp=&zero_ctx).
-        //     Pre-batch: ctxp read OK (ctx=0), then raw nr_events !=
-        //     0 -> falls through past the EINVAL gate to ENOSYS.
-        //     Post-batch: nr_events truncates to 0, hits the
-        //     `nr_events == 0` EINVAL gate (Linux's answer).
-        let zero_ctx: u64 = 0;
-        let ctx_ptr = (&raw const zero_ctx) as u64;
-        let a = SyscallArgs {
-            arg0: 0x1_0000_0000,
-            arg1: ctx_ptr,
-            arg2: 0,
-            arg3: 0,
-            arg4: 0,
-            arg5: 0,
-        };
-        let v = dispatch_linux(nr::IO_SETUP, &a).value;
-        if v != -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: io_setup high-half nr_events -> {} (expected -EINVAL)",
-                v
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // (b) swapon(specialfile=&buf, swap_flags=0x1_0000_0000).
-        //     Pre-batch: raw 0x1_0000_0000 & !0x7_FFFF != 0 -> EINVAL.
-        //     Post-batch: truncates to 0, passes flag-mask gate,
-        //     validate_user_read is a kernel-context no-op, and we
-        //     reach the terminal EPERM (no CAP_SYS_ADMIN).
-        let path_buf = [b'/'; 4];
-        let path_ptr = path_buf.as_ptr() as u64;
-        let a = SyscallArgs {
-            arg0: path_ptr,
-            arg1: 0x1_0000_0000,
-            arg2: 0,
-            arg3: 0,
-            arg4: 0,
-            arg5: 0,
-        };
-        let v = dispatch_linux(nr::SWAPON, &a).value;
-        if v != -i64::from(errno::EPERM) {
-            serial_println!(
-                "[syscall/linux]   FAIL: swapon high-half swap_flags -> {} (expected -EPERM)",
-                v
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // (c) membarrier(cmd=0x1_0000_0001, flags=0, cpu_id=0).
-        //     Pre-batch: raw cmd 0x1_0000_0001 didn't match any arm
-        //     (MEMBARRIER_CMD_GLOBAL=1 etc. are u64 constants whose
-        //     full 64-bit value differs) -> terminal EINVAL.
-        //     Post-batch: cmd truncates to 1 (GLOBAL), runs the
-        //     fence path and returns 0.
-        let a = SyscallArgs {
-            arg0: 0x1_0000_0001,
-            arg1: 0,
-            arg2: 0,
-            arg3: 0,
-            arg4: 0,
-            arg5: 0,
-        };
-        let v = dispatch_linux(nr::MEMBARRIER, &a).value;
-        if v != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: membarrier high-half cmd -> {} (expected 0)",
-                v
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // (d) membarrier(cmd=1 GLOBAL, flags=0x1_0000_0000, cpu_id=0).
-        //     Pre-batch: raw flags 0x1_0000_0000 & !FLAG_CPU(1) =
-        //     0x1_0000_0000 != 0 -> EINVAL.  Post-batch: flags
-        //     truncates to 0, passes the flag-mask gate, runs the
-        //     fence and returns 0.
-        let a = SyscallArgs {
-            arg0: 1,
-            arg1: 0x1_0000_0000,
-            arg2: 0,
-            arg3: 0,
-            arg4: 0,
-            arg5: 0,
-        };
-        let v = dispatch_linux(nr::MEMBARRIER, &a).value;
-        if v != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: membarrier high-half flags -> {} (expected 0)",
-                v
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        serial_println!(
-            "[syscall/linux]   io_setup/swapon/membarrier unsigned-int/int truncation: OK"
-        );
-
-        // membarrier cpu_id int-truncation (batch 330): Linux's third
-        // arg is C `int cpu_id`.  The QUERY arm rejects nonzero cpu_id
-        // with EINVAL; high-half garbage with low=0 must truncate and
-        // advance to the QUERY bitmask return.
-        // (a) cpu_id=0x1_0000_0000 (high-only) -> 0x3FF (QUERY succeeds).
-        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0x1_0000_0000, arg3: 0, arg4: 0, arg5: 0 };
-        let v = dispatch_linux(nr::MEMBARRIER, &a).value;
-        if v != 0x3FF {
-            serial_println!(
-                "[syscall/linux]   FAIL: membarrier QUERY high-half cpu_id -> {} (expected 0x3FF)",
-                v
-            );
-            return Err(KernelError::InternalError);
-        }
-        // (b) cpu_id=0x1_0000_0001 (high|bad-low 1) -> EINVAL.
-        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0x1_0000_0001, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::MEMBARRIER, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: membarrier QUERY high|bad-low cpu_id not EINVAL"
-            );
-            return Err(KernelError::InternalError);
-        }
-        // (c) cpu_id=0xFFFF_FFFF_0000_0000 (all-high, low=0) -> 0x3FF.
-        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0xFFFF_FFFF_0000_0000, arg3: 0, arg4: 0, arg5: 0 };
-        let v = dispatch_linux(nr::MEMBARRIER, &a).value;
-        if v != 0x3FF {
-            serial_println!(
-                "[syscall/linux]   FAIL: membarrier QUERY all-high cpu_id -> {} (expected 0x3FF)",
-                v
-            );
-            return Err(KernelError::InternalError);
-        }
-        // (d) cpu_id=0xFFFF_FFFF_0000_0001 (all-high|low=1) -> EINVAL.
-        //     Confirms the mask still trips the gate when the low 32
-        //     bits are nonzero, regardless of high-half pattern.
-        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0xFFFF_FFFF_0000_0001, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::MEMBARRIER, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: membarrier QUERY all-high|bad-low cpu_id not EINVAL"
-            );
-            return Err(KernelError::InternalError);
-        }
-        serial_println!(
-            "[syscall/linux]   membarrier cpu_id int-truncation (high-half ignored): OK"
-        );
-    }
+    self_test_io_swap_membarrier_truncation()?;
 
     // Batch 302 — sys_finit_module + sys_delete_module
     // int / unsigned-int flag truncation audit.

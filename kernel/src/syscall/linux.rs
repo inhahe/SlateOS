@@ -44903,6 +44903,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
     self_test_default_rlimits()?;
 
+    self_test_prlimit64_dispatch()?;
+
+    #[inline(never)]
+    fn self_test_prlimit64_dispatch() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // prlimit64 dispatch validation:
     //   - resource > 15 -> EINVAL.
     //   - pid != 0 and pid != caller -> EPERM.  caller_pid resolves to
@@ -45783,6 +45788,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
             pcb::destroy(test_pid);
         }
+    }
+        Ok(())
     }
 
     // rt_sigpending dispatch validation (batch 356 — structural fix).

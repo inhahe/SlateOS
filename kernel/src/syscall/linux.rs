@@ -46043,6 +46043,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_umask_dispatch()?;
+
+    #[inline(never)]
+    fn self_test_umask_dispatch() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // umask dispatch validation (batch 51 — per-process umask storage).
     //
     // Kernel-context path (caller_pid == None): the syscall falls
@@ -46146,6 +46151,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 return Err(KernelError::InternalError);
             }
         }
+    }
+        Ok(())
     }
 
     // sigaltstack dispatch validation:

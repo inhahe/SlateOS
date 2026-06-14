@@ -60,6 +60,28 @@ pub enum VmaKind {
     /// A page fault here means something went wrong (e.g., a PTE
     /// was corrupted or prematurely cleared).
     Fixed,
+
+    /// Demand-paged, file-backed private mapping (`MAP_PRIVATE` over a
+    /// regular file).  On the first access to a page, the fault handler
+    /// allocates a zeroed frame, reads the corresponding bytes from the
+    /// backing file (tail-zero-filled past EOF, matching Linux's page
+    /// zero-fill), and maps it.  Because the mapping is private, later
+    /// writes mutate that per-process frame and are never written back to
+    /// the file — so once populated the frame behaves like anonymous
+    /// memory (reclaimable to swap, CoW-shareable across fork).
+    ///
+    /// `handle` is a `crate::fs::handle` open-file id that the VMA owns an
+    /// independent reference to (bumped via `dup_shared` at mmap time and
+    /// on fork, released via `close` when the VMA is removed or the
+    /// process exits).  Keeping our own reference decouples the mapping's
+    /// lifetime from the file descriptor: `munmap`-after-`close` still
+    /// reads the right bytes.
+    FileBacked {
+        /// Open-file handle id backing this mapping (owned reference).
+        handle: u64,
+        /// Byte offset into the backing file that `start` maps to.
+        file_offset: u64,
+    },
 }
 
 /// A Virtual Memory Area: a contiguous range of virtual addresses
@@ -271,6 +293,18 @@ impl AddressSpace {
                 // fault here means a PTE was corrupted.
                 serial_println!(
                     "[fault] Fixed VMA fault at {:#x} — PTE missing for fixed mapping",
+                    fault_addr
+                );
+                Err(KernelError::PageFault)
+            }
+            VmaKind::FileBacked { .. } => {
+                // File-backed mappings only ever live in a *process*
+                // address space and are resolved by `pcb::try_resolve_fault`
+                // (which has access to the file-handle layer).  The kernel's
+                // global address space never registers one, so reaching here
+                // is a bug.
+                serial_println!(
+                    "[fault] FileBacked VMA fault at {:#x} in kernel address space — unexpected",
                     fault_addr
                 );
                 Err(KernelError::PageFault)

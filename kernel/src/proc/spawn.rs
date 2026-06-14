@@ -937,6 +937,12 @@ pub fn exec_process(
         page_table::clear_user_address_space(pml4_phys);
     }
 
+    // The page tables and frames are gone; drop the matching VMA metadata
+    // (and release any file-backed mapping references) so the new image
+    // starts with an empty VMA list instead of inheriting stale records
+    // from the old one.
+    pcb::reset_vmas_for_exec(pid);
+
     // Flush TLB for the user half.  Since we just freed all user
     // mappings, any stale TLB entries could cause use-after-free.
     // Reloading CR3 flushes all non-global TLB entries.

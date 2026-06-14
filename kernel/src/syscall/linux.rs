@@ -8706,6 +8706,42 @@ fn linux_file_mmap(
         }
     }
 
+    // Demand-paged fast path (TD22): a private, non-fixed mapping of a
+    // regular file is served lazily by the page-fault handler.  Register a
+    // `FileBacked` VMA that owns its own reference to the open file and
+    // return immediately — no frames are allocated until first touch, and
+    // private writes copy-on-fault without ever reaching the file.
+    //
+    // memfd-backed maps and `MAP_FIXED` overlays (the ld.so segment loader)
+    // keep the eager path below: memfd has a separate handle layer, and
+    // FIXED mappings are typically faulted in immediately by the loader, so
+    // there is little to gain and the eager path is already proven there.
+    if matches!(entry.kind, HandleKind::File) && private && !fixed {
+        // Take an independent reference on the open file description so the
+        // mapping keeps working after the caller closes its fd.
+        let mapped_handle = match crate::fs::handle::dup_shared(entry.raw_handle) {
+            Ok(h) => h,
+            Err(_) => {
+                pcb::linux_as_release(pid, length_aligned);
+                return linux_err(errno::ENOMEM);
+            }
+        };
+        let vma = Vma {
+            start: base,
+            end,
+            kind: VmaKind::FileBacked { handle: mapped_handle, file_offset: offset },
+            flags: page_flags,
+        };
+        if pcb::add_vma(pid, vma).is_err() {
+            // Couldn't record the mapping — drop our reference and refund.
+            let _ = crate::fs::handle::close(mapped_handle);
+            pcb::linux_as_release(pid, length_aligned);
+            return linux_err(errno::ENOMEM);
+        }
+        #[allow(clippy::cast_possible_wrap)]
+        return SyscallResult::ok(base as i64);
+    }
+
     // Allocate, fill from the file, and map each frame; roll back fully on
     // the first failure.
     for i in 0..want_frames {
@@ -39175,16 +39211,18 @@ fn caller_pid() -> Option<u64> {
 /// Coverage:
 ///  1. **Argument gates** (no VFS needed): zero length → `EINVAL`;
 ///     non-file/memfd kind → `ENODEV`.
-///  2. **Eager private copy + tail zero-fill**: a 20000-byte file mapped
-///     over two 16 KiB frames.  The first frame is fully file-backed; the
+///  2. **Demand-paged private map + tail zero-fill**: a 20000-byte file
+///     mapped MAP_PRIVATE over two 16 KiB frames registers a `FileBacked`
+///     VMA with no frames mapped yet.  Each page is then faulted in via
+///     `pcb::try_resolve_fault`; the first frame is fully file-backed, the
 ///     second is partially file-backed with a zero tail past EOF — exactly
 ///     Linux's page-tail zero-fill.  Content is verified by walking the
 ///     throwaway process's page table (`translate`) and reading each frame
 ///     through the HHDM.
 ///  3. **`MAP_FIXED` overlay + VMA split**: re-map only the first frame at
-///     the same base with `MAP_FIXED`, proving the existing mapping is
-///     replaced and the covering VMA splits into the overlaid range plus a
-///     surviving right remainder.
+///     the same base with `MAP_FIXED` (which keeps the eager copy path),
+///     proving the existing mapping is replaced and the covering FileBacked
+///     VMA splits into the overlaid range plus a surviving right remainder.
 ///
 /// Returns `Ok(())` on success (or a clean SKIP if the VFS write fails),
 /// and an error on the first hard failure.
@@ -39309,14 +39347,21 @@ pub fn self_test_file_mmap() -> crate::error::KernelResult<()> {
         .unwrap_or(0);
     let end = base.saturating_add(length_aligned);
 
-    // The VMA must be registered as a fully-backed Fixed range.
+    // A private, non-fixed file map is demand-paged (TD22): the VMA must be
+    // registered as a FileBacked range, not eagerly-backed Fixed.
     let has_vma = pcb::list_vmas(pid).is_some_and(|vmas| {
-        vmas.iter()
-            .any(|v| v.start == base && v.end == end && v.kind == VmaKind::Fixed)
+        vmas.iter().any(|v| {
+            v.start == base
+                && v.end == end
+                && matches!(v.kind, VmaKind::FileBacked { .. })
+        })
     });
     if !has_vma {
         teardown!();
-        serial_println!("[syscall/linux]   FAIL: Fixed VMA [{:#x},{:#x}) not registered", base, end);
+        serial_println!(
+            "[syscall/linux]   FAIL: FileBacked VMA [{:#x},{:#x}) not registered",
+            base, end
+        );
         return Err(KernelError::InternalError);
     }
 
@@ -39331,6 +39376,23 @@ pub fn self_test_file_mmap() -> crate::error::KernelResult<()> {
             as_after_initial, length_aligned
         );
         return Err(KernelError::InternalError);
+    }
+
+    // Pages are demand-paged, so nothing is mapped yet.  Drive the fault
+    // resolver for each page (simulating a user read of a not-present page:
+    // error code = U/S bit only) to populate it from the backing file.
+    let mut va_page = base;
+    while va_page < end {
+        // Error code bit 2 = user-mode access; present/write/fetch all clear.
+        if !pcb::try_resolve_fault(pid, va_page, 1 << 2) {
+            teardown!();
+            serial_println!(
+                "[syscall/linux]   FAIL: demand fault unresolved at {:#x}",
+                va_page
+            );
+            return Err(KernelError::InternalError);
+        }
+        va_page = va_page.saturating_add(frame_size);
     }
 
     // Verify every mapped byte: file content where it exists, zero past EOF.
@@ -39420,7 +39482,7 @@ pub fn self_test_file_mmap() -> crate::error::KernelResult<()> {
 
     teardown!();
     serial_println!(
-        "[syscall/linux]   file-backed mmap (2-frame copy + tail zero-fill + MAP_FIXED split): OK"
+        "[syscall/linux]   file-backed mmap (demand-paged 2 frames + tail zero-fill + MAP_FIXED split): OK"
     );
     Ok(())
 }

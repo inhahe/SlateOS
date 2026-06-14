@@ -542,43 +542,59 @@ lscpu's existing reader lights up automatically with real data.
 range files and `topology/` subtree). Tracked as the follow-up to the
 CPU-enumeration sysfs work.
 
-### TD22. File-backed `mmap` is an eager private copy — no demand paging, no shared write-back — DEBT 2026-06-13
+### TD22. File-backed `mmap` — Phase 1 (demand-paged `MAP_PRIVATE`) DONE; page cache + shared write-back still DEBT — PARTIAL 2026-06-14
 
-**Where:** `kernel/src/syscall/linux.rs` — `linux_file_mmap` (the file-backed
-arm of `sys_mmap`), plus `unmap_user_range` / `linux_file_mmap_rollback`
-helpers and `pcb::remove_vma_range` (VMA split for `MAP_FIXED`).
+**Where:** `kernel/src/mm/vma.rs` (`VmaKind::FileBacked`), `kernel/src/proc/pcb.rs`
+(`try_resolve_fault` FileBacked arm, `vma_release_backing`, `remove_vma`,
+`remove_vma_range`, `reset_vmas_for_exec`, `fork_create`, `destroy`),
+`kernel/src/syscall/linux.rs` — `linux_file_mmap` (the file-backed arm of
+`sys_mmap`), plus `unmap_user_range` / `linux_file_mmap_rollback` helpers.
 
-**What it is:** the file-backed `mmap(2)` path (the #1 blocker for running
-prebuilt Linux binaries — `ld.so`'s `_dl_map_segments`) is implemented with an
-**eager private-copy** model, not Linux's demand-paged page cache:
-- Every 16 KiB frame of the mapping is allocated, the file bytes are copied in
-  via `read_at` at map time, and the frame is mapped. There is no demand
-  paging — a large sparse file map populates the whole span up front.
-- The mapping is a **private snapshot**: it registers a `VmaKind::Fixed` VMA
-  ("already fully backed"), so writes to a `MAP_PRIVATE` map never participate
-  in CoW with the file, and the page cache is not shared between two processes
-  mapping the same file.
-- **Writable `MAP_SHARED` is rejected with `ENOSYS`** — we never write modified
-  pages back to the file, so honouring the shared-write contract is impossible
-  under this model. Read-only `MAP_SHARED` is served as a private copy (no
-  write is observable, so the distinction is moot).
-- `MAP_FIXED` correctly replaces an existing mapping (unmaps/frees the old
-  frames and splits the covering VMA via `pcb::remove_vma_range`), which is
-  what `ld.so` relies on when overlaying per-segment maps onto its reservation.
+**Phase 1 — DONE (2026-06-14): demand-paged `MAP_PRIVATE` for regular files.**
+A private, non-fixed `mmap` of a regular file now registers a
+`VmaKind::FileBacked { handle, file_offset }` VMA and allocates **no frames**
+up front. The page-fault handler (`pcb::try_resolve_fault`) resolves each page
+lazily: allocate a zeroed frame, `read_at(handle, file_offset + (page - start))`
+into it (tail stays zero past EOF — Linux page zero-fill), then map. Because
+the mapping is private, a write faults onto its own per-process frame and never
+reaches the file (correct `MAP_PRIVATE` semantics); once populated the frame is
+swap-reclaimable and CoW-shareable across `fork` like any anonymous page.
+- **Backing-handle lifetime:** the VMA owns an independent reference on the open
+  file description (`dup_shared` at mmap, again per-VMA on `fork`, net
+  retain/release on `remove_vma_range` splits), released via `close` on
+  `munmap` (`remove_vma`), `execve` (`reset_vmas_for_exec`), and process exit
+  (`destroy`). This decouples the mapping's lifetime from the caller's fd:
+  `munmap`-after-`close` still reads the right bytes.
+- **Bonus fix:** `execve` previously never cleared the per-process VMA list when
+  it tore down the old address space (`clear_user_address_space`), leaving stale
+  records in `/proc/<pid>/maps` and stale ranges the fault resolver could
+  "resolve". `reset_vmas_for_exec` now drops them all (and releases their
+  backings) so a fresh image starts with an empty VMA list, matching spawn.
 
-**Impact:** medium. Sufficient for `ld.so` shared-object loading and ordinary
-`MAP_PRIVATE` data maps (the Path X target). Two real gaps remain: (1) memory
-cost / latency for large maps (no lazy population); (2) writable `MAP_SHARED`
-file maps fail — any Linux program using shared mmap'd files for IPC or
-in-place file editing (e.g. some databases, `mmap`-based logging) will get
-`ENOSYS`.
+**Still eager (unchanged):** memfd-backed maps, read-only `MAP_SHARED`, and
+`MAP_FIXED` overlays (the `ld.so` per-segment loader) keep the eager-copy path —
+`VmaKind::Fixed`, frames allocated and `read_at`-filled at map time. memfd has a
+separate handle layer; FIXED ranges are typically faulted in immediately by the
+loader, so demand paging buys little there.
 
-**Proper fix:** introduce a file-backed VMA kind resolved by the page-fault
-handler (demand paging): on fault, look up the backing fd + offset, fetch the
-page from a shared page cache, map CoW for `MAP_PRIVATE` / shared for
-`MAP_SHARED`. For writable `MAP_SHARED`, add msync/writeback (dirty-page
-tracking + flush on unmap/msync). This depends on a unified page cache shared
-between the VFS read path and mmap, which does not exist yet.
+**Still DEBT — Phase 2: unified page cache + writable `MAP_SHARED`.**
+- Writable `MAP_SHARED` is still rejected with `ENOSYS` — we never write
+  modified pages back to the file, so the shared-write contract is impossible.
+  Any Linux program using shared mmap'd files for IPC or in-place editing (some
+  databases, `mmap`-based logging) gets `ENOSYS`.
+- Two processes mapping the same file do **not** share physical pages — each
+  demand-faults its own private copy. There is no unified page cache shared
+  between the VFS read path and mmap, so file pages can be resident twice.
+- The fault handler reads the file **synchronously via the VFS** inside the
+  page-fault path; a page cache would serve hits without re-reading.
+
+**Proper fix (Phase 2):** introduce a unified page cache shared between the VFS
+read path and mmap. Resolve `MAP_SHARED` faults to the shared cache page (mapped
+writable for `PROT_WRITE`), add dirty-page tracking + `msync`/unmap write-back,
+and switch `MAP_PRIVATE` to map the cache page CoW (copy only on write) instead
+of read-copying into a fresh frame. This is a foundational architectural fork
+(it touches the VFS, the frame allocator's ownership model, and writeback) and
+is logged for operator input in `open-questions.md`.
 
 ---
 

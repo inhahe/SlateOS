@@ -22,7 +22,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use crate::cap::{self, CapTable, Rights, ResourceType};
 use crate::error::{KernelError, KernelResult};
-use crate::mm::vma::Vma;
+use crate::mm::vma::{Vma, VmaKind};
 use crate::sched::task::TaskId;
 use crate::serial_println;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -1608,6 +1608,18 @@ pub fn fork_create(
         }
     }
 
+    // Each file-backed VMA the child inherits needs its own reference on
+    // the backing open-file description.  Collect the handles now (before
+    // `vmas` is moved into the child) and bump them after the process-table
+    // lock is released below.
+    let fork_retain_handles: Vec<u64> = vmas
+        .iter()
+        .filter_map(|v| match v.kind {
+            crate::mm::vma::VmaKind::FileBacked { handle, .. } => Some(handle),
+            _ => None,
+        })
+        .collect();
+
     let pid = alloc_pid();
     let child = Process {
         pid,
@@ -1815,6 +1827,15 @@ pub fn fork_create(
 
     table.insert(pid, child);
     PROCESSES_CREATED.fetch_add(1, Ordering::Relaxed);
+    drop(table);
+
+    // Bump the backing-file reference for each file-backed VMA the child
+    // inherited.  Done with the process-table lock released — the open-file
+    // lock must never nest under it.
+    for handle in fork_retain_handles {
+        let _ = crate::fs::handle::dup_shared(handle);
+    }
+
     Ok(pid)
 }
 
@@ -3761,6 +3782,31 @@ pub fn is_process_running(pid: ProcessId) -> bool {
 // Per-process VMA management (address-space records for all mmap regions)
 // ---------------------------------------------------------------------------
 
+/// Release the owned reference a VMA holds on its backing resource, if any.
+///
+/// A [`VmaKind::FileBacked`] VMA owns an independent reference to its
+/// backing open-file description.  This is called when such a VMA is
+/// dropped from a process's authoritative VMA list (`munmap`, or process
+/// teardown).  No-op for kinds without a backing resource.
+///
+/// The *retain* side (fork inheritance, `MAP_FIXED` split remainders) is
+/// applied directly on collected handle ids — see `fork_create`,
+/// `remove_vma_range`, and `reset_vmas_for_exec` — because those sites
+/// defer the open-file-lock operations until after the process-table lock
+/// is dropped (the established ordering is open-file-table *after*
+/// process-table, never the reverse).
+///
+/// Must be called with **no** process-table lock held, for the same
+/// lock-ordering reason.
+fn vma_release_backing(vma: &Vma) {
+    if let VmaKind::FileBacked { handle, .. } = vma.kind {
+        // Drops one reference; the underlying description is only torn
+        // down on the final close.  A failure means the handle was
+        // already gone, which is harmless here.
+        let _ = crate::fs::handle::close(handle);
+    }
+}
+
 /// Add a VMA to a process's per-process VMA list.
 ///
 /// Used by `SYS_MMAP` to register a mapped region — both committed
@@ -3825,16 +3871,26 @@ pub fn list_vmas(pid: ProcessId) -> Option<Vec<Vma>> {
 ///
 /// Returns `true` if a VMA was found and removed, `false` otherwise.
 pub fn remove_vma(pid: ProcessId, start: u64) -> bool {
-    let mut table = PROCESS_TABLE.lock();
-    let Some(proc) = table.get_mut(&pid) else {
-        return false;
+    // Remove under the lock, but release the VMA's backing reference (if
+    // any) only after dropping it — `vma_release_backing` takes the
+    // open-file lock, which must never be held under the process-table
+    // lock.
+    let removed = {
+        let mut table = PROCESS_TABLE.lock();
+        let Some(proc) = table.get_mut(&pid) else {
+            return false;
+        };
+        match proc.vmas.binary_search_by_key(&start, |v| v.start) {
+            Ok(idx) => Some(proc.vmas.remove(idx)),
+            Err(_) => None,
+        }
     };
-
-    if let Ok(idx) = proc.vmas.binary_search_by_key(&start, |v| v.start) {
-        proc.vmas.remove(idx);
-        true
-    } else {
-        false
+    match removed {
+        Some(vma) => {
+            vma_release_backing(&vma);
+            true
+        }
+        None => false,
     }
 }
 
@@ -3867,30 +3923,98 @@ pub fn remove_vma_range(pid: ProcessId, start: u64, end: u64) -> KernelResult<()
     if end <= start {
         return Err(KernelError::InvalidArgument);
     }
-    let mut table = PROCESS_TABLE.lock();
-    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
 
-    let mut kept: Vec<Vma> = Vec::with_capacity(proc.vmas.len());
-    for vma in proc.vmas.drain(..) {
-        // No overlap with [start, end): keep unchanged.
-        if vma.end <= start || vma.start >= end {
-            kept.push(vma);
-            continue;
+    // Backing-reference accounting for file-backed VMAs.  Every original
+    // FileBacked VMA owned exactly one reference; after the surgery each
+    // surviving remainder must own one.  We collect the deltas while the
+    // process-table lock is held but apply them only after releasing it
+    // (the open-file lock must never nest under the process-table lock).
+    // Retains are applied *before* releases so a description that survives
+    // the operation never transiently hits a zero refcount.
+    let mut retains: Vec<u64> = Vec::new();
+    let mut releases: Vec<u64> = Vec::new();
+
+    {
+        let mut table = PROCESS_TABLE.lock();
+        let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+
+        let mut kept: Vec<Vma> = Vec::with_capacity(proc.vmas.len());
+        for vma in proc.vmas.drain(..) {
+            // No overlap with [start, end): keep unchanged.
+            if vma.end <= start || vma.start >= end {
+                kept.push(vma);
+                continue;
+            }
+            // This original VMA is being split/dropped: it loses its
+            // single owned backing reference.
+            if let VmaKind::FileBacked { handle, .. } = vma.kind {
+                releases.push(handle);
+            }
+            // Left remainder [vma.start, start) survives an edge/superset
+            // overlap on the low side.
+            if vma.start < start {
+                let rem = Vma { end: start, ..vma };
+                if let VmaKind::FileBacked { handle, .. } = rem.kind {
+                    retains.push(handle);
+                }
+                kept.push(rem);
+            }
+            // Right remainder [end, vma.end) survives on the high side.
+            if vma.end > end {
+                let rem = Vma { start: end, ..vma };
+                if let VmaKind::FileBacked { handle, .. } = rem.kind {
+                    retains.push(handle);
+                }
+                kept.push(rem);
+            }
+            // Anything else (the part inside [start, end)) is dropped.
         }
-        // Left remainder [vma.start, start) survives an edge/superset
-        // overlap on the low side.
-        if vma.start < start {
-            kept.push(Vma { end: start, ..vma });
-        }
-        // Right remainder [end, vma.end) survives on the high side.
-        if vma.end > end {
-            kept.push(Vma { start: end, ..vma });
-        }
-        // Anything else (the part inside [start, end)) is dropped.
+        kept.sort_unstable_by_key(|v| v.start);
+        proc.vmas = kept;
     }
-    kept.sort_unstable_by_key(|v| v.start);
-    proc.vmas = kept;
+
+    // Apply backing-reference deltas with the process-table lock released.
+    for handle in retains {
+        let _ = crate::fs::handle::dup_shared(handle);
+    }
+    for handle in releases {
+        let _ = crate::fs::handle::close(handle);
+    }
     Ok(())
+}
+
+/// Drop *all* VMAs from a process's list, releasing any backing
+/// references, as part of `execve` replacing the process image.
+///
+/// `execve` tears down the entire old user address space (page tables
+/// and frames are freed by `clear_user_address_space`); the VMA list is
+/// process-level metadata that must be reset to match, otherwise stale
+/// records from the old image would linger in `/proc/<pid>/maps` and —
+/// worse — a fault in a now-unmapped old `mmap` range could be silently
+/// "resolved" against a stale VMA (re-demand-paging anonymous zeros, or
+/// re-reading an old file-backed mapping).  Clearing here makes a freshly
+/// exec'd image start with an empty VMA list, consistent with a freshly
+/// spawned one.
+///
+/// Backing references held by file-backed VMAs are released after the
+/// process-table lock is dropped (the open-file lock must not nest under
+/// it).  No-op if the PID is unknown.
+pub fn reset_vmas_for_exec(pid: ProcessId) {
+    let mut releases: Vec<u64> = Vec::new();
+    {
+        let mut table = PROCESS_TABLE.lock();
+        let Some(proc) = table.get_mut(&pid) else {
+            return;
+        };
+        for vma in proc.vmas.drain(..) {
+            if let VmaKind::FileBacked { handle, .. } = vma.kind {
+                releases.push(handle);
+            }
+        }
+    }
+    for handle in releases {
+        let _ = crate::fs::handle::close(handle);
+    }
 }
 
 /// Resolve a user-space page fault against a process's VMA list.
@@ -3910,7 +4034,7 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
     use crate::mm::fault::PageFaultError;
     use crate::mm::frame::{self, FRAME_SIZE};
     use crate::mm::page_table::{self, PageFlags, VirtAddr};
-    use crate::mm::vma::VmaKind;
+    // `VmaKind` is imported at module scope.
 
     let error = PageFaultError::new(error_code);
 
@@ -3968,13 +4092,17 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
         return false;
     }
 
-    // Only demand-page Anonymous and Stack VMAs.
-    match vma.kind {
-        VmaKind::Anonymous | VmaKind::Stack => {}
+    // Decide how to populate the new frame.  Anonymous/Stack pages are
+    // left zeroed; FileBacked pages are filled from the backing file.
+    // Guard/Fixed faults are never resolvable here.
+    let file_backing = match vma.kind {
+        VmaKind::Anonymous | VmaKind::Stack => None,
+        VmaKind::FileBacked { handle, file_offset } => Some((handle, file_offset)),
         VmaKind::Guard | VmaKind::Fixed => return false,
-    }
+    };
 
     let flags = vma.flags;
+    let vma_start = vma.start;
     let pml4_phys = proc.pml4_phys;
 
     // Permission checks.
@@ -4030,6 +4158,30 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
     unsafe {
         let hhdm_ptr = phys_frame.to_virt(hhdm) as *mut u8;
         core::ptr::write_bytes(hhdm_ptr, 0, FRAME_SIZE);
+    }
+
+    // For a file-backed mapping, fill the (already zeroed) frame with the
+    // page's bytes from the backing file.  A short read past EOF leaves the
+    // tail zero, matching Linux's page zero-fill semantics.
+    if let Some((handle, file_offset)) = file_backing {
+        // Byte offset into the file for the page containing the fault.
+        // `frame_base >= vma_start` (both frame-aligned, fault is in-VMA),
+        // so the subtraction never underflows.
+        #[allow(clippy::arithmetic_side_effects)]
+        let page_file_off = file_offset.wrapping_add(frame_base.wrapping_sub(vma_start));
+        // SAFETY: `phys_frame.to_virt(hhdm)` is the HHDM mapping of the
+        // freshly-allocated, exclusively-owned, zeroed frame of exactly
+        // FRAME_SIZE bytes.
+        let buf = unsafe {
+            core::slice::from_raw_parts_mut(phys_frame.to_virt(hhdm) as *mut u8, FRAME_SIZE)
+        };
+        if crate::fs::handle::read_at(handle, page_file_off, buf).is_err() {
+            // Read failed — release the cgroup charge and free the frame.
+            crate::cgroup::uncharge_current_mem(1);
+            // SAFETY: `phys_frame` was just allocated and is not mapped.
+            let _ = unsafe { frame::free_frame(phys_frame) };
+            return false;
+        }
     }
 
     // Map the frame.
@@ -4273,6 +4425,12 @@ pub fn destroy(pid: ProcessId) {
     // PROCESS_TABLE lock dropped — safe to acquire other locks.
 
     if let Some(proc) = removed {
+        // Release the backing-file reference each file-backed VMA owned.
+        // The process-table lock is already dropped, so taking the
+        // open-file lock here respects the lock ordering.
+        for vma in &proc.vmas {
+            vma_release_backing(vma);
+        }
         destroy_process_resources(pid, proc.pml4_phys, &proc.ipc_handles, &proc.initial_fds);
     }
 }

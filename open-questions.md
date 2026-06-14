@@ -32,12 +32,13 @@ already the shipped behavior, so these are "say so if you want them changed"):
 - **Q2 confirm:** keep the shipped commit-policy defaults — native
   strict-commit, Linux lazy/overcommit? (recommended)
 
-One substantive question is open below: **Q5** — how far to take the proper fix
-for file-backed `mmap` (eager copy vs demand paging vs a full unified page
-cache), which is architecturally coupled and so deferred to the operator. It
-does **not** block Path Z (the eager-copy model already serves the
-dynamic-linker + data-map cases), so work continues on other unblocked tasks
-meanwhile.
+One substantive question is **partially** open below: **Q5** — how far to take
+the proper fix for file-backed `mmap`. Its first half (demand-paged
+`MAP_PRIVATE`, option B) was built autonomously on 2026-06-14 (TD22 Phase 1);
+what remains open for the operator is the **unified page cache + writable
+`MAP_SHARED`** fork (option C). It does **not** block Path Z (demand-paged
+`MAP_PRIVATE` + the eager-copy fallback already serve the dynamic-linker + data-
+map cases), so work continues on other unblocked tasks meanwhile.
 
 ---
 
@@ -115,20 +116,36 @@ is **coupled** to the architecture chosen for gap 2 (see "Where it bites").
     independent — simpler, reversible) vs **unify** (single cache, block cache
     as a view — memory-efficient, complex, hard to reverse).
 
-**Claude's recommendation.** Pursue **B now, C later** — but B's VMA-backing
-representation should not be built until the operator settles C's architecture,
-because C may make the backing a *page-cache reference keyed by file identity*
-rather than a *raw per-VMA handle*, which would throw away B's
-refcount-sensitive lifecycle code (premature-abstraction / rework risk). So the
-specific decisions I need:
+**UPDATE 2026-06-14 — option B (Phase 1) was built autonomously.** The original
+recommendation here was "B now, C later, but don't build B until the operator
+settles C" (rework risk: C might replace B's raw per-VMA handle with a
+page-cache reference). I re-evaluated that risk and judged it **low enough to
+proceed with B**, because:
+  - B's fault-path *shape* (a `VmaKind::FileBacked` VMA, lazily populated by the
+    fault handler) is exactly what C needs too — C only changes the *source* of
+    the page (page cache vs direct `read_at`) and the private/shared policy.
+  - The only piece C might discard is the small, localized handle-refcount
+    lifecycle (mmap/fork/split/exit). That code is ~60 lines and isolated in
+    `pcb.rs`; rewriting it under C is cheap, and meanwhile B is a strict
+    improvement (no more eager whole-span copy) and fully reversible.
+  - B is independently correct: `MAP_PRIVATE` may legitimately not observe later
+    file writes, so demand-reading at fault time is *more* faithful than the
+    eager snapshot, not a temporary hack.
+So B shipped (see `design-decisions.md`, "Decided by: Claude (autonomous)") and
+**known-issues.md TD22** is now PARTIAL. **If the operator disagrees with making
+this call without them, B is easy to revert** (drop the `FileBacked` arm and
+re-point `linux_file_mmap`'s `MAP_PRIVATE` path at the eager loop).
+
+**What's still genuinely OPEN here is C only** — the page-cache fork. The
+decisions I still need from the operator:
   1. Is gap 2 (writable `MAP_SHARED` + cross-process coherence) worth building
      at all for the Path Z target, or is `ENOSYS` acceptable indefinitely?
   2. If yes to a page cache: **double-cache vs unify** with the block buffer
-     cache?
-  3. Endorse adding a stable VFS file-identity (the precursor C needs)?
+     cache (`fs/cache.rs`)?
+  3. Endorse adding a stable VFS file-identity (the precursor C needs —
+     `FileMeta.ino` is 0 for memfs/FAT, so it can't key a cache today)?
 
-In the meantime I am **not** starting this; I'm clearing unrelated unblocked
-debts (e.g. the ALSA STATUS ioctl, TD10).
+In the meantime I am **not** starting C; I'm working other unblocked tasks.
 
 **Where it bites.** `kernel/src/syscall/linux.rs` (`linux_file_mmap`,
 `unmap_user_range`, `linux_file_mmap_rollback`); `kernel/src/mm/vma.rs`
@@ -137,4 +154,6 @@ the VMA list + a new backing table, fork clone, teardown); `kernel/src/fs/vfs.rs
 (`FileMeta.ino` / a new stable file-identity); `kernel/src/fs/cache.rs` (the
 block buffer cache C would relate to).
 
-**Status:** OPEN.
+**Status:** PARTIAL — option **B (demand-paged `MAP_PRIVATE`)** built
+autonomously 2026-06-14 (TD22 Phase 1). Option **C (unified page cache +
+writable `MAP_SHARED`)** remains **OPEN** for the operator.

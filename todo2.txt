@@ -1,3 +1,40 @@
+somewhere down the road, we may want to implement a VM for Linux like WSL2. we could take the good ideas of Windows' Hypervisor that apply to our OS and build something similar, and/or take the good ideas of VMWare and/or VirtualBox. QEMU is another important VM to consider, except that I think it's very slow? of course, the VM Linux would share the filesystem, clipboard, window manager, GPU driver, etc. with the host., just like with WSL2. maybe we could add this to roadmap-detailed.md but as something optional to consider adding later when everything else is done. 
+
+"""
+Here's what I actually found — you're partly right, but the picture is a bit different from "todo.txt ≈ roadmap.md."
+
+todo.txt is 53,118 lines and is really a giant #-prefixed engineering journal. Breaking down its ~section headings:
+~40 DONE: + 15 VERIFIED: — detailed completion records (each ABI batch: verbatim Linux source, divergence analysis, self-test, "build clean / clippy / BOOT_OK").
+~90 BUG, 8 DIVERGENCE, 7 LIMITATION, 16 FIX/FIXED — bug and limitation notes.
+~5 IN PROGRESS, 4 DEFERRED, 2 JUDGMENT — forward-looking / deferred work.
+
+So the overlap is real but broader than you framed it. todo.txt currently duplicates three other things:
+roadmap.md — the DONE records re-state status that roadmap.md already tracks with checkboxes.
+git commit messages — each DONE: ABI batch NNN entry is essentially a copy of that commit's body.
+known-issues.md — the BUG/DIVERGENCE/LIMITATION entries are exactly what known-issues.md exists for.
+
+Where I'd push back on "merge into roadmap.md": dumping a 53k-line journal into roadmap.md would bloat the one file that should stay scannable. roadmap.md's value is being a concise status index. The right move isn't to grow it — it's to stop todo.txt from being a catch-all.
+
+My recommendation (the clean structure CLAUDE.md already implies):
+roadmap.md — status source of truth (checkboxes), stays concise.
+known-issues.md — all bugs / divergences / limitations / tech-debt (move the ~115 BUG/DIVERGENCE/LIMITATION entries here over time).
+git history — the changelog; the verbose per-batch DONE records mostly live in commit messages already.
+todo.txt — reserved for genuine open TODOs, judgment calls, and deferred-with-rationale items. Much smaller.
+
+There's also a doc contradiction worth resolving: roadmap-detailed.md says "todo.txt is the operator's personal file — AI does not write to it," while CLAUDE.md explicitly tells me to write to it (and it's full of my entries). We should pick one.
+
+This is your call (it's your file and a workflow policy). Options:
+(A) Leave it as-is — it works, it's just redundant.
+(B) Adopt the structure above going forward (no mass rewrite): new bugs → known-issues.md, new completions → just the commit + roadmap checkbox, todo.txt only for open items. The 53k-line backlog stays as a historical journal.
+(C) Same as B plus I do a one-time migration/prune of the existing todo.txt (move bugs to known-issues.md, archive the DONE-changelog).
+
+I'd suggest (B) — lowest risk, fixes the sprawl going forward, no risky bulk surgery on a huge file. Want me to go with that, and should I record whichever you pick in design-decisions.md? (Background note: the batch-553 boot-test is still running; I'll report it when it lands.)
+"""if you think it'll make things less chaotic for you, you should do B. and you've already thoroughly taken over my todo.txt, so go ahead and change it so that both the sources say it's yours. but note that you said that judgment calls should stay in todo.txt, and we already made separate .md file- to keep track of judgment calls (one for resolved judgment calls, one for judgment calls waiting for my input). i do want all the issues to be in known-issues.md, but we can make the move less risky by not deleting them from todo.txt either, OR deleting them from todo.txt as you move them but making a backup of todo.txt before you start.
+
+
+
+
+
 [ANSWERED 2026-06-13 → see operator-answers-2026-06-13.md] Your comments below
 are addressed there (NUMA/UMA explanation + option-C overhead for Q1; overcommit
 explanation, your options 4 & 5 confirmed-already-built, and the "default default"

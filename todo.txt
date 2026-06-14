@@ -52318,18 +52318,28 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ## pcb::reset_linux_state_for_exec(pid), called from spawn::exec_process
 ## right after reset_vmas_for_exec.  It clears, under one PROCESS_TABLE
 ## lock, exactly the fields Linux unconditionally resets on every exec:
-##   * membarrier_state -> 0   (membarrier_exec_mmap)
-##   * linux_thp_disable -> 0  (new mm gets default mm-flags)
-##   * linux_dumpable -> 1     (SUID_DUMP_USER; begin_new_exec, no cred
-##                              change so always the user default)
+##   * membarrier_state -> 0   (exec_mmap -> membarrier_exec_mmap zeroes
+##                              the new mm's membarrier_state)
+##   * linux_dumpable -> 1     (begin_new_exec calls set_dumpable explicitly
+##                              on every exec; no cred change here so always
+##                              SUID_DUMP_USER — this explicit reset wins
+##                              over the MMF_DUMPABLE MMF_INIT_MASK carry-in)
 ##   * linux_keepcaps -> 0     (SECBIT_KEEP_CAPS reset per execve)
 ## This also closes the deferred exec-reset notes on entries 94 (dumpable)
-## and 95 (keepcaps) and 98 (thp_disable).
+## and 95 (keepcaps).
 ##
-## CORRECTION to the earlier deferred notes: linux_pdeathsig and
-## linux_personality are deliberately NOT reset here.  The earlier entries
-## (pdeathsig note above; personality note on batch 55) assumed a generic
-## unconditional reset, but the accurate semantics are:
+## CORRECTION (also 2026-06-14, same session): entry 98's claim that
+## linux_thp_disable is "cleared on execve (new mm gets default flags)" is
+## WRONG, and an initial version of this hook wrongly reset it.  MMF_DISABLE_THP
+## lives in mm->flags and is in MMF_INIT_MASK; mm_init does
+## `mm->flags = current->mm->flags & MMF_INIT_MASK`, and that path runs for
+## exec too (bprm_mm_init -> mm_alloc -> mm_init, while current->mm is still
+## the old image's mm).  begin_new_exec has NO explicit THP override, so the
+## flag SURVIVES exec — identical mechanism to linux_memory_merge
+## (MMF_VM_MERGE_ANY), whose pcb doc already correctly says "preserved across
+## exec".  So thp_disable is now in the PRESERVED set, not the cleared set.
+##
+## Also deliberately NOT reset (correcting over-broad earlier notes):
 ##   * pdeathsig — prctl(2): cleared only when exec'ing a set-uid/set-gid
 ##     binary or one with file capabilities; otherwise PRESERVED across
 ##     execve.  We never change credentials at exec, so preserve.
@@ -52337,7 +52347,8 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##     personality and only clears READ_IMPLIES_EXEC (unmodelled);
 ##     ADDR_NO_RANDOMIZE survives exec (that's how `setarch -R` works).
 ## linux_no_new_privs (sticky), linux_child_subreaper (Linux preserves),
-## and the timer-slack pair are likewise preserved.
-## Self-test: pcb::test_reset_linux_state_for_exec dirties all eight
-## fields, calls the hook, and asserts the four cleared + four preserved;
-## boot test PASSED ("[proc]   exec Linux-state reset: OK").
+## linux_memory_merge / linux_thp_disable (MMF_INIT_MASK mm-flags), and the
+## timer-slack pair are likewise preserved.
+## Self-test: pcb::test_reset_linux_state_for_exec dirties all eight fields,
+## calls the hook, and asserts the three cleared + five preserved; boot test
+## PASSED ("[proc]   exec Linux-state reset: OK").

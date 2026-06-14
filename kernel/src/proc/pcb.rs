@@ -4129,18 +4129,26 @@ pub fn reset_vmas_for_exec(pid: ProcessId) {
 /// unknown.
 ///
 /// Reset (cleared on every exec, architecture-independent):
-/// * `membarrier_state` → 0 — `membarrier_exec_mmap` drops all
-///   registrations; the new image must re-register before it may issue an
-///   expedited barrier (TD8 residual).
-/// * `linux_thp_disable` → 0 — the new mm gets default mm-flags, so
-///   `MMF_DISABLE_THP` is cleared.
-/// * `linux_dumpable` → 1 (`SUID_DUMP_USER`) — `begin_new_exec` resets
-///   dumpability on every exec; with no credential change (we never run a
-///   privileged/secureexec image) the result is always `SUID_DUMP_USER`.
+/// * `membarrier_state` → 0 — `exec_mmap` calls `membarrier_exec_mmap`,
+///   which `atomic_set`s the new mm's `membarrier_state` to 0; the new
+///   image must re-register before it may issue an expedited barrier
+///   (TD8 residual).
+/// * `linux_dumpable` → 1 (`SUID_DUMP_USER`) — `begin_new_exec` *explicitly*
+///   resets dumpability on every exec (`set_dumpable(mm, ...)`); with no
+///   credential change (we never run a privileged/secureexec image) the
+///   result is always `SUID_DUMP_USER`. This explicit reset overrides the
+///   `MMF_DUMPABLE` value otherwise carried in via `MMF_INIT_MASK`.
 /// * `linux_keepcaps` → 0 — `SECBIT_KEEP_CAPS` is reset to 0 on every
 ///   successful execve (prctl(2) / capabilities(7)).
 ///
 /// Deliberately **NOT** reset (preserved across a normal exec):
+/// * `linux_thp_disable` — `MMF_DISABLE_THP` lives in `mm->flags` and is in
+///   `MMF_INIT_MASK`, so the new mm inherits it (`mm_init` does
+///   `mm->flags = current->mm->flags & MMF_INIT_MASK`, and that runs on the
+///   exec path via `bprm_mm_init`→`mm_alloc`→`mm_init` while `current->mm`
+///   is still the old image's mm). `begin_new_exec` has no explicit THP
+///   override, so the flag *survives* exec — identical mechanism to
+///   `linux_memory_merge` (`MMF_VM_MERGE_ANY`), which is likewise preserved.
 /// * `linux_pdeathsig` — prctl(2): the parent-death signal is cleared only
 ///   when exec'ing a set-uid/set-gid binary or one with file capabilities;
 ///   otherwise it is *preserved* across `execve`. We never change
@@ -4151,6 +4159,8 @@ pub fn reset_vmas_for_exec(pid: ProcessId) {
 ///   `setarch -R` works. Persona-byte is always 0 (PER_LINUX) here.
 /// * `linux_no_new_privs` — monotone-sticky by design.
 /// * `linux_child_subreaper` — Linux preserves it across exec.
+/// * `linux_memory_merge` — `MMF_VM_MERGE_ANY`, an `MMF_INIT_MASK` mm-flag
+///   preserved across exec (same mechanism as `linux_thp_disable`).
 /// * `linux_timer_slack_ns` / `linux_timer_slack_default_ns` — preserved.
 pub fn reset_linux_state_for_exec(pid: ProcessId) {
     let mut table = PROCESS_TABLE.lock();
@@ -4158,7 +4168,6 @@ pub fn reset_linux_state_for_exec(pid: ProcessId) {
         return;
     };
     proc.membarrier_state = 0;
-    proc.linux_thp_disable = 0;
     proc.linux_dumpable = 1; // SUID_DUMP_USER
     proc.linux_keepcaps = 0;
 }
@@ -5429,10 +5438,10 @@ fn test_reset_linux_state_for_exec() -> KernelResult<()> {
 
     // Dirty every field this helper touches, plus the preserved ones, to
     // distinguish "reset" from "preserved".
-    let _ = set_thp_disable(pid, 1);
     let _ = set_dumpable(pid, 0); // non-default (SUID_DUMP_DISABLE)
     let _ = set_keepcaps(pid, 1);
     membarrier_register(pid, 0x5); // arbitrary READY bits
+    let _ = set_thp_disable(pid, 1); // MMF_INIT_MASK flag — preserved
     let _ = set_pdeathsig(pid, 9); // preserved across normal exec
     let _ = set_personality(pid, 0x40000); // ADDR_NO_RANDOMIZE flag bit
     let _ = set_no_new_privs(pid, 1); // sticky
@@ -5440,32 +5449,32 @@ fn test_reset_linux_state_for_exec() -> KernelResult<()> {
 
     reset_linux_state_for_exec(pid);
 
-    // The four unconditionally-cleared fields.
+    // The three unconditionally-cleared fields.
     let cleared_ok = membarrier_state(pid) == Some(0)
-        && get_thp_disable(pid) == Some(0)
         && get_dumpable(pid) == Some(1) // SUID_DUMP_USER
         && get_keepcaps(pid) == Some(0);
     if !cleared_ok {
         serial_println!(
-            "[proc]   FAIL: exec reset did not clear membarrier/thp/dumpable/keepcaps \
-             (membarrier={:?} thp={:?} dumpable={:?} keepcaps={:?})",
-            membarrier_state(pid), get_thp_disable(pid),
-            get_dumpable(pid), get_keepcaps(pid),
+            "[proc]   FAIL: exec reset did not clear membarrier/dumpable/keepcaps \
+             (membarrier={:?} dumpable={:?} keepcaps={:?})",
+            membarrier_state(pid), get_dumpable(pid), get_keepcaps(pid),
         );
         destroy(pid);
         return Err(KernelError::InternalError);
     }
 
-    // The preserved fields must be untouched.
-    let preserved_ok = get_pdeathsig(pid) == Some(9)
+    // The preserved fields must be untouched (thp_disable is an
+    // MMF_INIT_MASK mm-flag and survives exec, like memory_merge).
+    let preserved_ok = get_thp_disable(pid) == Some(1)
+        && get_pdeathsig(pid) == Some(9)
         && get_personality(pid) == Some(0x40000)
         && get_no_new_privs(pid) == Some(1)
         && get_child_subreaper(pid) == Some(1);
     if !preserved_ok {
         serial_println!(
             "[proc]   FAIL: exec reset clobbered a preserved field \
-             (pdeathsig={:?} persona={:?} nnp={:?} subreaper={:?})",
-            get_pdeathsig(pid), get_personality(pid),
+             (thp={:?} pdeathsig={:?} persona={:?} nnp={:?} subreaper={:?})",
+            get_thp_disable(pid), get_pdeathsig(pid), get_personality(pid),
             get_no_new_privs(pid), get_child_subreaper(pid),
         );
         destroy(pid);

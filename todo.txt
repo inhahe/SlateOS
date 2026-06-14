@@ -52324,12 +52324,12 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##                              on every exec; no cred change here so always
 ##                              SUID_DUMP_USER — this explicit reset wins
 ##                              over the MMF_DUMPABLE MMF_INIT_MASK carry-in)
-##   * linux_keepcaps -> 0     (SECBIT_KEEP_CAPS reset per execve)
 ##   * linux_securebits SECBIT_KEEP_CAPS bit (bit 4) -> 0
 ##                             (cap_bprm_creds_from_file clears only this
 ##                              bit on every exec; lock bit + other bits
-##                              preserved — keeps securebits consistent with
-##                              the separately-stored linux_keepcaps)
+##                              preserved).  Bit 4 is now the single source
+##                              of truth for PR_SET_KEEPCAPS (see refactor
+##                              note below), so this resets keepcaps too.
 ## This also closes the deferred exec-reset notes on entries 94 (dumpable),
 ## 95 (keepcaps), and the securebits field doc's KEEP_CAPS exec caveat.
 ##
@@ -52357,3 +52357,22 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ## Self-test: pcb::test_reset_linux_state_for_exec dirties all eight fields,
 ## calls the hook, and asserts the three cleared + five preserved; boot test
 ## PASSED ("[proc]   exec Linux-state reset: OK").
+##
+## FOLLOW-UP (2026-06-14, same session): keepcaps/securebits single source
+## of truth.  The exec-reset audit exposed a real ABI bug from split storage:
+## entry 95 added a standalone `linux_keepcaps` field, but entry 112 stored
+## SECBIT_KEEP_CAPS in `linux_securebits` — the SAME logical flag, which Linux
+## keeps in ONE place (cred->securebits bit 4).  PR_SET_KEEPCAPS wrote only
+## linux_keepcaps; PR_SET_SECUREBITS wrote only linux_securebits; so
+## PR_GET_KEEPCAPS and PR_GET_SECUREBITS could disagree where Linux keeps them
+## identical.  FIX (the proper one, not a sync-hack): removed the linux_keepcaps
+## field entirely; pcb::get_keepcaps/set_keepcaps are now thin views over
+## linux_securebits bit 4 (set/clear only bit 4).  Also added the missing Linux
+## gate to PR_SET_KEEPCAPS: SECBIT_KEEP_CAPS_LOCKED (bit 5) set -> EPERM
+## (cap_task_prctl, verified against torvalds/linux v6.6 commoncap.c — the
+## check is `if (issecure(SECURE_KEEP_CAPS_LOCKED)) return -EPERM;` after the
+## arg2>1 EINVAL).  Gate extracted as pure `keepcaps_change_allowed(securebits)`
+## so it is unit-testable without a caller PCB.  Tests: self_test_prctl_dispatch
+## keepcaps block asserts get/set coherence both directions + the lock truth
+## table; test_reset_linux_state_for_exec proves set_keepcaps drives bit 4.
+## Build + clippy clean; boot test PASSED.

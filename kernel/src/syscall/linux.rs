@@ -8965,8 +8965,11 @@ fn write_cstr_field(dst: &mut [u8], src: &[u8]) {
 ///     bit.  SET accepts; GET returns 1 (the most paranoid answer
 ///     since we don't honour set*id setuid bits anyway).
 ///   - `PR_SET_KEEPCAPS` (8) / `PR_GET_KEEPCAPS` (7): capability
-///     preservation across uid change.  We don't have uids; accept SET
-///     and return 0 for GET.
+///     preservation across uid change.  Backed by `SECBIT_KEEP_CAPS`
+///     (securebits bit 4) — the single source of truth shared with
+///     `PR_SET_SECUREBITS`.  SET enforces the Linux rules (arg2 > 1 →
+///     EINVAL; `SECBIT_KEEP_CAPS_LOCKED` set → EPERM) then flips bit 4;
+///     GET reports that bit (0 by default).
 ///   - `PR_CAPBSET_READ` (23) / `PR_CAPBSET_DROP` (24): capability
 ///     bounding set.  We have a capability system but not Linux-style
 ///     POSIX capability bits; accept READ as "yes, that cap exists"
@@ -9002,6 +9005,18 @@ fn write_cstr_field(dst: &mut [u8], src: &[u8]) {
 /// inspect /proc/<pid>/comm to find their own threads (some debugger
 /// integration) will see empty names.  Tracked in todo.txt as needing
 /// per-thread name storage on the TCB plus a procfs string field.
+///
+/// Returns `true` if `PR_SET_KEEPCAPS` may modify the keepcaps flag
+/// given the caller's current `securebits`.  Mirrors Linux's
+/// `cap_task_prctl` (security/commoncap.c, v6.6): once
+/// `SECURE_KEEP_CAPS_LOCKED` (bit 5) is engaged the flag is frozen and
+/// `PR_SET_KEEPCAPS` returns `-EPERM`.  Pulled out as a pure function so
+/// the gate can be unit-tested without driving a real caller PCB through
+/// the syscall surface (kernel self-test context has no `caller_pid`).
+const fn keepcaps_change_allowed(securebits: u32) -> bool {
+    securebits & pcb::LINUX_SECBIT_KEEP_CAPS_LOCKED == 0
+}
+
 fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
     // Linux signature (kernel/sys.c):
     //   SYSCALL_DEFINE5(prctl, int, option,
@@ -9180,9 +9195,18 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
             if args.arg1 > 1 {
                 return linux_err(errno::EINVAL);
             }
-            #[allow(clippy::cast_possible_truncation)]
-            let new_keepcaps = args.arg1 as u32;
+            // Linux (cap_task_prctl): once SECURE_KEEP_CAPS_LOCKED is set the
+            // keepcaps flag is frozen — PR_SET_KEEPCAPS returns EPERM and does
+            // not touch the bit.  keepcaps is a view over securebits bit 4, so
+            // the lock is the companion bit 5 in the same word.  Kernel context
+            // (no PCB) has no securebits, so the lock can never be engaged there
+            // and the call silently succeeds without storing.
             if let Some(pid) = caller_pid() {
+                if !keepcaps_change_allowed(pcb::get_securebits(pid).unwrap_or(0)) {
+                    return linux_err(errno::EPERM);
+                }
+                #[allow(clippy::cast_possible_truncation)]
+                let new_keepcaps = args.arg1 as u32;
                 let _ = pcb::set_keepcaps(pid, new_keepcaps);
             }
             SyscallResult::ok(0)
@@ -49918,13 +49942,54 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // Install 1 (KEEPCAPS_KEEP).  set returns the prior value.
             assert_eq!(pcb::set_keepcaps(test_pid, 1), Some(0));
             assert_eq!(pcb::get_keepcaps(test_pid), Some(1));
-            // Cycle back to 0.
+            // keepcaps is a *view* over securebits bit 4 (single source of
+            // truth): setting keepcaps must surface in PR_GET_SECUREBITS and
+            // vice versa.  Setting keepcaps=1 lit SECBIT_KEEP_CAPS only.
+            assert_eq!(
+                pcb::get_securebits(test_pid),
+                Some(pcb::LINUX_SECBIT_KEEP_CAPS)
+            );
+            // Writing securebits directly is reflected by get_keepcaps.
+            assert_eq!(
+                pcb::set_securebits(test_pid, pcb::LINUX_SECBIT_NOROOT),
+                Some(pcb::LINUX_SECBIT_KEEP_CAPS)
+            );
+            assert_eq!(pcb::get_keepcaps(test_pid), Some(0));
+            // Re-light bit 4 alongside an unrelated bit; keepcaps sees it but
+            // set_keepcaps(0) must clear ONLY bit 4, leaving NOROOT intact.
+            assert_eq!(
+                pcb::set_securebits(
+                    test_pid,
+                    pcb::LINUX_SECBIT_KEEP_CAPS | pcb::LINUX_SECBIT_NOROOT
+                ),
+                Some(pcb::LINUX_SECBIT_NOROOT)
+            );
+            assert_eq!(pcb::get_keepcaps(test_pid), Some(1));
             assert_eq!(pcb::set_keepcaps(test_pid, 0), Some(1));
             assert_eq!(pcb::get_keepcaps(test_pid), Some(0));
+            assert_eq!(
+                pcb::get_securebits(test_pid),
+                Some(pcb::LINUX_SECBIT_NOROOT)
+            );
             pcb::destroy(test_pid);
             // After destroy the PCB is gone.
             assert_eq!(pcb::get_keepcaps(test_pid), None);
             assert_eq!(pcb::set_keepcaps(test_pid, 1), None);
+
+            // PR_SET_KEEPCAPS lock gate (Linux cap_task_prctl): the pure
+            // decision helper refuses once SECBIT_KEEP_CAPS_LOCKED is set,
+            // regardless of the other bits, and permits otherwise.  Tested
+            // directly because the EPERM path needs a caller PCB that the
+            // kernel self-test context cannot install.
+            assert!(keepcaps_change_allowed(0));
+            assert!(keepcaps_change_allowed(pcb::LINUX_SECBIT_KEEP_CAPS));
+            assert!(keepcaps_change_allowed(pcb::LINUX_SECBIT_NOROOT));
+            assert!(!keepcaps_change_allowed(pcb::LINUX_SECBIT_KEEP_CAPS_LOCKED));
+            assert!(!keepcaps_change_allowed(
+                pcb::LINUX_SECBIT_KEEP_CAPS
+                    | pcb::LINUX_SECBIT_KEEP_CAPS_LOCKED
+                    | pcb::LINUX_SECBIT_NOROOT
+            ));
         }
 
         // Batch 428 — PR_SET_DUMPABLE + PR_SET_KEEPCAPS arg2 narrowing

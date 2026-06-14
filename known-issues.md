@@ -1529,11 +1529,12 @@ PCB-reset hook (the same gap noted for `linux_dumpable`/`linux_keepcaps`/
 `reset_vmas_for_exec`, which clears (under one `PROCESS_TABLE` lock) exactly the
 fields Linux unconditionally resets on every exec — `membarrier_state` → 0
 (`exec_mmap`→`membarrier_exec_mmap`), `linux_dumpable` → 1 (`SUID_DUMP_USER`;
-explicit `set_dumpable` in `begin_new_exec`), `linux_keepcaps` → 0
-(`SECBIT_KEEP_CAPS`), and the `linux_securebits` `SECBIT_KEEP_CAPS` bit (bit 4
-only — `cap_bprm_creds_from_file` clears it on every exec, preserving the lock
-bit and every other securebit; keeps the securebits word consistent with the
-separately-stored `linux_keepcaps`). Fields Linux preserves across a normal (non-privileged)
+explicit `set_dumpable` in `begin_new_exec`), and the `linux_securebits`
+`SECBIT_KEEP_CAPS` bit (bit 4 only — `cap_bprm_creds_from_file` clears it on
+every exec, preserving the lock bit and every other securebit). That bit 4 is
+now the **single source of truth** for `prctl(PR_SET_KEEPCAPS)` (see the
+follow-up note below), so clearing it on exec resets keepcaps too. Fields Linux
+preserves across a normal (non-privileged)
 exec are left untouched: `linux_thp_disable` and `linux_memory_merge` (both
 `MMF_INIT_MASK` mm-flags that the new mm inherits via
 `mm->flags = current->mm->flags & MMF_INIT_MASK` — `begin_new_exec` has no
@@ -1551,6 +1552,25 @@ five preserved fields ("[proc]   exec Linux-state reset: OK"). The in-kernel
 caller (no owner mm) keeps the "fence/0" behaviour by feeding `u32::MAX` to the
 gating helper — there is no registration model for a kernel thread with no
 sibling userspace threads.
+
+**Follow-up — keepcaps/securebits single source of truth (2026-06-14):** the
+exec-reset audit surfaced a real ABI incoherence: `prctl(PR_SET_KEEPCAPS)` was
+backed by a standalone `linux_keepcaps` field while `SECBIT_KEEP_CAPS` lived in
+`linux_securebits`, even though Linux stores both in the *same*
+`cred->securebits` bit 4. `PR_SET_KEEPCAPS`/`PR_SET_SECUREBITS` wrote different
+storage, so `PR_GET_KEEPCAPS` and `PR_GET_SECUREBITS` could disagree where Linux
+keeps them identical. Fixed by removing the `linux_keepcaps` field and making
+`pcb::get_keepcaps`/`set_keepcaps` thin views over `linux_securebits` bit 4
+(set/clear only bit 4, leaving every other securebit intact). Also added the
+missing Linux gate to the `PR_SET_KEEPCAPS` handler: once
+`SECBIT_KEEP_CAPS_LOCKED` (bit 5) is engaged the flag is frozen and the call
+returns `-EPERM` (`cap_task_prctl`, verified against torvalds/linux v6.6
+`security/commoncap.c`). The gate is the pure helper
+`keepcaps_change_allowed(securebits)` so it is unit-testable without a caller
+PCB. Tests: `self_test_prctl_dispatch`'s keepcaps block now asserts get/set
+coherence in both directions (keepcaps↔securebits bit 4) and the lock-gate
+truth table; `pcb::test_reset_linux_state_for_exec` proves `set_keepcaps`
+coherently drives bit 4 and the exec reset clears only it.
 
 ### TD7. `set_mempolicy_home_node` returns 0 where Linux returns `-ENOENT`/`-EOPNOTSUPP` — APPROXIMATION 2026-06-12
 

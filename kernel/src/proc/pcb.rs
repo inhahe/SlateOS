@@ -573,9 +573,8 @@ pub struct Process {
     /// thus one registration set (a thread may register, another issue).
     /// Inherited verbatim across `fork` (Linux copies `membarrier_state`
     /// in `dup_mm`'s `memcpy`).  Linux resets it to 0 on `execve`
-    /// (`membarrier_exec_mmap`); we lack an exec-time PCB-reset hook (same
-    /// gap as `linux_dumpable`/`linux_keepcaps`), so it currently survives
-    /// exec — tracked in todo.txt.
+    /// (`membarrier_exec_mmap`); [`reset_linux_state_for_exec`] mirrors
+    /// this, clearing the registration mask on every successful exec.
     pub membarrier_state: u32,
     /// Linux `prctl(PR_SET_PDEATHSIG)` — signal to deliver to this
     /// process when its parent exits.  `0` means "disabled" (the
@@ -672,23 +671,6 @@ pub struct Process {
     /// and we don't have an exec hook for this yet, so the exec-time
     /// reset is a known limitation tracked in todo.txt.
     pub linux_dumpable: u32,
-    /// Linux `prctl(PR_SET_KEEPCAPS)` flag.  Controls whether the
-    /// process retains its permitted-capability set across a uid
-    /// change to non-root.  Stored as 0 (`KEEPCAPS_CLEAR`, the
-    /// default — capabilities cleared on uid change) or 1
-    /// (`KEEPCAPS_KEEP` — capabilities preserved).
-    ///
-    /// Inherited verbatim across fork on Linux (the per-thread
-    /// keepcaps flag is preserved by `copy_process`); Linux *resets*
-    /// it to 0 on every successful `execve`.  We preserve across
-    /// exec for now — same exec-time hook limitation as
-    /// `linux_dumpable`.  Tracked in todo.txt.
-    ///
-    /// We do not model POSIX capability sets, so the flag has no
-    /// effect on actual privilege transitions — it exists purely for
-    /// ABI round-trip so that programs which set and then read it
-    /// back observe the value they wrote.
-    pub linux_keepcaps: u32,
     /// Linux `prctl(PR_SET_NO_NEW_PRIVS)` sticky flag.  Once set to
     /// 1, execve(2) cannot grant privileges that the caller didn't
     /// already have (setuid bits become no-ops, file capabilities
@@ -699,9 +681,10 @@ pub struct Process {
     ///
     /// Default 0.  Inherited verbatim across fork (Linux semantics).
     /// Also preserved across execve (Linux semantics — unlike
-    /// `linux_dumpable` and `linux_keepcaps`, NNP propagates through
-    /// exec by design so a sandbox parent can `fork`+`execve` an
-    /// untrusted child without the child being able to escape NNP).
+    /// `linux_dumpable` and the `SECBIT_KEEP_CAPS` securebit, NNP
+    /// propagates through exec by design so a sandbox parent can
+    /// `fork`+`execve` an untrusted child without the child being
+    /// able to escape NNP).
     ///
     /// We do not model setuid binaries so NNP has no effect on
     /// actual privilege transitions; it exists purely for ABI
@@ -950,11 +933,15 @@ pub struct Process {
     /// (Linux: `cred->securebits` is copied by `prepare_cred`).
     /// Across exec, Linux's `cap_bprm_creds_from_file` clears
     /// `SECBIT_KEEP_CAPS` (bit 4) but leaves every other bit (including
-    /// the lock bits) intact.  [`reset_linux_state_for_exec`] now does
-    /// exactly this (`securebits &= !LINUX_SECBIT_KEEP_CAPS`), keeping it
-    /// consistent with the separately-stored `linux_keepcaps`.  Unlike
+    /// the lock bits) intact.  [`reset_linux_state_for_exec`] does
+    /// exactly this (`securebits &= !LINUX_SECBIT_KEEP_CAPS`).  Unlike
     /// MDWE/IO_FLUSHER (genuinely preserved across exec), KEEP_CAPS is the
     /// one securebit that exec clears.
+    ///
+    /// **Bit 4 is the single source of truth for `prctl(PR_SET_KEEPCAPS)`**:
+    /// `get_keepcaps`/`set_keepcaps` are thin views over this bit, matching
+    /// Linux where `PR_SET_KEEPCAPS` and `SECBIT_KEEP_CAPS` are the same
+    /// `cred->securebits` storage.  There is no separate keepcaps field.
     ///
     /// The storage helper bypasses lock validation so test fixtures
     /// can probe boundary cases.  The syscall surface enforces:
@@ -1286,10 +1273,6 @@ impl Process {
             // core-dumpable and /proc/self entries are owned by the
             // real uid.  PR_SET_DUMPABLE may flip this to 0 or 2.
             linux_dumpable: 1,
-            // Linux default: KEEPCAPS_CLEAR (0) — capability set is
-            // cleared on uid-change-from-root.  PR_SET_KEEPCAPS(1)
-            // opts out so caps survive setuid.
-            linux_keepcaps: 0,
             // Linux default: NNP cleared (0).  PR_SET_NO_NEW_PRIVS(1)
             // sets it; once set, sticky forever.
             linux_no_new_privs: 0,
@@ -1511,7 +1494,6 @@ pub fn fork_create(
         linux_sched_priority,
         linux_nice,
         linux_dumpable,
-        linux_keepcaps,
         linux_no_new_privs,
         linux_thp_disable,
         linux_timer_slack_ns,
@@ -1576,7 +1558,6 @@ pub fn fork_create(
             child_sched_priority,
             child_nice,
             parent.linux_dumpable,
-            parent.linux_keepcaps,
             parent.linux_no_new_privs,
             parent.linux_thp_disable,
             parent.linux_timer_slack_ns,
@@ -1729,16 +1710,10 @@ pub fn fork_create(
         linux_nice,
         // Linux: PR_SET_DUMPABLE state propagates verbatim across
         // fork.  Linux RESETS it to 1 on execve (unless the binary
-        // is setuid, in which case it becomes 2) — we don't model
-        // setuid binaries and we don't have an exec-time hook for
-        // this yet, so exec preserves rather than resets.  Known
-        // limitation tracked in todo.txt.
+        // is setuid, in which case it becomes 2); we don't model
+        // setuid binaries, and `reset_linux_state_for_exec` performs
+        // the reset-to-1 on every successful exec.
         linux_dumpable,
-        // Linux: PR_SET_KEEPCAPS propagates verbatim across fork
-        // and is RESET to 0 on execve.  We preserve across exec
-        // for the same reason as dumpable above — pending exec-time
-        // PCB cleanup hook.  Tracked in todo.txt.
-        linux_keepcaps,
         // Linux: PR_SET_NO_NEW_PRIVS propagates across fork AND
         // across exec by design (it is a sticky monotone flag —
         // sandboxes rely on it being preserved through exec).  Fork
@@ -1753,10 +1728,10 @@ pub fn fork_create(
         linux_child_subreaper: 0,
         // Linux: MMF_DISABLE_THP is copied from the parent's
         // mm_struct when the child mm is set up, so PR_SET_THP_DISABLE
-        // propagates verbatim across fork.  Linux CLEARS it on
-        // execve (the new mm gets default flags); we preserve
-        // across exec for now — same exec-hook limitation as the
-        // other prctl-flag entries.  Tracked in todo.txt.
+        // propagates verbatim across fork.  It is part of MMF_INIT_MASK,
+        // so it is PRESERVED across execve (the new mm inherits the
+        // MMF_INIT_MASK bits of the old mm) — `reset_linux_state_for_exec`
+        // deliberately leaves it untouched.
         linux_thp_disable,
         // Linux: timer_slack_ns and default_timer_slack_ns are
         // both copied verbatim from the parent's task_struct on
@@ -2657,22 +2632,42 @@ pub fn set_dumpable(pid: ProcessId, val: u32) -> Option<u32> {
 
 /// Read the recorded `prctl(PR_SET_KEEPCAPS)` flag for `pid`.
 ///
+/// This is a view over [`Process::linux_securebits`] bit 4
+/// (`SECBIT_KEEP_CAPS`): on Linux `PR_SET_KEEPCAPS` and the
+/// `SECBIT_KEEP_CAPS` securebit are the same `cred->securebits`
+/// storage, so we keep a single source of truth rather than a
+/// separate field that could drift out of sync with
+/// `PR_SET_SECUREBITS`.
+///
 /// Returns `None` if `pid` is unknown; `Some(0)` is the documented
 /// default (`KEEPCAPS_CLEAR` — capabilities cleared on uid change).
 #[must_use]
 pub fn get_keepcaps(pid: ProcessId) -> Option<u32> {
-    PROCESS_TABLE.lock().get(&pid).map(|p| p.linux_keepcaps)
+    PROCESS_TABLE
+        .lock()
+        .get(&pid)
+        .map(|p| u32::from(p.linux_securebits & LINUX_SECBIT_KEEP_CAPS != 0))
 }
 
-/// Install a new keepcaps flag for `pid`, returning the prior
-/// value.  Caller is responsible for validating the value is 0 or
-/// 1; this helper stores whatever it is given.  Returns `None` if
-/// `pid` is unknown.
+/// Install a new keepcaps flag for `pid`, returning the prior value
+/// (0 or 1).  A non-zero `val` sets `SECBIT_KEEP_CAPS` (bit 4) in
+/// [`Process::linux_securebits`]; zero clears it.  All other
+/// securebits are left untouched.  Returns `None` if `pid` is
+/// unknown.
+///
+/// This helper does **not** enforce the `SECBIT_KEEP_CAPS_LOCKED`
+/// rule — that check belongs at the `PR_SET_KEEPCAPS` syscall
+/// surface (matching Linux's `cap_task_prctl`), so test fixtures and
+/// the exec-time reset can manipulate the bit freely.
 pub fn set_keepcaps(pid: ProcessId, val: u32) -> Option<u32> {
     let mut table = PROCESS_TABLE.lock();
     let proc = table.get_mut(&pid)?;
-    let old = proc.linux_keepcaps;
-    proc.linux_keepcaps = val;
+    let old = u32::from(proc.linux_securebits & LINUX_SECBIT_KEEP_CAPS != 0);
+    if val != 0 {
+        proc.linux_securebits |= LINUX_SECBIT_KEEP_CAPS;
+    } else {
+        proc.linux_securebits &= !LINUX_SECBIT_KEEP_CAPS;
+    }
     Some(old)
 }
 
@@ -4141,16 +4136,14 @@ pub fn reset_vmas_for_exec(pid: ProcessId) {
 ///   credential change (we never run a privileged/secureexec image) the
 ///   result is always `SUID_DUMP_USER`. This explicit reset overrides the
 ///   `MMF_DUMPABLE` value otherwise carried in via `MMF_INIT_MASK`.
-/// * `linux_keepcaps` → 0 — `SECBIT_KEEP_CAPS` is reset to 0 on every
-///   successful execve (prctl(2) / capabilities(7)).
-/// * `linux_securebits` `SECBIT_KEEP_CAPS` bit (bit 4) → 0 — the same
-///   logical flag as `linux_keepcaps`, stored separately in our model.
-///   Linux's `cap_bprm_creds_from_file` does
+/// * `linux_securebits` `SECBIT_KEEP_CAPS` bit (bit 4) → 0 — this bit is
+///   the single source of truth for `prctl(PR_SET_KEEPCAPS)`
+///   (`get_keepcaps`/`set_keepcaps` are views over it). Linux's
+///   `cap_bprm_creds_from_file` does
 ///   `new->securebits &= ~issecure_mask(SECURE_KEEP_CAPS)` on every exec.
 ///   Only bit 4 is cleared: the lock bit (`SECBIT_KEEP_CAPS_LOCKED`, bit 5)
 ///   and every other securebit are preserved (the lock only blocks `prctl`
-///   changes, not this exec-time clear). Clearing it here keeps
-///   `linux_keepcaps` and the securebits word consistent post-exec.
+///   changes, not this exec-time clear).
 ///
 /// Deliberately **NOT** reset (preserved across a normal exec):
 /// * `linux_thp_disable` — `MMF_DISABLE_THP` lives in `mm->flags` and is in
@@ -4180,9 +4173,9 @@ pub fn reset_linux_state_for_exec(pid: ProcessId) {
     };
     proc.membarrier_state = 0;
     proc.linux_dumpable = 1; // SUID_DUMP_USER
-    proc.linux_keepcaps = 0;
     // Clear only SECBIT_KEEP_CAPS (bit 4); preserve the lock bit and all
-    // other securebits, matching cap_bprm_creds_from_file.
+    // other securebits, matching cap_bprm_creds_from_file.  This bit is the
+    // single source of truth for PR_SET_KEEPCAPS (see get/set_keepcaps).
     proc.linux_securebits &= !LINUX_SECBIT_KEEP_CAPS;
 }
 
@@ -5453,18 +5446,30 @@ fn test_reset_linux_state_for_exec() -> KernelResult<()> {
     // Dirty every field this helper touches, plus the preserved ones, to
     // distinguish "reset" from "preserved".
     let _ = set_dumpable(pid, 0); // non-default (SUID_DUMP_DISABLE)
-    let _ = set_keepcaps(pid, 1);
     membarrier_register(pid, 0x5); // arbitrary READY bits
     let _ = set_thp_disable(pid, 1); // MMF_INIT_MASK flag — preserved
     let _ = set_pdeathsig(pid, 9); // preserved across normal exec
     let _ = set_personality(pid, 0x40000); // ADDR_NO_RANDOMIZE flag bit
     let _ = set_no_new_privs(pid, 1); // sticky
     let _ = set_child_subreaper(pid, 1); // preserved
-    // KEEP_CAPS (cleared on exec) + its lock + NOROOT (both preserved).
-    let _ = set_securebits(
-        pid,
-        LINUX_SECBIT_KEEP_CAPS | LINUX_SECBIT_KEEP_CAPS_LOCKED | LINUX_SECBIT_NOROOT,
-    );
+    // The KEEP_CAPS lock + NOROOT (both preserved across exec).  Leave bit 4
+    // (KEEP_CAPS) clear here so the next step can prove set_keepcaps drives it.
+    let _ = set_securebits(pid, LINUX_SECBIT_KEEP_CAPS_LOCKED | LINUX_SECBIT_NOROOT);
+    // keepcaps is a *view* over securebits bit 4: set_keepcaps must flip that
+    // bit (and only that bit), and get_keepcaps/get_securebits must agree.
+    let _ = set_keepcaps(pid, 1);
+    let coherent_after_set = get_keepcaps(pid) == Some(1)
+        && get_securebits(pid)
+            == Some(LINUX_SECBIT_KEEP_CAPS | LINUX_SECBIT_KEEP_CAPS_LOCKED | LINUX_SECBIT_NOROOT);
+    if !coherent_after_set {
+        serial_println!(
+            "[proc]   FAIL: set_keepcaps did not coherently set securebits bit 4 \
+             (keepcaps={:?} securebits={:?})",
+            get_keepcaps(pid), get_securebits(pid),
+        );
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    }
 
     reset_linux_state_for_exec(pid);
 

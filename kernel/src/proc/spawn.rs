@@ -944,7 +944,8 @@ pub fn exec_process(
     pcb::reset_vmas_for_exec(pid);
 
     // Reset the per-process Linux ABI state that execve clears on every
-    // successful exec (membarrier registrations, dumpable, keepcaps).
+    // successful exec (membarrier registrations, dumpable, keepcaps, and
+    // the securebits SECBIT_KEEP_CAPS bit).
     // Mirrors Linux's begin_new_exec / membarrier_exec_mmap; the fields
     // Linux preserves (thp_disable and memory_merge — both MMF_INIT_MASK
     // mm-flags — plus pdeathsig, personality, no_new_privs, child_subreaper,

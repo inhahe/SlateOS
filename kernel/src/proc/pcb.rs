@@ -948,10 +948,13 @@ pub struct Process {
     ///
     /// Default 0 (all bits clear).  Inherited verbatim across fork
     /// (Linux: `cred->securebits` is copied by `prepare_cred`).
-    /// Preserved across exec (Linux clears KEEP_CAPS on exec but
-    /// leaves the other bits — caveat: we don't have an exec hook
-    /// yet, so we preserve everything, including KEEP_CAPS.  Same
-    /// limitation pattern as MDWE/IO_FLUSHER; tracked in todo.txt).
+    /// Across exec, Linux's `cap_bprm_creds_from_file` clears
+    /// `SECBIT_KEEP_CAPS` (bit 4) but leaves every other bit (including
+    /// the lock bits) intact.  [`reset_linux_state_for_exec`] now does
+    /// exactly this (`securebits &= !LINUX_SECBIT_KEEP_CAPS`), keeping it
+    /// consistent with the separately-stored `linux_keepcaps`.  Unlike
+    /// MDWE/IO_FLUSHER (genuinely preserved across exec), KEEP_CAPS is the
+    /// one securebit that exec clears.
     ///
     /// The storage helper bypasses lock validation so test fixtures
     /// can probe boundary cases.  The syscall surface enforces:
@@ -4140,6 +4143,14 @@ pub fn reset_vmas_for_exec(pid: ProcessId) {
 ///   `MMF_DUMPABLE` value otherwise carried in via `MMF_INIT_MASK`.
 /// * `linux_keepcaps` → 0 — `SECBIT_KEEP_CAPS` is reset to 0 on every
 ///   successful execve (prctl(2) / capabilities(7)).
+/// * `linux_securebits` `SECBIT_KEEP_CAPS` bit (bit 4) → 0 — the same
+///   logical flag as `linux_keepcaps`, stored separately in our model.
+///   Linux's `cap_bprm_creds_from_file` does
+///   `new->securebits &= ~issecure_mask(SECURE_KEEP_CAPS)` on every exec.
+///   Only bit 4 is cleared: the lock bit (`SECBIT_KEEP_CAPS_LOCKED`, bit 5)
+///   and every other securebit are preserved (the lock only blocks `prctl`
+///   changes, not this exec-time clear). Clearing it here keeps
+///   `linux_keepcaps` and the securebits word consistent post-exec.
 ///
 /// Deliberately **NOT** reset (preserved across a normal exec):
 /// * `linux_thp_disable` — `MMF_DISABLE_THP` lives in `mm->flags` and is in
@@ -4170,6 +4181,9 @@ pub fn reset_linux_state_for_exec(pid: ProcessId) {
     proc.membarrier_state = 0;
     proc.linux_dumpable = 1; // SUID_DUMP_USER
     proc.linux_keepcaps = 0;
+    // Clear only SECBIT_KEEP_CAPS (bit 4); preserve the lock bit and all
+    // other securebits, matching cap_bprm_creds_from_file.
+    proc.linux_securebits &= !LINUX_SECBIT_KEEP_CAPS;
 }
 
 /// Resolve a user-space page fault against a process's VMA list.
@@ -5446,18 +5460,27 @@ fn test_reset_linux_state_for_exec() -> KernelResult<()> {
     let _ = set_personality(pid, 0x40000); // ADDR_NO_RANDOMIZE flag bit
     let _ = set_no_new_privs(pid, 1); // sticky
     let _ = set_child_subreaper(pid, 1); // preserved
+    // KEEP_CAPS (cleared on exec) + its lock + NOROOT (both preserved).
+    let _ = set_securebits(
+        pid,
+        LINUX_SECBIT_KEEP_CAPS | LINUX_SECBIT_KEEP_CAPS_LOCKED | LINUX_SECBIT_NOROOT,
+    );
 
     reset_linux_state_for_exec(pid);
 
-    // The three unconditionally-cleared fields.
+    // The unconditionally-cleared state.
     let cleared_ok = membarrier_state(pid) == Some(0)
         && get_dumpable(pid) == Some(1) // SUID_DUMP_USER
-        && get_keepcaps(pid) == Some(0);
+        && get_keepcaps(pid) == Some(0)
+        // securebits: only KEEP_CAPS (bit 4) cleared, lock + NOROOT kept.
+        && get_securebits(pid)
+            == Some(LINUX_SECBIT_KEEP_CAPS_LOCKED | LINUX_SECBIT_NOROOT);
     if !cleared_ok {
         serial_println!(
-            "[proc]   FAIL: exec reset did not clear membarrier/dumpable/keepcaps \
-             (membarrier={:?} dumpable={:?} keepcaps={:?})",
+            "[proc]   FAIL: exec reset did not clear membarrier/dumpable/keepcaps/securebits \
+             (membarrier={:?} dumpable={:?} keepcaps={:?} securebits={:?})",
             membarrier_state(pid), get_dumpable(pid), get_keepcaps(pid),
+            get_securebits(pid),
         );
         destroy(pid);
         return Err(KernelError::InternalError);

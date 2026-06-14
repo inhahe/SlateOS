@@ -1530,7 +1530,10 @@ PCB-reset hook (the same gap noted for `linux_dumpable`/`linux_keepcaps`/
 fields Linux unconditionally resets on every exec — `membarrier_state` → 0
 (`exec_mmap`→`membarrier_exec_mmap`), `linux_dumpable` → 1 (`SUID_DUMP_USER`;
 explicit `set_dumpable` in `begin_new_exec`), `linux_keepcaps` → 0
-(`SECBIT_KEEP_CAPS`). Fields Linux preserves across a normal (non-privileged)
+(`SECBIT_KEEP_CAPS`), and the `linux_securebits` `SECBIT_KEEP_CAPS` bit (bit 4
+only — `cap_bprm_creds_from_file` clears it on every exec, preserving the lock
+bit and every other securebit; keeps the securebits word consistent with the
+separately-stored `linux_keepcaps`). Fields Linux preserves across a normal (non-privileged)
 exec are left untouched: `linux_thp_disable` and `linux_memory_merge` (both
 `MMF_INIT_MASK` mm-flags that the new mm inherits via
 `mm->flags = current->mm->flags & MMF_INIT_MASK` — `begin_new_exec` has no
@@ -1541,8 +1544,10 @@ only on set-uid/caps exec, otherwise preserved per prctl(2)),
 (sticky), `linux_child_subreaper`, timer-slack. (An initial version of the hook
 wrongly reset `linux_thp_disable`, repeating entry 98's mistaken "cleared on
 execve" claim; corrected same session.) Self-test
-`pcb::test_reset_linux_state_for_exec` asserts the three cleared + five preserved
-("[proc]   exec Linux-state reset: OK"). The in-kernel `membarrier` self-test
+`pcb::test_reset_linux_state_for_exec` asserts the cleared state (membarrier,
+dumpable, keepcaps, securebits KEEP_CAPS bit with lock+other bits kept) and the
+five preserved fields ("[proc]   exec Linux-state reset: OK"). The in-kernel
+`membarrier` self-test
 caller (no owner mm) keeps the "fence/0" behaviour by feeding `u32::MAX` to the
 gating helper — there is no registration model for a kernel thread with no
 sibling userspace threads.

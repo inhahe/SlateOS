@@ -52325,8 +52325,13 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##                              SUID_DUMP_USER — this explicit reset wins
 ##                              over the MMF_DUMPABLE MMF_INIT_MASK carry-in)
 ##   * linux_keepcaps -> 0     (SECBIT_KEEP_CAPS reset per execve)
-## This also closes the deferred exec-reset notes on entries 94 (dumpable)
-## and 95 (keepcaps).
+##   * linux_securebits SECBIT_KEEP_CAPS bit (bit 4) -> 0
+##                             (cap_bprm_creds_from_file clears only this
+##                              bit on every exec; lock bit + other bits
+##                              preserved — keeps securebits consistent with
+##                              the separately-stored linux_keepcaps)
+## This also closes the deferred exec-reset notes on entries 94 (dumpable),
+## 95 (keepcaps), and the securebits field doc's KEEP_CAPS exec caveat.
 ##
 ## CORRECTION (also 2026-06-14, same session): entry 98's claim that
 ## linux_thp_disable is "cleared on execve (new mm gets default flags)" is

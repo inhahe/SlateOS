@@ -62787,6 +62787,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_fcntl_record_locks()?;
+
+    #[inline(never)]
+    fn self_test_fcntl_record_locks() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // Batch 113: fcntl(F_GETLK / F_SETLK / F_SETLKW) and OFD
     // variants — single-process advisory record locks.  No other
     // holder can conflict, so SET succeeds and GET reports
@@ -63006,6 +63011,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: F_OFD_GETLK didn't write F_UNLCK");
             return Err(KernelError::InternalError);
         }
+    }
+        Ok(())
     }
 
     // xattr / quota / module / namespace / mount / swap / reboot /

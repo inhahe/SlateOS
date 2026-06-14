@@ -1634,6 +1634,14 @@ calls with the bare `image_end` (and drop `BRK_ASLR_BITS`/`choose_brk_start`/
 
 ## 22. File-backed `mmap` — stop at demand-paged `MAP_PRIVATE` (option B); decline the unified page cache (option C); writable `MAP_SHARED` stays `ENOSYS`
 
+> **SUPERSEDED IN PART by §23 (2026-06-14).** The operator reopened Q5 and
+> chose to adopt **C-lite** (a unified *read-only* page cache) when a concrete
+> consumer appears — see §23. What still stands from §22: full option C and
+> **writable `MAP_SHARED` writeback remain declined** (`ENOSYS` indefinitely),
+> and option B stays shipped meanwhile. Only the blanket "decline the unified
+> page cache" is narrowed: the read-only unified cache is now planned (deferred),
+> the writable-shared half is not.
+
 **Date:** 2026-06-14
 
 **Decided by:** Operator (this was `open-questions.md` Q5; Claude built option B
@@ -1706,3 +1714,136 @@ each page (page cache vs direct `read_at`) and add the shared/dirty policy.
 `kernel/src/proc/pcb.rs` (handle lifecycle), `kernel/src/fs/procfs.rs` (maps
 label). The declined C surface would additionally have touched
 `kernel/src/fs/vfs.rs` (file-identity) and `kernel/src/fs/cache.rs`.
+
+## 23. File-backed `mmap` (reopened) — adopt **C-lite** (a unified *read-only* page cache) when a concrete consumer appears; writable `MAP_SHARED` writeback stays declined
+
+**Date:** 2026-06-14
+
+**Decided by:** Operator (this reopened `open-questions.md` Q5; Claude proposed
+the **C-lite** middle option — read-only cross-process page sharing without the
+writable-`MAP_SHARED` writeback machinery — and the operator chose it). The
+operator's words: *"Q5: yes, we'll go with C-lite, but if you don't want to
+implement it now, document it wherever at what time we should implement it
+later."* This **narrows §22**: §22's blanket "decline the unified page cache" no
+longer holds — the *read-only* half is now planned (deferred). Everything else in
+§22 stands: full option C and **writable `MAP_SHARED` writeback remain declined
+indefinitely** (`ENOSYS`), and the shipped demand-paged `MAP_PRIVATE` path
+(option B, §17) stays as-is meanwhile.
+
+**What "C-lite" is.** A unified *read-only* page cache: pages of a file are
+cached once and shared (read-only) across every process that maps or reads them,
+giving two wins —
+1. **Shared-library / read-only text dedup:** N processes mapping the same
+   `libc`/`.text` share one set of physical frames instead of N copies.
+2. **De-double-caching:** a file's pages live in one cache rather than being held
+   both by the block buffer cache (`fs/cache.rs`) and per-mapping copies.
+
+**What C-lite deliberately OMITS** (and why it's "lite"): the writable
+`MAP_SHARED` path — dirty-page tracking, `msync`/writeback ordering, and
+cross-process write coherence. That is the hard, hard-to-reverse half and it
+stays declined (writable `MAP_SHARED` of a regular file keeps returning
+`ENOSYS`, exactly as in §22). C-lite is read-only, so it needs no dirty/writeback
+policy at all.
+
+**Decision — implement later, not now.** Per the operator, C-lite is *adopted in
+principle* but **not to be built immediately**. It is deferred until a concrete
+consumer needs it.
+
+**Trigger to implement (the "at what time" the operator asked for):** build
+C-lite when the **first real consumer of cross-process read-only page sharing
+appears** — in practice the **dynamic linker wanting shared-library `.text`
+dedup** (multiple processes mapping the same `.so`). That is the moment the
+memory-saving payoff becomes concrete rather than hypothetical. A secondary
+trigger is any measured double-caching cost once the block buffer cache and
+file-backed mappings are both heavily exercised.
+
+**Precursor work that must land first.** C-lite needs **stable VFS file
+identity** — a page cache is keyed by (file-identity, offset), and today
+`FileMeta.ino` is `0` for memfs and FAT, so two mappings of "the same file"
+cannot be recognised as such. Implementing stable inode/file-identity in
+`fs/vfs.rs` is a prerequisite and should be scheduled as the first sub-task when
+the trigger fires.
+
+**Rationale (both sides):**
+- *For deferring:* no consumer exists yet (the dynamic linker doesn't dedup
+  shared text today), the precursor (stable file-identity) is itself a
+  multi-file change, and building a cache with no client risks designing to the
+  wrong access pattern. Slate OS is native-first, so the urgency is low.
+- *For adopting (vs §22's full decline):* the read-only half is the *cheap,
+  reversible, high-value* slice — it captures the one advantage the operator
+  cared about ("saving memory for some programs") for the common shared-library
+  case, without taking on the writable-shared hairiness that §22 rightly
+  declined. C-lite is the Pareto-optimal point between B and full C.
+
+**Consequences:**
+- **known-issues.md TD22** reverts from "CLOSED (won't-fix gap 2)" to: **gap 1
+  done (option B); gap-2 read-only sharing PLANNED (deferred, see §23); gap-2
+  writable `MAP_SHARED` writeback won't-fix (`ENOSYS`).**
+- A deferred-with-rationale entry is recorded in `todo.txt` with the trigger
+  condition above.
+
+**Where it will live:** `kernel/src/fs/vfs.rs` (stable file-identity precursor),
+a new/extended page cache (likely unifying or fronting `kernel/src/fs/cache.rs`),
+`kernel/src/mm/vma.rs` (`VmaKind::FileBacked` fault path sources pages from the
+cache), `kernel/src/syscall/linux.rs` (`linux_file_mmap`). B's `FileBacked`
+fault-path shape is already the right foundation — C-lite only changes the
+*source* of each page (shared cache frame vs per-mapping `read_at`) and marks
+shared frames read-only/refcounted.
+
+## 24. Cross-process memory introspection — keep channel/shared-memory IPC for *consensual* sharing; add a **debug-capability-gated** `process_vm_readv`/`writev` for *unilateral* introspection
+
+**Date:** 2026-06-14
+
+**Decided by:** Operator (this was `open-questions.md` Q6). The operator's words:
+*"Q6: Yes, keep the existing IPC and add a debug-capability-gated ability to read
+all of another process' memory."*
+
+**The two-mechanism split (operator-confirmed):**
+1. **Consensual** cross-process memory sharing → the **existing channel +
+   shared-memory IPC** path, unchanged. Both parties opt in; no special right is
+   needed because the owner of the memory chooses to share it.
+2. **Unilateral** introspection (one process reading/writing another's memory
+   *without the target's cooperation*, à la `process_vm_readv`/`writev` and, in
+   future, `ptrace`) → gated by a **debug capability the caller holds over the
+   specific target process**, never derived from ambient PID/uid authority.
+
+**What was implemented this turn:**
+- **`Rights::DEBUG`** (bit 17) added in `kernel/src/cap/rights.rs` — the
+  unilateral-introspection authority, carried on a
+  `ResourceType::Process` capability whose `resource_id` is the target PID.
+  Delegation stays AND-mask (a holder can only pass on a subset), so debug
+  authority can only flow parent→child or from a privileged debugger broker —
+  never be conjured from PID/uid.
+- **`process_vm_impl`** (`kernel/src/syscall/linux.rs`): the cross-address-space
+  arm — previously a hard `ESRCH` rejection — now checks
+  `pcb::has_capability_for(caller, Process, target_owner, Rights::DEBUG)`. No
+  cap → **`EPERM`** (mirrors Linux `ptrace_may_access` denial); target gone /
+  no PML4 → **`ESRCH`**. With the cap, the copy loop routes the remote side
+  through `mm::user::copy_from_user_as` (read / `readv`) or
+  `copy_to_user_as` (write / `writev`), preserving Linux's best-effort
+  partial-copy contract.
+- **`DEBUG` gates both read and write.** A debug capability is total
+  introspection authority — real debuggers poke memory as well as read it — so a
+  single right covers `readv` and `writev` rather than splitting them.
+- Self-test `self_test_process_vm_cross_as` (registered in `main.rs`) covers the
+  gate predicate (false with no cap / read-only cap / wrong pid; true after
+  `DEBUG` granted) and the remote read/write transfer mechanism end-to-end via
+  HHDM verification.
+
+**Why a capability and not a PID/uid check.** Slate OS is capability-based with
+no ambient authority (CLAUDE.md architectural rule). "Same uid may ptrace" is
+exactly the ambient-authority model the design forbids. Routing unilateral
+introspection through an explicit, delegable, AND-mask-narrowable `DEBUG` right
+on a specific `Process` capability is the native-correct expression of "X may
+debug Y."
+
+**Deferred follow-up:** `ptrace` itself (breakpoints, single-step,
+register access, signal-delivery interception) still returns `EPERM`/`ENOSYS`;
+when it is built it will gate on the same `Process`+`DEBUG` capability. Logged in
+`todo.txt`.
+
+**Where it lives:** `kernel/src/cap/rights.rs` (`Rights::DEBUG`),
+`kernel/src/syscall/linux.rs` (`process_vm_impl`, `self_test_process_vm_cross_as`,
+`sys_process_vm_readv` doc), `kernel/src/main.rs` (self-test registration),
+`kernel/src/mm/user.rs` (`copy_from_user_as`/`copy_to_user_as`, the purpose-built
+cross-AS primitives).

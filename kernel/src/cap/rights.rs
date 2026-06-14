@@ -57,6 +57,20 @@ impl Rights {
     /// requests from userspace are downgraded to BestEffort.
     pub const IO_REALTIME: Self = Self(1 << 16);
 
+    /// Debug / unilateral-introspection authority over a process.
+    ///
+    /// Required on a [`Process`](crate::cap::ResourceType::Process)
+    /// capability to read or write the target process's memory
+    /// **across address spaces** via `process_vm_readv` /
+    /// `process_vm_writev` (and, in future, to `ptrace`-attach).  This
+    /// is *unilateral* introspection — the target does not consent — so
+    /// it must be granted explicitly (parent→child, or by a privileged
+    /// debugger broker), never derived from ambient PID/uid authority.
+    /// Consensual memory sharing is a separate path (channel +
+    /// shared-memory IPC) that never touches this right.
+    /// See design-decisions.md §24 (open-questions Q6).
+    pub const DEBUG: Self = Self(1 << 17);
+
     // --- Convenience combinations ---
 
     /// All rights.
@@ -169,6 +183,7 @@ impl core::fmt::Display for Rights {
             (Self::WAIT, "wait"),
             (Self::SIGNAL, "sig"),
             (Self::IO_REALTIME, "io_rt"),
+            (Self::DEBUG, "debug"),
         ];
 
         for (flag, name) in &flags {

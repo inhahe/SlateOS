@@ -579,7 +579,7 @@ lscpu's existing reader lights up automatically with real data.
 range files and `topology/` subtree). Tracked as the follow-up to the
 CPU-enumeration sysfs work.
 
-### TD22. File-backed `mmap` — Phase 1 (demand-paged `MAP_PRIVATE`) DONE; Phase 2 (page cache + writable `MAP_SHARED`) WON'T-FIX by operator decision — CLOSED 2026-06-14
+### TD22. File-backed `mmap` — Phase 1 (demand-paged `MAP_PRIVATE`) DONE; Phase 2 read-only unified cache PLANNED-DEFERRED (C-lite, §23); writable `MAP_SHARED` WON'T-FIX — UPDATED 2026-06-14
 
 **Where:** `kernel/src/mm/vma.rs` (`VmaKind::FileBacked`), `kernel/src/proc/pcb.rs`
 (`try_resolve_fault` FileBacked arm, `vma_release_backing`, `remove_vma`,
@@ -625,22 +625,29 @@ loader, so demand paging buys little there.
 - The fault handler reads the file **synchronously via the VFS** inside the
   page-fault path; a page cache would serve hits without re-reading.
 
-**Phase 2 — WON'T-FIX (operator decision 2026-06-14).** The operator declined the
-unified-page-cache fork (Q5 option C) as too large/hard-to-reverse for a
-native-first OS that does not target full Linux support — see
-`design-decisions.md` §22. **Writable `MAP_SHARED` of a regular file stays
-`ENOSYS` indefinitely**, and there is no unified VFS/mmap page cache. This is a
-deliberate, accepted limitation, not outstanding debt.
+**Phase 2 — split decision (operator, 2026-06-14; supersedes the earlier blanket
+won't-fix).** The operator reopened Q5 and chose **C-lite**: a unified
+*read-only* page cache. See `design-decisions.md` §23 (which narrows §22).
+- **Read-only unified cache — PLANNED, DEFERRED.** Cross-process read-only page
+  sharing (shared-library `.text` dedup + de-double-caching against
+  `fs/cache.rs`) is adopted in principle but **not built yet**. Trigger to
+  implement: the first concrete consumer of read-only page sharing — in practice
+  the dynamic linker wanting shared-library text dedup. Precursor: stable VFS
+  file-identity (`FileMeta.ino` is 0 for memfs/FAT today). Full deferral
+  rationale + trigger logged in `todo.txt`.
+- **Writable `MAP_SHARED` writeback — WON'T-FIX (unchanged).** Dirty-tracking,
+  `msync`/unmap write-back, and cross-process write coherence remain declined.
+  **Writable `MAP_SHARED` of a regular file stays `ENOSYS` indefinitely** — a
+  deliberate, accepted limitation, not outstanding debt. C-lite (read-only) needs
+  none of this machinery.
 
-If a concrete future consumer ever needs writable shared file maps or
-cross-process file-map coherence, the proper fix would be: a unified page cache
-shared between the VFS read path and mmap (resolve `MAP_SHARED` faults to the
-shared cache page mapped writable for `PROT_WRITE`; dirty-tracking +
-`msync`/unmap write-back; switch `MAP_PRIVATE` to CoW the cache page). It needs a
-stable VFS file-identity (`FileMeta.ino` is 0 for memfs/FAT) and a
-double-cache-vs-unify call against `fs/cache.rs`. The Phase-1 `VmaKind::FileBacked`
-fault-path shape is already the right foundation. Reopen via `design-decisions.md`
-§22 if revisited.
+When C-lite is built, the proper fix is: a unified page cache shared between the
+VFS read path and mmap, with file pages cached once and shared read-only
+(refcounted frames). The Phase-1 `VmaKind::FileBacked` fault-path shape is already
+the right foundation — C-lite only changes each page's *source* (shared cache
+frame vs per-mapping `read_at`). It needs the stable VFS file-identity precursor
+above and a double-cache-vs-unify call against `fs/cache.rs`. See
+`design-decisions.md` §23.
 
 ---
 

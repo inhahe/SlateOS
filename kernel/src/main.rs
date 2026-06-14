@@ -1274,6 +1274,14 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: Linux madvise(MADV_DONTNEED) self-test failed: {:?}", e);
     }
 
+    // Q6 / design-decisions §24: cross-address-space process_vm_readv/writev
+    // introspection gated by a Process capability carrying the DEBUG right.
+    // Exercises the authorization predicate + the remote read/write transfer
+    // mechanism against a throwaway target process's page table.
+    if let Err(e) = syscall::linux::self_test_process_vm_cross_as() {
+        serial_println!("WARNING: Linux process_vm cross-AS self-test failed: {:?}", e);
+    }
+
     boot_timing::mark(boot_timing::Milestone::Filesystem);
 
     // ProcFs self-test — constructs its own `ProcFs::new()` and reads live

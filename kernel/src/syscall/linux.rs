@@ -23162,25 +23162,32 @@ fn release_handle_ref(kind: HandleKind, raw_handle: u64) {
 /// Bulk-transfer data from another task's address space into the
 /// caller's iovecs.  flags is reserved and must be 0.
 ///
-/// Pre-batch this validated inputs and returned `-ESRCH` for every
-/// non-self target — gdb's `target remote :PID` data fetch path,
-/// strace's `--decode-fds=path` symlink reader, and CRIU's parasite
-/// injector all use this to copy small payloads across processes.
-/// The honest answer for cross-process is still `-ESRCH` (we don't yet
-/// have cross-AS page-table mapping), but the *same-address-space*
-/// case is feasible: when the target TID belongs to the calling
-/// process (our thread model: threads share a PCB), every byte of
-/// remote_iov lies in the caller's own user space and the transfer
-/// is a regular SMAP-bracketed copy_from_user → scratch →
-/// copy_to_user sequence.  Glibc's `__libc_check_pid` self-probe and
-/// LLDB's local-process introspection rely on the same-AS path, and
-/// pre-batch we broke both.
+/// Two transfer paths:
+///   * **Same address space** (target TID belongs to the calling process —
+///     our thread model: threads share a PCB): every byte of remote_iov lies
+///     in the caller's own user space and the transfer is a regular
+///     SMAP-bracketed copy_from_user → scratch → copy_to_user sequence.
+///     Glibc's `__libc_check_pid` self-probe and LLDB's local-process
+///     introspection rely on this path.
+///   * **Cross address space** (target in a *different* process — gdb
+///     `attach`, strace `-p`, CRIU): unilateral introspection, gated by the
+///     capability model.  Permitted **only** when the caller holds a
+///     `Process` capability over the target's owning process carrying the
+///     `DEBUG` right (Q6 / design-decisions §24) — never by ambient PID
+///     authority.  When authorized, the *remote* side of each chunk is read
+///     / written through the HHDM `copy_from_user_as` / `copy_to_user_as`
+///     primitives against the target's PML4; the local side stays on the
+///     SMAP copy primitives.  Without the capability → `-EPERM`; if the
+///     target has vanished → `-ESRCH`.
 ///
-/// Upgrade highlights:
+/// Consensual memory *sharing* between cooperating peers is a separate path
+/// (channel + shared-memory IPC) and never touches this syscall — see
+/// design-decisions §24.
+///
+/// Other behaviour:
 ///   * Validates iovec arrays as before (pointer non-NULL, readable
 ///     for `cnt * 16` bytes, counts ≤ 1024 / IOV_MAX).
-///   * If the target TID's owning process matches the caller's,
-///     stream bytes between the two iovec lists in 256-byte chunks
+///   * Streams bytes between the two iovec lists in 256-byte chunks
 ///     via a kernel-stack scratch buffer.  Returns the total bytes
 ///     moved (matches Linux's "best-effort partial copy" contract).
 ///   * If a user-pointer copy fails mid-transfer, returns the bytes
@@ -23188,7 +23195,6 @@ fn release_handle_ref(kind: HandleKind, raw_handle: u64) {
 ///     errno.  Matches Linux's `process_vm_readv` man-page: "On
 ///     error, -1 is returned ... however, if a non-empty prefix of
 ///     iovecs was transferred, that count is returned instead."
-///   * Cross-process target → `-ESRCH` (unchanged).
 ///   * Kernel-context callers (no caller_pid) accept any pid > 0 as
 ///     same-AS so the self-test can exercise the copy paths.
 fn sys_process_vm_readv(args: &SyscallArgs) -> SyscallResult {
@@ -23320,11 +23326,51 @@ fn process_vm_impl(args: &SyscallArgs, is_write: bool) -> SyscallResult {
         // can drive the copy path; production callers never hit this.
         _ => kernel_ctx,
     };
+    // Cross-address-space introspection gate (Q6 / design-decisions §24).
+    //
+    // When the target lives in a *different* address space, the transfer
+    // is unilateral introspection of another process (debuggers, CRIU,
+    // profilers).  Per the capability model this is permitted ONLY when
+    // the caller holds a `Process` capability over the target's owning
+    // process carrying the DEBUG right — never by ambient PID authority.
+    // `target_pml4 == 0` means "same address space" (use the current CR3
+    // via the SMAP copy primitives); a non-zero value routes the *remote*
+    // side of each copy through the HHDM `_as` primitives against that
+    // page table.
+    let mut target_pml4: u64 = 0;
     if !same_addr_space {
-        // Cross-AS not implemented — would need per-VMA inspection in
-        // the foreign address space plus per-page mapping.  Documented
-        // limitation; ESRCH matches Linux when the target task is gone.
-        return linux_err(errno::ESRCH);
+        // caller is Some here: a None caller forces same_addr_space=true
+        // (kernel-context self-test), so we never reach this arm with
+        // caller==None.  Be defensive anyway.
+        let Some(caller_pid_val) = caller else {
+            return linux_err(errno::ESRCH);
+        };
+        // target_owner is Some here for the same reason (a None owner with
+        // a Some caller yields same_addr_space=false and lands here); treat
+        // a missing owner as a vanished target.
+        let Some(owner) = target_owner else {
+            return linux_err(errno::ESRCH);
+        };
+        // Authorization: a Process capability over the target with DEBUG.
+        // A debug capability is total introspection authority, so it gates
+        // both the read (readv) and write (writev) directions.
+        if !crate::proc::pcb::has_capability_for(
+            caller_pid_val,
+            crate::cap::ResourceType::Process,
+            owner,
+            crate::cap::Rights::DEBUG,
+        ) {
+            // Caller lacks debug authority over the target.  EPERM mirrors
+            // Linux's ptrace_may_access denial (distinct from ESRCH, which
+            // means the target task does not exist).
+            return linux_err(errno::EPERM);
+        }
+        match crate::proc::pcb::get_pml4(owner) {
+            Some(p) if p != 0 => target_pml4 = p,
+            // Owner exists in the process table but has no page table
+            // (exiting / never fully constructed) — treat as gone.
+            _ => return linux_err(errno::ESRCH),
+        }
     }
 
     // Nothing to do if either side has zero entries; matches Linux
@@ -23396,10 +23442,30 @@ fn process_vm_impl(args: &SyscallArgs, is_write: bool) -> SyscallResult {
         } else {
             (r_base + ro, l_base + lo)
         };
-        // SAFETY: same-address-space invariant means both src and dst
-        // are user pointers in the caller's AS.  copy_from_user /
-        // copy_to_user perform SMAP-bracketed validation per byte.
-        let cf = unsafe { crate::mm::user::copy_from_user(src, scratch.as_mut_ptr(), n) };
+        // The "remote" side is the target's address space; the "local"
+        // side is always the caller's current CR3.  For readv the remote
+        // side is the source; for writev it is the destination.  When
+        // `target_pml4 != 0` (authorized cross-AS) the remote side is read
+        // / written through the HHDM `_as` primitives against that page
+        // table; the local side stays on the SMAP copy primitives.  When
+        // `target_pml4 == 0` (same AS) both sides use the current CR3.
+        let cross_as = target_pml4 != 0;
+        let src_remote = cross_as && !is_write;
+        let dst_remote = cross_as && is_write;
+        // SAFETY: for the non-remote side, src/dst are user pointers in the
+        // caller's current AS and copy_from_user / copy_to_user perform
+        // SMAP-bracketed per-byte validation.  The remote side uses the
+        // `_as` HHDM walkers which validate presence (and writability for
+        // the write side) against `target_pml4` page by page.
+        let cf = if src_remote {
+            crate::mm::user::copy_from_user_as(
+                target_pml4,
+                src,
+                scratch.get_mut(..n).unwrap_or(&mut []),
+            )
+        } else {
+            unsafe { crate::mm::user::copy_from_user(src, scratch.as_mut_ptr(), n) }
+        };
         if let Err(e) = cf {
             if total > 0 {
                 #[allow(clippy::cast_possible_wrap)]
@@ -23407,7 +23473,15 @@ fn process_vm_impl(args: &SyscallArgs, is_write: bool) -> SyscallResult {
             }
             return linux_err(linux_errno_for(e));
         }
-        let ct = unsafe { crate::mm::user::copy_to_user(scratch.as_ptr(), dst, n) };
+        let ct = if dst_remote {
+            crate::mm::user::copy_to_user_as(
+                target_pml4,
+                dst,
+                scratch.get(..n).unwrap_or(&[]),
+            )
+        } else {
+            unsafe { crate::mm::user::copy_to_user(scratch.as_ptr(), dst, n) }
+        };
         if let Err(e) = ct {
             if total > 0 {
                 #[allow(clippy::cast_possible_wrap)]
@@ -42795,6 +42869,158 @@ pub fn self_test_madvise_dontneed() -> crate::error::KernelResult<()> {
     pcb::destroy(pid);
     serial_println!(
         "[syscall/linux]   madvise(MADV_DONTNEED): frames freed + VMA persists + zero-refault: OK"
+    );
+    Ok(())
+}
+
+/// Self-test for the cross-address-space `process_vm_readv`/`writev`
+/// introspection path (Q6 / design-decisions §24).
+///
+/// Two halves, both unit-level (the full ring-3-debugger-reads-ring-3-target
+/// end-to-end path needs a two-process userspace harness like
+/// `proc::spawn::self_test_linux_file_mmap` and is deferred until a real
+/// debugger consumer exists — `caller_pid()` is `None` in kernel context, so
+/// `process_vm_impl`'s cross-AS arm cannot be driven directly here):
+///
+/// 1. **Authorization gate** — a "debugger" process must hold a `Process`
+///    capability over the target carrying the `DEBUG` right.  We assert the
+///    gate predicate is false with no cap, false with a non-DEBUG (READ-only)
+///    Process cap, and true once a DEBUG cap is granted.
+/// 2. **Remote transfer mechanism** — the `_as` HHDM primitives that the
+///    cross-AS arm routes the remote side through deliver the target's memory:
+///    we stamp a sentinel into a faulted target page, read it back via
+///    `copy_from_user_as(target_pml4, …)`, then poke a new value via
+///    `copy_to_user_as` and confirm it landed.
+pub fn self_test_process_vm_cross_as() -> crate::error::KernelResult<()> {
+    use crate::cap::{ResourceType, Rights};
+    use crate::error::KernelError;
+    use crate::mm::frame::FRAME_SIZE;
+    use crate::mm::page_table::{self, PageFlags, VirtAddr};
+    use crate::mm::vma::{Vma, VmaKind};
+    use crate::serial_println;
+
+    serial_println!("[syscall/linux] Running process_vm cross-AS introspection self-test...");
+
+    let frame_size = FRAME_SIZE as u64;
+    let debugger = pcb::create("linux-pvm-debugger", 0);
+    let target = pcb::create("linux-pvm-target", 0);
+
+    // Helper: tear down both throwaway processes on any exit path.
+    let cleanup = || {
+        pcb::destroy(debugger);
+        pcb::destroy(target);
+    };
+
+    let Some(target_pml4) = pcb::get_pml4(target).filter(|&p| p != 0) else {
+        cleanup();
+        serial_println!("[syscall/linux]   FAIL: target process has no PML4");
+        return Err(KernelError::InternalError);
+    };
+
+    // --- (1) Authorization gate ---------------------------------------------
+    // No capability yet: introspection must be denied.
+    if pcb::has_capability_for(debugger, ResourceType::Process, target, Rights::DEBUG) {
+        cleanup();
+        serial_println!("[syscall/linux]   FAIL: DEBUG granted with no capability");
+        return Err(KernelError::InternalError);
+    }
+    // A Process cap WITHOUT the DEBUG right must not satisfy the gate.
+    pcb::insert_caps(debugger, &[(ResourceType::Process, target, Rights::READ)])?;
+    if pcb::has_capability_for(debugger, ResourceType::Process, target, Rights::DEBUG) {
+        cleanup();
+        serial_println!("[syscall/linux]   FAIL: READ-only Process cap satisfied DEBUG gate");
+        return Err(KernelError::InternalError);
+    }
+    // Grant the DEBUG cap over the target: the gate must now open.
+    pcb::insert_caps(debugger, &[(ResourceType::Process, target, Rights::DEBUG)])?;
+    if !pcb::has_capability_for(debugger, ResourceType::Process, target, Rights::DEBUG) {
+        cleanup();
+        serial_println!("[syscall/linux]   FAIL: DEBUG cap not honoured by gate");
+        return Err(KernelError::InternalError);
+    }
+    // The DEBUG cap is specific to this target — it must not authorize a
+    // different (nonexistent) pid.
+    let other_pid = target.saturating_add(9999);
+    if pcb::has_capability_for(debugger, ResourceType::Process, other_pid, Rights::DEBUG) {
+        cleanup();
+        serial_println!("[syscall/linux]   FAIL: DEBUG cap leaked to a different target pid");
+        return Err(KernelError::InternalError);
+    }
+
+    // --- (2) Remote transfer mechanism --------------------------------------
+    // Give the target one faulted, writable anonymous page.
+    let base: u64 = 0x0000_0020_0000_0000; // 128 GiB, clear of heap/mmap windows
+    let end = base.saturating_add(frame_size);
+    let flags = PageFlags::PRESENT
+        | PageFlags::WRITABLE
+        | PageFlags::USER_ACCESSIBLE
+        | PageFlags::NO_EXECUTE;
+    if let Err(e) = pcb::add_vma(target, Vma { start: base, end, kind: VmaKind::Anonymous, flags }) {
+        cleanup();
+        serial_println!("[syscall/linux]   FAIL: add_vma {:?}", e);
+        return Err(KernelError::InternalError);
+    }
+    if !pcb::try_resolve_fault(target, base, 1 << 2) {
+        cleanup();
+        serial_println!("[syscall/linux]   FAIL: target demand fault unresolved");
+        return Err(KernelError::InternalError);
+    }
+
+    // Stamp a recognizable 8-byte pattern into the target page via the HHDM.
+    let hhdm = page_table::hhdm().ok_or(KernelError::InternalError)?;
+    let Some(phys) = page_table::translate(target_pml4, VirtAddr::new(base)) else {
+        cleanup();
+        serial_println!("[syscall/linux]   FAIL: target page not mapped post-fault");
+        return Err(KernelError::InternalError);
+    };
+    const PATTERN: [u8; 8] = [0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x23, 0x45, 0x67];
+    for (i, b) in PATTERN.iter().enumerate() {
+        // SAFETY: HHDM mapping of a freshly faulted, owned, writable frame;
+        // we write 8 bytes well within the 16 KiB frame.
+        unsafe {
+            (phys.saturating_add(hhdm).saturating_add(i as u64) as *mut u8).write_volatile(*b);
+        }
+    }
+
+    // Remote READ: the readv direction reads the target via copy_from_user_as.
+    let mut got = [0u8; 8];
+    if let Err(e) = crate::mm::user::copy_from_user_as(target_pml4, base, &mut got) {
+        cleanup();
+        serial_println!("[syscall/linux]   FAIL: copy_from_user_as remote read {:?}", e);
+        return Err(KernelError::InternalError);
+    }
+    if got != PATTERN {
+        cleanup();
+        serial_println!(
+            "[syscall/linux]   FAIL: remote read mismatch: {:x?} != {:x?}",
+            got, PATTERN
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Remote WRITE: the writev direction pokes the target via copy_to_user_as.
+    const POKE: [u8; 8] = [0xCA, 0xFE, 0xBA, 0xBE, 0x89, 0xAB, 0xCD, 0xEF];
+    if let Err(e) = crate::mm::user::copy_to_user_as(target_pml4, base, &POKE) {
+        cleanup();
+        serial_println!("[syscall/linux]   FAIL: copy_to_user_as remote write {:?}", e);
+        return Err(KernelError::InternalError);
+    }
+    // Verify the poke landed in the target's physical frame.
+    for (i, b) in POKE.iter().enumerate() {
+        // SAFETY: same faulted/owned target frame, 8 bytes within it.
+        let v = unsafe {
+            (phys.saturating_add(hhdm).saturating_add(i as u64) as *const u8).read_volatile()
+        };
+        if v != *b {
+            cleanup();
+            serial_println!("[syscall/linux]   FAIL: remote write not observed at byte {}", i);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    cleanup();
+    serial_println!(
+        "[syscall/linux]   process_vm cross-AS: DEBUG-cap gate + remote read/write: OK"
     );
     Ok(())
 }

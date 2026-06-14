@@ -29,6 +29,47 @@
 ## ############################################################################
 
 ## ============================================================================
+## DEFERRED (2026-06-14): C-lite unified read-only page cache (Q5 / design-decisions §23)
+## ============================================================================
+## WHAT: a unified *read-only* page cache so a file's pages are cached once and
+##   shared (read-only) across every process that maps/reads them. Two payoffs:
+##   (1) shared-library/.text dedup — N procs mapping the same .so share one set
+##   of physical frames; (2) de-double-caching between the block buffer cache
+##   (fs/cache.rs) and per-mapping copies. Deliberately OMITS the writable
+##   MAP_SHARED path (dirty tracking / msync / write coherence) — that half stays
+##   declined (ENOSYS) per §22/§23.
+## DECISION: operator adopted C-lite (Q5), but said implement LATER, not now.
+## TRIGGER (when to build it): the first concrete consumer of cross-process
+##   read-only page sharing appears — in practice the DYNAMIC LINKER wanting
+##   shared-library .text dedup (multiple processes mapping the same .so). A
+##   secondary trigger is measured double-caching cost once the block buffer
+##   cache and file-backed mappings are both heavily exercised.
+## PRECURSOR (must land first): stable VFS file identity. A page cache is keyed by
+##   (file-identity, offset), but FileMeta.ino is 0 for memfs and FAT today, so
+##   two mappings of "the same file" can't be recognized. Implement stable
+##   inode/file-identity in fs/vfs.rs as the first sub-task when the trigger fires.
+## WHERE: fs/vfs.rs (identity precursor), fs/cache.rs (unify/front the cache),
+##   mm/vma.rs (VmaKind::FileBacked fault path sources pages from the cache),
+##   syscall/linux.rs (linux_file_mmap). B's FileBacked fault-path shape is the
+##   foundation; C-lite only changes each page's SOURCE (shared cache frame vs
+##   per-mapping read_at) and marks shared frames read-only/refcounted.
+
+## ============================================================================
+## DEFERRED (2026-06-14): ptrace(2) behind the Process+DEBUG capability (Q6 / design-decisions §24)
+## ============================================================================
+## WHAT: full ptrace — breakpoints, single-step, register get/set, signal-delivery
+##   interception. Currently returns EPERM/ENOSYS.
+## DONE THIS TURN: the cross-address-space process_vm_readv/writev path is now
+##   implemented and gated on a Process capability carrying Rights::DEBUG over the
+##   target (EPERM without it). See §24.
+## TRIGGER: when a debugger/consumer needs live control (gdb-style) over a target.
+## GATE: ptrace must use the SAME Process+DEBUG capability gate as process_vm_*;
+##   never an ambient same-uid/PID check (CLAUDE.md: no ambient authority).
+## WHERE: kernel/src/syscall/linux.rs (ptrace dispatch), kernel/src/proc/ (thread
+##   stop/continue, register save areas), kernel/src/cap/rights.rs (Rights::DEBUG,
+##   already added).
+
+## ============================================================================
 ## DONE (2026-06-13): mechanical rename OuRoS -> Slate OS, EXECUTED.
 ## ============================================================================
 ## The full rename plan (survey facts, failure-mode analysis, execution recipe,

@@ -532,9 +532,9 @@ _Principle: monitoring something is a separate capability from doing it. Hooks a
 
 _The debugging suite is NEVER granted to normal applications. These are for debuggers, profilers, and developer tools. Each is a separate capability — granting `debug.attach` does not grant `debug.memory.write`._
 
-- [ ] `debug.attach` — attach to another process (ptrace-like debugging interface)
-- [ ] `debug.memory.read` — read another process's memory
-- [ ] `debug.memory.write` — write another process's memory (higher risk than read)
+- [ ] `debug.attach` — attach to another process (ptrace-like debugging interface) — blocked by: ptrace not yet built; deferred behind the same `Process`+`Rights::DEBUG` gate (todo.txt; design-decisions.md §24)
+- [-] `debug.memory.read` — read another process's memory — kernel mechanism DONE 2026-06-14: cross-address-space `process_vm_readv` now gated by a `Process` capability carrying `Rights::DEBUG` over the target (`EPERM` without it); see design-decisions.md §24. Remaining: surface as a first-class `debug.memory.read` capability name + grant policy.
+- [-] `debug.memory.write` — write another process's memory (higher risk than read) — kernel mechanism DONE 2026-06-14: cross-address-space `process_vm_writev`, same `Process`+`Rights::DEBUG` gate (§24). Remaining: distinct capability name (currently `DEBUG` gates both read and write — see §24 rationale).
 - [ ] `debug.breakpoint` — set breakpoints, single-step execution
 - [ ] `debug.trace.syscalls` — trace another process's syscall invocations
 - [ ] `debug.trace.ipc` — trace another process's IPC messages

@@ -55932,6 +55932,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_chroot_mknod()?;
+
+    #[inline(never)]
+    fn self_test_chroot_mknod() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // chroot — Linux gate ladder fidelity (batch 446).
     //
     // Linux's chroot runs getname → user_path_at → inode_permission
@@ -56176,6 +56181,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   mknod Linux gate ladder (EFAULT/ENOENT/ENAMETOOLONG/EINVAL/EPERM): OK"
         );
+    }
+        Ok(())
     }
 
     // truncate — Linux gate ladder fidelity (batch 447).

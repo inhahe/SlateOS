@@ -73357,6 +73357,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_sendmmsg_recvmmsg()?;
+
+    #[inline(never)]
+    fn self_test_sendmmsg_recvmmsg() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // Batch 438: sendmmsg / recvmmsg — fd lookup gates BEFORE
     // mmsg pointer validation, matching Linux's __sys_sendmmsg /
     // __sys_recvmmsg in net/socket.c (sockfd_lookup_light fires
@@ -73458,6 +73463,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   sendmmsg/recvmmsg fd lookup ordered before per-msg pointer validation (Linux: sockfd_lookup_light fires before the per-msg copy_msghdr_from_user loop; recvmmsg's timeout gate stays first): OK"
         );
+    }
+        Ok(())
     }
 
     // -----------------------------------------------------------------

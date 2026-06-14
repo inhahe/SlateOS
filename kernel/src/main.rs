@@ -1273,6 +1273,15 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: Linux argv[0] deref (ring 3) self-test failed: {:?}", e);
     }
 
+    // Ring-3 test that the SysV stack builder places the envp array at the
+    // correct *variable* offset (rsp + 16 + argc*8): a real Linux-ABI process
+    // computes envp[0] from argc, dereferences it, and exits with its first
+    // byte.  Distinct from the argv[0] test (fixed offset) — catches a
+    // misplaced envp array that getenv()-dependent toolchains would fault on.
+    if let Err(e) = proc::spawn::self_test_linux_envp0_deref() {
+        serial_println!("WARNING: Linux envp[0] deref (ring 3) self-test failed: {:?}", e);
+    }
+
     // Ring-3 end-to-end test of execveat(2) in both forms: a real Linux-ABI
     // launcher execs a target by path (AT_FDCWD) and by open-fd
     // (AT_EMPTY_PATH / fexecve), proving execveat replaces the image and

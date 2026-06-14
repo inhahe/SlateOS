@@ -2575,6 +2575,92 @@ pub fn self_test_linux_argv0_deref() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test that the System V initial stack places the **`envp`
+/// array at the correct variable offset**.
+///
+/// The sibling [`self_test_linux_argv0_deref`] dereferences `argv[0]` at the
+/// *fixed* offset `[rsp+8]`.  This test instead spawns
+/// [`elf::build_linux_envp0_deref_exit_elf`], which computes the envp address
+/// from the runtime `argc` (`[rsp + 16 + argc*8]`) and exits with the first
+/// byte of `envp[0]`.  We pass an `envp[0]` whose first byte is a known
+/// sentinel and assert the zombie's exit code equals it.
+///
+/// This catches a failure mode neither the argc-scalar test nor the argv[0]
+/// test can see: a stack builder could place `argc` and the argv pointers
+/// correctly yet position the `envp` array one slot off (e.g. forgetting the
+/// argv NULL terminator).  Real toolchains depend on `getenv()` for
+/// `PATH`/`TMPDIR`/`CC`, so a misplaced envp array crashes them even though
+/// argv looks fine.
+pub fn self_test_linux_envp0_deref() -> KernelResult<()> {
+    // First byte of envp[0]; distinct from interp(42)/mmap(91)/brk(109)/
+    // execveat(58)/argv0(81).  0x4D = 'M' = 77.
+    const SENTINEL: u8 = 0x4D;
+
+    serial_println!("[spawn] Running Linux envp[0] deref (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_envp0_deref_exit_elf();
+    // envp[0]'s first byte is the sentinel the target reads back and exits
+    // with; the rest of the string is irrelevant.  We pass two argv entries so
+    // the variable offset `rsp + 16 + argc*8` is genuinely exercised (a builder
+    // bug masked by argc==1 would still be caught here at argc==2).
+    let argv: &[&[u8]] = &[b"spawn-test-linux-envp0", b"second-arg"];
+    let envp: &[&[u8]] = &[b"\x4Denvp0-deref-test=1"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-envp0",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: envp0-deref spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Let the thread run: compute envp[0] from argc → deref → exit(first byte).
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: envp[0] deref (ring 3) — expected Zombie, got {:?} (a non-zombie \
+             state usually means the envp array was placed at the wrong stack slot and the \
+             process faulted dereferencing envp[0])",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(i32::from(SENTINEL)) {
+        serial_println!(
+            "[spawn]   FAIL: envp[0] deref (ring 3) — expected exit {} (envp[0][0] sentinel), \
+             got {:?} (a wrong-but-valid byte means the envp array is at the wrong offset)",
+            SENTINEL, exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   Linux envp[0] deref (ring 3: read byte through stack-builder envp[0] \
+         pointer at variable offset rsp+16+argc*8, byte == {}): OK",
+        SENTINEL
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the Linux `execveat(2)` syscall.
 ///
 /// `execveat` is exercised in **both** of its forms by spawning a real

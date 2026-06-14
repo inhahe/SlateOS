@@ -46412,6 +46412,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_prctl_dispatch()?;
+
+    #[inline(never)]
+    fn self_test_prctl_dispatch() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // prctl dispatch validation.
     //   - Recognised options return 0 (or their documented value).
     //   - Unknown options return EINVAL.
@@ -48993,6 +48998,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             assert_eq!(pcb::LINUX_CAP_FULL_SET & (1u64 << 41), 0);
             assert_eq!(pcb::LINUX_CAP_FULL_SET.count_ones(), 41);
         }
+    }
+        Ok(())
     }
 
     // ------------------------------------------------------------------

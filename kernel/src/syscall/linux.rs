@@ -54702,6 +54702,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_close_range()?;
+
+    #[inline(never)]
+    fn self_test_close_range() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // close_range — argument validation.
     {
         // first > last -> EINVAL.
@@ -54735,6 +54740,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+    }
+        Ok(())
     }
 
     // getrlimit / setrlimit — wrappers around prlimit64.

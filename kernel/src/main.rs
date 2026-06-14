@@ -1266,6 +1266,13 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: Linux brk(2) heap (ring 3) self-test failed: {:?}", e);
     }
 
+    // Ring-3 test that the SysV stack builder's argv *pointers* (not just the
+    // scalar argc) are valid in the mapped user stack: a real Linux-ABI
+    // process dereferences argv[0] and exits with its first byte.
+    if let Err(e) = proc::spawn::self_test_linux_argv0_deref() {
+        serial_println!("WARNING: Linux argv[0] deref (ring 3) self-test failed: {:?}", e);
+    }
+
     // Ring-3 end-to-end test of execveat(2) in both forms: a real Linux-ABI
     // launcher execs a target by path (AT_FDCWD) and by open-fd
     // (AT_EMPTY_PATH / fexecve), proving execveat replaces the image and

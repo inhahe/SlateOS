@@ -1238,6 +1238,103 @@ pub fn build_linux_argc_exit_test_elf() -> alloc::vec::Vec<u8> {
     buf
 }
 
+/// Build a **Linux-ABI** `ET_EXEC` test ELF that dereferences `argv[0]` and
+/// exits with its first byte:
+///
+/// ```text
+///   mov   rsi, [rsp+8]      ; rsi = argv[0]            (48 8B 74 24 08)
+///   movzx edi, byte [rsi]   ; edi = argv[0][0]         (0F B6 3E)
+///   mov   eax, 60           ; Linux SYS_exit           (B8 3C 00 00 00)
+///   syscall                 ; exit(argv[0][0])         (0F 05)
+///   int3                    ; unreachable trap         (CC)
+/// ```
+///
+/// Where [`build_linux_argc_exit_test_elf`] reads only the *scalar* `argc`
+/// from `[rsp]`, this image **dereferences a pointer the SysV stack builder
+/// placed** — `argv[0]` — and reads a byte *through* it.  That covers a
+/// distinct failure mode: a stack builder could compute `argc` correctly yet
+/// place the wrong absolute argv-string addresses (off-by-one / wrong
+/// stack-relative base finalised at spawn time), which the argc-only test
+/// cannot catch but which crashes every real program.  Spawn it with an
+/// `argv[0]` whose first byte is a known sentinel and assert the zombie's
+/// exit code equals that byte.
+///
+/// Tagged `ELFOSABI_GNU` so `spawn_process` builds a System V stack for it.
+#[must_use]
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+pub fn build_linux_argv0_deref_exit_elf() -> alloc::vec::Vec<u8> {
+    use alloc::vec;
+
+    let phdr_offset: u64 = 64;
+    let code_offset: u64 = 120;
+    let code_size: u64 = 16;
+    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+
+    let mut buf = vec![0u8; (code_offset + code_size) as usize];
+
+    // --- ELF header ---
+    buf[0] = 0x7F;
+    buf[1] = b'E';
+    buf[2] = b'L';
+    buf[3] = b'F';
+    buf[EI_CLASS] = ELFCLASS64;
+    buf[EI_DATA] = ELFDATA2LSB;
+    buf[EI_VERSION] = EV_CURRENT;
+    buf[EI_OSABI] = ELFOSABI_GNU; // tag Linux/GNU so detect_linux_abi() is true
+
+    write_u16(&mut buf, 16, ET_EXEC);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr); // e_entry
+    write_u64(&mut buf, 32, phdr_offset); // e_phoff
+    write_u64(&mut buf, 40, 0); // e_shoff
+    write_u32(&mut buf, 48, 0); // e_flags
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, 1); // e_phnum
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0);
+    write_u16(&mut buf, 62, 0);
+
+    // --- Program header (PT_LOAD: R+X) ---
+    let ph = phdr_offset as usize;
+    write_u32(&mut buf, ph, PT_LOAD);
+    write_u32(&mut buf, ph + 4, PF_R | PF_X);
+    write_u64(&mut buf, ph + 8, code_offset);
+    write_u64(&mut buf, ph + 16, load_vaddr);
+    write_u64(&mut buf, ph + 24, 0);
+    write_u64(&mut buf, ph + 32, code_size);
+    write_u64(&mut buf, ph + 40, code_size);
+    write_u64(&mut buf, ph + 48, 0x1000);
+
+    // --- Code: exit(argv[0][0]) ---
+    let cs = code_offset as usize;
+    for byte in &mut buf[cs..(cs + code_size as usize)] {
+        *byte = 0xCC; // INT3 trap padding.
+    }
+    // mov rsi, [rsp+8]  (48 8B 74 24 08)
+    buf[cs] = 0x48;
+    buf[cs + 1] = 0x8B;
+    buf[cs + 2] = 0x74;
+    buf[cs + 3] = 0x24;
+    buf[cs + 4] = 0x08;
+    // movzx edi, byte [rsi]  (0F B6 3E)
+    buf[cs + 5] = 0x0F;
+    buf[cs + 6] = 0xB6;
+    buf[cs + 7] = 0x3E;
+    // mov eax, 60  (B8 3C 00 00 00) — Linux SYS_exit
+    buf[cs + 8] = 0xB8;
+    buf[cs + 9] = 0x3C;
+    buf[cs + 10] = 0x00;
+    buf[cs + 11] = 0x00;
+    buf[cs + 12] = 0x00;
+    // syscall  (0F 05)
+    buf[cs + 13] = 0x0F;
+    buf[cs + 14] = 0x05;
+
+    buf
+}
+
 /// Build a minimal **Linux-ABI** `ET_EXEC` test ELF that simply calls
 /// `exit(exit_code)`:
 ///

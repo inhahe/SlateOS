@@ -2495,6 +2495,86 @@ pub fn self_test_linux_brk() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test that the SysV initial stack's **argv pointers** are
+/// valid in the mapped user stack — not just the scalar `argc`.
+///
+/// [`self_test_linux_argc`-style coverage](elf::build_linux_argc_exit_test_elf)
+/// reads only `argc` from `[rsp]`; this spawns
+/// [`elf::build_linux_argv0_deref_exit_elf`], which dereferences `argv[0]`
+/// (the pointer at `[rsp+8]`) and exits with its first byte.  We pass an
+/// `argv[0]` whose first byte is a known sentinel and assert the zombie's
+/// exit code equals it — proving the stack builder placed a *valid, correctly
+/// addressed* argv-string pointer, the failure mode the argc-scalar test
+/// cannot see but that crashes every real (glibc `_start` → deref argv/envp)
+/// program.
+pub fn self_test_linux_argv0_deref() -> KernelResult<()> {
+    // First byte of argv[0]; distinct from interp(42)/mmap(91)/brk(109)/
+    // execveat(58).  0x51 = 'Q' = 81.
+    const SENTINEL: u8 = 0x51;
+
+    serial_println!("[spawn] Running Linux argv[0] deref (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_argv0_deref_exit_elf();
+    // argv[0]'s first byte is the sentinel the target reads back and exits
+    // with; the rest of the string is irrelevant.
+    let argv: &[&[u8]] = &[b"\x51argv0-deref-test"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-argv0",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: argv0-deref spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Let the thread run: deref argv[0] → exit(first byte).
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: argv[0] deref (ring 3) — expected Zombie, got {:?} (a non-zombie \
+             state usually means argv[0] held a bad pointer and the process faulted \
+             dereferencing it)",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(i32::from(SENTINEL)) {
+        serial_println!(
+            "[spawn]   FAIL: argv[0] deref (ring 3) — expected exit {} (argv[0][0] sentinel), \
+             got {:?}",
+            SENTINEL, exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   Linux argv[0] deref (ring 3: read byte through stack-builder argv[0] \
+         pointer, byte == {}): OK",
+        SENTINEL
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the Linux `execveat(2)` syscall.
 ///
 /// `execveat` is exercised in **both** of its forms by spawning a real

@@ -68,6 +68,48 @@
 ## WHERE: kernel/src/syscall/linux.rs (ptrace dispatch), kernel/src/proc/ (thread
 ##   stop/continue, register save areas), kernel/src/cap/rights.rs (Rights::DEBUG,
 ##   already added).
+##
+## DEFERRED-WITH-DESIGN (2026-06-14): ring-3 END-TO-END test of the cross-AS
+##   process_vm_readv path (the gated read of ANOTHER process's memory from ring 3).
+## WHY DEFERRED (not done now): the kernel-context self-test
+##   (self_test_process_vm_cross_as) already covers the two hard parts — the
+##   capability-gate PREDICATE exhaustively (false w/ no cap, false w/ READ-only
+##   cap, true after DEBUG granted, false for wrong pid) and the cross-AS TRANSFER
+##   mechanism (copy_from_user_as/copy_to_user_as read+write a remote AS via HHDM).
+##   The only glue it can't drive is sys_process_vm_readv reading caller_pid() from
+##   a REAL ring-3 caller (kernel context forces caller=None -> same_addr_space).
+##   A true ring-3 E2E needs a LIVE target process (see design below) and so risks
+##   HANGING the cooperative-scheduled boot self-test if the target spins; the
+##   marginal assurance is low for a feature with NO consumer yet (ptrace above).
+## TRIGGER: build it when the real debugger consumer lands (ptrace) — a live
+##   debuggee gives a live target for free, making the orchestration natural.
+## TURNKEY DESIGN (worked out 2026-06-14, so future impl is mechanical):
+##   - owner_process(pid_arg) treats arg0 as a TID -> owning PCB; the gate checks a
+##     Process cap over that OWNER pid with Rights::DEBUG; get_pml4(owner) supplies
+##     the remote page table. So the target needs (a) a LIVE thread registered in
+##     THREAD_OWNERS (zombies are removed from THREAD_OWNERS -> owner_process None
+##     -> ESRCH, so a zombie target does NOT work even though its pml4 is retained
+##     until destroy()), and (b) its stamped page resident.
+##   - Make the target LIVE-BUT-BLOCKED, never spinning: target ELF maps an anon
+##     page at a fixed addr, stamps a known 8-byte pattern, then issues an
+##     indefinitely-BLOCKING syscall (futex-wait on a never-woken addr, or
+##     pause/blocking pipe read) so the thread stays in THREAD_OWNERS without
+##     burning CPU (no boot-test hang). Verify first that the chosen block syscall
+##     truly blocks and that pcb::destroy() cleanly tears down a blocked thread.
+##   - Orchestration: spawn target; yield; POLL the target's page via HHDM
+##     (translate target pml4 + addr) with a bounded retry until the stamp appears
+##     (readiness gate, same trick as the existing kernel-context test); then build
+##     the debugger ELF baking target_TID + target_addr(imm64) + expected(imm64),
+##     spawn it with capabilities=[(Process, target_PID, Rights::DEBUG)], yield,
+##     assert Zombie + exit_code==0x42 (match) ; then destroy debugger AND target.
+##   - Debugger ELF (new elf::build_linux_pvm_readv_test_elf): sub rsp,0x40 for
+##     scratch; build local_iov{base=rsp,len=8} at [rsp+0x10] and
+##     remote_iov{base=target_addr,len=8} at [rsp+0x20]; rdi=tid, rsi=&local_iov,
+##     rdx=1, r10=&remote_iov, r8=1, r9=0, eax=310 (SYS_process_vm_readv), syscall;
+##     cmp [rsp] to expected (imm64); cmove exit code 0x42/0x43; eax=60 exit.
+##   - ADD a NEGATIVE ring-3 case too: spawn a second debugger WITHOUT the DEBUG
+##     cap; it should see rax==-EPERM and exit a distinct code (e.g. 0x44), proving
+##     the gate denies an unauthorized ring-3 caller end-to-end.
 
 ## ============================================================================
 ## DONE (2026-06-13): mechanical rename OuRoS -> Slate OS, EXECUTED.

@@ -903,9 +903,9 @@
 ##   overwrite because each blocked reader is also woken by its own hrtimer (task id
 ##   captured at arm time), so only the rare concurrent-disarmed-blocking-readers edge
 ##   could lose a waiter — acceptable and matching the eventfd model.
-##   (signalfd's blocking read is now FIXED too — see its entry above; inotify still
-##   returns EAGAIN on blocking read — see its entry; its wake source is cross-cutting
-##   (fs::notify) rather than a self-contained hrtimer, so it is a separate follow-up.)
+##   (signalfd's blocking read is now FIXED too — see its entry above; inotify's
+##   blocking read is ALSO FIXED — see the next entry below; its wake source is the
+##   cross-cutting fs::notify owner-token wait-queue rather than a self-contained hrtimer.)
 ##
 ## [migrated 2026-06-13 -> known-issues.md TD15 (timerfd CANCEL_ON_SET) and TD16 (nested epoll)]
 

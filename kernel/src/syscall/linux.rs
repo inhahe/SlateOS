@@ -56185,6 +56185,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_truncate()?;
+
+    #[inline(never)]
+    fn self_test_truncate() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // truncate — Linux gate ladder fidelity (batch 447).
     //
     // Linux's truncate runs `length<0 → user_path_at → S_ISDIR/S_ISREG
@@ -56281,6 +56286,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   truncate Linux gate ladder (EINVAL/EFAULT/ENOENT/EISDIR/EROFS): OK"
         );
+    }
+        Ok(())
     }
 
     // ftruncate — Linux gate ladder fidelity (batch 448).

@@ -61,6 +61,14 @@ pub enum VmaKind {
     /// was corrupted or prematurely cleared).
     Fixed,
 
+    /// The Linux `brk`/`sbrk` heap.  Behaves exactly like
+    /// [`VmaKind::Anonymous`] for fault resolution (demand-paged,
+    /// zero-filled on first access) — it exists as a distinct kind only
+    /// so `/proc/<pid>/maps` can label the region `[heap]` and so the
+    /// `brk(2)` implementation can find and resize *its own* VMA without
+    /// disturbing unrelated anonymous mappings.
+    Brk,
+
     /// Demand-paged, file-backed private mapping (`MAP_PRIVATE` over a
     /// regular file).  On the first access to a page, the fault handler
     /// allocates a zeroed frame, reads the corresponding bytes from the
@@ -346,7 +354,7 @@ impl AddressSpace {
         }
 
         match kind {
-            VmaKind::Anonymous | VmaKind::Stack => {
+            VmaKind::Anonymous | VmaKind::Stack | VmaKind::Brk => {
                 // Demand-page: allocate a frame, zero it, map it.
                 self.demand_page(fault_addr, flags)
             }

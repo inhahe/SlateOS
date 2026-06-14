@@ -519,6 +519,22 @@ pub fn spawn_process(
                 return Err(e);
             }
         }
+
+        // Step 3c (Linux ABI): establish the `brk`/`sbrk` heap floor at the
+        // page-aligned end of the main executable's last loadable segment
+        // (Linux `set_brk` semantics — the break starts immediately above
+        // the data/BSS).  The interpreter lives in its own high window and
+        // does not affect the heap floor.  `brk(2)` grows the heap upward
+        // from here.  A degenerate image (no loadable segments) yields 0,
+        // i.e. "no heap"; brk(2) then behaves as a pure query.
+        match elf::image_end(&elf_file, exec_load_bias) {
+            Ok(brk_start) => pcb::set_brk_region(pid, brk_start),
+            Err(e) => {
+                serial_println!("[spawn] Failed to compute brk start: {:?}", e);
+                pcb::destroy(pid);
+                return Err(e);
+            }
+        }
     }
 
     // Step 4: Allocate and map the user stack.
@@ -1029,6 +1045,24 @@ pub fn exec_process(
                 return Err(e);
             }
         }
+
+        // Re-establish the `brk` heap floor for the new image (Linux
+        // `set_brk`), replacing whatever heap the old image had.  The old
+        // heap's frames and VMAs were already torn down with the rest of
+        // the user address space above.
+        match elf::image_end(&elf_file, exec_load_bias) {
+            Ok(brk_start) => pcb::set_brk_region(pid, brk_start),
+            Err(e) => {
+                serial_println!("[exec] Failed to compute brk start: {:?}", e);
+                let _ = pcb::set_exit_code(pid, KILLED_EXIT_CODE);
+                return Err(e);
+            }
+        }
+    } else {
+        // Exec'ing a native image: it has no Linux `brk` heap.  Clear any
+        // heap state inherited from a previous Linux image so a later
+        // (erroneous) brk(2) cannot resize against stale addresses.
+        pcb::set_brk_region(pid, 0);
     }
 
     // Step 5: Allocate and map a fresh user stack.
@@ -1262,7 +1296,7 @@ pub fn exec_process(
 /// `0x0000_7FFF_FFFF_0000`, growing down by at most `MAX_STACK_SIZE`).  A
 /// typical ld.so image is a few hundred KiB, so the gap above this base to
 /// the stack guard is ample even at the top of the ASLR window.
-const LINUX_INTERP_BASE: u64 = 0x0000_7000_0000_0000;
+pub(crate) const LINUX_INTERP_BASE: u64 = 0x0000_7000_0000_0000;
 
 /// ASLR entropy applied to the Linux program-interpreter load base,
 /// expressed in bits at 16 KiB-page granularity.
@@ -2272,6 +2306,80 @@ pub fn self_test_linux_file_mmap() -> KernelResult<()> {
     serial_println!(
         "[spawn]   Linux file-backed mmap (ring 3: open+mmap at offset 0 and \
          nonzero offset, mapped byte == {}): OK",
+        SENTINEL
+    );
+    Ok(())
+}
+
+/// Ring-3 end-to-end test of the Linux `brk(2)` heap.
+///
+/// Spawns a real Linux-ABI process that queries its program break, grows the
+/// heap by 32 KiB (two 16 KiB frames), writes a sentinel into the *second*
+/// frame of the new heap, reads it back, and `exit`s with that byte.  A clean
+/// exit with `SENTINEL` proves the whole path works: `set_brk_region` at load
+/// time, the grow branch of `sys_brk` (VMA add + RLIMIT_AS charge), and
+/// demand-paging the freshly-mapped heap frames on first touch.  A `0xAA`
+/// exit means the kernel refused/returned the wrong break; a non-zombie state
+/// means the process faulted dereferencing unmapped heap memory.
+pub fn self_test_linux_brk() -> KernelResult<()> {
+    const SENTINEL: u8 = 0x6D; // 109 — distinct from mmap (0x5B) and interp (42)
+
+    serial_println!("[spawn] Running Linux brk(2) heap (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_brk_test_elf(SENTINEL);
+    let argv: &[&[u8]] = &[b"brkprog"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-brk",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: brk-test spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Let the thread run: brk(0) → brk(grow) → write/read heap → exit(byte).
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: brk (ring 3) — expected Zombie, got {:?} (a non-zombie \
+             state usually means the heap grow didn't map the frame and the process \
+             faulted writing to it)",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(i32::from(SENTINEL)) {
+        serial_println!(
+            "[spawn]   FAIL: brk (ring 3) — expected exit {} (heap sentinel byte), \
+             got {:?} (0xAA = grow returned the wrong break)",
+            SENTINEL, exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   Linux brk(2) heap (ring 3: query + grow 32 KiB + write/read \
+         second frame, byte == {}): OK",
         SENTINEL
     );
     Ok(())

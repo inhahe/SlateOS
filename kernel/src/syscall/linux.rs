@@ -5458,20 +5458,165 @@ fn sys_munmap(args: &SyscallArgs) -> SyscallResult {
     result
 }
 
-/// `brk(addr)` — returns the current brk (we don't grow the heap).
+/// Round `v` up to the next 16 KiB frame boundary.
 ///
-/// Most modern libc allocators use mmap for large allocations and
-/// fall back to brk only when both are available.  Returning the input
-/// address unchanged is the documented "brk failed, keep current value"
-/// behaviour.  Programs that strictly require brk will fail allocations
-/// > current brk and either error out or fall through to mmap.
+/// `mask` must be `FRAME_SIZE - 1` (a contiguous low-bit mask, since
+/// `FRAME_SIZE` is a power of two).  Returns `None` on overflow.
+fn brk_round_up(v: u64, mask: u64) -> Option<u64> {
+    Some(v.checked_add(mask)? & !mask)
+}
+
+/// The architectural ceiling the `brk` heap of a process whose heap floor
+/// is `brk_start` must stay strictly below.
+///
+/// The heap grows upward from `brk_start`.  The next reserved region above
+/// it depends on where the executable was loaded:
+/// - A low-loaded `ET_EXEC` image (`brk_start < USER_MMAP_BASE`) must not
+///   grow into the general mmap window → ceiling = [`USER_MMAP_BASE`].
+/// - A high-loaded PIE image (at/above the mmap window) must not grow into
+///   the (ASLR-randomised) interpreter window → ceiling =
+///   [`spawn::LINUX_INTERP_BASE`], the floor of that window, which is the
+///   lowest address any interpreter could occupy.
+///
+/// This is a coarse but always-safe bound: it never lets the heap collide
+/// with the mmap region, the interpreter, or the stack (all of which sit at
+/// or above these boundaries).  RLIMIT_DATA bounds the heap far below this
+/// in practice.
+fn brk_ceiling(brk_start: u64) -> u64 {
+    if brk_start < crate::syscall::handlers::USER_MMAP_BASE {
+        crate::syscall::handlers::USER_MMAP_BASE
+    } else {
+        crate::proc::spawn::LINUX_INTERP_BASE
+    }
+}
+
+/// `brk(addr)` — set the program break (top of the Linux `brk`/`sbrk` heap).
+///
+/// Linux semantics (`mm/mmap.c::SYSCALL_DEFINE1(brk, ...)`):
+/// - `brk(0)` is the conventional query: it returns the current break.
+/// - `brk(addr)` with `addr` below the heap floor is clamped (no change),
+///   returning the current break.
+/// - Growing maps fresh zero-filled anonymous pages up to the page that
+///   contains `addr`; shrinking unmaps the pages no longer needed.
+/// - On **any** failure (RLIMIT, collision, OOM) Linux returns the
+///   *unchanged* current break rather than an errno — `glibc`'s `__sbrk`
+///   detects "the break did not move" and reports `ENOMEM` itself.
+///
+/// The heap is a single demand-paged [`VmaKind::Brk`] VMA spanning
+/// `[brk_start, round_up(brk_current))`.  Growth extends that VMA and
+/// charges `RLIMIT_AS` for the added virtual span (physical frames are
+/// allocated lazily on first touch); shrinkage unmaps + frees any
+/// faulted frames in the released range and refunds the charge.  The heap
+/// floor and current break live in the PCB (`brk_start`/`brk_current`),
+/// set at exec time from the executable's image end.
 fn sys_brk(args: &SyscallArgs) -> SyscallResult {
-    // Return the requested value to claim it succeeded.  When the
-    // memory-manager VMA layer grows a `brk` region, this becomes a
-    // real allocation; until then, programs see "your brk is whatever
-    // you asked for" and tend to fall through to mmap-based allocators.
+    use crate::mm::page_table::PageFlags;
+    use crate::mm::vma::{Vma, VmaKind};
+
+    let frame_size = crate::mm::frame::FRAME_SIZE as u64;
+    // FRAME_SIZE is a power of two, so FRAME_SIZE - 1 is the alignment mask.
+    let mask = frame_size.wrapping_sub(1);
+
+    // No process context (a kernel-thread caller): nothing to do.
+    let Some(pid) = caller_pid() else {
+        return SyscallResult::ok(0);
+    };
+    let Some((brk_start, brk_current)) = pcb::get_brk(pid) else {
+        return SyscallResult::ok(0);
+    };
+
+    // Helper: the "failed / unchanged" return value (current break).
     #[allow(clippy::cast_possible_wrap)]
-    SyscallResult::ok(args.arg0 as i64)
+    let unchanged = SyscallResult::ok(brk_current as i64);
+
+    // A process with no heap floor (native image / degenerate ELF with no
+    // loadable segments): brk can never grow.  Returning the (zero) current
+    // break signals "cannot extend", so allocators fall back to mmap.
+    if brk_start == 0 {
+        return unchanged;
+    }
+
+    let addr = args.arg0;
+
+    // Query (addr == 0) or a request to move the break below the heap floor:
+    // both leave the break unchanged (Linux clamps the low side to brk_start).
+    if addr == 0 || addr < brk_start {
+        return unchanged;
+    }
+
+    // Page span currently backed by the heap VMA vs. the span the request
+    // needs.  brk_start is frame-aligned (image_end rounds up), so an empty
+    // heap (brk_current == brk_start) has old_top == brk_start (no VMA).
+    let (Some(old_top), Some(new_top)) =
+        (brk_round_up(brk_current, mask), brk_round_up(addr, mask))
+    else {
+        // Address arithmetic overflowed near the top of the address space.
+        return unchanged;
+    };
+
+    if new_top > old_top {
+        // ---- Grow ----
+        // Stay below the architectural ceiling for this image's heap.
+        if new_top > brk_ceiling(brk_start) {
+            return unchanged;
+        }
+        // Enforce RLIMIT_DATA (resource index 2) on the heap size.
+        let data_size = addr.saturating_sub(brk_start);
+        if let Some((data_soft, _)) = pcb::get_rlimit(pid, pcb::RLIMIT_DATA_INDEX as u32) {
+            if data_soft != pcb::RLIM_INFINITY && data_size > data_soft {
+                return unchanged;
+            }
+        }
+        // Refuse to grow into any other existing mapping.
+        if linux_vma_overlap_bytes(pid, old_top, new_top) > 0 {
+            return unchanged;
+        }
+        // Charge RLIMIT_AS for the newly added virtual span (committed
+        // accounting; frames are demand-paged).
+        let added = new_top.saturating_sub(old_top);
+        if pcb::linux_as_charge(pid, added).is_err() {
+            return unchanged;
+        }
+        let flags = PageFlags::PRESENT
+            | PageFlags::WRITABLE
+            | PageFlags::USER_ACCESSIBLE
+            | PageFlags::NO_EXECUTE;
+        // Resize the heap VMA: drop the old (smaller) one, add the larger.
+        // remove_vma_range only edits bookkeeping — already-faulted frames
+        // in [brk_start, old_top) stay mapped and are re-covered below.
+        if old_top > brk_start && pcb::remove_vma_range(pid, brk_start, old_top).is_err() {
+            pcb::linux_as_release(pid, added);
+            return unchanged;
+        }
+        let vma = Vma { start: brk_start, end: new_top, kind: VmaKind::Brk, flags };
+        if pcb::add_vma(pid, vma).is_err() {
+            // Roll back: restore the old heap VMA and refund the charge.
+            if old_top > brk_start {
+                let old_vma =
+                    Vma { start: brk_start, end: old_top, kind: VmaKind::Brk, flags };
+                let _ = pcb::add_vma(pid, old_vma);
+            }
+            pcb::linux_as_release(pid, added);
+            return unchanged;
+        }
+    } else if new_top < old_top {
+        // ---- Shrink ----
+        let Some(pml4) = pcb::get_pml4(pid).filter(|p| *p != 0) else {
+            return unchanged;
+        };
+        // Unmap + free any faulted frames in the released range.
+        unmap_user_range(pml4, new_top, old_top, frame_size);
+        // Refund the RLIMIT_AS charge for the released span.
+        pcb::linux_as_release(pid, old_top.saturating_sub(new_top));
+        // Truncate (or drop) the heap VMA to [brk_start, new_top).
+        let _ = pcb::remove_vma_range(pid, new_top, old_top);
+    }
+    // else: same top frame — only a sub-page move; no VMA/frame change.
+
+    // Commit the new break.
+    pcb::set_brk_current(pid, addr);
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(addr as i64)
 }
 
 /// `rt_sigaction(sig, act, oldact, sigsetsize)` — install/query the
@@ -47765,6 +47910,75 @@ fn self_test_msync_truncation() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+/// Pure-logic tests for the `brk(2)` heap helpers (`brk_round_up`,
+/// `brk_ceiling`) — no process context required, so they run in the boot
+/// self-test alongside the other dispatch validators.  The end-to-end
+/// grow/write/read path is covered by the ring-3 test
+/// `proc::spawn::self_test_linux_brk`.
+#[inline(never)]
+fn self_test_brk_logic() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+    use crate::serial_println;
+
+    let frame = crate::mm::frame::FRAME_SIZE as u64;
+    let mask = frame.wrapping_sub(1);
+
+    // brk_round_up: 0 stays 0; anything in (0, frame] rounds to frame; the
+    // frame boundary itself is a fixed point; one past it rounds to 2*frame.
+    if brk_round_up(0, mask) != Some(0) {
+        serial_println!("[syscall/linux]   FAIL: brk_round_up(0) != 0");
+        return Err(KernelError::InternalError);
+    }
+    if brk_round_up(1, mask) != Some(frame) {
+        serial_println!("[syscall/linux]   FAIL: brk_round_up(1) != frame");
+        return Err(KernelError::InternalError);
+    }
+    if brk_round_up(frame, mask) != Some(frame) {
+        serial_println!("[syscall/linux]   FAIL: brk_round_up(frame) != frame");
+        return Err(KernelError::InternalError);
+    }
+    if brk_round_up(frame.saturating_add(1), mask) != Some(frame.saturating_mul(2)) {
+        serial_println!("[syscall/linux]   FAIL: brk_round_up(frame+1) != 2*frame");
+        return Err(KernelError::InternalError);
+    }
+    // Overflow near the top of the address space returns None rather than
+    // wrapping to a bogus low ceiling.
+    if brk_round_up(u64::MAX, mask).is_some() {
+        serial_println!("[syscall/linux]   FAIL: brk_round_up(u64::MAX) should overflow");
+        return Err(KernelError::InternalError);
+    }
+
+    // brk_ceiling: a low-loaded ET_EXEC heap is capped at the mmap window;
+    // a high-loaded PIE heap is capped at the interpreter window floor.
+    let mmap_base = crate::syscall::handlers::USER_MMAP_BASE;
+    let interp_base = crate::proc::spawn::LINUX_INTERP_BASE;
+    // ET_EXEC images load low (~256 GiB), well below the mmap window.
+    if brk_ceiling(0x0000_0040_0000_0000) != mmap_base {
+        serial_println!("[syscall/linux]   FAIL: brk_ceiling(ET_EXEC) != USER_MMAP_BASE");
+        return Err(KernelError::InternalError);
+    }
+    // A heap floor exactly at the mmap base counts as "at/above" → PIE ceiling.
+    if brk_ceiling(mmap_base) != interp_base {
+        serial_println!(
+            "[syscall/linux]   FAIL: brk_ceiling(USER_MMAP_BASE) != LINUX_INTERP_BASE"
+        );
+        return Err(KernelError::InternalError);
+    }
+    // The PIE load base sits above the mmap window but below the interp window.
+    if brk_ceiling(0x0000_5555_5555_4000) != interp_base {
+        serial_println!("[syscall/linux]   FAIL: brk_ceiling(PIE) != LINUX_INTERP_BASE");
+        return Err(KernelError::InternalError);
+    }
+    // Sanity: the layout invariant the two ceilings rely on.
+    if mmap_base >= interp_base {
+        serial_println!("[syscall/linux]   FAIL: USER_MMAP_BASE !< LINUX_INTERP_BASE");
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[syscall/linux]   brk(2) heap helpers (round_up + ceiling): OK");
+    Ok(())
+}
+
 #[inline(never)]
 fn self_test_default_rlimits() -> crate::error::KernelResult<()> {
     use crate::serial_println;
@@ -48113,6 +48327,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     self_test_msync_truncation()?;
 
     self_test_default_rlimits()?;
+
+    self_test_brk_logic()?;
 
     self_test_prlimit64_dispatch()?;
 

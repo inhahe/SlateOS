@@ -1257,6 +1257,15 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: Linux file-backed mmap (ring 3) self-test failed: {:?}", e);
     }
 
+    // Ring-3 end-to-end test of the Linux brk(2) heap: a real Linux-ABI
+    // process queries its program break, grows the heap by 32 KiB, writes a
+    // sentinel into the second frame, reads it back, and exits with that byte
+    // — proving set_brk_region at load, sys_brk's grow path, and demand-paging
+    // of the new heap frames.
+    if let Err(e) = proc::spawn::self_test_linux_brk() {
+        serial_println!("WARNING: Linux brk(2) heap (ring 3) self-test failed: {:?}", e);
+    }
+
     boot_timing::mark(boot_timing::Milestone::Filesystem);
 
     // ProcFs self-test — constructs its own `ProcFs::new()` and reads live

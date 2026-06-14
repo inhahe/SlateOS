@@ -769,6 +769,47 @@ pub unsafe fn load_segments_with_bias(
     Ok(())
 }
 
+/// Compute the highest 16 KiB-frame-aligned virtual address occupied by any
+/// `PT_LOAD` segment of `elf` when loaded at runtime bias `bias`.
+///
+/// This is where the Linux `brk`/`sbrk` heap begins: Linux places the
+/// program break immediately after the executable's last loadable segment
+/// (its data/BSS), rounded up to a page boundary (`mm/mmap.c` /
+/// `fs/binfmt_elf.c` `set_brk`).  The returned address is frame-aligned and
+/// suitable as the initial `brk_start`.
+///
+/// Returns `Ok(0)` if the image has no loadable segments (a degenerate ELF;
+/// the caller treats a zero result as "no heap").
+///
+/// # Errors
+///
+/// [`KernelError::InvalidAddress`] if applying `bias` or the frame round-up
+/// overflows `u64`.
+pub fn image_end(elf: &ElfFile<'_>, bias: u64) -> KernelResult<u64> {
+    let frame_size = FRAME_SIZE as u64;
+    // frame_size is a power of two, so frame_size - 1 is the alignment mask.
+    let mask = frame_size.wrapping_sub(1);
+    let mut highest: u64 = 0;
+    for seg in elf.loadable_segments()? {
+        let biased = seg
+            .vaddr
+            .checked_add(bias)
+            .ok_or(KernelError::InvalidAddress)?;
+        let seg_end = biased
+            .checked_add(seg.mem_size)
+            .ok_or(KernelError::InvalidAddress)?;
+        // Round the segment end up to the next frame boundary.
+        let aligned_end = seg_end
+            .checked_add(mask)
+            .ok_or(KernelError::InvalidAddress)?
+            & !mask;
+        if aligned_end > highest {
+            highest = aligned_end;
+        }
+    }
+    Ok(highest)
+}
+
 /// Load a single segment into the target address space.
 ///
 /// # Safety
@@ -1349,6 +1390,100 @@ pub fn build_linux_mmap_test_elf(
     // --- Path string immediately after the code ---
     let path_start = cs + path_offset_in_seg;
     buf[path_start..path_start + path_nul.len()].copy_from_slice(path_nul);
+
+    buf
+}
+
+/// Build a Linux-ABI ET_EXEC that exercises the `brk(2)` heap end-to-end.
+///
+/// The program:
+/// 1. `brk(0)` to query the initial program break (the heap floor); saves it.
+/// 2. `brk(old + 0x8000)` to grow the heap by 32 KiB (two 16 KiB frames).
+/// 3. Verifies the kernel returned the requested new break (proves the grow
+///    succeeded — on failure Linux/our kernel returns the *unchanged* break).
+/// 4. Writes `sentinel` into the **second** frame of the new heap
+///    (`old + 0x4000`), proving demand-paging maps frames beyond the first.
+/// 5. Reads the byte back and `exit(sentinel)`.
+///
+/// On any mismatch it exits `0xAA` so the test can distinguish a grow failure
+/// from a read-back failure.  Tagged `ELFOSABI_GNU` so the loader sets up the
+/// Linux `brk` region (`set_brk_region`); `brk` needs no capabilities.
+pub fn build_linux_brk_test_elf(sentinel: u8) -> alloc::vec::Vec<u8> {
+    use alloc::vec;
+
+    let phdr_offset: u64 = 64;
+    let code_offset: u64 = 120; // 64 (ehdr) + 56 (one phdr)
+    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+
+    // Hand-assembled x86_64.  Offsets (within the segment) are noted so the
+    // `jne` displacement can be computed.  SYS_brk=12, SYS_exit=60.
+    let mut code: [u8; 72] = [
+        0x31, 0xFF, // xor edi, edi               (brk arg = 0)          @0
+        0xB8, 0x0C, 0x00, 0x00, 0x00, // mov eax, 12 (SYS_brk)          @2
+        0x0F, 0x05, // syscall                                          @7
+        0x48, 0x89, 0xC3, // mov rbx, rax         (save old break)      @9
+        0x48, 0x8D, 0xB8, 0x00, 0x80, 0x00, 0x00, // lea rdi,[rax+0x8000] @12
+        0x48, 0x89, 0xFD, // mov rbp, rdi         (save desired break)  @19
+        0xB8, 0x0C, 0x00, 0x00, 0x00, // mov eax, 12 (SYS_brk)          @22
+        0x0F, 0x05, // syscall                                          @27
+        0x48, 0x39, 0xE8, // cmp rax, rbp         (granted == desired?) @29
+        0x0F, 0x85, 0x15, 0x00, 0x00, 0x00, // jne fail (disp=21)       @32
+        0xC6, 0x83, 0x00, 0x40, 0x00, 0x00, 0x00, // mov byte[rbx+0x4000],sentinel @38 (imm @44)
+        0x0F, 0xB6, 0xBB, 0x00, 0x40, 0x00, 0x00, // movzx edi,byte[rbx+0x4000]    @45
+        0xB8, 0x3C, 0x00, 0x00, 0x00, // mov eax, 60 (SYS_exit)         @52
+        0x0F, 0x05, // syscall                                          @57
+        // fail:                                                        @59
+        0xBF, 0xAA, 0x00, 0x00, 0x00, // mov edi, 0xAA  (mismatch code) @59
+        0xB8, 0x3C, 0x00, 0x00, 0x00, // mov eax, 60 (SYS_exit)         @64
+        0x0F, 0x05, // syscall                                          @69
+        0xCC, // int3 (unreachable safety net)                         @71
+    ];
+    // Patch the sentinel into the `mov byte [rbx+0x4000], imm8` immediate.
+    code[44] = sentinel;
+    let code_len = code.len(); // 72
+
+    let seg_data_len = code_len;
+    let file_size = code_offset as usize + seg_data_len;
+    let mut buf = vec![0u8; file_size];
+
+    // --- ELF header ---
+    buf[0] = 0x7F;
+    buf[1] = b'E';
+    buf[2] = b'L';
+    buf[3] = b'F';
+    buf[EI_CLASS] = ELFCLASS64;
+    buf[EI_DATA] = ELFDATA2LSB;
+    buf[EI_VERSION] = EV_CURRENT;
+    buf[EI_OSABI] = ELFOSABI_GNU; // tag Linux/GNU so detect_linux_abi() is true
+
+    write_u16(&mut buf, 16, ET_EXEC);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr); // e_entry
+    write_u64(&mut buf, 32, phdr_offset); // e_phoff
+    write_u64(&mut buf, 40, 0); // e_shoff
+    write_u32(&mut buf, 48, 0); // e_flags
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, 1); // e_phnum
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0);
+    write_u16(&mut buf, 62, 0);
+
+    // --- Program header (PT_LOAD: R+X covering the code) ---
+    let ph = phdr_offset as usize;
+    write_u32(&mut buf, ph, PT_LOAD);
+    write_u32(&mut buf, ph + 4, PF_R | PF_X);
+    write_u64(&mut buf, ph + 8, code_offset);
+    write_u64(&mut buf, ph + 16, load_vaddr);
+    write_u64(&mut buf, ph + 24, 0);
+    write_u64(&mut buf, ph + 32, seg_data_len as u64);
+    write_u64(&mut buf, ph + 40, seg_data_len as u64);
+    write_u64(&mut buf, ph + 48, 0x1000);
+
+    // --- Code ---
+    let cs = code_offset as usize;
+    buf[cs..cs + code_len].copy_from_slice(&code);
 
     buf
 }

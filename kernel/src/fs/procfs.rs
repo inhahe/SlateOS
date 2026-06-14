@@ -2519,6 +2519,7 @@ fn render_maps(vmas: &[crate::mm::vma::Vma]) -> Vec<u8> {
             VmaKind::Stack => "[stack]",
             VmaKind::Guard => "[guard]",
             VmaKind::Fixed => "[fixed]",
+            VmaKind::Brk => "[heap]",
             // A file-backed private mapping; Linux would show the backing
             // pathname here, but we don't cache the path in the VMA, so the
             // region renders unnamed (like an anonymous mapping).

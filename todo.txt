@@ -8780,10 +8780,14 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      across cores.  CoW pages requesting PROT_WRITE are NOT
 ##      immediately made writable; the existing CoW fault handler
 ##      upgrades them on first write.
-##   7. BRK NO-OP.  We return the input address unchanged, which is
-##      enough to make glibc's malloc fall back to mmap.  Real brk
-##      requires a per-process heap region in the VMM.  Acceptable
-##      because glibc/musl prefer mmap-backed malloc anyway.
+##   7. BRK — RESOLVED 2026-06-14.  Was a no-op stub (echoed the
+##      input address).  Now a real per-process demand-paged
+##      VmaKind::Brk heap with grow/shrink, RLIMIT_AS/RLIMIT_DATA
+##      enforcement, image-dependent ceiling, and Linux's
+##      return-unchanged-break-on-failure semantics.  See
+##      known-issues.md TD25.  Remaining minor gap: no
+##      arch_randomize_brk gap between data segment and heap floor
+##      (see "Linux arch_randomize_brk" item below).
 ##   8. GETEUID == GETUID, GETEGID == GETGID.  Our credential model
 ##      doesn't track effective IDs separately.  Documented; will need
 ##      a follow-up if/when we add setuid binary support.
@@ -9018,8 +9022,20 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      mapped".  Today PROT_NONE is approximated as read-only +
 ##      no-execute, which is wrong for any program that intentionally
 ##      uses PROT_NONE as a guard page or trap region.
-##   4. Honour brk properly.  brk's no-op is acceptable because glibc
-##      malloc falls back to mmap.
+##   4. Honour brk properly — RESOLVED 2026-06-14.  brk is now a real
+##      demand-paged heap (VmaKind::Brk), not a no-op.  See
+##      known-issues.md TD25.
+##      Future enhancement: Linux arch_randomize_brk.  Our brk_start
+##      is the exact page-aligned image end; Linux inserts a small
+##      random gap (CONFIG default: up to 32 MiB on x86_64) between
+##      the data segment and the heap floor so the heap base is
+##      ASLR'd.  Omitting it is correct (a fixed gap of 0 is legal)
+##      but weakens heap ASLR.  To add: in spawn::spawn_process /
+##      exec_process, before set_brk_region, advance the computed
+##      image_end by `rng::next_bounded(BRK_RND_PAGES)*FRAME_SIZE`
+##      (and keep it below brk_ceiling).  Where: kernel/src/proc/
+##      spawn.rs (set_brk_region call sites), kernel/src/syscall/
+##      linux.rs (brk_ceiling already bounds it).
 ##   4b. sigaction sa_mask / sa_flags / SA_RESTART — STORAGE DONE.
 ##      kernel/src/syscall/linux.rs now keeps a per-process per-signal
 ##      table (linux_sigaction_table) of the full Linux struct sigaction
@@ -11465,9 +11481,10 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      under-account (saturating_sub clamps at 0).  Programs
 ##      that munmap exact-size or smaller see correct numbers.
 ##      Acceptable until a real VMA splitter/merger lands.
-##      Limitation: brk(2) doesn't yet charge — sys_brk is still
-##      a "claim the heap is whatever you asked for" stub.  When
-##      we wire a real brk-region VMA, it should charge AS too.
+##      RESOLVED 2026-06-14: brk(2) now charges AS.  sys_brk is a
+##      real demand-paged VmaKind::Brk heap that charges RLIMIT_AS
+##      for the full added virtual span on grow and refunds on
+##      shrink (committed-by-default).  See known-issues.md TD25.
 ##      Limitation: Stack growth (lazy stack fault path) doesn't
 ##      charge.  When RLIMIT_STACK lands as its own enforcement
 ##      batch, that path should both check STACK and charge AS.

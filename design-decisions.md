@@ -1531,11 +1531,12 @@ seeded (fixed `LINUX_PIE_BASE` fallback otherwise) — the *same* `apply_aslr_ba
 helper and 28-bit entropy (`PIE_ASLR_BITS = 28`) as the interpreter. The 4 TiB
 PIE window sits far above the mmap window (`0x0060_…`) and far below the
 interpreter window (`0x7000_…`), leaving ≥1 TiB of headroom below the
-interpreter floor (asserted by `test_pie_aslr_window` in `spawn::self_test`). The
-brk heap is a stub today (sys_brk returns the requested value without allocating;
-programs fall through to mmap-based allocators), so the historical "brk grows
-above the PIE image" headroom concern is not yet binding; when a real brk region
-lands it must reserve growth space within this window's headroom.
+interpreter floor (asserted by `test_pie_aslr_window` in `spawn::self_test`). As of
+2026-06-14 the brk heap is real (see entry #21 below): a PIE image's heap grows
+from its page-aligned image end up to a ceiling of `LINUX_INTERP_BASE` (the
+interpreter window floor), i.e. into this window's headroom, so the "brk grows
+above the PIE image" concern is now handled by the `brk_ceiling` bound plus the
+grow-path VMA-overlap guard.
 
 **How to reverse:** set the bases back to the `LINUX_INTERP_BASE` /
 `LINUX_PIE_BASE` constants in `load_interpreter` / `choose_exec_load_bias` (drop
@@ -1543,3 +1544,68 @@ the `is_initialized()`/`apply_aslr_base` blocks) and remove
 `test_apply_aslr_base` / `test_pie_aslr_window`. To instead make it opt-out-able,
 gate the randomisation on a per-process "no randomise" flag fed from
 `personality(ADDR_NO_RANDOMIZE)`.
+
+## 21. Linux `brk`/`sbrk` heap — image-dependent ceiling, committed RLIMIT_AS charge, no `arch_randomize_brk` gap yet
+
+**Date:** 2026-06-14
+**Decided by:** Claude (autonomous) — reversible; the operator may overrule. The
+core task (replace the `sys_brk` no-op stub with a real heap) had no genuine
+fork — the stub was a latent ring-3 SIGSEGV (it claimed a grow succeeded while
+mapping nothing, so glibc's malloc brk fast path would fault on first heap
+write). Three sub-decisions had real tradeoffs.
+
+**Problem:**
+`sys_brk` (`kernel/src/syscall/linux.rs`) echoed the requested break and mapped
+no memory. A real heap needs a heap floor/break in the PCB, a demand-paged VMA,
+a growth ceiling that can't collide with other regions, and a resource-accounting
+policy.
+
+**Decision:**
+1. **Image-dependent ceiling (`brk_ceiling`).** A low-loaded ET_EXEC heap
+   (`brk_start < USER_MMAP_BASE`) is capped at `USER_MMAP_BASE` (the mmap window
+   floor); a high-loaded PIE heap (`brk_start >= USER_MMAP_BASE`, since
+   `LINUX_PIE_BASE ≈ 93 TiB` sits above the 384 GiB mmap window) is capped at
+   `LINUX_INTERP_BASE` (the interpreter window floor). This is a coarse but
+   always-safe bound — the heap can never grow into the mmap region, the
+   interpreter, or the stack — backed by a per-grow `linux_vma_overlap_bytes`
+   check as a second guard. RLIMIT_DATA bounds the heap far below this in
+   practice.
+2. **Committed RLIMIT_AS charge for the full grown virtual span up-front**, even
+   though frames are demand-paged. This matches the project's "committed memory
+   by default, no silent overcommit" design principle (CLAUDE.md / design.txt):
+   a successful `brk` grow reserves the address space against RLIMIT_AS
+   immediately; shrink refunds it. The alternative (charge per faulted frame)
+   would be overcommit and is rejected by the design spec.
+3. **No `arch_randomize_brk` gap yet** — `brk_start` is the exact page-aligned
+   image end. Linux inserts a small random gap (up to 32 MiB on x86_64) between
+   the data segment and the heap floor to ASLR the heap base. Omitting it is
+   *correct* (a fixed gap of 0 is legal and glibc copes), just weaker hardening;
+   deferred as a documented follow-up (todo.txt) rather than blocking the heap on
+   it.
+
+**Alternatives considered:**
+- *A single fixed ceiling for all images.* Rejected: ET_EXEC and PIE images sit
+  on opposite sides of the mmap window, so one constant can't bound both without
+  either forbidding ET_EXEC heap growth or letting a PIE heap grow into the mmap
+  window. The image-dependent split is the minimal correct rule.
+- *Per-faulted-frame RLIMIT_AS accounting (lazy charge).* Rejected: that is
+  overcommit, which the design spec forbids. Up-front committed charging is the
+  principled choice here.
+- *Implement `arch_randomize_brk` now.* Deferred, not rejected: it's a pure
+  hardening add with no correctness impact, and bundling it would widen the
+  change; tracked in todo.txt with the exact call sites.
+
+**Tests:** `syscall::linux::self_test_brk_logic` (pure: `brk_round_up`
+boundary/overflow, `brk_ceiling` ET_EXEC/PIE/ordering) and the ring-3
+`proc::spawn::self_test_linux_brk` (real Linux-ABI process queries its break,
+grows 32 KiB, writes a sentinel into the *second* heap frame, reads it back,
+exits with it — proving `set_brk_region` at load, the grow path, and
+demand-paging of multiple new heap frames).
+
+**How to reverse:** the heap is opt-in per process via `brk_start` — setting it
+to 0 (as native images do) makes `sys_brk` a permanent "cannot extend" that
+returns the unchanged break, so reverting to stub-like behaviour is a one-line
+change at the `set_brk_region` call sites. To change the accounting policy, swap
+the `linux_as_charge(added)` call for a per-fault charge in the `VmaKind::Brk`
+fault resolver. To add the randomisation gap, advance `image_end` by a bounded
+random page count before `set_brk_region` (see todo.txt).

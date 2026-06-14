@@ -1459,10 +1459,12 @@ builder's `AT_ENTRY`/`AT_PHDR`, so the whole image relocates consistently.
 The highest PIE base (`≈0x5955_5555_0000`) leaves ~22 TiB below the
 interpreter floor (`0x7000_0000_0000`) for the image + brk growth, and the
 PIE floor sits far above the mmap window (`0x60_0000_0000`), so no
-collision is possible. `sys_brk` is currently a no-op stub (returns the
-requested break without mapping; programs fall through to mmap), so there is
-no real heap above the PIE image today — when a real brk region lands it
-will grow into that 22 TiB headroom. Covered by `spawn::self_test`'s
+collision is possible. `sys_brk` is now a real demand-paged heap (see the
+"Linux brk(2) heap" resolution below): a PIE image's heap grows from its
+page-aligned image end up to a ceiling of `LINUX_INTERP_BASE`, i.e. into
+that 22 TiB headroom, and the grow path's VMA-overlap check is a second
+guard against colliding with the interpreter or mmap window. Covered by
+`spawn::self_test`'s
 `test_pie_aslr_window` (alignment + ≥1 TiB interpreter-floor headroom).
 Both halves of TD9 are now done; entropy/always-on policy is in
 design-decisions.md #20.
@@ -1569,6 +1571,59 @@ segment mapping via `load_segments_with_bias`, AT_BASE/AT_ENTRY auxv) is
 unit-tested via `spawn::test_load_interpreter_fallbacks` (static-ELF and
 absent-interpreter `Ok(None)` fallbacks).  See `todo.txt` "Linux
 dynamic-linker (ld.so) load path".
+
+### TD25. `sys_brk` was a no-op stub (claimed grow succeeded but mapped nothing → latent SIGSEGV) — RESOLVED 2026-06-14
+
+**What it was:** `sys_brk` (`kernel/src/syscall/linux.rs`) simply echoed
+`args.arg0` back to the caller — claiming the requested program break was
+granted while mapping **no** memory.  Any real glibc/musl program whose
+`malloc` used the brk fast path (it does for small allocations until the
+main arena is exhausted) would write into the "granted" heap and take an
+immediate page fault on unmapped memory → ring-3 SIGSEGV.  The stub only
+happened to be harmless because no glibc binary runs end-to-end yet; it
+was a live trap waiting for the first one.
+
+**Resolution (2026-06-14):** Implemented a real demand-paged brk heap.
+
+- **PCB state:** added `brk_start` (heap floor) and `brk_current` (program
+  break) to `Process` (`kernel/src/proc/pcb.rs`), inherited verbatim across
+  `fork` (CoW heap clone) and reset on `exec` — recomputed from the new
+  image's page-aligned end for Linux images (`elf::image_end`), cleared to
+  `0` for native images (no Linux brk heap).  Accessors `set_brk_region` /
+  `get_brk` / `set_brk_current`.
+- **VMA:** new `VmaKind::Brk` (`kernel/src/mm/vma.rs`) — faults exactly like
+  `Anonymous` (demand-paged, zero-filled); exists so `/proc/<pid>/maps`
+  labels it `[heap]` and `sys_brk` can find/resize its own VMA.  The heap is
+  a single `[brk_start, round_up(brk_current))` VMA.
+- **sys_brk semantics (Linux-faithful):** `brk(0)` / `addr < brk_start`
+  query (return unchanged break); grow maps the new span by replacing the
+  heap VMA (demand-paged) and charges `RLIMIT_AS` for the full added virtual
+  span up-front (committed-by-default — no overcommit); shrink unmaps+frees
+  faulted frames via `unmap_user_range` and refunds the charge; same-top-
+  frame moves touch nothing.  On **any** failure (RLIMIT_DATA, RLIMIT_AS,
+  VMA collision, OOM, overflow) it returns the *unchanged* break — exactly
+  what glibc's `__sbrk` expects so it falls back to mmap and reports ENOMEM
+  itself.
+- **Heap ceiling (image-dependent):** `brk_ceiling(brk_start)` returns
+  `USER_MMAP_BASE` for a low-loaded ET_EXEC (`brk_start < USER_MMAP_BASE`)
+  and `LINUX_INTERP_BASE` for a high-loaded PIE (`brk_start >=
+  USER_MMAP_BASE`), so the heap can never grow into the mmap window, the
+  interpreter window, or the stack.  The VMA-overlap check is a second
+  guard.
+
+**Tests:** `syscall::linux::self_test_brk_logic` (pure: `brk_round_up`
+boundary/overflow cases + `brk_ceiling` ET_EXEC/PIE/ordering) and the
+ring-3 end-to-end `proc::spawn::self_test_linux_brk` (a real Linux-ABI
+process queries its break, grows 32 KiB, writes a sentinel into the
+*second* heap frame, reads it back, exits with that byte — exit `0x6D`
+proves the grow + demand-paging of multiple frames works; both verified in
+the boot-test serial log).
+
+**Remaining (minor, documented in todo.txt):** `brk_start` is the exact
+page-aligned image end — Linux's `arch_randomize_brk` adds a small random
+gap (up to 32 MiB on x86_64) between the data segment and the heap floor.
+Harmless to omit (a fixed gap of 0 is valid), but it weakens heap ASLR; a
+future enhancement.
 
 ### TD8. `membarrier` PRIVATE_EXPEDITED issue without prior REGISTER returns 0 where Linux returns `-EPERM` — RESOLVED 2026-06-14
 

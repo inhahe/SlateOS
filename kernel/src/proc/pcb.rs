@@ -527,6 +527,20 @@ pub struct Process {
     /// field, matching Linux's "RLIMIT_AS only applies to processes
     /// going through the Linux ABI" model in our codebase.
     pub linux_as_bytes: u64,
+    /// Linux `brk`/`sbrk` heap base — the program break floor, set once at
+    /// `execve`/spawn time to the page-aligned end of the main executable's
+    /// last loadable segment (see [`crate::proc::elf::image_end`]).  `0`
+    /// means "no heap" (native processes, or a degenerate image with no
+    /// loadable segments); such a process's `brk(2)` is a pure query.
+    /// Inherited verbatim across `fork` (the child's address space mirrors
+    /// the parent's) and reset on `execve`.
+    pub brk_start: u64,
+    /// Linux `brk`/`sbrk` current program break — the byte address just
+    /// past the end of the heap.  Equal to [`Self::brk_start`] when the
+    /// heap is empty; grown/shrunk by `brk(2)`.  Always `>= brk_start`
+    /// (when `brk_start != 0`).  The heap occupies `[brk_start,
+    /// round_up(brk_current))` as a single [`VmaKind::Brk`] VMA.
+    pub brk_current: u64,
     /// Per-process file-mode creation mask, as installed by Linux's
     /// `umask(2)`.
     ///
@@ -1243,6 +1257,9 @@ impl Process {
             rlimits: DEFAULT_RLIMITS,
             // Fresh process has no Linux-mapped pages yet.
             linux_as_bytes: 0,
+            // No heap until the Linux ELF loader records the image end.
+            brk_start: 0,
+            brk_current: 0,
             // De-facto Linux distro default — what programs expect
             // when they query a freshly-spawned process's umask.
             linux_umask: 0o022,
@@ -1487,6 +1504,8 @@ pub fn fork_create(
         cwd,
         rlimits,
         linux_as_bytes,
+        brk_start,
+        brk_current,
         linux_umask,
         linux_personality,
         membarrier_state,
@@ -1548,6 +1567,10 @@ pub fn fork_create(
             parent.cwd.clone(),
             parent.rlimits,
             parent.linux_as_bytes,
+            // The child's address space mirrors the parent's, including its
+            // heap, so it inherits the same brk floor and break.
+            parent.brk_start,
+            parent.brk_current,
             parent.linux_umask,
             parent.linux_personality,
             // Linux copies `membarrier_state` verbatim in `dup_mm`'s
@@ -1674,6 +1697,10 @@ pub fn fork_create(
         // so it inherits the same RLIMIT_AS charge.  Each future
         // mmap/munmap in either process is accounted independently.
         linux_as_bytes,
+        // The child's heap (a CoW clone of the parent's) starts at the
+        // same floor and break; each process's later brk(2) is independent.
+        brk_start,
+        brk_current,
         // POSIX: the child inherits the parent's umask at the moment
         // of fork.  Subsequent umask calls in either process are
         // independent.
@@ -3056,6 +3083,11 @@ pub const RLIMIT_AS_INDEX: usize = 9;
 /// writes that would push a file past the per-process limit.
 pub const RLIMIT_FSIZE_INDEX: usize = 1;
 
+/// Index of `RLIMIT_DATA` (maximum data-segment / heap size) in
+/// [`Process::rlimits`].  Consulted by the Linux `brk(2)` translation
+/// layer to bound `brk`/`sbrk` heap growth.
+pub const RLIMIT_DATA_INDEX: usize = 2;
+
 /// Index of `RLIMIT_STACK` (maximum stack size) in [`Process::rlimits`].
 ///
 /// Consulted from the page-fault handler ([`crate::idt::try_grow_user_stack`])
@@ -3176,6 +3208,40 @@ pub fn linux_as_release(pid: ProcessId, bytes: u64) {
 #[must_use]
 pub fn linux_as_used(pid: ProcessId) -> Option<u64> {
     PROCESS_TABLE.lock().get(&pid).map(|p| p.linux_as_bytes)
+}
+
+/// Initialise the Linux `brk` heap for `pid`: set the heap floor and the
+/// initial (empty-heap) program break, both to `start`.
+///
+/// Called once from the Linux ELF spawn/exec path after the main
+/// executable's segments are loaded, with `start` = the page-aligned image
+/// end (see [`crate::proc::elf::image_end`]).  `start` of `0` means "no
+/// heap" (a degenerate image); `brk(2)` then behaves as a pure query.
+///
+/// Silently no-op if `pid` is unknown.
+pub fn set_brk_region(pid: ProcessId, start: u64) {
+    let mut table = PROCESS_TABLE.lock();
+    if let Some(proc) = table.get_mut(&pid) {
+        proc.brk_start = start;
+        proc.brk_current = start;
+    }
+}
+
+/// Read `(brk_start, brk_current)` for `pid`, or `None` if unknown.
+#[must_use]
+pub fn get_brk(pid: ProcessId) -> Option<(u64, u64)> {
+    PROCESS_TABLE.lock().get(&pid).map(|p| (p.brk_start, p.brk_current))
+}
+
+/// Update the current program break for `pid` to `new_brk`.
+///
+/// Called by `brk(2)` after the heap VMA and frame state have been
+/// adjusted to match.  Silently no-op if `pid` is unknown.
+pub fn set_brk_current(pid: ProcessId, new_brk: u64) {
+    let mut table = PROCESS_TABLE.lock();
+    if let Some(proc) = table.get_mut(&pid) {
+        proc.brk_current = new_brk;
+    }
 }
 
 /// Record one read-family syscall against `pid`'s I/O accounting.
@@ -4258,7 +4324,7 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
     // left zeroed; FileBacked pages are filled from the backing file.
     // Guard/Fixed faults are never resolvable here.
     let file_backing = match vma.kind {
-        VmaKind::Anonymous | VmaKind::Stack => None,
+        VmaKind::Anonymous | VmaKind::Stack | VmaKind::Brk => None,
         VmaKind::FileBacked { handle, file_offset } => Some((handle, file_offset)),
         VmaKind::Guard | VmaKind::Fixed => return false,
     };

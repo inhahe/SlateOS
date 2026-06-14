@@ -50136,6 +50136,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_register_ipc_pidfd_getfd()?;
+
+    #[inline(never)]
+    fn self_test_register_ipc_pidfd_getfd() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // Batch 130: register_ipc_handle wiring for `sys_pidfd_getfd`.
     //
     // Same class-bug shape as batch 129, applied to the cross-process
@@ -50261,6 +50266,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   register_ipc_handle pidfd_getfd wiring: OK",
         );
+    }
+        Ok(())
     }
 
     // Batch 92: fcntl(F_GET_RW_HINT / F_SET_RW_HINT /

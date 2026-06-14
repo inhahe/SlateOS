@@ -55718,6 +55718,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_clock_nanosleep()?;
+
+    #[inline(never)]
+    fn self_test_clock_nanosleep() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // clock_nanosleep — Linux gate order: clockid -> EINVAL/EOPNOTSUPP,
     // get_timespec64 -> EFAULT, timespec64_valid -> EINVAL, flags -> EINVAL.
     {
@@ -55840,6 +55845,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   clock_nanosleep clockid/EOPNOTSUPP/validity gates + unknown-flag-bit forward-compat (Linux: only TIMER_ABSTIME examined): OK"
         );
+    }
+        Ok(())
     }
 
     // nanosleep — Linux gate order: get_timespec64 -> EFAULT, then

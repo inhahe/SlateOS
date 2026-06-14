@@ -9258,10 +9258,23 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          Lets systemd's PR_CAPBSET_DROP loop run without
 ##          spuriously thinking a cap doesn't exist.
 ##        - PR_CAPBSET_DROP — silent success.
-##      Limitation: PR_SET_NAME / PR_GET_NAME are no-ops; debuggers
-##      that inspect /proc/<pid>/comm for thread identification see
-##      empty names.  Tracked as needing per-thread name storage on
-##      the TCB and a procfs string field.
+##      [SUPERSEDED — the per-option sub-claims above are stale; see the
+##       later per-option resolutions for the current behaviour:
+##         * PR_SET_NAME/PR_GET_NAME now persist through pcb.name and are
+##           visible via /proc/<pid>/{comm,stat,status} (entry #82, and the
+##           NULL-arg2 EFAULT fix in batch 269). They are NOT no-ops.
+##         * PR_SET_DUMPABLE/PR_GET_DUMPABLE persist per-PCB; GET round-trips
+##           the stored value (default 1), not a fixed 0.
+##         * PR_SET_KEEPCAPS/PR_GET_KEEPCAPS are backed by securebits bit 4
+##           (single source of truth shared with PR_SET_SECUREBITS), with
+##           the SECBIT_KEEP_CAPS_LOCKED EPERM gate enforced.
+##         * PR_SET_NO_NEW_PRIVS/PR_GET_NO_NEW_PRIVS persist per-PCB; GET
+##           round-trips the stored value (default 0), not a fixed 1.]
+##      Residual limitation: comm is stored per-process (pcb.name), not
+##      per-thread as Linux does — in a multi-threaded process all threads
+##      share one comm. Closing this needs per-TCB name storage. Secondary:
+##      non-UTF-8 comm bytes are rejected with EINVAL (we store comm as a
+##      Rust String) where Linux keeps raw bytes.
 ##  17. PERSONALITY — DONE as static PER_LINUX.  sys_personality
 ##      returns 0 (PER_LINUX) regardless of input.  Programs query
 ##      with personality(0xffff_ffff) to verify "are we Linux?";

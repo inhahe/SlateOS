@@ -8949,12 +8949,15 @@ fn write_cstr_field(dst: &mut [u8], src: &[u8]) {
 /// else — Linux's documented response for "unrecognised option".
 ///
 /// Accepted as silent success (returning 0):
-///   - `PR_SET_NAME` (15): set the comm name visible in `/proc/<pid>/comm`
-///     and `prctl(PR_GET_NAME)`.  We don't carry per-thread names yet,
-///     so the requested name is dropped, but the call succeeds so the
-///     program can continue.
-///   - `PR_GET_NAME` (16): the symmetric query.  We zero the user buf
-///     (16 bytes) if non-NULL, which reports "thread has no name".
+///   - `PR_SET_NAME` (15): install the comm name (up to 15 visible
+///     bytes; the 16th is the implicit NUL).  We copy 16 bytes from
+///     user space, truncate at the first NUL, and persist it through
+///     `pcb::set_name`, so it is observable via `prctl(PR_GET_NAME)`,
+///     `/proc/<pid>/comm`, `/proc/<pid>/stat`, and `/proc/<pid>/status`.
+///     NULL arg2 → EFAULT (matching `strncpy_from_user`).
+///   - `PR_GET_NAME` (16): the symmetric query — writes the stored comm
+///     into a 16-byte user buffer (NUL-padded, 16th byte always NUL).
+///     NULL arg2 → EFAULT.
 ///   - `PR_SET_DUMPABLE` (4) / `PR_GET_DUMPABLE` (3): the SUID-dump
 ///     flag.  SET accepts the full-64-bit arg2 ∈ {0, 1} (anything
 ///     else, including high-half noise, is EINVAL), persists it
@@ -9007,10 +9010,16 @@ fn write_cstr_field(dst: &mut [u8], src: &[u8]) {
 ///
 /// Everything else: `-EINVAL`.
 ///
-/// Limitation: PR_SET_NAME / PR_GET_NAME are no-ops — programs that
-/// inspect /proc/<pid>/comm to find their own threads (some debugger
-/// integration) will see empty names.  Tracked in todo.txt as needing
-/// per-thread name storage on the TCB plus a procfs string field.
+/// Limitation: the comm name is stored per-process (`pcb.name`), not
+/// per-thread as Linux does (each `task_struct` carries its own comm).
+/// In a multi-threaded process every thread therefore shares one comm,
+/// so a thread that sets its own name overwrites the shared value and
+/// `/proc/<pid>/task/<tid>/comm` reports that shared name rather than a
+/// per-thread one.  Single-threaded programs (the common case) are
+/// unaffected.  A secondary limitation: non-UTF-8 comm bytes are
+/// rejected with EINVAL (we store comm as a Rust `String`) where Linux
+/// would keep the raw bytes.  Both are tracked in todo.txt; closing the
+/// first needs per-TCB name storage.
 ///
 /// Returns `true` if `PR_SET_KEEPCAPS` may modify the keepcaps flag
 /// given the caller's current `securebits`.  Mirrors Linux's

@@ -55849,6 +55849,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_nanosleep()?;
+
+    #[inline(never)]
+    fn self_test_nanosleep() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // nanosleep — Linux gate order: get_timespec64 -> EFAULT, then
     // timespec64_valid -> EINVAL, then sleep.
     {
@@ -55923,6 +55928,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   nanosleep timespec64_valid gating: OK"
         );
+    }
+        Ok(())
     }
 
     // chroot — Linux gate ladder fidelity (batch 446).

@@ -1572,6 +1572,18 @@ coherence in both directions (keepcaps↔securebits bit 4) and the lock-gate
 truth table; `pcb::test_reset_linux_state_for_exec` proves `set_keepcaps`
 coherently drives bit 4 and the exec reset clears only it.
 
+**Companion fix — PR_SET_SECUREBITS lock enforcement now unit-tested
+(2026-06-14):** the same audit found the `PR_SET_SECUREBITS` lock-bit
+enforcement (a set lock can't be cleared; a locked flag can't flip) was
+inline in the handler and so its `-EPERM` path was unreachable from the
+kernel-context boot self-test (no `caller_pid` PCB to seed locked bits) —
+the test only covered value validation. Extracted the decision into the pure
+`securebits_change_allowed(cur, new_val)` (mirrors `cap_task_prctl`) and added
+a truth-table test to `self_test_prctl_dispatch` covering: no-locks→allowed,
+new-lock→allowed, clear-set-lock→denied, flip-locked-flag (both
+set→clear and clear→set)→denied, and locked-flag-kept-while-flipping-an-
+unlocked-flag→allowed ("PR_SET_SECUREBITS lock-bit enforcement … : OK").
+
 ### TD7. `set_mempolicy_home_node` returns 0 where Linux returns `-ENOENT`/`-EOPNOTSUPP` — APPROXIMATION 2026-06-12
 
 **What:** `sys_set_mempolicy_home_node()` (`kernel/src/syscall/linux.rs`)

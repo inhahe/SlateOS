@@ -9017,6 +9017,29 @@ const fn keepcaps_change_allowed(securebits: u32) -> bool {
     securebits & pcb::LINUX_SECBIT_KEEP_CAPS_LOCKED == 0
 }
 
+/// Returns `true` if changing securebits from `cur` to `new_val` is
+/// permitted by the lock bits.  Mirrors Linux's `cap_task_prctl`
+/// (`PR_SET_SECUREBITS`, security/commoncap.c): once a `_LOCKED` bit is
+/// set, (a) that lock bit may not be cleared, and (b) its paired flag bit
+/// (one position lower) may not flip.  Both violations yield `-EPERM` at
+/// the syscall surface.
+///
+/// Pulled out as a pure function so the lock-enforcement truth table can
+/// be unit-tested directly — the EPERM path is otherwise unreachable from
+/// the boot self-test, which runs in kernel context with no `caller_pid`
+/// PCB to seed `cur` with lock bits.
+const fn securebits_change_allowed(cur: u32, new_val: u32) -> bool {
+    let locks_now_set = cur & pcb::LINUX_SECURE_ALL_LOCKS;
+    // A currently-set lock bit must remain set in the new value.
+    if (new_val & locks_now_set) != locks_now_set {
+        return false;
+    }
+    // For every set lock bit, its paired flag bit (lock >> 1) must keep
+    // its current value — a locked flag cannot be flipped.
+    let locked_flag_mask = locks_now_set >> 1;
+    (new_val & locked_flag_mask) == (cur & locked_flag_mask)
+}
+
 fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
     // Linux signature (kernel/sys.c):
     //   SYSCALL_DEFINE5(prctl, int, option,
@@ -10337,17 +10360,9 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
             // checks above apply.
             if let Some(pid) = caller_pid() {
                 let cur = pcb::get_securebits(pid).unwrap_or(0);
-                // Any currently-set lock bit must remain set.
-                let locks_now_set = cur & pcb::LINUX_SECURE_ALL_LOCKS;
-                if (new_val & locks_now_set) != locks_now_set {
-                    return linux_err(errno::EPERM);
-                }
-                // For every set lock bit, the paired flag bit
-                // (one position lower) must match its current
-                // value.  Lock bits are odd-numbered; the paired
-                // flag bit is `lock >> 1`.
-                let locked_flag_mask = locks_now_set >> 1;
-                if (new_val & locked_flag_mask) != (cur & locked_flag_mask) {
+                // Lock-bit enforcement: a set lock may not be cleared, and a
+                // locked flag may not flip.  See `securebits_change_allowed`.
+                if !securebits_change_allowed(cur, new_val) {
                     return linux_err(errno::EPERM);
                 }
                 let _ = pcb::set_securebits(pid, new_val);
@@ -52012,6 +52027,50 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             assert_eq!(
                 pcb::LINUX_SECBIT_NO_CAP_AMBIENT_RAISE_LOCKED,
                 pcb::LINUX_SECBIT_NO_CAP_AMBIENT_RAISE << 1
+            );
+
+            // PR_SET_SECUREBITS lock-bit enforcement truth table, via the
+            // pure decision helper (the EPERM path is unreachable from this
+            // kernel-context self-test, which has no caller PCB to seed the
+            // current securebits with lock bits).  Mirrors cap_task_prctl.
+            //
+            // No locks set: any value change is permitted.
+            assert!(securebits_change_allowed(0, 0));
+            assert!(securebits_change_allowed(0, pcb::LINUX_SECURE_ALL_FLAGS));
+            assert!(securebits_change_allowed(
+                pcb::LINUX_SECBIT_NOROOT,
+                pcb::LINUX_SECBIT_NO_SETUID_FIXUP
+            ));
+            // Setting a NEW lock bit (that wasn't set before) is allowed.
+            assert!(securebits_change_allowed(0, pcb::LINUX_SECBIT_KEEP_CAPS_LOCKED));
+            // A currently-set lock bit must remain set — clearing it -> denied.
+            assert!(!securebits_change_allowed(pcb::LINUX_SECBIT_KEEP_CAPS_LOCKED, 0));
+            assert!(!securebits_change_allowed(
+                pcb::LINUX_SECBIT_NOROOT_LOCKED,
+                pcb::LINUX_SECBIT_KEEP_CAPS_LOCKED // different lock, original cleared
+            ));
+            // A locked flag may not flip.  KEEP_CAPS locked + currently SET:
+            // clearing the flag while keeping the lock -> denied.
+            assert!(!securebits_change_allowed(
+                pcb::LINUX_SECBIT_KEEP_CAPS | pcb::LINUX_SECBIT_KEEP_CAPS_LOCKED,
+                pcb::LINUX_SECBIT_KEEP_CAPS_LOCKED
+            ));
+            // KEEP_CAPS locked + currently CLEAR: setting the flag -> denied.
+            assert!(!securebits_change_allowed(
+                pcb::LINUX_SECBIT_KEEP_CAPS_LOCKED,
+                pcb::LINUX_SECBIT_KEEP_CAPS | pcb::LINUX_SECBIT_KEEP_CAPS_LOCKED
+            ));
+            // Locked flag kept at its current value (and lock kept) -> allowed,
+            // even while flipping an UNlocked flag in the same word.
+            assert!(securebits_change_allowed(
+                pcb::LINUX_SECBIT_KEEP_CAPS | pcb::LINUX_SECBIT_KEEP_CAPS_LOCKED,
+                pcb::LINUX_SECBIT_KEEP_CAPS
+                    | pcb::LINUX_SECBIT_KEEP_CAPS_LOCKED
+                    | pcb::LINUX_SECBIT_NOROOT
+            ));
+            serial_println!(
+                "[syscall/linux]   PR_SET_SECUREBITS lock-bit enforcement \
+                 (cap_task_prctl: locked bit can't clear, locked flag can't flip): OK"
             );
         }
 

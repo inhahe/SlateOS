@@ -80751,6 +80751,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_drm_kms_enumeration()?;
+
+    #[inline(never)]
+    fn self_test_drm_kms_enumeration() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // (DRM) KMS enumeration conversion helpers map every native enum variant
     // onto its DRM ABI value, and drm_mode_to_uapi narrows + names a mode.
     {
@@ -80823,6 +80828,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[syscall/linux]   DRM KMS enumeration conversions: OK");
+    }
+        Ok(())
     }
 
     // DRM dumb-buffer + framebuffer allocation mapping (commit 6).

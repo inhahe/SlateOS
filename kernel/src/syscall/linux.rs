@@ -51007,6 +51007,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_personality_dispatch()?;
+
+    #[inline(never)]
+    fn self_test_personality_dispatch() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // personality dispatch validation.
     //   - Always returns 0 (PER_LINUX is the only personality we know).
     {
@@ -51025,6 +51030,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: personality(0) not 0");
             return Err(KernelError::InternalError);
         }
+    }
+        Ok(())
     }
 
     // getresuid / getresgid dispatch validation.

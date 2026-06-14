@@ -72563,6 +72563,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_accept_accept4()?;
+
+    #[inline(never)]
+    fn self_test_accept_accept4() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // Batch 434: accept / accept4 — fd lookup gates BEFORE pointer
     // validation, matching Linux's __sys_accept4 → do_accept order in
     // net/socket.c.  For accept4 the flags gate stays first (Linux:
@@ -72692,6 +72697,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   accept/accept4 fd lookup ordered before pointer validation (Linux: do_accept's fdget fires before move_addr_to_user; accept4 flags gate stays first; bad fd → EBADF regardless of pointer validity): OK"
         );
+    }
+        Ok(())
     }
 
     // Batch 465: validate_sockaddr_out — accept / accept4 / recvfrom

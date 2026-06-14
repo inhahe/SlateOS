@@ -1173,6 +1173,7 @@ pub fn dispatch_linux_with_frame(
         nr::CLONE => Some(linux_clone(frame)),
         nr::CLONE3 => Some(linux_clone3(frame)),
         nr::EXECVE => Some(linux_execve(frame)),
+        nr::EXECVEAT => Some(linux_execveat(frame)),
         nr::RT_SIGRETURN => Some(linux_rt_sigreturn(frame)),
         _ => None,
     }
@@ -1845,20 +1846,11 @@ fn read_user_ptr_array(
 /// native `sys_process_exec_with_frame` behaviour.  On failure the
 /// caller observes a Linux `-errno` and continues running.
 fn linux_execve(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
-    use crate::proc::{signal, spawn::exec_process, thread};
-
     let filename_ptr = frame.arg0;
     let argv_user = frame.arg1;
     let envp_user = frame.arg2;
 
-    // ---- 1. Resolve caller's PID. ----
-    let task_id = crate::sched::current_task_id();
-    let pid = match thread::owner_process(task_id) {
-        Some(pid) if pid != 0 => pid,
-        _ => return -i64::from(errno::ESRCH),
-    };
-
-    // ---- 2. Read filename. ----
+    // Read filename.
     // PATH_MAX on Linux is 4096; our VFS uses str so we additionally
     // require valid UTF-8 (Linux accepts arbitrary bytes — the path
     // is "all bytes except / and NUL").  Treat invalid UTF-8 as
@@ -1874,6 +1866,32 @@ fn linux_execve(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
     let filename = match core::str::from_utf8(&filename_bytes) {
         Ok(s) => s,
         Err(_) => return -i64::from(errno::ENOENT),
+    };
+    linux_exec_common(frame, filename, &filename_bytes, argv_user, envp_user)
+}
+
+/// Shared core of `execve` / `execveat`.
+///
+/// With the executable already resolved to `filename` (a VFS-openable
+/// path) and `filename_bytes` (the original path bytes, used for the
+/// `/proc/<pid>/exe` link), read argv / envp from the userspace pointer
+/// arrays, load the image, and rewrite `frame` to land at the new entry
+/// point on success.  On any error the old address space is left intact
+/// and the negative errno is returned.
+fn linux_exec_common(
+    frame: &mut crate::syscall::entry::SyscallFrame,
+    filename: &str,
+    filename_bytes: &[u8],
+    argv_user: u64,
+    envp_user: u64,
+) -> i64 {
+    use crate::proc::{signal, spawn::exec_process, thread};
+
+    // ---- 1. Resolve caller's PID. ----
+    let task_id = crate::sched::current_task_id();
+    let pid = match thread::owner_process(task_id) {
+        Some(pid) if pid != 0 => pid,
+        _ => return -i64::from(errno::ESRCH),
     };
 
     // ---- 3. Read argv and envp pointer arrays. ----
@@ -1933,7 +1951,7 @@ fn linux_execve(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
     // on failure we pass None and the link reports NotFound.
     let exe_path: Option<alloc::vec::Vec<u8>> = {
         let cwd = crate::proc::pcb::get_cwd(pid).unwrap_or_else(|| alloc::vec![b'/']);
-        canonicalize_path(&cwd, filename_bytes.as_slice()).ok()
+        canonicalize_path(&cwd, filename_bytes).ok()
     };
 
     // ---- 7. Exec.  After this point the old AS is gone on success. ----
@@ -1973,6 +1991,96 @@ fn linux_execve(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
         }
         Err(e) => -i64::from(linux_errno_for(e)),
     }
+}
+
+/// `execveat(dirfd, pathname, argv, envp, flags)` — `execve` relative to a
+/// directory fd (and the basis of glibc's `fexecve`).
+///
+/// Real execution is routed here via [`dispatch_linux_with_frame`] because,
+/// like `execve`, success rewrites the saved register frame to enter the
+/// new image.  This resolves `dirfd` + `pathname` to a VFS-openable path —
+/// honouring `AT_EMPTY_PATH` for the `fexecve(fd, …)` form (empty path:
+/// exec the file the fd refers to) — then delegates to
+/// [`linux_exec_common`].  `AT_SYMLINK_NOFOLLOW` rejects a final symlink
+/// component with `ELOOP` (Linux's `do_open_execat` behaviour).
+///
+/// The non-frame [`sys_execveat`] entry (reachable only via the regular
+/// dispatch table, e.g. argument-validation tests) cannot rewrite a frame
+/// and so still returns `ENOSYS` after validating its arguments.
+fn linux_execveat(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
+    const AT_EMPTY_PATH: u32 = 0x1000;
+    const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
+
+    #[allow(clippy::cast_possible_truncation)]
+    let dirfd = frame.arg0 as i32;
+    let path_ptr = frame.arg1;
+    let argv_user = frame.arg2;
+    let envp_user = frame.arg3;
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = frame.arg4 as u32;
+
+    if flags & !(AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW) != 0 {
+        return -i64::from(errno::EINVAL);
+    }
+
+    // Decide whether pathname is empty (NULL pointer or first byte NUL).
+    let path_is_empty = if path_ptr == 0 {
+        true
+    } else {
+        let mut first = 0u8;
+        // SAFETY: copy_from_user validates the single-byte user read and
+        // performs the STAC/CLAC dance for SMAP.
+        match unsafe { crate::mm::user::copy_from_user(path_ptr, &raw mut first, 1) } {
+            Ok(()) => first == 0,
+            Err(e) => return -i64::from(linux_errno_for(e)),
+        }
+    };
+
+    // Resolve to a VFS-openable path string.
+    let filename_string: alloc::string::String = if path_is_empty {
+        if flags & AT_EMPTY_PATH == 0 {
+            // Empty path without AT_EMPTY_PATH → ENOENT (Linux getname()).
+            return -i64::from(errno::ENOENT);
+        }
+        // fexecve form: exec the file referred to by dirfd.  AT_FDCWD names
+        // the cwd (a directory), which is not executable.
+        if dirfd == AT_FDCWD {
+            return -i64::from(errno::EACCES);
+        }
+        let entry = match lookup_caller_fd(dirfd) {
+            Ok(e) => e,
+            Err(sr) => return sr.value,
+        };
+        if entry.kind != HandleKind::File {
+            return -i64::from(errno::EACCES);
+        }
+        match crate::fs::handle::handle_path(entry.raw_handle) {
+            Ok(p) => p,
+            Err(e) => return -i64::from(linux_errno_for(e)),
+        }
+    } else {
+        match resolve_at_path(dirfd, path_ptr) {
+            Ok(s) => s,
+            Err(sr) => return sr.value,
+        }
+    };
+
+    // AT_SYMLINK_NOFOLLOW: refuse a final symlink component.  Our VFS
+    // read_file would transparently follow it, so lstat the resolved path
+    // and return ELOOP when it is a symlink, matching Linux.
+    if flags & AT_SYMLINK_NOFOLLOW != 0 {
+        match crate::fs::Vfs::lstat(&filename_string) {
+            Ok(entry) if entry.entry_type == crate::fs::EntryType::Symlink => {
+                return -i64::from(errno::ELOOP);
+            }
+            Ok(_) => {}
+            Err(KernelError::NotFound) => return -i64::from(errno::ENOENT),
+            Err(e) => return -i64::from(linux_errno_for(e)),
+        }
+    }
+
+    let filename_bytes = filename_string.as_bytes();
+    linux_exec_common(frame, &filename_string, filename_bytes, argv_user, envp_user)
 }
 
 // ---------------------------------------------------------------------------
@@ -27392,9 +27500,15 @@ fn sys_openat2(args: &SyscallArgs) -> SyscallResult {
     sys_openat(&openat_args)
 }
 
-/// `execveat(dirfd, path, argv, envp, flags)` — like execve relative to a
-/// directory fd.  Flags are AT_EMPTY_PATH (0x1000) | AT_SYMLINK_NOFOLLOW
-/// (0x100).
+/// `execveat(dirfd, path, argv, envp, flags)` — non-frame validation entry.
+///
+/// Real `execveat` execution is handled by [`linux_execveat`] via
+/// [`dispatch_linux_with_frame`], which can rewrite the saved register
+/// frame to enter the new image.  This entry is reached only through the
+/// regular dispatch table (e.g. the argument-validation tests, or any
+/// caller that bypasses the frame path); without a frame it cannot exec,
+/// so it validates the arguments and returns `ENOSYS`.  Flags are
+/// `AT_EMPTY_PATH` (0x1000) | `AT_SYMLINK_NOFOLLOW` (0x100).
 fn sys_execveat(args: &SyscallArgs) -> SyscallResult {
     const AT_EMPTY_PATH: u32 = 0x1000;
     const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
@@ -45256,9 +45370,14 @@ fn self_test_dispatch_with_frame_routing() -> crate::error::KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
+    // EXECVE routes through the frame dispatcher and reads its filename
+    // first (Linux `getname()` order): the NULL filename pointer (arg0==0)
+    // is rejected with -EFAULT before any further work, exercising the
+    // routing.  (A valid filename from this process-less self-test frame
+    // would instead reach the caller-PID resolution and return -ESRCH.)
     f.syscall_nr = nr::EXECVE;
     match dispatch_linux_with_frame(&mut f) {
-        Some(v) if v == -i64::from(errno::ESRCH) => {}
+        Some(v) if v == -i64::from(errno::EFAULT) => {}
         other => {
             serial_println!(
                 "[syscall/linux]   FAIL: execve via with_frame → {:?}", other
@@ -45266,6 +45385,38 @@ fn self_test_dispatch_with_frame_routing() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
     }
+
+    // EXECVEAT (322) also routes through the frame dispatcher now.  With a
+    // NULL path pointer and no AT_EMPTY_PATH flag it is rejected with
+    // -ENOENT (empty path, Linux getname() semantics) before touching the
+    // caller process — exercising the new routing entry.
+    f.syscall_nr = nr::EXECVEAT;
+    f.arg0 = 0; // dirfd irrelevant: empty path + no AT_EMPTY_PATH → ENOENT
+    f.arg1 = 0; // NULL path
+    f.arg4 = 0; // no flags
+    match dispatch_linux_with_frame(&mut f) {
+        Some(v) if v == -i64::from(errno::ENOENT) => {}
+        other => {
+            serial_println!(
+                "[syscall/linux]   FAIL: execveat via with_frame → {:?}", other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    // Bad flag bits are rejected with -EINVAL ahead of path handling.
+    f.arg4 = 0xff;
+    match dispatch_linux_with_frame(&mut f) {
+        Some(v) if v == -i64::from(errno::EINVAL) => {}
+        other => {
+            serial_println!(
+                "[syscall/linux]   FAIL: execveat bad-flags via with_frame → {:?}",
+                other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    f.arg0 = 0;
+    f.arg4 = 0;
 
     // FORK and VFORK in self-test context have no calling process
     // either, but they reach fork::fork_process which returns

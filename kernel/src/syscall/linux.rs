@@ -16736,28 +16736,58 @@ fn sys_unlinkat(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
-/// Shared rename back-end: validate two path pointers, return ENOENT.
-fn rename_impl(old_ptr: u64, new_ptr: u64) -> SyscallResult {
-    if old_ptr == 0 || new_ptr == 0 {
-        return linux_err(errno::EFAULT);
+/// Shared rename back-end: resolve both endpoints (each honouring its own
+/// `dirfd`), check the File-WRITE capability, then rename via the native VFS
+/// (which emits `IN_MOVED_FROM`/`IN_MOVED_TO` to any watcher).
+///
+/// `noreplace` adds a best-effort destination-exists pre-check returning
+/// `EEXIST` (Linux `RENAME_NOREPLACE`).  The native VFS exposes no atomic
+/// noreplace variant, so a concurrent creator slipping in between the stat and
+/// the rename could still be clobbered — a documented TOCTOU that is acceptable
+/// until the FS layer grows an atomic noreplace rename.  (The boot self-test
+/// is single-threaded, so the window is not observable there.)
+fn rename_common(
+    old_dirfd: i32,
+    old_ptr: u64,
+    new_dirfd: i32,
+    new_ptr: u64,
+    noreplace: bool,
+) -> SyscallResult {
+    let old = match resolve_at_path(old_dirfd, old_ptr) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let new = match resolve_at_path(new_dirfd, new_ptr) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    if let Err(r) = require_fs_write() {
+        return r;
     }
-    if let Err(e) = crate::mm::user::validate_user_read(old_ptr, 1) {
-        return linux_err(linux_errno_for(e));
+    if noreplace {
+        match crate::fs::Vfs::stat(&new) {
+            Ok(_) => return linux_err(errno::EEXIST),
+            Err(KernelError::NotFound) => {}
+            Err(e) => return linux_err(linux_errno_for(e)),
+        }
     }
-    if let Err(e) = crate::mm::user::validate_user_read(new_ptr, 1) {
-        return linux_err(linux_errno_for(e));
+    match crate::fs::Vfs::rename(&old, &new) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(linux_errno_for(e)),
     }
-    linux_err(errno::ENOENT)
 }
 
-/// `rename(oldpath, newpath)` — refuse with ENOENT after validation.
+/// `rename(oldpath, newpath)` — route through the native VFS.
 fn sys_rename(args: &SyscallArgs) -> SyscallResult {
-    rename_impl(args.arg0, args.arg1)
+    rename_common(AT_FDCWD, args.arg0, AT_FDCWD, args.arg1, false)
 }
 
-/// `renameat(olddirfd, oldpath, newdirfd, newpath)` — same.
+/// `renameat(olddirfd, oldpath, newdirfd, newpath)` — route through the
+/// native VFS, honouring both dirfds.
 fn sys_renameat(args: &SyscallArgs) -> SyscallResult {
-    rename_impl(args.arg1, args.arg3)
+    let old_dirfd = args.arg0 as i32;
+    let new_dirfd = args.arg2 as i32;
+    rename_common(old_dirfd, args.arg1, new_dirfd, args.arg3, false)
 }
 
 /// `renameat2(olddirfd, oldpath, newdirfd, newpath, flags)`.
@@ -16792,9 +16822,9 @@ fn sys_renameat2(args: &SyscallArgs) -> SyscallResult {
     // caller-uninitialised garbage (the C calling convention does
     // not zero-extend unsigned int args).
     //
-    // Pre-batch (this batch): gates 2 and 3 were missing entirely.
+    // Batch 347: gates 2 and 3 were missing entirely.
     // A caller passing RENAME_EXCHANGE | RENAME_NOREPLACE saw
-    // ENOENT (from our empty-FS rename_impl) where Linux returns
+    // ENOENT (from the then-stubbed rename back-end) where Linux returns
     // EINVAL — confusing for fs-walkers that expect EXCHANGE to
     // refuse incoherent flag combinations early.  A caller passing
     // RENAME_WHITEOUT as an unprivileged user saw ENOENT where
@@ -16831,7 +16861,24 @@ fn sys_renameat2(args: &SyscallArgs) -> SyscallResult {
             }
         }
     }
-    rename_impl(args.arg1, args.arg3)
+    // Gate 4: the native VFS rename has no atomic exchange and no whiteout
+    // support, so any caller that passes those flags (and, for WHITEOUT,
+    // cleared the CAP gate above) gets EINVAL — the standard errno a Linux
+    // filesystem returns when its ->rename does not implement the requested
+    // RENAME_* flag.  RENAME_NOREPLACE is supported via rename_common's
+    // best-effort destination pre-check.
+    if (flags & (RENAME_EXCHANGE | RENAME_WHITEOUT)) != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    let old_dirfd = args.arg0 as i32;
+    let new_dirfd = args.arg2 as i32;
+    rename_common(
+        old_dirfd,
+        args.arg1,
+        new_dirfd,
+        args.arg3,
+        flags & RENAME_NOREPLACE != 0,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -57970,41 +58017,49 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "[syscall/linux]   unlinkat int truncation (high-half ignored): OK"
         );
 
-        // rename(NULL, x) -> EFAULT.
-        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0,
+        // Batch 488: the rename family now routes through Vfs::rename
+        // (emits IN_MOVED_FROM/IN_MOVED_TO).  Use deterministic absolute
+        // non-existent paths so the source-missing ENOENT terminal is
+        // independent of arbitrary memory contents.  `absent_ptr` (the old
+        // endpoint) is planted above; `absent2_ptr` is the new endpoint.
+        let absent2_buf = b"/__rename_selftest_absent2__\0";
+        let absent2_ptr = absent2_buf.as_ptr() as u64;
+        core::hint::black_box(&absent2_buf);
+        // rename(NULL, absent) -> EFAULT.
+        let a = SyscallArgs { arg0: 0, arg1: absent2_ptr, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::RENAME, &a).value
             != -i64::from(errno::EFAULT) {
             serial_println!("[syscall/linux]   FAIL: rename(NULL,_) not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // rename(x, NULL) -> EFAULT.
-        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
+        // rename(absent, NULL) -> EFAULT (old resolves; new NULL faults).
+        let a = SyscallArgs { arg0: absent_ptr, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::RENAME, &a).value
             != -i64::from(errno::EFAULT) {
             serial_println!("[syscall/linux]   FAIL: rename(_,NULL) not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // rename(x, y) -> ENOENT.
-        let a = SyscallArgs { arg0: 0x1000, arg1: 0x2000, arg2: 0, arg3: 0,
-            arg4: 0, arg5: 0 };
+        // rename(absent, absent2) -> ENOENT (source missing).
+        let a = SyscallArgs { arg0: absent_ptr, arg1: absent2_ptr, arg2: 0,
+            arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::RENAME, &a).value
             != -i64::from(errno::ENOENT) {
             serial_println!("[syscall/linux]   FAIL: rename not ENOENT");
             return Err(KernelError::InternalError);
         }
-        // renameat(_, x, _, y) -> ENOENT.
-        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0x2000,
-            arg4: 0, arg5: 0 };
+        // renameat(_, absent, _, absent2) -> ENOENT.
+        let a = SyscallArgs { arg0: 0, arg1: absent_ptr, arg2: 0,
+            arg3: absent2_ptr, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::RENAMEAT, &a).value
             != -i64::from(errno::ENOENT) {
             serial_println!("[syscall/linux]   FAIL: renameat not ENOENT");
             return Err(KernelError::InternalError);
         }
         // renameat2 with bogus flag bit -> EINVAL.
-        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0x2000,
-            arg4: 0x800_0000, arg5: 0 };
+        let a = SyscallArgs { arg0: 0, arg1: absent_ptr, arg2: 0,
+            arg3: absent2_ptr, arg4: 0x800_0000, arg5: 0 };
         if dispatch_linux(nr::RENAMEAT2, &a).value
             != -i64::from(errno::EINVAL) {
             serial_println!(
@@ -58012,13 +58067,74 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        // renameat2 valid flag (RENAME_NOREPLACE=1) -> ENOENT.
-        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0x2000,
-            arg4: 1, arg5: 0 };
+        // renameat2 valid flag (RENAME_NOREPLACE=1), absent->absent2 ->
+        // ENOENT (noreplace pre-check stats absent2 -> NotFound, proceeds,
+        // then Vfs::rename sees the missing source).
+        let a = SyscallArgs { arg0: 0, arg1: absent_ptr, arg2: 0,
+            arg3: absent2_ptr, arg4: 1, arg5: 0 };
         if dispatch_linux(nr::RENAMEAT2, &a).value
             != -i64::from(errno::ENOENT) {
             serial_println!("[syscall/linux]   FAIL: renameat2 not ENOENT");
             return Err(KernelError::InternalError);
+        }
+
+        // Real round-trip, gated on writability: rename moves a file and
+        // emits the MOVED pair; a follow-up NOREPLACE onto the now-existing
+        // destination must return EEXIST.
+        let rsrc = "/__rename_selftest_src__";
+        let rdst = "/__rename_selftest_dst__";
+        let _ = crate::fs::Vfs::remove(rsrc);
+        let _ = crate::fs::Vfs::remove(rdst);
+        if crate::fs::Vfs::write_file(rsrc, b"x").is_ok() {
+            let src_buf = b"/__rename_selftest_src__\0";
+            let src_ptr = src_buf.as_ptr() as u64;
+            let dst_buf = b"/__rename_selftest_dst__\0";
+            let dst_ptr = dst_buf.as_ptr() as u64;
+            core::hint::black_box(&src_buf);
+            core::hint::black_box(&dst_buf);
+            // rename(src, dst) -> 0.
+            let a = SyscallArgs { arg0: src_ptr, arg1: dst_ptr, arg2: 0,
+                arg3: 0, arg4: 0, arg5: 0 };
+            let v = dispatch_linux(nr::RENAME, &a).value;
+            if v != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: rename(src,dst) -> {} (expected 0)", v);
+                let _ = crate::fs::Vfs::remove(rsrc);
+                let _ = crate::fs::Vfs::remove(rdst);
+                return Err(KernelError::InternalError);
+            }
+            // Source gone, destination present.
+            if crate::fs::Vfs::stat(rsrc).is_ok() {
+                serial_println!("[syscall/linux]   FAIL: rename left source behind");
+                let _ = crate::fs::Vfs::remove(rdst);
+                return Err(KernelError::InternalError);
+            }
+            if crate::fs::Vfs::stat(rdst).is_err() {
+                serial_println!("[syscall/linux]   FAIL: rename did not create destination");
+                return Err(KernelError::InternalError);
+            }
+            // RENAME_NOREPLACE onto the existing destination -> EEXIST.
+            if crate::fs::Vfs::write_file(rsrc, b"y").is_ok() {
+                let a = SyscallArgs { arg0: 0, arg1: src_ptr, arg2: 0,
+                    arg3: dst_ptr, arg4: 1, arg5: 0 };
+                let v = dispatch_linux(nr::RENAMEAT2, &a).value;
+                if v != -i64::from(errno::EEXIST) {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: renameat2(NOREPLACE,existing) -> {} (expected EEXIST)", v);
+                    let _ = crate::fs::Vfs::remove(rsrc);
+                    let _ = crate::fs::Vfs::remove(rdst);
+                    return Err(KernelError::InternalError);
+                }
+            }
+            let _ = crate::fs::Vfs::remove(rsrc);
+            let _ = crate::fs::Vfs::remove(rdst);
+            serial_println!(
+                "[syscall/linux]   rename native-VFS round-trip (move + NOREPLACE EEXIST): OK"
+            );
+        } else {
+            serial_println!(
+                "[syscall/linux]   rename native-VFS round-trip skipped (read-only root)"
+            );
         }
 
         // Batch 314: renameat2 unsigned-int truncation — high-half
@@ -58030,15 +58146,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // flags)`.  flags is C unsigned int → low 32 bits only.  Pre-
         // batch we held flags as u64 and ran the mask check at 64-bit
         // width, so high-half garbage tripped the gate and returned
-        // EINVAL where Linux returns ENOENT (rename_impl validates
-        // pointers and returns ENOENT for our empty FS).
+        // EINVAL where Linux returns ENOENT (the rename routes through
+        // Vfs::rename, which reports the missing source as NotFound ->
+        // ENOENT).
         //
-        // (a) renameat2(0, 0x1000, 0, 0x2000, 0x1_0000_0001) → ENOENT
-        //     (high|RENAME_NOREPLACE; truncates to 1, mask passes,
-        //     rename_impl validates both pointers in kernel context
-        //     and returns ENOENT).
+        // (a) renameat2(0, absent, 0, absent2, 0x1_0000_0001) → ENOENT
+        //     (high|RENAME_NOREPLACE; truncates to 1, mask passes, the
+        //     noreplace pre-check stats absent2 (NotFound), then
+        //     Vfs::rename sees the missing source -> ENOENT).
         let a = SyscallArgs {
-            arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0x2000,
+            arg0: 0, arg1: absent_ptr, arg2: 0, arg3: absent2_ptr,
             arg4: 0x1_0000_0001, arg5: 0,
         };
         let v = dispatch_linux(nr::RENAMEAT2, &a).value;
@@ -58050,7 +58167,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // (b) renameat2(0, 0x1000, 0, 0x2000, 0x1_0000_0007) → EINVAL
+        // (b) renameat2(0, absent, 0, absent2, 0x1_0000_0007) → EINVAL
         //     (high|NOREPLACE|EXCHANGE|WHITEOUT; truncates to 7, all
         //     three valid bits set, gate 1 mask passes; gate 2 now
         //     rejects EXCHANGE|NOREPLACE (and EXCHANGE|WHITEOUT)
@@ -58059,7 +58176,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         //     EINVAL.  Locks in BOTH truncation (high half stripped)
         //     and gate-2 enforcement in a single probe.
         let a = SyscallArgs {
-            arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0x2000,
+            arg0: 0, arg1: absent_ptr, arg2: 0, arg3: absent2_ptr,
             arg4: 0x1_0000_0007, arg5: 0,
         };
         let v = dispatch_linux(nr::RENAMEAT2, &a).value;
@@ -58071,11 +58188,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // (c) renameat2(0, 0x1000, 0, 0x2000, 0x1_0000_0000) → ENOENT
+        // (c) renameat2(0, absent, 0, absent2, 0x1_0000_0000) → ENOENT
         //     (high-half only, low half zero; truncates to 0, mask
         //     passes — flags=0 is equivalent to plain renameat).
         let a = SyscallArgs {
-            arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0x2000,
+            arg0: 0, arg1: absent_ptr, arg2: 0, arg3: absent2_ptr,
             arg4: 0x1_0000_0000, arg5: 0,
         };
         let v = dispatch_linux(nr::RENAMEAT2, &a).value;
@@ -58087,13 +58204,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // (d) renameat2(0, 0x1000, 0, 0x2000, 0x1_0000_0008) → EINVAL
+        // (d) renameat2(0, absent, 0, absent2, 0x1_0000_0008) → EINVAL
         //     (high|bad-low 0x8; truncates to 0x8, mask rejects bit
         //     outside RENAME_NOREPLACE|EXCHANGE|WHITEOUT; verifies
         //     mask gate still rejects bogus low bits after high half
         //     is stripped).
         let a = SyscallArgs {
-            arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0x2000,
+            arg0: 0, arg1: absent_ptr, arg2: 0, arg3: absent2_ptr,
             arg4: 0x1_0000_0008, arg5: 0,
         };
         let v = dispatch_linux(nr::RENAMEAT2, &a).value;
@@ -58128,28 +58245,38 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // probing incoherent flag combinations saw ENOENT (our empty
     // FS) instead of Linux's EINVAL/EPERM.
     {
-        // (e) renameat2 RENAME_EXCHANGE alone (flags=2) -> ENOENT.
-        //     Gate 2 does not fire because neither NOREPLACE nor
-        //     WHITEOUT is set.  Falls through to rename_impl which
-        //     returns ENOENT for our empty FS.  Regression guard:
-        //     gate 2 must NOT reject EXCHANGE alone.
+        // Deterministic absolute non-existent endpoints (this function has
+        // its own scope, separate from the mkdir/rename basics above).
+        let absent_buf = b"/__rename_exchange_absent__\0";
+        let absent_ptr = absent_buf.as_ptr() as u64;
+        let absent2_buf = b"/__rename_exchange_absent2__\0";
+        let absent2_ptr = absent2_buf.as_ptr() as u64;
+        core::hint::black_box(&absent_buf);
+        core::hint::black_box(&absent2_buf);
+
+        // (e) renameat2 RENAME_EXCHANGE alone (flags=2) -> EINVAL.
+        //     Gate 2 does not fire (neither NOREPLACE nor WHITEOUT set),
+        //     but gate 4 rejects EXCHANGE because the native VFS rename has
+        //     no atomic exchange — the standard errno a Linux filesystem
+        //     returns when its ->rename does not implement the flag.
+        //     (Batch 488: previously fell through to the ENOENT stub.)
         let a = SyscallArgs {
-            arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0x2000,
+            arg0: 0, arg1: absent_ptr, arg2: 0, arg3: absent2_ptr,
             arg4: 2, arg5: 0,
         };
         let v = dispatch_linux(nr::RENAMEAT2, &a).value;
-        if v != -i64::from(errno::ENOENT) {
+        if v != -i64::from(errno::EINVAL) {
             serial_println!(
-                "[syscall/linux]   FAIL: renameat2(EXCHANGE alone) -> {} (expected -ENOENT)",
+                "[syscall/linux]   FAIL: renameat2(EXCHANGE alone) -> {} (expected -EINVAL)",
                 v
             );
             return Err(KernelError::InternalError);
         }
 
         // (f) renameat2 EXCHANGE|NOREPLACE (flags=3) -> EINVAL via
-        //     gate 2.  Pre-batch: ENOENT (gate 2 missing).
+        //     gate 2 (mutual-exclusion, before gate 4).
         let a = SyscallArgs {
-            arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0x2000,
+            arg0: 0, arg1: absent_ptr, arg2: 0, arg3: absent2_ptr,
             arg4: 3, arg5: 0,
         };
         let v = dispatch_linux(nr::RENAMEAT2, &a).value;
@@ -58162,11 +58289,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
 
         // (g) renameat2 EXCHANGE|WHITEOUT (flags=6) -> EINVAL via
-        //     gate 2 (mutual-exclusion).  Pre-batch: ENOENT.  This
-        //     also confirms gate-2 fires BEFORE gate-3 (the WHITEOUT
-        //     CAP check would have to evaluate caller_pid otherwise).
+        //     gate 2 (mutual-exclusion).  Confirms gate-2 fires BEFORE
+        //     gate-3 (the WHITEOUT CAP check would have to evaluate
+        //     caller_pid otherwise).
         let a = SyscallArgs {
-            arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0x2000,
+            arg0: 0, arg1: absent_ptr, arg2: 0, arg3: absent2_ptr,
             arg4: 6, arg5: 0,
         };
         let v = dispatch_linux(nr::RENAMEAT2, &a).value;
@@ -58178,31 +58305,28 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // (h) renameat2 WHITEOUT alone (flags=4) -> ENOENT from
-        //     kernel context.  Gate 3 (CAP_MKNOD) bypasses because
-        //     caller_pid() == None during boot self-test (kernel
-        //     context = implicit root).  Falls through to
-        //     rename_impl which returns ENOENT.  For userspace
-        //     non-root callers the gate would fire EPERM here,
-        //     unverifiable from boot self-test but documented in
-        //     todo.txt.  Pre-batch: ENOENT (gate 3 missing) — same
-        //     observable end state from kernel context, but the
-        //     gate is now in place for userspace callers.
+        // (h) renameat2 WHITEOUT alone (flags=4) -> EINVAL from kernel
+        //     context.  Gate 3 (CAP_MKNOD) bypasses because caller_pid()
+        //     == None during boot self-test (kernel context = implicit
+        //     root), so it reaches gate 4, which rejects WHITEOUT as
+        //     unsupported by the native VFS.  For userspace non-root
+        //     callers gate 3 fires EPERM first (unverifiable from boot
+        //     self-test).  (Batch 488: previously fell through to ENOENT.)
         let a = SyscallArgs {
-            arg0: 0, arg1: 0x1000, arg2: 0, arg3: 0x2000,
+            arg0: 0, arg1: absent_ptr, arg2: 0, arg3: absent2_ptr,
             arg4: 4, arg5: 0,
         };
         let v = dispatch_linux(nr::RENAMEAT2, &a).value;
-        if v != -i64::from(errno::ENOENT) {
+        if v != -i64::from(errno::EINVAL) {
             serial_println!(
-                "[syscall/linux]   FAIL: renameat2(WHITEOUT alone, kctx) -> {} (expected -ENOENT)",
+                "[syscall/linux]   FAIL: renameat2(WHITEOUT alone, kctx) -> {} (expected -EINVAL)",
                 v
             );
             return Err(KernelError::InternalError);
         }
 
         serial_println!(
-            "[syscall/linux]   renameat2 EXCHANGE mutex + WHITEOUT CAP gates: OK"
+            "[syscall/linux]   renameat2 EXCHANGE mutex + WHITEOUT CAP + unsupported-flag gates: OK"
         );
     }
         Ok(())

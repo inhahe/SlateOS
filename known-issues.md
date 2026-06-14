@@ -765,16 +765,20 @@ inotify shim. Watches are NON-RECURSIVE and keyed by
 NORMALIZED PATH STRING, not inode — re-adding the same path returns the same wd
 (mask replaced, or OR-combined under `IN_MASK_ADD`); a watched path deleted and
 recreated keeps the same wd. `IN_ONESHOT`/`IN_DONT_FOLLOW`/`IN_EXCL_UNLINK` are
-accepted-but-ignored control bits. Linux FS create/delete syscalls
-(`mkdir`/`mkdirat`/`rmdir`/`unlink`/`unlinkat`) now route through the native VFS
-(`Vfs::mkdir`/`rmdir`/`remove`), so inotify events DO flow from those Linux-ABI
-operations; the `rename`/`renameat`/`renameat2` family is still stubbed (ENOENT),
-so renames via the Linux ABI do not yet emit `IN_MOVED_FROM`/`IN_MOVED_TO`.
+accepted-but-ignored control bits. Linux FS mutation syscalls
+(`mkdir`/`mkdirat`/`rmdir`/`unlink`/`unlinkat`/`rename`/`renameat`/`renameat2`)
+now route through the native VFS (`Vfs::mkdir`/`rmdir`/`remove`/`rename`), so
+inotify events DO flow from Linux-ABI filesystem operations — including
+`IN_MOVED_FROM`/`IN_MOVED_TO` for renames. `renameat2` honours `RENAME_NOREPLACE`
+(best-effort destination pre-check → `EEXIST`; documented TOCTOU since the FS has
+no atomic noreplace variant) and rejects `RENAME_EXCHANGE`/`RENAME_WHITEOUT` with
+`EINVAL` (the native VFS rename implements neither).
 
 **Impact:** low — the common "watch a dir for create/delete/modify/move/open/close"
 file-manager/build-tool idiom is fully covered, now including the `IN_ISDIR`
-dir-flag. Remaining gaps bite only apps that need inode-identity semantics across
-delete+recreate (rare) or inotify events from Linux-ABI mutation syscalls.
+dir-flag and Linux-ABI-driven mutations. Remaining gaps bite only apps that need
+inode-identity semantics across delete+recreate (rare), an atomic
+`RENAME_NOREPLACE`, or `RENAME_EXCHANGE`/`RENAME_WHITEOUT`.
 
 **Progress (2026-06-14): IN_ACCESS, then IN_OPEN / IN_CLOSE_WRITE /
 IN_CLOSE_NOWRITE now implemented.** All three are gated by the lock-free
@@ -806,11 +810,13 @@ and Opened + ClosedWrite for writable), the inotify boot self-test (a dir-create
 event asserting `IN_CREATE | IN_ISDIR`), and the posix `test_translate_isdir_or_in`
 host unit test (dir vs file subject, and IN_IGNORED never tagged).
 
-**Remaining fix:** (a) route the Linux-ABI **rename** family
-(`rename`/`renameat`/`renameat2`) through `Vfs::rename` so renames emit
-`IN_MOVED_FROM`/`IN_MOVED_TO` (create/delete done 2026-06-14 via `resolve_at_path`
-+ `require_fs_write` + `Vfs::mkdir`/`rmdir`/`remove`); (b) switch watch identity to
-inode if/when stable inode numbers are available.
+**Remaining fix:** all Linux-ABI mutation syscalls (mkdir/rmdir/unlink/rename
+family) now route through the native VFS (2026-06-14, via `resolve_at_path` +
+`require_fs_write` + `Vfs::mkdir`/`rmdir`/`remove`/`rename`), so the only items
+left are: (a) switch watch identity to inode if/when stable inode numbers are
+available; (b) an atomic `RENAME_NOREPLACE` (currently a best-effort stat
+pre-check with a documented TOCTOU); (c) `RENAME_EXCHANGE`/`RENAME_WHITEOUT`
+support (currently `EINVAL`).
 
 ### TD16. epoll fd readiness not reported when an epoll is nested in poll/select/epoll — RESOLVED 2026-06-14
 

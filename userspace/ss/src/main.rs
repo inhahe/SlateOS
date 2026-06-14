@@ -474,15 +474,197 @@ fn read_unix_sockets() -> Vec<SocketEntry> {
     entries
 }
 
+// ---------------------------------------------------------------------------
+// Kernel read-path fallback (SYS_TCP_LIST / SYS_TCP_LISTENER_LIST)
+//
+// The kernel does not populate /proc/net/{tcp,tcp6,...}, so the procfs parser
+// above always comes back empty on Slate OS. These read-only diagnostic
+// syscalls are the live data source for the TCP views (TD18 read-path wiring);
+// we fall back to them whenever the procfs read yields nothing. There is no
+// kernel-side enumeration for UDP/raw/unix sockets yet, so those views stay
+// empty until the matching syscalls land.
+// ---------------------------------------------------------------------------
+
+/// List active TCP connections (20-byte records). Returns count.
+const SYS_TCP_LIST: u64 = 840;
+/// List active TCP listeners (4-byte records). Returns count.
+const SYS_TCP_LISTENER_LIST: u64 = 841;
+
+const TCP_LIST_RECORD_SIZE: usize = 20;
+const TCP_LISTENER_RECORD_SIZE: usize = 4;
+
+/// Upper bound on records requested in one listing call.
+const MAX_TCP_RECORDS: usize = 1024;
+
+// Real syscall path: only when building the Slate OS binary (non-test). The
+// `gather_sockets` test paths reach the query functions, and executing a raw
+// `syscall` instruction on the host build machine is undefined — so under
+// `cargo test` we compile the ENOSYS stub instead and the fallback returns
+// empty (the pure record decoders are unit-tested directly).
+#[cfg(all(target_arch = "x86_64", not(test)))]
+unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
+    let ret: i64;
+    // SAFETY: Caller guarantees arguments are valid for the given syscall.
+    // The `syscall` instruction clobbers rcx and r11 per the System V ABI.
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            inlateout("rax") nr as i64 => ret,
+            in("rdi") a1,
+            in("rsi") a2,
+            in("rdx") a3,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+// Stub for non-x86_64 hosts and for host test builds (see note above).
+#[cfg(any(not(target_arch = "x86_64"), test))]
+unsafe fn syscall3(_nr: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
+    -38 // ENOSYS
+}
+
+/// Format four network-order octets as a dotted-quad string.
+fn fmt_octets(b: [u8; 4]) -> String {
+    format!("{}.{}.{}.{}", b[0], b[1], b[2], b[3])
+}
+
+/// Map the kernel's `net::tcp::TcpState` discriminant (byte `[12]` of a
+/// `SYS_TCP_LIST` record) to ss's [`SocketState`]. The kernel enum order is
+/// `Closed, Listen, SynSent, SynReceived, Established, FinWait1, FinWait2,
+/// TimeWait, CloseWait, LastAck` (see `kernel/src/net/tcp.rs`).
+fn kernel_tcp_state(raw: u8) -> SocketState {
+    match raw {
+        0 => SocketState::Close,
+        1 => SocketState::Listen,
+        2 => SocketState::SynSent,
+        3 => SocketState::SynRecv,
+        4 => SocketState::Established,
+        5 => SocketState::FinWait1,
+        6 => SocketState::FinWait2,
+        7 => SocketState::TimeWait,
+        8 => SocketState::CloseWait,
+        9 => SocketState::LastAck,
+        _ => SocketState::Unknown,
+    }
+}
+
+/// Decode a flat buffer of 20-byte `SYS_TCP_LIST` records into socket entries.
+/// A trailing partial record (if any) is ignored by `chunks_exact`.
+fn parse_tcp_list_records(buf: &[u8]) -> Vec<SocketEntry> {
+    buf.chunks_exact(TCP_LIST_RECORD_SIZE)
+        .map(|rec| {
+            // rec.len() == 20 guaranteed by chunks_exact.
+            let local_addr = fmt_octets([rec[0], rec[1], rec[2], rec[3]]);
+            let local_port = u16::from_be_bytes([rec[4], rec[5]]);
+            let remote_addr = fmt_octets([rec[6], rec[7], rec[8], rec[9]]);
+            let remote_port = u16::from_be_bytes([rec[10], rec[11]]);
+            let state = kernel_tcp_state(rec[12]);
+            // rx/tx buffered are u24 LE in [13..16] / [16..19].
+            let recv_q =
+                u64::from(rec[13]) | (u64::from(rec[14]) << 8) | (u64::from(rec[15]) << 16);
+            let send_q =
+                u64::from(rec[16]) | (u64::from(rec[17]) << 8) | (u64::from(rec[18]) << 16);
+            SocketEntry {
+                proto: SocketProto::Tcp,
+                state,
+                recv_q,
+                send_q,
+                local_addr,
+                local_port,
+                remote_addr,
+                remote_port,
+                pid: None,
+                process_name: None,
+                inode: 0,
+                uid: 0,
+                unix_path: None,
+                timer: None,
+            }
+        })
+        .collect()
+}
+
+/// Decode a flat buffer of 4-byte `SYS_TCP_LISTENER_LIST` records into socket
+/// entries in the `LISTEN` state.
+fn parse_tcp_listener_records(buf: &[u8]) -> Vec<SocketEntry> {
+    buf.chunks_exact(TCP_LISTENER_RECORD_SIZE)
+        .map(|rec| {
+            // rec.len() == 4 guaranteed by chunks_exact.
+            let local_port = u16::from_be_bytes([rec[0], rec[1]]);
+            // rec[2]/rec[3] = backlog used/max — not shown in the socket list.
+            SocketEntry {
+                proto: SocketProto::Tcp,
+                state: SocketState::Listen,
+                recv_q: 0,
+                send_q: 0,
+                local_addr: "0.0.0.0".to_string(),
+                local_port,
+                remote_addr: "0.0.0.0".to_string(),
+                remote_port: 0,
+                pid: None,
+                process_name: None,
+                inode: 0,
+                uid: 0,
+                unix_path: None,
+                timer: None,
+            }
+        })
+        .collect()
+}
+
+/// Query active TCP connections via `SYS_TCP_LIST`. Empty on failure.
+fn query_tcp_connections() -> Vec<SocketEntry> {
+    let mut buf = vec![0u8; MAX_TCP_RECORDS * TCP_LIST_RECORD_SIZE];
+    // SAFETY: buf is a valid writable slice; the kernel writes at most buf.len()
+    // bytes and returns the number of 20-byte records written.
+    let ret =
+        unsafe { syscall3(SYS_TCP_LIST, buf.as_mut_ptr() as u64, buf.len() as u64, 0) };
+    if ret < 0 {
+        return Vec::new();
+    }
+    let count = usize::try_from(ret).unwrap_or(0);
+    let byte_len = count.saturating_mul(TCP_LIST_RECORD_SIZE).min(buf.len());
+    parse_tcp_list_records(buf.get(..byte_len).unwrap_or(&[]))
+}
+
+/// Query active TCP listeners via `SYS_TCP_LISTENER_LIST`. Empty on failure.
+fn query_tcp_listeners() -> Vec<SocketEntry> {
+    let mut buf = vec![0u8; MAX_TCP_RECORDS * TCP_LISTENER_RECORD_SIZE];
+    // SAFETY: as above; records are 4 bytes and the return is the count.
+    let ret = unsafe {
+        syscall3(SYS_TCP_LISTENER_LIST, buf.as_mut_ptr() as u64, buf.len() as u64, 0)
+    };
+    if ret < 0 {
+        return Vec::new();
+    }
+    let count = usize::try_from(ret).unwrap_or(0);
+    let byte_len = count.saturating_mul(TCP_LISTENER_RECORD_SIZE).min(buf.len());
+    parse_tcp_listener_records(buf.get(..byte_len).unwrap_or(&[]))
+}
+
 fn gather_sockets(cfg: &Config) -> Vec<SocketEntry> {
     let mut all = Vec::new();
 
+    let mut tcp = Vec::new();
     if cfg.show_tcp && !cfg.ipv6_only {
-        all.extend(read_proc_net("/proc/net/tcp", SocketProto::Tcp));
+        tcp.extend(read_proc_net("/proc/net/tcp", SocketProto::Tcp));
     }
     if cfg.show_tcp && !cfg.ipv4_only {
-        all.extend(read_proc_net("/proc/net/tcp6", SocketProto::Tcp6));
+        tcp.extend(read_proc_net("/proc/net/tcp6", SocketProto::Tcp6));
     }
+    // The kernel does not populate /proc/net/tcp; fall back to SYS_TCP_LIST +
+    // SYS_TCP_LISTENER_LIST when the procfs read came back empty (TD18). These
+    // syscalls expose IPv4 connections only, so skip the fallback under -6.
+    if cfg.show_tcp && tcp.is_empty() && !cfg.ipv6_only {
+        tcp.extend(query_tcp_connections());
+        tcp.extend(query_tcp_listeners());
+    }
+    all.extend(tcp);
+
     if cfg.show_udp && !cfg.ipv6_only {
         all.extend(read_proc_net("/proc/net/udp", SocketProto::Udp));
     }
@@ -1099,5 +1281,87 @@ mod tests {
         let args = vec!["ss".to_string(), "-H".to_string()];
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.no_header);
+    }
+
+    // -----------------------------------------------------------------------
+    // Kernel read-path fallback decoders (SYS_TCP_LIST / LISTENER_LIST).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_kernel_tcp_state_mapping() {
+        assert_eq!(kernel_tcp_state(0), SocketState::Close);
+        assert_eq!(kernel_tcp_state(1), SocketState::Listen);
+        assert_eq!(kernel_tcp_state(2), SocketState::SynSent);
+        assert_eq!(kernel_tcp_state(3), SocketState::SynRecv);
+        assert_eq!(kernel_tcp_state(4), SocketState::Established);
+        assert_eq!(kernel_tcp_state(7), SocketState::TimeWait);
+        assert_eq!(kernel_tcp_state(9), SocketState::LastAck);
+        assert_eq!(kernel_tcp_state(10), SocketState::Unknown);
+        assert_eq!(kernel_tcp_state(255), SocketState::Unknown);
+    }
+
+    #[test]
+    fn test_parse_tcp_list_records() {
+        // 10.0.2.15:443 -> 10.0.2.2:54321, Established (4),
+        // rx_buffered=0x010203, tx_buffered=0x040506.
+        let rec: [u8; 20] = [
+            10, 0, 2, 15, // local IP (network-order octets)
+            0x01, 0xBB, // local port 443 (BE)
+            10, 0, 2, 2, // remote IP
+            0xD4, 0x31, // remote port 54321 (BE)
+            4, // state = Established
+            0x03, 0x02, 0x01, // rx_buffered u24 LE
+            0x06, 0x05, 0x04, // tx_buffered u24 LE
+            0x01, // flags — ignored
+        ];
+        let socks = parse_tcp_list_records(&rec);
+        assert_eq!(socks.len(), 1);
+        let s = &socks[0];
+        assert_eq!(s.proto, SocketProto::Tcp);
+        assert_eq!(s.local_addr, "10.0.2.15");
+        assert_eq!(s.local_port, 443);
+        assert_eq!(s.remote_addr, "10.0.2.2");
+        assert_eq!(s.remote_port, 54321);
+        assert_eq!(s.state, SocketState::Established);
+        assert_eq!(s.recv_q, 0x01_0203);
+        assert_eq!(s.send_q, 0x04_0506);
+    }
+
+    #[test]
+    fn test_parse_tcp_list_records_partial_ignored() {
+        // 20 valid bytes + 7 trailing partial bytes that must be ignored.
+        let mut buf = vec![0u8; 20];
+        buf[0] = 127;
+        buf[3] = 1;
+        buf[4] = 0x00; // port 80 BE
+        buf[5] = 0x50;
+        buf[12] = 4; // Established
+        buf.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7]);
+        let socks = parse_tcp_list_records(&buf);
+        assert_eq!(socks.len(), 1);
+        assert_eq!(socks[0].local_addr, "127.0.0.1");
+        assert_eq!(socks[0].local_port, 80);
+    }
+
+    #[test]
+    fn test_parse_tcp_listener_records() {
+        let buf: [u8; 8] = [
+            0x00, 0x16, 1, 5, // port 22, backlog 1/5
+            0x1F, 0x90, 0, 10, // port 8080, backlog 0/10
+        ];
+        let socks = parse_tcp_listener_records(&buf);
+        assert_eq!(socks.len(), 2);
+        assert_eq!(socks[0].proto, SocketProto::Tcp);
+        assert_eq!(socks[0].local_port, 22);
+        assert_eq!(socks[0].state, SocketState::Listen);
+        assert_eq!(socks[0].local_addr, "0.0.0.0");
+        assert_eq!(socks[1].local_port, 8080);
+        assert_eq!(socks[1].state, SocketState::Listen);
+    }
+
+    #[test]
+    fn test_parse_tcp_records_empty() {
+        assert!(parse_tcp_list_records(&[]).is_empty());
+        assert!(parse_tcp_listener_records(&[]).is_empty());
     }
 }

@@ -777,6 +777,18 @@ has been applied to all three read-path tools (`ifconfig`, `ip`, `route`):
   neither). UDP has no kernel socket-table syscall, so the UDP connection view
   stays empty. 9 new host tests (`cargo test -p netstat`: 31 pass). netstat is
   read-only (no write paths).
+- **`ss` / `sockstat` (TCP socket view) — DONE 2026-06-14.** Reads
+  `/proc/net/{tcp,tcp6,udp,udp6,raw,raw6,unix}`, all unpopulated. The TCP view
+  now falls back to `SYS_TCP_LIST=840` + `SYS_TCP_LISTENER_LIST=841` (IPv4 only,
+  so the fallback is skipped under `-6`), mapping the kernel `net::tcp::TcpState`
+  discriminant to ss's `SocketState`. UDP/raw/unix have no kernel enumeration
+  syscall yet and stay empty. NOTE: unlike the other net tools, ss's existing
+  `run_ss`/`run_sockstat` unit tests exercise `gather_sockets`, which reaches the
+  query functions — so the real `syscall` asm is gated
+  `#[cfg(all(target_arch="x86_64", not(test)))]` with an ENOSYS stub under
+  `test` to avoid executing a raw syscall on the host; the pure record decoders
+  are unit-tested directly. 5 new host tests (`cargo test -p ss`: 37 pass). ss is
+  read-only (no write paths).
 
 **Proper fix:** this is an **operator design decision**, not a mechanical fix —
 the kernel must first grow the missing ABI, and the *shape* of that ABI is a

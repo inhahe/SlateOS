@@ -1338,7 +1338,7 @@ pub fn build_linux_exit_elf(exit_code: u8) -> alloc::vec::Vec<u8> {
 ///     movabs rsi, &path            ; pathname
 ///     movabs rdx, &argv            ; argv = [&path, NULL]
 ///     movabs r10, &envp            ; envp = [NULL]
-///     xor   r8d, r8d               ; flags = 0
+///     mov   r8d, flags_extra       ; flags (0, or e.g. AT_SYMLINK_NOFOLLOW)
 ///     mov   eax, 322               ; SYS_execveat
 ///     syscall
 ///     mov   edi, 0xEE              ; (only reached if exec failed)
@@ -1357,13 +1357,18 @@ pub fn build_linux_exit_elf(exit_code: u8) -> alloc::vec::Vec<u8> {
 ///     movabs rsi, &empty           ; pathname = "" (AT_EMPTY_PATH)
 ///     movabs rdx, &argv
 ///     movabs r10, &envp
-///     mov   r8d, 0x1000            ; flags = AT_EMPTY_PATH
+///     mov   r8d, 0x1000|flags_extra; flags = AT_EMPTY_PATH (+ extra)
 ///     mov   eax, 322               ; SYS_execveat
 ///     syscall
 ///     mov   edi, 0xEE
 ///     mov   eax, 60
 ///     syscall
 ///   ```
+///
+/// `flags_extra` is OR'd into the `flags` argument (the fexecve form always
+/// adds `AT_EMPTY_PATH` on top). Pass `0` for the plain forms, or e.g.
+/// `AT_SYMLINK_NOFOLLOW` (0x100) to test that `execveat` refuses a symlink
+/// target (the launcher then exits `0xEE` because execveat returns `ELOOP`).
 ///
 /// On success control transfers to the target image (which should `exit`
 /// with a sentinel); on failure the launcher exits `0xEE`, so the test can
@@ -1376,7 +1381,11 @@ pub fn build_linux_exit_elf(exit_code: u8) -> alloc::vec::Vec<u8> {
     clippy::arithmetic_side_effects,
     clippy::cast_possible_truncation
 )]
-pub fn build_linux_execveat_test_elf(fexecve: bool, path_nul: &[u8]) -> alloc::vec::Vec<u8> {
+pub fn build_linux_execveat_test_elf(
+    fexecve: bool,
+    flags_extra: u32,
+    path_nul: &[u8],
+) -> alloc::vec::Vec<u8> {
     use alloc::vec;
 
     let phdr_offset: u64 = 64;
@@ -1422,8 +1431,6 @@ pub fn build_linux_execveat_test_elf(fexecve: bool, path_nul: &[u8]) -> alloc::v
         code.extend_from_slice(&[0x49, 0xBA]);
         envp_imm = code.len();
         code.extend_from_slice(&[0u8; 8]);
-        // mov r8d, 0x1000          (41 B8 00 10 00 00)  AT_EMPTY_PATH
-        code.extend_from_slice(&[0x41, 0xB8, 0x00, 0x10, 0x00, 0x00]);
     } else {
         // mov rdi, -100            (48 C7 C7 9C FF FF FF)  AT_FDCWD
         code.extend_from_slice(&[0x48, 0xC7, 0xC7, 0x9C, 0xFF, 0xFF, 0xFF]);
@@ -1440,10 +1447,14 @@ pub fn build_linux_execveat_test_elf(fexecve: bool, path_nul: &[u8]) -> alloc::v
         code.extend_from_slice(&[0x49, 0xBA]);
         envp_imm = code.len();
         code.extend_from_slice(&[0u8; 8]);
-        // xor r8d, r8d             (45 31 C0)  flags = 0
-        code.extend_from_slice(&[0x45, 0x31, 0xC0]);
     }
     // Common tail (both forms):
+    // mov r8d, <flags>             (41 B8 <imm32>)  — the fexecve form must
+    // carry AT_EMPTY_PATH (0x1000); both forms OR in any caller-requested
+    // extra flag bits (e.g. AT_SYMLINK_NOFOLLOW for the reject-symlink test).
+    let final_flags = if fexecve { 0x1000u32 | flags_extra } else { flags_extra };
+    code.extend_from_slice(&[0x41, 0xB8]);
+    code.extend_from_slice(&final_flags.to_le_bytes());
     // mov eax, 322                 (B8 42 01 00 00)  SYS_execveat
     code.extend_from_slice(&[0xB8, 0x42, 0x01, 0x00, 0x00]);
     // syscall                      (0F 05)

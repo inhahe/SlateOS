@@ -2595,9 +2595,9 @@ pub fn self_test_linux_execveat() -> KernelResult<()> {
     };
 
     // Case A: path form — execveat(AT_FDCWD, "/…/tgt", …, flags=0).
-    let elf_path = elf::build_linux_execveat_test_elf(false, TGT_PATH_NUL);
+    let elf_path = elf::build_linux_execveat_test_elf(false, 0, TGT_PATH_NUL);
     // Case B: fexecve form — open(target) then execveat(fd, "", …, AT_EMPTY_PATH).
-    let elf_fexecve = elf::build_linux_execveat_test_elf(true, TGT_PATH_NUL);
+    let elf_fexecve = elf::build_linux_execveat_test_elf(true, 0, TGT_PATH_NUL);
 
     let res_a = run_one(&elf_path, "path form (AT_FDCWD)");
     let res_b = if res_a.is_ok() {
@@ -2614,6 +2614,95 @@ pub fn self_test_linux_execveat() -> KernelResult<()> {
         "[spawn]   Linux execveat(2) (ring 3: path form + fexecve/AT_EMPTY_PATH, \
          target exit == {}): OK",
         SENTINEL
+    );
+
+    // Case C: AT_SYMLINK_NOFOLLOW must *refuse* a symlink target with ELOOP.
+    // Stage a symlink pointing at a valid target, then execveat it with
+    // AT_SYMLINK_NOFOLLOW: the launcher should fall through to its failure
+    // tail and exit 0xEE (execveat returned an error), proving the kernel
+    // rejected the final symlink component rather than transparently
+    // following it to a successful exec.
+    const LINK_PATH: &str = "/slateos-test-execveat-link";
+    const LINK_PATH_NUL: &[u8] = b"/slateos-test-execveat-link\0";
+    const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
+    const EXEC_FAIL: u8 = 0xEE;
+
+    // Re-stage the target (Case A/B removed it above) and the symlink to it.
+    let tgt_elf2 = elf::build_linux_exit_elf(SENTINEL);
+    if crate::fs::Vfs::write_file(TGT_PATH, &tgt_elf2).is_err()
+        || crate::fs::Vfs::symlink(LINK_PATH, TGT_PATH).is_err()
+    {
+        // Symlink staging unsupported here — skip the NOFOLLOW case but keep
+        // the (already-passed) happy-path result.
+        let _ = crate::fs::Vfs::remove(LINK_PATH);
+        let _ = crate::fs::Vfs::remove(TGT_PATH);
+        serial_println!(
+            "[spawn]   Linux execveat(2) AT_SYMLINK_NOFOLLOW: SKIP (symlink staging failed)"
+        );
+        return Ok(());
+    }
+
+    let elf_nofollow =
+        elf::build_linux_execveat_test_elf(false, AT_SYMLINK_NOFOLLOW, LINK_PATH_NUL);
+    let argv: &[&[u8]] = &[b"execveatprog"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-execveat-nofollow",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+    };
+
+    let nofollow_result = spawn_process(&elf_nofollow, &options);
+    let (state_nf, exit_nf) = match nofollow_result {
+        Ok(r) => {
+            crate::sched::yield_now();
+            crate::sched::yield_now();
+            crate::sched::yield_now();
+            crate::sched::yield_now();
+            let st = pcb::state(r.pid);
+            let ec = pcb::exit_code(r.pid);
+            thread::on_thread_exit(r.task_id);
+            pcb::destroy(r.pid);
+            (st, ec)
+        }
+        Err(e) => {
+            let _ = crate::fs::Vfs::remove(LINK_PATH);
+            let _ = crate::fs::Vfs::remove(TGT_PATH);
+            serial_println!("[spawn]   FAIL: execveat-nofollow spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let _ = crate::fs::Vfs::remove(LINK_PATH);
+    let _ = crate::fs::Vfs::remove(TGT_PATH);
+
+    if state_nf != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: execveat AT_SYMLINK_NOFOLLOW — expected Zombie, got {:?}",
+            state_nf
+        );
+        return Err(KernelError::InternalError);
+    }
+    // The launcher must have run its failure tail (exit 0xEE): a SENTINEL exit
+    // would mean execveat followed the symlink and exec'd the target.
+    if exit_nf != Some(i32::from(EXEC_FAIL)) {
+        serial_println!(
+            "[spawn]   FAIL: execveat AT_SYMLINK_NOFOLLOW — expected exit {} (ELOOP → \
+             launcher failure tail), got {:?} ({} would mean the symlink was followed)",
+            EXEC_FAIL, exit_nf, SENTINEL
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   Linux execveat(2) AT_SYMLINK_NOFOLLOW (ring 3: symlink target \
+         refused with ELOOP): OK"
     );
     Ok(())
 }

@@ -598,11 +598,11 @@ is logged for operator input in `open-questions.md`.
 
 ---
 
-### TD21. Minor Linux-ABI fidelity gap — procfs fd visibility for native processes — APPROXIMATION 2026-06-13; sendfile + copy_file_range + splice + tee transfer IMPLEMENTED 2026-06-14
+### TD21. Minor Linux-ABI fidelity gap — procfs fd visibility for native processes — APPROXIMATION 2026-06-13; sendfile + copy_file_range + splice + tee + vmsplice transfer IMPLEMENTED 2026-06-14
 
 **Where:** `kernel/src/fs/procfs` (`/proc/<pid>/fd[info]`, `linux_fd_list`) and
 `kernel/src/syscall/linux.rs` (`sys_sendfile`, `sys_copy_file_range`,
-`sys_splice`, `sys_tee`). All are documented in-code.
+`sys_splice`, `sys_tee`, `sys_vmsplice`). All are documented in-code.
 
 **What it is:** one remaining deliberate Linux-ABI approximation:
 - **`/proc/<pid>/fd/` and `/fdinfo/` are EMPTY for *native* processes.** Native
@@ -702,6 +702,55 @@ here — a partial destination write simply copies fewer bytes and leaves the
 source intact. Tested by `self_test_tee` (duplicate + verify the source is
 unchanged, empty→EAGAIN, EOF→0, len-clamp). The whole splice/tee/vmsplice
 gate-only batch checks (539/540/541) still pass.
+
+**Progress (2026-06-14) — vmsplice data transfer implemented.** `sys_vmsplice`
+was the last validate-then-`EINVAL` stub in the zero-copy family. It now moves
+data between a process's user iovecs and a pipe via `vmsplice_core`. Direction is
+chosen by the pipe-fd's access mode (Linux's `vmsplice_type`): a write-end
+(FMODE_WRITE) **gathers** user buffers into the pipe (ITER_SOURCE); a read-end
+(FMODE_READ) **scatters** pipe bytes out to the user buffers (ITER_DEST). The
+Linux gate order is preserved: flags `& !SPLICE_F_ALL`→EINVAL; fd validity→EBADF;
+`nr_segs==0`→0; `nr_segs>1024` (UIO_MAXIOV)→EINVAL; iov pointer NULL→EFAULT;
+`validate_user_read` of the iovec array→EFAULT; then the fd must resolve to a
+**pipe** (non-pipe→EBADF, matching `get_pipe_info`). Each 16-byte iovec is parsed
+(`iov_base`,`iov_len`), zero-length segs skipped, and `iov_base==0` /
+`base+len > USER_SPACE_END` rejected EFAULT; the running total is capped at
+`MAX_RW_COUNT`→EINVAL. A broken pipe yields EPIPE, non-blocking exhaustion with
+nothing moved yields EAGAIN, and the first-byte-propagate / later-error-returns-
+partial convention matches the siblings.
+  The novel piece is **cross-address-space user access.** The existing
+`copy_from_user`/`copy_to_user` (`mm/user.rs`) target the *current* CR3 via
+STAC/CLAC, which is the kernel's own address space at boot (no user mappings), so
+they can't be exercised by a boot self-test. Two new pml4-parameterized primitives
+— `copy_from_user_as(pml4, src, dst)` and `copy_to_user_as(pml4, dst, src)` —
+walk an *explicit* page table and reach each user page through the HHDM
+(physical→kernel direct map), sidestepping SMAP entirely. In production
+`sys_vmsplice` passes the caller's own pml4 (`cr3_to_pml4(read_cr3())`); the self-
+test passes a throwaway process's pml4. These are also the reusable primitive a
+future `process_vm_readv`/`writev` will need. Tested by the post-process-init boot
+self-test `self_test_vmsplice`, which spins up a throwaway PCB, maps two adjacent
+writable user frames, and checks: cross-page `copy_from_user_as`, cross-page
+`copy_to_user_as` plus rejection of an unmapped VA, ITER_SOURCE (user→pipe), and
+ITER_DEST (pipe→user). The batch-541 gate-only checks still pass (kernel-context
+callers have no caller-pid/fd table and terminate before the transfer).
+
+**Bug fixed in passing (2026-06-14) — rmap/swap-reclaimable leak on process
+teardown.** While boot-testing vmsplice the `mm/compact.rs` Test 5 assertion
+("collect_private_frames should find our fake entry") began panicking. Root cause
+was a genuine pre-existing correctness bug, *not* the test: `clear_user_address_
+space` (`mm/page_table.rs`) freed a process's user frames (`frame::free_frame`)
+without ever calling `rmap::remove` or `swap::unregister_reclaimable` for them. So
+every process destroy/exec leaked stale reverse-mappings and reclaimable entries
+pointing at frames that were freed and could be reused — a real hazard (memory
+compaction or the swap reclaimer could act on a freed-and-reused frame) that also
+let leaked rmap entries accumulate until they crowded out compact's fragile
+4-slot probe. **Fix:** in the frame-freeing loop, before `free_frame`, the page-
+table indices are reassembled into the frame's virtual base
+(`(pml4_idx<<39)|(pdpt_idx<<30)|(pd_idx<<21)|(pt_idx<<12)`) and used to call
+`rmap::remove(frame_phys, pml4_phys, virt_base)` and
+`swap::unregister_reclaimable(pml4_phys, virt_base)` (both no-ops for untracked
+frames). After the fix the rmap table is empty at compact time and Test 5 passes
+(`found=1, saw_fake=true`).
 
 **Impact:** low — native-process fd introspection via `/proc` is unavailable
 (tools must use the native fd API).

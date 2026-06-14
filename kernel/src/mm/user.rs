@@ -323,6 +323,142 @@ pub unsafe fn copy_to_user(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Cross-address-space user memory copies
+// ---------------------------------------------------------------------------
+
+/// Resolve the physical address backing user virtual address `va` in the
+/// address space rooted at `pml4`, optionally requiring the page to be
+/// writable.
+///
+/// Returns the full physical address (including the page offset).
+fn user_page_phys(pml4: u64, va: u64, need_writable: bool) -> KernelResult<u64> {
+    let virt = VirtAddr::new(va);
+    if need_writable {
+        let flags = page_table::translate_flags(pml4, virt).ok_or(KernelError::InvalidAddress)?;
+        if !flags.contains(PageFlags::WRITABLE) {
+            return Err(KernelError::InvalidAddress);
+        }
+    }
+    page_table::translate(pml4, virt).ok_or(KernelError::InvalidAddress)
+}
+
+/// Copy `dst.len()` bytes from the user range starting at `user_src`, in the
+/// address space rooted at `pml4`, into the kernel slice `dst`.
+///
+/// Unlike [`copy_from_user`], which accesses the *current* address space via
+/// STAC/CLAC, this walks an explicit page table and reads each user page
+/// through its HHDM physical mapping.  That makes it usable for
+/// cross-address-space transfers (e.g. `vmsplice`, and a future
+/// `process_vm_readv`) and lets a kernel-context self-test drive it against a
+/// throwaway process's page table — the current (kernel) address space has no
+/// user mappings.  Going through the HHDM also sidesteps SMAP entirely, so no
+/// STAC/CLAC window is opened.
+///
+/// In a real syscall, pass the caller's PML4
+/// (`cr3_to_pml4(read_cr3())`), which is exactly the address space being read.
+///
+/// # Errors
+///
+/// [`KernelError::InvalidAddress`] if any part of the range is null, wraps,
+/// escapes user space, or is not mapped in `pml4`.
+//
+// Arithmetic here is bounded page-walk index math (page offsets are `<
+// PAGE_SIZE`, `copied < len`); overflow is the failure condition, not a bug,
+// and the boundary additions use `checked_add`.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn copy_from_user_as(pml4: u64, user_src: u64, dst: &mut [u8]) -> KernelResult<()> {
+    let len = dst.len();
+    if len == 0 {
+        return Ok(());
+    }
+    if user_src == 0 {
+        return Err(KernelError::InvalidAddress);
+    }
+    let end = user_src
+        .checked_add(len as u64)
+        .ok_or(KernelError::InvalidAddress)?;
+    if end > USER_SPACE_END {
+        return Err(KernelError::InvalidAddress);
+    }
+    let hhdm = page_table::hhdm().ok_or(KernelError::InvalidAddress)?;
+
+    let mut copied: usize = 0;
+    let mut va = user_src;
+    while copied < len {
+        let page_off = va & (PAGE_SIZE - 1);
+        let in_page = (PAGE_SIZE - page_off) as usize;
+        let n = in_page.min(len - copied);
+        let phys = user_page_phys(pml4, va, false)?;
+        let kva = hhdm.checked_add(phys).ok_or(KernelError::InvalidAddress)?;
+        // SAFETY: `phys` is a mapped physical address returned by translate();
+        // the HHDM maps all physical memory, so `kva` is a valid readable
+        // kernel pointer to `n` bytes that stay within a single 4 KiB page.
+        let src = unsafe { core::slice::from_raw_parts(kva as *const u8, n) };
+        let next = copied.checked_add(n).ok_or(KernelError::InvalidAddress)?;
+        dst.get_mut(copied..next)
+            .ok_or(KernelError::InvalidAddress)?
+            .copy_from_slice(src);
+        copied = next;
+        va = va.checked_add(n as u64).ok_or(KernelError::InvalidAddress)?;
+    }
+    Ok(())
+}
+
+/// Copy `src.len()` bytes from the kernel slice `src` into the user range
+/// starting at `user_dst`, in the address space rooted at `pml4`.
+///
+/// The write-side counterpart of [`copy_from_user_as`]: every destination
+/// page must be present *and* writable in `pml4`, and bytes are written
+/// through the HHDM physical mapping (no STAC/CLAC window).
+///
+/// # Errors
+///
+/// [`KernelError::InvalidAddress`] if any part of the range is null, wraps,
+/// escapes user space, or is not mapped writable in `pml4`.
+//
+// See `copy_from_user_as` for the arithmetic justification.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn copy_to_user_as(pml4: u64, user_dst: u64, src: &[u8]) -> KernelResult<()> {
+    let len = src.len();
+    if len == 0 {
+        return Ok(());
+    }
+    if user_dst == 0 {
+        return Err(KernelError::InvalidAddress);
+    }
+    let end = user_dst
+        .checked_add(len as u64)
+        .ok_or(KernelError::InvalidAddress)?;
+    if end > USER_SPACE_END {
+        return Err(KernelError::InvalidAddress);
+    }
+    let hhdm = page_table::hhdm().ok_or(KernelError::InvalidAddress)?;
+
+    let mut copied: usize = 0;
+    let mut va = user_dst;
+    while copied < len {
+        let page_off = va & (PAGE_SIZE - 1);
+        let in_page = (PAGE_SIZE - page_off) as usize;
+        let n = in_page.min(len - copied);
+        let phys = user_page_phys(pml4, va, true)?;
+        let kva = hhdm.checked_add(phys).ok_or(KernelError::InvalidAddress)?;
+        let next = copied.checked_add(n).ok_or(KernelError::InvalidAddress)?;
+        let chunk = src
+            .get(copied..next)
+            .ok_or(KernelError::InvalidAddress)?;
+        // SAFETY: `phys` is a mapped, writable physical address (checked via
+        // translate_flags); the HHDM maps all physical memory, so `kva` is a
+        // valid writable kernel pointer to `n` bytes within a single 4 KiB
+        // page.
+        let out = unsafe { core::slice::from_raw_parts_mut(kva as *mut u8, n) };
+        out.copy_from_slice(chunk);
+        copied = next;
+        va = va.checked_add(n as u64).ok_or(KernelError::InvalidAddress)?;
+    }
+    Ok(())
+}
+
 /// Read a single value from user-space (SMAP-safe).
 ///
 /// Validates the pointer, then reads a `T`-sized value.  This is the

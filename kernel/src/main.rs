@@ -1235,6 +1235,14 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: tee self-test failed: {:?}", e);
     }
 
+    // vmsplice(2) data-transfer test — drives vmsplice_core and the
+    // cross-address-space copy primitives against a throwaway process's page
+    // table (the boot address space has no user mappings), so it must run after
+    // process/paging init.
+    if let Err(e) = syscall::linux::self_test_vmsplice() {
+        serial_println!("WARNING: vmsplice self-test failed: {:?}", e);
+    }
+
     // File-backed Linux mmap test (needs a writable VFS to stage a file, so
     // it runs here rather than in syscall::linux::self_test() which precedes
     // VFS init).  Exercises the path ld.so uses to map shared objects.

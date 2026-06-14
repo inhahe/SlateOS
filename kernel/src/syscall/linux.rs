@@ -20348,11 +20348,235 @@ fn sys_vmsplice(args: &SyscallArgs) -> SyscallResult {
         return linux_err(errno::EFAULT);
     }
     // Each iovec is 16 bytes (ptr + len).
-    let total = nr_segs.saturating_mul(16);
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, total) {
+    let iov_bytes = nr_segs.saturating_mul(16);
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, iov_bytes) {
         return linux_err(linux_errno_for(e));
     }
-    linux_err(errno::EINVAL)
+
+    // do_vmsplice (fs/splice.c): the data path needs the calling process's fd
+    // table and address space.  Kernel-context callers (caller_pid()==None)
+    // have neither — preserve the historical terminal EINVAL after the no-op
+    // front gates (self_test_vmsplice drives vmsplice_core directly instead).
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => return linux_err(errno::EINVAL),
+    };
+    use crate::proc::linux_fd::HandleKind;
+    let entry = match pcb::linux_fd_lookup(pid, fd) {
+        Some(e) => e,
+        None => return linux_err(errno::EBADF),
+    };
+
+    // vmsplice_type() direction: FMODE_WRITE -> ITER_SOURCE (user -> pipe);
+    // FMODE_READ -> ITER_DEST (pipe -> user).  A pipe end is opened for a
+    // single direction, so its access mode selects the transfer direction.
+    let to_pipe = fd_access_is_writable(entry.status_flags);
+
+    // get_pipe_info(): vmsplice only operates on a pipe; any other fd kind
+    // (regular file, memfd, ...) -> EBADF, evaluated after import_iovec above.
+    if !matches!(entry.kind, HandleKind::Pipe) {
+        return linux_err(errno::EBADF);
+    }
+
+    // import_iovec(): copy the iovec array out of user memory and bounds-check
+    // each segment (access_ok), accumulating the cumulative byte count under
+    // MAX_RW_COUNT.  Mapping faults on the segment payloads surface later, at
+    // copy time, exactly like every other user-copy in the kernel.
+    let caller_pml4 = crate::mm::page_table::cr3_to_pml4(crate::mm::page_table::read_cr3());
+    let mut iov_raw = alloc::vec![0u8; iov_bytes];
+    if let Err(e) = crate::mm::user::copy_from_user_as(caller_pml4, args.arg1, &mut iov_raw) {
+        return linux_err(linux_errno_for(e));
+    }
+    let mut iovecs: alloc::vec::Vec<(u64, u64)> = alloc::vec::Vec::with_capacity(nr_segs);
+    let mut acc: u64 = 0;
+    for seg in 0..nr_segs {
+        let base_off = seg.saturating_mul(16);
+        let Some(base) = read_u64_le(&iov_raw, base_off) else {
+            return linux_err(errno::EFAULT);
+        };
+        let Some(len) = read_u64_le(&iov_raw, base_off.saturating_add(8)) else {
+            return linux_err(errno::EFAULT);
+        };
+        if len == 0 {
+            continue;
+        }
+        // access_ok: the whole segment must lie within the user half.
+        let seg_end = match base.checked_add(len) {
+            Some(e) => e,
+            None => return linux_err(errno::EFAULT),
+        };
+        if base == 0 || seg_end > crate::mm::page_table::USER_SPACE_END {
+            return linux_err(errno::EFAULT);
+        }
+        // MAX_RW_COUNT cap on the cumulative byte count.
+        acc = match acc.checked_add(len) {
+            Some(a) if a <= SENDFILE_MAX_COUNT => a,
+            _ => return linux_err(errno::EINVAL),
+        };
+        iovecs.push((base, len));
+    }
+    if iovecs.is_empty() {
+        return SyscallResult::ok(0);
+    }
+
+    let nonblock = (flags & SPLICE_F_NONBLOCK) != 0;
+    match vmsplice_core(caller_pml4, entry.raw_handle, to_pipe, &iovecs, nonblock) {
+        #[allow(clippy::cast_possible_wrap)]
+        Ok(moved) => SyscallResult::ok(moved as i64),
+        Err(crate::error::KernelError::ChannelClosed) => linux_err(errno::EPIPE),
+        Err(crate::error::KernelError::WouldBlock) => linux_err(errno::EAGAIN),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
+}
+
+/// Parse a little-endian `u64` at byte offset `off` of `buf`, or `None` if the
+/// 8-byte field would run past the end of the buffer.
+fn read_u64_le(buf: &[u8], off: usize) -> Option<u64> {
+    let end = off.checked_add(8)?;
+    let slice = buf.get(off..end)?;
+    let arr: [u8; 8] = slice.try_into().ok()?;
+    Some(u64::from_le_bytes(arr))
+}
+
+/// Core vmsplice transfer between user iovecs (addresses interpreted in the
+/// address space rooted at `pml4`) and a pipe end identified by `pipe_handle`.
+///
+/// `to_pipe == true` is ITER_SOURCE: gather the iovec bytes and write them
+/// into the pipe (the fd was the pipe's write end / FMODE_WRITE).
+/// `to_pipe == false` is ITER_DEST: read bytes from the pipe and scatter them
+/// into the iovecs (the fd was the read end / FMODE_READ).
+///
+/// `iovecs` are `(base, len)` pairs already imported from user memory.  Bytes
+/// move through a kernel bounce buffer; per-segment user access uses
+/// [`crate::mm::user::copy_from_user_as`] / `copy_to_user_as`, so the same
+/// path serves a real syscall (caller's PML4) and the boot self-test (a
+/// throwaway PML4).
+///
+/// Short-transfer / error semantics mirror Linux's splice family: an error
+/// before any byte moves propagates; once any byte has moved a later error is
+/// swallowed and the partial count returned.  In the pipe->user direction a
+/// blocking read is only attempted while nothing has been transferred yet
+/// (mirroring `splice_core`'s `allow_block = total == 0`), so a partially
+/// satisfied blocking call drains what is buffered and returns rather than
+/// stalling.
+fn vmsplice_core(
+    pml4: u64,
+    pipe_handle: u64,
+    to_pipe: bool,
+    iovecs: &[(u64, u64)],
+    nonblock: bool,
+) -> crate::error::KernelResult<u64> {
+    use crate::error::KernelError;
+    let h = crate::ipc::pipe::PipeHandle::from_raw(pipe_handle);
+    let mut buf = alloc::vec![0u8; SENDFILE_CHUNK];
+    let mut total: u64 = 0;
+
+    'segs: for &(base, len) in iovecs {
+        let mut off: u64 = 0;
+        while off < len {
+            #[allow(clippy::cast_possible_truncation)]
+            let want = len.saturating_sub(off).min(SENDFILE_CHUNK as u64) as usize;
+            if want == 0 {
+                break;
+            }
+            let uaddr = match base.checked_add(off) {
+                Some(a) => a,
+                None => break 'segs,
+            };
+
+            if to_pipe {
+                // Gather: user -> bounce buffer -> pipe.
+                let slice = match buf.get_mut(..want) {
+                    Some(s) => s,
+                    None => break 'segs,
+                };
+                match crate::mm::user::copy_from_user_as(pml4, uaddr, slice) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        if total == 0 {
+                            return Err(e);
+                        }
+                        break 'segs;
+                    }
+                }
+                let mut written = 0usize;
+                while written < want {
+                    let chunk = match slice.get(written..want) {
+                        Some(s) => s,
+                        None => break,
+                    };
+                    let res = if nonblock {
+                        crate::ipc::pipe::try_write(h, chunk)
+                    } else {
+                        crate::ipc::pipe::write(h, chunk)
+                    };
+                    match res {
+                        Ok(0) => break,
+                        Ok(w) => written = written.saturating_add(w),
+                        Err(e) => {
+                            if total == 0 && written == 0 {
+                                return Err(e);
+                            }
+                            return Ok(total.saturating_add(written as u64));
+                        }
+                    }
+                }
+                total = total.saturating_add(written as u64);
+                off = off.saturating_add(written as u64);
+                if written < want {
+                    // Pipe accepted fewer bytes than offered — stop here.
+                    return Ok(total);
+                }
+            } else {
+                // Scatter: pipe -> bounce buffer -> user.
+                let slice = match buf.get_mut(..want) {
+                    Some(s) => s,
+                    None => break 'segs,
+                };
+                let allow_block = !nonblock && total == 0;
+                let res = if allow_block {
+                    crate::ipc::pipe::read(h, slice)
+                } else {
+                    crate::ipc::pipe::try_read(h, slice)
+                };
+                let n = match res {
+                    Ok(0) => return Ok(total), // EOF: writer closed, nothing buffered
+                    Ok(n) => n,
+                    Err(KernelError::WouldBlock) => {
+                        if total == 0 {
+                            return Err(KernelError::WouldBlock);
+                        }
+                        return Ok(total);
+                    }
+                    Err(e) => {
+                        if total == 0 {
+                            return Err(e);
+                        }
+                        return Ok(total);
+                    }
+                };
+                let got = match slice.get(..n) {
+                    Some(s) => s,
+                    None => return Ok(total),
+                };
+                match crate::mm::user::copy_to_user_as(pml4, uaddr, got) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        if total == 0 {
+                            return Err(e);
+                        }
+                        return Ok(total);
+                    }
+                }
+                total = total.saturating_add(n as u64);
+                off = off.saturating_add(n as u64);
+                // If the pipe yielded fewer bytes than requested, loop again;
+                // the next read in this call is non-blocking (total > 0) and
+                // returns the accumulated count once the pipe drains.
+            }
+        }
+    }
+    Ok(total)
 }
 
 /// Positional write of `data` to a copy_file_range destination (File / MemFd)
@@ -41572,6 +41796,216 @@ pub fn self_test_tee() -> crate::error::KernelResult<()> {
 
     serial_println!(
         "[syscall/linux]   tee (duplicate + non-consumption, empty->EAGAIN, EOF->0, len-clamp): OK"
+    );
+    Ok(())
+}
+
+/// End-to-end test of the vmsplice data path ([`vmsplice_core`]) and the
+/// cross-address-space copy primitives it relies on
+/// ([`crate::mm::user::copy_from_user_as`] / `copy_to_user_as`).
+///
+/// `sys_vmsplice` moves bytes between *user* iovecs and a pipe.  At boot the
+/// current address space is the kernel's, with no user mappings, so — exactly
+/// like [`self_test_file_mmap`] — this stages a **throwaway process** with its
+/// own page table (via [`pcb::create`]), maps two adjacent writable user
+/// frames into it, and drives the transfer against that explicit PML4 rather
+/// than the (kernel) current address space.
+///
+/// Coverage:
+///  1. **`copy_from_user_as` across a page boundary**: stage a position-
+///     dependent pattern spanning both frames, copy it out, byte-compare.
+///  2. **`copy_to_user_as` across a page boundary**: write a second pattern in,
+///     read it back through the HHDM, byte-compare.  Plus a negative check
+///     that an unmapped user VA is rejected.
+///  3. **ITER_SOURCE (user -> pipe)**: gather a user buffer into a pipe and
+///     verify the pipe received exactly those bytes.
+///  4. **ITER_DEST (pipe -> user)**: scatter buffered pipe bytes into a user
+///     frame and verify the frame received exactly those bytes.
+//
+// Boot self-test scaffolding (never on a production path): arithmetic is over
+// fixed frame-size/index constants and HHDM addresses that cannot overflow on
+// x86_64, and the byte-pattern casts are masked to a single byte first.
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+pub fn self_test_vmsplice() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+    use crate::ipc::pipe;
+    use crate::mm::frame;
+    use crate::mm::page_table::{self, PageFlags, VirtAddr};
+    use crate::serial_println;
+
+    // 16 KiB-aligned base in the low user half, well clear of anything else.
+    const USER_BASE: u64 = 0x2000_0000;
+    let frame_size = frame::FRAME_SIZE as u64;
+
+    // Throwaway process with its own address space.
+    let pid = pcb::create("linux-vmsplice-test", 0);
+    let Some(pml4) = pcb::get_pml4(pid).filter(|&p| p != 0) else {
+        pcb::destroy(pid);
+        serial_println!("[syscall/linux]   FAIL: vmsplice test process has no PML4");
+        return Err(KernelError::InternalError);
+    };
+
+    macro_rules! teardown {
+        () => {{
+            pcb::destroy(pid);
+        }};
+    }
+    macro_rules! fail {
+        ($($arg:tt)*) => {{
+            teardown!();
+            serial_println!($($arg)*);
+            return Err(KernelError::InternalError);
+        }};
+    }
+
+    // Map two adjacent writable user frames at USER_BASE and USER_BASE+16KiB.
+    let flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER_ACCESSIBLE;
+    for i in 0..2u64 {
+        let va = USER_BASE + i * frame_size;
+        let phys = match frame::alloc_frame_zeroed() {
+            Ok(p) => p,
+            Err(e) => {
+                teardown!();
+                return Err(e);
+            }
+        };
+        // SAFETY: `pml4` is the throwaway process's freshly created table; `va`
+        // is frame-aligned and in the user half; `phys` is a freshly allocated
+        // zeroed frame owned by this mapping.
+        if let Err(e) = unsafe { page_table::map_frame(pml4, VirtAddr::new(va), phys, flags) } {
+            // SAFETY: `phys` was just allocated and the map failed, so it is
+            // unmapped and owned solely by us — safe to return to the allocator.
+            let _ = unsafe { frame::free_frame(phys) };
+            teardown!();
+            return Err(e);
+        }
+    }
+
+    let hhdm = match page_table::hhdm() {
+        Some(h) => h,
+        None => fail!("[syscall/linux]   FAIL: vmsplice test: no HHDM"),
+    };
+    // Stage/inspect a user byte directly through the throwaway page table.
+    let put = |va: u64, b: u8| -> bool {
+        match page_table::translate(pml4, VirtAddr::new(va)) {
+            Some(phys) => {
+                // SAFETY: `phys` is mapped in `pml4`; the HHDM maps all physical
+                // memory, so `hhdm + phys` is a valid writable kernel pointer.
+                unsafe { *((hhdm + phys) as *mut u8) = b };
+                true
+            }
+            None => false,
+        }
+    };
+    let get = |va: u64| -> Option<u8> {
+        page_table::translate(pml4, VirtAddr::new(va)).map(|phys|
+            // SAFETY: `phys` is mapped in `pml4`; the HHDM maps all physical
+            // memory, so `hhdm + phys` is a valid readable kernel pointer.
+            unsafe { *((hhdm + phys) as *const u8) })
+    };
+
+    // (1) copy_from_user_as across the page boundary.
+    let span = frame_size as usize + 50;
+    let mut expected = alloc::vec![0u8; span];
+    for (i, slot) in expected.iter_mut().enumerate() {
+        *slot = ((i.wrapping_mul(31).wrapping_add(7) & 0xff) as u8) | 1;
+    }
+    for (i, &b) in expected.iter().enumerate() {
+        if !put(USER_BASE + i as u64, b) {
+            fail!("[syscall/linux]   FAIL: vmsplice stage byte {}", i);
+        }
+    }
+    let mut rb = alloc::vec![0u8; span];
+    if let Err(e) = crate::mm::user::copy_from_user_as(pml4, USER_BASE, &mut rb) {
+        teardown!();
+        return Err(e);
+    }
+    if rb != expected {
+        fail!("[syscall/linux]   FAIL: copy_from_user_as cross-page mismatch");
+    }
+
+    // (2) copy_to_user_as across the page boundary, plus an unmapped-VA reject.
+    let mut pat2 = alloc::vec![0u8; span];
+    for (i, slot) in pat2.iter_mut().enumerate() {
+        *slot = ((i.wrapping_mul(17).wrapping_add(3) & 0xff) as u8) | 1;
+    }
+    if let Err(e) = crate::mm::user::copy_to_user_as(pml4, USER_BASE, &pat2) {
+        teardown!();
+        return Err(e);
+    }
+    for (i, &b) in pat2.iter().enumerate() {
+        if get(USER_BASE + i as u64) != Some(b) {
+            fail!("[syscall/linux]   FAIL: copy_to_user_as readback at {}", i);
+        }
+    }
+    let mut one = [0u8; 1];
+    if crate::mm::user::copy_from_user_as(pml4, USER_BASE + 8 * frame_size, &mut one).is_ok() {
+        fail!("[syscall/linux]   FAIL: copy_from_user_as of unmapped VA should fail");
+    }
+
+    // (3) ITER_SOURCE: user -> pipe.  User pages currently hold `pat2`.
+    {
+        const N: usize = 200;
+        let (p_r, p_w) = pipe::create();
+        let iov = alloc::vec![(USER_BASE, N as u64)];
+        let moved = match vmsplice_core(pml4, p_w.raw(), true, &iov, true) {
+            Ok(m) => m,
+            Err(e) => {
+                pipe::close(p_r);
+                pipe::close(p_w);
+                teardown!();
+                return Err(e);
+            }
+        };
+        let mut got = alloc::vec![0u8; N];
+        let gn = pipe::try_read(p_r, &mut got).unwrap_or(0);
+        pipe::close(p_r);
+        pipe::close(p_w);
+        if moved != N as u64 || gn != N || got.get(..N) != pat2.get(..N) {
+            fail!(
+                "[syscall/linux]   FAIL: vmsplice user->pipe moved {} gn {}",
+                moved, gn
+            );
+        }
+    }
+
+    // (4) ITER_DEST: pipe -> user (into the second frame).
+    {
+        const N: usize = 128;
+        let target = USER_BASE + frame_size;
+        let src: alloc::vec::Vec<u8> = (0..N as u32).map(|i| ((i & 0xff) as u8) | 1).collect();
+        let (q_r, q_w) = pipe::create();
+        let _ = pipe::try_write(q_w, &src);
+        for i in 0..N as u64 {
+            let _ = put(target + i, 0);
+        }
+        let iov = alloc::vec![(target, N as u64)];
+        let moved = match vmsplice_core(pml4, q_r.raw(), false, &iov, true) {
+            Ok(m) => m,
+            Err(e) => {
+                pipe::close(q_r);
+                pipe::close(q_w);
+                teardown!();
+                return Err(e);
+            }
+        };
+        pipe::close(q_r);
+        pipe::close(q_w);
+        let mut back = alloc::vec![0u8; N];
+        for (i, slot) in back.iter_mut().enumerate() {
+            match get(target + i as u64) {
+                Some(g) => *slot = g,
+                None => fail!("[syscall/linux]   FAIL: vmsplice pipe->user readback {}", i),
+            }
+        }
+        if moved != N as u64 || back != src {
+            fail!("[syscall/linux]   FAIL: vmsplice pipe->user moved {}", moved);
+        }
+    }
+
+    teardown!();
+    serial_println!(
+        "[syscall/linux]   vmsplice (copy_*_user_as cross-page, user->pipe, pipe->user): OK"
     );
     Ok(())
 }

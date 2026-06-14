@@ -56983,6 +56983,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_mkdir_rename_family()?;
+
+    #[inline(never)]
+    fn self_test_mkdir_rename_family() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // mkdir / mkdirat / rmdir / unlink / unlinkat / rename family —
     // pointer validation plus principled errno.
     {
@@ -57342,6 +57347,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   renameat2 unsigned-int truncation (high-half ignored): OK"
         );
+    }
+        Ok(())
     }
 
     // Batch 347 — sys_renameat2 EXCHANGE mutual-exclusion gate

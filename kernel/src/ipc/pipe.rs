@@ -266,6 +266,37 @@ impl Pipe {
         self.len -= to_read;
         to_read
     }
+
+    /// Copy up to `out.len()` bytes from the buffered data starting at logical
+    /// `offset` (0 = oldest buffered byte) into `out`, WITHOUT consuming them
+    /// (head/len are unchanged).  Returns the number of bytes copied, which is
+    /// 0 once `offset >= len`.  Used by `tee`, which duplicates pipe data
+    /// non-destructively.
+    #[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
+    fn peek_bytes_at(&self, offset: usize, out: &mut [u8]) -> usize {
+        if offset >= self.len {
+            return 0;
+        }
+        let avail = self.len - offset;
+        let to_read = out.len().min(avail);
+        if to_read == 0 {
+            return 0;
+        }
+        let cap = self.buf.len();
+        let start = (self.head + offset) % cap;
+
+        // First chunk: from `start` to end of buffer (or to_read).
+        let first = to_read.min(cap - start);
+        out[..first].copy_from_slice(&self.buf[start..start + first]);
+
+        // Second chunk: wrap around to the start of the buffer.
+        let second = to_read - first;
+        if second > 0 {
+            out[first..first + second].copy_from_slice(&self.buf[..second]);
+        }
+
+        to_read
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -522,6 +553,71 @@ pub fn try_read(handle: PipeHandle, buf: &mut [u8]) -> KernelResult<usize> {
         }
     }
     result
+}
+
+/// Peek at buffered pipe data WITHOUT consuming it.
+///
+/// Copies up to `buf.len()` bytes starting at logical `offset` (0 = the oldest
+/// buffered byte) into `buf`, leaving the pipe contents untouched.  Returns the
+/// number of bytes copied (0 once `offset` is at or past the buffered length).
+///
+/// This is the primitive behind `tee(2)`, which duplicates data from one pipe
+/// into another non-destructively: the caller peeks successive offsets and
+/// writes the copies into the destination pipe.
+///
+/// # Returns
+///
+/// - `Ok(n)` — copied `n` bytes (`n == 0` when nothing is buffered at `offset`).
+/// - `Err(InvalidArgument)` — `buf` is empty.
+/// - `Err(InvalidHandle)` — handle is a write handle, or the pipe is gone.
+pub fn peek_at(handle: PipeHandle, offset: u64, buf: &mut [u8]) -> KernelResult<usize> {
+    if handle.end() != PipeEnd::Read {
+        return Err(KernelError::InvalidHandle);
+    }
+    if buf.is_empty() {
+        return Err(KernelError::InvalidArgument);
+    }
+    let table = PIPES.lock();
+    let pipe = table
+        .get(&handle.pipe_id())
+        .ok_or(KernelError::InvalidHandle)?;
+    #[allow(clippy::cast_possible_truncation)]
+    let off = offset.min(usize::MAX as u64) as usize;
+    Ok(pipe.peek_bytes_at(off, buf))
+}
+
+/// Block the calling task until the pipe has data to read or the write end
+/// closes (EOF).  Unlike [`read`], this does not consume any bytes — it is the
+/// blocking-wait primitive for `tee`, which must wait for input on an empty
+/// source before duplicating it.
+///
+/// # Returns
+///
+/// - `Ok(true)` — data is now available to read.
+/// - `Ok(false)` — the write end is closed and no data remains (EOF).
+/// - `Err(InvalidHandle)` — handle is a write handle, or the pipe is gone.
+pub fn wait_readable(handle: PipeHandle) -> KernelResult<bool> {
+    if handle.end() != PipeEnd::Read {
+        return Err(KernelError::InvalidHandle);
+    }
+    loop {
+        {
+            let mut table = PIPES.lock();
+            let pipe = table
+                .get_mut(&handle.pipe_id())
+                .ok_or(KernelError::InvalidHandle)?;
+            if pipe.len > 0 {
+                return Ok(true);
+            }
+            if pipe.write_closed {
+                return Ok(false);
+            }
+            // Empty, writer still open — register and block.
+            pipe.reader_waiter = Some(sched::current_task_id());
+        }
+        super::stats::pipe_read_block();
+        sched::block_current();
+    }
 }
 
 /// Read bytes from a pipe with a timeout (nanoseconds).

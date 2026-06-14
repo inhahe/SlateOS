@@ -598,11 +598,11 @@ is logged for operator input in `open-questions.md`.
 
 ---
 
-### TD21. Minor Linux-ABI fidelity gap — procfs fd visibility for native processes — APPROXIMATION 2026-06-13; sendfile + copy_file_range + splice transfer IMPLEMENTED 2026-06-14
+### TD21. Minor Linux-ABI fidelity gap — procfs fd visibility for native processes — APPROXIMATION 2026-06-13; sendfile + copy_file_range + splice + tee transfer IMPLEMENTED 2026-06-14
 
 **Where:** `kernel/src/fs/procfs` (`/proc/<pid>/fd[info]`, `linux_fd_list`) and
 `kernel/src/syscall/linux.rs` (`sys_sendfile`, `sys_copy_file_range`,
-`sys_splice`). All are documented in-code.
+`sys_splice`, `sys_tee`). All are documented in-code.
 
 **What it is:** one remaining deliberate Linux-ABI approximation:
 - **`/proc/<pid>/fd/` and `/fdinfo/` are EMPTY for *native* processes.** Native
@@ -686,6 +686,22 @@ window; it is bounded to one 64 KiB chunk and is no worse than any non-atomic
 splice. The blocking path has no such window (its inner write loop drains the full
 chunk). Proper fix would require reference-counted pipe buffer pages (Linux's
 `pipe_buffer` model) so splice transfers ownership instead of copying.
+
+**Progress (2026-06-14) — tee data transfer implemented.** `sys_tee` was the
+last validate-then-`EINVAL` stub in this family. It now duplicates data from one
+pipe to another *non-destructively* via `tee_core`, built on two new pipe
+primitives (`kernel/src/ipc/pipe.rs`): `peek_at(handle, offset, buf)` copies
+buffered bytes at a logical offset without consuming them, and `wait_readable`
+blocks for input without consuming (the blocking-tee path). Gates match `do_tee`:
+flags/len front gates (unchanged batch-540), then FMODE_READ/WRITE→EBADF and the
+"two distinct pipes" requirement (both ends must be pipes with different ids,
+else EINVAL). `SPLICE_F_NONBLOCK` selects non-blocking; a broken destination
+pipe→EPIPE, non-blocking empty source→EAGAIN, EOF source→0. Because tee never
+consumes the source, the splice pipe→pipe data-loss concern does **not** apply
+here — a partial destination write simply copies fewer bytes and leaves the
+source intact. Tested by `self_test_tee` (duplicate + verify the source is
+unchanged, empty→EAGAIN, EOF→0, len-clamp). The whole splice/tee/vmsplice
+gate-only batch checks (539/540/541) still pass.
 
 **Impact:** low — native-process fd introspection via `/proc` is unavailable
 (tools must use the native fd API).

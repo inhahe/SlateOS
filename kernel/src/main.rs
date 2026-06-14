@@ -1229,6 +1229,12 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: splice self-test failed: {:?}", e);
     }
 
+    // tee(2) data-transfer test — drives tee_core against kernel-created pipes
+    // (non-blocking); needs no VFS but runs here alongside its splice sibling.
+    if let Err(e) = syscall::linux::self_test_tee() {
+        serial_println!("WARNING: tee self-test failed: {:?}", e);
+    }
+
     // File-backed Linux mmap test (needs a writable VFS to stage a file, so
     // it runs here rather than in syscall::linux::self_test() which precedes
     // VFS init).  Exercises the path ld.so uses to map shared objects.

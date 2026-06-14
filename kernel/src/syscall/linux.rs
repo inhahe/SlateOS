@@ -20097,6 +20097,107 @@ fn sys_splice(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(moved as i64)
 }
 
+/// Core tee transfer: duplicate up to `len` bytes from one pipe (read end
+/// `in_handle`) into another (write end `out_handle`) WITHOUT consuming the
+/// source.  Returns the number of bytes copied.
+///
+/// Unlike splice, tee is non-destructive: it peeks successive offsets of the
+/// source's buffered data and writes copies into the destination, so a partial
+/// destination write loses nothing (the source is untouched).  The amount
+/// copied is bounded by what is currently buffered in the source (a snapshot)
+/// and, for a non-blocking destination, by the space the destination accepts.
+///
+/// Blocking discipline (`nonblock` = `SPLICE_F_NONBLOCK`):
+///  * An empty source with the writer still open blocks for input (or yields
+///    `WouldBlock` → EAGAIN when non-blocking); EOF (writer closed, no data)
+///    returns `Ok(0)`.
+///  * A full destination blocks for space (blocking) or returns the partial
+///    count / `WouldBlock` (non-blocking).
+///
+/// Error semantics mirror `do_tee`: a first-byte error propagates; once any
+/// byte has been copied, a later error returns the partial count.
+fn tee_core(in_handle: u64, out_handle: u64, len: u64, nonblock: bool) -> crate::error::KernelResult<u64> {
+    use crate::error::KernelError;
+    let in_h = crate::ipc::pipe::PipeHandle::from_raw(in_handle);
+    let out_h = crate::ipc::pipe::PipeHandle::from_raw(out_handle);
+    let clamped = len.min(SENDFILE_MAX_COUNT);
+    if clamped == 0 {
+        return Ok(0);
+    }
+
+    // Determine how many bytes are available to duplicate (a snapshot of the
+    // source), blocking for input if the source is empty and we may block.
+    let buffered = loop {
+        let b = crate::ipc::pipe::readable_bytes(in_h); // read end -> bytes buffered
+        if b > 0 {
+            break b;
+        }
+        // Empty: distinguish EOF (writer closed) from "empty but open".
+        if crate::ipc::pipe::readable(in_h) {
+            return Ok(0); // write_closed with no data -> EOF
+        }
+        if nonblock {
+            return Err(KernelError::WouldBlock);
+        }
+        // Blocking: wait for data or EOF, then re-check.
+        if !crate::ipc::pipe::wait_readable(in_h)? {
+            return Ok(0); // woke on EOF
+        }
+    };
+
+    let to_copy = clamped.min(buffered);
+    let mut copied: u64 = 0;
+    let mut buf = alloc::vec![0u8; SENDFILE_CHUNK];
+    while copied < to_copy {
+        #[allow(clippy::cast_possible_truncation)]
+        let want = to_copy.saturating_sub(copied).min(SENDFILE_CHUNK as u64) as usize;
+        let slice = match buf.get_mut(..want) {
+            Some(s) => s,
+            None => break,
+        };
+        let n = crate::ipc::pipe::peek_at(in_h, copied, slice)?;
+        if n == 0 {
+            break; // snapshot exhausted (e.g. a concurrent reader drained it)
+        }
+        let mut written = 0usize;
+        while written < n {
+            let chunk = match buf.get(written..n) {
+                Some(s) => s,
+                None => break,
+            };
+            let w = if nonblock {
+                crate::ipc::pipe::try_write(out_h, chunk)
+            } else {
+                crate::ipc::pipe::write(out_h, chunk)
+            };
+            match w {
+                Ok(0) => break,
+                Ok(k) => written = written.saturating_add(k),
+                Err(KernelError::WouldBlock) => {
+                    // Non-blocking destination full.
+                    let done = copied.saturating_add(written as u64);
+                    if done == 0 {
+                        return Err(KernelError::WouldBlock);
+                    }
+                    return Ok(done);
+                }
+                Err(e) => {
+                    let done = copied.saturating_add(written as u64);
+                    if done == 0 {
+                        return Err(e);
+                    }
+                    return Ok(done);
+                }
+            }
+        }
+        copied = copied.saturating_add(written as u64);
+        if written < n {
+            break; // destination could not take the whole chunk -> stop
+        }
+    }
+    Ok(copied)
+}
+
 /// `tee(fd_in, fd_out, len, flags)`.
 fn sys_tee(args: &SyscallArgs) -> SyscallResult {
     // Linux gate order (fs/splice.c::SYSCALL_DEFINE4(tee)):
@@ -20142,20 +20243,52 @@ fn sys_tee(args: &SyscallArgs) -> SyscallResult {
     // "not two distinct pipes" path and the unimplemented transfer path
     // return EINVAL, identical to our terminal EINVAL. Pre-batch sys_tee
     // lacked this gate.
-    if let Some(pid) = caller_pid() {
-        if let Some(ein) = pcb::linux_fd_lookup(pid, fd_in) {
-            if !fd_access_is_readable(ein.status_flags) {
-                return linux_err(errno::EBADF);
-            }
-        }
-        if let Some(eout) = pcb::linux_fd_lookup(pid, fd_out) {
-            if !fd_access_is_writable(eout.status_flags) {
-                return linux_err(errno::EBADF);
-            }
-        }
+    // do_tee() body needs the fd entries.  Kernel-context callers
+    // (caller_pid()==None) have no Linux fd table — preserve the historical
+    // terminal EINVAL after the no-op front gates (self_test_tee drives the
+    // tee_core data path directly instead).
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => return linux_err(errno::EINVAL),
+    };
+    use crate::proc::linux_fd::HandleKind;
+    let in_entry = match pcb::linux_fd_lookup(pid, fd_in) {
+        Some(e) => e,
+        None => return linux_err(errno::EBADF),
+    };
+    let out_entry = match pcb::linux_fd_lookup(pid, fd_out) {
+        Some(e) => e,
+        None => return linux_err(errno::EBADF),
+    };
+
+    // do_tee() prologue: FMODE_READ(in) && FMODE_WRITE(out) -> EBADF.
+    if !fd_access_is_readable(in_entry.status_flags)
+        || !fd_access_is_writable(out_entry.status_flags)
+    {
+        return linux_err(errno::EBADF);
     }
 
-    linux_err(errno::EINVAL)
+    // tee() requires two *distinct* pipes (ipipe && opipe && ipipe != opipe).
+    // Anything else (a non-pipe end, or the same pipe on both ends) is EINVAL.
+    let in_is_pipe = matches!(in_entry.kind, HandleKind::Pipe);
+    let out_is_pipe = matches!(out_entry.kind, HandleKind::Pipe);
+    if !in_is_pipe
+        || !out_is_pipe
+        || (in_entry.raw_handle >> 1) == (out_entry.raw_handle >> 1)
+    {
+        return linux_err(errno::EINVAL);
+    }
+
+    let nonblock = (flags & SPLICE_F_NONBLOCK) != 0;
+    match tee_core(in_entry.raw_handle, out_entry.raw_handle, len, nonblock) {
+        #[allow(clippy::cast_possible_wrap)]
+        Ok(copied) => SyscallResult::ok(copied as i64),
+        // A destination pipe whose reader has gone -> EPIPE.
+        Err(crate::error::KernelError::ChannelClosed) => linux_err(errno::EPIPE),
+        // Non-blocking with nothing available to copy -> EAGAIN.
+        Err(crate::error::KernelError::WouldBlock) => linux_err(errno::EAGAIN),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
 }
 
 /// `vmsplice(fd, iov, nr_segs, flags)`.
@@ -41333,6 +41466,112 @@ pub fn self_test_splice() -> crate::error::KernelResult<()> {
     cleanup();
     serial_println!(
         "[syscall/linux]   splice (File<->Pipe, Pipe->Pipe, read+write offsets, empty-source EAGAIN, no-loss bound): OK"
+    );
+    Ok(())
+}
+
+/// Boot self-test for the [`tee_core`] transfer engine behind `sys_tee`.
+///
+/// tee duplicates pipe data non-destructively, so this drives `tee_core`
+/// against kernel-created pipes (non-blocking).  It needs no VFS.  Coverage:
+///  1. **Duplicate + non-consumption** — tee a pipe's bytes into another pipe,
+///     then verify both the destination received the data AND the source still
+///     holds the original bytes (the defining property of tee).
+///  2. **EOF / empty handling** — a non-blocking empty source with the writer
+///     still open yields `WouldBlock` (→ EAGAIN); a closed-writer empty source
+///     yields `Ok(0)`.
+///  3. **`len` clamp** — tee with a `len` smaller than the buffered amount
+///     copies exactly `len` bytes and leaves the source intact.
+pub fn self_test_tee() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+    use crate::ipc::pipe;
+    use crate::serial_println;
+
+    const PAYLOAD: &[u8] = b"Hello, sendfile world!"; // 22 bytes
+    let len = PAYLOAD.len() as u64;
+
+    macro_rules! fail {
+        ($($arg:tt)*) => {{
+            serial_println!($($arg)*);
+            return Err(KernelError::InternalError);
+        }};
+    }
+
+    // (1) Duplicate + non-consumption.
+    {
+        let (a_r, a_w) = pipe::create();
+        let (b_r, b_w) = pipe::create();
+        let _ = pipe::try_write(a_w, PAYLOAD);
+        let r = tee_core(a_r.raw(), b_w.raw(), 1u64 << 20, true);
+        let copied = match r {
+            Ok(c) => c,
+            Err(e) => {
+                pipe::close(a_r); pipe::close(a_w); pipe::close(b_r); pipe::close(b_w);
+                return Err(e);
+            }
+        };
+        // Destination got a copy.
+        let mut bb = alloc::vec![0u8; PAYLOAD.len()];
+        let bn = pipe::try_read(b_r, &mut bb).unwrap_or(0);
+        // Source is UNCHANGED — still fully readable.
+        let mut ab = alloc::vec![0u8; PAYLOAD.len()];
+        let an = pipe::try_read(a_r, &mut ab).unwrap_or(0);
+        pipe::close(a_r); pipe::close(a_w); pipe::close(b_r); pipe::close(b_w);
+        if copied != len || bn != PAYLOAD.len() || bb.as_slice() != PAYLOAD {
+            fail!("[syscall/linux]   FAIL: tee duplicate copied {} bn {}", copied, bn);
+        }
+        if an != PAYLOAD.len() || ab.as_slice() != PAYLOAD {
+            fail!("[syscall/linux]   FAIL: tee consumed the source (an {})", an);
+        }
+    }
+
+    // (2a) Non-blocking empty source, writer open -> WouldBlock.
+    {
+        let (a_r, a_w) = pipe::create();
+        let (b_r, b_w) = pipe::create();
+        let r = tee_core(a_r.raw(), b_w.raw(), 1u64 << 20, true);
+        pipe::close(a_r); pipe::close(a_w); pipe::close(b_r); pipe::close(b_w);
+        if !matches!(r, Err(KernelError::WouldBlock)) {
+            fail!("[syscall/linux]   FAIL: tee empty-source expected WouldBlock, got {:?}", r);
+        }
+    }
+
+    // (2b) Empty source, writer closed -> Ok(0) (EOF).
+    {
+        let (a_r, a_w) = pipe::create();
+        let (b_r, b_w) = pipe::create();
+        pipe::close(a_w); // EOF, no data
+        let r = tee_core(a_r.raw(), b_w.raw(), 1u64 << 20, true);
+        pipe::close(a_r); pipe::close(b_r); pipe::close(b_w);
+        if !matches!(r, Ok(0)) {
+            fail!("[syscall/linux]   FAIL: tee EOF-source expected Ok(0), got {:?}", r);
+        }
+    }
+
+    // (3) len clamp: copy only 5 bytes; source remains fully intact.
+    {
+        let (a_r, a_w) = pipe::create();
+        let (b_r, b_w) = pipe::create();
+        let _ = pipe::try_write(a_w, PAYLOAD);
+        let r = tee_core(a_r.raw(), b_w.raw(), 5, true);
+        let copied = match r {
+            Ok(c) => c,
+            Err(e) => {
+                pipe::close(a_r); pipe::close(a_w); pipe::close(b_r); pipe::close(b_w);
+                return Err(e);
+            }
+        };
+        let mut bb = alloc::vec![0u8; 5];
+        let bn = pipe::try_read(b_r, &mut bb).unwrap_or(0);
+        let src_left = pipe::readable_bytes(a_r);
+        pipe::close(a_r); pipe::close(a_w); pipe::close(b_r); pipe::close(b_w);
+        if copied != 5 || bn != 5 || Some(bb.as_slice()) != PAYLOAD.get(0..5) || src_left != len {
+            fail!("[syscall/linux]   FAIL: tee len-clamp copied {} bn {} src_left {}", copied, bn, src_left);
+        }
+    }
+
+    serial_println!(
+        "[syscall/linux]   tee (duplicate + non-consumption, empty->EAGAIN, EOF->0, len-clamp): OK"
     );
     Ok(())
 }

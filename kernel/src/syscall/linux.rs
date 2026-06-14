@@ -58731,6 +58731,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_signalfd_timerfd_inotify()?;
+
+    #[inline(never)]
+    fn self_test_signalfd_timerfd_inotify() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // signalfd / timerfd / inotify / fanotify — input validation and
     // ENOSYS-after-validate.
     {
@@ -59640,6 +59645,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   fanotify_mark mask-high > flag-mask > op-switch (ADD/REMOVE needs mask, FLUSH restricted) gate order: OK"
         );
+    }
+        Ok(())
     }
 
     // sendfile / splice / tee / vmsplice / copy_file_range / AIO /

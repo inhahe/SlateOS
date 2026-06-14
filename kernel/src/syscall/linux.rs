@@ -42165,6 +42165,98 @@ fn self_test_rt_sigreturn() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+/// TD4 extraction: Linux-sigaction table round-trip + lifecycle self-test.
+///
+/// Operates directly on the per-pid sigaction table (not via
+/// dispatch_linux, which needs a live caller pid the boot self-test
+/// lacks): verifies SIG_DFL defaults, set/get round-trip, per-signal
+/// independence, on_exec (caught→SIG_DFL, SIG_IGN handler preserved but
+/// flags/restorer/mask cleared), on_fork inheritance, and on_exit
+/// teardown. Uses synthetic pids that can't collide with real ones.
+/// Self-contained. See [`self_test_errno_mapping`] for the TD4 rationale.
+#[inline(never)]
+fn self_test_sigaction_table() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+    // Use a synthetic pid that won't collide with any real one.
+    let test_pid: u64 = 0xFFFF_FFFF_DEAD_0001;
+
+    // Initially: get() returns SIG_DFL defaults.
+    let initial = linux_sigaction_get(test_pid, 10);
+    if initial.sa_handler != SIG_DFL || initial.sa_flags != 0
+        || initial.sa_restorer != 0 || initial.sa_mask != 0
+    {
+        serial_println!("[syscall/linux]   FAIL: sigaction initial != defaults");
+        return Err(KernelError::InternalError);
+    }
+
+    // set() then get() round-trips.
+    let act = LinuxSigaction {
+        sa_handler: 0xCAFE_BABE_1234_5678,
+        sa_flags: sa_flags::SA_RESTART | sa_flags::SA_SIGINFO,
+        sa_restorer: 0xDEAD_BEEF_0000_0001,
+        sa_mask: 0xAAAA_BBBB_CCCC_DDDD,
+    };
+    linux_sigaction_set(test_pid, 10, act);
+    let read_back = linux_sigaction_get(test_pid, 10);
+    if read_back != act {
+        serial_println!("[syscall/linux]   FAIL: sigaction round-trip");
+        return Err(KernelError::InternalError);
+    }
+
+    // Per-signal independence: signal 11 still has defaults.
+    let other = linux_sigaction_get(test_pid, 11);
+    if other != LinuxSigaction::default() {
+        serial_println!("[syscall/linux]   FAIL: sigaction per-signal independence");
+        return Err(KernelError::InternalError);
+    }
+
+    // on_exec: SIG_IGN preserved, caught -> SIG_DFL.
+    // Set 11 to SIG_IGN, then re-test exec.
+    let ign = LinuxSigaction { sa_handler: SIG_IGN, sa_flags: sa_flags::SA_RESTART,
+        sa_restorer: 0x1234, sa_mask: 0x5678 };
+    linux_sigaction_set(test_pid, 11, ign);
+    linux_sigaction_on_exec(test_pid);
+    let after_exec_10 = linux_sigaction_get(test_pid, 10);
+    let after_exec_11 = linux_sigaction_get(test_pid, 11);
+    // Caught signal 10 should reset to SIG_DFL defaults.
+    if after_exec_10 != LinuxSigaction::default() {
+        serial_println!(
+            "[syscall/linux]   FAIL: sigaction on_exec didn't reset caught"
+        );
+        return Err(KernelError::InternalError);
+    }
+    // SIG_IGN signal 11 should keep handler but lose flags/restorer/mask.
+    if after_exec_11.sa_handler != SIG_IGN
+        || after_exec_11.sa_flags != 0
+        || after_exec_11.sa_restorer != 0
+        || after_exec_11.sa_mask != 0
+    {
+        serial_println!(
+            "[syscall/linux]   FAIL: sigaction on_exec mishandled SIG_IGN"
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // on_fork: child inherits parent's entries.
+    let child_pid: u64 = 0xFFFF_FFFF_DEAD_0002;
+    linux_sigaction_on_fork(test_pid, child_pid);
+    let child_11 = linux_sigaction_get(child_pid, 11);
+    if child_11.sa_handler != SIG_IGN {
+        serial_println!("[syscall/linux]   FAIL: sigaction on_fork didn't inherit");
+        return Err(KernelError::InternalError);
+    }
+
+    // on_exit: all entries gone.
+    linux_sigaction_on_exit(test_pid);
+    linux_sigaction_on_exit(child_pid);
+    let post_exit = linux_sigaction_get(test_pid, 11);
+    if post_exit != LinuxSigaction::default() {
+        serial_println!("[syscall/linux]   FAIL: sigaction on_exit didn't clear");
+        return Err(KernelError::InternalError);
+    }
+    Ok(())
+}
+
 pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
@@ -42379,85 +42471,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     //   Operates directly on the table (not via dispatch_linux),
     //   because dispatch_linux's rt_sigaction needs a live caller pid
     //   to record state, which the boot self-test doesn't have.
-    {
-        // Use a synthetic pid that won't collide with any real one.
-        let test_pid: u64 = 0xFFFF_FFFF_DEAD_0001;
-
-        // Initially: get() returns SIG_DFL defaults.
-        let initial = linux_sigaction_get(test_pid, 10);
-        if initial.sa_handler != SIG_DFL || initial.sa_flags != 0
-            || initial.sa_restorer != 0 || initial.sa_mask != 0
-        {
-            serial_println!("[syscall/linux]   FAIL: sigaction initial != defaults");
-            return Err(KernelError::InternalError);
-        }
-
-        // set() then get() round-trips.
-        let act = LinuxSigaction {
-            sa_handler: 0xCAFE_BABE_1234_5678,
-            sa_flags: sa_flags::SA_RESTART | sa_flags::SA_SIGINFO,
-            sa_restorer: 0xDEAD_BEEF_0000_0001,
-            sa_mask: 0xAAAA_BBBB_CCCC_DDDD,
-        };
-        linux_sigaction_set(test_pid, 10, act);
-        let read_back = linux_sigaction_get(test_pid, 10);
-        if read_back != act {
-            serial_println!("[syscall/linux]   FAIL: sigaction round-trip");
-            return Err(KernelError::InternalError);
-        }
-
-        // Per-signal independence: signal 11 still has defaults.
-        let other = linux_sigaction_get(test_pid, 11);
-        if other != LinuxSigaction::default() {
-            serial_println!("[syscall/linux]   FAIL: sigaction per-signal independence");
-            return Err(KernelError::InternalError);
-        }
-
-        // on_exec: SIG_IGN preserved, caught -> SIG_DFL.
-        // Set 11 to SIG_IGN, then re-test exec.
-        let ign = LinuxSigaction { sa_handler: SIG_IGN, sa_flags: sa_flags::SA_RESTART,
-            sa_restorer: 0x1234, sa_mask: 0x5678 };
-        linux_sigaction_set(test_pid, 11, ign);
-        linux_sigaction_on_exec(test_pid);
-        let after_exec_10 = linux_sigaction_get(test_pid, 10);
-        let after_exec_11 = linux_sigaction_get(test_pid, 11);
-        // Caught signal 10 should reset to SIG_DFL defaults.
-        if after_exec_10 != LinuxSigaction::default() {
-            serial_println!(
-                "[syscall/linux]   FAIL: sigaction on_exec didn't reset caught"
-            );
-            return Err(KernelError::InternalError);
-        }
-        // SIG_IGN signal 11 should keep handler but lose flags/restorer/mask.
-        if after_exec_11.sa_handler != SIG_IGN
-            || after_exec_11.sa_flags != 0
-            || after_exec_11.sa_restorer != 0
-            || after_exec_11.sa_mask != 0
-        {
-            serial_println!(
-                "[syscall/linux]   FAIL: sigaction on_exec mishandled SIG_IGN"
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // on_fork: child inherits parent's entries.
-        let child_pid: u64 = 0xFFFF_FFFF_DEAD_0002;
-        linux_sigaction_on_fork(test_pid, child_pid);
-        let child_11 = linux_sigaction_get(child_pid, 11);
-        if child_11.sa_handler != SIG_IGN {
-            serial_println!("[syscall/linux]   FAIL: sigaction on_fork didn't inherit");
-            return Err(KernelError::InternalError);
-        }
-
-        // on_exit: all entries gone.
-        linux_sigaction_on_exit(test_pid);
-        linux_sigaction_on_exit(child_pid);
-        let post_exit = linux_sigaction_get(test_pid, 11);
-        if post_exit != LinuxSigaction::default() {
-            serial_println!("[syscall/linux]   FAIL: sigaction on_exit didn't clear");
-            return Err(KernelError::InternalError);
-        }
-    }
+    self_test_sigaction_table()?;
 
     // rt_sigaction validation via dispatch_linux:
     //   - sig == 0 -> EINVAL

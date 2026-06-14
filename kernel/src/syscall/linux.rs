@@ -57447,6 +57447,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_lseek_whence()?;
+
+    #[inline(never)]
+    fn self_test_lseek_whence() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // Batch 348 — sys_lseek whence int truncation in File arm.
     // Linux's fs/read_write.c::SYSCALL_DEFINE3(lseek) declares
     // whence as `int` (rdx); the x86_64 syscall entry leaves the
@@ -57556,6 +57561,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   lseek whence int truncation (File arm): OK"
         );
+    }
+        Ok(())
     }
 
     // readlink / readlinkat / chmod family / chown family / truncate /

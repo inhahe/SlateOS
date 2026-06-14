@@ -42257,6 +42257,157 @@ fn self_test_sigaction_table() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+/// TD4 extraction: rt_sigaction validation self-test (incl. Batch 353
+/// sig int-truncation).
+///
+/// Exercises the cheap rejects (sig==0, sig>NSIG, sigsetsize!=0/8 →
+/// EINVAL) plus the Linux SYSCALL_DEFINE4 rdi-truncation behaviour: a
+/// high-half-set sig must truncate to its low 32 bits before the signum
+/// gates, so high|SIGHUP / high|NSIG / high|SIGKILL(query) reach the
+/// caller_pid lookup (-ESRCH in boot context) while i32==-1 hits the
+/// lower-bound EINVAL gate. Closes with a u64→i32→u32→u64 cast-isolation
+/// table. Self-contained. See [`self_test_errno_mapping`] for the TD4
+/// rationale.
+#[inline(never)]
+fn self_test_rt_sigaction_validation() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+    // sig == 0
+    let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 8,
+        arg4: 0, arg5: 0 };
+    if dispatch_linux(nr::RT_SIGACTION, &a).value != -i64::from(errno::EINVAL) {
+        serial_println!("[syscall/linux]   FAIL: rt_sigaction sig=0");
+        return Err(KernelError::InternalError);
+    }
+    // sig > NSIG
+    let a = SyscallArgs { arg0: 65, arg1: 0, arg2: 0, arg3: 8,
+        arg4: 0, arg5: 0 };
+    if dispatch_linux(nr::RT_SIGACTION, &a).value != -i64::from(errno::EINVAL) {
+        serial_println!("[syscall/linux]   FAIL: rt_sigaction sig=65");
+        return Err(KernelError::InternalError);
+    }
+    // sigsetsize mismatch
+    let a = SyscallArgs { arg0: 10, arg1: 0, arg2: 0, arg3: 7,
+        arg4: 0, arg5: 0 };
+    if dispatch_linux(nr::RT_SIGACTION, &a).value != -i64::from(errno::EINVAL) {
+        serial_println!("[syscall/linux]   FAIL: rt_sigaction sigsetsize");
+        return Err(KernelError::InternalError);
+    }
+
+    // Batch 353: sig int truncation.
+    //
+    // Linux's SYSCALL_DEFINE4(rt_sigaction, int, sig, ...)
+    // truncates rdi to its low 32 bits before do_sigaction
+    // inspects the value.  Pre-batch we held sig at u64 width,
+    // so high-half garbage bypassed the SIGHUP / SIGKILL gates
+    // and hit the `sig > NSIG=64` reject where Linux would
+    // proceed with the truncated value.  All probes below run
+    // in boot context with no caller pid, so successful
+    // truncation surfaces as ESRCH from the
+    // `caller_pid().ok_or(ESRCH)` lookup that follows the
+    // signum validation — pre-batch it surfaced as EINVAL from
+    // the signum gate.
+
+    // (a) sig = 0x1_0000_0001 (high|SIGHUP=1) with act=NULL,
+    //     oldact=NULL, sigsetsize=8 -> truncates to SIGHUP,
+    //     passes NSIG/SIGKILL/SIGSTOP/sigsetsize gates,
+    //     reaches caller_pid -> ESRCH.  Pre-batch: EINVAL.
+    let a = SyscallArgs {
+        arg0: 0x1_0000_0001, arg1: 0, arg2: 0, arg3: 8,
+        arg4: 0, arg5: 0,
+    };
+    if dispatch_linux(nr::RT_SIGACTION, &a).value
+        != -i64::from(errno::ESRCH) {
+        serial_println!(
+            "[syscall/linux]   FAIL: rt_sigaction(high|SIGHUP) not ESRCH"
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // (b) sig = 0x1_0000_0040 (high|NSIG=64) — the highest
+    //     valid signal.  Truncates to 64, passes NSIG (sig
+    //     <= NSIG), not SIGKILL/SIGSTOP, sigsetsize=8 OK ->
+    //     ESRCH.  Pre-batch: EINVAL via the raw `sig > NSIG`
+    //     gate (0x1_0000_0040 = 4294967360 >> 64).
+    let a = SyscallArgs {
+        arg0: 0x1_0000_0040, arg1: 0, arg2: 0, arg3: 8,
+        arg4: 0, arg5: 0,
+    };
+    if dispatch_linux(nr::RT_SIGACTION, &a).value
+        != -i64::from(errno::ESRCH) {
+        serial_println!(
+            "[syscall/linux]   FAIL: rt_sigaction(high|NSIG) not ESRCH"
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // (c) sig = 0x1_0000_0009 (high|SIGKILL=9) with act=NULL
+    //     (query-only).  Truncates to SIGKILL; the SIGKILL
+    //     gate rejects `act != NULL` only — query-only is
+    //     fine.  sigsetsize=8 OK -> ESRCH.  Pre-batch:
+    //     EINVAL via raw `sig > NSIG`.
+    let a = SyscallArgs {
+        arg0: 0x1_0000_0009, arg1: 0, arg2: 0, arg3: 8,
+        arg4: 0, arg5: 0,
+    };
+    if dispatch_linux(nr::RT_SIGACTION, &a).value
+        != -i64::from(errno::ESRCH) {
+        serial_println!(
+            "[syscall/linux]   FAIL: rt_sigaction(high|SIGKILL,query) not ESRCH"
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // (d) sig = 0xFFFF_FFFF (i32 == -1).  Truncation gives
+    //     sig_i32 = -1, sig_i32 < 1 -> EINVAL via the new
+    //     lower-bound gate.  Pre-batch this same EINVAL came
+    //     from the raw `sig > NSIG` upper-bound gate — this
+    //     probe guards the gate restructuring: the lower-
+    //     bound check must fire before the unsigned upper-
+    //     bound check, so negative inputs never accidentally
+    //     wrap into the valid 1..=NSIG range.
+    let a = SyscallArgs {
+        arg0: 0xFFFF_FFFF, arg1: 0, arg2: 0, arg3: 8,
+        arg4: 0, arg5: 0,
+    };
+    if dispatch_linux(nr::RT_SIGACTION, &a).value
+        != -i64::from(errno::EINVAL) {
+        serial_println!(
+            "[syscall/linux]   FAIL: rt_sigaction(i32=-1) not EINVAL"
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // (e) Cast-isolation: 4-case table verifying that the
+    //     u64 -> i32 -> u32 -> u64 chain preserves the low
+    //     32 bits and zeroes the high half (when non-
+    //     negative), exactly as Linux's `valid_signal(sig)`
+    //     cast-to-unsigned-int observes.
+    let cases: [(u64, i32, u64); 4] = [
+        (0x1_0000_0001,         1,         1),
+        (0x1_0000_0040,         64,        64),
+        (0x1_0000_0009,         9,         9),
+        (0xFFFF_FFFF_0000_000A, 10,        10),
+    ];
+    for &(input, expect_i32, expect_u64) in &cases {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let got_i32 = input as i32;
+        #[allow(clippy::cast_sign_loss)]
+        let got_u64 = u64::from(got_i32 as u32);
+        if got_i32 != expect_i32 || got_u64 != expect_u64 {
+            serial_println!(
+                "[syscall/linux]   FAIL: rt_sigaction trunc {:#x} -> i32={} u64={:#x} (want i32={} u64={:#x})",
+                input, got_i32, got_u64, expect_i32, expect_u64
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    serial_println!(
+        "[syscall/linux]   rt_sigaction sig int truncation: OK"
+    );
+    Ok(())
+}
+
 pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
@@ -42480,142 +42631,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     //   - unknown sa_flags bits -> EINVAL (needs an act pointer; we
     //     can't safely deref one from boot context so we only test
     //     the cheap rejects above).
-    {
-        // sig == 0
-        let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 8,
-            arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::RT_SIGACTION, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: rt_sigaction sig=0");
-            return Err(KernelError::InternalError);
-        }
-        // sig > NSIG
-        let a = SyscallArgs { arg0: 65, arg1: 0, arg2: 0, arg3: 8,
-            arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::RT_SIGACTION, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: rt_sigaction sig=65");
-            return Err(KernelError::InternalError);
-        }
-        // sigsetsize mismatch
-        let a = SyscallArgs { arg0: 10, arg1: 0, arg2: 0, arg3: 7,
-            arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::RT_SIGACTION, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: rt_sigaction sigsetsize");
-            return Err(KernelError::InternalError);
-        }
-
-        // Batch 353: sig int truncation.
-        //
-        // Linux's SYSCALL_DEFINE4(rt_sigaction, int, sig, ...)
-        // truncates rdi to its low 32 bits before do_sigaction
-        // inspects the value.  Pre-batch we held sig at u64 width,
-        // so high-half garbage bypassed the SIGHUP / SIGKILL gates
-        // and hit the `sig > NSIG=64` reject where Linux would
-        // proceed with the truncated value.  All probes below run
-        // in boot context with no caller pid, so successful
-        // truncation surfaces as ESRCH from the
-        // `caller_pid().ok_or(ESRCH)` lookup that follows the
-        // signum validation — pre-batch it surfaced as EINVAL from
-        // the signum gate.
-
-        // (a) sig = 0x1_0000_0001 (high|SIGHUP=1) with act=NULL,
-        //     oldact=NULL, sigsetsize=8 -> truncates to SIGHUP,
-        //     passes NSIG/SIGKILL/SIGSTOP/sigsetsize gates,
-        //     reaches caller_pid -> ESRCH.  Pre-batch: EINVAL.
-        let a = SyscallArgs {
-            arg0: 0x1_0000_0001, arg1: 0, arg2: 0, arg3: 8,
-            arg4: 0, arg5: 0,
-        };
-        if dispatch_linux(nr::RT_SIGACTION, &a).value
-            != -i64::from(errno::ESRCH) {
-            serial_println!(
-                "[syscall/linux]   FAIL: rt_sigaction(high|SIGHUP) not ESRCH"
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // (b) sig = 0x1_0000_0040 (high|NSIG=64) — the highest
-        //     valid signal.  Truncates to 64, passes NSIG (sig
-        //     <= NSIG), not SIGKILL/SIGSTOP, sigsetsize=8 OK ->
-        //     ESRCH.  Pre-batch: EINVAL via the raw `sig > NSIG`
-        //     gate (0x1_0000_0040 = 4294967360 >> 64).
-        let a = SyscallArgs {
-            arg0: 0x1_0000_0040, arg1: 0, arg2: 0, arg3: 8,
-            arg4: 0, arg5: 0,
-        };
-        if dispatch_linux(nr::RT_SIGACTION, &a).value
-            != -i64::from(errno::ESRCH) {
-            serial_println!(
-                "[syscall/linux]   FAIL: rt_sigaction(high|NSIG) not ESRCH"
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // (c) sig = 0x1_0000_0009 (high|SIGKILL=9) with act=NULL
-        //     (query-only).  Truncates to SIGKILL; the SIGKILL
-        //     gate rejects `act != NULL` only — query-only is
-        //     fine.  sigsetsize=8 OK -> ESRCH.  Pre-batch:
-        //     EINVAL via raw `sig > NSIG`.
-        let a = SyscallArgs {
-            arg0: 0x1_0000_0009, arg1: 0, arg2: 0, arg3: 8,
-            arg4: 0, arg5: 0,
-        };
-        if dispatch_linux(nr::RT_SIGACTION, &a).value
-            != -i64::from(errno::ESRCH) {
-            serial_println!(
-                "[syscall/linux]   FAIL: rt_sigaction(high|SIGKILL,query) not ESRCH"
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // (d) sig = 0xFFFF_FFFF (i32 == -1).  Truncation gives
-        //     sig_i32 = -1, sig_i32 < 1 -> EINVAL via the new
-        //     lower-bound gate.  Pre-batch this same EINVAL came
-        //     from the raw `sig > NSIG` upper-bound gate — this
-        //     probe guards the gate restructuring: the lower-
-        //     bound check must fire before the unsigned upper-
-        //     bound check, so negative inputs never accidentally
-        //     wrap into the valid 1..=NSIG range.
-        let a = SyscallArgs {
-            arg0: 0xFFFF_FFFF, arg1: 0, arg2: 0, arg3: 8,
-            arg4: 0, arg5: 0,
-        };
-        if dispatch_linux(nr::RT_SIGACTION, &a).value
-            != -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: rt_sigaction(i32=-1) not EINVAL"
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // (e) Cast-isolation: 4-case table verifying that the
-        //     u64 -> i32 -> u32 -> u64 chain preserves the low
-        //     32 bits and zeroes the high half (when non-
-        //     negative), exactly as Linux's `valid_signal(sig)`
-        //     cast-to-unsigned-int observes.
-        let cases: [(u64, i32, u64); 4] = [
-            (0x1_0000_0001,         1,         1),
-            (0x1_0000_0040,         64,        64),
-            (0x1_0000_0009,         9,         9),
-            (0xFFFF_FFFF_0000_000A, 10,        10),
-        ];
-        for &(input, expect_i32, expect_u64) in &cases {
-            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-            let got_i32 = input as i32;
-            #[allow(clippy::cast_sign_loss)]
-            let got_u64 = u64::from(got_i32 as u32);
-            if got_i32 != expect_i32 || got_u64 != expect_u64 {
-                serial_println!(
-                    "[syscall/linux]   FAIL: rt_sigaction trunc {:#x} -> i32={} u64={:#x} (want i32={} u64={:#x})",
-                    input, got_i32, got_u64, expect_i32, expect_u64
-                );
-                return Err(KernelError::InternalError);
-            }
-        }
-
-        serial_println!(
-            "[syscall/linux]   rt_sigaction sig int truncation: OK"
-        );
-    }
+    self_test_rt_sigaction_validation()?;
 
     // Batch 354: rt_sigprocmask gate ordering & how arithmetic.
     //

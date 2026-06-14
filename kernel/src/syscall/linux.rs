@@ -51433,7 +51433,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "[syscall/linux]   getpgid/getsid/setpgid int truncation: OK"
         );
     }
+        Ok(())
+    }
 
+    self_test_setpgid_existence_gate()?;
+
+    #[inline(never)]
+    fn self_test_setpgid_existence_gate() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // Batch 360: setpgid existence-check + gate order.
     //
     // Pre-batch sys_setpgid validated only `pgid < 0` and otherwise

@@ -51318,7 +51318,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
     }
+        Ok(())
+    }
 
+    self_test_process_group_session()?;
+
+    #[inline(never)]
+    fn self_test_process_group_session() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // Process-group / session syscall dispatch validation.
     //   - getpgrp() returns the caller PID (or 1 in contextless boot).
     //   - getpgid(0) same.

@@ -72855,6 +72855,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_bind_connect()?;
+
+    #[inline(never)]
+    fn self_test_bind_connect() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // Batch 435: bind / connect — fd lookup gates BEFORE pointer
     // validation, matching Linux's __sys_bind / __sys_connect in
     // net/socket.c (sockfd_lookup_light / fdget runs before
@@ -72948,6 +72953,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   bind/connect fd lookup ordered before pointer validation (Linux: sockfd_lookup_light / fdget fires before move_addr_to_kernel; bad fd → EBADF regardless of addr/addrlen): OK"
         );
+    }
+        Ok(())
     }
 
     // Batch 464: bind / connect / sendto — addr_len bound checks

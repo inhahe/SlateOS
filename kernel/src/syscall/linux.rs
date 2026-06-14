@@ -39506,6 +39506,132 @@ fn self_test_native_translation() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+/// TD4 extraction: arch_prctl ARCH_SET_GS / ARCH_GET_GS validation matrix
+/// (self_test group 9b). Mirrors the FS matrix but on IA32_KERNEL_GS_BASE;
+/// `saved_kgs` is sampled and restored on every exit path (a successful
+/// ARCH_SET_GS clobbers the per-CPU pointer). Self-contained. See
+/// [`self_test_errno_mapping`] for the TD4 rationale.
+#[inline(never)]
+fn self_test_arch_prctl_set_gs() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+
+    // batch 85.  Mirrors the FS validation matrix exactly except
+    // it writes/reads IA32_KERNEL_GS_BASE instead, because that is
+    // where the userspace GS lives in a syscall context (post-
+    // SWAPGS).  CAVEAT: in this boot-time self-test no SWAPGS has
+    // run, so KERNEL_GS_BASE currently holds the kernel's per-CPU
+    // pointer (set during syscall::entry::init).  Successful
+    // ARCH_SET_GS would overwrite that and the next syscall
+    // trampoline would dereference garbage — so we read/restore
+    // around every successful call.
+    const ARCH_SET_GS_CODE: u64 = 0x1001;
+    const ARCH_GET_GS_CODE: u64 = 0x1004;
+    const IA32_KERNEL_GS_BASE_MSR: u32 = 0xC000_0102;
+    // SAFETY: RDMSR on IA32_KERNEL_GS_BASE is side-effect-free
+    // and the MSR is architecturally defined on every x86_64 CPU.
+    let saved_kgs = unsafe { crate::cpu::rdmsr(IA32_KERNEL_GS_BASE_MSR) };
+
+    // ARCH_SET_GS at the boundary -> EPERM.
+    let set_gs_boundary = SyscallArgs {
+        arg0: ARCH_SET_GS_CODE, arg1: 1u64 << 47, arg2: 0, arg3: 0,
+        arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::ARCH_PRCTL, &set_gs_boundary);
+    if r.value != -(errno::EPERM as i64) {
+        // SAFETY: restoring saved KERNEL_GS_BASE.
+        unsafe { crate::cpu::wrmsr(IA32_KERNEL_GS_BASE_MSR, saved_kgs); }
+        serial_println!(
+            "[syscall/linux]   FAIL: arch_prctl(ARCH_SET_GS, 1<<47) → {} (expected -EPERM)",
+            r.value
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // ARCH_SET_GS with a kernel high-canonical address -> EPERM.
+    let set_gs_kernel = SyscallArgs {
+        arg0: ARCH_SET_GS_CODE, arg1: 0xffff_ffff_8000_0000, arg2: 0,
+        arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::ARCH_PRCTL, &set_gs_kernel);
+    if r.value != -(errno::EPERM as i64) {
+        // SAFETY: restoring saved KERNEL_GS_BASE.
+        unsafe { crate::cpu::wrmsr(IA32_KERNEL_GS_BASE_MSR, saved_kgs); }
+        serial_println!(
+            "[syscall/linux]   FAIL: arch_prctl(ARCH_SET_GS, kernel-addr) → {} (expected -EPERM)",
+            r.value
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // ARCH_SET_GS with u64::MAX -> EPERM (non-canonical; rejected
+    // before WRMSR could #GP).
+    let set_gs_top = SyscallArgs {
+        arg0: ARCH_SET_GS_CODE, arg1: u64::MAX, arg2: 0, arg3: 0,
+        arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::ARCH_PRCTL, &set_gs_top);
+    if r.value != -(errno::EPERM as i64) {
+        // SAFETY: restoring saved KERNEL_GS_BASE.
+        unsafe { crate::cpu::wrmsr(IA32_KERNEL_GS_BASE_MSR, saved_kgs); }
+        serial_println!(
+            "[syscall/linux]   FAIL: arch_prctl(ARCH_SET_GS, u64::MAX) → {} (expected -EPERM)",
+            r.value
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // ARCH_SET_GS just below the boundary -> success.  Sentinel
+    // value chosen so the post-read verifies the write happened.
+    const GS_TEST_VAL: u64 = (1u64 << 47) - 0x2000;
+    let set_gs_ok = SyscallArgs {
+        arg0: ARCH_SET_GS_CODE, arg1: GS_TEST_VAL, arg2: 0,
+        arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::ARCH_PRCTL, &set_gs_ok);
+    if r.value != 0 {
+        // SAFETY: restoring saved KERNEL_GS_BASE.
+        unsafe { crate::cpu::wrmsr(IA32_KERNEL_GS_BASE_MSR, saved_kgs); }
+        serial_println!(
+            "[syscall/linux]   FAIL: arch_prctl(ARCH_SET_GS, valid) → {} (expected 0)",
+            r.value
+        );
+        return Err(KernelError::InternalError);
+    }
+    // SAFETY: RDMSR on IA32_KERNEL_GS_BASE is side-effect-free.
+    let observed = unsafe { crate::cpu::rdmsr(IA32_KERNEL_GS_BASE_MSR) };
+    if observed != GS_TEST_VAL {
+        // SAFETY: restoring saved KERNEL_GS_BASE.
+        unsafe { crate::cpu::wrmsr(IA32_KERNEL_GS_BASE_MSR, saved_kgs); }
+        serial_println!(
+            "[syscall/linux]   FAIL: ARCH_SET_GS wrote {:#x}, expected {:#x}",
+            observed, GS_TEST_VAL
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // ARCH_GET_GS with NULL out pointer -> EFAULT.
+    let get_gs_null = SyscallArgs {
+        arg0: ARCH_GET_GS_CODE, arg1: 0, arg2: 0, arg3: 0, arg4: 0,
+        arg5: 0,
+    };
+    let r = dispatch_linux(nr::ARCH_PRCTL, &get_gs_null);
+    if r.value != -(errno::EFAULT as i64) {
+        // SAFETY: restoring saved KERNEL_GS_BASE.
+        unsafe { crate::cpu::wrmsr(IA32_KERNEL_GS_BASE_MSR, saved_kgs); }
+        serial_println!(
+            "[syscall/linux]   FAIL: arch_prctl(ARCH_GET_GS, NULL) → {} (expected -EFAULT)",
+            r.value
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Restore IA32_KERNEL_GS_BASE before any future syscall path
+    // can swapgs and dereference it as the per-CPU pointer.
+    // SAFETY: writing back the exact value we sampled above.
+    unsafe { crate::cpu::wrmsr(IA32_KERNEL_GS_BASE_MSR, saved_kgs); }
+    Ok(())
+}
+
 /// TD4 extraction: arch_prctl unknown-code reject + ARCH_SET_FS address
 /// validation matrix (self_test groups 9–9a). The ARCH_SET_FS tests clobber
 /// IA32_FS_BASE, so the original value is sampled and restored on every exit
@@ -40007,121 +40133,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // (9)-(9a) arch_prctl unknown-code reject + ARCH_SET_FS bounds matrix.
     self_test_arch_prctl_set_fs()?;
 
-    // (9b) arch_prctl(ARCH_SET_GS / ARCH_GET_GS) — newly wired in
-    // batch 85.  Mirrors the FS validation matrix exactly except
-    // it writes/reads IA32_KERNEL_GS_BASE instead, because that is
-    // where the userspace GS lives in a syscall context (post-
-    // SWAPGS).  CAVEAT: in this boot-time self-test no SWAPGS has
-    // run, so KERNEL_GS_BASE currently holds the kernel's per-CPU
-    // pointer (set during syscall::entry::init).  Successful
-    // ARCH_SET_GS would overwrite that and the next syscall
-    // trampoline would dereference garbage — so we read/restore
-    // around every successful call.
-    const ARCH_SET_GS_CODE: u64 = 0x1001;
-    const ARCH_GET_GS_CODE: u64 = 0x1004;
-    const IA32_KERNEL_GS_BASE_MSR: u32 = 0xC000_0102;
-    // SAFETY: RDMSR on IA32_KERNEL_GS_BASE is side-effect-free
-    // and the MSR is architecturally defined on every x86_64 CPU.
-    let saved_kgs = unsafe { crate::cpu::rdmsr(IA32_KERNEL_GS_BASE_MSR) };
-
-    // ARCH_SET_GS at the boundary -> EPERM.
-    let set_gs_boundary = SyscallArgs {
-        arg0: ARCH_SET_GS_CODE, arg1: 1u64 << 47, arg2: 0, arg3: 0,
-        arg4: 0, arg5: 0,
-    };
-    let r = dispatch_linux(nr::ARCH_PRCTL, &set_gs_boundary);
-    if r.value != -(errno::EPERM as i64) {
-        // SAFETY: restoring saved KERNEL_GS_BASE.
-        unsafe { crate::cpu::wrmsr(IA32_KERNEL_GS_BASE_MSR, saved_kgs); }
-        serial_println!(
-            "[syscall/linux]   FAIL: arch_prctl(ARCH_SET_GS, 1<<47) → {} (expected -EPERM)",
-            r.value
-        );
-        return Err(KernelError::InternalError);
-    }
-
-    // ARCH_SET_GS with a kernel high-canonical address -> EPERM.
-    let set_gs_kernel = SyscallArgs {
-        arg0: ARCH_SET_GS_CODE, arg1: 0xffff_ffff_8000_0000, arg2: 0,
-        arg3: 0, arg4: 0, arg5: 0,
-    };
-    let r = dispatch_linux(nr::ARCH_PRCTL, &set_gs_kernel);
-    if r.value != -(errno::EPERM as i64) {
-        // SAFETY: restoring saved KERNEL_GS_BASE.
-        unsafe { crate::cpu::wrmsr(IA32_KERNEL_GS_BASE_MSR, saved_kgs); }
-        serial_println!(
-            "[syscall/linux]   FAIL: arch_prctl(ARCH_SET_GS, kernel-addr) → {} (expected -EPERM)",
-            r.value
-        );
-        return Err(KernelError::InternalError);
-    }
-
-    // ARCH_SET_GS with u64::MAX -> EPERM (non-canonical; rejected
-    // before WRMSR could #GP).
-    let set_gs_top = SyscallArgs {
-        arg0: ARCH_SET_GS_CODE, arg1: u64::MAX, arg2: 0, arg3: 0,
-        arg4: 0, arg5: 0,
-    };
-    let r = dispatch_linux(nr::ARCH_PRCTL, &set_gs_top);
-    if r.value != -(errno::EPERM as i64) {
-        // SAFETY: restoring saved KERNEL_GS_BASE.
-        unsafe { crate::cpu::wrmsr(IA32_KERNEL_GS_BASE_MSR, saved_kgs); }
-        serial_println!(
-            "[syscall/linux]   FAIL: arch_prctl(ARCH_SET_GS, u64::MAX) → {} (expected -EPERM)",
-            r.value
-        );
-        return Err(KernelError::InternalError);
-    }
-
-    // ARCH_SET_GS just below the boundary -> success.  Sentinel
-    // value chosen so the post-read verifies the write happened.
-    const GS_TEST_VAL: u64 = (1u64 << 47) - 0x2000;
-    let set_gs_ok = SyscallArgs {
-        arg0: ARCH_SET_GS_CODE, arg1: GS_TEST_VAL, arg2: 0,
-        arg3: 0, arg4: 0, arg5: 0,
-    };
-    let r = dispatch_linux(nr::ARCH_PRCTL, &set_gs_ok);
-    if r.value != 0 {
-        // SAFETY: restoring saved KERNEL_GS_BASE.
-        unsafe { crate::cpu::wrmsr(IA32_KERNEL_GS_BASE_MSR, saved_kgs); }
-        serial_println!(
-            "[syscall/linux]   FAIL: arch_prctl(ARCH_SET_GS, valid) → {} (expected 0)",
-            r.value
-        );
-        return Err(KernelError::InternalError);
-    }
-    // SAFETY: RDMSR on IA32_KERNEL_GS_BASE is side-effect-free.
-    let observed = unsafe { crate::cpu::rdmsr(IA32_KERNEL_GS_BASE_MSR) };
-    if observed != GS_TEST_VAL {
-        // SAFETY: restoring saved KERNEL_GS_BASE.
-        unsafe { crate::cpu::wrmsr(IA32_KERNEL_GS_BASE_MSR, saved_kgs); }
-        serial_println!(
-            "[syscall/linux]   FAIL: ARCH_SET_GS wrote {:#x}, expected {:#x}",
-            observed, GS_TEST_VAL
-        );
-        return Err(KernelError::InternalError);
-    }
-
-    // ARCH_GET_GS with NULL out pointer -> EFAULT.
-    let get_gs_null = SyscallArgs {
-        arg0: ARCH_GET_GS_CODE, arg1: 0, arg2: 0, arg3: 0, arg4: 0,
-        arg5: 0,
-    };
-    let r = dispatch_linux(nr::ARCH_PRCTL, &get_gs_null);
-    if r.value != -(errno::EFAULT as i64) {
-        // SAFETY: restoring saved KERNEL_GS_BASE.
-        unsafe { crate::cpu::wrmsr(IA32_KERNEL_GS_BASE_MSR, saved_kgs); }
-        serial_println!(
-            "[syscall/linux]   FAIL: arch_prctl(ARCH_GET_GS, NULL) → {} (expected -EFAULT)",
-            r.value
-        );
-        return Err(KernelError::InternalError);
-    }
-
-    // Restore IA32_KERNEL_GS_BASE before any future syscall path
-    // can swapgs and dereference it as the per-CPU pointer.
-    // SAFETY: writing back the exact value we sampled above.
-    unsafe { crate::cpu::wrmsr(IA32_KERNEL_GS_BASE_MSR, saved_kgs); }
+    // (9b) arch_prctl ARCH_SET_GS / ARCH_GET_GS validation matrix.
+    self_test_arch_prctl_set_gs()?;
 
     // (9c) Batch 99: arch_prctl(ARCH_GET_CPUID = 0x1011) and
     // ARCH_SET_CPUID (0x1012).  glibc, gdb, lldb, rr, V8, and

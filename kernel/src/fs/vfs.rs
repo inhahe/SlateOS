@@ -1603,9 +1603,22 @@ impl Vfs {
     pub fn read_file(path: &str) -> KernelResult<Vec<u8>> {
         let path = Self::resolve_follow(path)?;
         check_file_tags(&path)?;
-        let mut vfs = VFS.lock();
-        let (mp, relative) = find_mount(&mut vfs, &path)?;
-        mp.fs.read_file(relative)
+        let result = {
+            let mut vfs = VFS.lock();
+            let (mp, relative) = find_mount(&mut vfs, &path)?;
+            mp.fs.read_file(relative)
+        };
+        // inotify IN_ACCESS: emit an Accessed event after a successful read,
+        // but only when some watch actually requested ACCESS (a lock-free
+        // gate).  The read path is high-frequency, so without an ACCESS watch
+        // this is a single relaxed atomic load and we never touch the notify
+        // lock.  Emitted after releasing the VFS lock (notify is a leaf lock).
+        if result.is_ok()
+            && super::notify::interest_includes(super::notify::FsEventMask::ACCESS)
+        {
+            super::notify::emit(super::notify::FsEventType::Accessed, &path, None);
+        }
+        result
     }
 
     /// Get metadata for a path.
@@ -1937,11 +1950,20 @@ impl Vfs {
     pub fn read_at(path: &str, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
         let path = Self::resolve_follow(path)?;
         check_file_tags(&path)?;
-        let mut vfs = VFS.lock();
-        let (mp, relative) = find_mount(&mut vfs, &path)?;
-        mp.fs.read_at(relative, offset, len)
-        // Note: no ACCESS event emitted by default (high-frequency).
-        // Callers that need it can emit manually.
+        let result = {
+            let mut vfs = VFS.lock();
+            let (mp, relative) = find_mount(&mut vfs, &path)?;
+            mp.fs.read_at(relative, offset, len)
+        };
+        // inotify IN_ACCESS, gated on a live ACCESS watch (see `read_file`).
+        // The gate keeps this off the read hot path when no watch wants it —
+        // the reason ACCESS was historically not emitted here at all.
+        if result.is_ok()
+            && super::notify::interest_includes(super::notify::FsEventMask::ACCESS)
+        {
+            super::notify::emit(super::notify::FsEventType::Accessed, &path, None);
+        }
+        result
     }
 
     /// Write bytes at a specific offset within a file.

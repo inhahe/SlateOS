@@ -47,7 +47,7 @@ use alloc::collections::BTreeMap;
 use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 
 use crate::error::{KernelError, KernelResult};
@@ -173,6 +173,74 @@ const MAX_WATCHES: usize = 256;
 static NEXT_WATCH_ID: AtomicU64 = AtomicU64::new(1);
 
 static WATCHES: Mutex<BTreeMap<u64, FsWatch>> = Mutex::new(BTreeMap::new());
+
+// ---------------------------------------------------------------------------
+// Per-event-bit interest counts (lock-free hot-path gate)
+// ---------------------------------------------------------------------------
+//
+// `emit()` is called after VFS operations on the hot path (every write, and —
+// once gated — every read).  Taking the `WATCHES` lock on every such call just
+// to discover that no watch cares about this event type is wasteful, and the
+// read path is high-frequency enough that the original code deliberately did
+// NOT emit an `ACCESS` event at all (see the note on `Vfs::read_at`).
+//
+// Instead we keep one reference count per `FsEventMask` bit: the number of live
+// watches whose mask includes that bit.  Maintained on every watch create
+// (increment) and close (decrement), it lets any caller ask
+// `interest_includes(mask)` with a handful of relaxed atomic loads and no lock.
+// The read path uses it to skip the `ACCESS` emit entirely in the common case
+// (no watch asked for `ACCESS`), so the inotify `IN_ACCESS` feature costs
+// nothing when unused; `emit()` itself uses it as a lock-free early-out.
+
+/// Number of distinct event-type bits in [`FsEventMask`] — CREATE, DELETE,
+/// MODIFY, RENAME, METADATA, ACCESS (bits 0..=5).
+const NUM_EVENT_BITS: usize = 6;
+
+/// Per-event-bit reference counts: `INTEREST_COUNTS[b]` is the number of live
+/// watches whose mask includes bit `b`.  See the module-internal note above.
+static INTEREST_COUNTS: [AtomicU32; NUM_EVENT_BITS] = [
+    AtomicU32::new(0),
+    AtomicU32::new(0),
+    AtomicU32::new(0),
+    AtomicU32::new(0),
+    AtomicU32::new(0),
+    AtomicU32::new(0),
+];
+
+/// Adjust the per-bit interest counts for `mask`: increment each set bit on a
+/// watch create (`add == true`), decrement on a close.  The decrement is
+/// saturating so a stray double-close can never underflow a counter.
+fn adjust_interest(mask: FsEventMask, add: bool) {
+    for (bit, counter) in INTEREST_COUNTS.iter().enumerate() {
+        if mask.0 & (1u32 << bit) == 0 {
+            continue;
+        }
+        if add {
+            counter.fetch_add(1, Ordering::Relaxed);
+        } else {
+            // The closure always returns `Some`, so `fetch_update` never fails;
+            // the saturating subtraction is the whole point, so discarding the
+            // (always-`Ok`) result is safe.
+            let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                Some(v.saturating_sub(1))
+            });
+        }
+    }
+}
+
+/// Is any live watch interested in *any* of the event bits in `mask`?
+///
+/// A lock-free check (one relaxed load per set bit) used by VFS hot paths to
+/// avoid calling [`emit`] — and taking the `WATCHES` lock — when nothing would
+/// match.  The file read path in particular gates its high-frequency `ACCESS`
+/// event on this.
+#[must_use]
+pub fn interest_includes(mask: FsEventMask) -> bool {
+    INTEREST_COUNTS
+        .iter()
+        .enumerate()
+        .any(|(bit, counter)| mask.0 & (1u32 << bit) != 0 && counter.load(Ordering::Relaxed) > 0)
+}
 
 // ---------------------------------------------------------------------------
 // Blocking-read wait queue
@@ -310,6 +378,10 @@ pub fn create_watch_owned(
         owner_token,
     });
 
+    // Track per-bit interest so the hot-path `interest_includes` gate stays
+    // accurate (counted only once the watch is actually in the table).
+    adjust_interest(mask, true);
+
     crate::serial_println!(
         "[notify] Watch {} created for '{}' (mask={:#x}, recursive={}, owner={:#x})",
         id, path, mask.0, recursive, owner_token
@@ -371,6 +443,8 @@ pub fn close_watch(watch_id: u64) -> KernelResult<()> {
         return Err(KernelError::InvalidHandle);
     };
     let owner_token = removed.owner_token;
+    // Release this watch's contribution to the per-bit interest counts.
+    adjust_interest(removed.mask, false);
     drop(watches);
 
     // Wake any readers parked on this watch's owner so they re-evaluate (e.g.
@@ -451,9 +525,18 @@ fn path_matches(watch_path: &str, recursive: bool, candidate: &str) -> bool {
 /// This is on the hot path — must be fast when no watches exist.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn emit(event_type: FsEventType, path: &str, new_path: Option<&str>) {
+    // Lock-free fast path: if no live watch is interested in this event type,
+    // there is nothing to queue — skip without ever taking the `WATCHES` lock.
+    // (Internal `Overflow` events have an empty mask and are never emitted this
+    // way; they are surfaced via the per-watch `overflowed` flag.)
+    if !interest_includes(event_type.to_mask()) {
+        return;
+    }
+
     let mut watches = WATCHES.lock();
 
-    // Fast path: no watches registered.
+    // Defensive: a watch could have closed between the interest check and the
+    // lock; bail if the table is now empty.
     if watches.is_empty() {
         return;
     }
@@ -776,6 +859,88 @@ pub fn self_test() -> KernelResult<()> {
         }
     }
     crate::serial_println!("[notify]   Watch cleanup verified ✓");
+
+    // --- IN_ACCESS / interest-gate coverage (TD17) -------------------------
+    //
+    // ACCESS is deliberately *excluded* from `ALL_CHANGES` so the read hot path
+    // never emits unless a watch explicitly asks for it. The emit fast path is
+    // gated on `interest_includes(ACCESS)`; verify the gate tracks watch
+    // create/close and that an ACCESS watch actually receives `Accessed`.
+
+    // Baseline: capture current ACCESS interest (could be true if some unrelated
+    // ACCESS watch is live; the invariant we assert is delta-correct regardless).
+    let access_baseline = interest_includes(FsEventMask::ACCESS);
+
+    let access_id = create_watch("/", FsEventMask::ACCESS, false)?;
+    if !interest_includes(FsEventMask::ACCESS) {
+        crate::serial_println!("[notify]   FAIL: ACCESS interest gate not set after watch create");
+        close_watch(access_id)?;
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("[notify]   ACCESS interest gate set on create ✓");
+
+    // Synthetic Accessed event must reach the ACCESS watch.
+    emit(FsEventType::Accessed, "/PROBE.TXT", None);
+    let events = read_events(access_id, 10)?;
+    if events.len() != 1 || events[0].event_type != FsEventType::Accessed {
+        crate::serial_println!(
+            "[notify]   FAIL: ACCESS watch expected 1 Accessed event, got {}",
+            events.len()
+        );
+        close_watch(access_id)?;
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("[notify]   Synthetic Accessed event received ✓");
+
+    // A non-ACCESS watch must NOT see the Accessed event (mask filtering).
+    let create_only = create_watch("/", FsEventMask::CREATE, false)?;
+    emit(FsEventType::Accessed, "/PROBE.TXT", None);
+    let leaked = read_events(create_only, 10)?;
+    if !leaked.is_empty() {
+        crate::serial_println!(
+            "[notify]   FAIL: CREATE-only watch leaked Accessed event ({} events)",
+            leaked.len()
+        );
+        close_watch(access_id)?;
+        close_watch(create_only)?;
+        return Err(KernelError::InternalError);
+    }
+    // Drain the ACCESS watch's copy of that second emit.
+    let _ = read_events(access_id, 10)?;
+    close_watch(create_only)?;
+    crate::serial_println!("[notify]   Non-ACCESS watch ignores Accessed ✓");
+
+    // End-to-end: a real `Vfs::read_file` must surface an Accessed event when an
+    // ACCESS watch is live. Write a probe, read it, assert the event surfaces.
+    let probe_path = "/ACCESS_PROBE.TXT";
+    super::vfs::Vfs::write_file(probe_path, b"hi")?;
+    let _ = super::vfs::Vfs::read_file(probe_path)?;
+    let e2e = read_events(access_id, 10)?;
+    let saw_probe = e2e
+        .iter()
+        .any(|e| e.event_type == FsEventType::Accessed && e.path == probe_path);
+    if !saw_probe {
+        crate::serial_println!(
+            "[notify]   FAIL: Vfs::read_file did not surface Accessed for {} ({} events)",
+            probe_path,
+            e2e.len()
+        );
+        close_watch(access_id)?;
+        let _ = super::vfs::Vfs::remove(probe_path);
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("[notify]   End-to-end Vfs::read_file ACCESS hook verified ✓");
+
+    // Cleanup: closing the ACCESS watch must return interest to baseline.
+    close_watch(access_id)?;
+    let _ = super::vfs::Vfs::remove(probe_path);
+    if interest_includes(FsEventMask::ACCESS) != access_baseline {
+        crate::serial_println!(
+            "[notify]   FAIL: ACCESS interest gate did not return to baseline after close"
+        );
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("[notify]   ACCESS interest gate cleared on close ✓");
 
     waiter_registry_self_test()?;
 

@@ -561,6 +561,22 @@ pub struct Process {
     /// `personality(persona)` followed by `personality(0xffffffff)`,
     /// which gdb in particular relies on for its own bookkeeping.
     pub linux_personality: u32,
+    /// Per-mm `membarrier(2)` registration READY bitmask (Linux's
+    /// `mm->membarrier_state`).  Each `MEMBARRIER_CMD_REGISTER_*` command
+    /// sets the matching READY bit; the corresponding
+    /// `MEMBARRIER_CMD_PRIVATE_EXPEDITED*` issue command returns `EPERM`
+    /// unless its bit is set (Linux gates expedited barriers on prior
+    /// registration).  The bit layout is private to the membarrier syscall
+    /// handler (`syscall::linux`); this field stores it opaquely.
+    ///
+    /// Per-mm, not per-thread: all threads of a process share one mm and
+    /// thus one registration set (a thread may register, another issue).
+    /// Inherited verbatim across `fork` (Linux copies `membarrier_state`
+    /// in `dup_mm`'s `memcpy`).  Linux resets it to 0 on `execve`
+    /// (`membarrier_exec_mmap`); we lack an exec-time PCB-reset hook (same
+    /// gap as `linux_dumpable`/`linux_keepcaps`), so it currently survives
+    /// exec — tracked in todo.txt.
+    pub membarrier_state: u32,
     /// Linux `prctl(PR_SET_PDEATHSIG)` — signal to deliver to this
     /// process when its parent exits.  `0` means "disabled" (the
     /// default and what every freshly-forked process starts with).
@@ -1243,6 +1259,9 @@ impl Process {
             // PER_LINUX (no personality flags) — what every modern
             // Linux process inherits from init.
             linux_personality: 0,
+            // A fresh mm has no membarrier registrations (Linux's
+            // `mm->membarrier_state` starts at 0).
+            membarrier_state: 0,
             // PR_SET_PDEATHSIG default is "disabled".  Inherited
             // across fork as zero per Linux: see the explicit reset
             // in `kernel/copy_process` for the same reason
@@ -1484,6 +1503,7 @@ pub fn fork_create(
         linux_as_bytes,
         linux_umask,
         linux_personality,
+        membarrier_state,
         linux_sched_policy,
         linux_sched_priority,
         linux_nice,
@@ -1545,6 +1565,10 @@ pub fn fork_create(
             parent.linux_as_bytes,
             parent.linux_umask,
             parent.linux_personality,
+            // Linux copies `membarrier_state` verbatim in `dup_mm`'s
+            // memcpy, so a forked child inherits the parent's membarrier
+            // registrations.
+            parent.membarrier_state,
             child_sched_policy,
             child_sched_priority,
             child_nice,
@@ -1674,6 +1698,11 @@ pub fn fork_create(
         // execve resets persona to PER_LINUX (0), but fork preserves
         // whatever the parent had set.
         linux_personality,
+        // Linux: `membarrier_state` is copied verbatim across fork (the
+        // `dup_mm` memcpy), so the child inherits the parent's membarrier
+        // registrations.  Linux resets it on execve; we lack an exec-time
+        // hook (see the field doc / todo.txt).
+        membarrier_state,
         // Linux: PR_SET_PDEATHSIG is reset across fork.  A parent
         // who has PDEATHSIG armed does not pass that arming to its
         // children; each child starts with no death signal and must
@@ -2406,6 +2435,30 @@ pub fn set_personality(pid: ProcessId, new: u32) -> Option<u32> {
     let old = proc.linux_personality;
     proc.linux_personality = new;
     Some(old)
+}
+
+/// Read the per-mm `membarrier(2)` registration READY bitmask for `pid`.
+///
+/// Returns `None` if `pid` is unknown (e.g. a kernel-context caller with no
+/// owner process).  See [`Process::membarrier_state`] for the bit layout
+/// (opaque to this module; defined by the membarrier syscall handler).
+#[must_use]
+pub fn membarrier_state(pid: ProcessId) -> Option<u32> {
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.membarrier_state)
+}
+
+/// OR `bits` into the per-mm `membarrier(2)` READY bitmask for `pid`,
+/// returning the resulting bitmask.
+///
+/// Idempotent: re-registering an already-registered command leaves the
+/// state unchanged (matches Linux, where a repeat `REGISTER_*` is a no-op).
+/// The `PROCESS_TABLE` lock serialises concurrent registrations from
+/// sibling threads of the same process.  Returns `None` if `pid` is unknown.
+pub fn membarrier_register(pid: ProcessId, bits: u32) -> Option<u32> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid)?;
+    proc.membarrier_state |= bits;
+    Some(proc.membarrier_state)
 }
 
 /// Read the per-process memory-commit policy override for `pid`.

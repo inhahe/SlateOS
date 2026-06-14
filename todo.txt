@@ -52301,3 +52301,20 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ## drm_event (struct drm_event_vblank) readable/pollable on the card fd so
 ## DRM_MODE_PAGE_FLIP_EVENT clients don't hang; PAGE_FLIP itself maps to
 ## DrmDevice::page_flip(crtc_id, fb_id).
+
+## ----------------------------------------------------------------------
+## membarrier(2) membarrier_state NOT reset on execve (TD8 residual)
+## ----------------------------------------------------------------------
+## Added 2026-06-14.  TD8 (per-mm membarrier registration gating) is
+## resolved: Process now carries a `membarrier_state: u32` READY bitmask
+## (pcb.rs) that REGISTER_* sets and the PRIVATE_EXPEDITED* issues are
+## gated on (EPERM if unset).  It is inherited verbatim across fork (Linux
+## dup_mm memcpy).  Linux ALSO resets it to 0 on execve
+## (membarrier_exec_mmap), but we have no exec-time PCB-reset hook yet, so
+## a registration currently survives exec.  Consequence: a process that
+## registered PRIVATE_EXPEDITED, then execve'd, can issue the expedited
+## barrier without re-registering, where Linux would EPERM until the new
+## image re-registers.  Impact negligible (well-behaved programs register
+## at startup regardless).  Proper fix: when the shared exec-time PCB
+## cleanup block is built (it must also reset linux_pdeathsig, dumpable,
+## keepcaps — see entries above), add `proc.membarrier_state = 0;` there.

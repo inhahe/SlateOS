@@ -28516,6 +28516,136 @@ fn sys_clone3(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+// ---------------------------------------------------------------------------
+// membarrier(2) command numbers (from <linux/membarrier.h>) and the per-mm
+// registration model.  Shared between `sys_membarrier` and the pure decision
+// helper `membarrier_decide` (which is unit-tested in isolation).
+// ---------------------------------------------------------------------------
+const MEMBARRIER_CMD_QUERY: u64 = 0;
+const MEMBARRIER_CMD_GLOBAL: u64 = 1 << 0;
+const MEMBARRIER_CMD_GLOBAL_EXPEDITED: u64 = 1 << 1;
+const MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED: u64 = 1 << 2;
+const MEMBARRIER_CMD_PRIVATE_EXPEDITED: u64 = 1 << 3;
+const MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED: u64 = 1 << 4;
+const MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE: u64 = 1 << 5;
+const MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE: u64 = 1 << 6;
+const MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ: u64 = 1 << 7;
+const MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_RSEQ: u64 = 1 << 8;
+const MEMBARRIER_CMD_GET_REGISTRATIONS: u64 = 1 << 9;
+const MEMBARRIER_CMD_FLAG_CPU: u64 = 1;
+
+// Per-mm registration READY bits stored opaquely in `Process::membarrier_state`.
+// The numeric layout is private to this module; only the GET_REGISTRATIONS
+// return value (a bitmask of REGISTER command numbers) is ABI-visible, and it
+// is reconstructed by `membarrier_registrations_mask`.
+const MEMBARRIER_READY_GLOBAL_EXPEDITED: u32 = 1 << 0;
+const MEMBARRIER_READY_PRIVATE_EXPEDITED: u32 = 1 << 1;
+const MEMBARRIER_READY_PRIVATE_EXPEDITED_SYNC_CORE: u32 = 1 << 2;
+const MEMBARRIER_READY_PRIVATE_EXPEDITED_RSEQ: u32 = 1 << 3;
+
+/// What a (non-QUERY) `membarrier` command resolves to given the issuing mm's
+/// current registration `state`.  Kept separate from `sys_membarrier` so the
+/// gating logic can be unit-tested without a process context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MembarrierAction {
+    /// Drain the local store buffer and return 0 (a barrier was issued).
+    Fence,
+    /// Set these READY bits in the issuing mm's state, then return 0.
+    Register(u32),
+    /// Return the registered-command bitmask (computed from the real state by
+    /// `membarrier_registrations_mask`).
+    GetRegistrations,
+    /// Return `-EPERM`: an expedited barrier was issued without first
+    /// registering the matching command (Linux gates expedited barriers on
+    /// prior registration, and that check precedes the single-CPU shortcut).
+    Eperm,
+    /// Return `-EINVAL`: unrecognised command.
+    Einval,
+}
+
+/// Decide how to handle a non-QUERY `membarrier` `cmd` given the issuing mm's
+/// registration `state` (the READY bitmask).  Pure — no side effects — so the
+/// EPERM gating can be exhaustively unit-tested.
+///
+/// Mirrors Linux v6.6 `kernel/sched/membarrier.c`:
+///   * `GLOBAL` / `GLOBAL_EXPEDITED` issue need no registration.
+///   * each `PRIVATE_EXPEDITED*` issue returns `-EPERM` unless its matching
+///     READY bit is set (set by the corresponding `REGISTER_*`).
+///   * `REGISTER_*` set their READY bit and succeed.
+///   * `GET_REGISTRATIONS` reports the registered commands.
+fn membarrier_decide(cmd: u64, state: u32) -> MembarrierAction {
+    match cmd {
+        MEMBARRIER_CMD_GLOBAL | MEMBARRIER_CMD_GLOBAL_EXPEDITED => MembarrierAction::Fence,
+        MEMBARRIER_CMD_PRIVATE_EXPEDITED => {
+            if state & MEMBARRIER_READY_PRIVATE_EXPEDITED != 0 {
+                MembarrierAction::Fence
+            } else {
+                MembarrierAction::Eperm
+            }
+        }
+        MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE => {
+            if state & MEMBARRIER_READY_PRIVATE_EXPEDITED_SYNC_CORE != 0 {
+                MembarrierAction::Fence
+            } else {
+                MembarrierAction::Eperm
+            }
+        }
+        MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ => {
+            if state & MEMBARRIER_READY_PRIVATE_EXPEDITED_RSEQ != 0 {
+                MembarrierAction::Fence
+            } else {
+                MembarrierAction::Eperm
+            }
+        }
+        MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED => {
+            MembarrierAction::Register(MEMBARRIER_READY_GLOBAL_EXPEDITED)
+        }
+        MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED => {
+            MembarrierAction::Register(MEMBARRIER_READY_PRIVATE_EXPEDITED)
+        }
+        MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE => {
+            MembarrierAction::Register(MEMBARRIER_READY_PRIVATE_EXPEDITED_SYNC_CORE)
+        }
+        MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_RSEQ => {
+            MembarrierAction::Register(MEMBARRIER_READY_PRIVATE_EXPEDITED_RSEQ)
+        }
+        MEMBARRIER_CMD_GET_REGISTRATIONS => MembarrierAction::GetRegistrations,
+        _ => MembarrierAction::Einval,
+    }
+}
+
+/// Reconstruct the ABI-visible `GET_REGISTRATIONS` bitmask (a set of
+/// `MEMBARRIER_CMD_REGISTER_*` command numbers) from an mm's opaque READY
+/// `state`.  Mirrors Linux v6.6 `membarrier_get_registrations`.
+fn membarrier_registrations_mask(state: u32) -> u32 {
+    let mut mask = 0u32;
+    if state & MEMBARRIER_READY_GLOBAL_EXPEDITED != 0 {
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            mask |= MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED as u32;
+        }
+    }
+    if state & MEMBARRIER_READY_PRIVATE_EXPEDITED != 0 {
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            mask |= MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED as u32;
+        }
+    }
+    if state & MEMBARRIER_READY_PRIVATE_EXPEDITED_SYNC_CORE != 0 {
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            mask |= MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE as u32;
+        }
+    }
+    if state & MEMBARRIER_READY_PRIVATE_EXPEDITED_RSEQ != 0 {
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            mask |= MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_RSEQ as u32;
+        }
+    }
+    mask
+}
+
 /// `membarrier(cmd, flags, cpu_id)` — issue a memory barrier across
 /// threads sharing the caller's MM (or all threads, for the GLOBAL
 /// variants).
@@ -28547,12 +28677,29 @@ fn sys_clone3(args: &SyscallArgs) -> SyscallResult {
 ///     then "fence and return 0" remains the correct answer.
 ///
 /// Therefore "fence locally and return 0" is the truthful answer
-/// for every barrier command, including the GLOBAL variants —
-/// there is no other thread in the system whose view we need to
-/// affect.  REGISTER_* commands are pure bookkeeping (per-task
-/// "I might call this later" hints); accepting them without
-/// per-task state is correct as long as the corresponding barrier
-/// still succeeds, which it does.
+/// for every barrier command that is *permitted to run*, including
+/// the GLOBAL variants — there is no other thread in the system
+/// whose view we need to affect.
+///
+/// ## Registration gating (TD8)
+///
+/// Linux still requires an expedited command to be **registered**
+/// before it may be issued: `membarrier_private_expedited()` returns
+/// `-EPERM` when the issuing mm's `membarrier_state` lacks the
+/// matching `*_READY` bit, and that check runs *before* the
+/// single-CPU shortcut — so even on our uniprocessor an unregistered
+/// `PRIVATE_EXPEDITED*` issue must be `-EPERM`, not 0.  We honour
+/// this with a per-mm READY bitmask (`Process::membarrier_state`,
+/// shared across the process's threads so a thread may register and
+/// a sibling issue).  `REGISTER_*` set their bit; the three
+/// `PRIVATE_EXPEDITED*` issues are gated on it; `GET_REGISTRATIONS`
+/// reports the registered set.  The gating decision lives in the
+/// pure, unit-tested [`membarrier_decide`].  `GLOBAL` and
+/// `GLOBAL_EXPEDITED` issue need no registration (Linux does not
+/// EPERM them).  The boot self-test runs in kernel context with no
+/// owner mm; there the registration model is moot (no sibling
+/// userspace threads), so the fence is always permitted — see the
+/// `u32::MAX` gating-state note at the issue site.
 ///
 /// ## Linux ABI reference (cmd values from `<linux/membarrier.h>`)
 ///
@@ -28575,18 +28722,8 @@ fn sys_clone3(args: &SyscallArgs) -> SyscallResult {
 /// shares the MM; we accept the bit on the documented commands
 /// and reject it on REGISTER_*/GLOBAL where Linux also rejects it.
 fn sys_membarrier(args: &SyscallArgs) -> SyscallResult {
-    const MEMBARRIER_CMD_QUERY: u64 = 0;
-    const MEMBARRIER_CMD_GLOBAL: u64 = 1 << 0;
-    const MEMBARRIER_CMD_GLOBAL_EXPEDITED: u64 = 1 << 1;
-    const MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED: u64 = 1 << 2;
-    const MEMBARRIER_CMD_PRIVATE_EXPEDITED: u64 = 1 << 3;
-    const MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED: u64 = 1 << 4;
-    const MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE: u64 = 1 << 5;
-    const MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE: u64 = 1 << 6;
-    const MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ: u64 = 1 << 7;
-    const MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_RSEQ: u64 = 1 << 8;
-    const MEMBARRIER_CMD_GET_REGISTRATIONS: u64 = 1 << 9;
-    const MEMBARRIER_CMD_FLAG_CPU: u64 = 1;
+    // Command numbers, READY bits, and the gating helper live at module scope
+    // (just above) so the `membarrier_decide` logic can be unit-tested.
 
     // Linux signature: `SYSCALL_DEFINE3(membarrier, int, cmd, unsigned
     // int, flags, int, cpu_id)`.  All three args are declared as 32-bit
@@ -28685,45 +28822,44 @@ fn sys_membarrier(args: &SyscallArgs) -> SyscallResult {
         return linux_err(errno::EINVAL);
     }
 
-    match cmd {
-        MEMBARRIER_CMD_GLOBAL
-        | MEMBARRIER_CMD_GLOBAL_EXPEDITED
-        | MEMBARRIER_CMD_PRIVATE_EXPEDITED
-        | MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE
-        | MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ => {
-            // Drain the local store buffer.  See doc comment above
-            // for why this is sufficient in our single-MM world.
+    // Resolve the issuing mm's per-process registration state (TD8).  A
+    // userspace caller always has an owner process; only the in-kernel boot
+    // self-test reaches here with none.  In that kernel context there is no
+    // mm registration model and no sibling userspace threads to synchronise,
+    // so an expedited barrier is a valid local no-op regardless of
+    // registration — we feed `u32::MAX` to the gating helper to bypass the
+    // EPERM check there, while reporting the *real* (empty) state for
+    // GET_REGISTRATIONS.
+    let pid = crate::proc::thread::owner_process(crate::sched::current_task_id());
+    let real_state = pid
+        .and_then(crate::proc::pcb::membarrier_state)
+        .unwrap_or(0);
+    let gating_state = if pid.is_some() { real_state } else { u32::MAX };
+
+    match membarrier_decide(cmd, gating_state) {
+        MembarrierAction::Fence => {
+            // Drain the local store buffer.  See doc comment above for why
+            // this is sufficient in our single-MM world.
             core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
             SyscallResult::ok(0)
         }
-        MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED
-        | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED
-        | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE
-        | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_RSEQ => {
-            // KNOWN DIVERGENCE (known-issues TD8): Linux v6.6
-            // membarrier_private_expedited() returns -EPERM when the issuing
-            // mm has NOT first registered the matching command (the
-            // MEMBARRIER_STATE_*_READY bit in mm->membarrier_state), and that
-            // EPERM check runs BEFORE the single-CPU `return 0` shortcut — so
-            // even on our uniprocessor a PRIVATE_EXPEDITED issued without
-            // prior registration should be -EPERM, not 0.  Faithfully matching
-            // this requires per-mm registration state (shared across the
-            // process's threads); a per-task map would wrongly reject a
-            // cross-thread issue that Linux accepts.  Deferred because the
-            // boot self-test (our only harness) runs in kernel context with
-            // no owner process, so the per-mm path cannot be exercised there.
-            // We currently accept the REGISTER no-op and the issue paths
-            // unconditionally.
+        MembarrierAction::Register(bits) => {
+            // Record the registration in the per-mm state so a later
+            // expedited issue of the matching command is permitted.  In the
+            // no-owner-process kernel context there is nowhere to record it;
+            // the no-op return matches Linux's "REGISTER always succeeds".
+            if let Some(p) = pid {
+                let _ = crate::proc::pcb::membarrier_register(p, bits);
+            }
             SyscallResult::ok(0)
         }
-        MEMBARRIER_CMD_GET_REGISTRATIONS => {
-            // Linux 6.3+: bitmask of commands currently registered
-            // for this thread.  We track no per-task registration,
-            // so "no registrations" is the truthful answer (the
-            // barriers work regardless).
-            SyscallResult::ok(0)
+        MembarrierAction::GetRegistrations => {
+            // Linux 6.3+: bitmask of REGISTER_* commands currently registered
+            // for this mm.  Computed from the real state (0 in kernel context).
+            SyscallResult::ok(i64::from(membarrier_registrations_mask(real_state)))
         }
-        _ => linux_err(errno::EINVAL),
+        MembarrierAction::Eperm => linux_err(errno::EPERM),
+        MembarrierAction::Einval => linux_err(errno::EINVAL),
     }
 }
 
@@ -43530,6 +43666,191 @@ fn self_test_seccomp_quotactl_truncation() -> crate::error::KernelResult<()> {
 }
 
 #[inline(never)]
+fn self_test_membarrier_registration() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+    // TD8 — membarrier(2) per-mm registration gating.  Exercise the pure
+    // decision helper exhaustively, then the per-mm READY-bit store via a
+    // throwaway process (the EPERM path can't be driven through the syscall
+    // layer at boot, where the caller has no owner mm).
+
+    // 1. Pure `membarrier_decide` gating.
+    let cases: &[(u64, u32, MembarrierAction)] = &[
+        // GLOBAL family needs no registration.
+        (MEMBARRIER_CMD_GLOBAL, 0, MembarrierAction::Fence),
+        (MEMBARRIER_CMD_GLOBAL_EXPEDITED, 0, MembarrierAction::Fence),
+        // PRIVATE_EXPEDITED is EPERM until registered.
+        (MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0, MembarrierAction::Eperm),
+        (
+            MEMBARRIER_CMD_PRIVATE_EXPEDITED,
+            MEMBARRIER_READY_PRIVATE_EXPEDITED,
+            MembarrierAction::Fence,
+        ),
+        (
+            MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE,
+            0,
+            MembarrierAction::Eperm,
+        ),
+        (
+            MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE,
+            MEMBARRIER_READY_PRIVATE_EXPEDITED_SYNC_CORE,
+            MembarrierAction::Fence,
+        ),
+        (
+            MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ,
+            0,
+            MembarrierAction::Eperm,
+        ),
+        (
+            MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ,
+            MEMBARRIER_READY_PRIVATE_EXPEDITED_RSEQ,
+            MembarrierAction::Fence,
+        ),
+        // A non-matching READY bit does NOT permit a different command.
+        (
+            MEMBARRIER_CMD_PRIVATE_EXPEDITED,
+            MEMBARRIER_READY_PRIVATE_EXPEDITED_RSEQ,
+            MembarrierAction::Eperm,
+        ),
+        // REGISTER_* map to their READY bit.
+        (
+            MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED,
+            0,
+            MembarrierAction::Register(MEMBARRIER_READY_GLOBAL_EXPEDITED),
+        ),
+        (
+            MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED,
+            0,
+            MembarrierAction::Register(MEMBARRIER_READY_PRIVATE_EXPEDITED),
+        ),
+        (
+            MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE,
+            0,
+            MembarrierAction::Register(MEMBARRIER_READY_PRIVATE_EXPEDITED_SYNC_CORE),
+        ),
+        (
+            MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_RSEQ,
+            0,
+            MembarrierAction::Register(MEMBARRIER_READY_PRIVATE_EXPEDITED_RSEQ),
+        ),
+        (
+            MEMBARRIER_CMD_GET_REGISTRATIONS,
+            0,
+            MembarrierAction::GetRegistrations,
+        ),
+        // Unknown command.
+        (1 << 10, 0, MembarrierAction::Einval),
+    ];
+    for &(cmd, state, expected) in cases {
+        let got = membarrier_decide(cmd, state);
+        if got != expected {
+            serial_println!(
+                "[syscall/linux]   FAIL: membarrier_decide(cmd={}, state={}) = {:?}, expected {:?}",
+                cmd,
+                state,
+                got,
+                expected
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // 2. GET_REGISTRATIONS bitmask reconstruction.
+    if membarrier_registrations_mask(0) != 0 {
+        serial_println!("[syscall/linux]   FAIL: membarrier_registrations_mask(0) != 0");
+        return Err(KernelError::InternalError);
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let priv_cmd = MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED as u32;
+    if membarrier_registrations_mask(MEMBARRIER_READY_PRIVATE_EXPEDITED) != priv_cmd {
+        serial_println!("[syscall/linux]   FAIL: registrations_mask(PRIVATE) != REGISTER_PRIVATE");
+        return Err(KernelError::InternalError);
+    }
+    let all_ready = MEMBARRIER_READY_GLOBAL_EXPEDITED
+        | MEMBARRIER_READY_PRIVATE_EXPEDITED
+        | MEMBARRIER_READY_PRIVATE_EXPEDITED_SYNC_CORE
+        | MEMBARRIER_READY_PRIVATE_EXPEDITED_RSEQ;
+    #[allow(clippy::cast_possible_truncation)]
+    let all_cmds = (MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED
+        | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED
+        | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE
+        | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_RSEQ) as u32;
+    if membarrier_registrations_mask(all_ready) != all_cmds {
+        serial_println!("[syscall/linux]   FAIL: registrations_mask(all) != all REGISTER cmds");
+        return Err(KernelError::InternalError);
+    }
+
+    // 3. Per-mm READY-bit store via a throwaway process.
+    {
+        let pid = pcb::create("membarrier-reg-test", 0);
+        // Fresh mm: no registrations -> a PRIVATE_EXPEDITED issue would EPERM.
+        if pcb::membarrier_state(pid) != Some(0) {
+            serial_println!("[syscall/linux]   FAIL: fresh membarrier_state != Some(0)");
+            pcb::destroy(pid);
+            return Err(KernelError::InternalError);
+        }
+        if membarrier_decide(MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0) != MembarrierAction::Eperm {
+            serial_println!("[syscall/linux]   FAIL: unregistered PRIVATE_EXPEDITED not Eperm");
+            pcb::destroy(pid);
+            return Err(KernelError::InternalError);
+        }
+        // Register PRIVATE_EXPEDITED -> bit set, idempotent.
+        if pcb::membarrier_register(pid, MEMBARRIER_READY_PRIVATE_EXPEDITED)
+            != Some(MEMBARRIER_READY_PRIVATE_EXPEDITED)
+        {
+            serial_println!("[syscall/linux]   FAIL: register PRIVATE returned wrong state");
+            pcb::destroy(pid);
+            return Err(KernelError::InternalError);
+        }
+        if pcb::membarrier_register(pid, MEMBARRIER_READY_PRIVATE_EXPEDITED)
+            != Some(MEMBARRIER_READY_PRIVATE_EXPEDITED)
+        {
+            serial_println!("[syscall/linux]   FAIL: re-register PRIVATE not idempotent");
+            pcb::destroy(pid);
+            return Err(KernelError::InternalError);
+        }
+        // The matching issue is now permitted.
+        let state = pcb::membarrier_state(pid).unwrap_or(0);
+        if membarrier_decide(MEMBARRIER_CMD_PRIVATE_EXPEDITED, state) != MembarrierAction::Fence {
+            serial_println!("[syscall/linux]   FAIL: registered PRIVATE_EXPEDITED not Fence");
+            pcb::destroy(pid);
+            return Err(KernelError::InternalError);
+        }
+        // A different expedited command remains EPERM.
+        if membarrier_decide(MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ, state)
+            != MembarrierAction::Eperm
+        {
+            serial_println!("[syscall/linux]   FAIL: RSEQ permitted by PRIVATE registration");
+            pcb::destroy(pid);
+            return Err(KernelError::InternalError);
+        }
+        // Register a second command; both bits coexist.
+        let both = MEMBARRIER_READY_PRIVATE_EXPEDITED | MEMBARRIER_READY_PRIVATE_EXPEDITED_RSEQ;
+        if pcb::membarrier_register(pid, MEMBARRIER_READY_PRIVATE_EXPEDITED_RSEQ) != Some(both) {
+            serial_println!("[syscall/linux]   FAIL: register RSEQ did not OR into state");
+            pcb::destroy(pid);
+            return Err(KernelError::InternalError);
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let both_cmds = (MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED
+            | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_RSEQ) as u32;
+        if membarrier_registrations_mask(both) != both_cmds {
+            serial_println!("[syscall/linux]   FAIL: registrations_mask(both) wrong");
+            pcb::destroy(pid);
+            return Err(KernelError::InternalError);
+        }
+        pcb::destroy(pid);
+        // After destroy the mm is gone -> None (no registration to consult).
+        if pcb::membarrier_state(pid).is_some() {
+            serial_println!("[syscall/linux]   FAIL: membarrier_state on destroyed pid not None");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    serial_println!("[syscall/linux]   membarrier per-mm registration gating (TD8): OK");
+    Ok(())
+}
+
+#[inline(never)]
 fn self_test_io_swap_membarrier_truncation() -> crate::error::KernelResult<()> {
     use crate::serial_println;
     // Batch 301 — sys_io_setup + sys_swapon + sys_membarrier
@@ -45040,6 +45361,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     self_test_seccomp_quotactl_truncation()?;
 
     self_test_io_swap_membarrier_truncation()?;
+
+    self_test_membarrier_registration()?;
 
     self_test_module_archprctl_truncation()?;
 

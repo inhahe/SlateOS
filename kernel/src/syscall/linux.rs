@@ -41005,6 +41005,150 @@ fn self_test_sanitize_mpol_flags() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+/// TD4 extraction: get_nodes + mpol_new fidelity (self_test group 9g-546).
+/// Verifies NULL-mask=empty handling, the 32768-bit nodemask cap, and the
+/// mpol_new PREFERRED_MANY/PREFERRED/LOCAL + STATIC/RELATIVE emptiness rules
+/// across set_mempolicy and mbind. Self-contained. See
+/// [`self_test_errno_mapping`] for the TD4 rationale.
+#[inline(never)]
+fn self_test_get_nodes_mpol_new() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+
+    const MPOL_DEFAULT: u64 = 0;
+    const MPOL_PREFERRED: u64 = 1;
+    const MPOL_BIND: u64 = 2;
+    const MPOL_LOCAL: u64 = 4;
+    const MPOL_PREFERRED_MANY: u64 = 5;
+    const MPOL_F_STATIC_NODES: u64 = 1 << 15;
+    let mask: u64 = 0x1; // node {0}
+
+    // set_mempolicy(PREFERRED_MANY, NULL, 0) -> -EINVAL.
+    // PREFERRED_MANY demands a non-empty mask (was wrongly accepted).
+    let a = SyscallArgs {
+        arg0: MPOL_PREFERRED_MANY, arg1: 0, arg2: 0,
+        arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
+    if r.value != i64::from(errno::EINVAL).wrapping_neg() {
+        serial_println!(
+            "[syscall/linux]   FAIL: set_mempolicy(PREFERRED_MANY,empty) -> {} (expected -EINVAL)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // set_mempolicy(PREFERRED_MANY, {0}, 64) -> 0 (non-empty ok).
+    let a = SyscallArgs {
+        arg0: MPOL_PREFERRED_MANY,
+        arg1: (&raw const mask).addr() as u64,
+        arg2: 64, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
+    if r.value != 0 {
+        serial_println!(
+            "[syscall/linux]   FAIL: set_mempolicy(PREFERRED_MANY,{{0}}) -> {} (expected 0)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // set_mempolicy(DEFAULT, NULL, maxnode=64) -> 0.  A NULL mask with
+    // maxnode>0 is an empty mask (success), not -EFAULT.
+    let a = SyscallArgs {
+        arg0: MPOL_DEFAULT, arg1: 0, arg2: 64,
+        arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
+    if r.value != 0 {
+        serial_println!(
+            "[syscall/linux]   FAIL: set_mempolicy(DEFAULT,NULL,64) -> {} (expected 0)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // set_mempolicy(BIND, NULL, maxnode=64) -> -EINVAL (NULL=empty,
+    // BIND needs non-empty), NOT -EFAULT.
+    let a = SyscallArgs {
+        arg0: MPOL_BIND, arg1: 0, arg2: 64,
+        arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
+    if r.value != i64::from(errno::EINVAL).wrapping_neg() {
+        serial_println!(
+            "[syscall/linux]   FAIL: set_mempolicy(BIND,NULL,64) -> {} (expected -EINVAL)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // set_mempolicy(PREFERRED | STATIC_NODES, empty) -> -EINVAL.
+    // Empty PREFERRED is only legal without STATIC/RELATIVE flags.
+    let a = SyscallArgs {
+        arg0: MPOL_PREFERRED | MPOL_F_STATIC_NODES, arg1: 0, arg2: 0,
+        arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
+    if r.value != i64::from(errno::EINVAL).wrapping_neg() {
+        serial_println!(
+            "[syscall/linux]   FAIL: set_mempolicy(PREFERRED|STATIC,empty) -> {} (expected -EINVAL)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // set_mempolicy(LOCAL | STATIC_NODES, empty) -> -EINVAL.
+    // LOCAL must carry no STATIC/RELATIVE flag.
+    let a = SyscallArgs {
+        arg0: MPOL_LOCAL | MPOL_F_STATIC_NODES, arg1: 0, arg2: 0,
+        arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
+    if r.value != i64::from(errno::EINVAL).wrapping_neg() {
+        serial_println!(
+            "[syscall/linux]   FAIL: set_mempolicy(LOCAL|STATIC) -> {} (expected -EINVAL)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // set_mempolicy(BIND, {0}, maxnode=40000) -> -EINVAL via the
+    // 32768-bit cap (40000-1 = 39999 > 32768).  The cap fires before
+    // any user read, so the tiny stack mask is never over-read.
+    let a = SyscallArgs {
+        arg0: MPOL_BIND,
+        arg1: (&raw const mask).addr() as u64,
+        arg2: 40000, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
+    if r.value != i64::from(errno::EINVAL).wrapping_neg() {
+        serial_println!(
+            "[syscall/linux]   FAIL: set_mempolicy(BIND,{{0}},40000) -> {} (expected -EINVAL cap)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // mbind(PREFERRED_MANY, empty) over a 4 KiB range -> -EINVAL.
+    let a = SyscallArgs {
+        arg0: 0x1000, arg1: 0x1000, arg2: MPOL_PREFERRED_MANY,
+        arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::MBIND, &a);
+    if r.value != i64::from(errno::EINVAL).wrapping_neg() {
+        serial_println!(
+            "[syscall/linux]   FAIL: mbind(PREFERRED_MANY,empty) -> {} (expected -EINVAL)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[syscall/linux]   get_nodes NULL-mask=empty + 32768-bit cap + mpol_new PREFERRED_MANY/STATIC/RELATIVE rules (batch 546): OK"
+    );
+    Ok(())
+}
+
 pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
@@ -41117,149 +41261,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
     // (9g-546) Batch 546: get_nodes + mpol_new fidelity for mbind /
     // set_mempolicy.  Three verbatim corrections vs Linux v6.6
-    // mm/mempolicy.c:
-    //   * get_nodes treats a NULL nmask as an EMPTY mask + success (not
-    //     -EFAULT); the per-mode emptiness rule then decides.
-    //   * the nodemask bit cap is PAGE_SIZE*BITS_PER_BYTE = 32768 (after
-    //     --maxnode), not our old 1<<23, and over-cap -> -EINVAL before
-    //     any user read.
-    //   * mpol_new requires a NON-empty mask for MPOL_PREFERRED_MANY (we
-    //     previously accepted empty), and rejects empty MPOL_PREFERRED /
-    //     any MPOL_LOCAL when MPOL_F_STATIC_NODES / RELATIVE_NODES is set.
-    {
-        const MPOL_DEFAULT: u64 = 0;
-        const MPOL_PREFERRED: u64 = 1;
-        const MPOL_BIND: u64 = 2;
-        const MPOL_LOCAL: u64 = 4;
-        const MPOL_PREFERRED_MANY: u64 = 5;
-        const MPOL_F_STATIC_NODES: u64 = 1 << 15;
-        let mask: u64 = 0x1; // node {0}
-
-        // set_mempolicy(PREFERRED_MANY, NULL, 0) -> -EINVAL.
-        // PREFERRED_MANY demands a non-empty mask (was wrongly accepted).
-        let a = SyscallArgs {
-            arg0: MPOL_PREFERRED_MANY, arg1: 0, arg2: 0,
-            arg3: 0, arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
-        if r.value != i64::from(errno::EINVAL).wrapping_neg() {
-            serial_println!(
-                "[syscall/linux]   FAIL: set_mempolicy(PREFERRED_MANY,empty) -> {} (expected -EINVAL)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // set_mempolicy(PREFERRED_MANY, {0}, 64) -> 0 (non-empty ok).
-        let a = SyscallArgs {
-            arg0: MPOL_PREFERRED_MANY,
-            arg1: (&raw const mask).addr() as u64,
-            arg2: 64, arg3: 0, arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
-        if r.value != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: set_mempolicy(PREFERRED_MANY,{{0}}) -> {} (expected 0)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // set_mempolicy(DEFAULT, NULL, maxnode=64) -> 0.  A NULL mask with
-        // maxnode>0 is an empty mask (success), not -EFAULT.
-        let a = SyscallArgs {
-            arg0: MPOL_DEFAULT, arg1: 0, arg2: 64,
-            arg3: 0, arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
-        if r.value != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: set_mempolicy(DEFAULT,NULL,64) -> {} (expected 0)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // set_mempolicy(BIND, NULL, maxnode=64) -> -EINVAL (NULL=empty,
-        // BIND needs non-empty), NOT -EFAULT.
-        let a = SyscallArgs {
-            arg0: MPOL_BIND, arg1: 0, arg2: 64,
-            arg3: 0, arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
-        if r.value != i64::from(errno::EINVAL).wrapping_neg() {
-            serial_println!(
-                "[syscall/linux]   FAIL: set_mempolicy(BIND,NULL,64) -> {} (expected -EINVAL)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // set_mempolicy(PREFERRED | STATIC_NODES, empty) -> -EINVAL.
-        // Empty PREFERRED is only legal without STATIC/RELATIVE flags.
-        let a = SyscallArgs {
-            arg0: MPOL_PREFERRED | MPOL_F_STATIC_NODES, arg1: 0, arg2: 0,
-            arg3: 0, arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
-        if r.value != i64::from(errno::EINVAL).wrapping_neg() {
-            serial_println!(
-                "[syscall/linux]   FAIL: set_mempolicy(PREFERRED|STATIC,empty) -> {} (expected -EINVAL)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // set_mempolicy(LOCAL | STATIC_NODES, empty) -> -EINVAL.
-        // LOCAL must carry no STATIC/RELATIVE flag.
-        let a = SyscallArgs {
-            arg0: MPOL_LOCAL | MPOL_F_STATIC_NODES, arg1: 0, arg2: 0,
-            arg3: 0, arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
-        if r.value != i64::from(errno::EINVAL).wrapping_neg() {
-            serial_println!(
-                "[syscall/linux]   FAIL: set_mempolicy(LOCAL|STATIC) -> {} (expected -EINVAL)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // set_mempolicy(BIND, {0}, maxnode=40000) -> -EINVAL via the
-        // 32768-bit cap (40000-1 = 39999 > 32768).  The cap fires before
-        // any user read, so the tiny stack mask is never over-read.
-        let a = SyscallArgs {
-            arg0: MPOL_BIND,
-            arg1: (&raw const mask).addr() as u64,
-            arg2: 40000, arg3: 0, arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::SET_MEMPOLICY, &a);
-        if r.value != i64::from(errno::EINVAL).wrapping_neg() {
-            serial_println!(
-                "[syscall/linux]   FAIL: set_mempolicy(BIND,{{0}},40000) -> {} (expected -EINVAL cap)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // mbind(PREFERRED_MANY, empty) over a 4 KiB range -> -EINVAL.
-        let a = SyscallArgs {
-            arg0: 0x1000, arg1: 0x1000, arg2: MPOL_PREFERRED_MANY,
-            arg3: 0, arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::MBIND, &a);
-        if r.value != i64::from(errno::EINVAL).wrapping_neg() {
-            serial_println!(
-                "[syscall/linux]   FAIL: mbind(PREFERRED_MANY,empty) -> {} (expected -EINVAL)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        serial_println!(
-            "[syscall/linux]   get_nodes NULL-mask=empty + 32768-bit cap + mpol_new PREFERRED_MANY/STATIC/RELATIVE rules (batch 546): OK"
-        );
-    }
+    // mm/mempolicy.c: NULL-mask=empty (not -EFAULT), 32768-bit nodemask
+    // cap, and the PREFERRED_MANY/PREFERRED/LOCAL emptiness rules under
+    // STATIC/RELATIVE flags.  Extracted to self_test_get_nodes_mpol_new (TD4).
+    self_test_get_nodes_mpol_new()?;
 
     // (9h) Batch 104: migrate_pages upgraded from -ENOSYS stub to
     // UMA-aware no-op.  Every page is already on node 0 so the

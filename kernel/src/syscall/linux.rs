@@ -46155,6 +46155,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_sigaltstack_dispatch()?;
+
+    #[inline(never)]
+    fn self_test_sigaltstack_dispatch() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // sigaltstack dispatch validation:
     //   - Both NULL pointers -> 0 (the trivial no-op success).
     //   - ss / old_ss with kernel-context bypass on validate_user_*
@@ -46353,6 +46358,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   sigaltstack ss_flags + ss_size gates: OK"
         );
+    }
+        Ok(())
     }
 
     // ioctl dispatch validation:

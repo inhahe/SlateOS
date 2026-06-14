@@ -66449,6 +66449,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_openat2_execveat_mount()?;
+
+    #[inline(never)]
+    fn self_test_openat2_execveat_mount() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // -----------------------------------------------------------------
     // openat2 / execveat / handle-at + new mount API
     // -----------------------------------------------------------------
@@ -67309,6 +67314,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   move_mount may_mount() EPERM gate (batch 492): OK"
         );
+    }
+        Ok(())
     }
 
     // -----------------------------------------------------------------

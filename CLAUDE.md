@@ -340,6 +340,62 @@ The human operator is often away from the computer or asleep. Do not stop and wa
 
 ---
 
+## Effort & Duration Calibration (measured, not guessed)
+
+Your trained instinct estimates task durations in **human-developer
+calendar units**, and is consistently wrong by ~1–2 orders of magnitude
+on this project — because the training data is humans, who code far
+slower than you. Do **not** answer "how hard/long is X?" or pace your own
+work using that instinct. Use the numbers below, which are **measured
+from this repo's own history** (4640 commits over 46 days; every session
+JSONL entry and every git commit carries an ISO-8601 millisecond
+timestamp, so this is observed, not assumed).
+
+**Your actual measured throughput:**
+- **~1 committed, tested, logical change every ~5 minutes of active
+  work** (median commit spacing 4.7 min; ~12.6 commits per active hour
+  across ~331 active hours).
+- Concrete recent anchors (single-day chain): a kernel bug fix *with*
+  root-cause instrumentation + a regression test + three full QEMU
+  boot-test cycles = **~38 min**; a new syscall feature (`execveat` real
+  execution incl. `fexecve`) = **~21 min**; a new capability-gated
+  syscall pair (`process_vm_readv/writev`) = **~17 min**; a focused
+  ring-3 self-test = **~7–10 min**.
+
+**Divide your gut estimate hard. Rough conversion:**
+
+| Your instinct says… | Reality (active work) | You're off by |
+|---|---|---|
+| "a couple hours" | ~5–20 min | ~10× |
+| "a day or two" | ~20–40 min | ~20–40× |
+| "a week or two" (a subsystem) | a few focused active hours, spread over 1–3 calendar days | ~20–40× |
+| "months" / "~a year" (e.g. a Chromium port) | days-to-weeks of active work *if unblocked* | ≥10×; and the real gate is missing **prerequisites/dependencies**, not your effort |
+
+**Consequences for behavior:**
+- When asked how hard/long something is, answer in the *measured* units
+  (minutes-to-hours of active work; at most a handful of calendar days
+  for genuinely large things) — not human-team weeks/months.
+- When self-pacing, treat "big" roadmap tasks as cheap enough to **just
+  start**. A "large initiative" here is usually a few active hours, not a
+  commitment you must ration or seek permission to begin. (The standing
+  rule to get operator go-ahead before a *giant external port* still
+  holds — that's about prioritization/prerequisites, not effort cost.)
+
+**Calendar time vs. active time.** The coding is fast; what actually
+stretches wall-clock delivery is **downtime, not effort** — overwhelmingly
+rate-limit windows. The most recent rate-limit lasted ~2.9–3.1 days (the
+history shows one ~75 h and one ~68 h gap). Even counting *all* idle +
+rate-limit gaps, the project still averaged **~100 commits/calendar-day**.
+So for "when will it be done?": model the work as minutes-to-hours, and
+add slack only for possible rate-limit downtime — never inflate the
+coding itself. (Methodology note: the active-rate figure excludes long
+human-away idle gaps but retains the most recent multi-day rate-limit as
+real downtime; earlier multi-day gaps are noisier — they predate the
+one-agent-at-a-time rule and overlapped concurrent sessions — so they
+were not used to derive the active rate.)
+
+---
+
 ## When You Finish a Task
 
 1. All code compiles with no warnings (`cargo build` clean, `cargo clippy` clean).

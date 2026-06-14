@@ -8955,15 +8955,21 @@ fn write_cstr_field(dst: &mut [u8], src: &[u8]) {
 ///     program can continue.
 ///   - `PR_GET_NAME` (16): the symmetric query.  We zero the user buf
 ///     (16 bytes) if non-NULL, which reports "thread has no name".
-///   - `PR_SET_DUMPABLE` (4) / `PR_GET_DUMPABLE` (3): we don't produce
-///     core dumps; SET accepts any value, GET returns 0 (not dumpable).
+///   - `PR_SET_DUMPABLE` (4) / `PR_GET_DUMPABLE` (3): the SUID-dump
+///     flag.  SET accepts the full-64-bit arg2 ∈ {0, 1} (anything
+///     else, including high-half noise, is EINVAL), persists it
+///     per-PCB, and GET round-trips the stored value.  Kernel context
+///     (no PCB) reports the SUID_DUMP_USER default (1).
 ///   - `PR_SET_PDEATHSIG` (1): "send sig when parent dies" — we don't
 ///     have parent-death tracking but most callers (systemd, init
 ///     systems) handle SET failing only by logging.  Accepting it
 ///     keeps them quiet.
-///   - `PR_SET_NO_NEW_PRIVS` (38) / `PR_GET_NO_NEW_PRIVS` (39): sandbox
-///     bit.  SET accepts; GET returns 1 (the most paranoid answer
-///     since we don't honour set*id setuid bits anyway).
+///   - `PR_SET_NO_NEW_PRIVS` (38) / `PR_GET_NO_NEW_PRIVS` (39): the
+///     sticky no-new-privileges sandbox bit.  SET enforces the Linux
+///     argument shape (arg2 == 1 and arg3..arg5 == 0, else EINVAL) and
+///     stores 1 per-PCB; once set it can never be cleared.  GET
+///     (arg2..arg5 must be 0, else EINVAL) round-trips the stored
+///     value (0 by default).  Kernel context (no PCB) reports 0.
 ///   - `PR_SET_KEEPCAPS` (8) / `PR_GET_KEEPCAPS` (7): capability
 ///     preservation across uid change.  Backed by `SECBIT_KEEP_CAPS`
 ///     (securebits bit 4) — the single source of truth shared with

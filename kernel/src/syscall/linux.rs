@@ -49915,6 +49915,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_fcntl_seals()?;
+
+    #[inline(never)]
+    fn self_test_fcntl_seals() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // Batch 128: fcntl(F_ADD_SEALS / F_GET_SEALS) — memfd sealing API.
     //
     // The dispatch arms gate on caller_pid() + linux_fd_lookup +
@@ -49980,6 +49985,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         crate::ipc::memfd::close(h);
         serial_println!("[syscall/linux]   fcntl F_ADD_SEALS/F_GET_SEALS gate: OK");
+    }
+        Ok(())
     }
 
     // Batch 129: register_ipc_handle wiring for EventFd / MemFd

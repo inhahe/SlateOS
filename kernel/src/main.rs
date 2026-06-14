@@ -1282,6 +1282,15 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: Linux envp[0] deref (ring 3) self-test failed: {:?}", e);
     }
 
+    // Ring-3 end-to-end test of the fork()+wait4() reap cycle — the core
+    // process-lifecycle primitive every toolchain (make→gcc→cc1/as/ld) needs.
+    // The launcher reaps with a non-blocking WNOHANG retry loop and the
+    // harness drives the scheduler with a bounded yield loop, so this can
+    // never hang the boot: worst case is a clean failed assertion.
+    if let Err(e) = proc::spawn::self_test_linux_fork_wait() {
+        serial_println!("WARNING: Linux fork()+wait4() (ring 3) self-test failed: {:?}", e);
+    }
+
     // Ring-3 end-to-end test of execveat(2) in both forms: a real Linux-ABI
     // launcher execs a target by path (AT_FDCWD) and by open-fd
     // (AT_EMPTY_PATH / fexecve), proving execveat replaces the image and

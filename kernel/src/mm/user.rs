@@ -12,8 +12,11 @@
 //! 2. `ptr + len` must not overflow (wrapping into kernel space).
 //! 3. Every 4 KiB page in the range must be mapped in the current
 //!    process's page table.
-//! 4. For write validation, every mapped page must have the WRITABLE
-//!    flag set.
+//! 4. For write validation, every mapped page must be writable.  A
+//!    copy-on-write page (present, read-only, COW bit set) counts as
+//!    writable: validation breaks the CoW eagerly (private copy +
+//!    writable remap) so the kernel can write through the pointer.
+//!    Only a genuinely read-only mapping fails write validation.
 //!
 //! ## Performance
 //!
@@ -174,7 +177,27 @@ fn validate_user_range(ptr: u64, len: usize, need_writable: bool) -> KernelResul
         if need_writable {
             if let Some(flags) = page_flags(pml4, virt) {
                 if !flags.contains(PageFlags::WRITABLE) {
-                    return Err(KernelError::InvalidAddress);
+                    // A copy-on-write page is present and read-only by
+                    // design: a write triggers the CoW fault handler,
+                    // which makes a private copy and remaps the page
+                    // writable.  The kernel cannot rely on that fault
+                    // firing for its own `core::ptr::write` to the user
+                    // page, so break the CoW *now* — exactly what Linux
+                    // does in `get_user_pages(FOLL_WRITE)` before letting
+                    // the kernel write through a user pointer.  This is
+                    // the common state for the whole address space right
+                    // after `fork()`, so any write-validating syscall
+                    // (wait4, read, pipe, gettimeofday, …) called by a
+                    // freshly-forked process hits it.
+                    if flags.contains(PageFlags::COW) {
+                        super::cow::resolve_cow_fault(pml4, addr)?;
+                        // CoW now broken; the page is privately mapped
+                        // and writable.  Fall through to the next page.
+                    } else {
+                        // Genuinely read-only mapping (e.g. a read-only
+                        // file or PROT_READ region) → real EFAULT.
+                        return Err(KernelError::InvalidAddress);
+                    }
                 }
             }
         }

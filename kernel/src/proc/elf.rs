@@ -1440,6 +1440,156 @@ pub fn build_linux_envp0_deref_exit_elf() -> alloc::vec::Vec<u8> {
     buf
 }
 
+/// Build a **Linux-ABI** `ET_EXEC` test ELF that exercises the full
+/// `fork(2)` → child `exit(2)` → parent `wait4(2)` reap cycle entirely in
+/// ring 3, then exits with the child's `WEXITSTATUS`.
+///
+/// This is the single most important process-lifecycle primitive for a real
+/// toolchain: `make` spawns `gcc`, which spawns `cc1`/`as`/`ld`, each via
+/// `fork`+`execve`+`wait4`.  The parent issues a **blocking** `wait4(-1,
+/// &status, 0, NULL)` — exactly what `make`/`gcc` do — which exercises the
+/// real block-and-wake path: the parent registers as a wait-any waiter and
+/// sleeps in `block_current`, leaving the run queue; the child then runs and
+/// its exit (`on_thread_exit`) wakes the parent, which re-scans, reaps, and
+/// exits with the child's `WEXITSTATUS`.
+///
+/// **Why this cannot hang the boot:** the launcher itself blocks, but the
+/// *harness* that drives it ([`crate::proc::spawn::self_test_linux_fork_wait`])
+/// pumps the scheduler with a **bounded** `yield_now` loop and force-destroys
+/// the launcher if it never becomes a zombie.  So even if the child-exit
+/// wakeup were broken, the worst case is a clean failed assertion, never a
+/// boot hang.  (An earlier non-blocking `WNOHANG`+`sched_yield` spin version
+/// timed out because the child was starved while the parent stayed runnable;
+/// blocking is both simpler and matches real toolchain usage.)
+///
+/// Pseudo-assembly (offsets are bytes from the segment start):
+///
+/// ```text
+///  0  sub   rsp, 16             ; reserve a 4-byte status slot on the stack
+///  4  mov   eax, 57             ; SYS_fork
+///  9  syscall                   ; rax = child pid (parent) | 0 (child)
+/// 11  test  rax, rax
+/// 14  jz    child               ; rax==0 -> child path
+/// 16  mov   edi, -1             ; parent: pid = -1 (wait for any child)
+/// 21  mov   rsi, rsp            ; &status
+/// 24  xor   edx, edx            ; options = 0 (blocking wait)
+/// 26  xor   r10d, r10d          ; rusage = NULL
+/// 29  mov   eax, 61             ; SYS_wait4
+/// 34  syscall                   ; rax = reaped pid (>0) | <0 on error
+/// 36  test  rax, rax
+/// 39  jle   parent_fail         ; rax<=0 -> unexpected (no child reaped)
+/// 41  movzx edi, byte [rsp+1]   ; WEXITSTATUS = byte at &status+1
+/// 46  mov   eax, 60             ; SYS_exit(WEXITSTATUS)
+/// 51  syscall
+/// 53 parent_fail:
+/// 53  mov   edi, 0xA1           ; wait4-error sentinel (161)
+/// 58  mov   eax, 60             ; SYS_exit
+/// 63  syscall
+/// 65 child:
+/// 65  mov   edi, 0x4B           ; child exit code (sentinel 75)
+/// 70  mov   eax, 60             ; SYS_exit
+/// 75  syscall
+/// 77  int3                      ; unreachable trap
+/// ```
+///
+/// On a healthy system the child exits `0x4B`, the kernel encodes the normal
+/// exit as `wstatus = (0x4B << 8)`, so `WEXITSTATUS` (the byte at
+/// `&status + 1`) is `0x4B`, and the parent exits `0x4B` (75).  The paired
+/// self-test [`crate::proc::spawn::self_test_linux_fork_wait`] asserts the
+/// parent zombie's exit code is exactly 75.
+///
+/// Tagged `ELFOSABI_GNU` so `spawn_process` builds a System V stack and routes
+/// the process through the Linux ABI.
+#[must_use]
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+pub fn build_linux_fork_wait_test_elf() -> alloc::vec::Vec<u8> {
+    use alloc::vec;
+
+    let phdr_offset: u64 = 64;
+    let code_offset: u64 = 120;
+    let code_size: u64 = 88; // 78 bytes of code + INT3 padding
+    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+
+    let mut buf = vec![0u8; (code_offset + code_size) as usize];
+
+    // --- ELF header ---
+    buf[0] = 0x7F;
+    buf[1] = b'E';
+    buf[2] = b'L';
+    buf[3] = b'F';
+    buf[EI_CLASS] = ELFCLASS64;
+    buf[EI_DATA] = ELFDATA2LSB;
+    buf[EI_VERSION] = EV_CURRENT;
+    buf[EI_OSABI] = ELFOSABI_GNU; // tag Linux/GNU so detect_linux_abi() is true
+
+    write_u16(&mut buf, 16, ET_EXEC);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr); // e_entry
+    write_u64(&mut buf, 32, phdr_offset); // e_phoff
+    write_u64(&mut buf, 40, 0); // e_shoff
+    write_u32(&mut buf, 48, 0); // e_flags
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, 1); // e_phnum
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0);
+    write_u16(&mut buf, 62, 0);
+
+    // --- Program header (PT_LOAD: R+X) ---
+    let ph = phdr_offset as usize;
+    write_u32(&mut buf, ph, PT_LOAD);
+    write_u32(&mut buf, ph + 4, PF_R | PF_X);
+    write_u64(&mut buf, ph + 8, code_offset);
+    write_u64(&mut buf, ph + 16, load_vaddr);
+    write_u64(&mut buf, ph + 24, 0);
+    write_u64(&mut buf, ph + 32, code_size);
+    write_u64(&mut buf, ph + 40, code_size);
+    write_u64(&mut buf, ph + 48, 0x1000);
+
+    // --- Code ---
+    let cs = code_offset as usize;
+    // INT3-fill the whole segment first; the explicit bytes below overwrite
+    // the live instructions and leave the tail as trap padding.
+    for byte in &mut buf[cs..(cs + code_size as usize)] {
+        *byte = 0xCC;
+    }
+    // Hand-assembled (encodings verified against the Intel SDM):
+    //   jz  rel8 = child(65) - 16 = 0x31
+    //   jle rel8 = parent_fail(53) - 41 = 0x0C
+    let code: [u8; 78] = [
+        0x48, 0x83, 0xEC, 0x10, // sub rsp, 16
+        0xB8, 0x39, 0x00, 0x00, 0x00, // mov eax, 57 (SYS_fork)
+        0x0F, 0x05, // syscall
+        0x48, 0x85, 0xC0, // test rax, rax
+        0x74, 0x31, // jz child
+        // parent: blocking wait4(-1, &status, 0, NULL)
+        0xBF, 0xFF, 0xFF, 0xFF, 0xFF, // mov edi, -1
+        0x48, 0x89, 0xE6, // mov rsi, rsp
+        0x31, 0xD2, // xor edx, edx (options = 0, blocking)
+        0x45, 0x31, 0xD2, // xor r10d, r10d (rusage = NULL)
+        0xB8, 0x3D, 0x00, 0x00, 0x00, // mov eax, 61 (SYS_wait4)
+        0x0F, 0x05, // syscall
+        0x48, 0x85, 0xC0, // test rax, rax
+        0x7E, 0x0C, // jle parent_fail
+        0x0F, 0xB6, 0x7C, 0x24, 0x01, // movzx edi, byte [rsp+1] (WEXITSTATUS)
+        0xB8, 0x3C, 0x00, 0x00, 0x00, // mov eax, 60 (SYS_exit)
+        0x0F, 0x05, // syscall
+        // parent_fail:
+        0xBF, 0xA1, 0x00, 0x00, 0x00, // mov edi, 0xA1 (wait4-error sentinel 161)
+        0xB8, 0x3C, 0x00, 0x00, 0x00, // mov eax, 60 (SYS_exit)
+        0x0F, 0x05, // syscall
+        // child:
+        0xBF, 0x4B, 0x00, 0x00, 0x00, // mov edi, 0x4B (child sentinel 75)
+        0xB8, 0x3C, 0x00, 0x00, 0x00, // mov eax, 60 (SYS_exit)
+        0x0F, 0x05, // syscall
+        0xCC, // int3
+    ];
+    buf[cs..(cs + code.len())].copy_from_slice(&code);
+
+    buf
+}
+
 /// Build a minimal **Linux-ABI** `ET_EXEC` test ELF that simply calls
 /// `exit(exit_code)`:
 ///

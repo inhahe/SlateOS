@@ -2661,6 +2661,107 @@ pub fn self_test_linux_envp0_deref() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the Linux `fork(2)` → child `exit(2)` →
+/// parent `wait4(2)` reap cycle.
+///
+/// This is the core process-lifecycle primitive every real toolchain relies
+/// on: `make` → `gcc` → `cc1`/`as`/`ld` are all `fork`+`execve`+`wait4`.  We
+/// spawn [`elf::build_linux_fork_wait_test_elf`], a real Linux-ABI program
+/// that forks, has the child `exit(0x4B)`, and has the parent reap it with a
+/// **blocking** `wait4(-1, &status, 0, NULL)` (exactly what `make`/`gcc` do),
+/// then exit with the decoded `WEXITSTATUS`.  A healthy run leaves the parent
+/// zombie with exit code `0x4B` (75); we assert exactly that.
+///
+/// **Why this is safe to run at boot:** although the *launcher* blocks in
+/// `wait4`, this *harness* drives the scheduler with a **bounded** `yield_now`
+/// loop and force-destroys the launcher afterward, so even a broken
+/// child-exit wakeup can only produce a clean failed assertion, never a boot
+/// hang.  (The parent's block leaves the run queue, letting the child run; the
+/// child's exit wakes the parent via `on_thread_exit`'s wait-any wakeup.)
+pub fn self_test_linux_fork_wait() -> KernelResult<()> {
+    // Child exits 0x4B (75); the parent's WEXITSTATUS is the same byte, so the
+    // parent zombie exits 75.  Distinct from interp(42)/mmap(91)/brk(109)/
+    // execveat(58)/argv0(81)/envp0(77)/wait4-error(161).
+    const CHILD_EXIT: i32 = 0x4B;
+    // Upper bound on scheduler ticks we grant the parent+child to complete
+    // their fork/exit/reap dance.  Each iteration is a single non-blocking
+    // `yield_now`; we break early the moment the parent becomes a zombie, so
+    // a healthy run costs only a handful.  Generous enough that a slow but
+    // correct scheduler still finishes; bounded so a broken one can't hang.
+    const MAX_YIELDS: usize = 256;
+
+    serial_println!("[spawn] Running Linux fork()+wait4() reap (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_fork_wait_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-fork-wait"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-fork-wait",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: fork-wait spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Drive the scheduler until the parent process becomes a zombie or we
+    // exhaust the bound.  Each `yield_now` hands the CPU to a ready ring-3
+    // task: the parent runs, forks, then blocks in `wait4`, which lets the
+    // child run to exit; the child's exit wakes the parent, which reaps and
+    // exits.  This harness never blocks, so the loop is bounded regardless of
+    // whether the launcher's wakeup path works.
+    for _ in 0..MAX_YIELDS {
+        crate::sched::yield_now();
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            break;
+        }
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fork()+wait4() (ring 3) — parent not a zombie after {} yields, \
+             got {:?} (the parent is still blocked in wait4; the child-exit wakeup never \
+             fired, or fork never resumed the child)",
+            MAX_YIELDS, state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(CHILD_EXIT) {
+        // 0xA1/161 means the parent's wait4 returned <= 0 (no child reaped /
+        // error); any other wrong value means WEXITSTATUS decoded wrong.
+        serial_println!(
+            "[spawn]   FAIL: fork()+wait4() (ring 3) — expected parent exit {} \
+             (child WEXITSTATUS), got {:?} (0xA1/161 = parent's wait4 returned an error)",
+            CHILD_EXIT, exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   Linux fork()+wait4() (ring 3: parent forked a child, blocked in wait4, \
+         reaped it on the child's exit, decoded WEXITSTATUS == {}): OK",
+        CHILD_EXIT
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the Linux `execveat(2)` syscall.
 ///
 /// `execveat` is exercised in **both** of its forms by spawning a real

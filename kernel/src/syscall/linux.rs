@@ -41149,6 +41149,190 @@ fn self_test_get_nodes_mpol_new() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+/// TD4 extraction: migrate_pages UMA-aware no-op (self_test group 9h).
+/// Verifies the kernel_migrate_pages gate ladder: subset-EPERM ahead of
+/// the nodes_and/nodes_empty EINVAL gate, NULL-mask=empty-success, maxnode
+/// cap, and get_nodes-before-pid-lookup ordering (negative/unknown pid ->
+/// ESRCH). Self-contained. See [`self_test_errno_mapping`] for the TD4
+/// rationale.
+#[inline(never)]
+fn self_test_migrate_pages() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+
+    // Case 1: both masks contain node 0 -> 0 (zero unmoved).
+    let mask: u64 = 0x1;
+    let a = SyscallArgs {
+        arg0: 0, arg1: 64,
+        arg2: (&raw const mask).addr() as u64,
+        arg3: (&raw const mask).addr() as u64,
+        arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::MIGRATE_PAGES, &a);
+    if r.value != 0 {
+        serial_println!(
+            "[syscall/linux]   FAIL: migrate_pages({{0}},{{0}}) -> {} (expected 0)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 2: target mask empty -> -EINVAL.
+    let empty: u64 = 0x0;
+    let a = SyscallArgs {
+        arg0: 0, arg1: 64,
+        arg2: (&raw const mask).addr() as u64,
+        arg3: (&raw const empty).addr() as u64,
+        arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::MIGRATE_PAGES, &a);
+    if r.value != -i64::from(errno::EINVAL) {
+        serial_println!(
+            "[syscall/linux]   FAIL: migrate_pages({{0}},empty) -> {} (expected -EINVAL)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 3: target mask = {bit 1} (no node 0) -> -EPERM.
+    // Batch 547: faithful kernel_migrate_pages.  `*new = {1}` is not
+    // a subset of mems_allowed = {0}; with no CAP_SYS_NICE in the
+    // dispatch context, `nodes_subset` failure yields -EPERM (it is
+    // checked BEFORE the `nodes_and`/`nodes_empty` -EINVAL gate).
+    // Pre-batch this conflated the EPERM/EINVAL split into -EINVAL.
+    let bad: u64 = 0x2;
+    let a = SyscallArgs {
+        arg0: 0, arg1: 64,
+        arg2: (&raw const mask).addr() as u64,
+        arg3: (&raw const bad).addr() as u64,
+        arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::MIGRATE_PAGES, &a);
+    if r.value != i64::from(errno::EPERM).wrapping_neg() {
+        serial_println!(
+            "[syscall/linux]   FAIL: migrate_pages({{0}},{{1}}) -> {} (expected -EPERM)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 4: source mask empty, target = {0} -> 0 (nothing
+    // to move on UMA either way).
+    let a = SyscallArgs {
+        arg0: 0, arg1: 64,
+        arg2: (&raw const empty).addr() as u64,
+        arg3: (&raw const mask).addr() as u64,
+        arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::MIGRATE_PAGES, &a);
+    if r.value != 0 {
+        serial_println!(
+            "[syscall/linux]   FAIL: migrate_pages(empty,{{0}}) -> {} (expected 0)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 5: old_nodes NULL, valid new = {0} -> 0.
+    // Batch 547: faithful `get_nodes` treats a NULL mask as an empty
+    // set + success (the `!nmask` short-circuit), NOT -EFAULT.  An
+    // empty source mask with target {0} is a trivial UMA success
+    // (cf. Case 4).  Pre-batch the inline `arg2==0 -> EFAULT` gate
+    // diverged from Linux here.
+    let a = SyscallArgs {
+        arg0: 0, arg1: 64,
+        arg2: 0,
+        arg3: (&raw const mask).addr() as u64,
+        arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::MIGRATE_PAGES, &a);
+    if r.value != 0 {
+        serial_println!(
+            "[syscall/linux]   FAIL: migrate_pages(NULL,{{0}}) -> {} (expected 0)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 6: maxnode too large -> -EINVAL.
+    let a = SyscallArgs {
+        arg0: 0, arg1: (1 << 24),
+        arg2: (&raw const mask).addr() as u64,
+        arg3: (&raw const mask).addr() as u64,
+        arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::MIGRATE_PAGES, &a);
+    if r.value != -i64::from(errno::EINVAL) {
+        serial_println!(
+            "[syscall/linux]   FAIL: migrate_pages(huge maxnode) -> {} (expected -EINVAL)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 7: negative pid with valid masks -> -ESRCH.
+    // Linux kernel_migrate_pages: get_nodes runs BEFORE the pid
+    // lookup; find_task_by_vpid on a negative pid returns NULL ->
+    // -ESRCH.  Pre-batch we rejected pid<0 with EINVAL at the
+    // very top, ahead of the mask copy, so a probe walking the
+    // gate ladder saw EINVAL where Linux returns ESRCH.
+    let a = SyscallArgs {
+        arg0: u64::MAX, arg1: 64,
+        arg2: (&raw const mask).addr() as u64,
+        arg3: (&raw const mask).addr() as u64,
+        arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::MIGRATE_PAGES, &a);
+    if r.value != -i64::from(errno::ESRCH) {
+        serial_println!(
+            "[syscall/linux]   FAIL: migrate_pages(neg pid) -> {} (expected -ESRCH)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 8: unknown positive pid (not self) with valid masks
+    // -> -ESRCH.  Same Linux find_task_by_vpid NULL path.
+    // Pre-batch we accepted pid > 0 silently and returned 0.
+    let a = SyscallArgs {
+        arg0: 99_999, arg1: 64,
+        arg2: (&raw const mask).addr() as u64,
+        arg3: (&raw const mask).addr() as u64,
+        arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::MIGRATE_PAGES, &a);
+    if r.value != -i64::from(errno::ESRCH) {
+        serial_println!(
+            "[syscall/linux]   FAIL: migrate_pages(unknown pid) -> {} (expected -ESRCH)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 9: pid=-1, old=NULL, valid new -> -ESRCH.
+    // Batch 547: a NULL old mask is now an empty-set success (not
+    // -EFAULT), so both `get_nodes` calls succeed and the pid lookup
+    // runs: find_task_by_vpid(-1) -> NULL -> -ESRCH.  Pre-batch the
+    // NULL-old EFAULT gate beat the pid lookup and returned -EFAULT.
+    let a = SyscallArgs {
+        arg0: u64::MAX, arg1: 64,
+        arg2: 0,
+        arg3: (&raw const mask).addr() as u64,
+        arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::MIGRATE_PAGES, &a);
+    if r.value != i64::from(errno::ESRCH).wrapping_neg() {
+        serial_println!(
+            "[syscall/linux]   FAIL: migrate_pages(neg pid,NULL old) -> {} (expected -ESRCH)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[syscall/linux]   migrate_pages get_nodes(old,new)/pid-ESRCH/new-subset EPERM (batch 547): OK"
+    );
+    Ok(())
+}
+
 pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
@@ -41269,179 +41453,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // (9h) Batch 104: migrate_pages upgraded from -ENOSYS stub to
     // UMA-aware no-op.  Every page is already on node 0 so the
     // migration is trivially a success that moves zero pages.
-    {
-        // Case 1: both masks contain node 0 -> 0 (zero unmoved).
-        let mask: u64 = 0x1;
-        let a = SyscallArgs {
-            arg0: 0, arg1: 64,
-            arg2: (&raw const mask).addr() as u64,
-            arg3: (&raw const mask).addr() as u64,
-            arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::MIGRATE_PAGES, &a);
-        if r.value != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: migrate_pages({{0}},{{0}}) -> {} (expected 0)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 2: target mask empty -> -EINVAL.
-        let empty: u64 = 0x0;
-        let a = SyscallArgs {
-            arg0: 0, arg1: 64,
-            arg2: (&raw const mask).addr() as u64,
-            arg3: (&raw const empty).addr() as u64,
-            arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::MIGRATE_PAGES, &a);
-        if r.value != -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: migrate_pages({{0}},empty) -> {} (expected -EINVAL)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 3: target mask = {bit 1} (no node 0) -> -EPERM.
-        // Batch 547: faithful kernel_migrate_pages.  `*new = {1}` is not
-        // a subset of mems_allowed = {0}; with no CAP_SYS_NICE in the
-        // dispatch context, `nodes_subset` failure yields -EPERM (it is
-        // checked BEFORE the `nodes_and`/`nodes_empty` -EINVAL gate).
-        // Pre-batch this conflated the EPERM/EINVAL split into -EINVAL.
-        let bad: u64 = 0x2;
-        let a = SyscallArgs {
-            arg0: 0, arg1: 64,
-            arg2: (&raw const mask).addr() as u64,
-            arg3: (&raw const bad).addr() as u64,
-            arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::MIGRATE_PAGES, &a);
-        if r.value != i64::from(errno::EPERM).wrapping_neg() {
-            serial_println!(
-                "[syscall/linux]   FAIL: migrate_pages({{0}},{{1}}) -> {} (expected -EPERM)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 4: source mask empty, target = {0} -> 0 (nothing
-        // to move on UMA either way).
-        let a = SyscallArgs {
-            arg0: 0, arg1: 64,
-            arg2: (&raw const empty).addr() as u64,
-            arg3: (&raw const mask).addr() as u64,
-            arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::MIGRATE_PAGES, &a);
-        if r.value != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: migrate_pages(empty,{{0}}) -> {} (expected 0)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 5: old_nodes NULL, valid new = {0} -> 0.
-        // Batch 547: faithful `get_nodes` treats a NULL mask as an empty
-        // set + success (the `!nmask` short-circuit), NOT -EFAULT.  An
-        // empty source mask with target {0} is a trivial UMA success
-        // (cf. Case 4).  Pre-batch the inline `arg2==0 -> EFAULT` gate
-        // diverged from Linux here.
-        let a = SyscallArgs {
-            arg0: 0, arg1: 64,
-            arg2: 0,
-            arg3: (&raw const mask).addr() as u64,
-            arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::MIGRATE_PAGES, &a);
-        if r.value != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: migrate_pages(NULL,{{0}}) -> {} (expected 0)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 6: maxnode too large -> -EINVAL.
-        let a = SyscallArgs {
-            arg0: 0, arg1: (1 << 24),
-            arg2: (&raw const mask).addr() as u64,
-            arg3: (&raw const mask).addr() as u64,
-            arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::MIGRATE_PAGES, &a);
-        if r.value != -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: migrate_pages(huge maxnode) -> {} (expected -EINVAL)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 7: negative pid with valid masks -> -ESRCH.
-        // Linux kernel_migrate_pages: get_nodes runs BEFORE the pid
-        // lookup; find_task_by_vpid on a negative pid returns NULL ->
-        // -ESRCH.  Pre-batch we rejected pid<0 with EINVAL at the
-        // very top, ahead of the mask copy, so a probe walking the
-        // gate ladder saw EINVAL where Linux returns ESRCH.
-        let a = SyscallArgs {
-            arg0: u64::MAX, arg1: 64,
-            arg2: (&raw const mask).addr() as u64,
-            arg3: (&raw const mask).addr() as u64,
-            arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::MIGRATE_PAGES, &a);
-        if r.value != -i64::from(errno::ESRCH) {
-            serial_println!(
-                "[syscall/linux]   FAIL: migrate_pages(neg pid) -> {} (expected -ESRCH)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 8: unknown positive pid (not self) with valid masks
-        // -> -ESRCH.  Same Linux find_task_by_vpid NULL path.
-        // Pre-batch we accepted pid > 0 silently and returned 0.
-        let a = SyscallArgs {
-            arg0: 99_999, arg1: 64,
-            arg2: (&raw const mask).addr() as u64,
-            arg3: (&raw const mask).addr() as u64,
-            arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::MIGRATE_PAGES, &a);
-        if r.value != -i64::from(errno::ESRCH) {
-            serial_println!(
-                "[syscall/linux]   FAIL: migrate_pages(unknown pid) -> {} (expected -ESRCH)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 9: pid=-1, old=NULL, valid new -> -ESRCH.
-        // Batch 547: a NULL old mask is now an empty-set success (not
-        // -EFAULT), so both `get_nodes` calls succeed and the pid lookup
-        // runs: find_task_by_vpid(-1) -> NULL -> -ESRCH.  Pre-batch the
-        // NULL-old EFAULT gate beat the pid lookup and returned -EFAULT.
-        let a = SyscallArgs {
-            arg0: u64::MAX, arg1: 64,
-            arg2: 0,
-            arg3: (&raw const mask).addr() as u64,
-            arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::MIGRATE_PAGES, &a);
-        if r.value != i64::from(errno::ESRCH).wrapping_neg() {
-            serial_println!(
-                "[syscall/linux]   FAIL: migrate_pages(neg pid,NULL old) -> {} (expected -ESRCH)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-        serial_println!(
-            "[syscall/linux]   migrate_pages get_nodes(old,new)/pid-ESRCH/new-subset EPERM (batch 547): OK"
-        );
-    }
+    // Extracted to self_test_migrate_pages (TD4).
+    self_test_migrate_pages()?;
 
     // (9i) Batch 105: move_pages upgraded from -ENOSYS stub to a
     // UMA-aware no-op + per-page status writer.  Verifies that

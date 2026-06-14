@@ -54473,6 +54473,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_msync_flag_alignment()?;
+
+    #[inline(never)]
+    fn self_test_msync_flag_alignment() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // msync flag/alignment validation.
     {
         // flags == 0 with len == 0 -> 0 (end == start short-circuit).
@@ -54577,6 +54582,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   msync wrap-to-zero / end<start: OK"
         );
+    }
+        Ok(())
     }
 
     // fadvise64 / readahead — advice validation.

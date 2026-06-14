@@ -1171,7 +1171,27 @@ verification before changing the stored errno.
 against v6.6, then store `-ENODEV` for out-of-range / no-memory nodes and
 `-EACCES` for valid-but-disallowed nodes, and update Case 4's expectation.
 
-### TD4. Monolithic `syscall::linux::self_test()` has an unbounded boot-stack frame — IN PROGRESS 2026-06-13
+### TD4. Monolithic `syscall::linux::self_test()` has an unbounded boot-stack frame — RESOLVED 2026-06-14
+
+**Resolution (2026-06-14):** The split is complete. Every self-contained
+validation block in `self_test()` is now wrapped in its own
+`#[inline(never)]` nested helper (`fn self_test_NAME() -> KernelResult<()>`,
+called via `?`), so each sub-frame is allocated and freed transiently around
+its call and no single frame is the sum of all batches. The body went from one
+monolithic ~1.4 MB frame to ~80 small per-block helpers. Three earlier helpers
+that had grown to wrap multiple sibling blocks (`getrusage_sysinfo_times` = 5
+blocks, `capget_capset` = 2, `sched_affinity` = 2) were peeled apart so each
+block gets its own frame. A structural scan confirms **zero** bare top-level
+blocks remain. The technique used throughout (Technique B): insert a 5-line
+header — `self_test_NAME()?;` + `#[inline(never)] fn self_test_NAME() -> …
+{ use crate::serial_println;` — immediately before the block's leading
+comment, and a 2-line footer — `Ok(())` + `}` — immediately after the block's
+closing brace; the block body is never reproduced or re-indented, so the wrap
+is safe for arbitrarily large blocks. A non-inlined nested fn cannot capture
+enclosing locals, which acts as a compile-time safety net against
+mis-scoping. Every wrap was individually boot-tested (BOOT_OK) and committed.
+This removes the F10 (`.bss`/`FPU_STRATEGY` silent-corruption) failure class
+at its root rather than merely deferring it behind the boot-stack canary.
 
 **Progress (2026-06-13):** Began the incremental `#[inline(never)]` split. The
 two leading self-contained check groups were extracted into standalone

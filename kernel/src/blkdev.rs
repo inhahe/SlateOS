@@ -253,21 +253,23 @@ static REGISTRY: Mutex<Vec<RegisteredDevice>> = Mutex::new(Vec::new());
 /// Register a block device with the given name.
 ///
 /// The name should be short and unique (e.g., `"vda"`, `"sda"`).
-/// Panics if a device with the same name is already registered.
+///
+/// If a device with the same name is already registered, the old entry is
+/// removed and replaced by the new one.  This matters because lookups
+/// ([`with_device`]) return the *first* matching entry: leaving a stale
+/// duplicate behind would shadow the new device, so re-registration must
+/// drop the old entry rather than append alongside it.
 pub fn register(name: &str, device: Box<dyn BlockDevice>) {
     let mut registry = REGISTRY.lock();
 
-    // Check for duplicate names.
-    for entry in registry.iter() {
-        if entry.name == name {
-            crate::serial_println!(
-                "[blkdev] WARNING: device '{}' already registered, replacing",
-                name
-            );
-            // We'll just push and keep the old one — find() returns the last match.
-            // This is fine for now; a proper implementation would remove the old one.
-            break;
-        }
+    // Replace on duplicate name: drop any existing entry so the freshly
+    // registered device becomes the one lookups resolve to.
+    if registry.iter().any(|entry| entry.name == name) {
+        crate::serial_println!(
+            "[blkdev] WARNING: device '{}' already registered, replacing",
+            name
+        );
+        registry.retain(|entry| entry.name != name);
     }
 
     // Snapshot the device metadata now, while we still have direct access

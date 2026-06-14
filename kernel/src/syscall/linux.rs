@@ -68966,6 +68966,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_seccomp_ptrace_clone3()?;
+
+    #[inline(never)]
+    fn self_test_seccomp_ptrace_clone3() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // -----------------------------------------------------------------
     // seccomp / ptrace / clone3 / membarrier / rseq / sync_file_range +
     // process_madvise / cachestat / mseal / map_shadow_stack
@@ -70648,6 +70653,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   map_shadow_stack EOPNOTSUPP before input validation (CET-incapable CPU): OK"
         );
+    }
+        Ok(())
     }
 
     // -----------------------------------------------------------------

@@ -30,8 +30,6 @@ use std::process;
 // Syscall interface
 // ============================================================================
 
-const SYS_NET_IOCTL: u64 = 810;
-
 /// Read-only interface-info query syscall (`kernel/src/syscall/number.rs`,
 /// `SYS_NET_IF_INFO`). Returns a fixed 24-byte record describing the default
 /// network interface. This is the live read source: the kernel does not yet
@@ -74,9 +72,17 @@ unsafe fn syscall4(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
     ret
 }
 
-fn net_ioctl(cmd: u64, iface: &str, arg: u64) -> i64 {
-    let name = format!("{iface}\0");
-    unsafe { syscall4(SYS_NET_IOCTL, cmd, name.as_ptr() as u64, arg, 0) }
+/// Issue a network-configuration ioctl.
+///
+/// Slate OS does not yet expose a net-config syscall. The number these tools
+/// previously used (810) is actually `SYS_UDP_BIND` in the kernel, so issuing
+/// the syscall here bound a UDP socket to a bogus port (the `cmd` value),
+/// leaked the resulting handle, and reported false success. Until the
+/// net-config ABI lands (operator decision, TD18), interface/route
+/// configuration is unsupported: return `ENOSYS` without touching the kernel
+/// rather than corrupting UDP socket state.
+fn net_ioctl(_cmd: u64, _iface: &str, _arg: u64) -> i64 {
+    -38 // ENOSYS — net-config syscall ABI not yet defined (see note above).
 }
 
 // ============================================================================

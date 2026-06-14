@@ -724,7 +724,9 @@ client-side number correction:
   `ARP_TABLE=843` are present and read-only. Precise harm (traced 2026-06-01):
   with a Socket-WRITE cap the call silently binds+leaks a UDP socket on a low
   port and misleads the user that the config change applied; without the cap it
-  fails. The intended operation never happens either way.
+  fails. The intended operation never happens either way. **Write-path harm
+  neutered 2026-06-14** for `ifconfig`/`ip`/`route` — see the dedicated bullet
+  below; `dhcpcd`/`fw`/`nft` still carry the latent `SYS_NET_IOCTL` misuse.
 - **mount/umount**: no `MOUNT`/`UMOUNT` syscall (620/621 are
   `FS_TRASH_RESTORE`/`FS_TRASH_EMPTY`).
 - **mkfs/fsck/diskutil**: no `FS_FORMAT`/`FS_VERIFY`/`FS_REPAIR`/`FS_TRIM`
@@ -747,9 +749,8 @@ has been applied to all three read-path tools (`ifconfig`, `ip`, `route`):
   0 — the syscall carries none — rather than fabricating traffic stats). Pure
   decode/format helpers (`parse_net_if_info`, `fmt_ipv4`, `fmt_mac`,
   `compute_broadcast`) are host-unit-tested (8 new tests; `cargo test -p
-  ifconfig` 32 pass). The **write** paths (`up`/`down`/`set ip`/…) still issue
-  the non-existent `SYS_NET_IOCTL` and remain no-ops (unchanged — that half
-  needs the operator ABI decision below).
+  ifconfig` 32 pass). The **write** paths (`up`/`down`/`set ip`/…) no longer
+  issue the bogus `SYS_NET_IOCTL` — see the write-path safety fix below.
 - **`ip` (`ip addr show`, `ip link`, `ip route`, `ip stats`) — DONE 2026-06-14.**
   Same dead read paths (`/sys/class/net/`, `/proc/net/dev`, `/proc/net/route`).
   `read_interfaces` now falls back to `SYS_NET_IF_INFO` to synthesize the `eth0`
@@ -759,12 +760,13 @@ has been applied to all three read-path tools (`ifconfig`, `ip`, `route`):
   ip/mac/ttl), reusing the `arp` tool's count-bounded parse + zero-MAC =
   INCOMPLETE convention. 14 host tests total (`cargo test -p ip`: 14 pass; +4 for
   ARP). Write paths (`ip link set`, `ip addr add/del`, `ip route add/del`)
-  unchanged — still no-ops via `SYS_NET_IOCTL`.
+  no longer issue the bogus `SYS_NET_IOCTL` — see the write-path safety fix below.
 - **`route` (`route`, `route -n`, `route -v`) — DONE 2026-06-14.** Its
   `/proc/net/route`, `/sys/net/routes`, and `/proc/net/if_inet` sources are all
   unpopulated; `read_routes` now synthesizes the connected network route and the
   default route from `SYS_NET_IF_INFO`. 4 new host tests (`cargo test -p route`:
-  10 pass). Write paths (`route add/del/flush`) unchanged.
+  10 pass). Write paths (`route add/del/flush`) — see the write-path safety fix
+  below.
 - **`netstat` (`-t`/`-l`/`-r`/`-i` connection, route, and iface views) — DONE
   2026-06-14.** Its `/proc/net/{tcp,udp,route,dev}` and `/sys/class/net` sources
   are all unpopulated. It now falls back to the read-only diagnostic syscalls:
@@ -789,6 +791,28 @@ has been applied to all three read-path tools (`ifconfig`, `ip`, `route`):
   `test` to avoid executing a raw syscall on the host; the pure record decoders
   are unit-tested directly. 5 new host tests (`cargo test -p ss`: 37 pass). ss is
   read-only (no write paths).
+
+**Write-path safety fix — DONE 2026-06-14** (`ifconfig`, `ip`, `route`). The
+write paths in these three tools were worse than the "harmless no-op" originally
+documented. Each defined `const SYS_NET_IOCTL: u64 = 810` and called
+`syscall(810, cmd, …)` where `cmd` ∈ {1,2,3,10,11,12} (up/down/set-ip/route
+add/del/flush) was passed as **arg0**. But `810` is `SYS_UDP_BIND` and its arg0
+is a **port number** — so every config command actually bound a UDP socket to
+port 1/2/3/10/11/12, leaked the returned handle, and — because the handle is a
+non-negative return value — reported **false success** to the user. (`route`
+additionally carried a dead `net_ioctl6`/`syscall6` path, and a dead
+`/sys/net/routes/*` sysfs write fallback the kernel never serves.) Fix: removed
+the fabricated `SYS_NET_IOCTL` constant from all three; `net_ioctl` now returns
+`-38` (ENOSYS) **without issuing any syscall**, with a doc comment explaining the
+`810` aliasing; removed `route`'s dead `net_ioctl6`/`syscall6`; added honest
+`-38 → "Function not implemented (... not yet supported on Slate OS)"` arms to
+`route`'s add/del error matches. Result: false-success-with-socket-leak becomes
+an honest failure + non-zero exit until the net-config ABI lands. The read-only
+`SYS_NET_IF_INFO`/`SYS_ARP_TABLE` query wrappers (`syscall3`/`syscall4`) are
+retained and still used. All three still cross-compile for `x86_64-slateos` and
+pass clippy + host tests (ifconfig 32, ip 14, route 10). NOTE: `dhcpcd`, `fw`,
+and `nft` still contain the same latent `SYS_NET_IOCTL=810` misuse and should get
+the same neutering treatment (not yet done).
 
 **Proper fix:** this is an **operator design decision**, not a mechanical fix —
 the kernel must first grow the missing ABI, and the *shape* of that ABI is a

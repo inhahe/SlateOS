@@ -2,7 +2,9 @@
 //!
 //! Displays and configures network interfaces using the traditional `ifconfig`
 //! command syntax. Reads live state from `/sys/class/net/` and `/proc/net/`,
-//! writes configuration via `SYS_NET_IOCTL` syscalls.
+//! falling back to read-only kernel syscalls (`SYS_NET_IF_INFO`). Write/config
+//! operations (up/down/set-ip/...) return `ENOSYS` until the net-config syscall
+//! ABI is defined -- see the note on `net_ioctl`.
 //!
 //! # Usage
 //!
@@ -28,9 +30,6 @@ use std::process;
 // ============================================================================
 // Syscall interface
 // ============================================================================
-
-/// Network IOCTL syscall number -- shared with the `ip` utility.
-const SYS_NET_IOCTL: u64 = 810;
 
 /// Read-only interface-info query syscall (`kernel/src/syscall/number.rs`,
 /// `SYS_NET_IF_INFO`). Returns a fixed 24-byte record describing the default
@@ -69,11 +68,17 @@ unsafe fn syscall4(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
     ret
 }
 
-/// Issue a network IOCTL syscall for the named interface.
-fn net_ioctl(cmd: u64, iface: &str, arg: u64) -> i64 {
-    let name = format!("{iface}\0");
-    // SAFETY: We pass a valid NUL-terminated interface name and a numeric arg.
-    unsafe { syscall4(SYS_NET_IOCTL, cmd, name.as_ptr() as u64, arg, 0) }
+/// Issue a network interface-configuration ioctl.
+///
+/// Slate OS does not yet expose a net-config syscall. The number these tools
+/// previously used (810) is actually `SYS_UDP_BIND` in the kernel, so issuing
+/// the syscall here bound a UDP socket to a bogus port (the `cmd` value),
+/// leaked the resulting handle, and reported false success. Until the
+/// net-config ABI lands (operator decision, TD18), interface configuration is
+/// unsupported: return `ENOSYS` without touching the kernel rather than
+/// corrupting UDP socket state.
+fn net_ioctl(_cmd: u64, _iface: &str, _arg: u64) -> i64 {
+    -38 // ENOSYS — net-config syscall ABI not yet defined (see note above).
 }
 
 // ============================================================================

@@ -24,8 +24,6 @@ use std::process;
 // Syscall interface
 // ============================================================================
 
-const SYS_NET_IOCTL: u64 = 810;
-
 /// Read-only interface-info query syscall (`kernel/src/syscall/number.rs`,
 /// `SYS_NET_IF_INFO`). Returns a fixed 24-byte record describing the default
 /// network interface. The kernel does not populate `/proc/net/route`,
@@ -59,34 +57,17 @@ unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     ret
 }
 
-#[cfg(target_arch = "x86_64")]
-unsafe fn syscall6(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> i64 {
-    let ret: i64;
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            inlateout("rax") nr as i64 => ret,
-            in("rdi") a1,
-            in("rsi") a2,
-            in("rdx") a3,
-            in("r10") a4,
-            in("r8") a5,
-            in("r9") a6,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    ret
-}
-
-fn net_ioctl(cmd: u64, a1: u64, a2: u64) -> i64 {
-    unsafe { syscall3(SYS_NET_IOCTL, cmd, a1, a2) }
-}
-
-#[allow(dead_code)]
-fn net_ioctl6(cmd: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64 {
-    unsafe { syscall6(SYS_NET_IOCTL, cmd, a1, a2, a3, a4, a5) }
+/// Issue a routing-table modification.
+///
+/// Slate OS does not yet expose a net-config / route-modification syscall.
+/// The number these tools previously used (810) is actually `SYS_UDP_BIND` in
+/// the kernel, so issuing the syscall here bound a UDP socket to a bogus port
+/// (the `cmd` value), leaked the resulting handle, and reported false success.
+/// Until the route-config ABI lands (operator decision, TD18), route
+/// modification is unsupported: return `ENOSYS` without touching the kernel
+/// rather than corrupting UDP socket state.
+fn net_ioctl(_cmd: u64, _a1: u64, _a2: u64) -> i64 {
+    -38 // ENOSYS — route-config syscall ABI not yet defined (see note above).
 }
 
 // ============================================================================
@@ -499,6 +480,7 @@ fn add_route(dest: u32, mask: u32, gateway: u32, metric: u32, is_host: bool) {
                     -1 => "Operation not permitted",
                     -17 => "File exists (route already present)",
                     -22 => "Invalid argument",
+                    -38 => "Function not implemented (route configuration not yet supported on Slate OS)",
                     -99 => "Cannot assign requested address",
                     _ => "Network is unreachable",
                 }
@@ -541,6 +523,7 @@ fn del_route(dest: u32, mask: u32) {
                     -1 => "Operation not permitted",
                     -3 => "No such process (route not found)",
                     -22 => "Invalid argument",
+                    -38 => "Function not implemented (route configuration not yet supported on Slate OS)",
                     _ => "Unknown error",
                 }
             );

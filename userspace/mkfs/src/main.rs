@@ -1,8 +1,12 @@
 //! Slate OS mkfs -- Create Filesystems
 //!
-//! Creates filesystems on disk devices or image files. Supports ext4, FAT32,
-//! and tmpfs via the kernel's `SYS_FS_FORMAT` syscall (number 651 in the
-//! filesystem zone, 600-799).
+//! Creates filesystems on disk devices or image files (ext4, FAT32, tmpfs).
+//!
+//! NOTE: Slate OS has no filesystem-format syscall yet. The format step
+//! (`do_format`) returns `ENOSYS` rather than issuing a syscall — see the note
+//! on `do_format` for why the earlier `SYS_FS_FORMAT=651` call was wrong (651
+//! is `SYS_FS_SEEK_HOLE`). All the device probing/validation/dry-run logic is
+//! real; only the final write is gated on the missing ABI.
 //!
 //! # Usage
 //!
@@ -42,40 +46,10 @@ use std::process;
 // Syscall interface
 // ============================================================================
 
-/// Format a filesystem on a device.
-/// arg1 = device path pointer, arg2 = device path length,
-/// arg3 = filesystem type id (1=ext4, 2=fat32, 3=tmpfs).
-const SYS_FS_FORMAT: u64 = 651;
-
-/// Filesystem type identifiers accepted by the kernel.
+/// Filesystem type identifiers that a future format ABI would accept.
 const FS_TYPE_EXT4: u64 = 1;
 const FS_TYPE_FAT32: u64 = 2;
 const FS_TYPE_TMPFS: u64 = 3;
-
-/// Invoke a syscall with 3 arguments.
-///
-/// The kernel receives: rdi=arg1, rsi=arg2, rdx=arg3.
-/// Returns a negative errno on failure, 0 on success.
-#[cfg(target_arch = "x86_64")]
-unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
-    let ret: i64;
-    // SAFETY: Caller ensures arguments are valid pointers/values for the
-    // given syscall number. The kernel validates all inputs and returns
-    // a negative errno on failure.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            inlateout("rax") nr as i64 => ret,
-            in("rdi") a1,
-            in("rsi") a2,
-            in("rdx") a3,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    ret
-}
 
 /// Translate a negative syscall return into a human-readable error message.
 fn syscall_error_msg(ret: i64) -> &'static str {
@@ -1042,29 +1016,22 @@ fn check_bad_blocks(dev_path: &str, verbose: bool) {
 // Format execution
 // ============================================================================
 
-/// Issue the SYS_FS_FORMAT syscall to create the filesystem.
-fn do_format(dev_path: &str, fs_type_id: u64) -> Result<(), String> {
-    let path_bytes = dev_path.as_bytes();
-    let ret = unsafe {
-        // SAFETY: path_bytes points to valid UTF-8 memory with known length.
-        // The kernel will validate the pointer and length.
-        syscall3(
-            SYS_FS_FORMAT,
-            path_bytes.as_ptr() as u64,
-            path_bytes.len() as u64,
-            fs_type_id,
-        )
-    };
-
-    if ret < 0 {
-        Err(format!(
-            "SYS_FS_FORMAT failed (errno {}): {}",
-            -ret,
-            syscall_error_msg(ret)
-        ))
-    } else {
-        Ok(())
-    }
+/// Create the filesystem on the device.
+///
+/// Slate OS has no filesystem-format syscall. The earlier implementation issued
+/// `syscall(651, path_ptr, path_len, fs_type)`, but `651` is `SYS_FS_SEEK_HOLE`
+/// — a real but unrelated syscall whose arg0 is an *fd*, not a path pointer. The
+/// call therefore handed a userspace pointer to `seek_hole` as a file
+/// descriptor, yielding a misleading `EBADF`/`EINVAL` instead of an honest
+/// "not implemented", while never formatting anything. Until a real fs-format
+/// ABI lands this returns `ENOSYS` without issuing any syscall, so `mkfs`
+/// honestly reports that it cannot create the filesystem.
+fn do_format(_dev_path: &str, _fs_type_id: u64) -> Result<(), String> {
+    // -38 == ENOSYS. No fs-format syscall exists yet (see note above).
+    Err(format!(
+        "filesystem creation failed (errno 38): {}",
+        syscall_error_msg(-38)
+    ))
 }
 
 // ============================================================================

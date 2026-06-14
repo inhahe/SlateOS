@@ -5,8 +5,12 @@
 //! benchmarking I/O performance, querying S.M.A.R.T. status, and issuing TRIM.
 //!
 //! Reads from `/sys/block/`, `/proc/partitions`, and `/proc/mounts`.
-//! Write operations (format, repair, trim) use Slate OS syscalls in the FS range
-//! (600-799).
+//!
+//! NOTE: Slate OS has no filesystem-admin syscalls yet, so the write/query
+//! operations (format, verify, repair, trim, statfs) honestly report `ENOSYS`
+//! instead of issuing a syscall — see the `ENOSYS` note for why the earlier
+//! `650..=655` calls were wrong (650/651 are the unrelated SEEK_DATA/SEEK_HOLE).
+//! All read-only listing/info/usage logic works via sysfs/procfs.
 //!
 //! # Usage
 //!
@@ -31,69 +35,21 @@ use std::process;
 use std::time::Instant;
 
 // ============================================================================
-// Syscall interface
+// Filesystem-admin operations
 // ============================================================================
 
-// Filesystem ioctl syscalls (fs zone, 600-799 range).
-#[allow(dead_code)]
-const SYS_FS_IOCTL: u64 = 650;
-#[allow(dead_code)]
-const SYS_FS_FORMAT: u64 = 651;
-#[allow(dead_code)]
-const SYS_FS_VERIFY: u64 = 652;
-#[allow(dead_code)]
-const SYS_FS_REPAIR: u64 = 653;
-#[allow(dead_code)]
-const SYS_FS_TRIM: u64 = 654;
-#[allow(dead_code)]
-const SYS_FS_STATFS: u64 = 655;
-
-/// Invoke a syscall with up to 5 arguments.
+/// Result code for an unsupported filesystem-admin operation.
 ///
-/// The kernel receives arguments in: rdi, rsi, rdx, r10, r8.
-#[cfg(target_arch = "x86_64")]
-unsafe fn syscall5(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64 {
-    let ret: i64;
-    // SAFETY: Caller ensures arguments are valid pointers/values for the
-    // given syscall number. The kernel validates all inputs and returns
-    // a negative errno on failure.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            inlateout("rax") nr as i64 => ret,
-            in("rdi") a1,
-            in("rsi") a2,
-            in("rdx") a3,
-            in("r10") a4,
-            in("r8") a5,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    ret
-}
-
-/// Invoke a syscall with 3 arguments.
-#[cfg(target_arch = "x86_64")]
-unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
-    // SAFETY: Delegated to syscall5 with zero-filled trailing args.
-    unsafe { syscall5(nr, a1, a2, a3, 0, 0) }
-}
-
-/// Invoke a syscall with 2 arguments.
-#[cfg(target_arch = "x86_64")]
-unsafe fn syscall2(nr: u64, a1: u64, a2: u64) -> i64 {
-    // SAFETY: Delegated to syscall5 with zero-filled trailing args.
-    unsafe { syscall5(nr, a1, a2, 0, 0, 0) }
-}
-
-/// Make a null-terminated C string from a Rust string slice.
-fn c_str(s: &str) -> Vec<u8> {
-    let mut v = s.as_bytes().to_vec();
-    v.push(0);
-    v
-}
+/// Slate OS has no filesystem-admin syscalls (format/verify/repair/trim/statfs).
+/// The earlier implementation hand-rolled `syscall(650..=655, ...)`, but those
+/// numbers are **not** an fs-admin ABI: `650`/`651` are the unrelated
+/// `SYS_FS_SEEK_DATA`/`SYS_FS_SEEK_HOLE` (a format request thus handed a device
+/// *path pointer* to `seek_hole` as a *file descriptor*, yielding a misleading
+/// `EBADF`/`EINVAL` while formatting nothing), and `652..=655` are unassigned
+/// (so the kernel already bounced them with `ENOSYS`). Rather than issue a real
+/// but wrong syscall — or trip into the kernel only to bounce — every fs-admin
+/// op resolves to this honest `ENOSYS` until a real fs-admin ABI lands.
+const ENOSYS: i64 = -38;
 
 /// Translate a negative syscall return into a human-readable error.
 fn syscall_error_msg(ret: i64) -> String {
@@ -837,24 +793,10 @@ fn cmd_format(device_name: &str, fstype: &str) {
 
     println!("Formatting /dev/{} as {}...", dev_name, fstype);
 
-    let dev_cstr = c_str(&format!("/dev/{dev_name}"));
-    let fs_cstr = c_str(fstype);
-
-    let ret = unsafe {
-        syscall3(
-            SYS_FS_FORMAT,
-            dev_cstr.as_ptr() as u64,
-            fs_cstr.as_ptr() as u64,
-            0, // flags (reserved)
-        )
-    };
-
-    if ret < 0 {
-        eprintln!("error: format failed: {}", syscall_error_msg(ret));
-        process::exit(1);
-    }
-
-    println!("Successfully formatted /dev/{} as {}", dev_name, fstype);
+    // No fs-format syscall exists yet (see ENOSYS note); fail honestly rather
+    // than issue a real but unrelated syscall.
+    eprintln!("error: format failed: {}", syscall_error_msg(ENOSYS));
+    process::exit(1);
 }
 
 // ============================================================================
@@ -884,23 +826,9 @@ fn cmd_verify(device_name: &str) {
     }
     println!("  Mode: read-only check");
 
-    let dev_cstr = c_str(&format!("/dev/{dev_name}"));
-
-    // flags=0 means read-only check
-    let ret = unsafe {
-        syscall2(
-            SYS_FS_VERIFY,
-            dev_cstr.as_ptr() as u64,
-            0, // flags: 0 = read-only
-        )
-    };
-
-    if ret < 0 {
-        eprintln!("Verification FAILED: {}", syscall_error_msg(ret));
-        process::exit(1);
-    }
-
-    println!("Verification complete: filesystem is clean.");
+    // No fs-verify syscall exists yet (see ENOSYS note); fail honestly.
+    eprintln!("Verification FAILED: {}", syscall_error_msg(ENOSYS));
+    process::exit(1);
 }
 
 // ============================================================================
@@ -925,25 +853,11 @@ fn cmd_repair(device_name: &str) {
     }
 
     println!("Repairing filesystem on /dev/{}...", dev_name);
-    println!("  WARNING: This may modify on-disk data.");
 
-    let dev_cstr = c_str(&format!("/dev/{dev_name}"));
-
-    // flags=1 means write-mode repair
-    let ret = unsafe {
-        syscall2(
-            SYS_FS_REPAIR,
-            dev_cstr.as_ptr() as u64,
-            1, // flags: 1 = allow writes for repair
-        )
-    };
-
-    if ret < 0 {
-        eprintln!("Repair FAILED: {}", syscall_error_msg(ret));
-        process::exit(1);
-    }
-
-    println!("Repair complete.");
+    // No fs-repair syscall exists yet (see ENOSYS note); fail honestly rather
+    // than claim a repair that never happened.
+    eprintln!("Repair FAILED: {}", syscall_error_msg(ENOSYS));
+    process::exit(1);
 }
 
 // ============================================================================
@@ -1006,7 +920,7 @@ fn cmd_usage(path: &str) {
     println!();
 
     // Issue statfs syscall on the path.
-    let mut result = StatfsResult {
+    let result = StatfsResult {
         total_blocks: 0,
         free_blocks: 0,
         avail_blocks: 0,
@@ -1015,19 +929,11 @@ fn cmd_usage(path: &str) {
         block_size: 0,
     };
 
-    let path_cstr = c_str(path);
-
-    let ret = unsafe {
-        syscall2(
-            SYS_FS_STATFS,
-            path_cstr.as_ptr() as u64,
-            &mut result as *mut StatfsResult as u64,
-        )
-    };
-
+    // Slate OS has no statfs syscall yet (see ENOSYS note). Skip the kernel
+    // round-trip and show the sysfs-based estimate. The exact-usage formatting
+    // below is retained, ready to wire up once a real statfs ABI exists.
+    let ret = ENOSYS;
     if ret < 0 {
-        // If the syscall is not available, try to read from /proc/mounts
-        // and /sys/block for an estimate.
         eprintln!(
             "  (statfs syscall unavailable: {}; showing estimate from sysfs)",
             syscall_error_msg(ret)
@@ -1412,24 +1318,10 @@ fn cmd_trim(device_name: &str) {
     println!("Issuing TRIM to /dev/{}...", dev.name);
     println!("  Size: {}", format_size(dev.size_bytes()));
 
-    let dev_cstr = c_str(&format!("/dev/{}", dev.name));
-
-    // Trim the entire device: offset=0, length=total size.
-    let ret = unsafe {
-        syscall3(
-            SYS_FS_TRIM,
-            dev_cstr.as_ptr() as u64,
-            0, // offset
-            dev.size_bytes(),
-        )
-    };
-
-    if ret < 0 {
-        eprintln!("TRIM failed: {}", syscall_error_msg(ret));
-        process::exit(1);
-    }
-
-    println!("TRIM complete.");
+    // No fs-trim syscall exists yet (see ENOSYS note); fail honestly rather
+    // than issue a real but unrelated syscall and claim the TRIM happened.
+    eprintln!("TRIM failed: {}", syscall_error_msg(ENOSYS));
+    process::exit(1);
 }
 
 // ============================================================================

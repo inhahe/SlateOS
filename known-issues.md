@@ -725,14 +725,25 @@ client-side number correction:
   with a Socket-WRITE cap the call silently binds+leaks a UDP socket on a low
   port and misleads the user that the config change applied; without the cap it
   fails. The intended operation never happens either way. **Write-path harm
-  neutered 2026-06-14** for `ifconfig`/`ip`/`route` — see the dedicated bullet
-  below; `dhcpcd`/`fw`/`nft` still carry the latent `SYS_NET_IOCTL` misuse.
+  neutered 2026-06-14** for all six net-config tools (`ifconfig`/`ip`/`route`
+  then `dhcpcd`/`fw`/`nft`) — see the dedicated bullets below.
 - **mount/umount**: no `MOUNT`/`UMOUNT` syscall (620/621 are
-  `FS_TRASH_RESTORE`/`FS_TRASH_EMPTY`).
+  `FS_TRASH_RESTORE`/`FS_TRASH_EMPTY`). **Already neutered** — `mount`/`umount`
+  carry an explicit comment about the 620/621 trash-syscall aliasing and return
+  ENOSYS rather than issuing it.
 - **mkfs/fsck/diskutil**: no `FS_FORMAT`/`FS_VERIFY`/`FS_REPAIR`/`FS_TRIM`
-  syscall (650–655 are `SEEK_DATA`/`SEEK_HOLE` + unassigned).
+  syscall (650–655 are `SEEK_DATA`/`SEEK_HOLE` + unassigned). **Format-path
+  aliasing neutered 2026-06-14** — `mkfs` and `diskutil` defined
+  `SYS_FS_FORMAT=651`, but `651` is `SYS_FS_SEEK_HOLE` (a real syscall whose
+  arg0 is an *fd*), so a format request handed `seek_hole` a device *path
+  pointer* as a file descriptor → misleading `EBADF`/`EINVAL` while formatting
+  nothing. Both now return `ENOSYS` without issuing any syscall (see the
+  dedicated bullet below). `fsck`'s `652`/`653` and diskutil's `652..=655` are
+  *unassigned* (not aliasing a real syscall), so the kernel already bounces them
+  with a clean ENOSYS — benign; `fsck` left as-is.
 - **chroot**: no `CHROOT`/`CHDIR`/`SETUID`/`SETGID`/`SETGROUPS` syscall — needs a
-  real process-credential + filesystem-root ABI.
+  real process-credential + filesystem-root ABI. **Already neutered** — `chroot`
+  carries ENOSYS stubs and a comment about the earlier fake syscall numbers.
 
 **Impact:** these specific tools are non-functional (no-op at best). They are not
 on any critical path, so nothing currently blocks on them.
@@ -836,6 +847,26 @@ All three cross-compile for `x86_64-slateos` and pass clippy. With this, **no
 remaining userspace tool defines or issues `SYS_NET_IOCTL`/`810` for net-config**
 (verified by grep). Only the legitimate `SYS_UDP_BIND=810` users (`dig`, `nc`,
 `inetd`, …) reference the number now.
+
+**Disk-admin format-path safety fix — DONE 2026-06-14** (`mkfs`, `diskutil`).
+The same fabricated-syscall pattern lived in the disk-admin tools: both defined
+`SYS_FS_FORMAT=651` and issued `syscall(651, path_ptr, …)`. But `651` is
+`SYS_FS_SEEK_HOLE` — a real syscall whose arg0 is a *file descriptor*, not a
+path pointer — so a `mkfs`/`diskutil format` actually invoked `seek_hole` with a
+userspace pointer reinterpreted as an fd, returning a misleading `EBADF`/`EINVAL`
+while formatting nothing. Fix:
+- **`mkfs`** — removed `SYS_FS_FORMAT`/`syscall3`; `do_format` now returns the
+  honest `ENOSYS` message without issuing a syscall. 35 host tests pass.
+- **`diskutil`** — removed `SYS_FS_{IOCTL,FORMAT,VERIFY,REPAIR,TRIM,STATFS}` +
+  the `syscall5`/`syscall3`/`syscall2`/`c_str` plumbing; format/verify/repair/
+  trim now fail honestly with `ENOSYS`, and `usage` (statfs) skips the kernel
+  round-trip and goes straight to its existing sysfs-based estimate. The
+  exact-usage formatting is retained, ready to wire once a real statfs ABI lands.
+  Builds + clippy clean.
+- **`fsck`** left as-is: its `652`/`653` are *unassigned*, so the kernel already
+  returns a clean `ENOSYS` (no real-syscall aliasing) — benign. Neutering it
+  would only cascade `build_flags`/`FSCK_FLAG_*` into dead code for no safety
+  gain; revisit when the fs-admin ABI lands.
 
 **Proper fix:** this is an **operator design decision**, not a mechanical fix —
 the kernel must first grow the missing ABI, and the *shape* of that ABI is a

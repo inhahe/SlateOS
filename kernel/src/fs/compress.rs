@@ -675,7 +675,7 @@ enum LzToken {
 fn insert_hash(
     data: &[u8],
     pos: usize,
-    head: &mut [u32; HASH_SIZE],
+    head: &mut [u32],
     prev: &mut [u32],
 ) -> u32 {
     let h = lz77_hash(data, pos);
@@ -692,7 +692,7 @@ fn insert_hash(
 fn find_best_match(
     data: &[u8],
     pos: usize,
-    head: &[u32; HASH_SIZE],
+    head: &[u32],
     prev: &[u32],
 ) -> (usize, usize) {
     let remaining = data.len().wrapping_sub(pos);
@@ -773,7 +773,15 @@ fn lz77_tokenize(data: &[u8]) -> Vec<LzToken> {
 
     // Hash chain: head[h] = most recent pos with hash h.
     // prev[pos % MAX_DISTANCE] = previous pos in same chain.
-    let mut head = [0u32; HASH_SIZE];
+    //
+    // `head` is heap-allocated (a `Vec`, like `prev`) rather than a stack
+    // array: at HASH_SIZE = 4096 the `[u32; HASH_SIZE]` form occupied 16 KiB
+    // of the 64 KiB kernel task stack, and combined with the rest of the
+    // gzip/deflate call chain (plus any interrupt that nests on the same
+    // stack) it overflowed into the guard page — a double fault (#DF) in the
+    // benchmark suite.  Keeping it on the heap removes that 16 KiB frame.
+    // See known-issues.md B-DF1.
+    let mut head = vec![0u32; HASH_SIZE];
     let mut prev = vec![0; MAX_DISTANCE];
 
     let mut pos: usize = 0;

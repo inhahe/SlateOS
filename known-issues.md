@@ -14,63 +14,75 @@ work that should be done now."
 
 ## Active Bugs
 
-### B-DF1. Double fault in the deferred benchmark suite during a late `http_gzip` stage — OPEN 2026-06-14
+### B-DF1. Kernel-stack overflow → double fault when an IRQ frame pushes onto a near-full kernel task stack (deferred benchmark suite) — ROOT-CAUSED; gzip frame fixed, systemic part OPEN 2026-06-14
 
-**Where:** late in the `deferred_bench_task` suite (`kernel/src/bench.rs`),
-around the `http_gzip_8KiB` benchmark. Only reachable now that W2 (mouse-cursor
-busy-yield starvation) is fixed — previously the suite never ran this far, so
-this is a **pre-existing latent bug unmasked by the W2 fix**, not caused by it.
+**Root cause (CONFIRMED): kernel task stack overflow into the guard page.**
+The deferred benchmark suite runs heavy, *debug-built* code paths in kernel
+context (gzip/deflate, `format!`-heavy JSON, crypto) on a kernel task with a
+fixed **64 KiB** stack (`TASK_STACK_SIZE = 4 * 16 KiB`). The kstack allocator
+(`kernel/src/mm/kstack.rs`) lays out each task stack as `[guard 16 KiB][stack
+64 KiB]`, slot stride `SLOT_SIZE = 0x14000`, region base `0xFFFF_C100_0000_0000`.
+The reported fault `RSP = 0xffffc1000003ffb8` decodes to slot 3, within-slot
+offset `0x3FB8`, which is **< GUARD_SIZE (0x4000)** — i.e. RSP is **inside the
+guard page**, ~72 bytes below `stack_bottom`. So the stack overflowed; the
+faulting `atomic_load` (and the IRQ frame that the CPU was pushing) landed on
+the unmapped guard page → the fault could not be delivered → #DF.
+(Correction to an earlier note: RSP is **not** "near the top of the stack" — I
+had mis-decoded the slot stride. It is firmly in the guard page. The two
+backtrace frames are the #DF handler's own IST stack — `handle_double_fault` /
+`isr_double_fault` — and are uninformative.)
 
-**Symptom (exact serial output):**
-```
-EXCEPTION: Double Fault (#DF) at 0xffffffff812fe288, error=0x0
-  CS=0x8 RFLAGS=0x86 RSP=0xffffc1000003ffb8 SS=0x10
-  Task: 115 (""), priority 0, cpu 0
-  Backtrace (2 frames):
-    # 0: 0xffffffff81277c91
-    # 1: 0xffffffff8126cdfd
-FATAL: Double fault is unrecoverable. Halting.
-```
+**Why an IRQ tips it over.** Hardware IRQs (timer vector 32; device IRQs 33–56,
+incl. mouse IRQ12) are installed in the IDT with **IST index 0** (see
+`idt.rs::init`, `IdtEntry::new(..., 0, 0)`) — they run on the *current* kernel
+task stack, not a dedicated stack. When a benchmark has driven the task stack
+near `stack_bottom`, the CPU pushing the interrupt frame (and the handler's own
+frames) crosses into the guard page → #DF. Only the double fault itself uses an
+IST (IST1). This makes *any* near-full kernel stack a double-fault risk on the
+next interrupt — a real, production-relevant bug for any in-kernel code that
+uses a lot of stack, not merely a benchmark artifact.
 
-**Symbolization (against `build/nm-sorted.txt`):**
-- Fault PC `0x812fe288` is inside `core::sync::atomic::atomic_load` (symbol at
-  `0x812fe280`, +8). So the faulting context was executing an atomic load (a
-  `mov` from memory) when a fault occurred that could not be delivered → #DF.
-- The two backtrace frames are **the double-fault handler's own IST stack**,
-  not the faulting code: `0x81277c91` is inside `handle_double_fault`
-  (`0x81277690`) and `0x8126cdfd` is inside `isr_double_fault` (`0x8126cdd4`).
-  `backtrace::print_current()` walked the #DF IST stack, so those frames are
-  uninformative — ignore them. (An earlier note mis-symbolized these as
-  `handle_general_protection`/`isr_irq12`; that was wrong — corrected here.)
-- Task 115 is the `deferred_bench_task` driver, shown at **priority 0** because
-  the anti-starvation booster had boosted it.
+**FIXED part — the 16 KiB gzip hash table (`kernel/src/fs/compress.rs`).**
+`lz77_tokenize()` allocated `let mut head = [0u32; HASH_SIZE]` with
+`HASH_SIZE = 4096` = **16 KiB on the stack** (a quarter of the whole 64 KiB
+stack), while its sibling `prev` was already heap-allocated. Moved `head` to a
+`Vec` (heap) and changed `insert_hash`/`find_best_match` to take `&[u32]`/`&mut
+[u32]` slices (call sites unchanged — `&mut Vec<u32>` coerces). Verified: with
+this fix the `http_gzip_1KiB` and `http_gzip_8KiB` benchmarks now **complete**
+(8192B → 4507B), where before they double-faulted. This was the dominant
+single stack frame and removing it is correct regardless (gzip should never use
+16 KiB of stack).
 
-**Leading hypotheses (not yet confirmed):**
-1. The atomic load faulted because its operand pointer was bad/unmapped (a
-   #PF/#GP whose delivery then double-faulted). Reported `RSP=0xffffc1000003ffb8`
-   sits very near the *top* of a 64 KiB task kernel stack
-   (`TASK_STACK_SIZE = 4 * 16 KiB`), so a classic deep-recursion stack overflow
-   is **not** the obvious cause (stack looks shallow) — unless RSP itself is the
-   corrupted value (pointing into an unmapped region), in which case any
-   exception delivery would fault on the push → #DF.
-2. A corrupted/dangling atomic operand in the gzip/deflate benchmark path
-   (e.g., an `Atomic*` living in a structure that was freed/reused).
+**OPEN part — the systemic interrupt-on-near-full-stack overflow.** After the
+gzip fix the suite advances one stage further and double-faults again at the
+**identical** guard-page `RSP=0xffffc1000003ffb8`, now in `Task 114` during
+`bench_dashboard_api_status` (`crate::net::dashboard::bench_api_status`). The
+dashboard path has no single large array — it is `format!`-heavy, and debug
+builds give `core::fmt` very deep, un-inlined, stack-hungry call chains. So this
+is the *general* problem: 64 KiB is marginal for debug-built in-kernel heavy
+code + an IRQ frame on top. Fixing it benchmark-by-benchmark is whack-a-mole.
 
-**Reproduce:** `bash scripts/boot-test.sh --bench --timeout=600` and let the
-suite run past `context_switch`/`pick_next`/`ipc`/`vfs` into `http_gzip`.
-Expensive: `compress_repeating` alone eats ~200 s under QEMU/TCG.
+**Proper fix is an architectural decision — see `open-questions.md`.** The
+textbook fix is a dedicated per-CPU IRQ stack (x86 IST), like Linux's IRQ
+stacks, so interrupt handlers never consume the interrupted task's stack.
+**Complication:** the timer handler deliberately re-enables interrupts
+(`apic.rs:1162`, `sti` after EOI, for preemption), so IRQs *can* nest — a naive
+single shared IRQ IST would be clobbered by a nested IRQ resetting RSP to the
+IST top. A correct IRQ-stack implementation must therefore support nesting (or
+the hard-IRQ phase must not re-enable IF). This is a careful change to the
+hottest, most safety-critical path; alternatives (bump kernel-task stack size;
+keep heavy code out of the kernel; release-build) each have tradeoffs. Deferred
+to the operator as an open question rather than changing the IRQ path
+autonomously.
 
-**Next step:** symbolize precisely which `atomic_load` instantiation lives at
-`0x812fe280` (match the mangled hash via `nm`/`objdump -d` of the kernel ELF)
-to identify the type being loaded; disassemble around `0x812fe288` to see the
-operand register; and add a guard/log in the `http_gzip` bench setup to dump the
-atomic's address before the load. Determine whether RSP is corrupt (compare to
-task 115's real stack range) vs. the operand pointer is corrupt.
+**Reproduce:** `bash scripts/boot-test.sh --bench --timeout=600`; the suite now
+runs through `compress`, `context_switch`, `pick_next`, `ipc`, `vfs`, all
+`http_*` incl. both `http_gzip_*`, then #DFs entering `dashboard_api_status`.
 
-**Impact:** `BENCH_OK` and the post-`http_gzip` benchmarks (ISR latency,
-scorecard) still don't complete — but for a *different, deeper* reason than W2.
-Does not affect normal operation: the default `BOOT_OK` boot test passes
-(the deferred bench suite runs only after BOOT_OK).
+**Impact:** `BENCH_OK` and the last benchmarks (dashboard API, ISR latency,
+scorecard) still don't complete. Does **not** affect normal operation: the
+default `BOOT_OK` boot test passes (the deferred bench suite runs only after
+BOOT_OK).
 
 ### W1. Intermittent boot-test hang recurred once at the OOM self-test — WATCHLIST 2026-06-10
 

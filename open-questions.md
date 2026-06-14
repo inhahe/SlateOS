@@ -23,10 +23,11 @@ Format for each entry:
 
 ---
 
-One substantive design discussion remains open below: **Q6** — the
-authorization model for cross-process memory introspection. The operator has
-indicated a direction (capability model) but raised a refinement worth settling
-before implementation (see Q6).
+Two substantive design discussions remain open below: **Q5 (reopened)** — how
+far to take native file mapping / the page cache; and **Q6** — the authorization
+model for cross-process memory introspection. The operator has indicated a
+direction on Q6 (capability model) but raised a refinement worth settling before
+implementation (see Q6).
 
 ---
 
@@ -48,10 +49,94 @@ Recently resolved (see `design-decisions.md` for the full rationale):
   2026-06-13; **Path Z** (run prebuilt Linux toolchain binaries on the Linux-ABI
   layer now, native-port selectively later), native-first/no-leak kept
   inviolate, clang green-lit for install (§12).
-- Q5 file-backed `mmap` — how far to take the fix — resolved 2026-06-14;
-  operator declined the unified-page-cache fork (option C); keep the shipped
-  demand-paged `MAP_PRIVATE` (option B), writable `MAP_SHARED` stays `ENOSYS`
-  indefinitely (§22).
+- Q5 file-backed `mmap` — how far to take the fix — resolved 2026-06-14
+  (§22), then **REOPENED 2026-06-14** by the operator with a sharper framing
+  (native file mapping as a first-class feature; page cache as API-agnostic
+  infrastructure; FS-cache-vs-mmap; databases). §22 still stands until this
+  reconsideration settles — see **Q5 (reopened)** below.
+
+---
+
+## Q5 (reopened) — Native file mapping & the unified page cache: how far to take it? — OPEN (reopened 2026-06-14)
+
+**Background.** §22 declined the unified page cache (option C) on the grounds
+that it is a lot of work whose only payoff is memory savings for *some Linux
+programs*, and Slate is not primarily a Linux box. The operator has reopened
+this with a sharper observation: **mmap'ing files may be valuable for Slate
+natively, not just as Linux compatibility.** That reframes the whole question.
+
+**Key insight — the page cache is API-agnostic infrastructure, not a Linux
+tax.** A page cache is a mechanism: map a file's contents into physical frames
+*once*, and let multiple mappings (and the FS read/write path) share those
+frames. Linux `mmap` is just one thin projection onto that engine. §22's
+cost/benefit was framed as "is the page cache worth it *for Linux*?" — but if we
+want native file mapping at all, we build the engine regardless and Linux mmap
+becomes nearly free on top of it. The native facility need **not** match Linux
+semantics: build the best native mapping facility (capability handles, explicit
+durability/consistency semantics) and project Linux `mmap` onto a subset — the
+same native-underneath / Linux-projection pattern we use for channel IPC (→
+pipes/sockets) and committed memory (→ overcommit mode).
+
+**Key insight — a strong FS cache shrinks mmap's irreducible value to a small
+core.** The operator is right that a good FS cache covers most of what mmap is
+used for. What it does *not* cover, and mmap does:
+  1. **Cross-process read-only page sharing** (the killer feature): shared-library
+     text mapped by N processes lives in RAM *once*. A read()-cache can dedup the
+     *cache* copy, but each process still needs its own resident copy unless it
+     maps. Purely a read-only benefit.
+  2. **Zero-copy large-file random access** — scattered offsets without a read()
+     syscall per access.
+  3. **Convenience** — pointer-chasing a file as memory.
+
+**Key insight — databases do NOT want mmap.** The operator's hunch ("maybe
+databases work optimally with just a good FS cache") matches industry
+consensus. CIDR 2022 *"Are You Sure You Want to Use MMAP in Your DBMS?"*
+(Crotty/Leis/Pavlo) argues against mmap for databases: no control over eviction
+order, unthrottleable page-fault stalls, no write-ordering for crash
+consistency, brutal TLB shootdowns under concurrency. Real systems agree —
+MongoDB replaced MMAPv1 with WiredTiger's explicit buffer pool; PostgreSQL has
+always used its own buffer pool. The high-performance answer is **buffer-pool +
+io_uring async I/O**, which Slate is already building toward. So a serious DB on
+Slate should use our cache + io_uring and would *not* want mmap.
+
+**Options (revised).**
+
+- **A — revert to no file mapping.** (Original §22 framing's floor.) Rejected
+  already; we shipped B.
+- **B — demand-paged `MAP_PRIVATE` only (status quo / §22).** Per-mapping private
+  frames, no sharing, no writeback. Pros: shipped, simple. Cons: no cross-process
+  page sharing (shared-library text duplicated per process), double-caching
+  (mmap'd file pages distinct from FS-cache pages).
+- **C-lite — unified *read-only* page cache.** Map file contents into shared
+  frames; multiple mappings + the FS read/write path share them. Gives
+  cross-process read-only page sharing (the shared-library win) **and**
+  de-double-caching, but **omits** writable `MAP_SHARED` writeback — the
+  dirty-tracking / msync / write-ordering machinery that is the genuinely hard,
+  hard-to-reverse part. `MAP_SHARED` writable stays `ENOSYS`. Pros: captures the
+  strong native benefit at a fraction of full-C cost; aligns with "DBs don't want
+  writable mmap anyway." Cons: still real work (cache keyed by stable file
+  identity — needs `FileMeta.ino` ≠ 0 for memfs/FAT first); CoW interaction with
+  the existing private-mapping path.
+- **C — full unified page cache** with writable `MAP_SHARED` + writeback. Pros:
+  full Linux mmap semantics. Cons: the writeback/dirty/ordering machinery is the
+  expensive, hard-to-reverse part — and the database analysis says nobody serious
+  should want writable shared mappings anyway.
+
+**Claude's recommendation.** Don't build it yet, but don't foreclose it. Defer
+until a concrete consumer exists (the dynamic linker wanting shared-library text
+dedup is the likely first). When one appears, build **C-lite**, not a revert to A
+nor a jump to full C. §22's "decline C" should be read as declining *full* C; it
+should not bar C-lite. Meanwhile B stays shipped and correct.
+
+**Where it bites.** `sys_mmap` / file-backed VMA path in
+`kernel/src/syscall/linux.rs`; `fs/cache.rs` (block buffer cache — the
+double-cache candidate to unify with); `FileMeta.ino` (currently 0 for
+memfs/FAT — the stable-file-identity precursor C-lite needs); VMA model
+`kernel/src/mm/vma.rs` (`VmaKind::FileBacked`). design-decisions.md §22 to be
+amended when the operator settles this.
+
+**Status.** OPEN (reopened). Non-blocking — no consumer exists yet, so the loop
+continues on other work.
 
 ---
 

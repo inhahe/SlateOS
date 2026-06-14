@@ -233,6 +233,18 @@ pub fn io_stats() -> IoStats {
 struct RegisteredDevice {
     name: String,
     device: Box<dyn BlockDevice>,
+    /// Device metadata, snapshotted at registration time.
+    ///
+    /// Captured once via [`BlockDevice::info`] (which needs `&self`) so
+    /// that read-only listing paths holding only a shared borrow of the
+    /// registry — [`list_devices`] — can return the *real* capacity /
+    /// read-only flag instead of fabricated zeros.  The `name` field is
+    /// overridden with the registry-assigned name (authoritative — a
+    /// driver may hard-code its own `info().name`, e.g. every virtio-blk
+    /// device reports `"vda"`, while the registry assigns vda/vdb/vdc).
+    /// Block-device geometry is fixed after init for all current drivers
+    /// (virtio-blk, AHCI, NVMe), so the snapshot never goes stale.
+    info: BlockDeviceInfo,
 }
 
 /// Global block device registry.
@@ -258,10 +270,17 @@ pub fn register(name: &str, device: Box<dyn BlockDevice>) {
         }
     }
 
+    // Snapshot the device metadata now, while we still have direct access
+    // to the trait object, and stamp it with the registry-assigned name
+    // (authoritative over any name the driver hard-codes in its own info()).
+    let mut info = device.info();
+    info.name = String::from(name);
+
     crate::serial_println!("[blkdev] Registered device '{}'", name);
     registry.push(RegisteredDevice {
         name: String::from(name),
         device,
+        info,
     });
 }
 
@@ -282,35 +301,20 @@ where
 }
 
 /// List all registered block devices.
+///
+/// Returns the metadata snapshotted at registration time (real capacity,
+/// sector size, and read-only flag — see [`RegisteredDevice::info`]).
 pub fn list_devices() -> Vec<BlockDeviceInfo> {
     let registry = REGISTRY.lock();
-    registry.iter().map(|entry| {
-        // We can't call info() without &self, but BlockDeviceInfo is on
-        // the trait.  We stored the device as Box<dyn BlockDevice>, so
-        // we need a non-mutable borrow.  Since info() takes &self, this
-        // is fine — but we need to work around the Mutex<Vec<...>> borrow.
-        //
-        // Actually, we hold the lock, so we can call info() directly:
-        BlockDeviceInfo {
-            name: entry.name.clone(),
-            // We can't call entry.device.info() because we only have &entry
-            // (iter(), not iter_mut()).  The info is reconstructed from the name.
-            // TODO: Cache the info at registration time.
-            sector_count: 0,
-            sector_size: SECTOR_SIZE as u32,
-            read_only: false,
-        }
-    }).collect()
+    registry.iter().map(|entry| entry.info.clone()).collect()
 }
 
 /// List all registered block device names and their info.
 ///
-/// This version uses `iter_mut()` to call the trait method.
+/// Equivalent to [`list_devices`]; both now return the registration-time
+/// snapshot.  Retained as a separate name for existing callers.
 pub fn list_devices_full() -> Vec<BlockDeviceInfo> {
-    let mut registry = REGISTRY.lock();
-    registry.iter_mut().map(|entry| {
-        entry.device.info()
-    }).collect()
+    list_devices()
 }
 
 // ---------------------------------------------------------------------------

@@ -67318,6 +67318,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_numa_sched_landlock()?;
+
+    #[inline(never)]
+    fn self_test_numa_sched_landlock() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // -----------------------------------------------------------------
     // NUMA + sched_setattr/getattr + landlock + kcmp + restart_syscall
     // -----------------------------------------------------------------
@@ -68957,6 +68962,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: restart_syscall not EINTR");
             return Err(KernelError::InternalError);
         }
+    }
+        Ok(())
     }
 
     // -----------------------------------------------------------------

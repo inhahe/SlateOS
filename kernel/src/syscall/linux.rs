@@ -40682,6 +40682,213 @@ fn self_test_set_mempolicy() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+/// TD4 extraction: mbind UMA-aware accept/reject (self_test group 9g).
+/// Per-VMA equivalent of set_mempolicy: exercises range/alignment/flag
+/// validation, node-existence checks, the MPOL_MF_MOVE_ALL CAP_SYS_NICE
+/// gate ordering, and MPOL_MF_MOVE acceptance — all self-contained. See
+/// [`self_test_errno_mapping`] for the TD4 rationale.
+#[inline(never)]
+fn self_test_mbind() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+
+    const MPOL_DEFAULT: u64 = 0;
+    const MPOL_BIND: u64 = 2;
+    const MPOL_INTERLEAVE: u64 = 3;
+    const MPOL_LOCAL: u64 = 4;
+    const MPOL_MF_STRICT: u64 = 4;
+
+    // Case 1: zero-length range -> 0 (Linux no-op success).
+    let a = SyscallArgs {
+        arg0: 0, arg1: 0, arg2: MPOL_DEFAULT, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::MBIND, &a);
+    if r.value != 0 {
+        serial_println!(
+            "[syscall/linux]   FAIL: mbind(0,0,DEFAULT,...) -> {} (expected 0)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 2: mbind(BIND, {0}, 64) over a 4 KiB range -> 0.
+    let mask: u64 = 0x1;
+    let a = SyscallArgs {
+        arg0: 0x1000, arg1: 0x1000, arg2: MPOL_BIND,
+        arg3: (&raw const mask).addr() as u64, arg4: 64, arg5: 0,
+    };
+    let r = dispatch_linux(nr::MBIND, &a);
+    if r.value != 0 {
+        serial_println!(
+            "[syscall/linux]   FAIL: mbind(BIND,{{0}}) -> {} (expected 0)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 3: mbind with MPOL_MF_STRICT -> 0 (on UMA every page is
+    // already on node 0, so STRICT is trivially satisfied).
+    let a = SyscallArgs {
+        arg0: 0x1000, arg1: 0x1000, arg2: MPOL_BIND,
+        arg3: (&raw const mask).addr() as u64, arg4: 64,
+        arg5: MPOL_MF_STRICT,
+    };
+    let r = dispatch_linux(nr::MBIND, &a);
+    if r.value != 0 {
+        serial_println!(
+            "[syscall/linux]   FAIL: mbind(BIND|STRICT) -> {} (expected 0)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 4: misaligned addr -> -EINVAL.
+    let a = SyscallArgs {
+        arg0: 0x123, arg1: 0x1000, arg2: MPOL_DEFAULT,
+        arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::MBIND, &a);
+    if r.value != -i64::from(errno::EINVAL) {
+        serial_println!(
+            "[syscall/linux]   FAIL: mbind(unaligned) -> {} (expected -EINVAL)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 5: bogus mbind flags bit -> -EINVAL.
+    let a = SyscallArgs {
+        arg0: 0, arg1: 0x1000, arg2: MPOL_DEFAULT,
+        arg3: 0, arg4: 0, arg5: 0x8,
+    };
+    let r = dispatch_linux(nr::MBIND, &a);
+    if r.value != -i64::from(errno::EINVAL) {
+        serial_println!(
+            "[syscall/linux]   FAIL: mbind(bogus flag) -> {} (expected -EINVAL)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 6: MPOL_BIND with empty mask -> -EINVAL.
+    let a = SyscallArgs {
+        arg0: 0, arg1: 0x1000, arg2: MPOL_BIND,
+        arg3: 0, arg4: 0, arg5: 0,
+    };
+    let r = dispatch_linux(nr::MBIND, &a);
+    if r.value != -i64::from(errno::EINVAL) {
+        serial_println!(
+            "[syscall/linux]   FAIL: mbind(BIND,empty) -> {} (expected -EINVAL)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 7: MPOL_INTERLEAVE with mask = {bit 1} (= node we don't
+    // have) -> -EINVAL.
+    let bad_mask: u64 = 0x2;
+    let a = SyscallArgs {
+        arg0: 0, arg1: 0x1000, arg2: MPOL_INTERLEAVE,
+        arg3: (&raw const bad_mask).addr() as u64, arg4: 64, arg5: 0,
+    };
+    let r = dispatch_linux(nr::MBIND, &a);
+    if r.value != -i64::from(errno::EINVAL) {
+        serial_println!(
+            "[syscall/linux]   FAIL: mbind(INTERLEAVE,{{1}}) -> {} (expected -EINVAL)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 8: MPOL_LOCAL with non-empty mask -> -EINVAL.
+    let a = SyscallArgs {
+        arg0: 0, arg1: 0x1000, arg2: MPOL_LOCAL,
+        arg3: (&raw const mask).addr() as u64, arg4: 64, arg5: 0,
+    };
+    let r = dispatch_linux(nr::MBIND, &a);
+    if r.value != -i64::from(errno::EINVAL) {
+        serial_println!(
+            "[syscall/linux]   FAIL: mbind(LOCAL,{{0}}) -> {} (expected -EINVAL)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 9: maxnode > 0 but nodemask NULL -> -EINVAL (NOT -EFAULT).
+    // Linux get_nodes treats a NULL nmask as an empty mask and returns
+    // success; the empty mask then fails BIND's non-empty rule in
+    // mpol_new -> -EINVAL.  (Pre-batch we returned -EFAULT here.)
+    let a = SyscallArgs {
+        arg0: 0, arg1: 0x1000, arg2: MPOL_BIND,
+        arg3: 0, arg4: 64, arg5: 0,
+    };
+    let r = dispatch_linux(nr::MBIND, &a);
+    if r.value != i64::from(errno::EINVAL).wrapping_neg() {
+        serial_println!(
+            "[syscall/linux]   FAIL: mbind(BIND,NULL,64) -> {} (expected -EINVAL)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 10: MPOL_MF_MOVE_ALL without CAP_SYS_NICE -> -EPERM.
+    // Linux do_mbind runs `(flags & MPOL_MF_MOVE_ALL) &&
+    // !capable(CAP_SYS_NICE) -> -EPERM` immediately after the
+    // flag-bits sanity check and ahead of `start & ~PAGE_MASK`
+    // (addr alignment).  Pre-batch we ran addr alignment first
+    // and a probe passing (addr=unaligned, flags=MOVE_ALL) saw
+    // EINVAL where Linux returns EPERM.  Verify the EPERM gate
+    // fires even with an unaligned addr.
+    const MPOL_MF_MOVE_ALL: u64 = 1 << 1;
+    let a = SyscallArgs {
+        arg0: 0x123, arg1: 0x1000, arg2: MPOL_DEFAULT,
+        arg3: 0, arg4: 0, arg5: MPOL_MF_MOVE_ALL,
+    };
+    let r = dispatch_linux(nr::MBIND, &a);
+    if r.value != -i64::from(errno::EPERM) {
+        serial_println!(
+            "[syscall/linux]   FAIL: mbind(unaligned,MOVE_ALL) -> {} (expected -EPERM)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 11: MPOL_MF_MOVE_ALL with aligned addr still -> -EPERM
+    // (capability gate, not address gate).
+    let a = SyscallArgs {
+        arg0: 0x1000, arg1: 0x1000, arg2: MPOL_DEFAULT,
+        arg3: 0, arg4: 0, arg5: MPOL_MF_MOVE_ALL,
+    };
+    let r = dispatch_linux(nr::MBIND, &a);
+    if r.value != -i64::from(errno::EPERM) {
+        serial_println!(
+            "[syscall/linux]   FAIL: mbind(aligned,MOVE_ALL) -> {} (expected -EPERM)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Case 12: MPOL_MF_MOVE (not MOVE_ALL) does NOT trigger
+    // EPERM — MOVE is allowed for any user.  This case should
+    // still succeed UMA-style.
+    const MPOL_MF_MOVE_ONLY: u64 = 1 << 0;
+    let a = SyscallArgs {
+        arg0: 0x1000, arg1: 0x1000, arg2: MPOL_DEFAULT,
+        arg3: 0, arg4: 0, arg5: MPOL_MF_MOVE_ONLY,
+    };
+    let r = dispatch_linux(nr::MBIND, &a);
+    if r.value != 0 {
+        serial_println!(
+            "[syscall/linux]   FAIL: mbind(aligned,MOVE) -> {} (expected 0)",
+            r.value,
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[syscall/linux]   mbind MOVE_ALL EPERM ahead of addr-align: OK"
+    );
+    Ok(())
+}
+
 pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
@@ -40780,203 +40987,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
     // (9g) Batch 103: mbind upgraded from -ENOSYS stub to UMA-aware
     // accept/reject decision.  Per-VMA equivalent of batch 102.
-    {
-        const MPOL_DEFAULT: u64 = 0;
-        const MPOL_BIND: u64 = 2;
-        const MPOL_INTERLEAVE: u64 = 3;
-        const MPOL_LOCAL: u64 = 4;
-        const MPOL_MF_STRICT: u64 = 4;
-
-        // Case 1: zero-length range -> 0 (Linux no-op success).
-        let a = SyscallArgs {
-            arg0: 0, arg1: 0, arg2: MPOL_DEFAULT, arg3: 0, arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::MBIND, &a);
-        if r.value != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: mbind(0,0,DEFAULT,...) -> {} (expected 0)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 2: mbind(BIND, {0}, 64) over a 4 KiB range -> 0.
-        let mask: u64 = 0x1;
-        let a = SyscallArgs {
-            arg0: 0x1000, arg1: 0x1000, arg2: MPOL_BIND,
-            arg3: (&raw const mask).addr() as u64, arg4: 64, arg5: 0,
-        };
-        let r = dispatch_linux(nr::MBIND, &a);
-        if r.value != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: mbind(BIND,{{0}}) -> {} (expected 0)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 3: mbind with MPOL_MF_STRICT -> 0 (on UMA every page is
-        // already on node 0, so STRICT is trivially satisfied).
-        let a = SyscallArgs {
-            arg0: 0x1000, arg1: 0x1000, arg2: MPOL_BIND,
-            arg3: (&raw const mask).addr() as u64, arg4: 64,
-            arg5: MPOL_MF_STRICT,
-        };
-        let r = dispatch_linux(nr::MBIND, &a);
-        if r.value != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: mbind(BIND|STRICT) -> {} (expected 0)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 4: misaligned addr -> -EINVAL.
-        let a = SyscallArgs {
-            arg0: 0x123, arg1: 0x1000, arg2: MPOL_DEFAULT,
-            arg3: 0, arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::MBIND, &a);
-        if r.value != -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: mbind(unaligned) -> {} (expected -EINVAL)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 5: bogus mbind flags bit -> -EINVAL.
-        let a = SyscallArgs {
-            arg0: 0, arg1: 0x1000, arg2: MPOL_DEFAULT,
-            arg3: 0, arg4: 0, arg5: 0x8,
-        };
-        let r = dispatch_linux(nr::MBIND, &a);
-        if r.value != -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: mbind(bogus flag) -> {} (expected -EINVAL)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 6: MPOL_BIND with empty mask -> -EINVAL.
-        let a = SyscallArgs {
-            arg0: 0, arg1: 0x1000, arg2: MPOL_BIND,
-            arg3: 0, arg4: 0, arg5: 0,
-        };
-        let r = dispatch_linux(nr::MBIND, &a);
-        if r.value != -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: mbind(BIND,empty) -> {} (expected -EINVAL)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 7: MPOL_INTERLEAVE with mask = {bit 1} (= node we don't
-        // have) -> -EINVAL.
-        let bad_mask: u64 = 0x2;
-        let a = SyscallArgs {
-            arg0: 0, arg1: 0x1000, arg2: MPOL_INTERLEAVE,
-            arg3: (&raw const bad_mask).addr() as u64, arg4: 64, arg5: 0,
-        };
-        let r = dispatch_linux(nr::MBIND, &a);
-        if r.value != -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: mbind(INTERLEAVE,{{1}}) -> {} (expected -EINVAL)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 8: MPOL_LOCAL with non-empty mask -> -EINVAL.
-        let a = SyscallArgs {
-            arg0: 0, arg1: 0x1000, arg2: MPOL_LOCAL,
-            arg3: (&raw const mask).addr() as u64, arg4: 64, arg5: 0,
-        };
-        let r = dispatch_linux(nr::MBIND, &a);
-        if r.value != -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: mbind(LOCAL,{{0}}) -> {} (expected -EINVAL)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 9: maxnode > 0 but nodemask NULL -> -EINVAL (NOT -EFAULT).
-        // Linux get_nodes treats a NULL nmask as an empty mask and returns
-        // success; the empty mask then fails BIND's non-empty rule in
-        // mpol_new -> -EINVAL.  (Pre-batch we returned -EFAULT here.)
-        let a = SyscallArgs {
-            arg0: 0, arg1: 0x1000, arg2: MPOL_BIND,
-            arg3: 0, arg4: 64, arg5: 0,
-        };
-        let r = dispatch_linux(nr::MBIND, &a);
-        if r.value != i64::from(errno::EINVAL).wrapping_neg() {
-            serial_println!(
-                "[syscall/linux]   FAIL: mbind(BIND,NULL,64) -> {} (expected -EINVAL)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 10: MPOL_MF_MOVE_ALL without CAP_SYS_NICE -> -EPERM.
-        // Linux do_mbind runs `(flags & MPOL_MF_MOVE_ALL) &&
-        // !capable(CAP_SYS_NICE) -> -EPERM` immediately after the
-        // flag-bits sanity check and ahead of `start & ~PAGE_MASK`
-        // (addr alignment).  Pre-batch we ran addr alignment first
-        // and a probe passing (addr=unaligned, flags=MOVE_ALL) saw
-        // EINVAL where Linux returns EPERM.  Verify the EPERM gate
-        // fires even with an unaligned addr.
-        const MPOL_MF_MOVE_ALL: u64 = 1 << 1;
-        let a = SyscallArgs {
-            arg0: 0x123, arg1: 0x1000, arg2: MPOL_DEFAULT,
-            arg3: 0, arg4: 0, arg5: MPOL_MF_MOVE_ALL,
-        };
-        let r = dispatch_linux(nr::MBIND, &a);
-        if r.value != -i64::from(errno::EPERM) {
-            serial_println!(
-                "[syscall/linux]   FAIL: mbind(unaligned,MOVE_ALL) -> {} (expected -EPERM)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 11: MPOL_MF_MOVE_ALL with aligned addr still -> -EPERM
-        // (capability gate, not address gate).
-        let a = SyscallArgs {
-            arg0: 0x1000, arg1: 0x1000, arg2: MPOL_DEFAULT,
-            arg3: 0, arg4: 0, arg5: MPOL_MF_MOVE_ALL,
-        };
-        let r = dispatch_linux(nr::MBIND, &a);
-        if r.value != -i64::from(errno::EPERM) {
-            serial_println!(
-                "[syscall/linux]   FAIL: mbind(aligned,MOVE_ALL) -> {} (expected -EPERM)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-
-        // Case 12: MPOL_MF_MOVE (not MOVE_ALL) does NOT trigger
-        // EPERM — MOVE is allowed for any user.  This case should
-        // still succeed UMA-style.
-        const MPOL_MF_MOVE_ONLY: u64 = 1 << 0;
-        let a = SyscallArgs {
-            arg0: 0x1000, arg1: 0x1000, arg2: MPOL_DEFAULT,
-            arg3: 0, arg4: 0, arg5: MPOL_MF_MOVE_ONLY,
-        };
-        let r = dispatch_linux(nr::MBIND, &a);
-        if r.value != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: mbind(aligned,MOVE) -> {} (expected 0)",
-                r.value,
-            );
-            return Err(KernelError::InternalError);
-        }
-        serial_println!(
-            "[syscall/linux]   mbind MOVE_ALL EPERM ahead of addr-align: OK"
-        );
-    }
+    // Extracted to self_test_mbind (TD4).
+    self_test_mbind()?;
 
     // (9g-545) Batch 545: sanitize_mpol_flags fidelity.  Linux v6.6
     // mm/mempolicy.c::sanitize_mpol_flags treats MPOL_MODE_FLAGS as

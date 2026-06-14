@@ -9283,6 +9283,12 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      storage Linux's comm lives in. This also makes comm genuinely
 ##      per-thread (resolves the old "all threads share one comm"
 ##      limitation). pcb.name is no longer touched by SET_NAME.
+##      FOLLOW-UP DONE (2026-06-14, commit 8d0bd4dfb): execve now resets
+##      the calling thread's comm to the new image basename (truncated to
+##      15 visible bytes), matching Linux — exec_process updates the
+##      scheduler task name via set_task_name(current_task_id, ...) from
+##      the resolved exe_path/argv[0]. Pure exec_comm_basename helper +
+##      7-case boot self-test ("[spawn] exec_comm_basename: all cases OK").
 ##      Residual limitation: non-UTF-8 comm bytes are still rejected with
 ##      EINVAL — the scheduler stores raw bytes, but the procfs surfaces
 ##      lossily decode the task name to a str (invalid bytes render as

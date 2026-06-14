@@ -19686,6 +19686,200 @@ fn sys_sendfile(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(moved as i64)
 }
 
+/// `SPLICE_F_NONBLOCK` (fs/splice.h) — do not block on the pipe end(s).
+const SPLICE_F_NONBLOCK: u32 = 0x02;
+
+/// Read up to `buf.len()` bytes from a splice source.  File/MemFd sources are
+/// read positionally at `pos` (cursor untouched — the caller advances it);
+/// pipe sources are read sequentially from the pipe's own cursor.  `allow_block`
+/// is honoured only for a *blocking* pipe source and only on the very first
+/// read (so splice waits for initial data but, once any byte has moved, drains
+/// what is already buffered without waiting for more).
+fn splice_read(
+    kind: crate::proc::linux_fd::HandleKind,
+    handle: u64,
+    pos: u64,
+    buf: &mut [u8],
+    nonblock: bool,
+    allow_block: bool,
+) -> crate::error::KernelResult<usize> {
+    use crate::proc::linux_fd::HandleKind;
+    match kind {
+        HandleKind::File | HandleKind::MemFd => sendfile_src_read_at(kind, handle, pos, buf),
+        HandleKind::Pipe => {
+            let h = crate::ipc::pipe::PipeHandle::from_raw(handle);
+            if !nonblock && allow_block {
+                crate::ipc::pipe::read(h, buf)
+            } else {
+                crate::ipc::pipe::try_read(h, buf)
+            }
+        }
+        _ => Err(crate::error::KernelError::InvalidArgument),
+    }
+}
+
+/// Write `data` to a splice destination.  File/MemFd destinations are written
+/// positionally at `pos` (file-extending); pipe destinations are written
+/// sequentially.  `nonblock` selects the non-blocking pipe path.
+fn splice_write(
+    kind: crate::proc::linux_fd::HandleKind,
+    handle: u64,
+    pos: u64,
+    data: &[u8],
+    nonblock: bool,
+) -> crate::error::KernelResult<usize> {
+    use crate::proc::linux_fd::HandleKind;
+    match kind {
+        HandleKind::File | HandleKind::MemFd => cfr_dst_write_at(kind, handle, pos, data),
+        HandleKind::Pipe => {
+            let h = crate::ipc::pipe::PipeHandle::from_raw(handle);
+            if nonblock {
+                crate::ipc::pipe::try_write(h, data)
+            } else {
+                crate::ipc::pipe::write(h, data)
+            }
+        }
+        _ => Err(crate::error::KernelError::InvalidArgument),
+    }
+}
+
+/// Free buffer space in a pipe destination (bytes that `write` would accept
+/// immediately), or `None` if the destination is not a pipe.  Used to bound a
+/// non-blocking read so the bytes consumed from a pipe *source* are never more
+/// than the pipe *destination* can accept in the same iteration — without this
+/// bound a partial pipe write would discard already-consumed source bytes,
+/// since a pipe read cannot be "un-read".
+fn splice_dst_pipe_space(kind: crate::proc::linux_fd::HandleKind, handle: u64) -> Option<u64> {
+    use crate::proc::linux_fd::HandleKind;
+    if matches!(kind, HandleKind::Pipe) {
+        Some(crate::ipc::pipe::readable_bytes(
+            crate::ipc::pipe::PipeHandle::from_raw(handle),
+        ))
+    } else {
+        None
+    }
+}
+
+/// Core splice transfer: move up to `len` bytes between a source and a
+/// destination where at least one end is a pipe, via a kernel bounce buffer.
+/// File/MemFd ends are read/written positionally at `in_start` / `out_start`;
+/// pipe ends use their own cursors.  Returns `(bytes_moved, in_end, out_end)`
+/// where `in_end`/`out_end` are the post-transfer file positions (meaningful
+/// only for the File/MemFd side; the pipe side ignores them).
+///
+/// Blocking discipline (`nonblock` = `SPLICE_F_NONBLOCK`):
+///  * Non-blocking: a pipe with no data / no space yields `WouldBlock` when
+///    nothing has moved yet (mapped to EAGAIN by the caller); once any byte has
+///    moved, exhaustion simply ends the transfer with the partial count.
+///  * Blocking: the first pipe-source read waits for data; the destination
+///    write loop blocks for pipe space as needed.
+///
+/// Data-loss safety: when the destination is a pipe in non-blocking mode the
+/// per-iteration read is bounded to the pipe's free space, so every byte read
+/// from a pipe source can be fully delivered.  (A concurrent writer racing to
+/// fill the destination pipe between the space probe and the write is the only
+/// residual window; it is no worse than any non-atomic splice and is bounded to
+/// one chunk — documented in known-issues TD21.)
+///
+/// Error semantics mirror `do_splice` / `do_sendfile`: a first-byte error
+/// propagates; once any byte has moved, a later error returns the partial count.
+fn splice_core(
+    in_kind: crate::proc::linux_fd::HandleKind,
+    in_handle: u64,
+    out_kind: crate::proc::linux_fd::HandleKind,
+    out_handle: u64,
+    in_start: u64,
+    out_start: u64,
+    len: u64,
+    nonblock: bool,
+) -> crate::error::KernelResult<(u64, u64, u64)> {
+    use crate::error::KernelError;
+    let clamped = len.min(SENDFILE_MAX_COUNT);
+    let mut total: u64 = 0;
+    let mut ip = in_start;
+    let mut op = out_start;
+    if clamped == 0 {
+        return Ok((0, ip, op));
+    }
+    let mut buf = alloc::vec![0u8; SENDFILE_CHUNK];
+    while total < clamped {
+        #[allow(clippy::cast_possible_truncation)]
+        let mut want = clamped.saturating_sub(total).min(SENDFILE_CHUNK as u64) as usize;
+        // Bound the read by destination-pipe free space in non-blocking mode so
+        // a pipe source is never over-consumed (see the doc comment above).
+        if nonblock {
+            if let Some(space) = splice_dst_pipe_space(out_kind, out_handle) {
+                if space == 0 {
+                    if total == 0 {
+                        return Err(KernelError::WouldBlock);
+                    }
+                    break;
+                }
+                #[allow(clippy::cast_possible_truncation)]
+                let space_usize = space.min(SENDFILE_CHUNK as u64) as usize;
+                want = want.min(space_usize);
+            }
+        }
+        let slice = match buf.get_mut(..want) {
+            Some(s) => s,
+            None => break,
+        };
+        let allow_block = total == 0;
+        let n = match splice_read(in_kind, in_handle, ip, slice, nonblock, allow_block) {
+            Ok(0) => break, // source EOF (file EOF or all pipe writers closed)
+            Ok(n) => n,
+            Err(KernelError::WouldBlock) => {
+                if total == 0 {
+                    return Err(KernelError::WouldBlock);
+                }
+                break; // no more buffered data right now
+            }
+            Err(e) => {
+                if total == 0 {
+                    return Err(e);
+                }
+                break;
+            }
+        };
+        let mut written = 0usize;
+        while written < n {
+            let chunk = match buf.get(written..n) {
+                Some(s) => s,
+                None => break,
+            };
+            let at = op.saturating_add(written as u64);
+            match splice_write(out_kind, out_handle, at, chunk, nonblock) {
+                Ok(0) => break,
+                Ok(w) => written = written.saturating_add(w),
+                Err(KernelError::WouldBlock) => {
+                    // Destination pipe filled (only reachable via the race noted
+                    // above). Stop and report whatever moved.
+                    if total == 0 && written == 0 {
+                        return Err(KernelError::WouldBlock);
+                    }
+                    break;
+                }
+                Err(e) => {
+                    if total == 0 && written == 0 {
+                        return Err(e);
+                    }
+                    total = total.saturating_add(written as u64);
+                    ip = ip.saturating_add(written as u64);
+                    op = op.saturating_add(written as u64);
+                    return Ok((total, ip, op));
+                }
+            }
+        }
+        total = total.saturating_add(written as u64);
+        ip = ip.saturating_add(written as u64);
+        op = op.saturating_add(written as u64);
+        if written < n {
+            break; // short destination write — stop
+        }
+    }
+    Ok((total, ip, op))
+}
+
 /// `splice(fd_in, off_in, fd_out, off_out, len, flags)`.
 fn sys_splice(args: &SyscallArgs) -> SyscallResult {
     // Linux ABI: SYSCALL_DEFINE6(splice, int fd_in, loff_t __user *off_in,
@@ -19790,21 +19984,117 @@ fn sys_splice(args: &SyscallArgs) -> SyscallResult {
         }
     }
 
+    // do_splice() prologue + body need the fd entries.  Kernel-context callers
+    // (caller_pid()==None) have no Linux fd table, so they cannot name fds —
+    // preserve the historical terminal EINVAL after the no-op front gates.  The
+    // splice_core data path is exercised directly by self_test_splice instead.
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => return linux_err(errno::EINVAL),
+    };
+    use crate::proc::linux_fd::HandleKind;
+    let in_entry = match pcb::linux_fd_lookup(pid, fd_in) {
+        Some(e) => e,
+        None => return linux_err(errno::EBADF),
+    };
+    let out_entry = match pcb::linux_fd_lookup(pid, fd_out) {
+        Some(e) => e,
+        None => return linux_err(errno::EBADF),
+    };
+
     // do_splice() prologue: FMODE_READ(in) && FMODE_WRITE(out) -> EBADF.
-    if let Some(pid) = caller_pid() {
-        if let Some(ein) = pcb::linux_fd_lookup(pid, fd_in) {
-            if !fd_access_is_readable(ein.status_flags) {
-                return linux_err(errno::EBADF);
-            }
+    if !fd_access_is_readable(in_entry.status_flags)
+        || !fd_access_is_writable(out_entry.status_flags)
+    {
+        return linux_err(errno::EBADF);
+    }
+
+    let in_is_pipe = matches!(in_entry.kind, HandleKind::Pipe);
+    let out_is_pipe = matches!(out_entry.kind, HandleKind::Pipe);
+
+    // splice requires at least one pipe endpoint (do_splice's else arm -> EINVAL
+    // when neither side is a pipe — that is sendfile/copy_file_range territory).
+    if !in_is_pipe && !out_is_pipe {
+        return linux_err(errno::EINVAL);
+    }
+    // A non-pipe end must be a splice-capable regular file (File/MemFd); pipes,
+    // consoles, sockets, etc. on the non-pipe side are rejected EINVAL.
+    let regular = |k: HandleKind| matches!(k, HandleKind::File | HandleKind::MemFd);
+    if (!in_is_pipe && !regular(in_entry.kind)) || (!out_is_pipe && !regular(out_entry.kind)) {
+        return linux_err(errno::EINVAL);
+    }
+    // Splicing a pipe to its own other end (ipipe == opipe) is EINVAL.  A pipe
+    // handle encodes the pipe id in bits 1..63, so equal ids = same pipe.
+    if in_is_pipe && out_is_pipe && (in_entry.raw_handle >> 1) == (out_entry.raw_handle >> 1) {
+        return linux_err(errno::EINVAL);
+    }
+
+    // Resolve the File/MemFd-side start positions.  A pipe end has no offset
+    // (off_* was forced NULL by the ESPIPE gate above), so its start is unused.
+    let in_start = if in_is_pipe {
+        0
+    } else {
+        match copy_file_range_resolve_pos(off_in, in_entry.kind, in_entry.raw_handle) {
+            Ok(p) => p,
+            Err(r) => return r,
         }
-        if let Some(eout) = pcb::linux_fd_lookup(pid, fd_out) {
-            if !fd_access_is_writable(eout.status_flags) {
-                return linux_err(errno::EBADF);
+    };
+    let out_start = if out_is_pipe {
+        0
+    } else {
+        match copy_file_range_resolve_pos(off_out, out_entry.kind, out_entry.raw_handle) {
+            Ok(p) => p,
+            Err(r) => return r,
+        }
+    };
+
+    let nonblock = (flags & SPLICE_F_NONBLOCK) != 0;
+    let (moved, in_end, out_end) = match splice_core(
+        in_entry.kind,
+        in_entry.raw_handle,
+        out_entry.kind,
+        out_entry.raw_handle,
+        in_start,
+        out_start,
+        len,
+        nonblock,
+    ) {
+        Ok(v) => v,
+        // A pipe whose reader has gone -> EPIPE (matches write(2) on a broken pipe).
+        Err(crate::error::KernelError::ChannelClosed) => return linux_err(errno::EPIPE),
+        // Non-blocking exhaustion with nothing moved -> EAGAIN.
+        Err(crate::error::KernelError::WouldBlock) => return linux_err(errno::EAGAIN),
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+
+    // Position bookkeeping for the File/MemFd side(s): a NULL offset advances
+    // the file cursor; a non-NULL offset leaves the cursor and writes the new
+    // position back (which can surface EFAULT after a successful transfer).
+    if !in_is_pipe {
+        if off_in != 0 {
+            if let Err(r) = copy_file_range_writeback(off_in, in_end) {
+                return r;
             }
+        } else {
+            // Discarding the Result is safe: the handle was just read successfully,
+            // so set_pos can only fail on an internal bug, and Linux returns the
+            // moved count regardless of post-transfer bookkeeping.
+            let _ = sendfile_src_set_pos(in_entry.kind, in_entry.raw_handle, in_end);
+        }
+    }
+    if !out_is_pipe {
+        if off_out != 0 {
+            if let Err(r) = copy_file_range_writeback(off_out, out_end) {
+                return r;
+            }
+        } else {
+            // Same rationale as the source-cursor advance above.
+            let _ = sendfile_src_set_pos(out_entry.kind, out_entry.raw_handle, out_end);
         }
     }
 
-    linux_err(errno::EINVAL)
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(moved as i64)
 }
 
 /// `tee(fd_in, fd_out, len, flags)`.
@@ -40812,6 +41102,237 @@ pub fn self_test_copy_file_range() -> crate::error::KernelResult<()> {
     cleanup();
     serial_println!(
         "[syscall/linux]   copy_file_range (File<->File/MemFd positional copy, read+write offsets, cross-kind, overlap-reject): OK"
+    );
+    Ok(())
+}
+
+/// Boot self-test for the [`splice_core`] transfer engine behind `sys_splice`.
+///
+/// The syscall entry cannot run at boot (no Linux fd table), so this drives the
+/// data path directly against kernel-opened file handles and kernel-created
+/// pipes, exclusively in non-blocking mode (`nonblock = true`) so it never
+/// parks the boot thread.  Coverage:
+///  1. **File -> Pipe** — drain a file into a pipe; verify the pipe content and
+///     the source file `in_end`.
+///  2. **Pipe -> File** — fill a pipe, close its write end, splice to a file;
+///     verify content and the destination `out_end`.
+///  3. **Pipe -> Pipe** — duplicate one pipe's bytes into another.
+///  4. **Positional read offset** (File -> Pipe at `in_start` = 7, len 5).
+///  5. **Positional write offset** (Pipe -> File at `out_start` = 3, hole + tail).
+///  6. **Non-blocking empty source** — a pipe with no data but an open writer
+///     yields `WouldBlock` (→ EAGAIN) with nothing moved.
+///  7. **No-loss bound** — splicing a 6000-byte pipe into a 4096-capacity pipe
+///     moves exactly 4096 and leaves the remaining 1904 in the source (the
+///     destination-space bound prevents over-consumption of the source pipe).
+pub fn self_test_splice() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+    use crate::fs::handle::{self, OpenFlags};
+    use crate::ipc::pipe;
+    use crate::proc::linux_fd::HandleKind;
+    use crate::serial_println;
+
+    const SRC: &str = "/tmp/__spl_src__";
+    const DST: &str = "/tmp/__spl_dst__";
+    const PAYLOAD: &[u8] = b"Hello, sendfile world!"; // 22 bytes
+    let len = PAYLOAD.len() as u64;
+
+    let _ = crate::fs::Vfs::remove(SRC);
+    let _ = crate::fs::Vfs::remove(DST);
+    if crate::fs::Vfs::write_file(SRC, PAYLOAD).is_err() {
+        serial_println!("[syscall/linux]   splice self-test skipped (/tmp not writable)");
+        return Ok(());
+    }
+    let out_flags = OpenFlags::WRITE
+        .union(OpenFlags::CREATE)
+        .union(OpenFlags::TRUNCATE);
+    let cleanup = || {
+        let _ = crate::fs::Vfs::remove(SRC);
+        let _ = crate::fs::Vfs::remove(DST);
+    };
+    // Fail helper: print, clean up, and bail with InternalError.
+    macro_rules! fail {
+        ($($arg:tt)*) => {{
+            serial_println!($($arg)*);
+            cleanup();
+            return Err(KernelError::InternalError);
+        }};
+    }
+
+    // (1) File -> Pipe.
+    {
+        let (rh, wh) = pipe::create();
+        let in_h = handle::open(SRC, OpenFlags::READ)?;
+        let r = splice_core(HandleKind::File, in_h, HandleKind::Pipe, wh.raw(), 0, 0, 1u64 << 20, true);
+        let _ = handle::close(in_h);
+        let (moved, in_end, _) = match r {
+            Ok(v) => v,
+            Err(e) => {
+                pipe::close(rh);
+                pipe::close(wh);
+                cleanup();
+                return Err(e);
+            }
+        };
+        let mut rb = alloc::vec![0u8; PAYLOAD.len()];
+        let n = pipe::try_read(rh, &mut rb).unwrap_or(0);
+        pipe::close(rh);
+        pipe::close(wh);
+        if moved != len || in_end != len || n != PAYLOAD.len() || rb.as_slice() != PAYLOAD {
+            fail!("[syscall/linux]   FAIL: splice File->Pipe moved {} in_end {} n {}", moved, in_end, n);
+        }
+    }
+
+    // (2) Pipe -> File (write end closed -> clean EOF after drain).
+    {
+        let (rh, wh) = pipe::create();
+        if pipe::try_write(wh, PAYLOAD).unwrap_or(0) != PAYLOAD.len() {
+            pipe::close(rh);
+            pipe::close(wh);
+            fail!("[syscall/linux]   FAIL: splice Pipe->File staging write failed");
+        }
+        pipe::close(wh); // EOF after the buffered bytes are drained
+        let out_h = handle::open(DST, out_flags)?;
+        let r = splice_core(HandleKind::Pipe, rh.raw(), HandleKind::File, out_h, 0, 0, 1u64 << 20, true);
+        let _ = handle::close(out_h);
+        pipe::close(rh);
+        let (moved, _, out_end) = match r {
+            Ok(v) => v,
+            Err(e) => {
+                cleanup();
+                return Err(e);
+            }
+        };
+        if moved != len || out_end != len
+            || !matches!(crate::fs::Vfs::read_file(DST), Ok(ref c) if c.as_slice() == PAYLOAD)
+        {
+            fail!("[syscall/linux]   FAIL: splice Pipe->File moved {} out_end {}", moved, out_end);
+        }
+    }
+
+    // (3) Pipe -> Pipe.
+    {
+        let (a_r, a_w) = pipe::create();
+        let (b_r, b_w) = pipe::create();
+        let _ = pipe::try_write(a_w, PAYLOAD);
+        pipe::close(a_w); // EOF on source after drain
+        let r = splice_core(HandleKind::Pipe, a_r.raw(), HandleKind::Pipe, b_w.raw(), 0, 0, 1u64 << 20, true);
+        let (moved, _, _) = match r {
+            Ok(v) => v,
+            Err(e) => {
+                pipe::close(a_r);
+                pipe::close(b_r);
+                pipe::close(b_w);
+                cleanup();
+                return Err(e);
+            }
+        };
+        let mut rb = alloc::vec![0u8; PAYLOAD.len()];
+        let n = pipe::try_read(b_r, &mut rb).unwrap_or(0);
+        pipe::close(a_r);
+        pipe::close(b_r);
+        pipe::close(b_w);
+        if moved != len || n != PAYLOAD.len() || rb.as_slice() != PAYLOAD {
+            fail!("[syscall/linux]   FAIL: splice Pipe->Pipe moved {} n {}", moved, n);
+        }
+    }
+
+    // (4) Positional read offset: 5 bytes from in_start=7 ("sendf") -> pipe.
+    {
+        let (rh, wh) = pipe::create();
+        let in_h = handle::open(SRC, OpenFlags::READ)?;
+        let r = splice_core(HandleKind::File, in_h, HandleKind::Pipe, wh.raw(), 7, 0, 5, true);
+        let _ = handle::close(in_h);
+        let (moved, in_end, _) = match r {
+            Ok(v) => v,
+            Err(e) => {
+                pipe::close(rh);
+                pipe::close(wh);
+                cleanup();
+                return Err(e);
+            }
+        };
+        let mut rb = alloc::vec![0u8; 5];
+        let n = pipe::try_read(rh, &mut rb).unwrap_or(0);
+        pipe::close(rh);
+        pipe::close(wh);
+        if moved != 5 || in_end != 12 || n != 5 || Some(rb.as_slice()) != PAYLOAD.get(7..12) {
+            fail!("[syscall/linux]   FAIL: splice read-offset moved {} in_end {} n {}", moved, in_end, n);
+        }
+    }
+
+    // (5) Positional write offset: Pipe -> File at out_start=3 (hole + tail).
+    {
+        let (rh, wh) = pipe::create();
+        let _ = pipe::try_write(wh, PAYLOAD);
+        pipe::close(wh);
+        let out_h = handle::open(DST, out_flags)?;
+        let r = splice_core(HandleKind::Pipe, rh.raw(), HandleKind::File, out_h, 0, 3, 1u64 << 20, true);
+        let _ = handle::close(out_h);
+        pipe::close(rh);
+        let (moved, _, out_end) = match r {
+            Ok(v) => v,
+            Err(e) => {
+                cleanup();
+                return Err(e);
+            }
+        };
+        let expect_end = 3 + len;
+        if moved != len || out_end != expect_end
+            || !matches!(crate::fs::Vfs::read_file(DST),
+                Ok(ref c) if c.len() as u64 == expect_end && c.get(3..) == Some(PAYLOAD))
+        {
+            fail!("[syscall/linux]   FAIL: splice write-offset moved {} out_end {}", moved, out_end);
+        }
+    }
+
+    // (6) Non-blocking empty source -> WouldBlock (writer still open).
+    {
+        let (rh, wh) = pipe::create();
+        let out_h = handle::open(DST, out_flags)?;
+        let r = splice_core(HandleKind::Pipe, rh.raw(), HandleKind::File, out_h, 0, 0, 1u64 << 20, true);
+        let _ = handle::close(out_h);
+        pipe::close(rh);
+        pipe::close(wh);
+        if !matches!(r, Err(KernelError::WouldBlock)) {
+            fail!("[syscall/linux]   FAIL: splice empty-source expected WouldBlock, got {:?}", r);
+        }
+    }
+
+    // (7) No-loss bound: 6000-byte source pipe into a 4096-capacity dest pipe
+    // moves exactly the dest capacity and leaves the remainder in the source.
+    {
+        let big = alloc::vec![0xABu8; 6000];
+        let (a_r, a_w) = pipe::create();
+        let (b_r, b_w) = pipe::create();
+        // Shrink the destination to the 4096-byte minimum.
+        if pipe::set_capacity(b_w, pipe::MIN_PIPE_BUFFER_CAPACITY).is_err() {
+            pipe::close(a_r); pipe::close(a_w); pipe::close(b_r); pipe::close(b_w);
+            fail!("[syscall/linux]   FAIL: splice no-loss dest resize failed");
+        }
+        let wrote = pipe::try_write(a_w, &big).unwrap_or(0);
+        let r = splice_core(HandleKind::Pipe, a_r.raw(), HandleKind::Pipe, b_w.raw(), 0, 0, 6000, true);
+        let moved = match r {
+            Ok((m, _, _)) => m,
+            Err(e) => {
+                pipe::close(a_r); pipe::close(a_w); pipe::close(b_r); pipe::close(b_w);
+                cleanup();
+                return Err(e);
+            }
+        };
+        // Bytes still buffered in the source after the bounded transfer.
+        let src_left = pipe::readable_bytes(a_r);
+        let dst_buffered = pipe::readable_bytes(b_r);
+        pipe::close(a_r); pipe::close(a_w); pipe::close(b_r); pipe::close(b_w);
+        let cap = pipe::MIN_PIPE_BUFFER_CAPACITY as u64;
+        if wrote != 6000 || moved != cap || src_left != 6000 - cap || dst_buffered != cap {
+            fail!("[syscall/linux]   FAIL: splice no-loss wrote {} moved {} src_left {} dst {}",
+                wrote, moved, src_left, dst_buffered);
+        }
+    }
+
+    cleanup();
+    serial_println!(
+        "[syscall/linux]   splice (File<->Pipe, Pipe->Pipe, read+write offsets, empty-source EAGAIN, no-loss bound): OK"
     );
     Ok(())
 }

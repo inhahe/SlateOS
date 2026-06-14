@@ -1222,6 +1222,13 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: copy_file_range self-test failed: {:?}", e);
     }
 
+    // splice(2) data-transfer test — drives splice_core against kernel-opened
+    // file handles and kernel-created pipes (non-blocking) since the syscall
+    // entry needs a per-process Linux fd table absent in kernel context.
+    if let Err(e) = syscall::linux::self_test_splice() {
+        serial_println!("WARNING: splice self-test failed: {:?}", e);
+    }
+
     // File-backed Linux mmap test (needs a writable VFS to stage a file, so
     // it runs here rather than in syscall::linux::self_test() which precedes
     // VFS init).  Exercises the path ld.so uses to map shared objects.

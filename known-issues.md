@@ -598,11 +598,11 @@ is logged for operator input in `open-questions.md`.
 
 ---
 
-### TD21. Minor Linux-ABI fidelity gap — procfs fd visibility for native processes — APPROXIMATION 2026-06-13; sendfile + copy_file_range transfer IMPLEMENTED 2026-06-14
+### TD21. Minor Linux-ABI fidelity gap — procfs fd visibility for native processes — APPROXIMATION 2026-06-13; sendfile + copy_file_range + splice transfer IMPLEMENTED 2026-06-14
 
 **Where:** `kernel/src/fs/procfs` (`/proc/<pid>/fd[info]`, `linux_fd_list`) and
-`kernel/src/syscall/linux.rs` (`sys_sendfile`, `sys_copy_file_range`). All are
-documented in-code.
+`kernel/src/syscall/linux.rs` (`sys_sendfile`, `sys_copy_file_range`,
+`sys_splice`). All are documented in-code.
 
 **What it is:** one remaining deliberate Linux-ABI approximation:
 - **`/proc/<pid>/fd/` and `/fdinfo/` are EMPTY for *native* processes.** Native
@@ -660,6 +660,32 @@ makes). Tested end-to-end by the post-`/tmp` boot self-test
 offset, positional *write* offset, File→MemFd / MemFd→File cross-kind, and
 overlap-detect true/false/cross-kind). The batch-537 gate-only checks still pass
 (kernel-context callers terminate `EINVAL` before the transfer).
+
+**Progress (2026-06-14) — splice data transfer implemented.** `sys_splice` was
+also a validate-front-gates-then-`EINVAL` stub. It now moves data via
+`splice_core`, a 64 KiB bounce-buffer loop where File/MemFd ends are read/written
+positionally (`read_at`/`write_at`) and pipe ends use their own cursors
+(`pipe::read|try_read` / `pipe::write|try_write`). The full Linux gate order is
+preserved (len==0→0; flags mask→EINVAL; fds→EBADF; pipe-end-with-offset→ESPIPE;
+offset readability→EFAULT; FMODE_READ/WRITE→EBADF) and the do_splice prologue
+gates are added: at least one end must be a pipe (else EINVAL — sendfile territory),
+a non-pipe end must be a splice-capable regular file (File/MemFd, else EINVAL), and
+splicing a pipe to its own other end (ipipe==opipe) is EINVAL. `SPLICE_F_NONBLOCK`
+selects the non-blocking pipe path; a broken pipe yields EPIPE, non-blocking
+exhaustion with nothing moved yields EAGAIN. Position semantics match the siblings
+(NULL offset advances the file cursor; explicit offset is read/written-back via
+`put_user`). Tested by `self_test_splice` (File↔Pipe, Pipe→Pipe, positional
+read+write offsets, empty-source→EAGAIN, and the no-loss bound).
+**LIMITATION (pipe→pipe data-loss race):** our model copies bytes (read source →
+write dest) rather than moving pipe buffers by reference like Linux. To avoid
+discarding already-consumed source bytes on a partial destination-pipe write, the
+non-blocking read is bounded to the destination pipe's current free space
+(`readable_bytes` on the write end). A *concurrent* writer racing to fill the
+destination pipe between the space probe and the write is the only residual loss
+window; it is bounded to one 64 KiB chunk and is no worse than any non-atomic
+splice. The blocking path has no such window (its inner write loop drains the full
+chunk). Proper fix would require reference-counted pipe buffer pages (Linux's
+`pipe_buffer` model) so splice transfers ownership instead of copying.
 
 **Impact:** low — native-process fd introspection via `/proc` is unavailable
 (tools must use the native fd API).

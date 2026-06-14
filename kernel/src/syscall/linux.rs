@@ -56613,6 +56613,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_stat_family()?;
+
+    #[inline(never)]
+    fn self_test_stat_family() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // stat / lstat / fstat / newfstatat — input validation.
     {
         // stat(NULL, _) -> EFAULT.
@@ -56749,6 +56754,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   stat/lstat/newfstatat statbuf unobservable on no-file FS (Linux v6.6 fs/stat.c: cp_old_stat/cp_new_stat after vfs_stat success): OK"
         );
+    }
+        Ok(())
     }
 
     // statx — input validation and AT_EMPTY_PATH success.

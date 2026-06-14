@@ -217,6 +217,71 @@ fn query_net_if_info() -> Option<NetIfInfo> {
 }
 
 // ============================================================================
+// Kernel ARP-table query (SYS_ARP_TABLE, read-only)
+// ============================================================================
+
+/// Read-only ARP-cache query syscall (`kernel/src/syscall/number.rs`,
+/// `SYS_ARP_TABLE`). The kernel does not populate `/proc/net/arp`, so
+/// `ip neigh` falls back to this syscall (TD18 read-path wiring).
+const SYS_ARP_TABLE: u64 = 843;
+
+/// Size of one `SYS_ARP_TABLE` record (must match the kernel's `RECORD_SIZE`).
+const ARP_RECORD_SIZE: usize = 12;
+
+/// Maximum number of ARP records we ask the kernel to return in one call.
+const MAX_ARP_RECORDS: usize = 256;
+
+/// Parse a flat buffer of 12-byte `SYS_ARP_TABLE` records into `NeighEntry`s.
+///
+/// Each record: `[0..4]` IPv4 (network order = `A.B.C.D`), `[4..10]` MAC,
+/// `[10..12]` TTL seconds (u16 LE). A trailing partial record (if any) is
+/// ignored by `chunks_exact`. A zero MAC marks an incomplete entry.
+fn parse_arp_records(buf: &[u8]) -> Vec<NeighEntry> {
+    buf.chunks_exact(ARP_RECORD_SIZE)
+        .map(|rec| {
+            // rec.len() == ARP_RECORD_SIZE (12) is guaranteed by chunks_exact.
+            let ip = fmt_ipv4([rec[0], rec[1], rec[2], rec[3]]);
+            let mac = [rec[4], rec[5], rec[6], rec[7], rec[8], rec[9]];
+            // TTL (rec[10..12]) is read but not displayed; reserved for future use.
+            let complete = mac != [0u8; 6];
+            NeighEntry {
+                ip,
+                mac: fmt_mac(mac),
+                // The kernel exposes a single global interface; name it eth0
+                // for output compatibility.
+                iface: "eth0".to_string(),
+                state: if complete { "REACHABLE" } else { "INCOMPLETE" }.to_string(),
+            }
+        })
+        .collect()
+}
+
+/// Query the kernel ARP cache via `SYS_ARP_TABLE`. Returns an empty vector on
+/// syscall failure (caller already tried `/proc/net/arp`).
+fn query_arp_table() -> Vec<NeighEntry> {
+    let mut buf = vec![0u8; MAX_ARP_RECORDS * ARP_RECORD_SIZE];
+    // SAFETY: `buf` is a valid, writable slice; we pass its pointer and exact
+    // byte length. SYS_ARP_TABLE writes at most that many bytes and returns the
+    // number of 12-byte records written.
+    let ret = unsafe {
+        syscall4(
+            SYS_ARP_TABLE,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+            0,
+            0,
+        )
+    };
+    if ret < 0 {
+        return Vec::new();
+    }
+    let count = usize::try_from(ret).unwrap_or(0);
+    let byte_len = count.saturating_mul(ARP_RECORD_SIZE).min(buf.len());
+    let records = buf.get(..byte_len).unwrap_or(&[]);
+    parse_arp_records(records)
+}
+
+// ============================================================================
 // Data reading from /proc and /sys
 // ============================================================================
 
@@ -521,6 +586,12 @@ fn read_arp() -> Vec<NeighEntry> {
                 });
             }
         }
+    }
+
+    // The kernel does not populate /proc/net/arp; fall back to the read-only
+    // SYS_ARP_TABLE syscall so `ip neigh` shows the live cache (TD18).
+    if entries.is_empty() {
+        entries = query_arp_table();
     }
 
     entries
@@ -1084,5 +1155,53 @@ mod tests {
             up: true,
         };
         assert!(route_from_net_if_info(&info).is_none());
+    }
+
+    #[test]
+    fn test_parse_arp_records_complete() {
+        // One record: 192.168.1.1 -> 52:54:00:12:34:56, TTL 30s.
+        let rec = [
+            192, 168, 1, 1, // IPv4 (network order)
+            0x52, 0x54, 0x00, 0x12, 0x34, 0x56, // MAC
+            30, 0, // TTL (u16 LE)
+        ];
+        let entries = parse_arp_records(&rec);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].ip, "192.168.1.1");
+        assert_eq!(entries[0].mac, "52:54:00:12:34:56");
+        assert_eq!(entries[0].iface, "eth0");
+        assert_eq!(entries[0].state, "REACHABLE");
+    }
+
+    #[test]
+    fn test_parse_arp_records_incomplete() {
+        // Zero MAC marks an incomplete entry (resolution pending).
+        let rec = [10, 0, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0];
+        let entries = parse_arp_records(&rec);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].ip, "10.0.2.2");
+        assert_eq!(entries[0].mac, "00:00:00:00:00:00");
+        assert_eq!(entries[0].state, "INCOMPLETE");
+    }
+
+    #[test]
+    fn test_parse_arp_records_multiple_and_partial() {
+        // Two full records plus 3 trailing bytes that must be ignored.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&[192, 168, 0, 1, 1, 2, 3, 4, 5, 6, 60, 0]);
+        buf.extend_from_slice(&[192, 168, 0, 2, 7, 8, 9, 10, 11, 12, 0, 0]);
+        buf.extend_from_slice(&[1, 2, 3]); // partial -> ignored
+        let entries = parse_arp_records(&buf);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].ip, "192.168.0.1");
+        assert_eq!(entries[0].mac, "01:02:03:04:05:06");
+        assert_eq!(entries[0].state, "REACHABLE");
+        assert_eq!(entries[1].ip, "192.168.0.2");
+        assert_eq!(entries[1].state, "REACHABLE");
+    }
+
+    #[test]
+    fn test_parse_arp_records_empty() {
+        assert!(parse_arp_records(&[]).is_empty());
     }
 }

@@ -754,9 +754,12 @@ has been applied to all three read-path tools (`ifconfig`, `ip`, `route`):
   Same dead read paths (`/sys/class/net/`, `/proc/net/dev`, `/proc/net/route`).
   `read_interfaces` now falls back to `SYS_NET_IF_INFO` to synthesize the `eth0`
   interface, and `read_routes` synthesizes the default route from the record's
-  gateway field. 10 new host tests (`cargo test -p ip`: 10 pass). Write paths
-  (`ip link set`, `ip addr add/del`, `ip route add/del`) unchanged — still
-  no-ops via `SYS_NET_IOCTL`.
+  gateway field. `ip neigh` previously read the unpopulated `/proc/net/arp`; it
+  now falls back to the read-only `SYS_ARP_TABLE=843` syscall (12-byte records:
+  ip/mac/ttl), reusing the `arp` tool's count-bounded parse + zero-MAC =
+  INCOMPLETE convention. 14 host tests total (`cargo test -p ip`: 14 pass; +4 for
+  ARP). Write paths (`ip link set`, `ip addr add/del`, `ip route add/del`)
+  unchanged — still no-ops via `SYS_NET_IOCTL`.
 - **`route` (`route`, `route -n`, `route -v`) — DONE 2026-06-14.** Its
   `/proc/net/route`, `/sys/net/routes`, and `/proc/net/if_inet` sources are all
   unpopulated; `read_routes` now synthesizes the connected network route and the

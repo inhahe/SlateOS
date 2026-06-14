@@ -50362,6 +50362,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_prctl_sched_core()?;
+
+    #[inline(never)]
+    fn self_test_prctl_sched_core() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // Batch 93: prctl(PR_SCHED_CORE) — Chromium / runc / Java tenant
     // isolation all probe this on startup to learn whether the
     // kernel supports SMT-sibling co-scheduling cookies.  Pre-batch
@@ -50403,6 +50408,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         };
         let r = dispatch_linux(nr::PRCTL, &a);
         assert_eq!(r.value, -i64::from(errno::ENODEV));
+    }
+        Ok(())
     }
 
     // Batch 94: fcntl(F_DUPFD_QUERY = 1027) — Linux 6.10+ query of

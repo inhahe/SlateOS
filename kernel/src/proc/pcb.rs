@@ -4118,6 +4118,51 @@ pub fn reset_vmas_for_exec(pid: ProcessId) {
     }
 }
 
+/// Reset the per-process Linux ABI state that `execve(2)` clears, so a
+/// freshly-exec'd image starts with the same Linux-visible flags a freshly
+/// *spawned* one would have.
+///
+/// Linux resets a specific subset of mm/task flags in `begin_new_exec` /
+/// `membarrier_exec_mmap` on **every** successful exec; the rest are
+/// preserved. This helper clears exactly the unconditionally-reset subset,
+/// under a single `PROCESS_TABLE` lock acquisition. No-op if `pid` is
+/// unknown.
+///
+/// Reset (cleared on every exec, architecture-independent):
+/// * `membarrier_state` → 0 — `membarrier_exec_mmap` drops all
+///   registrations; the new image must re-register before it may issue an
+///   expedited barrier (TD8 residual).
+/// * `linux_thp_disable` → 0 — the new mm gets default mm-flags, so
+///   `MMF_DISABLE_THP` is cleared.
+/// * `linux_dumpable` → 1 (`SUID_DUMP_USER`) — `begin_new_exec` resets
+///   dumpability on every exec; with no credential change (we never run a
+///   privileged/secureexec image) the result is always `SUID_DUMP_USER`.
+/// * `linux_keepcaps` → 0 — `SECBIT_KEEP_CAPS` is reset to 0 on every
+///   successful execve (prctl(2) / capabilities(7)).
+///
+/// Deliberately **NOT** reset (preserved across a normal exec):
+/// * `linux_pdeathsig` — prctl(2): the parent-death signal is cleared only
+///   when exec'ing a set-uid/set-gid binary or one with file capabilities;
+///   otherwise it is *preserved* across `execve`. We never change
+///   credentials at exec, so the faithful behaviour is to preserve it.
+/// * `linux_personality` — on x86_64 `set_personality_64bit()` *inherits*
+///   the personality and only clears `READ_IMPLIES_EXEC` (which we do not
+///   model); notably `ADDR_NO_RANDOMIZE` survives exec, which is how
+///   `setarch -R` works. Persona-byte is always 0 (PER_LINUX) here.
+/// * `linux_no_new_privs` — monotone-sticky by design.
+/// * `linux_child_subreaper` — Linux preserves it across exec.
+/// * `linux_timer_slack_ns` / `linux_timer_slack_default_ns` — preserved.
+pub fn reset_linux_state_for_exec(pid: ProcessId) {
+    let mut table = PROCESS_TABLE.lock();
+    let Some(proc) = table.get_mut(&pid) else {
+        return;
+    };
+    proc.membarrier_state = 0;
+    proc.linux_thp_disable = 0;
+    proc.linux_dumpable = 1; // SUID_DUMP_USER
+    proc.linux_keepcaps = 0;
+}
+
 /// Resolve a user-space page fault against a process's VMA list.
 ///
 /// Called from the page fault handler (IDT vector 14) when a user-mode
@@ -5371,7 +5416,72 @@ pub fn self_test() -> KernelResult<()> {
     test_job_control_state()?;
     test_mmap_commit_policy()?;
     test_reserve_unmapped_area()?;
+    test_reset_linux_state_for_exec()?;
 
+    Ok(())
+}
+
+/// Test: `reset_linux_state_for_exec` clears exactly the exec-cleared
+/// Linux ABI fields and preserves the ones Linux keeps across a normal
+/// (non-privileged) execve.
+fn test_reset_linux_state_for_exec() -> KernelResult<()> {
+    let pid = create("exec-reset-test", 0);
+
+    // Dirty every field this helper touches, plus the preserved ones, to
+    // distinguish "reset" from "preserved".
+    let _ = set_thp_disable(pid, 1);
+    let _ = set_dumpable(pid, 0); // non-default (SUID_DUMP_DISABLE)
+    let _ = set_keepcaps(pid, 1);
+    membarrier_register(pid, 0x5); // arbitrary READY bits
+    let _ = set_pdeathsig(pid, 9); // preserved across normal exec
+    let _ = set_personality(pid, 0x40000); // ADDR_NO_RANDOMIZE flag bit
+    let _ = set_no_new_privs(pid, 1); // sticky
+    let _ = set_child_subreaper(pid, 1); // preserved
+
+    reset_linux_state_for_exec(pid);
+
+    // The four unconditionally-cleared fields.
+    let cleared_ok = membarrier_state(pid) == Some(0)
+        && get_thp_disable(pid) == Some(0)
+        && get_dumpable(pid) == Some(1) // SUID_DUMP_USER
+        && get_keepcaps(pid) == Some(0);
+    if !cleared_ok {
+        serial_println!(
+            "[proc]   FAIL: exec reset did not clear membarrier/thp/dumpable/keepcaps \
+             (membarrier={:?} thp={:?} dumpable={:?} keepcaps={:?})",
+            membarrier_state(pid), get_thp_disable(pid),
+            get_dumpable(pid), get_keepcaps(pid),
+        );
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    }
+
+    // The preserved fields must be untouched.
+    let preserved_ok = get_pdeathsig(pid) == Some(9)
+        && get_personality(pid) == Some(0x40000)
+        && get_no_new_privs(pid) == Some(1)
+        && get_child_subreaper(pid) == Some(1);
+    if !preserved_ok {
+        serial_println!(
+            "[proc]   FAIL: exec reset clobbered a preserved field \
+             (pdeathsig={:?} persona={:?} nnp={:?} subreaper={:?})",
+            get_pdeathsig(pid), get_personality(pid),
+            get_no_new_privs(pid), get_child_subreaper(pid),
+        );
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    }
+
+    destroy(pid);
+
+    // Unknown pid is a silent no-op (no panic, no resurrection).
+    reset_linux_state_for_exec(pid);
+    if get_dumpable(pid).is_some() {
+        serial_println!("[proc]   FAIL: pid live after destroy in exec-reset test");
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[proc]   exec Linux-state reset: OK");
     Ok(())
 }
 

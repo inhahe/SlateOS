@@ -943,6 +943,14 @@ pub fn exec_process(
     // from the old one.
     pcb::reset_vmas_for_exec(pid);
 
+    // Reset the per-process Linux ABI state that execve clears on every
+    // successful exec (membarrier registrations, THP-disable, dumpable,
+    // keepcaps). Mirrors Linux's begin_new_exec / membarrier_exec_mmap;
+    // the fields Linux preserves (pdeathsig, personality, no_new_privs,
+    // child_subreaper, timer slack) are deliberately left untouched. See
+    // pcb::reset_linux_state_for_exec for the per-field rationale.
+    pcb::reset_linux_state_for_exec(pid);
+
     // Flush TLB for the user half.  Since we just freed all user
     // mappings, any stale TLB entries could cause use-after-free.
     // Reloading CR3 flushes all non-global TLB entries.

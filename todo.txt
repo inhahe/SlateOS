@@ -52304,17 +52304,40 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 
 ## ----------------------------------------------------------------------
 ## membarrier(2) membarrier_state NOT reset on execve (TD8 residual)
+## ---- RESOLVED 2026-06-14 ----
 ## ----------------------------------------------------------------------
 ## Added 2026-06-14.  TD8 (per-mm membarrier registration gating) is
 ## resolved: Process now carries a `membarrier_state: u32` READY bitmask
 ## (pcb.rs) that REGISTER_* sets and the PRIVATE_EXPEDITED* issues are
 ## gated on (EPERM if unset).  It is inherited verbatim across fork (Linux
 ## dup_mm memcpy).  Linux ALSO resets it to 0 on execve
-## (membarrier_exec_mmap), but we have no exec-time PCB-reset hook yet, so
-## a registration currently survives exec.  Consequence: a process that
-## registered PRIVATE_EXPEDITED, then execve'd, can issue the expedited
-## barrier without re-registering, where Linux would EPERM until the new
-## image re-registers.  Impact negligible (well-behaved programs register
-## at startup regardless).  Proper fix: when the shared exec-time PCB
-## cleanup block is built (it must also reset linux_pdeathsig, dumpable,
-## keepcaps — see entries above), add `proc.membarrier_state = 0;` there.
+## (membarrier_exec_mmap), but we had no exec-time PCB-reset hook yet, so
+## a registration survived exec.
+##
+## RESOLUTION (2026-06-14): added the shared exec-time PCB-reset hook —
+## pcb::reset_linux_state_for_exec(pid), called from spawn::exec_process
+## right after reset_vmas_for_exec.  It clears, under one PROCESS_TABLE
+## lock, exactly the fields Linux unconditionally resets on every exec:
+##   * membarrier_state -> 0   (membarrier_exec_mmap)
+##   * linux_thp_disable -> 0  (new mm gets default mm-flags)
+##   * linux_dumpable -> 1     (SUID_DUMP_USER; begin_new_exec, no cred
+##                              change so always the user default)
+##   * linux_keepcaps -> 0     (SECBIT_KEEP_CAPS reset per execve)
+## This also closes the deferred exec-reset notes on entries 94 (dumpable)
+## and 95 (keepcaps) and 98 (thp_disable).
+##
+## CORRECTION to the earlier deferred notes: linux_pdeathsig and
+## linux_personality are deliberately NOT reset here.  The earlier entries
+## (pdeathsig note above; personality note on batch 55) assumed a generic
+## unconditional reset, but the accurate semantics are:
+##   * pdeathsig — prctl(2): cleared only when exec'ing a set-uid/set-gid
+##     binary or one with file capabilities; otherwise PRESERVED across
+##     execve.  We never change credentials at exec, so preserve.
+##   * personality — on x86_64 set_personality_64bit() inherits the
+##     personality and only clears READ_IMPLIES_EXEC (unmodelled);
+##     ADDR_NO_RANDOMIZE survives exec (that's how `setarch -R` works).
+## linux_no_new_privs (sticky), linux_child_subreaper (Linux preserves),
+## and the timer-slack pair are likewise preserved.
+## Self-test: pcb::test_reset_linux_state_for_exec dirties all eight
+## fields, calls the hook, and asserts the four cleared + four preserved;
+## boot test PASSED ("[proc]   exec Linux-state reset: OK").

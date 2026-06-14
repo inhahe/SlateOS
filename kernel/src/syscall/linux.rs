@@ -16479,13 +16479,14 @@ fn sys_statx(args: &SyscallArgs) -> SyscallResult {
 // ---------------------------------------------------------------------------
 // Directory / file create / remove / rename
 //
-// Without a backing filesystem none of these can succeed.  We pick the
-// errno most likely to let userspace fall back gracefully:
-//   - mkdir / mkdirat: EROFS ("read-only filesystem") so installers and
-//     test runners know the FS itself is the obstacle, not a path problem.
-//   - rmdir / unlink / unlinkat / rename / renameat / renameat2:
-//     ENOENT ("no such file") — the target does not exist in our empty
-//     FS, which is the truthful answer.
+// These route through the native VFS (`crate::fs::Vfs`), the same backing
+// store the Linux-ABI open/read/write path already uses.  Each handler
+// resolves its path(s) with `resolve_at_path` (mirroring `openat` dirfd
+// semantics), checks the caller holds a File-WRITE capability, then calls the
+// matching `Vfs` operation.  The `Vfs` layer enforces real semantics (parent
+// existence, EEXIST, ENOTEMPTY, …) and emits the `fs::notify` events that back
+// inotify, so mutations performed through the Linux ABI are now observable to
+// inotify watchers — closing TD17 remaining-fix (a).
 // All variants validate their path pointers first so callers passing
 // garbage observe EFAULT.
 // ---------------------------------------------------------------------------
@@ -16496,6 +16497,100 @@ fn validate_user_str(ptr: u64) -> crate::error::KernelResult<()> {
         return Err(KernelError::InvalidAddress);
     }
     crate::mm::user::validate_user_read(ptr, 1)
+}
+
+/// Resolve a `(dirfd, user path pointer)` pair to an owned path string for the
+/// native VFS, mirroring `openat(2)` path semantics:
+///
+/// - `AT_FDCWD`, or any absolute path, is taken verbatim (the native VFS
+///   normalises it from the filesystem root — there is no per-process cwd in
+///   the native path resolver, identical to how `open_common` forwards paths).
+/// - A relative path with a real `dirfd` is resolved by looking the dirfd up,
+///   confirming it is a directory, and prepending its path — the exact logic
+///   `sys_openat` uses for its relative branch.
+///
+/// On any failure this returns a fully-formed `SyscallResult` (errno already
+/// translated) ready for the caller to return directly.
+fn resolve_at_path(dirfd: i32, path_ptr: u64) -> Result<alloc::string::String, SyscallResult> {
+    if path_ptr == 0 {
+        return Err(linux_err(errno::EFAULT));
+    }
+    const MAX_PATH: usize = 4096;
+
+    // A real dirfd only matters for a relative path; peek the first byte to
+    // decide, matching `sys_openat`.
+    if dirfd != AT_FDCWD {
+        let mut first = 0u8;
+        // SAFETY: copy_from_user validates the single-byte user read and does
+        // the STAC/CLAC dance for SMAP.
+        if let Err(e) = unsafe { crate::mm::user::copy_from_user(path_ptr, &raw mut first, 1) } {
+            return Err(linux_err(linux_errno_for(e)));
+        }
+        if first == 0 {
+            // Empty path under *at without AT_EMPTY_PATH → ENOENT.
+            return Err(linux_err(errno::ENOENT));
+        }
+        if first != b'/' {
+            // Relative path: resolve dirfd to a directory path and prepend.
+            let entry = match lookup_caller_fd(dirfd) {
+                Ok(e) => e,
+                Err(r) => return Err(r),
+            };
+            if entry.kind != HandleKind::File {
+                return Err(linux_err(errno::ENOTDIR));
+            }
+            let dir_path = match crate::fs::handle::handle_path(entry.raw_handle) {
+                Ok(p) => p,
+                Err(e) => return Err(linux_err(linux_errno_for(e))),
+            };
+            match crate::fs::Vfs::stat(&dir_path) {
+                Ok(st) if st.entry_type == crate::fs::EntryType::Directory => {}
+                Ok(_) => return Err(linux_err(errno::ENOTDIR)),
+                Err(KernelError::NotFound) => return Err(linux_err(errno::ENOENT)),
+                Err(e) => return Err(linux_err(linux_errno_for(e))),
+            }
+            let rel = match read_user_cstr(path_ptr, MAX_PATH) {
+                Ok(b) => b,
+                Err(e) => return Err(linux_err(e)),
+            };
+            let dir_bytes = dir_path.as_bytes();
+            let mut combined: alloc::vec::Vec<u8> =
+                alloc::vec::Vec::with_capacity(dir_bytes.len().saturating_add(1).saturating_add(rel.len()));
+            combined.extend_from_slice(dir_bytes);
+            if dir_bytes.last().copied() != Some(b'/') {
+                combined.push(b'/');
+            }
+            combined.extend_from_slice(&rel);
+            if combined.len() > MAX_PATH.saturating_sub(1) {
+                return Err(linux_err(errno::ENAMETOOLONG));
+            }
+            return match alloc::string::String::from_utf8(combined) {
+                Ok(s) => Ok(s),
+                Err(_) => Err(linux_err(errno::EINVAL)),
+            };
+        }
+        // first == b'/': absolute path, dirfd ignored — fall through.
+    }
+
+    // AT_FDCWD or an absolute path: take the path verbatim.
+    let bytes = match read_user_cstr(path_ptr, MAX_PATH) {
+        Ok(b) => b,
+        Err(e) => return Err(linux_err(e)),
+    };
+    if bytes.is_empty() {
+        return Err(linux_err(errno::ENOENT));
+    }
+    match alloc::string::String::from_utf8(bytes) {
+        Ok(s) => Ok(s),
+        Err(_) => Err(linux_err(errno::EINVAL)),
+    }
+}
+
+/// Require the caller to hold a File-WRITE capability before a VFS mutation.
+/// Returns a ready-to-return `EACCES`/`EPERM` `SyscallResult` on failure.
+fn require_fs_write() -> Result<(), SyscallResult> {
+    handlers::require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE)
+        .map_err(|e| linux_err(linux_errno_for(e)))
 }
 
 /// `mkdir(path, mode)` — Linux gate ladder.
@@ -16521,40 +16616,81 @@ fn validate_user_str(ptr: u64) -> crate::error::KernelResult<()> {
 /// latter is actively misleading (it suggests the mount is the
 /// problem when in fact the caller's input is malformed).
 fn sys_mkdir(args: &SyscallArgs) -> SyscallResult {
-    if let Err(e) = check_path_str_nonempty(args.arg0) {
-        return linux_err(e);
-    }
-    linux_err(errno::EROFS)
+    mkdir_common(AT_FDCWD, args.arg0)
 }
 
 /// `mkdirat(dirfd, path, mode)` — same Linux contract as `sys_mkdir`,
 /// see that body for empty-path ENOENT rationale (batch 482).
 fn sys_mkdirat(args: &SyscallArgs) -> SyscallResult {
-    if let Err(e) = check_path_str_nonempty(args.arg1) {
-        return linux_err(e);
-    }
-    linux_err(errno::EROFS)
+    let dirfd = args.arg0 as i32;
+    mkdir_common(dirfd, args.arg1)
 }
 
-/// `rmdir(path)` — refuse with ENOENT after pointer validation.
+/// Shared `mkdir`/`mkdirat` back-end: resolve the path, check the File-WRITE
+/// capability, then create the directory via the native VFS (which emits
+/// `IN_CREATE | IN_ISDIR`).  The Linux `mode` argument is not honoured — the
+/// native VFS does not yet track per-directory permission bits.
+fn mkdir_common(dirfd: i32, path_ptr: u64) -> SyscallResult {
+    let path = match resolve_at_path(dirfd, path_ptr) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    if let Err(r) = require_fs_write() {
+        return r;
+    }
+    match crate::fs::Vfs::mkdir(&path) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
+}
+
+/// `rmdir(path)` — remove an empty directory via the native VFS.
+///
+/// Resolves the path (AT_FDCWD semantics), checks the File-WRITE
+/// capability, then calls `Vfs::rmdir`, which emits
+/// `IN_DELETE | IN_ISDIR` to any watcher.  The native VFS returns
+/// `NotADirectory` (→ `ENOTDIR`) if the target is a regular file and
+/// `DirectoryNotEmpty` (→ `ENOTEMPTY`) if non-empty, matching Linux.
 fn sys_rmdir(args: &SyscallArgs) -> SyscallResult {
-    match validate_user_str(args.arg0) {
-        Ok(()) => linux_err(errno::ENOENT),
-        Err(KernelError::InvalidAddress) if args.arg0 == 0 => linux_err(errno::EFAULT),
+    let path = match resolve_at_path(AT_FDCWD, args.arg0) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    if let Err(r) = require_fs_write() {
+        return r;
+    }
+    match crate::fs::Vfs::rmdir(&path) {
+        Ok(()) => SyscallResult::ok(0),
         Err(e) => linux_err(linux_errno_for(e)),
     }
 }
 
-/// `unlink(path)` — refuse with ENOENT after pointer validation.
+/// `unlink(path)` — remove a regular file/symlink via the native VFS.
+///
+/// Resolves the path (AT_FDCWD semantics), checks the File-WRITE
+/// capability, then calls `Vfs::remove`, which emits `IN_DELETE` to
+/// any watcher.  The native VFS returns `IsADirectory` (→ `EISDIR`)
+/// if the target is a directory, matching Linux's refusal to unlink
+/// directories.
 fn sys_unlink(args: &SyscallArgs) -> SyscallResult {
-    match validate_user_str(args.arg0) {
-        Ok(()) => linux_err(errno::ENOENT),
-        Err(KernelError::InvalidAddress) if args.arg0 == 0 => linux_err(errno::EFAULT),
+    let path = match resolve_at_path(AT_FDCWD, args.arg0) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    if let Err(r) = require_fs_write() {
+        return r;
+    }
+    match crate::fs::Vfs::remove(&path) {
+        Ok(()) => SyscallResult::ok(0),
         Err(e) => linux_err(linux_errno_for(e)),
     }
 }
 
-/// `unlinkat(dirfd, path, flags)` — refuse with ENOENT after validation.
+/// `unlinkat(dirfd, path, flags)` — remove via the native VFS.
+///
+/// With `AT_REMOVEDIR` set the call behaves like `rmdir`; otherwise
+/// like `unlink`.  Path resolution honours the `dirfd` (AT_FDCWD or a
+/// real directory fd).
 fn sys_unlinkat(args: &SyscallArgs) -> SyscallResult {
     // Linux ABI: `int unlinkat(int dirfd, const char *pathname,
     // int flags)`.  SYSCALL_DEFINE3(unlinkat, int, dfd, const char
@@ -16581,9 +16717,21 @@ fn sys_unlinkat(args: &SyscallArgs) -> SyscallResult {
     if flags & !VALID_FLAGS != 0 {
         return linux_err(errno::EINVAL);
     }
-    match validate_user_str(args.arg1) {
-        Ok(()) => linux_err(errno::ENOENT),
-        Err(KernelError::InvalidAddress) if args.arg1 == 0 => linux_err(errno::EFAULT),
+    let dirfd = args.arg0 as i32;
+    let path = match resolve_at_path(dirfd, args.arg1) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    if let Err(r) = require_fs_write() {
+        return r;
+    }
+    let result = if flags & AT_REMOVEDIR != 0 {
+        crate::fs::Vfs::rmdir(&path)
+    } else {
+        crate::fs::Vfs::remove(&path)
+    };
+    match result {
+        Ok(()) => SyscallResult::ok(0),
         Err(e) => linux_err(linux_errno_for(e)),
     }
 }
@@ -57514,11 +57662,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // kernel-resident buffers so the new check_path_str_nonempty's
         // first-byte read targets mapped memory (same retrofit batch
         // 481 did for symlink/link and 447 for truncate).
-        let mk_nonempty: [u8; 2] = *b"d\0";
         let mk_empty: [u8; 1] = [0u8];
-        core::hint::black_box(&mk_nonempty);
         core::hint::black_box(&mk_empty);
-        let mk_ptr = mk_nonempty.as_ptr() as u64;
         let mk_empty_ptr = mk_empty.as_ptr() as u64;
         // mkdir(NULL,_) -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
@@ -57537,14 +57682,6 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 "[syscall/linux]   FAIL: mkdir(empty) not ENOENT ({})",
                 dispatch_linux(nr::MKDIR, &a).value,
             );
-            return Err(KernelError::InternalError);
-        }
-        // mkdir(valid,_) -> EROFS.
-        let a = SyscallArgs { arg0: mk_ptr, arg1: 0, arg2: 0, arg3: 0,
-            arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::MKDIR, &a).value
-            != -i64::from(errno::EROFS) {
-            serial_println!("[syscall/linux]   FAIL: mkdir not EROFS");
             return Err(KernelError::InternalError);
         }
         // mkdirat(_, NULL, _) -> EFAULT.
@@ -57566,17 +57703,21 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
-        // mkdirat(_, valid, _) -> EROFS.
-        let a = SyscallArgs { arg0: 0, arg1: mk_ptr, arg2: 0, arg3: 0,
-            arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::MKDIRAT, &a).value
-            != -i64::from(errno::EROFS) {
-            serial_println!("[syscall/linux]   FAIL: mkdirat not EROFS");
-            return Err(KernelError::InternalError);
-        }
         serial_println!(
-            "[syscall/linux]   mkdir/mkdirat empty-path -> ENOENT (Linux v6.6 fs/namei.c::getname_flags: `!len && !(flags & LOOKUP_EMPTY)` -> -ENOENT, ahead of mkdirat's EROFS terminal): OK"
+            "[syscall/linux]   mkdir/mkdirat empty-path -> ENOENT (Linux v6.6 fs/namei.c::getname_flags: `!len && !(flags & LOOKUP_EMPTY)` -> -ENOENT, ahead of the VFS routing): OK"
         );
+        // Batch 488: rmdir/unlink/unlinkat now route through the native
+        // VFS (Vfs::rmdir/remove) instead of the old ENOENT stub, so a
+        // successful delete emits IN_DELETE(|IN_ISDIR) to any watcher.
+        // Pointer-validation gates (EFAULT for NULL, ENOENT for a missing
+        // path) are preserved by resolve_at_path.  An *absolute* path that
+        // does not exist gives a deterministic ENOENT terminal independent
+        // of the dirfd (resolve_at_path takes an absolute path verbatim and
+        // ignores the dirfd), which lets the int-truncation legs below probe
+        // flag handling without depending on arbitrary memory contents.
+        let absent_buf = b"/__mutate_selftest_absent__\0";
+        let absent_ptr = absent_buf.as_ptr() as u64;
+        core::hint::black_box(&absent_buf);
         // rmdir(NULL) -> EFAULT.
         let a = SyscallArgs { arg0: 0, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
@@ -57585,12 +57726,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: rmdir(NULL) not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // rmdir(0x1000) -> ENOENT.
-        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
+        // rmdir(absent) -> ENOENT.
+        let a = SyscallArgs { arg0: absent_ptr, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::RMDIR, &a).value
             != -i64::from(errno::ENOENT) {
-            serial_println!("[syscall/linux]   FAIL: rmdir not ENOENT");
+            serial_println!("[syscall/linux]   FAIL: rmdir(absent) not ENOENT");
             return Err(KernelError::InternalError);
         }
         // unlink(NULL) -> EFAULT.
@@ -57601,16 +57742,17 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: unlink(NULL) not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // unlink(0x1000) -> ENOENT.
-        let a = SyscallArgs { arg0: 0x1000, arg1: 0, arg2: 0, arg3: 0,
+        // unlink(absent) -> ENOENT.
+        let a = SyscallArgs { arg0: absent_ptr, arg1: 0, arg2: 0, arg3: 0,
             arg4: 0, arg5: 0 };
         if dispatch_linux(nr::UNLINK, &a).value
             != -i64::from(errno::ENOENT) {
-            serial_println!("[syscall/linux]   FAIL: unlink not ENOENT");
+            serial_println!("[syscall/linux]   FAIL: unlink(absent) not ENOENT");
             return Err(KernelError::InternalError);
         }
-        // unlinkat with bogus flag bit -> EINVAL.
-        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0x800_0000,
+        // unlinkat with bogus flag bit -> EINVAL (flag mask checked before
+        // any path resolution).
+        let a = SyscallArgs { arg0: 0, arg1: absent_ptr, arg2: 0x800_0000,
             arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::UNLINKAT, &a).value
             != -i64::from(errno::EINVAL) {
@@ -57627,13 +57769,112 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: unlinkat(NULL) not EFAULT");
             return Err(KernelError::InternalError);
         }
-        // unlinkat(_, 0x1000, AT_REMOVEDIR) -> ENOENT.
-        let a = SyscallArgs { arg0: 0, arg1: 0x1000, arg2: 0x200,
+        // unlinkat(_, absent, AT_REMOVEDIR) -> ENOENT (rmdir semantics).
+        let a = SyscallArgs { arg0: 0, arg1: absent_ptr, arg2: 0x200,
             arg3: 0, arg4: 0, arg5: 0 };
         if dispatch_linux(nr::UNLINKAT, &a).value
             != -i64::from(errno::ENOENT) {
-            serial_println!("[syscall/linux]   FAIL: unlinkat not ENOENT");
+            serial_println!("[syscall/linux]   FAIL: unlinkat(absent) not ENOENT");
             return Err(KernelError::InternalError);
+        }
+
+        // Real round-trip through the native VFS, gated on a writability
+        // probe so a read-only root still passes the suite.  Exercises:
+        //   mkdir(new) -> 0, mkdir(existing) -> EEXIST,
+        //   unlink(dir) -> EISDIR, rmdir(dir) -> 0, rmdir(gone) -> ENOENT,
+        //   and for a regular file: rmdir(file) -> ENOTDIR,
+        //   unlink(file) -> 0, unlink(gone) -> ENOENT.
+        let probe_dir = "/__mutate_selftest_dir__";
+        let _ = crate::fs::Vfs::rmdir(probe_dir); // clean any stale slate
+        let writable = crate::fs::Vfs::mkdir(probe_dir).is_ok();
+        if writable {
+            // Undo the probe; the dispatch path recreates it below.
+            let _ = crate::fs::Vfs::rmdir(probe_dir);
+            let dir_buf = b"/__mutate_selftest_dir__\0";
+            let dir_ptr = dir_buf.as_ptr() as u64;
+            core::hint::black_box(&dir_buf);
+            // mkdir(new) -> 0.
+            let a = SyscallArgs { arg0: dir_ptr, arg1: 0o755, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            let v = dispatch_linux(nr::MKDIR, &a).value;
+            if v != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: mkdir(new) -> {} (expected 0)", v);
+                let _ = crate::fs::Vfs::rmdir(probe_dir);
+                return Err(KernelError::InternalError);
+            }
+            // mkdir(existing) -> EEXIST.
+            let v = dispatch_linux(nr::MKDIR, &a).value;
+            if v != -i64::from(errno::EEXIST) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: mkdir(existing) -> {} (expected EEXIST)", v);
+                let _ = crate::fs::Vfs::rmdir(probe_dir);
+                return Err(KernelError::InternalError);
+            }
+            // unlink(dir) -> EISDIR (cannot unlink a directory).
+            let a_u = SyscallArgs { arg0: dir_ptr, arg1: 0, arg2: 0, arg3: 0,
+                arg4: 0, arg5: 0 };
+            let v = dispatch_linux(nr::UNLINK, &a_u).value;
+            if v != -i64::from(errno::EISDIR) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: unlink(dir) -> {} (expected EISDIR)", v);
+                let _ = crate::fs::Vfs::rmdir(probe_dir);
+                return Err(KernelError::InternalError);
+            }
+            // rmdir(dir) -> 0.
+            let v = dispatch_linux(nr::RMDIR, &a).value;
+            if v != 0 {
+                serial_println!(
+                    "[syscall/linux]   FAIL: rmdir(dir) -> {} (expected 0)", v);
+                return Err(KernelError::InternalError);
+            }
+            // rmdir(gone) -> ENOENT.
+            let v = dispatch_linux(nr::RMDIR, &a).value;
+            if v != -i64::from(errno::ENOENT) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: rmdir(gone) -> {} (expected ENOENT)", v);
+                return Err(KernelError::InternalError);
+            }
+            // Regular-file leg: write a file via the VFS, then exercise the
+            // syscall paths.
+            let file_path = "/__mutate_selftest_file__";
+            if crate::fs::Vfs::write_file(file_path, b"x").is_ok() {
+                let file_buf = b"/__mutate_selftest_file__\0";
+                let file_ptr = file_buf.as_ptr() as u64;
+                core::hint::black_box(&file_buf);
+                let a_f = SyscallArgs { arg0: file_ptr, arg1: 0, arg2: 0,
+                    arg3: 0, arg4: 0, arg5: 0 };
+                // rmdir(regular file) -> ENOTDIR.
+                let v = dispatch_linux(nr::RMDIR, &a_f).value;
+                if v != -i64::from(errno::ENOTDIR) {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: rmdir(file) -> {} (expected ENOTDIR)", v);
+                    let _ = crate::fs::Vfs::remove(file_path);
+                    return Err(KernelError::InternalError);
+                }
+                // unlink(file) -> 0.
+                let v = dispatch_linux(nr::UNLINK, &a_f).value;
+                if v != 0 {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: unlink(file) -> {} (expected 0)", v);
+                    let _ = crate::fs::Vfs::remove(file_path);
+                    return Err(KernelError::InternalError);
+                }
+                // unlink(gone) -> ENOENT.
+                let v = dispatch_linux(nr::UNLINK, &a_f).value;
+                if v != -i64::from(errno::ENOENT) {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: unlink(gone) -> {} (expected ENOENT)", v);
+                    return Err(KernelError::InternalError);
+                }
+            }
+            serial_println!(
+                "[syscall/linux]   mkdir/rmdir/unlink native-VFS round-trip (0/EEXIST/EISDIR/0/ENOENT/ENOTDIR): OK"
+            );
+        } else {
+            serial_println!(
+                "[syscall/linux]   mkdir/rmdir/unlink native-VFS round-trip skipped (read-only root)"
+            );
         }
 
         // Batch 313: unlinkat int truncation — high-half register
@@ -57645,13 +57886,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // so high-half garbage tripped the gate and returned EINVAL
         // where Linux returns ENOENT (no such file in our empty FS).
         //
-        // (a) unlinkat(0, 0x1000, 0x1_0000_0200) → ENOENT
+        // (a) unlinkat(0, absent, 0x1_0000_0200) → ENOENT
         //     (high|AT_REMOVEDIR; truncates to 0x200, mask passes,
-        //     validate_user_str succeeds in kernel context, ENOENT
+        //     absolute path resolves, Vfs::rmdir -> NotFound, ENOENT
         //     terminal).
         let a = SyscallArgs {
             arg0: 0,
-            arg1: 0x1000,
+            arg1: absent_ptr,
             arg2: 0x1_0000_0200,
             arg3: 0, arg4: 0, arg5: 0,
         };
@@ -57664,12 +57905,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // (b) unlinkat(0, 0x1000, 0x1_0000_0000) → ENOENT
+        // (b) unlinkat(0, absent, 0x1_0000_0000) → ENOENT
         //     (high-half only, low half zero; truncates to 0, mask
-        //     passes, ENOENT terminal).
+        //     passes, unlink semantics, Vfs::remove -> NotFound, ENOENT).
         let a = SyscallArgs {
             arg0: 0,
-            arg1: 0x1000,
+            arg1: absent_ptr,
             arg2: 0x1_0000_0000,
             arg3: 0, arg4: 0, arg5: 0,
         };
@@ -57705,13 +57946,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // (d) unlinkat(0, 0x1000, 0x1_0000_0010) → EINVAL
+        // (d) unlinkat(0, absent, 0x1_0000_0010) → EINVAL
         //     (high|bad-low 0x10; truncates to 0x10, mask rejects bit
         //     outside AT_REMOVEDIR; verifies mask gate still rejects
-        //     bogus low bits after high half is stripped).
+        //     bogus low bits after high half is stripped — checked before
+        //     any path resolution, so the path is incidental).
         let a = SyscallArgs {
             arg0: 0,
-            arg1: 0x1000,
+            arg1: absent_ptr,
             arg2: 0x1_0000_0010,
             arg3: 0, arg4: 0, arg5: 0,
         };

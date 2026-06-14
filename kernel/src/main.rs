@@ -1215,6 +1215,13 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: sendfile self-test failed: {:?}", e);
     }
 
+    // copy_file_range(2) data-transfer test — same kernel-context constraint as
+    // sendfile, so it drives the copy_file_range_core / overlap path against
+    // kernel-opened handles directly.
+    if let Err(e) = syscall::linux::self_test_copy_file_range() {
+        serial_println!("WARNING: copy_file_range self-test failed: {:?}", e);
+    }
+
     // File-backed Linux mmap test (needs a writable VFS to stage a file, so
     // it runs here rather than in syscall::linux::self_test() which precedes
     // VFS init).  Exercises the path ld.so uses to map shared objects.

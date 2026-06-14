@@ -598,10 +598,11 @@ is logged for operator input in `open-questions.md`.
 
 ---
 
-### TD21. Minor Linux-ABI fidelity gap — procfs fd visibility for native processes — APPROXIMATION 2026-06-13; sendfile transfer IMPLEMENTED 2026-06-14
+### TD21. Minor Linux-ABI fidelity gap — procfs fd visibility for native processes — APPROXIMATION 2026-06-13; sendfile + copy_file_range transfer IMPLEMENTED 2026-06-14
 
 **Where:** `kernel/src/fs/procfs` (`/proc/<pid>/fd[info]`, `linux_fd_list`) and
-`kernel/src/syscall/linux.rs` (`sys_sendfile`). Both are documented in-code.
+`kernel/src/syscall/linux.rs` (`sys_sendfile`, `sys_copy_file_range`). All are
+documented in-code.
 
 **What it is:** one remaining deliberate Linux-ABI approximation:
 - **`/proc/<pid>/fd/` and `/fdinfo/` are EMPTY for *native* processes.** Native
@@ -633,6 +634,32 @@ slice, count-clamp-to-remaining, EOF→0, File→MemFd and MemFd→File cross-ki
 gate-only `self_test_sendfile_splice_aio` batch-538 checks still pass (kernel-context
 callers have no fd table, so the syscall still terminates `EINVAL` before the
 transfer). The `put_user(pos)` write-back EFAULT noted previously is now modelled.
+
+**Progress (2026-06-14) — copy_file_range data transfer implemented.**
+`sys_copy_file_range` was likewise a validate-front-gates-then-`EINVAL` stub. It
+now performs a real positional in-kernel copy via `copy_file_range_core`: a
+64 KiB bounce-buffer loop that reads from the source at an absolute byte offset
+(`read_at`) and writes to the destination at an absolute byte offset (`write_at`,
+which extends the file) — neither cursor is touched by the core, so distinct
+source/dest offsets are honoured. Both source and destination must be regular-file
+kinds (File/MemFd), matching `vfs_copy_file_range`'s `S_ISREG` requirement; pipes
+and consoles are rejected `EINVAL`. The full Linux gate order is now enforced:
+fds (`EBADF`) → offset readability (`EFAULT`) → `flags != 0` (`EINVAL`) →
+regular-file (`EINVAL`) → access-mode/`O_APPEND` (`EBADF`). Position semantics
+mirror sendfile: a NULL `off_in`/`off_out` reads-from and advances the file's own
+cursor; a non-NULL pointer supplies an explicit position, leaves the cursor, and
+writes the post-transfer position back via `put_user` (EFAULT-after-copy modelled).
+`len` is clamped to `MAX_RW_COUNT`; the same first-byte-propagate / later-error-
+returns-partial semantics apply. Linux's same-file-overlap `EINVAL` is enforced by
+`copy_file_range_overlaps`. **LIMITATION:** "same object" is detected by open-path
+equality (File) / raw-handle identity (MemFd); two *hardlinks* to one inode have
+distinct paths and are not detected as overlapping — Linux compares inodes, which
+our fd layer does not expose here (same approximation the rest of the path layer
+makes). Tested end-to-end by the post-`/tmp` boot self-test
+`self_test_copy_file_range` (File→File positional whole-file, positional read
+offset, positional *write* offset, File→MemFd / MemFd→File cross-kind, and
+overlap-detect true/false/cross-kind). The batch-537 gate-only checks still pass
+(kernel-context callers terminate `EINVAL` before the transfer).
 
 **Impact:** low — native-process fd introspection via `/proc` is unavailable
 (tools must use the native fd API).

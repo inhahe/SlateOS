@@ -19932,6 +19932,187 @@ fn sys_vmsplice(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::EINVAL)
 }
 
+/// Positional write of `data` to a copy_file_range destination (File / MemFd)
+/// at absolute byte `pos`, WITHOUT advancing the open-file cursor.  Returns
+/// bytes accepted (`data.len()` for these kinds barring an error or memfd
+/// seal).
+fn cfr_dst_write_at(
+    kind: crate::proc::linux_fd::HandleKind,
+    handle: u64,
+    pos: u64,
+    data: &[u8],
+) -> crate::error::KernelResult<usize> {
+    use crate::proc::linux_fd::HandleKind;
+    match kind {
+        HandleKind::File => crate::fs::handle::write_at(handle, pos, data),
+        HandleKind::MemFd => {
+            crate::ipc::memfd::write_at(crate::ipc::memfd::MemFdHandle::from_raw(handle), pos, data)
+        }
+        _ => Err(crate::error::KernelError::InvalidArgument),
+    }
+}
+
+/// Core copy_file_range transfer: move up to `len` bytes from a source fd
+/// (File / MemFd) at absolute byte `in_start` to a destination fd at absolute
+/// byte `out_start`, via a kernel bounce buffer using positional reads and
+/// writes (neither cursor is touched here — the caller handles that).  Stops
+/// at source EOF or a short destination write.  Returns
+/// `(bytes_moved, in_end, out_end)`.
+///
+/// Error semantics mirror `do_sendfile` / `generic_copy_file_range`: a
+/// first-byte error propagates, a later error returns the partial count.
+fn copy_file_range_core(
+    in_kind: crate::proc::linux_fd::HandleKind,
+    in_handle: u64,
+    out_kind: crate::proc::linux_fd::HandleKind,
+    out_handle: u64,
+    in_start: u64,
+    out_start: u64,
+    len: u64,
+) -> crate::error::KernelResult<(u64, u64, u64)> {
+    let clamped = len.min(SENDFILE_MAX_COUNT);
+    let mut total: u64 = 0;
+    let mut ip = in_start;
+    let mut op = out_start;
+    if clamped == 0 {
+        return Ok((0, ip, op));
+    }
+    let mut buf = alloc::vec![0u8; SENDFILE_CHUNK];
+    while total < clamped {
+        #[allow(clippy::cast_possible_truncation)]
+        let want = clamped.saturating_sub(total).min(SENDFILE_CHUNK as u64) as usize;
+        let slice = match buf.get_mut(..want) {
+            Some(s) => s,
+            None => break,
+        };
+        let n = match sendfile_src_read_at(in_kind, in_handle, ip, slice) {
+            Ok(0) => break, // source EOF
+            Ok(n) => n,
+            Err(e) => {
+                if total == 0 {
+                    return Err(e);
+                }
+                break;
+            }
+        };
+        let mut written = 0usize;
+        while written < n {
+            let chunk = match buf.get(written..n) {
+                Some(s) => s,
+                None => break,
+            };
+            let at = op.saturating_add(written as u64);
+            match cfr_dst_write_at(out_kind, out_handle, at, chunk) {
+                Ok(0) => break,
+                Ok(w) => written = written.saturating_add(w),
+                Err(e) => {
+                    if total == 0 && written == 0 {
+                        return Err(e);
+                    }
+                    total = total.saturating_add(written as u64);
+                    ip = ip.saturating_add(written as u64);
+                    op = op.saturating_add(written as u64);
+                    return Ok((total, ip, op));
+                }
+            }
+        }
+        total = total.saturating_add(written as u64);
+        ip = ip.saturating_add(written as u64);
+        op = op.saturating_add(written as u64);
+        if written < n {
+            break; // partial destination write — stop
+        }
+    }
+    Ok((total, ip, op))
+}
+
+/// True if a copy_file_range request names the SAME backing object for both
+/// source and destination with overlapping `[pos, pos+len)` ranges — Linux
+/// rejects that case with EINVAL (`generic_copy_file_checks`).
+///
+/// "Same object" is detected by open-path equality for File handles and by
+/// handle identity for MemFd (all handles to one memfd share the same raw id).
+/// LIMITATION: two *hardlinks* to the same inode have distinct paths and are
+/// not detected as the same object — Linux compares inodes, which our fd layer
+/// does not expose here.  This is the same approximation the rest of the path
+/// layer makes; documented in known-issues TD21.
+fn copy_file_range_overlaps(
+    in_kind: crate::proc::linux_fd::HandleKind,
+    in_handle: u64,
+    out_kind: crate::proc::linux_fd::HandleKind,
+    out_handle: u64,
+    pos_in: u64,
+    pos_out: u64,
+    len: u64,
+) -> bool {
+    use crate::proc::linux_fd::HandleKind;
+    let same = match (in_kind, out_kind) {
+        (HandleKind::File, HandleKind::File) => matches!(
+            (
+                crate::fs::handle::handle_path(in_handle),
+                crate::fs::handle::handle_path(out_handle),
+            ),
+            (Ok(a), Ok(b)) if a == b
+        ),
+        (HandleKind::MemFd, HandleKind::MemFd) => in_handle == out_handle,
+        _ => false,
+    };
+    if !same {
+        return false;
+    }
+    let clamped = len.min(SENDFILE_MAX_COUNT);
+    if clamped == 0 {
+        return false;
+    }
+    let in_end = pos_in.saturating_add(clamped);
+    let out_end = pos_out.saturating_add(clamped);
+    // Half-open ranges overlap iff each starts before the other ends.
+    pos_in < out_end && pos_out < in_end
+}
+
+/// Resolve a copy_file_range start position from an offset pointer.  A NULL
+/// pointer means "use the file's current cursor"; a non-NULL pointer is read
+/// from user space (it was already validated readable at gate 2) and a
+/// negative loff_t is rejected with EINVAL (`generic_copy_file_checks`).
+fn copy_file_range_resolve_pos(
+    ptr: u64,
+    kind: crate::proc::linux_fd::HandleKind,
+    handle: u64,
+) -> Result<u64, SyscallResult> {
+    if ptr != 0 {
+        let mut b = [0u8; 8];
+        // SAFETY: gate 2 validated [ptr, +8) readable; copy_from_user re-checks.
+        let r = unsafe { crate::mm::user::copy_from_user(ptr, b.as_mut_ptr(), 8) };
+        if let Err(e) = r {
+            return Err(linux_err(linux_errno_for(e)));
+        }
+        let p = u64::from_le_bytes(b);
+        #[allow(clippy::cast_possible_wrap)]
+        if (p as i64) < 0 {
+            return Err(linux_err(errno::EINVAL));
+        }
+        Ok(p)
+    } else {
+        sendfile_src_pos(kind, handle).map_err(|e| linux_err(linux_errno_for(e)))
+    }
+}
+
+/// Write a post-transfer position back to a copy_file_range offset pointer
+/// (`put_user(pos, off)`).  Validates the slot is writable, mirroring Linux's
+/// unconditional write-back which can surface EFAULT after a successful copy.
+fn copy_file_range_writeback(ptr: u64, pos: u64) -> Result<(), SyscallResult> {
+    if let Err(e) = crate::mm::user::validate_user_write(ptr, 8) {
+        return Err(linux_err(linux_errno_for(e)));
+    }
+    let b = pos.to_le_bytes();
+    // SAFETY: validated [ptr, +8) writable directly above.
+    let r = unsafe { crate::mm::user::copy_to_user(b.as_ptr(), ptr, 8) };
+    if let Err(e) = r {
+        return Err(linux_err(linux_errno_for(e)));
+    }
+    Ok(())
+}
+
 /// `copy_file_range(fd_in, off_in, fd_out, off_out, len, flags)`.
 fn sys_copy_file_range(args: &SyscallArgs) -> SyscallResult {
     // Linux ABI (fs/read_write.c):
@@ -20007,42 +20188,106 @@ fn sys_copy_file_range(args: &SyscallArgs) -> SyscallResult {
         return linux_err(errno::EINVAL);
     }
 
-    // Gate 4 (vfs_copy_file_range -> generic_file_rw_checks): regular-file and
-    // access-mode gates.  Needs the per-process fd table; in kernel context
-    // (caller_pid()==None) there are no fds, so this is skipped and we fall
-    // through to the terminal arm.
-    if let Some(pid) = caller_pid() {
-        use crate::proc::linux_fd::{HandleKind, O_APPEND};
-        if let (Some(ein), Some(eout)) = (
-            pcb::linux_fd_lookup(pid, fd_in),
-            pcb::linux_fd_lookup(pid, fd_out),
-        ) {
-            // 4a: !S_ISREG(in) || !S_ISREG(out) -> -EINVAL.  Only File/MemFd
-            // back a regular-file inode; pipes, consoles, eventfd, etc. are
-            // non-regular.  (Linux's preceding S_ISDIR -> -EISDIR arm is not
-            // modelled: our fd layer does not distinguish a directory fd from
-            // a regular File.)
-            let is_regular =
-                |k: HandleKind| matches!(k, HandleKind::File | HandleKind::MemFd);
-            if !is_regular(ein.kind) || !is_regular(eout.kind) {
-                return linux_err(errno::EINVAL);
-            }
-            // 4b: !(in & FMODE_READ) || !(out & FMODE_WRITE) || (out & O_APPEND)
-            //     -> -EBADF.
-            if !fd_access_is_readable(ein.status_flags)
-                || !fd_access_is_writable(eout.status_flags)
-                || (eout.status_flags & O_APPEND) != 0
-            {
-                return linux_err(errno::EBADF);
-            }
-        }
+    // Gate 4 (vfs_copy_file_range -> generic_file_rw_checks) and the transfer
+    // both need the fd entries.  Kernel-context callers (caller_pid()==None)
+    // have no Linux fd table, so they cannot name fds — preserve the historical
+    // terminal EINVAL after the no-op front gates.
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => return linux_err(errno::EINVAL),
+    };
+    use crate::proc::linux_fd::{HandleKind, O_APPEND};
+    let in_entry = match pcb::linux_fd_lookup(pid, fd_in) {
+        Some(e) => e,
+        None => return linux_err(errno::EBADF),
+    };
+    let out_entry = match pcb::linux_fd_lookup(pid, fd_out) {
+        Some(e) => e,
+        None => return linux_err(errno::EBADF),
+    };
+    // 4a: !S_ISREG(in) || !S_ISREG(out) -> -EINVAL.  Only File/MemFd back a
+    // regular-file inode; pipes, consoles, eventfd, etc. are non-regular.
+    // (Linux's preceding S_ISDIR -> -EISDIR arm is not modelled: our fd layer
+    // does not distinguish a directory fd from a regular File.)
+    let is_regular = |k: HandleKind| matches!(k, HandleKind::File | HandleKind::MemFd);
+    if !is_regular(in_entry.kind) || !is_regular(out_entry.kind) {
+        return linux_err(errno::EINVAL);
+    }
+    // 4b: !(in & FMODE_READ) || !(out & FMODE_WRITE) || (out & O_APPEND) -> -EBADF.
+    if !fd_access_is_readable(in_entry.status_flags)
+        || !fd_access_is_writable(out_entry.status_flags)
+        || (out_entry.status_flags & O_APPEND) != 0
+    {
+        return linux_err(errno::EBADF);
     }
 
-    // Both fds are regular, readable-in / writable-out, non-append: Linux would
-    // perform the copy here.  Server-side cross-file copy is not implemented
-    // yet, so the operation is unsupported -> terminal EINVAL.  (Pre-existing
-    // limitation; the reject gates above now match Linux precisely.)
-    linux_err(errno::EINVAL)
+    // Resolve the start positions: a NULL offset pointer reads from (and later
+    // advances) the file's own cursor; a non-NULL pointer supplies an explicit
+    // position that is written back afterwards.
+    let off_in_ptr = args.arg1;
+    let off_out_ptr = args.arg3;
+    let in_start =
+        match copy_file_range_resolve_pos(off_in_ptr, in_entry.kind, in_entry.raw_handle) {
+            Ok(p) => p,
+            Err(r) => return r,
+        };
+    let out_start =
+        match copy_file_range_resolve_pos(off_out_ptr, out_entry.kind, out_entry.raw_handle) {
+            Ok(p) => p,
+            Err(r) => return r,
+        };
+
+    let len = args.arg4;
+    // Linux rejects a same-file copy whose source and destination ranges
+    // overlap with EINVAL.
+    if copy_file_range_overlaps(
+        in_entry.kind,
+        in_entry.raw_handle,
+        out_entry.kind,
+        out_entry.raw_handle,
+        in_start,
+        out_start,
+        len,
+    ) {
+        return linux_err(errno::EINVAL);
+    }
+
+    let (moved, in_end, out_end) = match copy_file_range_core(
+        in_entry.kind,
+        in_entry.raw_handle,
+        out_entry.kind,
+        out_entry.raw_handle,
+        in_start,
+        out_start,
+        len,
+    ) {
+        Ok(v) => v,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+
+    // Position bookkeeping per side: NULL offset advances the file cursor; a
+    // non-NULL offset leaves the cursor and writes the new position back.
+    if off_in_ptr != 0 {
+        if let Err(r) = copy_file_range_writeback(off_in_ptr, in_end) {
+            return r;
+        }
+    } else {
+        // Discarding the Result is safe — the handle was just used successfully
+        // for the read, so set_pos can only fail on an internal bug; the bytes
+        // have already moved and Linux returns the count regardless.
+        let _ = sendfile_src_set_pos(in_entry.kind, in_entry.raw_handle, in_end);
+    }
+    if off_out_ptr != 0 {
+        if let Err(r) = copy_file_range_writeback(off_out_ptr, out_end) {
+            return r;
+        }
+    } else {
+        // Same rationale as the source-cursor advance above.
+        let _ = sendfile_src_set_pos(out_entry.kind, out_entry.raw_handle, out_end);
+    }
+
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(moved as i64)
 }
 
 // ---------------------------------------------------------------------------
@@ -40338,6 +40583,235 @@ pub fn self_test_sendfile() -> crate::error::KernelResult<()> {
     let _ = crate::fs::Vfs::remove(DST);
     serial_println!(
         "[syscall/linux]   sendfile (File<->File/MemFd copy, offset+count slice, count-clamp, EOF, cross-kind): OK"
+    );
+    Ok(())
+}
+
+/// Boot self-test for the [`copy_file_range_core`] / [`copy_file_range_overlaps`]
+/// transfer engine that backs `sys_copy_file_range`.
+///
+/// The syscall entry itself cannot be exercised at boot — `caller_pid()` is
+/// `None`, so there is no Linux fd table to name fds — so this drives the
+/// data-moving core directly against kernel-opened handles, exactly as
+/// [`self_test_sendfile`] does.  Coverage:
+///  1. **File -> File** positional whole-file copy (`in_start`/`out_start` = 0).
+///  2. **Positional read offset** — 5 bytes from `in_start` = 7 ("sendf") to
+///     `out_start` = 0, verifying `in_end`/`out_end` and the destination slice.
+///  3. **Positional WRITE offset** — `write_at` past byte 0: copy the 3-byte
+///     tail to `out_start` = 5 of a fresh dest, proving the positional write
+///     lands at the requested offset and extends the file.
+///  4. **File -> MemFd** and **MemFd -> File** cross-kind transfers.
+///  5. **Overlap detection** — `copy_file_range_overlaps` returns `true` for
+///     the same backing object with overlapping ranges and `false` for
+///     disjoint ranges or distinct objects.
+///
+/// Returns `Ok(())` on success (or a clean SKIP if `/tmp` is not writable).
+pub fn self_test_copy_file_range() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+    use crate::fs::handle::{self, OpenFlags};
+    use crate::proc::linux_fd::HandleKind;
+    use crate::serial_println;
+
+    const SRC: &str = "/tmp/__cfr_src__";
+    const DST: &str = "/tmp/__cfr_dst__";
+    // "Hello, sendfile world!" — 22 bytes (reuse the sendfile payload shape).
+    const PAYLOAD: &[u8] = b"Hello, sendfile world!";
+    let len = PAYLOAD.len() as u64;
+
+    let _ = crate::fs::Vfs::remove(SRC);
+    let _ = crate::fs::Vfs::remove(DST);
+
+    if crate::fs::Vfs::write_file(SRC, PAYLOAD).is_err() {
+        serial_println!("[syscall/linux]   copy_file_range self-test skipped (/tmp not writable)");
+        return Ok(());
+    }
+
+    let out_flags = OpenFlags::WRITE
+        .union(OpenFlags::CREATE)
+        .union(OpenFlags::TRUNCATE);
+
+    let cleanup = || {
+        let _ = crate::fs::Vfs::remove(SRC);
+        let _ = crate::fs::Vfs::remove(DST);
+    };
+
+    // (1) File -> File whole-file positional copy.
+    {
+        let in_h = handle::open(SRC, OpenFlags::READ)?;
+        let out_h = handle::open(DST, out_flags)?;
+        let r = copy_file_range_core(HandleKind::File, in_h, HandleKind::File, out_h, 0, 0, 1u64 << 20);
+        let _ = handle::close(in_h);
+        let _ = handle::close(out_h);
+        let (moved, in_end, out_end) = match r {
+            Ok(v) => v,
+            Err(e) => {
+                cleanup();
+                return Err(e);
+            }
+        };
+        if moved != len || in_end != len || out_end != len {
+            serial_println!(
+                "[syscall/linux]   FAIL: cfr File->File moved {} in_end {} out_end {} (expected {})",
+                moved, in_end, out_end, len);
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+        if !matches!(crate::fs::Vfs::read_file(DST), Ok(ref c) if c.as_slice() == PAYLOAD) {
+            serial_println!("[syscall/linux]   FAIL: cfr File->File content mismatch");
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // (2) Positional read offset: 5 bytes from in_start=7 ("sendf") to out_start=0.
+    {
+        let in_h = handle::open(SRC, OpenFlags::READ)?;
+        let out_h = handle::open(DST, out_flags)?;
+        let r = copy_file_range_core(HandleKind::File, in_h, HandleKind::File, out_h, 7, 0, 5);
+        let _ = handle::close(in_h);
+        let _ = handle::close(out_h);
+        let (moved, in_end, out_end) = match r {
+            Ok(v) => v,
+            Err(e) => {
+                cleanup();
+                return Err(e);
+            }
+        };
+        if moved != 5 || in_end != 12 || out_end != 5 {
+            serial_println!(
+                "[syscall/linux]   FAIL: cfr read-offset moved {} in_end {} out_end {} (expected 5/12/5)",
+                moved, in_end, out_end);
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+        if !matches!(crate::fs::Vfs::read_file(DST), Ok(ref c) if Some(c.as_slice()) == PAYLOAD.get(7..12)) {
+            serial_println!("[syscall/linux]   FAIL: cfr read-offset slice mismatch");
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // (3) Positional WRITE offset: copy the 3-byte tail ("ld!") to out_start=5.
+    // write_at must land the bytes at offset 5 and extend the file to len 8.
+    {
+        let in_h = handle::open(SRC, OpenFlags::READ)?;
+        let out_h = handle::open(DST, out_flags)?;
+        let r = copy_file_range_core(HandleKind::File, in_h, HandleKind::File, out_h, 19, 5, 100);
+        let _ = handle::close(in_h);
+        let _ = handle::close(out_h);
+        let (moved, in_end, out_end) = match r {
+            Ok(v) => v,
+            Err(e) => {
+                cleanup();
+                return Err(e);
+            }
+        };
+        if moved != 3 || in_end != 22 || out_end != 8 {
+            serial_println!(
+                "[syscall/linux]   FAIL: cfr write-offset moved {} in_end {} out_end {} (expected 3/22/8)",
+                moved, in_end, out_end);
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+        // The destination is 8 bytes; bytes [5..8) are the tail "ld!".
+        if !matches!(crate::fs::Vfs::read_file(DST),
+            Ok(ref c) if c.len() == 8 && c.get(5..8) == PAYLOAD.get(19..22))
+        {
+            serial_println!("[syscall/linux]   FAIL: cfr write-offset tail not at offset 5");
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // (4) File -> MemFd (cross-kind destination, positional).
+    {
+        let mf = crate::ipc::memfd::create_with_flags(b"cfr-dst".to_vec(), false);
+        let in_h = handle::open(SRC, OpenFlags::READ)?;
+        let r = copy_file_range_core(HandleKind::File, in_h, HandleKind::MemFd, mf.raw(), 0, 0, 1u64 << 20);
+        let _ = handle::close(in_h);
+        let (moved, _, out_end) = match r {
+            Ok(v) => v,
+            Err(e) => {
+                crate::ipc::memfd::close(mf);
+                cleanup();
+                return Err(e);
+            }
+        };
+        let mut rb = alloc::vec![0u8; PAYLOAD.len()];
+        let n = crate::ipc::memfd::read_at(mf, 0, &mut rb).unwrap_or(0);
+        crate::ipc::memfd::close(mf);
+        if moved != len || out_end != len || n != PAYLOAD.len() || rb.as_slice() != PAYLOAD {
+            serial_println!("[syscall/linux]   FAIL: cfr File->MemFd mismatch (moved {} n {})", moved, n);
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // (5) MemFd -> File (cross-kind source, positional).
+    {
+        let mf = crate::ipc::memfd::create_with_flags(b"cfr-src".to_vec(), false);
+        if crate::ipc::memfd::write_at(mf, 0, PAYLOAD).is_err() {
+            crate::ipc::memfd::close(mf);
+            serial_println!("[syscall/linux]   FAIL: cfr MemFd->File staging write failed");
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+        let out_h = handle::open(DST, out_flags)?;
+        let r = copy_file_range_core(HandleKind::MemFd, mf.raw(), HandleKind::File, out_h, 0, 0, 1u64 << 20);
+        let _ = handle::close(out_h);
+        crate::ipc::memfd::close(mf);
+        let (moved, _, _) = match r {
+            Ok(v) => v,
+            Err(e) => {
+                cleanup();
+                return Err(e);
+            }
+        };
+        if moved != len || !matches!(crate::fs::Vfs::read_file(DST), Ok(ref c) if c.as_slice() == PAYLOAD) {
+            serial_println!("[syscall/linux]   FAIL: cfr MemFd->File mismatch (moved {})", moved);
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // (6) Overlap detection. Two open handles to the same path are the "same
+    // object" (path equality); overlapping ranges must be rejected, disjoint
+    // ranges and distinct objects accepted.
+    {
+        let h1 = handle::open(SRC, OpenFlags::READ)?;
+        let h2 = handle::open(SRC, OpenFlags::READ)?;
+        // Same object, overlapping [0,10) vs [2,12) -> true.
+        let overlap = copy_file_range_overlaps(HandleKind::File, h1, HandleKind::File, h2, 0, 2, 10);
+        // Same object, disjoint [0,3) vs [10,13) -> false.
+        let disjoint = copy_file_range_overlaps(HandleKind::File, h1, HandleKind::File, h2, 0, 10, 3);
+        let _ = handle::close(h1);
+        let _ = handle::close(h2);
+        if !overlap {
+            serial_println!("[syscall/linux]   FAIL: cfr overlap not detected for same-object ranges");
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+        if disjoint {
+            serial_println!("[syscall/linux]   FAIL: cfr overlap false-positive on disjoint ranges");
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+        // Distinct objects (File vs MemFd) never overlap.
+        let mf = crate::ipc::memfd::create_with_flags(b"cfr-distinct".to_vec(), false);
+        let h3 = handle::open(SRC, OpenFlags::READ)?;
+        let cross = copy_file_range_overlaps(HandleKind::File, h3, HandleKind::MemFd, mf.raw(), 0, 0, 10);
+        let _ = handle::close(h3);
+        crate::ipc::memfd::close(mf);
+        if cross {
+            serial_println!("[syscall/linux]   FAIL: cfr overlap false-positive across distinct kinds");
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    cleanup();
+    serial_println!(
+        "[syscall/linux]   copy_file_range (File<->File/MemFd positional copy, read+write offsets, cross-kind, overlap-reject): OK"
     );
     Ok(())
 }

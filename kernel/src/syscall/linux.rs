@@ -56481,6 +56481,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_access_faccessat()?;
+
+    #[inline(never)]
+    fn self_test_access_faccessat() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // access / faccessat / faccessat2 — input validation, then ENOENT.
     {
         // Bogus mode bit (8 is not R/W/X/F) -> EINVAL.
@@ -56604,6 +56609,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!(
             "[syscall/linux]   faccessat2 flags int-truncation (high-half ignored): OK"
         );
+    }
+        Ok(())
     }
 
     // stat / lstat / fstat / newfstatat — input validation.

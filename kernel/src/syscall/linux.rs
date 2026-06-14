@@ -80832,6 +80832,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_drm_dumb_buffer()?;
+
+    #[inline(never)]
+    fn self_test_drm_dumb_buffer() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // DRM dumb-buffer + framebuffer allocation mapping (commit 6).
     {
         use crate::drm::mode::PixelFormat;
@@ -80860,6 +80865,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[syscall/linux]   DRM dumb-buffer format mapping: OK");
+    }
+        Ok(())
     }
 
     serial_println!("[syscall/linux] Translation self-test PASSED");

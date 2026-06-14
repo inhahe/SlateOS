@@ -42695,6 +42695,195 @@ fn self_test_mprotect_flush_range() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+#[inline(never)]
+fn self_test_madvise_validation() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+    // madvise(addr, len, advice) coverage, Linux do_madvise gate order:
+    //   1. behavior_valid  -> EINVAL  (FIRST — fires for unknown advice
+    //                                  even with len=0 and bad addr)
+    //   2. !PAGE_ALIGNED(addr) -> EINVAL
+    //   3. len overflow    -> EINVAL
+    //   4. addr+len overflow -> EINVAL
+    //   5. len == 0        -> 0  (no-op, after gates 1-4)
+    //   6. HWPOISON/SOFT_OFFLINE -> EPERM (capable check ahead of VMA walk)
+    //   7. out-of-user-range -> ENOMEM
+    //   8. known no-op advice -> 0
+    const MADV_DONTNEED: u64 = 4;
+    const MADV_FREE: u64 = 8;
+    const MADV_COLLAPSE: u64 = 25; // upper documented bound
+    const MADV_HWPOISON: u64 = 100;
+    const MADV_SOFT_OFFLINE: u64 = 101;
+
+    // Gate 1: unknown advice with len=0 and bogus addr -> EINVAL.
+    // Pre-batch this returned 0 because len==0 was the first gate.
+    let a = SyscallArgs { arg0: 0x4001 /* misaligned */, arg1: 0,
+        arg2: 9999 /* bogus advice */, arg3: 0, arg4: 0, arg5: 0 };
+    if dispatch_linux(nr::MADVISE, &a).value != -i64::from(errno::EINVAL) {
+        serial_println!("[syscall/linux]   FAIL: madvise(unknown advice, len=0) not EINVAL");
+        return Err(KernelError::InternalError);
+    }
+    // Same shape with valid advice and valid addr — len=0 no-op.
+    let a = SyscallArgs { arg0: 0x4000, arg1: 0,
+        arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+    if dispatch_linux(nr::MADVISE, &a).value != 0 {
+        serial_println!("[syscall/linux]   FAIL: madvise(known, len=0) not 0");
+        return Err(KernelError::InternalError);
+    }
+    // Gate 2: misaligned addr with len=0 and valid advice -> EINVAL.
+    // Pre-batch this returned 0 (len=0 short-circuited).
+    let a = SyscallArgs { arg0: 0x4001, arg1: 0,
+        arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+    if dispatch_linux(nr::MADVISE, &a).value != -i64::from(errno::EINVAL) {
+        serial_println!("[syscall/linux]   FAIL: madvise(misalign, len=0) not EINVAL");
+        return Err(KernelError::InternalError);
+    }
+
+    // Known hints over a valid user-space range return 0.
+    for advice in [0u64, 1, 2, 3, MADV_DONTNEED, MADV_FREE, MADV_COLLAPSE] {
+        let a = SyscallArgs { arg0: 0x4000, arg1: 0x4000,
+            arg2: advice, arg3: 0, arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::MADVISE, &a).value;
+        if v != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: madvise(advice={}) -> {} (expected 0)",
+                advice, v
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // HWPOISON / SOFT_OFFLINE over a user range: EPERM.
+    for advice in [MADV_HWPOISON, MADV_SOFT_OFFLINE] {
+        let a = SyscallArgs { arg0: 0x4000, arg1: 0x4000,
+            arg2: advice, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::MADVISE, &a).value != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: madvise(advice={}) not EPERM", advice
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    // Gate 6: HWPOISON with kernel addr -> EPERM (capable check
+    // fires before the VMA bounds check).  Pre-batch this
+    // returned ENOMEM via the user-space bounds gate.
+    let a = SyscallArgs { arg0: 0xFFFF_8000_0000_0000, arg1: 0x4000,
+        arg2: MADV_HWPOISON, arg3: 0, arg4: 0, arg5: 0 };
+    if dispatch_linux(nr::MADVISE, &a).value != -i64::from(errno::EPERM) {
+        serial_println!("[syscall/linux]   FAIL: madvise(HWPOISON, kernel addr) not EPERM");
+        return Err(KernelError::InternalError);
+    }
+
+    // Unknown advice (26 — between documented max 25 and HWPOISON):
+    // EINVAL.
+    let a = SyscallArgs { arg0: 0x4000, arg1: 0x4000,
+        arg2: 26, arg3: 0, arg4: 0, arg5: 0 };
+    if dispatch_linux(nr::MADVISE, &a).value != -i64::from(errno::EINVAL) {
+        serial_println!("[syscall/linux]   FAIL: madvise unknown advice");
+        return Err(KernelError::InternalError);
+    }
+
+    // Batch 513: Linux v6.6's madvise_behavior_valid is an
+    // enumerated switch, not a 0..=25 range.  Values 5, 6, 7
+    // are NOT in the case list and must produce EINVAL.
+    // Pre-batch we accepted them silently via the contiguous
+    // range match.  The NULL+len=0 idiom (the canonical glibc
+    // / jemalloc feature-detect shape) makes the divergence
+    // observable without needing a valid VMA: madvise's gate
+    // 1 fires before gate 5 (len==0 → 0).
+    for advice in [5u64, 6, 7] {
+        let a = SyscallArgs { arg0: 0, arg1: 0,
+            arg2: advice, arg3: 0, arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::MADVISE, &a).value;
+        if v != -i64::from(errno::EINVAL) {
+            serial_println!(
+                "[syscall/linux]   FAIL: madvise(advice={}) -> {} (want EINVAL, v6.6 madvise_behavior_valid switch default)",
+                advice, v,
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    // Positive-discriminator probes: advice values directly
+    // adjacent to the 5/6/7 gap (4 = MADV_DONTNEED, 8 =
+    // MADV_FREE) AND the other newly-explicit values not
+    // previously exercised by the existing probe loop
+    // (10 DONTFORK, 11 DOFORK, 18 WIPEONFORK, 19 KEEPONFORK,
+    // 22 POPULATE_READ, 23 POPULATE_WRITE, 24
+    // DONTNEED_LOCKED) must still succeed with NULL+len=0.
+    // Locks in that the enumerated-switch rewrite didn't
+    // accidentally drop a previously-accepted value.
+    for advice in [4u64, 8, 10, 11, 18, 19, 22, 23, 24] {
+        let a = SyscallArgs { arg0: 0, arg1: 0,
+            arg2: advice, arg3: 0, arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::MADVISE, &a).value;
+        if v != 0 {
+            serial_println!(
+                "[syscall/linux]   FAIL: madvise(advice={}, NULL, 0) -> {} (want 0; positive discriminator after switch rewrite)",
+                advice, v,
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    serial_println!(
+        "[syscall/linux]   madvise_behavior_valid enumerated switch — advice {{5,6,7}} reject as EINVAL (v6.6 mm/madvise.c::madvise_behavior_valid default: return false): OK"
+    );
+
+    // Misaligned addr with nonzero len: EINVAL.
+    let a = SyscallArgs { arg0: 0x4001, arg1: 0x4000,
+        arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+    if dispatch_linux(nr::MADVISE, &a).value != -i64::from(errno::EINVAL) {
+        serial_println!("[syscall/linux]   FAIL: madvise misalign");
+        return Err(KernelError::InternalError);
+    }
+
+    // Kernel-space addr with nonzero len and valid no-op advice:
+    // ENOMEM (Linux's per-VMA walk finds no covering VMA).
+    let a = SyscallArgs { arg0: 0xFFFF_8000_0000_0000, arg1: 0x4000,
+        arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+    if dispatch_linux(nr::MADVISE, &a).value != -i64::from(errno::ENOMEM) {
+        serial_println!("[syscall/linux]   FAIL: madvise kernel-addr");
+        return Err(KernelError::InternalError);
+    }
+    // Gate 2 ABI-page discriminator: addr=0x5000 is 4 KiB-aligned
+    // (matches Linux's PAGE_SIZE) but NOT 16 KiB-aligned (the
+    // kernel's internal FRAME_SIZE).  Pre-batch this returned
+    // EINVAL because we checked against the larger frame size;
+    // Linux accepts because PAGE_ALIGNED holds.  A glibc allocator
+    // or CRIU probe routinely passes 4 KiB-aligned addresses.
+    let a = SyscallArgs { arg0: 0x5000, arg1: 0x1000,
+        arg2: 0 /* MADV_NORMAL */, arg3: 0, arg4: 0, arg5: 0 };
+    if dispatch_linux(nr::MADVISE, &a).value != 0 {
+        serial_println!(
+            "[syscall/linux]   FAIL: madvise(4 KiB-aligned, not 16 KiB-aligned) not 0"
+        );
+        return Err(KernelError::InternalError);
+    }
+    // Same shape with len=0 still passes alignment (gate 2) and
+    // then succeeds at gate 5 (end==start).
+    let a = SyscallArgs { arg0: 0x5000, arg1: 0,
+        arg2: 4 /* MADV_DONTNEED */, arg3: 0, arg4: 0, arg5: 0 };
+    if dispatch_linux(nr::MADVISE, &a).value != 0 {
+        serial_println!(
+            "[syscall/linux]   FAIL: madvise(4 KiB-aligned, len=0) not 0"
+        );
+        return Err(KernelError::InternalError);
+    }
+    // Discriminator for sub-4-KiB misalignment: addr=0x4002 fails
+    // even the ABI alignment gate -> EINVAL.  Confirms we still
+    // reject genuine sub-page misalignment.
+    let a = SyscallArgs { arg0: 0x4002, arg1: 0x1000,
+        arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+    if dispatch_linux(nr::MADVISE, &a).value != -i64::from(errno::EINVAL) {
+        serial_println!(
+            "[syscall/linux]   FAIL: madvise(sub-4-KiB misalign) not EINVAL"
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[syscall/linux]   madvise ABI-page alignment (4 KiB) gate order: OK"
+    );
+    Ok(())
+}
+
 pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
@@ -42959,191 +43148,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // function only flushes — it doesn't touch the page tables.
     self_test_mprotect_flush_range()?;
 
-    // madvise(addr, len, advice) coverage, Linux do_madvise gate order:
-    //   1. behavior_valid  -> EINVAL  (FIRST — fires for unknown advice
-    //                                  even with len=0 and bad addr)
-    //   2. !PAGE_ALIGNED(addr) -> EINVAL
-    //   3. len overflow    -> EINVAL
-    //   4. addr+len overflow -> EINVAL
-    //   5. len == 0        -> 0  (no-op, after gates 1-4)
-    //   6. HWPOISON/SOFT_OFFLINE -> EPERM (capable check ahead of VMA walk)
-    //   7. out-of-user-range -> ENOMEM
-    //   8. known no-op advice -> 0
-    {
-        const MADV_DONTNEED: u64 = 4;
-        const MADV_FREE: u64 = 8;
-        const MADV_COLLAPSE: u64 = 25; // upper documented bound
-        const MADV_HWPOISON: u64 = 100;
-        const MADV_SOFT_OFFLINE: u64 = 101;
-
-        // Gate 1: unknown advice with len=0 and bogus addr -> EINVAL.
-        // Pre-batch this returned 0 because len==0 was the first gate.
-        let a = SyscallArgs { arg0: 0x4001 /* misaligned */, arg1: 0,
-            arg2: 9999 /* bogus advice */, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::MADVISE, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: madvise(unknown advice, len=0) not EINVAL");
-            return Err(KernelError::InternalError);
-        }
-        // Same shape with valid advice and valid addr — len=0 no-op.
-        let a = SyscallArgs { arg0: 0x4000, arg1: 0,
-            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::MADVISE, &a).value != 0 {
-            serial_println!("[syscall/linux]   FAIL: madvise(known, len=0) not 0");
-            return Err(KernelError::InternalError);
-        }
-        // Gate 2: misaligned addr with len=0 and valid advice -> EINVAL.
-        // Pre-batch this returned 0 (len=0 short-circuited).
-        let a = SyscallArgs { arg0: 0x4001, arg1: 0,
-            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::MADVISE, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: madvise(misalign, len=0) not EINVAL");
-            return Err(KernelError::InternalError);
-        }
-
-        // Known hints over a valid user-space range return 0.
-        for advice in [0u64, 1, 2, 3, MADV_DONTNEED, MADV_FREE, MADV_COLLAPSE] {
-            let a = SyscallArgs { arg0: 0x4000, arg1: 0x4000,
-                arg2: advice, arg3: 0, arg4: 0, arg5: 0 };
-            let v = dispatch_linux(nr::MADVISE, &a).value;
-            if v != 0 {
-                serial_println!(
-                    "[syscall/linux]   FAIL: madvise(advice={}) -> {} (expected 0)",
-                    advice, v
-                );
-                return Err(KernelError::InternalError);
-            }
-        }
-
-        // HWPOISON / SOFT_OFFLINE over a user range: EPERM.
-        for advice in [MADV_HWPOISON, MADV_SOFT_OFFLINE] {
-            let a = SyscallArgs { arg0: 0x4000, arg1: 0x4000,
-                arg2: advice, arg3: 0, arg4: 0, arg5: 0 };
-            if dispatch_linux(nr::MADVISE, &a).value != -i64::from(errno::EPERM) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: madvise(advice={}) not EPERM", advice
-                );
-                return Err(KernelError::InternalError);
-            }
-        }
-        // Gate 6: HWPOISON with kernel addr -> EPERM (capable check
-        // fires before the VMA bounds check).  Pre-batch this
-        // returned ENOMEM via the user-space bounds gate.
-        let a = SyscallArgs { arg0: 0xFFFF_8000_0000_0000, arg1: 0x4000,
-            arg2: MADV_HWPOISON, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::MADVISE, &a).value != -i64::from(errno::EPERM) {
-            serial_println!("[syscall/linux]   FAIL: madvise(HWPOISON, kernel addr) not EPERM");
-            return Err(KernelError::InternalError);
-        }
-
-        // Unknown advice (26 — between documented max 25 and HWPOISON):
-        // EINVAL.
-        let a = SyscallArgs { arg0: 0x4000, arg1: 0x4000,
-            arg2: 26, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::MADVISE, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: madvise unknown advice");
-            return Err(KernelError::InternalError);
-        }
-
-        // Batch 513: Linux v6.6's madvise_behavior_valid is an
-        // enumerated switch, not a 0..=25 range.  Values 5, 6, 7
-        // are NOT in the case list and must produce EINVAL.
-        // Pre-batch we accepted them silently via the contiguous
-        // range match.  The NULL+len=0 idiom (the canonical glibc
-        // / jemalloc feature-detect shape) makes the divergence
-        // observable without needing a valid VMA: madvise's gate
-        // 1 fires before gate 5 (len==0 → 0).
-        for advice in [5u64, 6, 7] {
-            let a = SyscallArgs { arg0: 0, arg1: 0,
-                arg2: advice, arg3: 0, arg4: 0, arg5: 0 };
-            let v = dispatch_linux(nr::MADVISE, &a).value;
-            if v != -i64::from(errno::EINVAL) {
-                serial_println!(
-                    "[syscall/linux]   FAIL: madvise(advice={}) -> {} (want EINVAL, v6.6 madvise_behavior_valid switch default)",
-                    advice, v,
-                );
-                return Err(KernelError::InternalError);
-            }
-        }
-        // Positive-discriminator probes: advice values directly
-        // adjacent to the 5/6/7 gap (4 = MADV_DONTNEED, 8 =
-        // MADV_FREE) AND the other newly-explicit values not
-        // previously exercised by the existing probe loop
-        // (10 DONTFORK, 11 DOFORK, 18 WIPEONFORK, 19 KEEPONFORK,
-        // 22 POPULATE_READ, 23 POPULATE_WRITE, 24
-        // DONTNEED_LOCKED) must still succeed with NULL+len=0.
-        // Locks in that the enumerated-switch rewrite didn't
-        // accidentally drop a previously-accepted value.
-        for advice in [4u64, 8, 10, 11, 18, 19, 22, 23, 24] {
-            let a = SyscallArgs { arg0: 0, arg1: 0,
-                arg2: advice, arg3: 0, arg4: 0, arg5: 0 };
-            let v = dispatch_linux(nr::MADVISE, &a).value;
-            if v != 0 {
-                serial_println!(
-                    "[syscall/linux]   FAIL: madvise(advice={}, NULL, 0) -> {} (want 0; positive discriminator after switch rewrite)",
-                    advice, v,
-                );
-                return Err(KernelError::InternalError);
-            }
-        }
-        serial_println!(
-            "[syscall/linux]   madvise_behavior_valid enumerated switch — advice {{5,6,7}} reject as EINVAL (v6.6 mm/madvise.c::madvise_behavior_valid default: return false): OK"
-        );
-
-        // Misaligned addr with nonzero len: EINVAL.
-        let a = SyscallArgs { arg0: 0x4001, arg1: 0x4000,
-            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::MADVISE, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: madvise misalign");
-            return Err(KernelError::InternalError);
-        }
-
-        // Kernel-space addr with nonzero len and valid no-op advice:
-        // ENOMEM (Linux's per-VMA walk finds no covering VMA).
-        let a = SyscallArgs { arg0: 0xFFFF_8000_0000_0000, arg1: 0x4000,
-            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::MADVISE, &a).value != -i64::from(errno::ENOMEM) {
-            serial_println!("[syscall/linux]   FAIL: madvise kernel-addr");
-            return Err(KernelError::InternalError);
-        }
-        // Gate 2 ABI-page discriminator: addr=0x5000 is 4 KiB-aligned
-        // (matches Linux's PAGE_SIZE) but NOT 16 KiB-aligned (the
-        // kernel's internal FRAME_SIZE).  Pre-batch this returned
-        // EINVAL because we checked against the larger frame size;
-        // Linux accepts because PAGE_ALIGNED holds.  A glibc allocator
-        // or CRIU probe routinely passes 4 KiB-aligned addresses.
-        let a = SyscallArgs { arg0: 0x5000, arg1: 0x1000,
-            arg2: 0 /* MADV_NORMAL */, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::MADVISE, &a).value != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: madvise(4 KiB-aligned, not 16 KiB-aligned) not 0"
-            );
-            return Err(KernelError::InternalError);
-        }
-        // Same shape with len=0 still passes alignment (gate 2) and
-        // then succeeds at gate 5 (end==start).
-        let a = SyscallArgs { arg0: 0x5000, arg1: 0,
-            arg2: 4 /* MADV_DONTNEED */, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::MADVISE, &a).value != 0 {
-            serial_println!(
-                "[syscall/linux]   FAIL: madvise(4 KiB-aligned, len=0) not 0"
-            );
-            return Err(KernelError::InternalError);
-        }
-        // Discriminator for sub-4-KiB misalignment: addr=0x4002 fails
-        // even the ABI alignment gate -> EINVAL.  Confirms we still
-        // reject genuine sub-page misalignment.
-        let a = SyscallArgs { arg0: 0x4002, arg1: 0x1000,
-            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::MADVISE, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!(
-                "[syscall/linux]   FAIL: madvise(sub-4-KiB misalign) not EINVAL"
-            );
-            return Err(KernelError::InternalError);
-        }
-        serial_println!(
-            "[syscall/linux]   madvise ABI-page alignment (4 KiB) gate order: OK"
-        );
-    }
+    self_test_madvise_validation()?;
 
     // wait4 wstatus encoding (pure function — no real reaped child
     // needed).  Three branches: normal exit, signaled, crashed.

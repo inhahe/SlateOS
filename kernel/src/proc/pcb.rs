@@ -5370,7 +5370,126 @@ pub fn self_test() -> KernelResult<()> {
     test_io_accounting()?;
     test_job_control_state()?;
     test_mmap_commit_policy()?;
+    test_reserve_unmapped_area()?;
 
+    Ok(())
+}
+
+/// Test: VMA-aware mmap gap reservation (`reserve_unmapped_area`).
+///
+/// This is the atomic find-gap-and-insert path that every anonymous and
+/// file-backed `mmap` now uses to place a mapping in the general user mmap
+/// window.  It is exercised here against a throwaway process — pure PCB
+/// bookkeeping, independent of the page-table mapping and the userspace
+/// syscall harness the boot self-test cannot drive.  Over a small private
+/// test window it verifies:
+///   - the first reservation lands at the window base and registers a VMA
+///     with the requested kind/bounds,
+///   - a second same-size reservation lands immediately after the first
+///     (bottom-up first-fit, no overlap),
+///   - removing the first VMA opens a hole the next reservation *reuses*
+///     (freed space is not leaked — the core fix vs. the old monotonic
+///     bump allocator),
+///   - a request larger than any remaining gap returns `None` and inserts
+///     nothing,
+///   - an unknown pid returns `None`.
+fn test_reserve_unmapped_area() -> KernelResult<()> {
+    use crate::mm::page_table::PageFlags;
+
+    let frame = crate::mm::frame::FRAME_SIZE as u64;
+    let pid = create("reserve-area-test", 0);
+    set_running(pid)?;
+
+    // Fresh process: the VMA list must start empty so the placement
+    // assertions below are deterministic.
+    match list_vmas(pid) {
+        Some(v) if v.is_empty() => {}
+        _ => {
+            serial_println!("[proc]   FAIL: fresh process should have no VMAs");
+            destroy(pid);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // A 4-frame private test window, well clear of anything else.
+    let region_start = 0x0000_0050_0000_0000u64;
+    let region_end = region_start.saturating_add(frame.saturating_mul(4));
+    let flags = PageFlags::PRESENT | PageFlags::USER_ACCESSIBLE | PageFlags::WRITABLE;
+
+    // (1) First reservation → window base, with a registered Anonymous VMA.
+    let a = reserve_unmapped_area(pid, frame, region_start, region_end, VmaKind::Anonymous, flags);
+    if a != Some(region_start) {
+        serial_println!("[proc]   FAIL: first reserve should land at window base");
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    }
+    match list_vmas(pid).as_deref() {
+        Some([v])
+            if v.start == region_start
+                && v.end == region_start.saturating_add(frame)
+                && matches!(v.kind, VmaKind::Anonymous) => {}
+        _ => {
+            serial_println!("[proc]   FAIL: first reserve did not register the expected VMA");
+            destroy(pid);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // (2) Second same-size reservation → immediately after the first.
+    let b = reserve_unmapped_area(pid, frame, region_start, region_end, VmaKind::Anonymous, flags);
+    if b != Some(region_start.saturating_add(frame)) {
+        serial_println!("[proc]   FAIL: second reserve should follow the first (no overlap)");
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    }
+
+    // (3) Free the first VMA → opens a hole the next reserve must reuse.
+    if !remove_vma(pid, region_start) {
+        serial_println!("[proc]   FAIL: remove_vma(base) should succeed");
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    }
+    let c = reserve_unmapped_area(pid, frame, region_start, region_end, VmaKind::Anonymous, flags);
+    if c != Some(region_start) {
+        serial_println!("[proc]   FAIL: reserve should reuse the freed hole at base");
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    }
+
+    // (4) Window now holds [base, base+2*frame); a 3-frame request can't fit
+    //     in the remaining 2-frame tail → None, and nothing is inserted.
+    let before = list_vmas(pid).map_or(0, |v| v.len());
+    let big = reserve_unmapped_area(
+        pid,
+        frame.saturating_mul(3),
+        region_start,
+        region_end,
+        VmaKind::Anonymous,
+        flags,
+    );
+    if big.is_some() {
+        serial_println!("[proc]   FAIL: oversized reserve should fail with None");
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    }
+    let after = list_vmas(pid).map_or(0, |v| v.len());
+    if before != after {
+        serial_println!("[proc]   FAIL: failed reserve must not insert a VMA");
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    }
+
+    destroy(pid);
+
+    // (5) Unknown pid → None.
+    if reserve_unmapped_area(pid, frame, region_start, region_end, VmaKind::Anonymous, flags)
+        .is_some()
+    {
+        serial_println!("[proc]   FAIL: unknown pid should yield None");
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[proc]   reserve_unmapped_area: OK");
     Ok(())
 }
 

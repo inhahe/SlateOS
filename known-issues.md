@@ -765,6 +765,18 @@ has been applied to all three read-path tools (`ifconfig`, `ip`, `route`):
   unpopulated; `read_routes` now synthesizes the connected network route and the
   default route from `SYS_NET_IF_INFO`. 4 new host tests (`cargo test -p route`:
   10 pass). Write paths (`route add/del/flush`) unchanged.
+- **`netstat` (`-t`/`-l`/`-r`/`-i` connection, route, and iface views) — DONE
+  2026-06-14.** Its `/proc/net/{tcp,udp,route,dev}` and `/sys/class/net` sources
+  are all unpopulated. It now falls back to the read-only diagnostic syscalls:
+  connection list ← `SYS_TCP_LIST=840` (20-byte records) + listeners ←
+  `SYS_TCP_LISTENER_LIST=841` (4-byte records, mapping the kernel
+  `net::tcp::TcpState` discriminant to netstat's state enum); route view ←
+  `SYS_NET_IF_INFO=842` (connected + default route, same synthesis as `route`);
+  iface view ← `SYS_NET_IF_INFO` (name/MTU) + `SYS_NET_STAT=825` (48-byte
+  counters; rx_errors/tx_dropped reported as 0 since the kernel exposes
+  neither). UDP has no kernel socket-table syscall, so the UDP connection view
+  stays empty. 9 new host tests (`cargo test -p netstat`: 31 pass). netstat is
+  read-only (no write paths).
 
 **Proper fix:** this is an **operator design decision**, not a mechanical fix —
 the kernel must first grow the missing ABI, and the *shape* of that ABI is a

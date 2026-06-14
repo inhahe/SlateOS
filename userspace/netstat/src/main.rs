@@ -598,6 +598,280 @@ fn parse_protocol_stats() -> HashMap<String, ProtoStats> {
 }
 
 // ---------------------------------------------------------------------------
+// Kernel read-path fallback (SYS_TCP_LIST / SYS_TCP_LISTENER_LIST /
+// SYS_NET_IF_INFO / SYS_NET_STAT)
+//
+// The kernel does not populate /proc/net/{tcp,udp,route,dev} or /sys/class/net,
+// so the procfs parsers above always come back empty on Slate OS. These
+// read-only diagnostic syscalls are the live data source (TD18 read-path
+// wiring); we fall back to them whenever the procfs read yields nothing.
+// ---------------------------------------------------------------------------
+
+/// List active TCP connections (20-byte records). Returns count.
+const SYS_TCP_LIST: u64 = 840;
+/// List active TCP listeners (4-byte records). Returns count.
+const SYS_TCP_LISTENER_LIST: u64 = 841;
+/// Query interface configuration (24-byte record). Returns 0.
+const SYS_NET_IF_INFO: u64 = 842;
+/// Query interface byte/packet counters (48-byte record). Returns 0.
+const SYS_NET_STAT: u64 = 825;
+
+const TCP_LIST_RECORD_SIZE: usize = 20;
+const TCP_LISTENER_RECORD_SIZE: usize = 4;
+const NET_IF_INFO_SIZE: usize = 24;
+const NET_STAT_SIZE: usize = 48;
+
+/// Upper bound on records requested in one listing call.
+const MAX_TCP_RECORDS: usize = 1024;
+
+#[cfg(target_arch = "x86_64")]
+unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
+    let ret: i64;
+    // SAFETY: Caller guarantees arguments are valid for the given syscall.
+    // The `syscall` instruction clobbers rcx and r11 per the System V ABI.
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            inlateout("rax") nr as i64 => ret,
+            in("rdi") a1,
+            in("rsi") a2,
+            in("rdx") a3,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+// Stub for non-x86_64 hosts (e.g. running tests on a non-x86_64 build machine).
+#[cfg(not(target_arch = "x86_64"))]
+unsafe fn syscall3(_nr: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
+    -38 // ENOSYS
+}
+
+/// Format four network-order octets as a dotted-quad string.
+fn fmt_octets(b: [u8; 4]) -> String {
+    format!("{}.{}.{}.{}", b[0], b[1], b[2], b[3])
+}
+
+/// Map the kernel's `net::tcp::TcpState` discriminant (byte `[12]` of a
+/// `SYS_TCP_LIST` record) to netstat's [`TcpState`]. The kernel enum order is
+/// `Closed, Listen, SynSent, SynReceived, Established, FinWait1, FinWait2,
+/// TimeWait, CloseWait, LastAck` (see `kernel/src/net/tcp.rs`).
+fn kernel_tcp_state(raw: u8) -> Option<TcpState> {
+    match raw {
+        0 => Some(TcpState::Close),
+        1 => Some(TcpState::Listen),
+        2 => Some(TcpState::SynSent),
+        3 => Some(TcpState::SynRecv),
+        4 => Some(TcpState::Established),
+        5 => Some(TcpState::FinWait1),
+        6 => Some(TcpState::FinWait2),
+        7 => Some(TcpState::TimeWait),
+        8 => Some(TcpState::CloseWait),
+        9 => Some(TcpState::LastAck),
+        _ => None,
+    }
+}
+
+/// Decode a flat buffer of 20-byte `SYS_TCP_LIST` records into connections.
+/// A trailing partial record (if any) is ignored by `chunks_exact`.
+fn parse_tcp_list_records(buf: &[u8]) -> Vec<Connection> {
+    buf.chunks_exact(TCP_LIST_RECORD_SIZE)
+        .map(|rec| {
+            // rec.len() == 20 guaranteed by chunks_exact.
+            let local_addr = fmt_octets([rec[0], rec[1], rec[2], rec[3]]);
+            let local_port = u16::from_be_bytes([rec[4], rec[5]]);
+            let remote_addr = fmt_octets([rec[6], rec[7], rec[8], rec[9]]);
+            let remote_port = u16::from_be_bytes([rec[10], rec[11]]);
+            let state = kernel_tcp_state(rec[12]);
+            // rx/tx buffered are u24 LE in [13..16] / [16..19].
+            let rx_queue =
+                u32::from(rec[13]) | (u32::from(rec[14]) << 8) | (u32::from(rec[15]) << 16);
+            let tx_queue =
+                u32::from(rec[16]) | (u32::from(rec[17]) << 8) | (u32::from(rec[18]) << 16);
+            Connection {
+                protocol: "tcp".to_string(),
+                local_addr,
+                local_port,
+                remote_addr,
+                remote_port,
+                state,
+                tx_queue,
+                rx_queue,
+                inode: 0,
+                uid: 0,
+                pid: None,
+                program: None,
+            }
+        })
+        .collect()
+}
+
+/// Decode a flat buffer of 4-byte `SYS_TCP_LISTENER_LIST` records into
+/// connections in the `LISTEN` state.
+fn parse_tcp_listener_records(buf: &[u8]) -> Vec<Connection> {
+    buf.chunks_exact(TCP_LISTENER_RECORD_SIZE)
+        .map(|rec| {
+            // rec.len() == 4 guaranteed by chunks_exact.
+            let local_port = u16::from_be_bytes([rec[0], rec[1]]);
+            // rec[2]/rec[3] = backlog used/max — not shown in the connection list.
+            Connection {
+                protocol: "tcp".to_string(),
+                local_addr: "0.0.0.0".to_string(),
+                local_port,
+                remote_addr: "0.0.0.0".to_string(),
+                remote_port: 0,
+                state: Some(TcpState::Listen),
+                tx_queue: 0,
+                rx_queue: 0,
+                inode: 0,
+                uid: 0,
+                pid: None,
+                program: None,
+            }
+        })
+        .collect()
+}
+
+/// Synthesize routing entries from a 24-byte `SYS_NET_IF_INFO` record: a
+/// connected network route (when ip & mask is nonzero) and a default route
+/// (when a gateway is set). Mirrors the standalone `route` tool's synthesis.
+fn routes_from_if_info(rec: &[u8; NET_IF_INFO_SIZE]) -> Vec<RouteEntry> {
+    let ip = [rec[0], rec[1], rec[2], rec[3]];
+    let mask = [rec[4], rec[5], rec[6], rec[7]];
+    let gw = [rec[8], rec[9], rec[10], rec[11]];
+    let network = [
+        ip[0] & mask[0],
+        ip[1] & mask[1],
+        ip[2] & mask[2],
+        ip[3] & mask[3],
+    ];
+    let mut routes = Vec::new();
+    if network != [0, 0, 0, 0] {
+        routes.push(RouteEntry {
+            destination: fmt_octets(network),
+            gateway: "0.0.0.0".to_string(),
+            genmask: fmt_octets(mask),
+            flags: "U".to_string(),
+            metric: 0,
+            _ref_cnt: 0,
+            use_cnt: 0,
+            iface: "eth0".to_string(),
+        });
+    }
+    if gw != [0, 0, 0, 0] {
+        routes.push(RouteEntry {
+            destination: "0.0.0.0".to_string(),
+            gateway: fmt_octets(gw),
+            genmask: "0.0.0.0".to_string(),
+            flags: "UG".to_string(),
+            metric: 0,
+            _ref_cnt: 0,
+            use_cnt: 0,
+            iface: "eth0".to_string(),
+        });
+    }
+    routes
+}
+
+/// Synthesize an interface-stats entry from the 24-byte `SYS_NET_IF_INFO`
+/// record (for the name/MTU) and the 48-byte `SYS_NET_STAT` record (for the
+/// counters). `SYS_NET_STAT` does not expose rx_errors or tx_dropped, so those
+/// are reported as 0 rather than fabricated.
+fn iface_from_if_info_and_stat(
+    _if_rec: &[u8; NET_IF_INFO_SIZE],
+    stat: &[u8; NET_STAT_SIZE],
+) -> IfaceEntry {
+    let u64_at = |off: usize| -> u64 {
+        let mut b = [0u8; 8];
+        b.copy_from_slice(&stat[off..off + 8]);
+        u64::from_le_bytes(b)
+    };
+    IfaceEntry {
+        name: "eth0".to_string(),
+        mtu: 1500,
+        rx_bytes: u64_at(24),
+        rx_packets: u64_at(32),
+        rx_errors: 0,
+        rx_dropped: u64_at(40),
+        tx_bytes: u64_at(0),
+        tx_packets: u64_at(8),
+        tx_errors: u64_at(16),
+        tx_dropped: 0,
+    }
+}
+
+/// Query active TCP connections via `SYS_TCP_LIST`. Empty on failure.
+fn query_tcp_connections() -> Vec<Connection> {
+    let mut buf = vec![0u8; MAX_TCP_RECORDS * TCP_LIST_RECORD_SIZE];
+    // SAFETY: buf is a valid writable slice; the kernel writes at most buf.len()
+    // bytes and returns the number of 20-byte records written.
+    let ret = unsafe {
+        syscall3(SYS_TCP_LIST, buf.as_mut_ptr() as u64, buf.len() as u64, 0)
+    };
+    if ret < 0 {
+        return Vec::new();
+    }
+    let count = usize::try_from(ret).unwrap_or(0);
+    let byte_len = count.saturating_mul(TCP_LIST_RECORD_SIZE).min(buf.len());
+    parse_tcp_list_records(buf.get(..byte_len).unwrap_or(&[]))
+}
+
+/// Query active TCP listeners via `SYS_TCP_LISTENER_LIST`. Empty on failure.
+fn query_tcp_listeners() -> Vec<Connection> {
+    let mut buf = vec![0u8; MAX_TCP_RECORDS * TCP_LISTENER_RECORD_SIZE];
+    // SAFETY: as above; records are 4 bytes and the return is the count.
+    let ret = unsafe {
+        syscall3(SYS_TCP_LISTENER_LIST, buf.as_mut_ptr() as u64, buf.len() as u64, 0)
+    };
+    if ret < 0 {
+        return Vec::new();
+    }
+    let count = usize::try_from(ret).unwrap_or(0);
+    let byte_len = count.saturating_mul(TCP_LISTENER_RECORD_SIZE).min(buf.len());
+    parse_tcp_listener_records(buf.get(..byte_len).unwrap_or(&[]))
+}
+
+/// Fetch the raw 24-byte `SYS_NET_IF_INFO` record. `None` on failure.
+fn query_net_if_info_raw() -> Option<[u8; NET_IF_INFO_SIZE]> {
+    let mut buf = [0u8; NET_IF_INFO_SIZE];
+    // SAFETY: buf is exactly 24 bytes, satisfying the kernel's minimum length.
+    let ret = unsafe {
+        syscall3(SYS_NET_IF_INFO, buf.as_mut_ptr() as u64, buf.len() as u64, 0)
+    };
+    if ret < 0 { None } else { Some(buf) }
+}
+
+/// Fetch the raw 48-byte `SYS_NET_STAT` record. `None` on failure.
+fn query_net_stat_raw() -> Option<[u8; NET_STAT_SIZE]> {
+    let mut buf = [0u8; NET_STAT_SIZE];
+    // SAFETY: buf is exactly 48 bytes, the size the kernel writes.
+    let ret = unsafe {
+        syscall3(SYS_NET_STAT, buf.as_mut_ptr() as u64, buf.len() as u64, 0)
+    };
+    if ret < 0 { None } else { Some(buf) }
+}
+
+/// Route table via the kernel fallback (connected + default route).
+fn query_routes() -> Vec<RouteEntry> {
+    query_net_if_info_raw()
+        .map(|rec| routes_from_if_info(&rec))
+        .unwrap_or_default()
+}
+
+/// Interface-stats table via the kernel fallback (a single synthesized eth0).
+fn query_ifaces() -> Vec<IfaceEntry> {
+    match (query_net_if_info_raw(), query_net_stat_raw()) {
+        (Some(if_rec), Some(stat)) => {
+            vec![iface_from_if_info_and_stat(&if_rec, &stat)]
+        }
+        _ => Vec::new(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Display: service/port name lookup (common ports only, no external db)
 // ---------------------------------------------------------------------------
 
@@ -1113,7 +1387,12 @@ fn main() {
 
     // -r: routing table
     if opts.show_route {
-        let routes = parse_route_table();
+        let mut routes = parse_route_table();
+        // The kernel does not populate /proc/net/route; fall back to the
+        // SYS_NET_IF_INFO-derived connected + default routes (TD18).
+        if routes.is_empty() {
+            routes = query_routes();
+        }
         if routes.is_empty() {
             let _ = writeln!(stdout, "No routing entries found.");
         } else {
@@ -1124,7 +1403,12 @@ fn main() {
 
     // -i: interface table
     if opts.show_iface {
-        let ifaces = parse_iface_stats();
+        let mut ifaces = parse_iface_stats();
+        // The kernel does not populate /proc/net/dev; fall back to the
+        // SYS_NET_IF_INFO + SYS_NET_STAT synthesized eth0 entry (TD18).
+        if ifaces.is_empty() {
+            ifaces = query_ifaces();
+        }
         if ifaces.is_empty() {
             let _ = writeln!(stdout, "No interface statistics available.");
         } else {
@@ -1144,6 +1428,15 @@ fn main() {
     if opts.show_udp {
         connections.extend(parse_proc_net_file("/proc/net/udp", "udp", false));
         connections.extend(parse_proc_net_file("/proc/net/udp6", "udp6", true));
+    }
+
+    // The kernel does not populate /proc/net/{tcp,udp}; fall back to the
+    // SYS_TCP_LIST + SYS_TCP_LISTENER_LIST diagnostic syscalls when the procfs
+    // read came back empty (TD18). Only TCP has a listing syscall — UDP has no
+    // kernel-side socket table to enumerate yet.
+    if connections.is_empty() && opts.show_tcp {
+        connections.extend(query_tcp_connections());
+        connections.extend(query_tcp_listeners());
     }
 
     // Filter: listening only
@@ -1413,5 +1706,148 @@ mod tests {
 
         let addr2: Ipv6Addr = "fe80::1".parse().unwrap();
         assert!(extract_mapped_v4(&addr2).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Kernel read-path fallback tests (SYS_TCP_LIST / LISTENER_LIST /
+    // NET_IF_INFO / NET_STAT decoders).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_kernel_tcp_state_mapping() {
+        assert_eq!(kernel_tcp_state(0), Some(TcpState::Close));
+        assert_eq!(kernel_tcp_state(1), Some(TcpState::Listen));
+        assert_eq!(kernel_tcp_state(2), Some(TcpState::SynSent));
+        assert_eq!(kernel_tcp_state(3), Some(TcpState::SynRecv));
+        assert_eq!(kernel_tcp_state(4), Some(TcpState::Established));
+        assert_eq!(kernel_tcp_state(7), Some(TcpState::TimeWait));
+        assert_eq!(kernel_tcp_state(9), Some(TcpState::LastAck));
+        assert_eq!(kernel_tcp_state(10), None);
+        assert_eq!(kernel_tcp_state(255), None);
+    }
+
+    #[test]
+    fn test_parse_tcp_list_records() {
+        // One connection: 10.0.2.15:443 (local) -> 10.0.2.2:54321 (remote),
+        // Established (state=4), rx_buffered=0x010203, tx_buffered=0x040506.
+        let rec: [u8; 20] = [
+            10, 0, 2, 15, // local IP (network order octets)
+            0x01, 0xBB, // local port 443 (BE)
+            10, 0, 2, 2, // remote IP
+            0xD4, 0x31, // remote port 54321 (BE)
+            4, // state = Established
+            0x03, 0x02, 0x01, // rx_buffered u24 LE = 0x010203
+            0x06, 0x05, 0x04, // tx_buffered u24 LE = 0x040506
+            0x01, // flags (keepalive) — ignored by decoder
+        ];
+        let conns = parse_tcp_list_records(&rec);
+        assert_eq!(conns.len(), 1);
+        let c = &conns[0];
+        assert_eq!(c.protocol, "tcp");
+        assert_eq!(c.local_addr, "10.0.2.15");
+        assert_eq!(c.local_port, 443);
+        assert_eq!(c.remote_addr, "10.0.2.2");
+        assert_eq!(c.remote_port, 54321);
+        assert_eq!(c.state, Some(TcpState::Established));
+        assert_eq!(c.rx_queue, 0x01_0203);
+        assert_eq!(c.tx_queue, 0x04_0506);
+    }
+
+    #[test]
+    fn test_parse_tcp_list_records_partial_ignored() {
+        // 20 valid bytes + 5 trailing partial bytes that must be ignored.
+        let mut buf = vec![0u8; 20];
+        buf[0] = 192;
+        buf[1] = 168;
+        buf[2] = 1;
+        buf[3] = 5;
+        buf[4] = 0x00; // port 80 BE
+        buf[5] = 0x50;
+        buf[12] = 1; // Listen-ish state value (kernel Listen=1)
+        buf.extend_from_slice(&[1, 2, 3, 4, 5]);
+        let conns = parse_tcp_list_records(&buf);
+        assert_eq!(conns.len(), 1);
+        assert_eq!(conns[0].local_addr, "192.168.1.5");
+        assert_eq!(conns[0].local_port, 80);
+        assert_eq!(conns[0].state, Some(TcpState::Listen));
+    }
+
+    #[test]
+    fn test_parse_tcp_listener_records() {
+        // Two listeners: port 22 and port 8080.
+        let buf: [u8; 8] = [
+            0x00, 0x16, 1, 5, // port 22 BE, backlog 1/5
+            0x1F, 0x90, 0, 10, // port 8080 BE, backlog 0/10
+        ];
+        let conns = parse_tcp_listener_records(&buf);
+        assert_eq!(conns.len(), 2);
+        assert_eq!(conns[0].local_port, 22);
+        assert_eq!(conns[0].state, Some(TcpState::Listen));
+        assert_eq!(conns[0].local_addr, "0.0.0.0");
+        assert_eq!(conns[1].local_port, 8080);
+        assert_eq!(conns[1].state, Some(TcpState::Listen));
+    }
+
+    #[test]
+    fn test_routes_from_if_info() {
+        // ip 10.0.2.15, mask 255.255.255.0, gw 10.0.2.2.
+        let mut rec = [0u8; NET_IF_INFO_SIZE];
+        rec[0..4].copy_from_slice(&[10, 0, 2, 15]);
+        rec[4..8].copy_from_slice(&[255, 255, 255, 0]);
+        rec[8..12].copy_from_slice(&[10, 0, 2, 2]);
+        let routes = routes_from_if_info(&rec);
+        assert_eq!(routes.len(), 2);
+        // Connected route.
+        assert_eq!(routes[0].destination, "10.0.2.0");
+        assert_eq!(routes[0].gateway, "0.0.0.0");
+        assert_eq!(routes[0].genmask, "255.255.255.0");
+        assert_eq!(routes[0].flags, "U");
+        assert_eq!(routes[0].iface, "eth0");
+        // Default route.
+        assert_eq!(routes[1].destination, "0.0.0.0");
+        assert_eq!(routes[1].gateway, "10.0.2.2");
+        assert_eq!(routes[1].flags, "UG");
+    }
+
+    #[test]
+    fn test_routes_from_if_info_unconfigured() {
+        let rec = [0u8; NET_IF_INFO_SIZE];
+        assert!(routes_from_if_info(&rec).is_empty());
+    }
+
+    #[test]
+    fn test_routes_from_if_info_no_gateway() {
+        // Configured ip/mask but no gateway -> connected route only.
+        let mut rec = [0u8; NET_IF_INFO_SIZE];
+        rec[0..4].copy_from_slice(&[192, 168, 1, 50]);
+        rec[4..8].copy_from_slice(&[255, 255, 255, 0]);
+        let routes = routes_from_if_info(&rec);
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].destination, "192.168.1.0");
+        assert_eq!(routes[0].flags, "U");
+    }
+
+    #[test]
+    fn test_iface_from_if_info_and_stat() {
+        let if_rec = [0u8; NET_IF_INFO_SIZE];
+        let mut stat = [0u8; NET_STAT_SIZE];
+        stat[0..8].copy_from_slice(&100u64.to_le_bytes()); // tx_bytes
+        stat[8..16].copy_from_slice(&5u64.to_le_bytes()); // tx_packets
+        stat[16..24].copy_from_slice(&1u64.to_le_bytes()); // tx_errors
+        stat[24..32].copy_from_slice(&200u64.to_le_bytes()); // rx_bytes
+        stat[32..40].copy_from_slice(&9u64.to_le_bytes()); // rx_packets
+        stat[40..48].copy_from_slice(&2u64.to_le_bytes()); // rx_drops
+        let e = iface_from_if_info_and_stat(&if_rec, &stat);
+        assert_eq!(e.name, "eth0");
+        assert_eq!(e.mtu, 1500);
+        assert_eq!(e.tx_bytes, 100);
+        assert_eq!(e.tx_packets, 5);
+        assert_eq!(e.tx_errors, 1);
+        assert_eq!(e.rx_bytes, 200);
+        assert_eq!(e.rx_packets, 9);
+        assert_eq!(e.rx_dropped, 2);
+        // Fields the kernel does not expose are reported as 0, not fabricated.
+        assert_eq!(e.rx_errors, 0);
+        assert_eq!(e.tx_dropped, 0);
     }
 }

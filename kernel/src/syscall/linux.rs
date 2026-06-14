@@ -49345,6 +49345,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
+    self_test_prctl_get_auxv()?;
+
+    #[inline(never)]
+    fn self_test_prctl_get_auxv() -> crate::error::KernelResult<()> {
+        use crate::serial_println;
     // Batch 89: prctl(PR_GET_AUXV) — Linux 6.4+ glibc/perf/BPF
     // probes the saved auxiliary vector via prctl option
     // 0x4155_5856 ("AUXV").  We don't yet store a kernel-side
@@ -49491,6 +49496,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 return Err(KernelError::InternalError);
             }
         }
+    }
+        Ok(())
     }
 
     // Batch 90: fcntl(F_GETOWN_EX / F_SETOWN_EX) — thread/process/

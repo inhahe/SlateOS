@@ -7841,16 +7841,20 @@ Remaining net improvements (diminishing returns):
 ## Cross-Zone Bug Reports
 
 - bench_isr_latency() page fault → double fault (kernel-core zone):
-  The ISR latency benchmark crashes with "Page Fault (#PF) at
-  0xffffffff8000f19e, address=0x8, error=0x2" which is a write to
-  near-null (struct offset 0x8 of a null pointer).  This cascades to
-  a Double Fault at 0xffffffff80d47ac3.  The ISR benchmark is in
-  kernel-core zone (kernel/src/bench.rs, bench_isr_latency fn).
-  WORKAROUND APPLIED: Moved bench_isr_latency() to the END of the
-  benchmark sequence so VFS/net/crypto/HTTP/dashboard benchmarks all
-  run and get scored before the crash.  The ISR crash still needs a
-  proper fix in kernel-core zone (likely null pointer in APIC timer
-  handler path under QEMU).
+  RESOLVED 2026-06-15 — no longer reproduces.  The crash ("Page Fault
+  (#PF) at 0xffffffff8000f19e, address=0x8" cascading to #DF) was an
+  artifact of the OLD timer-ISR path that called preempt() inline during
+  the hard-IRQ handler.  The Q7 deferred-preemption restructuring
+  (design-decisions.md §26: timer ISR only sets NEED_RESCHED; the context
+  switch runs later on the task stack) removed that path and the crash
+  with it.  Verified by running bench_isr_latency() both early in the
+  suite and in its normal end-of-suite slot — it completes cleanly
+  (≈54µs hard-IRQ phase under TCG).  The full --bench suite now reaches
+  BENCH_OK end-to-end ("Boot test PASSED").  (The actual last BENCH_OK
+  blocker turned out to be a separate scheduler self-deadlock in
+  bench_dashboard_api_status — fixed in design-decisions.md §27 /
+  known-issues.md B-DF1 follow-up.)  bench_isr_latency() still runs last
+  in run_all(), which is harmless now; it can be reordered freely.
 
 - Boot hangs after mm::integ_test test 9 ("Cgroup per-frame tracking: OK").
   The next test (test 10: cgroup charge/uncharge, frame.rs ~line 2740)

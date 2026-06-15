@@ -83,10 +83,85 @@ suite and does **not** affect normal operation (default boot test passes).
 
 ---
 
+## Q8. Which libc + rootfs strategy unblocks Path Z dynamic execution of prebuilt Linux binaries? — OPEN 2026-06-14
+
+**Question.** The operator-prioritized direction is **Path Z** (Q4, resolved
+2026-06-13): run *prebuilt* Linux toolchain binaries on the Linux-ABI layer now.
+The Linux-ABI loader/syscall plumbing for this is now extensively built and
+proven for **static** binaries end-to-end (`proc::spawn::self_test_linux_file_mmap`
+and `self_test_linux_brk` spawn real ring-3 Linux-ABI processes that issue
+`open`/`mmap`/`brk` and exit with a verified code; file-backed `mmap`, real
+`brk`/`sbrk`, `madvise(DONTNEED)`, SysV initial stack + auxv, PIE/interp ASLR, and
+the `ld.so` *load* path are all implemented). The one documented blocker for
+**dynamic** execution (roadmap.md line 5089) is: *"end-to-end interpreter
+EXECUTION deferred until a real glibc/musl `ld.so` is on disk."* There is no real
+Linux rootfs today — `scripts/create-disk.py` only builds a minimal FAT image
+with test files for the FAT driver self-test. To run an actual dynamically-linked
+prebuilt Linux binary we need a real libc + dynamic linker on a real on-disk
+filesystem. **Which libc, and how do we build/populate the rootfs?**
+
+**Options.**
+
+- **A. musl (static-first, then dynamic).** Bootstrap with musl: tiny, permissive
+  (MIT), trivial to build fully-static, and its `ld-musl-x86_64.so.1` is a single
+  self-contained file.
+  - *Pros:* fastest path to a *real compiled* Linux binary running (static musl
+    "hello world" needs no rootfs libc at all — just the ELF on disk); minimal
+    ABI surface; easy to vendor/build on the dev box; great for proving the
+    loader against real (non-hand-assembled) binaries.
+  - *Cons:* most *prebuilt* Linux toolchain binaries (the actual Path-Z target —
+    distro GCC/binutils/CMake) are linked against **glibc**, not musl, so musl
+    proves the loader but does not by itself run the prioritized prebuilt
+    toolchain; musl's syscall/behaviour assumptions differ from glibc in places.
+- **B. glibc directly.** Target glibc from the start, since the prioritized
+  prebuilt toolchain (Q3: GCC/CMake/Make first) is glibc-linked.
+  - *Pros:* matches the actual binaries we want to run; no second migration; the
+    `ld-linux-x86-64.so.2` + `libc.so.6` + friends are exactly what a distro
+    `gcc` needs at runtime.
+  - *Cons:* glibc is large and exercises far more of the Linux ABI (TLS edge
+    cases, `__libc_start_main`, `vDSO`, NSS, locale, many more syscalls/`ioctl`s)
+    — a much bigger first-light bring-up than musl; harder to build/obtain on a
+    Windows dev host; more ABI gaps to chase before *anything* runs.
+- **C. Both, staged.** musl static now to prove the loader against real compiled
+  binaries, then glibc for the prebuilt toolchain.
+  - *Pros:* de-risks the loader with the cheap target first; clear milestones.
+  - *Cons:* two bring-ups; some throwaway musl-specific work.
+
+  Orthogonally, the **rootfs** question: the design says *ext4 first*, so the
+  real answer is an ext4 image populated with the libc tree (vs. the current
+  FAT-only test image). Building/populating an ext4 rootfs on a Windows dev host
+  (and how to source the libc files — vendor prebuilt vs. build-from-source) is
+  itself a setup decision bundled into this.
+
+**Claude's recommendation.** **C (musl static first, then glibc), on an ext4
+rootfs.** A static musl binary needs no on-disk libc and exercises the
+already-built static-load path with a *real* compiler-produced ELF (the current
+end-to-end tests use hand-assembled ELFs), so it's the cheapest way to flush out
+real-world loader/ABI bugs before taking on glibc's much larger surface for the
+actual prebuilt toolchain. I have **not** started this autonomously because (1)
+the libc choice steers a large amount of subsequent ABI-compat work and is costly
+to reverse, (2) it's the operator's prioritized initiative and they may have a
+preference (e.g. "go straight to glibc, I don't care about musl"), and (3)
+building/sourcing a libc + ext4 rootfs on the Windows dev box has setup forks
+worth a quick operator steer. In the meantime the static-binary path is already
+proven and the loader plumbing is complete, so no autonomous progress is lost by
+waiting.
+
+**Where it bites.** `scripts/create-disk.py` (rootfs build — currently FAT test
+image only), `kernel/src/proc/spawn.rs` (`load_interpreter`, the `ld.so` entry
+path), `kernel/src/elf.rs` (`interp_path`/`load_segments_with_bias`),
+`kernel/src/syscall/linux.rs` (further ABI gaps glibc will exercise), and the
+ext4 mount/root path. Roadmap.md line 5089 ("end-to-end interpreter EXECUTION
+deferred until a real glibc/musl ld.so is on disk").
+
+**Status.** OPEN.
+
+---
+
 No further open questions remain. All earlier deferred operator decisions
 (Q1–Q6) have been resolved — see the "Recently resolved" list below and
 `design-decisions.md` for full rationale. New decisions that genuinely need the
-operator should be appended above this line as `## Q8 …`.
+operator should be appended above this line as `## Q9 …`.
 
 ---
 

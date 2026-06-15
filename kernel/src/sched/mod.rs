@@ -1856,6 +1856,31 @@ pub fn do_deferred_preempt() {
         .get(cpu)
         .is_some_and(|f| f.swap(false, Ordering::AcqRel));
     if pending && !cpu_is_idle(cpu) && !crate::softirq::is_processing() {
+        // Deadlock guard: never block on SCHED from the deferred-preempt path.
+        //
+        // `preempt()` calls `schedule_inner()`, which takes `SCHED.lock()`.  If
+        // the timer interrupted this CPU *while the running task held SCHED*
+        // (e.g. inside `task_list()`, which collects a heap `Vec` under the
+        // lock), preempting now would re-enter `SCHED.lock()` on the same CPU
+        // and spin forever — the interrupted frame can never release the lock
+        // because this CPU is now stuck in the nested acquire (and the `cli`
+        // below would make the hang unrecoverable).  This is the same hazard
+        // `unthrottle_expired()` avoids with `try_lock()` from ISR context.
+        //
+        // If SCHED is currently held (by this CPU's interrupted task *or*
+        // transiently by another CPU — we can't tell which, and skipping is
+        // safe either way), re-arm NEED_RESCHED and defer to the next tick.
+        // SCHED critical sections are short, so the preemption lands on a
+        // subsequent tick where the task is not holding the lock.  This makes
+        // involuntary preemption deadlock-free for *every* SCHED holder, not
+        // just the long `task_list()` hold (it also closes the analogous —
+        // tiny but real — window during voluntary `yield_now`/`block`).
+        if SCHED.is_locked() {
+            if let Some(f) = NEED_RESCHED.get(cpu) {
+                f.store(true, Ordering::Release);
+            }
+            return;
+        }
         // Disable interrupts across the involuntary context switch.
         //
         // B-DF1 recursion: without this, the whole `preempt → schedule_inner`

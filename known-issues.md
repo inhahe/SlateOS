@@ -28,10 +28,36 @@ stack, misclassified as a fresh outermost IRQ → recursion until guard-page
 overflow); fixed by disabling interrupts across the involuntary switch in
 `do_deferred_preempt`. See `design-decisions.md` §26. **Validated:**
 `http_gzip_8KiB` — which previously double-faulted entering the dashboard benches
-on a near-full task stack — now runs to completion. (Note: the *separate*
-`bench_isr_latency` null-pointer crash — `todo.txt` "Cross-Zone Bug Reports" — is
-a distinct kernel-core bug, not this overflow class, and still blocks the literal
-`BENCH_OK` marker since it runs last.)
+on a near-full task stack — now runs to completion.
+
+**Follow-up 2026-06-15 — `BENCH_OK` now reached end-to-end.** After the Q7
+landing, two further blockers were chased to ground:
+
+1. **The previously-documented `bench_isr_latency` null-pointer crash no longer
+   reproduces.** It was an artifact of the *old* timer-ISR path that called
+   `preempt()` inline during the hard-IRQ handler; the Q7 deferred-preempt
+   restructuring (timer ISR only sets `NEED_RESCHED`; the switch runs later on
+   the task stack) removed it. Verified by running `bench_isr_latency()` both
+   early and in its normal end-of-suite slot — it completes cleanly (≈54 µs
+   hard-IRQ phase under TCG, above the 10 µs target but that is emulation
+   noise, not a fault). The stale `todo.txt` "Cross-Zone Bug Reports" entry is
+   superseded.
+
+2. **The actual last `BENCH_OK` blocker was a scheduler self-deadlock, now
+   fixed.** `bench_dashboard_api_status` calls `dashboard::api_status()` →
+   `sched::task_list()`, which holds `SCHED` (a plain `spin::Mutex`) across a
+   heap `Vec` collect over *all* tasks. Run 1000× in a tight loop, a timer tick
+   reliably lands while the task holds `SCHED`; the Q7 deferred-preempt then ran
+   `preempt() → schedule_inner() → SCHED.lock()` on the *same* CPU and spun
+   forever (the `cli` in `do_deferred_preempt` made the hang unrecoverable). The
+   fix: `do_deferred_preempt` now checks `SCHED.is_locked()` and, if held,
+   re-arms `NEED_RESCHED` and defers to the next tick instead of blocking — the
+   same try/skip discipline `unthrottle_expired()` already uses from ISR
+   context. This closes the *entire* "involuntary preempt while the interrupted
+   context holds SCHED" deadlock class (including the tiny analogous window
+   during voluntary `yield_now`/`block`), at the single involuntary-preempt
+   site. **Validated: the full `--bench` suite now reaches `BENCH_OK` ("Boot
+   test PASSED").** See `design-decisions.md` §27.
 
 The original analysis is retained below for history.
 

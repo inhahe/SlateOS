@@ -158,13 +158,27 @@ pub const IDLE_PRIORITY: u8 = (NUM_PRIORITIES - 1) as u8;
 /// Default priority for normal tasks.
 pub const DEFAULT_PRIORITY: u8 = 16;
 
-/// Stack size for kernel tasks: 4 frames = 64 KiB.
+/// Stack size for kernel tasks. 4 frames = 64 KiB.
 ///
-/// Linux uses 4 pages (16 KiB) with 4 KiB pages.  We use 4 frames
-/// (64 KiB) with 16 KiB pages — proportionally equivalent.  Debug
-/// builds require more stack than release due to unoptimized frames
-/// (no inlining, no dead-store elimination).  32 KiB was insufficient
-/// for deep call chains (scheduler → wait queue → lock → yield).
+/// Linux uses 4 pages (16 KiB) with 4 KiB pages; we use 4 frames (64 KiB) with
+/// 16 KiB pages — proportionally equivalent, with ample headroom for the
+/// deepest in-kernel call chains plus the preemption path (`schedule_inner`,
+/// a ~2 KiB frame that runs on the interrupted task's own stack).
+///
+/// History: a transient #DF at `schedule_inner+0x11` while running heavy
+/// in-kernel benchmark code (gzip/dashboard JSON) was *misdiagnosed* as a
+/// stack-capacity shortfall and "fixed" by bumping debug builds to 128 KiB.
+/// That bump was reverted: the real cause was unbounded **re-entrant
+/// preemption recursion** (a nested timer tick re-entering
+/// `do_deferred_preempt → preempt → schedule_inner` with interrupts enabled on
+/// the task stack), proven because the overflow filled the *entire* stack at
+/// both 64 KiB and 128 KiB. The proper fix disables interrupts across the
+/// deferred-preempt context switch (see `sched::do_deferred_preempt`), so
+/// 64 KiB is sufficient in both profiles.
+///
+/// `kstack::STACK_FRAMES` is derived from this constant (single source of
+/// truth) so the guard-page allocator and the canary/watermark logic here can
+/// never drift apart.
 #[allow(clippy::arithmetic_side_effects)]
 pub const TASK_STACK_SIZE: usize = 4 * FRAME_SIZE;
 

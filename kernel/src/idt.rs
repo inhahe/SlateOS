@@ -381,6 +381,226 @@ pub struct InterruptStackFrame {
 }
 
 // ---------------------------------------------------------------------------
+// Per-CPU hardware-IRQ stacks (B-DF1 / open-questions Q7, option A)
+//
+// Hardware IRQs (vectors 32–56, plus the 251/252/255 APIC IPIs) are
+// configured with IST index 0, meaning the CPU does NOT switch stacks on
+// entry — the interrupt frame is pushed onto whatever stack the interrupted
+// code was using.  Heavy in-kernel code running on a near-full 64 KiB kernel
+// task stack could therefore push an IRQ frame into the guard page, causing
+// an unrecoverable double fault.
+//
+// To bound interrupt stack usage independently of task-stack depth, each CPU
+// gets a dedicated IRQ stack.  The IRQ entry path (`irq_common_dispatch`)
+// manually switches RSP to this stack for the duration of the handler, then
+// switches back.  Unlike x86 hardware IST — which unconditionally resets RSP
+// to the IST top on *every* interrupt and would clobber an outer handler's
+// frame on a nested IRQ — the manual switch is performed only on the
+// *outermost* IRQ.  A nested IRQ (the timer re-enables interrupts mid-handler
+// for preemption) is detected by RSP already lying within the IRQ-stack range
+// and continues to grow down the same IRQ stack.
+//
+// The IRQ stacks are allocated from the guard-page-protected kstack
+// allocator, so an IRQ-stack overflow still faults on a guard page (clear
+// diagnostic) instead of silently corrupting memory.
+//
+// The context switch that preemption performs must NOT run on the IRQ stack
+// (it would record a transient IRQ-stack RSP as the task's resume point), so
+// preemption is deferred: the timer ISR sets a flag via
+// `sched::request_preempt()` and the outermost IRQ frame services it via
+// `sched::do_deferred_preempt()` after RSP is back on the task stack.
+// ---------------------------------------------------------------------------
+
+/// Top (highest address, initial RSP) of each CPU's IRQ stack.  `0` = not yet
+/// allocated — that CPU runs IRQs on its task stack as a safe fallback until
+/// `init_irq_stack` runs.
+static IRQ_STACK_TOP: [AtomicU64; crate::smp::MAX_CPUS] = {
+    const ZERO: AtomicU64 = AtomicU64::new(0);
+    [ZERO; crate::smp::MAX_CPUS]
+};
+
+/// Bottom (lowest usable address) of each CPU's IRQ stack.  Combined with the
+/// top, used to detect whether the current RSP is already on the IRQ stack
+/// (i.e. a nested IRQ).
+static IRQ_STACK_BOTTOM: [AtomicU64; crate::smp::MAX_CPUS] = {
+    const ZERO: AtomicU64 = AtomicU64::new(0);
+    [ZERO; crate::smp::MAX_CPUS]
+};
+
+/// Allocate and install this CPU's dedicated hardware-IRQ stack.
+///
+/// Idempotent per CPU: a second call for an already-initialized CPU is a
+/// no-op (the stack is never freed for the lifetime of the system).  Must be
+/// called once per CPU *before* that CPU enables interrupts (`sti`).
+///
+/// On allocation failure the CPU keeps running IRQs on its task stack (the
+/// pre-existing behaviour) — safe, but without the overflow-isolation
+/// benefit; the failure is logged.
+pub fn init_irq_stack(cpu: usize) {
+    let Some(top_slot) = IRQ_STACK_TOP.get(cpu) else {
+        serial_println!("[idt] init_irq_stack: cpu {} out of range", cpu);
+        return;
+    };
+    if top_slot.load(Ordering::Acquire) != 0 {
+        return; // Already initialized for this CPU.
+    }
+    match mm::kstack::alloc() {
+        Ok(info) => {
+            if let Some(b) = IRQ_STACK_BOTTOM.get(cpu) {
+                b.store(info.stack_bottom, Ordering::Release);
+            }
+            // Publish the top last: `irq_common_dispatch` treats a non-zero
+            // top as "IRQ stack ready" and reads the bottom only after.
+            top_slot.store(info.stack_top, Ordering::Release);
+            serial_println!(
+                "[idt] CPU {} IRQ stack: {:#x}..{:#x}",
+                cpu,
+                info.stack_bottom,
+                info.stack_top
+            );
+        }
+        Err(e) => {
+            serial_println!(
+                "[idt] CPU {} IRQ stack alloc failed ({:?}); IRQs run on task stack",
+                cpu,
+                e
+            );
+        }
+    }
+}
+
+/// Read the current stack pointer.
+#[inline(always)]
+fn read_rsp() -> u64 {
+    let rsp: u64;
+    // SAFETY: Reading RSP has no side effects and does not touch memory.
+    unsafe {
+        core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags));
+    }
+    rsp
+}
+
+/// Dispatch a hardware IRQ to its Rust handler by vector number.
+///
+/// `frame` points to the `InterruptStackFrame` saved on the interrupted
+/// task's kernel stack; it remains valid for the duration of the handler
+/// regardless of which stack the handler executes on.
+extern "C" fn dispatch_vector(frame: *mut InterruptStackFrame, vector: u64) {
+    // SAFETY: `frame` was produced by `lea rdi, [rsp + 128]` in the IRQ entry
+    // stub and points to a valid `InterruptStackFrame` that outlives this
+    // call (it lives on the interrupted task's kernel stack).
+    let frame_ref: &InterruptStackFrame = unsafe { &*frame };
+    match vector {
+        32 => crate::apic::handle_timer_irq(frame_ref, 0),
+        251 => crate::tlb::handle_tlb_shootdown_irq(frame_ref, 0),
+        252 => crate::apic::handle_reschedule_irq(frame_ref, 0),
+        255 => crate::apic::handle_spurious_irq(frame_ref, 0),
+        v @ 33..=56 => {
+            // Vectors 33–56 map to IOAPIC inputs 0–23.
+            #[allow(clippy::arithmetic_side_effects)] // v >= 33 in this arm.
+            let irq = (v - 33) as u32;
+            crate::ioapic::handle_device_irq(irq);
+        }
+        _ => {}
+    }
+}
+
+/// Execute `dispatch_vector(frame, vector)` on the dedicated IRQ stack whose
+/// top is `irq_top`, then switch RSP back to the caller's (task) stack.
+///
+/// # Safety
+///
+/// `irq_top` must be the 16-byte-aligned top of a valid, mapped, exclusively
+/// owned IRQ stack with enough headroom for the handler's worst-case frame,
+/// and the current RSP must NOT already be on that stack.  `frame` must point
+/// to a valid `InterruptStackFrame`.
+unsafe fn run_on_irq_stack(irq_top: u64, frame: *mut InterruptStackFrame, vector: u64) {
+    // SAFETY: We save the caller's (task) RSP onto the new IRQ stack via the
+    // `{saved}` operand, switch RSP to the IRQ stack, call `dispatch_vector`
+    // (its System V arguments `frame`/`vector` are placed in RDI/RSI by the
+    // `inout` operands), then restore the saved task RSP via `pop rsp`.  The
+    // `push`/`sub rsp, 8` keeps RSP 16-byte aligned at the `call`.  RSP is
+    // exactly restored, so the asm block preserves the stack pointer.
+    //
+    // Every register the template touches is a *named operand* — there are no
+    // bare hardcoded registers that the compiler could also allocate to an
+    // operand (the original bug: the compiler put `{f}` in RAX and a literal
+    // `mov rax, rsp` clobbered it).  RDI/RSI carry the call args (`inout … =>
+    // _`); RAX/RCX/RDX/R8–R11 are declared clobbered by the call, which forces
+    // `top`/`f`/`saved` into callee-saved registers the compiler preserves.
+    unsafe {
+        core::arch::asm!(
+            "mov {saved}, rsp",
+            "mov rsp, {top}",
+            "push {saved}",
+            "sub rsp, 8",
+            "call {f}",
+            "add rsp, 8",
+            "pop rsp",
+            top = in(reg) irq_top,
+            f = in(reg) dispatch_vector as extern "C" fn(*mut InterruptStackFrame, u64),
+            saved = out(reg) _,
+            inout("rdi") frame => _,
+            inout("rsi") vector => _,
+            lateout("rax") _,
+            lateout("rcx") _,
+            lateout("rdx") _,
+            lateout("r8") _,
+            lateout("r9") _,
+            lateout("r10") _,
+            lateout("r11") _,
+        );
+    }
+}
+
+/// Common Rust entry point for every hardware IRQ.
+///
+/// Called by every IRQ assembly stub after it has saved the 15 GPRs and the
+/// interrupt frame on the interrupted task's kernel stack, with `frame`
+/// pointing at the saved `InterruptStackFrame` and `vector` the IDT vector
+/// number.  Switches to the per-CPU IRQ stack for the handler (outermost IRQ
+/// only), then services any deferred preemption on the task stack.
+#[unsafe(no_mangle)]
+extern "C" fn irq_common_dispatch(frame: *mut InterruptStackFrame, vector: u64) {
+    let cpu = crate::smp::current_cpu_index();
+    let top = IRQ_STACK_TOP
+        .get(cpu)
+        .map_or(0, |t| t.load(Ordering::Acquire));
+
+    if top == 0 {
+        // IRQ stack not yet installed for this CPU — run on the task stack
+        // (pre-existing behaviour: safe, but without overflow isolation).
+        dispatch_vector(frame, vector);
+        crate::sched::do_deferred_preempt();
+        return;
+    }
+
+    let bottom = IRQ_STACK_BOTTOM
+        .get(cpu)
+        .map_or(0, |b| b.load(Ordering::Acquire));
+    let rsp = read_rsp();
+
+    if rsp > bottom && rsp <= top {
+        // Nested IRQ: we are *already* on the IRQ stack (the timer re-enables
+        // interrupts mid-handler).  Keep growing down the same stack; do NOT
+        // re-switch and do NOT preempt here — the outermost frame owns
+        // preemption, which must run on the task stack.
+        dispatch_vector(frame, vector);
+        return;
+    }
+
+    // Outermost IRQ: run the handler on the IRQ stack, then return to the
+    // task stack and service any deferred preemption there.
+    // SAFETY: `top` is the valid top of this CPU's IRQ stack (non-zero ⇒
+    // installed by `init_irq_stack`), and the RSP range check above confirms
+    // we are not already on it.
+    unsafe {
+        run_on_irq_stack(top, frame, vector);
+    }
+    crate::sched::do_deferred_preempt();
+}
+
+// ---------------------------------------------------------------------------
 // Assembly stubs via global_asm!
 //
 // Each stub:
@@ -513,34 +733,26 @@ isr_stub_no_error!(isr_simd_fp, handle_simd_fp);
 // Default handler for unregistered vectors.
 isr_stub_no_error!(isr_default, handle_default);
 
-// Hardware IRQ handlers (vectors 32+).
-// Timer (vector 32) — driven by the Local APIC timer.
-isr_stub_no_error!(isr_timer, handle_timer_irq);
-// TLB shootdown IPI (vector 251) — sent by other CPUs to request TLB flush.
-isr_stub_no_error!(isr_tlb_shootdown, handle_tlb_shootdown_irq);
-// Reschedule IPI (vector 252) — sent to wake idle CPUs when work is enqueued.
-isr_stub_no_error!(isr_reschedule, handle_reschedule_irq);
-// Spurious (vector 255) — APIC spurious interrupts.
-isr_stub_no_error!(isr_spurious, handle_spurious_irq);
-
 // ---------------------------------------------------------------------------
-// External device IRQ stubs (IOAPIC inputs 0–23 → vectors 33–56)
+// Hardware IRQ stubs (vectors 32–56 + APIC IPIs 251/252/255)
 //
-// Each stub saves all registers, passes the IRQ number in EDI (first
-// argument, System V ABI), calls the common `handle_device_irq` handler
-// in ioapic.rs, restores registers, and returns via IRETQ.
+// Every hardware IRQ stub saves the dummy error code + 15 GPRs on the
+// interrupted task's kernel stack (so the GPR/IRETQ frame is preserved across
+// a possible context switch), then calls the common Rust dispatcher
+// `irq_common_dispatch(frame, vector)`.  The dispatcher switches to the
+// per-CPU IRQ stack for the handler and routes by vector number.  Passing the
+// vector (not a pre-bound handler) lets one stub shape serve every IRQ while
+// keeping per-vector identity for the nesting-aware stack switch.
 // ---------------------------------------------------------------------------
 
-/// Generate an assembly stub for an external device IRQ.
-///
-/// The stub passes `$irq` (the IOAPIC input number) to the Rust
-/// handler `handle_device_irq(irq: u32)` defined in `ioapic.rs`.
-macro_rules! isr_irq_stub {
-    ($stub:ident, $irq:literal) => {
+/// Generate an assembly stub for a hardware IRQ that dispatches via
+/// `irq_common_dispatch` with the given IDT `$vector`.
+macro_rules! irq_stub {
+    ($stub:ident, $vector:literal) => {
         global_asm!(
             concat!(".global ", stringify!($stub)),
             concat!(stringify!($stub), ":"),
-            "push 0",              // dummy error code
+            "push 0",              // dummy error code (IRQs push none)
             "push rax",
             "push rcx",
             "push rdx",
@@ -556,8 +768,9 @@ macro_rules! isr_irq_stub {
             "push r13",
             "push r14",
             "push r15",
-            concat!("mov edi, ", stringify!($irq)),
-            "call handle_device_irq",
+            "lea rdi, [rsp + 128]", // RDI = &InterruptStackFrame (16 × 8)
+            concat!("mov esi, ", stringify!($vector)), // RSI = IDT vector
+            "call irq_common_dispatch",
             "pop r15",
             "pop r14",
             "pop r13",
@@ -580,30 +793,41 @@ macro_rules! isr_irq_stub {
     };
 }
 
-isr_irq_stub!(isr_irq0, 0);
-isr_irq_stub!(isr_irq1, 1);
-isr_irq_stub!(isr_irq2, 2);
-isr_irq_stub!(isr_irq3, 3);
-isr_irq_stub!(isr_irq4, 4);
-isr_irq_stub!(isr_irq5, 5);
-isr_irq_stub!(isr_irq6, 6);
-isr_irq_stub!(isr_irq7, 7);
-isr_irq_stub!(isr_irq8, 8);
-isr_irq_stub!(isr_irq9, 9);
-isr_irq_stub!(isr_irq10, 10);
-isr_irq_stub!(isr_irq11, 11);
-isr_irq_stub!(isr_irq12, 12);
-isr_irq_stub!(isr_irq13, 13);
-isr_irq_stub!(isr_irq14, 14);
-isr_irq_stub!(isr_irq15, 15);
-isr_irq_stub!(isr_irq16, 16);
-isr_irq_stub!(isr_irq17, 17);
-isr_irq_stub!(isr_irq18, 18);
-isr_irq_stub!(isr_irq19, 19);
-isr_irq_stub!(isr_irq20, 20);
-isr_irq_stub!(isr_irq21, 21);
-isr_irq_stub!(isr_irq22, 22);
-isr_irq_stub!(isr_irq23, 23);
+// Timer (vector 32) — driven by the Local APIC timer.
+irq_stub!(isr_timer, 32);
+// TLB shootdown IPI (vector 251) — sent by other CPUs to request TLB flush.
+irq_stub!(isr_tlb_shootdown, 251);
+// Reschedule IPI (vector 252) — sent to wake idle CPUs when work is enqueued.
+irq_stub!(isr_reschedule, 252);
+// Spurious (vector 255) — APIC spurious interrupts.
+irq_stub!(isr_spurious, 255);
+
+// External device IRQs (IOAPIC inputs 0–23 → vectors 33–56).  The dispatcher
+// maps vector V in 33..=56 to IOAPIC input V-33 → handle_device_irq.
+irq_stub!(isr_irq0, 33);
+irq_stub!(isr_irq1, 34);
+irq_stub!(isr_irq2, 35);
+irq_stub!(isr_irq3, 36);
+irq_stub!(isr_irq4, 37);
+irq_stub!(isr_irq5, 38);
+irq_stub!(isr_irq6, 39);
+irq_stub!(isr_irq7, 40);
+irq_stub!(isr_irq8, 41);
+irq_stub!(isr_irq9, 42);
+irq_stub!(isr_irq10, 43);
+irq_stub!(isr_irq11, 44);
+irq_stub!(isr_irq12, 45);
+irq_stub!(isr_irq13, 46);
+irq_stub!(isr_irq14, 47);
+irq_stub!(isr_irq15, 48);
+irq_stub!(isr_irq16, 49);
+irq_stub!(isr_irq17, 50);
+irq_stub!(isr_irq18, 51);
+irq_stub!(isr_irq19, 52);
+irq_stub!(isr_irq20, 53);
+irq_stub!(isr_irq21, 54);
+irq_stub!(isr_irq22, 55);
+irq_stub!(isr_irq23, 56);
 
 // ---------------------------------------------------------------------------
 // Ring 3 exception handling

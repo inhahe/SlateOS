@@ -1165,22 +1165,22 @@ pub extern "C" fn handle_timer_irq(frame: &crate::idt::InterruptStackFrame, _err
     // --- CPU time accounting: leaving IRQ context ---
     crate::cputime::exit_irq();
 
-    // If the scheduler says the time slice expired, reschedule.
+    // If the scheduler says the time slice expired, request a *deferred*
+    // preemption rather than context-switching here.
     //
-    // Skip if this CPU is in the schedule_inner idle fallback (IDLE_FLAG
-    // set).  The idle fallback handles its own task picking and context
-    // switching.  Calling preempt() here would nest schedule_inner calls,
-    // corrupting the blocked task's saved context (the inner switch_context
-    // would save the ISR + idle-loop stack as the task's resume point).
+    // The IRQ entry path (idt::irq_common_dispatch) runs hardware IRQ
+    // handlers on a dedicated per-CPU IRQ stack (B-DF1 / open-questions Q7,
+    // option A).  A context switch performed *inside* this handler would
+    // therefore record the transient IRQ-stack RSP as the task's resume
+    // point — corrupting it.  Instead we set the NEED_RESCHED flag here; the
+    // outermost IRQ frame services it via sched::do_deferred_preempt() after
+    // RSP has been restored to the interrupted task's kernel stack.
     //
-    // Also skip if we're in softirq context (nested timer interrupt
-    // during softirq processing).  The outer timer ISR will handle
-    // preemption after softirqs complete.
-    if needs_reschedule
-        && !crate::sched::cpu_is_idle(crate::smp::current_cpu_index())
-        && !crate::softirq::is_processing()
-    {
-        crate::sched::preempt();
+    // request_preempt() only sets a flag; do_deferred_preempt() applies the
+    // same guards the in-handler check used to (skip the idle fallback, skip
+    // softirq context) before actually calling preempt().
+    if needs_reschedule {
+        crate::sched::request_preempt();
     }
 }
 

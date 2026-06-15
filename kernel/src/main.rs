@@ -2561,6 +2561,10 @@ extern "C" fn kernel_main() -> ! {
     // the timer (vector 32), and spurious interrupts (vector 255).
     // The APIC is configured and the scheduler is ready.
     console::boot_step(console::BootStatus::Running, "Preemptive scheduling");
+    // Install the BSP's dedicated per-CPU IRQ stack before enabling
+    // interrupts, so hardware IRQs never push their frame onto a near-full
+    // kernel task stack (B-DF1 / open-questions Q7, option A).
+    idt::init_irq_stack(0);
     unsafe {
         cpu::sti();
     }

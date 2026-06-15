@@ -306,6 +306,27 @@ static RESCHEDULE_PENDING: [CachePadded<AtomicBool>; priority_rr::MAX_CPUS] = {
     [INIT; priority_rr::MAX_CPUS]
 };
 
+/// Per-CPU "needs reschedule" flag set from interrupt context (deferred
+/// preemption).
+///
+/// Set by [`request_preempt`] (called from the timer ISR when a time slice
+/// expires) and serviced by [`do_deferred_preempt`], which runs at the
+/// *outermost* IRQ level **after** the IRQ entry path has switched RSP back
+/// to the interrupted task's kernel stack.
+///
+/// This is the linchpin of the IRQ-stack design (B-DF1 / open-questions Q7,
+/// option A): hardware IRQs run on a dedicated per-CPU IRQ stack, but the
+/// context switch performed by `preempt()` must record the *task* stack's
+/// RSP as the task's resume point — never a transient IRQ-stack RSP.  By
+/// deferring the actual `preempt()` call out of the handler and onto the
+/// task stack, the saved resume point is always correct, and nested IRQs
+/// (the timer re-enables interrupts mid-handler for preemption) simply
+/// accumulate the flag, which the outermost IRQ then services exactly once.
+static NEED_RESCHED: [CachePadded<AtomicBool>; priority_rr::MAX_CPUS] = {
+    const INIT: CachePadded<AtomicBool> = CachePadded::new(AtomicBool::new(false));
+    [INIT; priority_rr::MAX_CPUS]
+};
+
 // ---------------------------------------------------------------------------
 // Per-CPU scheduler statistics
 // ---------------------------------------------------------------------------
@@ -1789,6 +1810,91 @@ pub fn preempt() {
         current_cpu_id() as u64,
     );
     schedule_inner(true, SwitchKind::Involuntary);
+}
+
+/// Request a deferred preemption on the calling CPU.
+///
+/// Called from interrupt context (the timer ISR) instead of calling
+/// [`preempt`] directly.  Sets the per-CPU [`NEED_RESCHED`] flag; the actual
+/// context switch is performed by [`do_deferred_preempt`] at the outermost
+/// IRQ level, after the IRQ entry path has restored RSP to the interrupted
+/// task's kernel stack.
+///
+/// This guarantees the context switch's saved resume point is the task
+/// stack's RSP, never the transient per-CPU IRQ stack (see B-DF1 / Q7).
+#[inline]
+pub fn request_preempt() {
+    let cpu = current_cpu_id();
+    if let Some(f) = NEED_RESCHED.get(cpu) {
+        f.store(true, Ordering::Release);
+    }
+}
+
+/// Service a pending deferred preemption, if one was requested.
+///
+/// Called by the IRQ entry path ([`crate::idt::irq_common_dispatch`]) at the
+/// outermost IRQ level, **after** RSP has been switched back to the
+/// interrupted task's kernel stack.  Atomically clears the per-CPU
+/// [`NEED_RESCHED`] flag and, if it was set, calls [`preempt`].
+///
+/// The guards mirror the original in-handler preemption check: skip if this
+/// CPU is in the `schedule_inner` idle fallback (calling `preempt()` there
+/// would nest `schedule_inner` and corrupt the blocked task's saved
+/// context), and skip during softirq processing (a nested timer IRQ during
+/// softirq work — the outer ISR will preempt after softirqs complete).
+///
+/// # Safety
+///
+/// Must be called on the interrupted task's kernel stack (not the IRQ
+/// stack), with interrupts in a state where a context switch is safe (the
+/// timer ISR re-enables interrupts before returning, so IF is restored on
+/// the about-to-be-saved task).
+#[inline]
+pub fn do_deferred_preempt() {
+    let cpu = current_cpu_id();
+    let pending = NEED_RESCHED
+        .get(cpu)
+        .is_some_and(|f| f.swap(false, Ordering::AcqRel));
+    if pending && !cpu_is_idle(cpu) && !crate::softirq::is_processing() {
+        // Disable interrupts across the involuntary context switch.
+        //
+        // B-DF1 recursion: without this, the whole `preempt → schedule_inner`
+        // path runs on the interrupted task's stack with interrupts enabled
+        // (the timer ISR re-enabled them via `sti` so the outgoing task is
+        // saved with IF=1).  A timer tick arriving *during* `schedule_inner`
+        // has RSP on the task stack — outside the per-CPU IRQ-stack range — so
+        // `idt::irq_common_dispatch` treats it as a fresh *outermost* IRQ,
+        // re-enters `do_deferred_preempt → preempt → schedule_inner`, and
+        // recurses one ~2 KiB frame at a time until the task stack overflows
+        // its guard page (#DF at `schedule_inner+0x11`).  Disabling interrupts
+        // here prevents any nested tick for the duration of the switch.
+        //
+        // Correctness of IF preservation (the reason the ISR `sti`s in the
+        // first place — see apic.rs handle_timer_irq):
+        //   * The outgoing task is saved by `switch_context` with IF=0, but it
+        //     is *always* resumed at the instruction right after `preempt()`
+        //     below, whose next statement is the `sti` — so it regains
+        //     interrupts immediately, and the enclosing IRQ stub's `iretq`
+        //     restores IF=1 from the saved frame regardless.
+        //   * Voluntary yields (`yield_now`, channel/futex blocking) do NOT go
+        //     through this path; they run, and are saved, with IF=1 — so the
+        //     per-task RFLAGS-preservation invariant is untouched for them.
+        //   * `preempt()` calls `schedule_inner(true, ..)` (requeue=true), so
+        //     the current task is always re-enqueued and a runnable task is
+        //     always picked — the HLT-based idle fallback (which needs IF=1) is
+        //     never entered from here.
+        //
+        // SAFETY: plain IF toggles with no memory effects; paired so IF is
+        // restored on every path (the `sti` runs after `preempt()` returns,
+        // i.e. when this CPU is switched back to this task).
+        unsafe {
+            core::arch::asm!("cli", options(nomem, nostack, preserves_flags));
+        }
+        preempt();
+        unsafe {
+            core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
+        }
+    }
 }
 
 /// Reset bandwidth period counters and re-enqueue all throttled tasks.

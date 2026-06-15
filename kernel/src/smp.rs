@@ -807,6 +807,11 @@ extern "C" fn ap_entry() -> ! {
     // Must be before sti() so the timer ISR sees a valid current task.
     let _idle_id = crate::sched::register_ap_idle(cpu_index);
 
+    // Install this AP's dedicated per-CPU IRQ stack before enabling
+    // interrupts, so hardware IRQs run on it rather than the task stack
+    // (B-DF1 / open-questions Q7, option A).
+    crate::idt::init_irq_stack(cpu_index);
+
     // Enable interrupts.  The APIC timer will start firing.
     // SAFETY: IDT is loaded, APIC is configured, idle task registered.
     unsafe {

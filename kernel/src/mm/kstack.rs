@@ -10,23 +10,24 @@
 //!
 //! ```text
 //! ┌──────────────────────────────────────────┐ ← slot_base + SLOT_SIZE
-//! │         Stack (32 KiB, 2 frames)         │   Usable stack, grows down
+//! │      Stack (STACK_SIZE: 64 KiB)          │   Usable stack, grows down
 //! │         Mapped, writable                 │
 //! ├──────────────────────────────────────────┤ ← slot_base + GUARD_SIZE
 //! │         Guard page (16 KiB, 1 frame)     │   Unmapped — fault on access
 //! └──────────────────────────────────────────┘ ← slot_base
 //! ```
 //!
-//! The guard page is registered as a [`VmaKind::Guard`] in the kernel
-//! address space.  If the stack grows past its 32 KiB limit and touches
-//! the guard page, the page fault handler recognizes the Guard VMA and
-//! panics with a clear diagnostic.
+//! The stack size is `sched::task::TASK_STACK_SIZE` (the single source of
+//! truth): 64 KiB (4 frames). The guard page is registered as a
+//! [`VmaKind::Guard`] in the kernel address space. If the stack grows past its
+//! limit and touches the guard page, the page fault handler recognizes the
+//! Guard VMA and panics with a clear diagnostic.
 //!
 //! ## Virtual Address Region
 //!
 //! Uses `0xFFFF_C100_0000_0000` — well above the HHDM and below the
-//! kernel text section.  With 48 KiB per slot, supports up to 4096
-//! concurrent kernel stacks (192 MiB of virtual address space).
+//! kernel text section.  With a per-slot size of 80 KiB, supports up to 4096
+//! concurrent kernel stacks (320 MiB of virtual address space).
 //!
 //! ## Advantages Over Previous HHDM Stacks
 //!
@@ -62,12 +63,14 @@ const GUARD_FRAMES: usize = 1;
 #[allow(clippy::arithmetic_side_effects)]
 const GUARD_SIZE: u64 = (GUARD_FRAMES * FRAME_SIZE) as u64;
 
-/// Number of frames per stack (4 frames = 64 KiB).
+/// Number of frames per stack.
 ///
-/// Must match `sched::task::TASK_STACK_SIZE / FRAME_SIZE`.  Debug builds
-/// require larger stacks due to unoptimized frames (no inlining, no DSE).
-/// 32 KiB overflowed in deep call chains (scheduler → wait queue → yield).
-const STACK_FRAMES: usize = 4;
+/// Derived from `sched::task::TASK_STACK_SIZE` (the single source of truth for
+/// kernel-task stack sizing) so the guard-page allocator here and the
+/// canary/watermark logic in `sched::task` can never drift apart. Currently 4
+/// frames (64 KiB) — see `sched::task::TASK_STACK_SIZE` for the rationale.
+#[allow(clippy::arithmetic_side_effects)]
+const STACK_FRAMES: usize = crate::sched::task::TASK_STACK_SIZE / FRAME_SIZE;
 
 /// Size of the stack in bytes.
 #[allow(clippy::arithmetic_side_effects)]
@@ -78,7 +81,9 @@ pub const STACK_SIZE: u64 = (STACK_FRAMES * FRAME_SIZE) as u64;
 const SLOT_SIZE: u64 = GUARD_SIZE + STACK_SIZE;
 
 /// Maximum number of kernel stacks (limits virtual address consumption).
-/// 4096 stacks × 80 KiB (guard + stack) = 320 MiB virtual.
+/// 4096 stacks × per-slot size (guard + stack = 80 KiB) = 320 MiB virtual,
+/// which fits comfortably in the ~7 TiB between `KSTACK_REGION_BASE`
+/// (0xFFFF_C100…) and the test regions (0xFFFF_C800…).
 const MAX_STACKS: usize = 4096;
 
 /// Bitmap words needed to track MAX_STACKS slots (64 bits per word).

@@ -14,7 +14,26 @@ work that should be done now."
 
 ## Active Bugs
 
-### B-DF1. Kernel-stack overflow → double fault when an IRQ frame pushes onto a near-full kernel task stack (deferred benchmark suite) — ROOT-CAUSED; gzip frame fixed, systemic part OPEN 2026-06-14
+### B-DF1. Kernel-stack overflow → double fault when an IRQ frame pushes onto a near-full kernel task stack (deferred benchmark suite) — FIXED 2026-06-15 (Q7 option A)
+
+**RESOLVED 2026-06-15.** Fixed via `open-questions.md` Q7 → **option A**
+(operator-chosen): a dedicated per-CPU guard-page IRQ stack with a manual
+nesting-aware switch in `idt::irq_common_dispatch` (so hardware IRQ frames/
+handlers never consume the interrupted task's stack), plus **deferred
+preemption** (timer ISR sets `NEED_RESCHED`; the outermost IRQ frame runs the
+context switch on the task stack via `sched::do_deferred_preempt`). The
+restructuring also exposed an **unbounded re-entrant preemption recursion**
+(nested timer tick during `schedule_inner`, with interrupts enabled on the task
+stack, misclassified as a fresh outermost IRQ → recursion until guard-page
+overflow); fixed by disabling interrupts across the involuntary switch in
+`do_deferred_preempt`. See `design-decisions.md` §26. **Validated:**
+`http_gzip_8KiB` — which previously double-faulted entering the dashboard benches
+on a near-full task stack — now runs to completion. (Note: the *separate*
+`bench_isr_latency` null-pointer crash — `todo.txt` "Cross-Zone Bug Reports" — is
+a distinct kernel-core bug, not this overflow class, and still blocks the literal
+`BENCH_OK` marker since it runs last.)
+
+The original analysis is retained below for history.
 
 **Root cause (CONFIRMED): kernel task stack overflow into the guard page.**
 The deferred benchmark suite runs heavy, *debug-built* code paths in kernel

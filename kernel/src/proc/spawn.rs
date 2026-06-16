@@ -4738,6 +4738,203 @@ pub fn self_test_linux_real_glibc_fault() -> KernelResult<()> {
     }
 }
 
+/// Path Z: prove the REAL-glibc **`SI_QUEUE` payload** signal path end-to-end.
+///
+/// [`self_test_linux_real_glibc_signal`] covers a plain async signal and
+/// [`self_test_linux_real_glibc_fault`] covers a synchronous fault signal.
+/// This one covers the *queued* path with a user-supplied `sigval`: it runs
+/// `/bin/sigqueue`, which:
+///   - installs a `SA_SIGINFO` handler for `SIGUSR1` via `sigaction(2)`;
+///   - calls `sigqueue(getpid(), SIGUSR1, sv)` with `sv.sival_int =
+///     0x12345678` (glibc routes this through `rt_sigqueueinfo(2)`);
+///   - in the handler, reads `info->si_code` (expect `SI_QUEUE = -1`),
+///     `info->si_value.sival_int` (expect `0x12345678`) and `info->si_pid`
+///     (expect `getpid()`), then prints the captured values and `exit`s.
+///
+/// This proves the kernel:
+///   - reads the user-supplied `siginfo` in `sys_rt_sigqueueinfo`, copies the
+///     `si_value` union out of user memory, and records it on the pending
+///     signal;
+///   - on delivery, stamps `si_value` (and `si_code = SI_QUEUE`) into the
+///     `rt_sigframe` via [`crate::proc::linux_sigframe::LinuxSiginfo::queue`]
+///     at the correct ABI offset (struct +24);
+///   - records the *real caller* pid/uid as `si_pid`/`si_uid` (faithful and
+///     unforgeable), not a user-supplied value.
+///
+/// Output is deterministic, so we assert the exact bytes plus `exit(23)`
+/// (2 = sigaction/sigqueue failed, 3 = handler never ran, 4 = wrong signo,
+/// 5 = wrong si_code, 6 = wrong si_value, 7 = wrong si_pid).  No-op (returns
+/// `Ok`) when `/mnt/bin/sigqueue` is absent.
+pub fn self_test_linux_real_glibc_sigqueue() -> KernelResult<()> {
+    use crate::fs::handle;
+    use crate::proc::linux_fd::{FdEntry, O_WRONLY};
+
+    const EXPECT_EXIT: i32 = 23;
+    // SIGUSR1 = 10, SI_QUEUE = -1, sival_int = 0x12345678, self == getpid().
+    const EXPECT_OUT: &[u8] =
+        b"SLATE_GLIBC_SIGQUEUE_OK signo=10 code=-1 value=0x12345678 self=1\n";
+
+    const SRC_LD: &str = "/mnt/lib64/ld-linux-x86-64.so.2";
+    const SRC_LIBC: &str = "/mnt/lib/x86_64-linux-gnu/libc.so.6";
+    const SRC_SIGQUEUE: &str = "/mnt/bin/sigqueue";
+    const DST_LD: &str = "/lib64/ld-linux-x86-64.so.2";
+    const DST_LIBC: &str = "/lib/x86_64-linux-gnu/libc.so.6";
+    const DST_SIGQUEUE: &str = "/bin/sigqueue";
+    const CAPTURE: &str = "/glibc-sigqueue-capture.tmp";
+    // Single-threaded, synchronous self-sigqueue — completes promptly.
+    const MAX_YIELDS: usize = 65_536;
+
+    if !crate::fs::Vfs::exists(SRC_SIGQUEUE) {
+        return Ok(());
+    }
+
+    serial_println!("[spawn] Running REAL glibc SI_QUEUE-payload (SIGUSR1 handler, ring 3, Path Z) test...");
+
+    let _ = crate::fs::Vfs::mkdir_all("/lib64");
+    let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
+    let _ = crate::fs::Vfs::mkdir_all("/bin");
+    for (src, dst) in [(SRC_LD, DST_LD), (SRC_LIBC, DST_LIBC), (SRC_SIGQUEUE, DST_SIGQUEUE)] {
+        match crate::fs::Vfs::read_file(src) {
+            Ok(bytes) => {
+                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
+                    serial_println!(
+                        "[spawn]   real glibc sigqueue: SKIP (staging {} -> {} failed: {:?})",
+                        src, dst, e
+                    );
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                serial_println!(
+                    "[spawn]   real glibc sigqueue: SKIP (reading {} failed: {:?})",
+                    src, e
+                );
+                return Ok(());
+            }
+        }
+    }
+
+    let exe_elf = match crate::fs::Vfs::read_file(DST_SIGQUEUE) {
+        Ok(b) => b,
+        Err(e) => {
+            serial_println!("[spawn]   real glibc sigqueue: SKIP (re-read {} failed: {:?})", DST_SIGQUEUE, e);
+            return Ok(());
+        }
+    };
+
+    let _ = crate::fs::Vfs::remove(CAPTURE);
+    let capture_handle = match handle::open(
+        CAPTURE,
+        handle::OpenFlags::READ
+            .union(handle::OpenFlags::WRITE)
+            .union(handle::OpenFlags::CREATE),
+    ) {
+        Ok(h) => h,
+        Err(e) => {
+            serial_println!("[spawn]   real glibc sigqueue: SKIP (capture-file open failed: {:?})", e);
+            return Ok(());
+        }
+    };
+
+    let argv: &[&[u8]] = &[b"/bin/sigqueue"];
+    let envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C"];
+    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-glibc-sigqueue",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: Some(DST_SIGQUEUE.as_bytes()),
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = handle::close(capture_handle);
+            let _ = crate::fs::Vfs::remove(CAPTURE);
+            serial_println!("[spawn]   FAIL: real glibc sigqueue spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Redirect fd 1 → capture before the child runs.
+    let _ = pcb::linux_fd_take(result.pid, 1);
+    if let Err(e) = pcb::linux_fd_install_at(result.pid, 1, FdEntry::file(capture_handle, O_WRONLY)) {
+        let _ = handle::close(capture_handle);
+        thread::on_thread_exit(result.task_id);
+        pcb::destroy(result.pid);
+        let _ = crate::fs::Vfs::remove(CAPTURE);
+        serial_println!("[spawn]   FAIL: real glibc sigqueue — redirecting fd 1 failed: {:?}", e);
+        return Err(KernelError::InternalError);
+    }
+
+    let mut reaped = false;
+    for _ in 0..MAX_YIELDS {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            reaped = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    let captured = crate::fs::Vfs::read_file(CAPTURE);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(CAPTURE);
+
+    if !reaped || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: real glibc sigqueue — process did not exit within {} yields \
+             (state={:?}); the SIGUSR1 handler likely faulted (bad rt_sigframe) or the \
+             SI_QUEUE payload corrupted the siginfo",
+            MAX_YIELDS, state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECT_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: real glibc sigqueue — exit code={:?}, expected {} (2=sigaction/\
+             sigqueue failed, 3=handler never ran, 4=wrong signo, 5=wrong si_code, \
+             6=wrong si_value, 7=wrong si_pid)",
+            exit_code, EXPECT_EXIT
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    match captured {
+        Ok(bytes) if bytes.as_slice() == EXPECT_OUT => {
+            serial_println!(
+                "[spawn]   REAL glibc sigqueue (ring 3: sigqueue → SIGUSR1 SA_SIGINFO handler \
+                 entered via Linux rt_sigframe, si_code=SI_QUEUE + sival_int payload + si_pid \
+                 read back, captured {} bytes == expected): OK",
+                bytes.len()
+            );
+            Ok(())
+        }
+        Ok(bytes) => {
+            serial_println!(
+                "[spawn]   FAIL: real glibc sigqueue — captured {} bytes {:?}, expected {:?}",
+                bytes.len(), bytes.as_slice(), EXPECT_OUT
+            );
+            Err(KernelError::InternalError)
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: real glibc sigqueue — reading capture file back failed: {:?}",
+                e
+            );
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

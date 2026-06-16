@@ -955,10 +955,24 @@ unmapped `0xDEAD000` enters an unmodified glibc `SA_SIGINFO` `SIGSEGV` handler t
 `si_signo==11`/`si_code==SEGV_MAPERR(1)`/`si_addr==0xdead000` and `siglongjmp`s out, printing
 `SLATE_GLIBC_FAULT_OK signo=11 code=1 addr=0xdead000` (boot test PASSED).
 
-**Remaining (tracked as future work, not this debt):** `SI_QUEUE` `si_value`/`si_ptr`
-payload from `rt_sigqueueinfo(2)`/`sigqueue(3)` — the `value` field and `SI_QUEUE` constant
-exist (`#[allow(dead_code)]`) but no post path stamps them yet. Additive on top of the
-now-correct sender-class plumbing.
+**`SI_QUEUE` `si_value`/`si_ptr` payload — RESOLVED 2026-06-16 (follow-on to TD29).**
+`rt_sigqueueinfo(2)`, `rt_tgsigqueueinfo(2)` and `pidfd_send_signal(2)` now read the
+user-supplied `siginfo`, copy out `si_code` and the 8-byte `si_value` union
+(`read_user_siginfo_payload`, SMAP-safe via `copy_from_user`), record the value on the
+pending signal, and stamp it into the delivered `siginfo_t` at the correct ABI offset
+(struct +24) via the new `LinuxSiginfo::queue(...)` builder; `build_linux_rt_frame`
+branches to it when `si_code == SI_QUEUE`. The shared kill funnel was refactored into
+`kill_common_value` / `tgkill_common_value` / `sys_signal_send_with_info(args, si_code,
+value)` so all gate ordering (EFAULT → forging-EPERM → ESRCH-before-EINVAL → authority)
+is shared and only the final post stamps the payload. Linux's `do_rt_sigqueueinfo`
+forging gate (`(si_code >= 0 || si_code == SI_TKILL) && caller != target → EPERM`) is now
+enforced on all three queued-signal entry points; the recorded `si_pid`/`si_uid` is the
+*real caller* (faithful + unforgeable), only `si_value`/`si_code` come from the user.
+Verified ring-3 by `/bin/sigqueue` (`sigqueue(getpid(), SIGUSR1, {.sival_int=0x12345678})`
+→ handler reads `si_code==SI_QUEUE(-1)`, `si_value.sival_int==0x12345678`,
+`si_pid==getpid()`, printing `SLATE_GLIBC_SIGQUEUE_OK signo=10 code=-1 value=0x12345678
+self=1`, boot test PASSED) plus in-kernel forging-gate (EPERM) and SI_QUEUE-bypass
+(ESRCH-before-EINVAL) assertions.
 
 ### TD28. Linux `munmap` is 16 KiB-frame-granular (delegates to native handler), not 4 KiB-page-granular — DEBT 2026-06-15
 

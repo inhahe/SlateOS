@@ -175,6 +175,30 @@ impl LinuxSiginfo {
         info
     }
 
+    /// Build a `siginfo_t` for a **queued** signal (`sigqueue(3)` /
+    /// `rt_sigqueueinfo(2)`, `si_code == SI_QUEUE`).  The `_rt` union member is
+    /// `struct { pid_t _pid; uid_t _uid; sigval_t _sigval; }`, a superset of
+    /// the `_kill` layout: `si_pid` at offset 16, `si_uid` at 20, and the
+    /// 8-byte `si_value` (union of `int sival_int` / `void *sival_ptr`) at
+    /// offset 24 (= union+8).  glibc's `siginfo_t` exposes that word as
+    /// `si_value`, which a queued-signal handler reads.
+    #[must_use]
+    pub fn queue(signo: i32, si_code: i32, sender_pid: i32, sender_uid: u32, value: u64) -> Self {
+        let mut info = Self {
+            si_signo: signo,
+            si_errno: 0,
+            si_code,
+            _pad0: 0,
+            sifields: [0u8; 112],
+        };
+        // _rt: _pid @ union+0 (struct off 16), _uid @ union+4 (20),
+        //      _sigval @ union+8 (24, 8 bytes).
+        info.sifields[0..4].copy_from_slice(&sender_pid.to_ne_bytes());
+        info.sifields[4..8].copy_from_slice(&sender_uid.to_ne_bytes());
+        info.sifields[8..16].copy_from_slice(&value.to_ne_bytes());
+        info
+    }
+
     /// Build a `siginfo_t` for a **fault** signal (`SIGSEGV`/`SIGBUS`/
     /// `SIGFPE`/`SIGILL`/`SIGTRAP`).  The `_sigfault` union member is
     /// `struct { void *_addr; ... }`, so `si_addr` sits at offset 16.
@@ -258,15 +282,13 @@ pub fn compute_layout(user_rsp: u64) -> Option<FrameLayout> {
 
 /// `si_code` constants.
 ///
-/// This is the complete set of `si_code` values the signal-delivery path
-/// can stamp into a `siginfo_t`.  `SI_USER` is what we emit today (we do
-/// not yet record the sending pid/uid in the pending bitmap, so every
-/// caught signal is reported as a generic user-directed one); `SI_KERNEL`
-/// and `SI_TKILL` are reserved for the planned sender-faithful path
-/// (kernel-generated faults vs. `tgkill`/`raise`).  They are kept here as
-/// the canonical ABI enumeration so the future work has a single source
-/// of truth.
-#[allow(dead_code)] // SI_KERNEL/SI_TKILL: reserved for sender-faithful siginfo (see above).
+/// The complete set of `si_code` values the signal-delivery path can stamp
+/// into a `siginfo_t`. All are now produced by the sender-faithful path:
+/// `SI_USER` (`kill(2)`), `SI_KERNEL` (timer/kernel-generated), `SI_TKILL`
+/// (`tgkill`/`raise`), and `SI_QUEUE` (`sigqueue`/`rt_sigqueueinfo`, which
+/// additionally carries an `si_value`). Kept here as the canonical ABI
+/// enumeration so the builders above have a single source of truth.
+#[allow(dead_code)] // SI_KERNEL: also defined in proc::signal; kept for ABI completeness.
 pub mod si_code {
     /// Sent by `kill(2)` (sender is a user process).
     pub const SI_USER: i32 = 0;
@@ -274,6 +296,8 @@ pub mod si_code {
     pub const SI_KERNEL: i32 = 0x80;
     /// Sent by `tgkill(2)` / `raise(3)` (thread-directed).
     pub const SI_TKILL: i32 = -6;
+    /// Sent by `sigqueue(3)` / `rt_sigqueueinfo(2)` (carries an `si_value`).
+    pub const SI_QUEUE: i32 = -1;
 }
 
 /// Boot self-test: assert every Linux signal-frame struct is the exact
@@ -372,6 +396,21 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     let faddr = u64::from_ne_bytes(fault.sifields[0..8].try_into().unwrap_or([0; 8]));
     if faddr != 0xDEAD_BEEF {
         serial_println!("[sigframe]   FAIL: siginfo::fault si_addr round-trip");
+        return Err(KernelError::InvalidArgument);
+    }
+    // si_pid / si_uid / si_value (`_rt` layout) round-trip for the queued
+    // (`sigqueue`/`rt_sigqueueinfo`) path: pid@16, uid@20, value@24.
+    let q = LinuxSiginfo::queue(10, si_code::SI_QUEUE, 7, 1000, 0x1234_5678_9ABC_DEF0);
+    let q_pid = i32::from_ne_bytes(q.sifields[0..4].try_into().unwrap_or([0; 4]));
+    let q_uid = u32::from_ne_bytes(q.sifields[4..8].try_into().unwrap_or([0; 4]));
+    let q_val = u64::from_ne_bytes(q.sifields[8..16].try_into().unwrap_or([0; 8]));
+    if q.si_signo != 10
+        || q.si_code != si_code::SI_QUEUE
+        || q_pid != 7
+        || q_uid != 1000
+        || q_val != 0x1234_5678_9ABC_DEF0
+    {
+        serial_println!("[sigframe]   FAIL: siginfo::queue si_pid/si_uid/si_value round-trip");
         return Err(KernelError::InvalidArgument);
     }
 

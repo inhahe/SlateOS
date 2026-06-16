@@ -224,9 +224,6 @@ pub mod si_code {
     /// Sent by the kernel itself (timer expiry, kernel-injected signals).
     pub const SI_KERNEL: i32 = 0x80;
     /// Sent by `sigqueue(3)` / `rt_sigqueueinfo(2)` (carries an `si_value`).
-    // Reserved for future `rt_sigqueueinfo`/`SI_QUEUE` support — part of the
-    // complete ABI constant set; not yet stamped by any post path.
-    #[allow(dead_code)]
     pub const SI_QUEUE: i32 = -1;
     /// Sent by `tkill(2)` / `tgkill(2)` (i.e. `raise`/`pthread_kill`).
     pub const SI_TKILL: i32 = -6;

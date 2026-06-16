@@ -3812,6 +3812,23 @@ pub fn sys_signal_send_with_code(
     args: &super::dispatch::SyscallArgs,
     si_code: i32,
 ) -> super::dispatch::SyscallResult {
+    // kill/tkill/tgkill carry no data word — stamp si_value = 0.
+    sys_signal_send_with_info(args, si_code, 0)
+}
+
+/// Like [`sys_signal_send_with_code`], but also stamps an `si_value` data word
+/// into the delivered `siginfo_t`.
+///
+/// This is the funnel for `rt_sigqueueinfo(2)`/`sigqueue(3)` (`SI_QUEUE`),
+/// where the sender attaches a `union sigval` payload the receiving
+/// `SA_SIGINFO` handler reads as `info->si_value`. The sender pid/uid recorded
+/// are still the caller's real identity (matching Linux's `prepare_signal`),
+/// not a value the caller can forge.
+pub fn sys_signal_send_with_info(
+    args: &super::dispatch::SyscallArgs,
+    si_code: i32,
+    value: u64,
+) -> super::dispatch::SyscallResult {
     use crate::proc::{pcb, signal, thread};
     use super::dispatch::SyscallResult;
 
@@ -3857,13 +3874,14 @@ pub fn sys_signal_send_with_code(
     }
 
     // Record the sender identity (caller pid + real uid) so an SA_SIGINFO
-    // handler on the target sees a faithful siginfo_t.
+    // handler on the target sees a faithful siginfo_t. `value` is the queued
+    // `si_value` payload (0 for the plain kill/tkill/tgkill path).
     #[allow(clippy::cast_possible_truncation)]
     let info = signal::SigInfo {
         code: si_code,
         sender_pid: caller as u32,
         sender_uid: pcb::process_uid(caller).unwrap_or(0),
-        value: 0,
+        value,
     };
     match signal::classify_post_info(target, sig, info) {
         signal::PostDecision::Deliver | signal::PostDecision::Drop => {

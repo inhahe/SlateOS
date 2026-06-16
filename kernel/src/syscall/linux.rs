@@ -1880,21 +1880,30 @@ pub fn build_linux_rt_frame(
     };
 
     // Async (process-directed) signal: fill siginfo from the recorded source
-    // metadata (si_code + sender pid/uid captured at post time). The SI_QUEUE
-    // si_value payload is not yet threaded (see known-issues.md), so
-    // `info.value` is unused here.
-    let siginfo = crate::proc::linux_sigframe::LinuxSiginfo::kill(
-        #[allow(clippy::cast_possible_wrap)]
-        {
-            sig as i32
-        },
-        info.code,
-        #[allow(clippy::cast_possible_wrap)]
-        {
-            info.sender_pid as i32
-        },
-        info.sender_uid,
-    );
+    // metadata (si_code + sender pid/uid captured at post time). A queued
+    // signal (`sigqueue`/`rt_sigqueueinfo`, SI_QUEUE) additionally carries the
+    // user-supplied `si_value` payload at union+8; every other class leaves it
+    // zero, so we use the `_rt`-layout builder only for SI_QUEUE.
+    #[allow(clippy::cast_possible_wrap)]
+    let signo_i = sig as i32;
+    #[allow(clippy::cast_possible_wrap)]
+    let sender_pid_i = info.sender_pid as i32;
+    let siginfo = if info.code == crate::proc::signal::si_code::SI_QUEUE {
+        crate::proc::linux_sigframe::LinuxSiginfo::queue(
+            signo_i,
+            info.code,
+            sender_pid_i,
+            info.sender_uid,
+            info.value,
+        )
+    } else {
+        crate::proc::linux_sigframe::LinuxSiginfo::kill(
+            signo_i,
+            info.code,
+            sender_pid_i,
+            info.sender_uid,
+        )
+    };
 
     match emit_linux_rt_frame(pid, sig, act, &regs, siginfo) {
         Some(entry) => {
@@ -3413,8 +3422,9 @@ const SIGNALFD_SIGINFO_SIZE: usize = 128;
 ///   * `cap < 128` → EINVAL (Linux requires room for at least one record).
 ///   * For each consumable masked-pending signal (up to `cap / 128`
 ///     records), emit a record whose `ssi_signo` is the signal number;
-///     all other fields are zeroed (we do not yet carry siginfo payloads,
-///     matching our `rt_sigqueueinfo` which drops the payload).
+///     all other fields are zeroed (signalfd does not yet surface the
+///     recorded siginfo source class/sender/`si_value` — a separate
+///     enhancement from the `rt_sigframe` delivery path, which does).
 ///   * If no masked signal is pending: `O_NONBLOCK` → EAGAIN.  A blocking read
 ///     instead parks the caller until a masked signal arrives, via the
 ///     per-process `signalfd` wait queue: it registers in
@@ -6737,6 +6747,15 @@ fn sys_kill(args: &SyscallArgs) -> SyscallResult {
 /// stamped into the delivered `siginfo_t` (`SI_USER` for `kill`, `SI_TKILL`
 /// for the thread-directed variants).
 fn kill_common(args: &SyscallArgs, si_code: i32) -> SyscallResult {
+    // The plain kill/tkill/tgkill path carries no `si_value` payload.
+    kill_common_value(args, si_code, 0)
+}
+
+/// Like [`kill_common`], but also carries an `si_value` data word for the
+/// queued-signal path (`rt_sigqueueinfo`/`rt_tgsigqueueinfo`). All the Linux
+/// gate ordering (target resolution → ESRCH-before-EINVAL → authority) is
+/// shared with `kill_common`; only the final post stamps the payload.
+fn kill_common_value(args: &SyscallArgs, si_code: i32, value: u64) -> SyscallResult {
     // Linux signature: `SYSCALL_DEFINE2(kill, pid_t, pid, int, sig)`.
     // Both `pid` and `sig` are `int`, so the x86_64 syscall ABI
     // truncates args.arg0/arg1 to their low 32 bits before the body
@@ -6873,7 +6892,7 @@ fn kill_common(args: &SyscallArgs, si_code: i32) -> SyscallResult {
         arg4: args.arg4,
         arg5: args.arg5,
     };
-    linux_from_native(handlers::sys_signal_send_with_code(&send_args, si_code))
+    linux_from_native(handlers::sys_signal_send_with_info(&send_args, si_code, value))
 }
 
 /// `rt_sigpending(set, sigsetsize)` — report the pending-signal mask
@@ -7024,6 +7043,14 @@ fn sys_tkill(args: &SyscallArgs) -> SyscallResult {
 ///   - Otherwise, behaves exactly like [`sys_tkill`] (and thus like
 ///     `kill(tgid, sig)` for now).
 fn sys_tgkill(args: &SyscallArgs) -> SyscallResult {
+    // tgkill is thread-directed: deliver SI_TKILL with no si_value payload.
+    tgkill_common_value(args, crate::proc::signal::si_code::SI_TKILL, 0)
+}
+
+/// Shared body of `tgkill`/`rt_tgsigqueueinfo`. Resolves `tid` → owning pid,
+/// verifies it belongs to `tgid`, then posts via [`kill_common_value`] with
+/// the given `si_code` and `si_value` payload.
+fn tgkill_common_value(args: &SyscallArgs, si_code: i32, value: u64) -> SyscallResult {
     // Linux signature:
     //   `SYSCALL_DEFINE3(tgkill, pid_t, tgid, pid_t, pid, int, sig)`
     // All three are 32-bit, so the x86_64 ABI truncates each register
@@ -7066,7 +7093,7 @@ fn sys_tgkill(args: &SyscallArgs) -> SyscallResult {
         arg2: 0, arg3: 0, arg4: 0, arg5: 0,
     };
     // tgkill is thread-directed: deliver SI_TKILL, matching Linux's do_tkill.
-    kill_common(&kill_args, crate::proc::signal::si_code::SI_TKILL)
+    kill_common_value(&kill_args, si_code, value)
 }
 
 /// `umask(mask)` — set the process file-mode creation mask, returning
@@ -23584,33 +23611,48 @@ fn sys_pidfd_send_signal(args: &SyscallArgs) -> SyscallResult {
     }
     // (No signal-scope flag handling: v6.6 rejects all non-zero flags
     // at the top gate, so `flags` is guaranteed 0 by this point.)
-    if args.arg2 != 0 {
-        // copy_siginfo_from_user_any — struct siginfo_t = 128 bytes.
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 128) {
-            return linux_err(linux_errno_for(e));
+    // copy_siginfo_from_user_any — struct siginfo_t = 128 bytes. When an info
+    // buffer is supplied, extract the user's si_code + si_value so a queued
+    // payload reaches an SA_SIGINFO handler; a NULL buffer means "synthesise
+    // SI_USER from the caller" (the plain kill path).
+    let user_info = if args.arg2 != 0 {
+        match read_user_siginfo_payload(args.arg2) {
+            Ok(v) => Some(v),
+            Err(e) => return linux_err(linux_errno_for(e)),
         }
-    }
+    } else {
+        None
+    };
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let sig = args.arg1 as i32;
     if !(0..=64).contains(&sig) {
         // valid_signal() inside kill_pid_info; surfaced after fd & info.
         return linux_err(errno::EINVAL);
     }
-    // entry.raw_handle holds the target PID as a u64 (set by
-    // `FdEntry::pidfd`).  Hand off to sys_kill, which dispatches the
-    // sig==0 existence probe locally and routes sig>0 through
-    // `handlers::sys_signal_send`.  The siginfo_t buffer is ignored
-    // (we've already validated readability above) — our native send
-    // path only takes (pid, sig) and synthesises a kernel-internal
-    // si_code; user-supplied siginfo is silently discarded, matching
-    // the limited shape Linux allows non-CAP_SYS_ADMIN processes to
-    // forge.
+    // entry.raw_handle holds the target PID as a u64 (set by `FdEntry::pidfd`).
     let kill_args = SyscallArgs {
         arg0: entry.raw_handle,
         arg1: args.arg1,
         arg2: 0, arg3: 0, arg4: 0, arg5: 0,
     };
-    sys_kill(&kill_args)
+    match user_info {
+        // NULL info: SI_USER synthesised from the caller (sys_kill path).
+        None => sys_kill(&kill_args),
+        // Explicit info: apply Linux's forging restriction (only si_code < 0,
+        // != SI_TKILL, may target another process), then carry the payload.
+        Some((user_code, user_value)) => {
+            use crate::proc::signal::si_code::SI_TKILL;
+            let task_id = crate::sched::current_task_id();
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            let caller_i = crate::proc::thread::owner_process(task_id).unwrap_or(0) as i32;
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            let target_i = entry.raw_handle as i32;
+            if (user_code >= 0 || user_code == SI_TKILL) && caller_i != target_i {
+                return linux_err(errno::EPERM);
+            }
+            kill_common_value(&kill_args, user_code, user_value)
+        }
+    }
 }
 
 /// `pidfd_getfd(pidfd, targetfd, flags)`.
@@ -32337,22 +32379,33 @@ fn sys_rt_sigtimedwait(args: &SyscallArgs) -> SyscallResult {
 /// EFAULT.  Swap the order to match.
 fn sys_rt_sigqueueinfo(args: &SyscallArgs) -> SyscallResult {
     // 1. Mirror Linux's copy_from_user(uinfo, sizeof(struct siginfo)):
-    //    EFAULT for NULL or unmapped buffer comes before sig validation.
+    //    EFAULT for NULL or unmapped buffer comes before any other check.
     if args.arg2 == 0 {
         return linux_err(errno::EFAULT);
     }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 128) {
-        return linux_err(linux_errno_for(e));
-    }
-    // 2. sig validation matches Linux's eventual valid_signal() check
-    //    inside the kill_proc_info path.
+    let (user_code, user_value) = match read_user_siginfo_payload(args.arg2) {
+        Ok(v) => v,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+
+    // 2. Linux's do_rt_sigqueueinfo forging gate (precedes target resolution):
+    //    a userspace caller may not impersonate a kernel/user/tkill-sourced
+    //    signal to *another* process. Only si_code < 0 (and != SI_TKILL),
+    //    e.g. SI_QUEUE, may be queued to a different pid; anything else is
+    //    EPERM unless the target is the caller itself.
+    use crate::proc::signal::si_code::SI_TKILL;
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let sig = args.arg1 as i32;
-    if !(0..=64).contains(&sig) {
-        return linux_err(errno::EINVAL);
+    let pid_arg = args.arg0 as i32;
+    let task_id = crate::sched::current_task_id();
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let caller_i = crate::proc::thread::owner_process(task_id).unwrap_or(0) as i32;
+    if (user_code >= 0 || user_code == SI_TKILL) && caller_i != pid_arg {
+        return linux_err(errno::EPERM);
     }
-    // Forward to kill semantics — the signal goes through, the siginfo
-    // payload is dropped because our dispatch doesn't carry it.
+
+    // 3. Forward through the shared kill funnel (which performs target
+    //    resolution / ESRCH-before-EINVAL / authority), carrying the
+    //    user-supplied si_code and si_value into the delivered siginfo_t.
     let kill_args = SyscallArgs {
         arg0: args.arg0,
         arg1: args.arg1,
@@ -32361,7 +32414,32 @@ fn sys_rt_sigqueueinfo(args: &SyscallArgs) -> SyscallResult {
         arg4: 0,
         arg5: 0,
     };
-    sys_kill(&kill_args)
+    kill_common_value(&kill_args, user_code, user_value)
+}
+
+/// Read the `si_code` and `si_value` words from a user `siginfo_t` for the
+/// queued-signal syscalls. Copies the whole 128-byte struct into a kernel
+/// buffer (SMAP-safe, no alignment assumption on the user pointer) and
+/// extracts `si_code` at offset 8 and the 8-byte `si_value` at offset 24
+/// (the `_rt` union member on x86_64).
+fn read_user_siginfo_payload(uinfo: u64) -> crate::error::KernelResult<(i32, u64)> {
+    let mut buf = [0u8; 128];
+    // SAFETY: `buf` is a valid, writable 128-byte kernel buffer; copy_from_user
+    // validates the user range and uses STAC/CLAC for SMAP-safe access.
+    unsafe {
+        crate::mm::user::copy_from_user(uinfo, buf.as_mut_ptr(), buf.len())?;
+    }
+    // Offsets are fixed by the x86_64 siginfo_t ABI; `get`+`try_into` keep this
+    // panic-free (slices are statically in-bounds for a 128-byte buffer).
+    let code_bytes: [u8; 4] = buf
+        .get(8..12)
+        .and_then(|s| s.try_into().ok())
+        .ok_or(crate::error::KernelError::InvalidArgument)?;
+    let value_bytes: [u8; 8] = buf
+        .get(24..32)
+        .and_then(|s| s.try_into().ok())
+        .ok_or(crate::error::KernelError::InvalidArgument)?;
+    Ok((i32::from_ne_bytes(code_bytes), u64::from_ne_bytes(value_bytes)))
 }
 
 /// `rt_tgsigqueueinfo(tgid, tid, sig, info*)`.
@@ -32370,18 +32448,30 @@ fn sys_rt_sigqueueinfo(args: &SyscallArgs) -> SyscallResult {
 /// buffer in `__copy_siginfo_from_user` before sig validation, so a
 /// bad `info` pointer surfaces EFAULT regardless of sig shape.
 fn sys_rt_tgsigqueueinfo(args: &SyscallArgs) -> SyscallResult {
+    // EFAULT (bad info pointer) precedes everything, like rt_sigqueueinfo.
     if args.arg3 == 0 {
         return linux_err(errno::EFAULT);
     }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg3, 128) {
-        return linux_err(linux_errno_for(e));
-    }
+    let (user_code, user_value) = match read_user_siginfo_payload(args.arg3) {
+        Ok(v) => v,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+
+    // Forging gate: do_rt_tgsigqueueinfo compares the *tgid* (arg0) to the
+    // caller's own pid. Same rule as rt_sigqueueinfo — only si_code < 0 (and
+    // != SI_TKILL) may be queued cross-process.
+    use crate::proc::signal::si_code::SI_TKILL;
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let sig = args.arg2 as i32;
-    if !(0..=64).contains(&sig) {
-        return linux_err(errno::EINVAL);
+    let tgid_arg = args.arg0 as i32;
+    let task_id = crate::sched::current_task_id();
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let caller_i = crate::proc::thread::owner_process(task_id).unwrap_or(0) as i32;
+    if (user_code >= 0 || user_code == SI_TKILL) && caller_i != tgid_arg {
+        return linux_err(errno::EPERM);
     }
-    // Forward to tgkill semantics.
+
+    // Forward through the shared tgkill funnel (tid→pid resolution + tgid
+    // membership + ESRCH/EINVAL ordering), carrying the payload.
     let tgkill_args = SyscallArgs {
         arg0: args.arg0,
         arg1: args.arg1,
@@ -32390,7 +32480,7 @@ fn sys_rt_tgsigqueueinfo(args: &SyscallArgs) -> SyscallResult {
         arg4: 0,
         arg5: 0,
     };
-    sys_tgkill(&tgkill_args)
+    tgkill_common_value(&tgkill_args, user_code, user_value)
 }
 
 /// `timer_create(clockid, sigevent*, timerid_t*)`.
@@ -75716,6 +75806,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let buf_ptr = buf.as_ptr() as u64;
         let siginfo_buf = [0u8; 128];
         let siginfo_ptr = siginfo_buf.as_ptr() as u64;
+        // A siginfo with si_code = SI_QUEUE (-1) at offset 8: this is the only
+        // si_code a userspace caller may queue to *another* process, so it
+        // bypasses do_rt_sigqueueinfo's forging gate (which would otherwise
+        // return EPERM before the sig-range check).  Used to isolate the
+        // bad-sig -> EINVAL path.  si_code = -1 -> bytes [0xFF; 4] at [8..12].
+        let mut queueinfo_buf = [0u8; 128];
+        if let Some(slot) = queueinfo_buf.get_mut(8..12) {
+            slot.copy_from_slice(&crate::proc::signal::si_code::SI_QUEUE.to_ne_bytes());
+        }
+        let queueinfo_ptr = queueinfo_buf.as_ptr() as u64;
         let timerid_buf = [0u8; 4];
         let timerid_ptr = timerid_buf.as_ptr() as u64;
         let itimerspec_buf = [0u8; 32];
@@ -75866,11 +75966,25 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             );
         }
 
-        // rt_sigqueueinfo bad sig + valid info -> EINVAL (sig range
-        // check fires after the info-copy succeeds).
+        // rt_sigqueueinfo with SI_USER si_code to *another* pid -> EPERM.
+        // do_rt_sigqueueinfo's forging gate (si_code >= 0 && caller != pid)
+        // fires before target resolution and sig validation, so even a bad
+        // sig + valid info returns EPERM here (caller is not pid 1).
         let a = SyscallArgs { arg0: 1, arg1: 99, arg2: siginfo_ptr, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::RT_SIGQUEUEINFO, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: rt_sigqueueinfo bad sig not EINVAL");
+        if dispatch_linux(nr::RT_SIGQUEUEINFO, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: rt_sigqueueinfo SI_USER forge not EPERM");
+            return Err(KernelError::InternalError);
+        }
+        // rt_sigqueueinfo bad sig + valid SI_QUEUE info to a nonexistent pid
+        // -> ESRCH.  SI_QUEUE (si_code < 0) bypasses the forging gate, then the
+        // shared kill funnel resolves the target before validating sig, so the
+        // missing pid 1 surfaces ESRCH before the bad sig would yield EINVAL
+        // (faithful Linux gate order; see self_test_kill_gate_order).  The old
+        // rt_sigqueueinfo validated sig early and returned EINVAL here — an
+        // unfaithful ESRCH-vs-EINVAL inversion fixed by routing through the funnel.
+        let a = SyscallArgs { arg0: 1, arg1: 99, arg2: queueinfo_ptr, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::RT_SIGQUEUEINFO, &a).value != -i64::from(errno::ESRCH) {
+            serial_println!("[syscall/linux]   FAIL: rt_sigqueueinfo bad sig + absent pid not ESRCH");
             return Err(KernelError::InternalError);
         }
         // rt_sigqueueinfo NULL info -> EFAULT (copy_from_user fires
@@ -75888,10 +76002,19 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // rt_tgsigqueueinfo bad sig + valid info -> EINVAL.
+        // rt_tgsigqueueinfo SI_USER si_code to *another* tgid -> EPERM
+        // (same forging gate, gated against tgid = arg0).
         let a = SyscallArgs { arg0: 1, arg1: 1, arg2: 99, arg3: siginfo_ptr, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::RT_TGSIGQUEUEINFO, &a).value != -i64::from(errno::EINVAL) {
-            serial_println!("[syscall/linux]   FAIL: rt_tgsigqueueinfo bad sig not EINVAL");
+        if dispatch_linux(nr::RT_TGSIGQUEUEINFO, &a).value != -i64::from(errno::EPERM) {
+            serial_println!("[syscall/linux]   FAIL: rt_tgsigqueueinfo SI_USER forge not EPERM");
+            return Err(KernelError::InternalError);
+        }
+        // rt_tgsigqueueinfo bad sig + valid SI_QUEUE info to a nonexistent
+        // tgid -> ESRCH (SI_QUEUE bypasses the forging gate; the funnel then
+        // resolves the target before sig validation, so the absent pid wins).
+        let a = SyscallArgs { arg0: 1, arg1: 1, arg2: 99, arg3: queueinfo_ptr, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::RT_TGSIGQUEUEINFO, &a).value != -i64::from(errno::ESRCH) {
+            serial_println!("[syscall/linux]   FAIL: rt_tgsigqueueinfo bad sig + absent pid not ESRCH");
             return Err(KernelError::InternalError);
         }
         // rt_tgsigqueueinfo NULL info -> EFAULT.

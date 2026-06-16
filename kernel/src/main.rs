@@ -1443,6 +1443,17 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z: SI_QUEUE payload delivery. Proves an AbiMode::Linux process that
+    // sigqueue()s itself with a sival_int receives si_code = SI_QUEUE, the
+    // user-supplied si_value (stamped at the correct ABI offset), and a
+    // faithful si_pid (the real caller). No-op when rootfs.ext4 is absent.
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_sigqueue() {
+        serial_println!(
+            "WARNING: Path-Z real glibc SI_QUEUE-payload self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

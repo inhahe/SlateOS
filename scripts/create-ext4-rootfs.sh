@@ -367,6 +367,77 @@ EOF
 gcc -O2 -o "$STAGE/bin/fault" "$CSRC6" -Wl,-rpath,"$LIBC_DIR" -Wl,--enable-new-dtags
 rm -f "$CSRC6"
 
+# --- the "sigqueue" test binary: queued signal with an si_value payload -------
+# The "signal" binary exercises a plain raise()->tgkill (SI_TKILL, no payload).
+# This one exercises the *queued* path: sigqueue(3) attaches a data word that
+# the kernel must carry byte-exact into the delivered siginfo_t and hand to an
+# unmodified glibc SA_SIGINFO handler as info->si_value. It validates the full
+# rt_sigqueueinfo round-trip:
+#   - si_code  = SI_QUEUE (-1)            [queued, not kill/tkill];
+#   - si_pid   = getpid()                 [sender-faithful identity];
+#   - si_value.sival_int = 0x12345678     [the attached payload].
+# glibc routes sigqueue(getpid(), sig, val) through rt_sigqueueinfo(2). The
+# handler reads info->si_value.sival_int and resumes via rt_sigreturn (no
+# longjmp needed -- a queued signal does not re-fault). Output is
+# deterministic. Returns 23 on success (2 = sigaction failed, 3 = handler
+# never ran, 4 = wrong signo, 5 = wrong si_code, 6 = wrong si_value,
+# 7 = wrong si_pid).
+CSRC7="$STAGE/sigqueue.c"
+cat > "$CSRC7" <<'EOF'
+/* SlateOS Path-Z real-glibc queued-signal (sigqueue + si_value) test. */
+#include <stdio.h>
+#include <signal.h>
+#include <string.h>
+#include <unistd.h>
+
+/* SI_QUEUE is glibc-internal in some header configurations; pin the ABI value. */
+#ifndef SI_QUEUE
+#define SI_QUEUE (-1)
+#endif
+
+#define PAYLOAD 0x12345678
+
+static volatile sig_atomic_t got = 0;
+static volatile int got_signo = -1;
+static volatile int got_code = -1;
+static volatile int got_value = -1;
+static volatile int got_pid = -1;
+
+static void handler(int signo, siginfo_t *info, void *ucv) {
+    got_signo = signo;
+    got_code = info ? info->si_code : -99;
+    got_value = info ? info->si_value.sival_int : -99;
+    got_pid = info ? (int)info->si_pid : -99;
+    got = 1;
+    (void)ucv;
+}
+
+int main(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = handler;
+    sa.sa_flags = SA_SIGINFO;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGUSR1, &sa, NULL) != 0) return 2;
+
+    union sigval sv;
+    sv.sival_int = PAYLOAD;
+    if (sigqueue(getpid(), SIGUSR1, sv) != 0) return 2;  /* -> rt_sigqueueinfo */
+
+    if (!got) return 3;            /* handler never ran -> delivery broken */
+    if (got_signo != SIGUSR1) return 4;
+    if (got_code != SI_QUEUE) return 5;        /* queued si_code           */
+    if (got_value != PAYLOAD) return 6;        /* faithful si_value payload */
+    if (got_pid != (int)getpid()) return 7;    /* sender-faithful si_pid    */
+
+    printf("SLATE_GLIBC_SIGQUEUE_OK signo=%d code=%d value=0x%x self=%d\n",
+           got_signo, got_code, got_value, got_pid == (int)getpid());
+    return 23;
+}
+EOF
+gcc -O2 -o "$STAGE/bin/sigqueue" "$CSRC7" -Wl,-rpath,"$LIBC_DIR" -Wl,--enable-new-dtags
+rm -f "$CSRC7"
+
 echo "[rootfs] staged tree:"
 ( cd "$STAGE" && find lib64 lib bin -type f -printf '  %-44p %10s bytes\n' )
 

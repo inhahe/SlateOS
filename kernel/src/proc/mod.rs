@@ -39,6 +39,7 @@ pub mod exception;
 pub mod fork;
 pub mod itimer;
 pub mod linux_fd;
+pub mod linux_sigframe;
 pub mod linux_stack;
 pub mod pcb;
 pub mod signal;
@@ -76,6 +77,8 @@ pub fn self_test() -> KernelResult<()> {
     linux_fd::self_test()?;
     serial_println!("[proc] Running Linux SysV-stack self-test...");
     linux_stack::self_test()?;
+    serial_println!("[proc] Running Linux rt_sigframe ABI self-test...");
+    linux_sigframe::self_test()?;
     serial_println!("[proc] Running thread-clone self-test...");
     thread_clone::self_test()?;
 

@@ -1518,68 +1518,303 @@ fn validate_clone3_args(cl_args_ptr: u64, size: u64) -> Result<ClonedArgs, i32> 
     })
 }
 
-/// Linux `rt_sigreturn(2)` translation.
+/// Set of RFLAGS bits a user `rt_sigreturn` is permitted to restore.
 ///
-/// Linux semantics: takes no arguments, returns no value (it cannot
-/// "return" to the caller in the C sense — it rewrites the saved
-/// register state and the syscall-return path then resumes at the
-/// pre-signal `RIP/RSP/RFLAGS` with all the pre-signal GPRs).
+/// A signal handler can scribble arbitrary bytes into `uc.uc_mcontext`
+/// before calling `rt_sigreturn`, so we must treat the restored RFLAGS
+/// as fully attacker-controlled.  We keep only the arithmetic/status
+/// flags plus the benign user-settable bits, then force IF=1 and the
+/// reserved bit-1, and drop everything dangerous: IF-clear (would
+/// disable interrupts in ring 3 — impossible anyway, but defensive),
+/// IOPL (would grant I/O-port access), NT (nested-task), VM, VIF/VIP,
+/// and the always-zero reserved bits.
 ///
-/// Our implementation reuses the native `sys_signal_return_with_frame`
-/// restore path because our `proc::signal::deliver_pending_signal`
-/// writes a native `SignalContext` on the user stack regardless of
-/// the calling ABI.  The only Linux-side wrinkle is *where* on the
-/// user stack the context lives at `rt_sigreturn` entry — Linux
-/// programs reach `rt_sigreturn` via two paths:
+/// Bits kept: CF(0) PF(2) AF(4) ZF(6) SF(7) TF(8) DF(10) OF(11) AC(18)
+/// ID(21).  TF is permitted so a debugger-driven single-step survives a
+/// signal round-trip, matching Linux.
+const SIGRETURN_RFLAGS_USER_MASK: u64 = 0x0024_0DD5;
+
+/// RFLAGS bits the kernel always forces on after a `rt_sigreturn`:
+/// IF (interrupts enabled) + the mandatory reserved bit 1.
+const SIGRETURN_RFLAGS_FORCED: u64 = 0x0000_0202;
+
+/// Linux `rt_sigreturn(2)` translation — restores from a **Linux-shape**
+/// `ucontext` built by [`build_linux_rt_frame`].
 ///
-///   1. Direct: the signal handler calls `rt_sigreturn` itself
-///      (Linux-equivalent of our own POSIX-shim trampoline).  At this
-///      point `user_rsp == ctx_addr - 8` because we placed a fake
-///      8-byte null return slot below the context (see
-///      `deliver_pending_signal`).  The context address is therefore
-///      `user_rsp + 8`.
-///   2. Via `SA_RESTORER`: the handler does `ret`, which pops the
-///      8-byte return slot (transferring control to the restorer),
-///      and the restorer does `mov rax, 15; syscall`.  At that point
-///      `user_rsp == ctx_addr`.
+/// Linux semantics: takes no arguments, never returns to its caller in
+/// the C sense — it rewrites the saved register state so the
+/// syscall-return path resumes at the pre-signal `RIP/RSP/RFLAGS` with
+/// the pre-signal GPRs and the pre-handler signal mask.
 ///
-/// We probe both candidates in order and use the first one that
-/// points at a readable user mapping.  This covers both shim styles
-/// without requiring the caller to know which we used.
+/// At `rt_sigreturn` entry the user stack looks like this (the handler
+/// has already `ret`'d through `pretcode` into `sa_restorer`, which then
+/// did `mov $15,%rax; syscall`), so `%rsp` points exactly at the
+/// embedded `ucontext`:
 ///
-/// If neither candidate is mapped, return `-EFAULT` — the syscall
-/// frame is left untouched, and the userspace handler will continue
-/// (which is wrong but defensive: corrupting RIP/RSP on a bad
-/// `rt_sigreturn` call would just SIGSEGV the process anyway).
+/// ```text
+///   user_rsp ─▶ ucontext   (304 bytes; uc_mcontext at +40)
+///              siginfo     (128 bytes)
+/// ```
+///
+/// We read the `ucontext`, restore every GPR from `uc_mcontext`, restore
+/// `RIP`/`RSP`, sanitise `RFLAGS` (see [`SIGRETURN_RFLAGS_USER_MASK`]),
+/// restore the blocked signal mask from `uc_sigmask`, and return
+/// `uc_mcontext.rax` as the syscall result (which the SYSRET path loads
+/// into the resumed `RAX`).
+///
+/// If the `ucontext` is not a readable, suitably-aligned user mapping we
+/// return `-EFAULT` and leave the frame untouched: a malformed
+/// `rt_sigreturn` would otherwise let userspace point `RIP` anywhere.
 fn linux_rt_sigreturn(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
-    use crate::proc::signal::SignalContext;
-    let ctx_size = core::mem::size_of::<SignalContext>();
-    let ctx_align = core::mem::align_of::<SignalContext>() as u64;
-    // Case 1: direct sigreturn from handler — ctx is at RSP + 8.
-    // Case 2: SA_RESTORER path — ctx is at RSP.
-    let candidates = [
-        frame.user_rsp.wrapping_add(8),
-        frame.user_rsp,
-    ];
-    for candidate in candidates {
-        // Reject misaligned candidates *before* validate_user_read:
-        // validate_user_read has a kernel-context bypass that returns
-        // Ok(()) during boot self-tests, but the subsequent unsafe
-        // deref in sys_signal_return_with_frame fires a debug-mode
-        // alignment panic on misaligned pointers.  Defensive
-        // alignment check keeps us out of that path entirely.
-        if candidate == 0 || (candidate & (ctx_align - 1)) != 0 {
-            continue;
-        }
-        if crate::mm::user::validate_user_read(candidate, ctx_size).is_ok() {
-            // sys_signal_return_with_frame reads ctx from frame.arg0
-            // and overwrites it (along with the other GPRs) from the
-            // restored context, so it's safe to clobber arg0 here.
-            frame.arg0 = candidate;
-            return crate::syscall::handlers::sys_signal_return_with_frame(frame);
-        }
+    use crate::proc::linux_sigframe::LinuxUcontext;
+
+    let uc_addr = frame.user_rsp;
+    let uc_size = core::mem::size_of::<LinuxUcontext>();
+    // The ucontext is 8-byte aligned by construction (frame_addr ≡ 8
+    // mod 16, +8 for pretcode ⇒ uc_addr ≡ 0 mod 16).  Reject a bogus
+    // unaligned pointer before the unsafe read.
+    if uc_addr == 0 || (uc_addr & 0x7) != 0 {
+        return -i64::from(errno::EFAULT);
     }
-    -i64::from(errno::EFAULT)
+    if crate::mm::user::validate_user_read(uc_addr, uc_size).is_err() {
+        return -i64::from(errno::EFAULT);
+    }
+
+    // SAFETY: validated above as a readable user mapping spanning the
+    // whole ucontext, and 8-byte aligned (LinuxUcontext's alignment).
+    // CR3 still points at this process's address space (we are returning
+    // to it).  read_unaligned is used defensively even though alignment
+    // is guaranteed.
+    let uc = unsafe { core::ptr::read_unaligned(uc_addr as *const LinuxUcontext) };
+    let mc = &uc.uc_mcontext;
+
+    // Restore the interrupted GPRs from uc_mcontext.
+    frame.arg0 = mc.rdi;
+    frame.arg1 = mc.rsi;
+    frame.arg2 = mc.rdx;
+    frame.arg3 = mc.r10;
+    frame.arg4 = mc.r8;
+    frame.arg5 = mc.r9;
+    frame.rbx = mc.rbx;
+    frame.rbp = mc.rbp;
+    frame.r12 = mc.r12;
+    frame.r13 = mc.r13;
+    frame.r14 = mc.r14;
+    frame.r15 = mc.r15;
+    frame.user_rip = mc.rip;
+    frame.user_rsp = mc.rsp;
+    frame.user_rflags =
+        (mc.eflags & SIGRETURN_RFLAGS_USER_MASK) | SIGRETURN_RFLAGS_FORCED;
+
+    // Restore the pre-handler blocked mask.  set_blocked strips
+    // SIGKILL/SIGSTOP, so a crafted uc_sigmask cannot wedge those.
+    if let Some(pid) = caller_pid() {
+        let _ = crate::proc::signal::set_blocked(pid, uc.uc_sigmask);
+    }
+
+    // The resumed RAX is whatever the interrupted context held (the
+    // value the pre-signal syscall was about to return, captured in
+    // uc_mcontext.rax at delivery time).
+    #[allow(clippy::cast_possible_wrap)]
+    {
+        mc.rax as i64
+    }
+}
+
+/// Per-signal disposition for a Linux-ABI process, resolved from the
+/// per-process [`LinuxSigaction`] table.
+pub enum LinuxDisposition {
+    /// A user handler is installed; build an `rt_sigframe` and enter it.
+    Handler(LinuxSigaction),
+    /// Explicit `SIG_IGN`: drop the signal silently.
+    Ignore,
+    /// `SIG_DFL`: apply the kernel default action (terminate/stop/ignore).
+    Default,
+}
+
+/// Resolve how a Linux-ABI process should react to signal `sig`.
+///
+/// Consults the per-signal `struct sigaction` table (not the legacy
+/// single-trampoline pointer), so each signal gets its own disposition —
+/// exactly as Linux does.
+#[must_use]
+pub fn linux_disposition(pid: pcb::ProcessId, sig: u32) -> LinuxDisposition {
+    let act = linux_sigaction_get(pid, sig);
+    match act.sa_handler {
+        SIG_DFL => LinuxDisposition::Default,
+        SIG_IGN => LinuxDisposition::Ignore,
+        _ => LinuxDisposition::Handler(act),
+    }
+}
+
+/// Build a byte-exact Linux `struct rt_sigframe` on the user stack and
+/// rewrite the syscall frame so the SYSRET path enters the handler.
+///
+/// This is the Linux-ABI counterpart of the native trampoline path in
+/// [`crate::syscall::handlers::deliver_pending_signal`].  An unmodified
+/// glibc (or WINE) handler installed via `rt_sigaction` expects:
+///
+///   * `%rdi = signo`, `%rsi = &siginfo`, `%rdx = &ucontext`;
+///   * `%rsp` pointing at `pretcode` (= `sa_restorer`), which the handler
+///     `ret`s into to reach `rt_sigreturn`;
+///   * a fully-populated `siginfo` and `ucontext` at the advertised
+///     addresses.
+///
+/// `ret_val` is the value the interrupted syscall was about to return; it
+/// is stashed in `uc_mcontext.rax` and restored by [`linux_rt_sigreturn`].
+///
+/// Returns `true` on successful delivery (frame rewritten, one signal
+/// consumed).  Returns `false` if the user stack cannot hold the frame —
+/// in that case the signal is re-armed (left pending) for the next
+/// return-to-user, and the caller should fall back to the normal return
+/// value.
+#[must_use]
+pub fn build_linux_rt_frame(
+    frame: &mut crate::syscall::entry::SyscallFrame,
+    ret_val: i64,
+    pid: pcb::ProcessId,
+    sig: u32,
+    act: &LinuxSigaction,
+) -> bool {
+    use crate::proc::linux_sigframe::{
+        self, si_code, FrameLayout, LinuxSigcontext, LinuxStackT, LinuxUcontext,
+        RT_SIGFRAME_SIZE,
+    };
+    use crate::proc::signal;
+
+    // Where does the frame land on the user stack?  Underflow ⇒ re-arm.
+    let layout: FrameLayout = match linux_sigframe::compute_layout(frame.user_rsp) {
+        Some(l) => l,
+        None => {
+            let _ = signal::set_pending(pid, sig);
+            return false;
+        }
+    };
+
+    // Validate the whole frame region [frame_addr, frame_addr + size) is
+    // writable user memory before touching it.  On failure re-arm and
+    // skip — exactly like the native path (a future sigaltstack would
+    // give a fallback stack here).
+    if crate::mm::user::validate_user_write(layout.frame_addr, RT_SIGFRAME_SIZE)
+        .is_err()
+    {
+        let _ = signal::set_pending(pid, sig);
+        return false;
+    }
+
+    // ---- compute the new blocked mask (effective during the handler) ----
+    // old = mask in effect before delivery (restored on rt_sigreturn).
+    let old_blocked = signal::blocked(pid);
+    let sig_bit = 1u64 << (u64::from(sig).saturating_sub(1) & 63);
+    let mut new_blocked = old_blocked | act.sa_mask;
+    // Unless SA_NODEFER, the delivered signal is blocked during its own
+    // handler so it can't recursively re-enter.
+    if (act.sa_flags & sa_flags::SA_NODEFER) == 0 {
+        new_blocked |= sig_bit;
+    }
+
+    // ---- build the saved machine context (uc_mcontext) ----
+    // fpstate stays 0 (NULL) via Default: no FP context is saved, so
+    // rt_sigreturn skips the FP restore.
+    #[allow(clippy::cast_sign_loss)]
+    let sc = LinuxSigcontext {
+        rdi: frame.arg0,
+        rsi: frame.arg1,
+        rdx: frame.arg2,
+        r10: frame.arg3,
+        r8: frame.arg4,
+        r9: frame.arg5,
+        rbx: frame.rbx,
+        rbp: frame.rbp,
+        r12: frame.r12,
+        r13: frame.r13,
+        r14: frame.r14,
+        r15: frame.r15,
+        rip: frame.user_rip,
+        rsp: frame.user_rsp,
+        // The interrupted syscall's return value resumes in RAX.
+        rax: ret_val as u64,
+        // rcx/r11 are clobbered by the `syscall` instruction in the
+        // interrupted context; their architectural values there are the
+        // return RIP and saved RFLAGS, so reproduce that.
+        rcx: frame.user_rip,
+        r11: frame.user_rflags,
+        eflags: frame.user_rflags,
+        cs: crate::gdt::USER_CS,
+        ss: crate::gdt::USER_DS,
+        // oldmask is the deprecated low-32 signal mask; glibc reads
+        // uc_sigmask instead, but fill it for completeness.
+        oldmask: old_blocked,
+        ..LinuxSigcontext::default()
+    };
+
+    let uc = LinuxUcontext {
+        uc_flags: 0,
+        uc_link: 0,
+        uc_stack: LinuxStackT {
+            ss_sp: 0,
+            // SS_DISABLE (2): no alternate signal stack installed.
+            ss_flags: 2,
+            _pad: 0,
+            ss_size: 0,
+        },
+        uc_mcontext: sc,
+        // Restored by rt_sigreturn: the mask that was in effect before
+        // the handler ran.
+        uc_sigmask: old_blocked,
+    };
+
+    // ---- build siginfo ----
+    // We don't record the sender pid/uid in the pending bitmap, so we
+    // emit a process-directed siginfo with SI_USER and a zero sender.
+    // (Faithful per-signal si_code/sender tracking is future work — see
+    // known-issues; glibc handlers that only read si_signo are unaffected.)
+    let info = linux_sigframe::LinuxSiginfo::kill(
+        #[allow(clippy::cast_possible_wrap)]
+        {
+            sig as i32
+        },
+        si_code::SI_USER,
+        0,
+        0,
+    );
+
+    // ---- write the frame to user memory ----
+    // SAFETY: the region [frame_addr, frame_addr + RT_SIGFRAME_SIZE) was
+    // validated as writable user memory above; uc_addr/info_addr lie
+    // within it (see compute_layout), and CR3 points at this process's
+    // address space.  write_unaligned avoids any alignment assumption.
+    unsafe {
+        core::ptr::write_unaligned(layout.frame_addr as *mut u64, act.sa_restorer);
+        core::ptr::write_unaligned(layout.uc_addr as *mut LinuxUcontext, uc);
+        core::ptr::write_unaligned(
+            layout.info_addr as *mut linux_sigframe::LinuxSiginfo,
+            info,
+        );
+    }
+
+    // ---- apply the new blocked mask ----
+    let _ = signal::set_blocked(pid, new_blocked);
+
+    // ---- SA_RESETHAND: one-shot handler resets to SIG_DFL ----
+    if (act.sa_flags & sa_flags::SA_RESETHAND) != 0 {
+        linux_sigaction_set(pid, sig, LinuxSigaction::default());
+    }
+
+    // ---- rewrite the syscall frame to enter the handler ----
+    frame.user_rip = act.sa_handler;
+    frame.user_rsp = layout.frame_addr;
+    frame.arg0 = u64::from(sig); // rdi = signo
+    frame.arg1 = layout.info_addr; // rsi = &siginfo
+    frame.arg2 = layout.uc_addr; // rdx = &ucontext
+    frame.arg3 = 0; // r10
+    frame.arg4 = 0; // r8
+    frame.arg5 = 0; // r9
+    // Enter the handler with a clean RFLAGS: IF set, DF/TF cleared (a
+    // handler must run with DF=0 per the SysV ABI).
+    frame.user_rflags = SIGRETURN_RFLAGS_FORCED;
+
+    true
 }
 
 /// Linux `fork()` / `vfork()` translation.

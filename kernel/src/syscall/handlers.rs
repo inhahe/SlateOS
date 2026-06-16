@@ -4162,6 +4162,17 @@ pub fn deliver_pending_signal(
         _ => return false,
     };
 
+    // Linux-ABI processes get a byte-exact Linux `rt_sigframe` so an
+    // unmodified glibc/WINE handler sees correct siginfo/ucontext and
+    // returns via its own `sa_restorer` → `rt_sigreturn`. The native
+    // SEH-style `SignalContext` trampoline path below is for native
+    // POSIX-shim processes only.
+    if crate::proc::pcb::get_abi_mode(pid)
+        == Some(crate::proc::pcb::AbiMode::Linux)
+    {
+        return deliver_linux_signal(frame, ret_val, pid, task_id);
+    }
+
     let trampoline = match signal::trampoline(pid) {
         Some(addr) => addr,
         None => {
@@ -4265,6 +4276,71 @@ pub fn deliver_pending_signal(
     frame.arg5 = 0;
 
     true
+}
+
+/// Deliver pending signals to a **Linux-ABI** process at the
+/// syscall-return checkpoint.
+///
+/// Unlike the native path (one trampoline pointer per process), a Linux
+/// process has a per-signal `struct sigaction` disposition. This loop
+/// consumes deliverable signals lowest-first; for each:
+///
+///   * **Handler** — build a Linux `rt_sigframe`
+///     ([`crate::syscall::linux::build_linux_rt_frame`]) and enter the
+///     handler. One handler per return-to-user (matching the native
+///     path and Linux's "handle one, re-check on `rt_sigreturn`" model),
+///     so we stop and return `true` once a frame is built. If the stack
+///     cannot hold the frame the signal is re-armed and we return
+///     `false`.
+///   * **Ignore** (`SIG_IGN`) — drop and continue to the next signal.
+///   * **Default** (`SIG_DFL`) — apply the kernel default action
+///     (terminate / stop / ignore / continue), reusing the same helpers
+///     as the native no-handler path. A terminating default never
+///     returns.
+///
+/// Returns `true` if a handler frame was built (frame rewritten),
+/// `false` if nothing was delivered to a handler.
+fn deliver_linux_signal(
+    frame: &mut super::entry::SyscallFrame,
+    ret_val: i64,
+    pid: crate::proc::pcb::ProcessId,
+    task_id: crate::sched::task::TaskId,
+) -> bool {
+    use crate::proc::signal;
+    use crate::syscall::linux::{self, LinuxDisposition};
+
+    loop {
+        let sig = match signal::take_deliverable(pid) {
+            Some(s) => s,
+            None => return false,
+        };
+
+        match linux::linux_disposition(pid, sig) {
+            LinuxDisposition::Handler(act) => {
+                // Build a Linux rt_sigframe and enter the handler. On a
+                // stack-placement failure the signal is re-armed inside
+                // build_linux_rt_frame and we fall through to `false`.
+                return linux::build_linux_rt_frame(frame, ret_val, pid, sig, &act);
+            }
+            LinuxDisposition::Ignore => {
+                // Explicit SIG_IGN: drop and check the next signal.
+            }
+            LinuxDisposition::Default => match signal::default_action(sig) {
+                signal::DefaultAction::Terminate => {
+                    terminate_current_process_for_signal(pid, task_id, sig);
+                    // Unreachable: task_exit never returns.
+                }
+                signal::DefaultAction::Stop => {
+                    signal::discard_pending_cont(pid);
+                    stop_process_for_signal(pid, sig, Some(task_id));
+                }
+                signal::DefaultAction::Ignore
+                | signal::DefaultAction::Continue => {
+                    // Dropped; check the next.
+                }
+            },
+        }
+    }
 }
 
 /// `SYS_PROCESS_KILL` — force-terminate a process.

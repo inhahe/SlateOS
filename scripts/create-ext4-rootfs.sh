@@ -217,6 +217,63 @@ rm -f "$CSRC4"
 echo "[rootfs] pthread binary DT_NEEDED:"
 readelf -d "$STAGE/bin/pthread" 2>/dev/null | grep -E 'NEEDED|RUNPATH' | sed 's/^/  /'
 
+# --- the "signal" test binary: real glibc SA_SIGINFO handler round-trip --------
+# This is the integration coverage the kernel's own signal-shim self-tests
+# cannot provide: they exercise the pending/blocked/disposition bookkeeping in
+# isolation but never build a real Linux `rt_sigframe` and enter an unmodified
+# glibc handler.  This binary installs a `SA_SIGINFO` handler for SIGUSR1 via
+# `sigaction(2)` (glibc fills in `sa_restorer` = `__restore_rt` automatically),
+# `raise(3)`s SIGUSR1 (glibc routes that through `tgkill(2)`), and the handler
+# reads `info->si_signo`/`si_code` and sets a flag.  This exercises, end to end:
+#   - `rt_sigaction` install (handler + SA_SIGINFO + sa_restorer + sa_mask);
+#   - signal posting via raise/tgkill;
+#   - the kernel's Linux-shape `rt_sigframe` delivery: handler entered with
+#     rdi=signo, rsi=&siginfo, rdx=&ucontext, rsp at pretcode=sa_restorer;
+#   - the handler correctly reading a byte-exact `siginfo_t`;
+#   - the return path: handler `ret`s into glibc's `__restore_rt`, which calls
+#     `rt_sigreturn`, restoring the pre-signal context so `main` resumes.
+# Output is deterministic: SIGUSR1 = 10 on x86_64, and the kernel currently
+# stamps si_code = SI_USER (0) for caught signals (sender-faithful si_code is
+# future work), so the line is fixed.  Returns 17 (2 = sigaction failed,
+# 3 = handler never ran, 4 = wrong signo).
+CSRC5="$STAGE/signal.c"
+cat > "$CSRC5" <<'EOF'
+/* SlateOS Path-Z real-glibc signal (SA_SIGINFO handler + rt_sigreturn) test. */
+#include <stdio.h>
+#include <signal.h>
+#include <string.h>
+
+static volatile sig_atomic_t got = 0;
+static volatile int got_signo = -1;
+static volatile int got_code = -1;
+
+static void handler(int signo, siginfo_t *info, void *ucv) {
+    got_signo = signo;
+    got_code = info ? info->si_code : -99;
+    got = 1;
+    (void)ucv;
+}
+
+int main(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = handler;
+    sa.sa_flags = SA_SIGINFO;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGUSR1, &sa, NULL) != 0) return 2;
+
+    raise(SIGUSR1);            /* glibc: tgkill(getpid(), gettid(), SIGUSR1) */
+
+    if (!got) return 3;        /* handler never ran -> delivery broken */
+    if (got_signo != SIGUSR1) return 4;
+
+    printf("SLATE_GLIBC_SIGNAL_OK signo=%d code=%d\n", got_signo, got_code);
+    return 17;
+}
+EOF
+gcc -O2 -o "$STAGE/bin/signal" "$CSRC5" -Wl,-rpath,"$LIBC_DIR" -Wl,--enable-new-dtags
+rm -f "$CSRC5"
+
 echo "[rootfs] staged tree:"
 ( cd "$STAGE" && find lib64 lib bin -type f -printf '  %-44p %10s bytes\n' )
 

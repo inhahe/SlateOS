@@ -1415,6 +1415,21 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z, part 5: run a REAL glibc binary (/bin/signal) that installs an
+    // SA_SIGINFO handler for SIGUSR1, raise()s it, and (in the handler) reads
+    // the siginfo before returning via glibc's __restore_rt -> rt_sigreturn.
+    // Exercises the kernel's byte-exact Linux rt_sigframe delivery
+    // (build_linux_rt_frame) and the rt_sigreturn restore path.  fd 1 is
+    // captured; the exact deterministic output + exit code (17) are asserted.
+    // This is the real-glibc signal integration coverage the in-kernel
+    // signal-shim self-tests cannot provide.  No-ops when rootfs.ext4 is absent.
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_signal() {
+        serial_println!(
+            "WARNING: Path-Z real glibc signal self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

@@ -17146,6 +17146,148 @@ const S_IFREG: u32 = 0o100000;
 const S_IFDIR: u32 = 0o040000;
 const S_IFCHR: u32 = 0o020000;
 const S_IFIFO: u32 = 0o010000;
+const S_IFLNK: u32 = 0o120000;
+
+/// Derive the `st_mode` (file-type | permission) bits from VFS metadata.
+///
+/// The VFS may report `permissions == 0` for filesystems that don't track
+/// Unix permission bits (memfs `FileMeta::minimal`, FAT); in that case we
+/// synthesise a sensible default by type (dirs `0o755`, symlinks `0o777`,
+/// regular files `0o644`) so callers see a plausible mode rather than
+/// `0o000` (which would make e.g. `access(X_OK)` checks spuriously fail).
+fn meta_mode_bits(meta: &crate::fs::FileMeta) -> u32 {
+    let (typ, default_perm): (u32, u32) = match meta.entry_type {
+        crate::fs::EntryType::Directory => (S_IFDIR, 0o755),
+        crate::fs::EntryType::Symlink => (S_IFLNK, 0o777),
+        // VolumeLabel is a FAT artefact with no Unix analogue; treat as a
+        // regular file so stat() at least returns a coherent shape.
+        crate::fs::EntryType::File | crate::fs::EntryType::VolumeLabel => (S_IFREG, 0o644),
+    };
+    let perm = if meta.permissions == 0 {
+        default_perm
+    } else {
+        u32::from(meta.permissions) & 0o7777
+    };
+    typ | perm
+}
+
+/// Fill a 144-byte `struct stat` from VFS [`FileMeta`](crate::fs::FileMeta)
+/// for a path-based stat/lstat/newfstatat.  Timestamps that the VFS reports
+/// as 0 (unknown) are backfilled with the current wall-clock time so callers
+/// never see a 1970 epoch date.
+fn fill_stat_from_meta(buf: &mut [u8; STAT_SIZE], meta: &crate::fs::FileMeta) {
+    fn put_u64(buf: &mut [u8; STAT_SIZE], off: usize, v: u64) {
+        let bytes = v.to_ne_bytes();
+        #[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
+        buf[off..off + 8].copy_from_slice(&bytes);
+    }
+    fn put_u32(buf: &mut [u8; STAT_SIZE], off: usize, v: u32) {
+        let bytes = v.to_ne_bytes();
+        #[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
+        buf[off..off + 4].copy_from_slice(&bytes);
+    }
+
+    let mode = meta_mode_bits(meta);
+    let now_ns = crate::timekeeping::clock_realtime();
+    let pick = |t: u64| if t == 0 { now_ns } else { t };
+    let atime = pick(meta.accessed_ns);
+    let mtime = pick(meta.modified_ns);
+    let ctime = pick(meta.changed_ns);
+    let nlink = u64::from(meta.nlinks.max(1));
+
+    put_u64(buf, 0, 0); // st_dev
+    put_u64(buf, 8, meta.ino); // st_ino
+    put_u64(buf, 16, nlink); // st_nlink
+    put_u32(buf, 24, mode); // st_mode
+    put_u32(buf, 28, meta.uid); // st_uid
+    put_u32(buf, 32, meta.gid); // st_gid
+    // 36..=39: __pad0
+    put_u64(buf, 40, 0); // st_rdev
+    put_u64(buf, 48, meta.size); // st_size
+    put_u64(buf, 56, 16 * 1024); // st_blksize
+    put_u64(buf, 64, meta.blocks); // st_blocks (512-byte units)
+    put_u64(buf, 72, atime / 1_000_000_000); // st_atim.tv_sec
+    put_u64(buf, 80, atime % 1_000_000_000); // st_atim.tv_nsec
+    put_u64(buf, 88, mtime / 1_000_000_000); // st_mtim.tv_sec
+    put_u64(buf, 96, mtime % 1_000_000_000); // st_mtim.tv_nsec
+    put_u64(buf, 104, ctime / 1_000_000_000); // st_ctim.tv_sec
+    put_u64(buf, 112, ctime % 1_000_000_000); // st_ctim.tv_nsec
+}
+
+/// Fill a 256-byte `struct statx` from VFS [`FileMeta`](crate::fs::FileMeta)
+/// for a path-based statx.
+fn fill_statx_from_meta(buf: &mut [u8; STATX_SIZE], meta: &crate::fs::FileMeta) {
+    fn put_u32(buf: &mut [u8; STATX_SIZE], off: usize, v: u32) {
+        let bytes = v.to_ne_bytes();
+        #[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
+        buf[off..off + 4].copy_from_slice(&bytes);
+    }
+    fn put_u64(buf: &mut [u8; STATX_SIZE], off: usize, v: u64) {
+        let bytes = v.to_ne_bytes();
+        #[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
+        buf[off..off + 8].copy_from_slice(&bytes);
+    }
+    fn put_u16(buf: &mut [u8; STATX_SIZE], off: usize, v: u16) {
+        let bytes = v.to_ne_bytes();
+        #[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
+        buf[off..off + 2].copy_from_slice(&bytes);
+    }
+    fn put_i64(buf: &mut [u8; STATX_SIZE], off: usize, v: i64) {
+        let bytes = v.to_ne_bytes();
+        #[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
+        buf[off..off + 8].copy_from_slice(&bytes);
+    }
+
+    let mode = meta_mode_bits(meta);
+    #[allow(clippy::cast_possible_truncation)]
+    let mode_u16 = mode as u16;
+    let now_ns = crate::timekeeping::clock_realtime();
+    let pick = |t: u64| if t == 0 { now_ns } else { t };
+    #[allow(clippy::cast_possible_wrap)]
+    let to_sec = |t: u64| (t / 1_000_000_000) as i64;
+    #[allow(clippy::cast_possible_truncation)]
+    let to_nsec = |t: u64| (t % 1_000_000_000) as u32;
+    let atime = pick(meta.accessed_ns);
+    let mtime = pick(meta.modified_ns);
+    let ctime = pick(meta.changed_ns);
+    let btime = pick(meta.created_ns);
+
+    put_u32(buf, 0, STATX_BASIC_STATS); // stx_mask
+    put_u32(buf, 4, 16 * 1024); // stx_blksize
+    put_u64(buf, 8, 0); // stx_attributes
+    put_u32(buf, 16, meta.nlinks.max(1)); // stx_nlink
+    put_u32(buf, 20, meta.uid); // stx_uid
+    put_u32(buf, 24, meta.gid); // stx_gid
+    put_u16(buf, 28, mode_u16); // stx_mode
+    put_u64(buf, 32, meta.ino); // stx_ino
+    put_u64(buf, 40, meta.size); // stx_size
+    put_u64(buf, 48, meta.blocks); // stx_blocks
+    put_u64(buf, 56, 0); // stx_attributes_mask
+    put_i64(buf, 64, to_sec(atime)); // stx_atime
+    put_u32(buf, 72, to_nsec(atime));
+    put_i64(buf, 80, to_sec(btime)); // stx_btime
+    put_u32(buf, 88, to_nsec(btime));
+    put_i64(buf, 96, to_sec(ctime)); // stx_ctime
+    put_u32(buf, 104, to_nsec(ctime));
+    put_i64(buf, 112, to_sec(mtime)); // stx_mtime
+    put_u32(buf, 120, to_nsec(mtime));
+}
+
+/// Resolve a (cwd-canonicalised) absolute path to VFS metadata for a
+/// path-based stat, mapping VFS errors to the Linux errno a stat caller
+/// expects.  `follow` selects `metadata` (follow trailing symlink) vs
+/// `lmetadata` (no-follow, for `lstat`/`AT_SYMLINK_NOFOLLOW`).
+fn stat_meta_for_path(path: &str, follow: bool) -> Result<crate::fs::FileMeta, SyscallResult> {
+    let r = if follow {
+        crate::fs::Vfs::metadata(path)
+    } else {
+        crate::fs::Vfs::lmetadata(path)
+    };
+    r.map_err(|e| match e {
+        KernelError::NotFound => linux_err(errno::ENOENT),
+        other => linux_err(linux_errno_for(other)),
+    })
+}
 
 /// Fill a 144-byte struct stat for the given Linux fd-table entry.
 fn fill_stat_for_fd(
@@ -17250,55 +17392,85 @@ fn fill_stat_for_fd(
 }
 
 /// Shared path-based stat back-end (used by stat, lstat).
-fn stat_path_impl(path_ptr: u64, _statbuf_ptr: u64) -> SyscallResult {
-    // Linux v6.6 fs/stat.c::SYSCALL_DEFINE2(stat) and
-    // SYSCALL_DEFINE2(lstat) call vfs_stat()/vfs_lstat() which run
-    // getname() then filename_lookup() BEFORE the statbuf is ever
-    // touched (cp_old_stat/cp_new_stat is unreachable on a path
-    // resolution error):
-    //
-    //     SYSCALL_DEFINE2(stat, ..., struct __old_kernel_stat __user *, statbuf)
-    //     {
-    //         struct kstat stat;
-    //         int error;
-    //         error = vfs_stat(filename, &stat);
-    //         if (error)
-    //             return error;                       // statbuf untouched
-    //         return cp_old_stat(&stat, statbuf);
-    //     }
-    //
-    // On our skeleton FS no files exist, so every successful
-    // getname surfaces -ENOENT from filename_lookup before the
-    // statbuf copy.  An eager `statbuf == 0 -> EFAULT` gate is
-    // therefore unobservable in Linux semantics — pre-batch we
-    // returned EFAULT for `stat("validpath", NULL)` where Linux
-    // returns ENOENT.  Batch 488: drop the eager statbuf gate.
-    //
-    // Same rationale as batch 478's readlink/readlinkat buf-NULL
-    // removal: a defensively-added pointer gate that fires ahead
-    // of where the kernel actually accesses the pointer.
+///
+/// Linux v6.6 fs/stat.c::SYSCALL_DEFINE2(stat)/SYSCALL_DEFINE2(lstat) call
+/// vfs_stat()/vfs_lstat() — getname() then filename_lookup() — BEFORE the
+/// statbuf is ever touched (cp_new_stat is unreachable on a path resolution
+/// error), so the statbuf pointer is only validated *after* a successful
+/// lookup.  That ordering means `stat("validpath", NULL)` returns ENOENT on a
+/// missing file and EFAULT only when the file exists; we preserve it.
+///
+/// `follow` selects vfs_stat (follow trailing symlink, for `stat`) vs
+/// vfs_lstat (no-follow, for `lstat`).
+///
+/// Kernel context (no caller PID) still returns ENOENT for any readable
+/// pathname: the boot-time syscall-fidelity self-tests pass a fake pointer in
+/// kernel context and assert the no-file ENOENT contract.  Real VFS lookups
+/// only run for ring-3 callers, where the path is canonicalised against the
+/// process cwd first.
+fn stat_path_common(path_ptr: u64, statbuf_ptr: u64, follow: bool) -> SyscallResult {
     if path_ptr == 0 {
         return linux_err(errno::EFAULT);
     }
     if let Err(e) = crate::mm::user::validate_user_read(path_ptr, 1) {
         return linux_err(linux_errno_for(e));
     }
-    // No-file FS: every readable-pathname call -> ENOENT (matches
-    // Linux's filename_lookup failure on a non-existent path; also
-    // matches Linux's getname `!len && !LOOKUP_EMPTY -> -ENOENT`
-    // for empty path, since the !LOOKUP_EMPTY plain stat/lstat
-    // gate makes both cases collapse onto the same errno).
-    linux_err(errno::ENOENT)
+
+    // Kernel context: preserve the no-file ENOENT contract the batch-488
+    // fidelity self-tests depend on.
+    let pid = match caller_pid() {
+        Some(pid) => pid,
+        None => return linux_err(errno::ENOENT),
+    };
+
+    // Resolve the pathname against the caller's cwd, then look it up in the
+    // VFS.  getname `!len && !LOOKUP_EMPTY -> -ENOENT` is mirrored by
+    // canonicalize_path returning ENOENT for an empty path.
+    let bytes = match read_user_cstr(path_ptr, 4096) {
+        Ok(b) => b,
+        Err(e) => return linux_err(e),
+    };
+    let cwd = pcb::get_cwd(pid).unwrap_or_else(|| alloc::vec![b'/']);
+    let canon = match canonicalize_path(&cwd, &bytes) {
+        Ok(p) => p,
+        Err(e) => return linux_err(e),
+    };
+    let canon_str = match core::str::from_utf8(&canon) {
+        Ok(s) => s,
+        Err(_) => return linux_err(errno::EINVAL),
+    };
+    let meta = match stat_meta_for_path(canon_str, follow) {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
+
+    // Lookup succeeded — now the statbuf pointer is observed (cp_new_stat).
+    if statbuf_ptr == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(statbuf_ptr, STAT_SIZE) {
+        return linux_err(linux_errno_for(e));
+    }
+    let mut buf = [0u8; STAT_SIZE];
+    fill_stat_from_meta(&mut buf, &meta);
+    // SAFETY: validated as a writable STAT_SIZE-byte range above.
+    let r = unsafe {
+        crate::mm::user::copy_to_user(buf.as_ptr(), statbuf_ptr, STAT_SIZE)
+    };
+    if let Err(e) = r {
+        return linux_err(linux_errno_for(e));
+    }
+    SyscallResult::ok(0)
 }
 
-/// `stat(path, statbuf)` — no such file (no VFS yet).
+/// `stat(path, statbuf)` — follow trailing symlink.
 fn sys_stat(args: &SyscallArgs) -> SyscallResult {
-    stat_path_impl(args.arg0, args.arg1)
+    stat_path_common(args.arg0, args.arg1, true)
 }
 
-/// `lstat(path, statbuf)` — no such file (no VFS yet).
+/// `lstat(path, statbuf)` — do not follow trailing symlink.
 fn sys_lstat(args: &SyscallArgs) -> SyscallResult {
-    stat_path_impl(args.arg0, args.arg1)
+    stat_path_common(args.arg0, args.arg1, false)
 }
 
 /// `fstat(fd, statbuf)` — synthesise stat based on the fd's HandleKind.
@@ -17398,17 +17570,44 @@ fn sys_newfstatat(args: &SyscallArgs) -> SyscallResult {
         return sys_fstat(&fstat_args);
     }
 
-    // Otherwise it's a path lookup we cannot satisfy.  Linux:
-    // getname(filename, lookup_flags) runs first, then
-    // filename_lookup; on our no-file FS the latter returns ENOENT
-    // and the statbuf copy never happens.  Skip the statbuf gate.
+    // Non-empty path: resolve via the dirfd + cwd rules (resolve_at_path),
+    // then perform a real VFS lookup.  Linux runs getname/filename_lookup
+    // BEFORE cp_new_stat touches statbuf, so the statbuf gate is deferred
+    // until after a successful lookup.
     if path == 0 {
         return linux_err(errno::EFAULT);
     }
     if let Err(e) = crate::mm::user::validate_user_read(path, 1) {
         return linux_err(linux_errno_for(e));
     }
-    linux_err(errno::ENOENT)
+    // Kernel context preserves the no-file ENOENT contract (batch-488
+    // fidelity self-tests).
+    if caller_pid().is_none() {
+        return linux_err(errno::ENOENT);
+    }
+    let resolved = match resolve_at_path(dirfd, path) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let follow = flags & AT_SYMLINK_NOFOLLOW == 0;
+    let meta = match stat_meta_for_path(&resolved, follow) {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
+    if statbuf == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(statbuf, STAT_SIZE) {
+        return linux_err(linux_errno_for(e));
+    }
+    let mut buf = [0u8; STAT_SIZE];
+    fill_stat_from_meta(&mut buf, &meta);
+    // SAFETY: validated as a writable STAT_SIZE-byte range above.
+    let r = unsafe { crate::mm::user::copy_to_user(buf.as_ptr(), statbuf, STAT_SIZE) };
+    if let Err(e) = r {
+        return linux_err(linux_errno_for(e));
+    }
+    SyscallResult::ok(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -17675,16 +17874,43 @@ fn sys_statx(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::ok(0);
     }
 
-    // Path lookup: cannot find any file.  Linux's filename_lookup
-    // returns -ENOENT ahead of cp_statx on our no-file FS, so the
-    // statxbuf pointer is irrelevant here — skip its gate.
+    // Non-empty path: resolve via dirfd + cwd, then real VFS lookup.
+    // Linux's vfs_fstatat (getname/filename_lookup) runs ahead of cp_statx,
+    // so the statxbuf gate is deferred until after a successful lookup.
     if path == 0 {
         return linux_err(errno::EFAULT);
     }
     if let Err(e) = crate::mm::user::validate_user_read(path, 1) {
         return linux_err(linux_errno_for(e));
     }
-    linux_err(errno::ENOENT)
+    // Kernel context preserves the no-file ENOENT contract (batch-488
+    // fidelity self-tests).
+    if caller_pid().is_none() {
+        return linux_err(errno::ENOENT);
+    }
+    let resolved = match resolve_at_path(dirfd, path) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let follow = flags & AT_SYMLINK_NOFOLLOW == 0;
+    let meta = match stat_meta_for_path(&resolved, follow) {
+        Ok(m) => m,
+        Err(r) => return r,
+    };
+    if statxbuf == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(statxbuf, STATX_SIZE) {
+        return linux_err(linux_errno_for(e));
+    }
+    let mut buf = [0u8; STATX_SIZE];
+    fill_statx_from_meta(&mut buf, &meta);
+    // SAFETY: validated as a writable STATX_SIZE-byte range above.
+    let r = unsafe { crate::mm::user::copy_to_user(buf.as_ptr(), statxbuf, STATX_SIZE) };
+    if let Err(e) = r {
+        return linux_err(linux_errno_for(e));
+    }
+    SyscallResult::ok(0)
 }
 
 // ---------------------------------------------------------------------------

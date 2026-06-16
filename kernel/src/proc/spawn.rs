@@ -8118,6 +8118,149 @@ pub fn self_test_linux_real_glibc_shell_relpath() -> KernelResult<()> {
     }
 }
 
+/// Part 24 (Path Z): real dash `[ -f PATH ]` exercises path-based stat.
+///
+/// `dash -c '[ -f /bin/dash ] && echo HASFILE > /stat-out.txt'`.  The `[`
+/// builtin's `-f` predicate calls `stat(2)` (via glibc, today routed through
+/// `statx`/`newfstatat`) on the pathname; the redirect only fires if the stat
+/// reports the file exists and is a regular file.  Before the stat-stub fix
+/// every path-based stat returned ENOENT unconditionally, so `[ -f ... ]` was
+/// always false and nothing was written — a real program-visible regression.
+/// This test pins the fixed behaviour: the path stat must succeed and report a
+/// regular file so the redirect produces the expected output.
+pub fn self_test_linux_real_glibc_shell_statpath() -> KernelResult<()> {
+    const EXPECT_EXIT: i32 = 0;
+    const EXPECT_OUT: &[u8] = b"HASFILE\n";
+
+    const SRC_LD: &str = "/mnt/lib64/ld-linux-x86-64.so.2";
+    const SRC_LIBC: &str = "/mnt/lib/x86_64-linux-gnu/libc.so.6";
+    const SRC_DASH: &str = "/mnt/bin/dash";
+    const DST_LD: &str = "/lib64/ld-linux-x86-64.so.2";
+    const DST_LIBC: &str = "/lib/x86_64-linux-gnu/libc.so.6";
+    const DST_DASH: &str = "/bin/dash";
+    const OUT_PATH: &str = "/stat-out.txt";
+    const MAX_YIELDS: usize = 262_144;
+
+    if !crate::fs::Vfs::exists(SRC_DASH) {
+        return Ok(());
+    }
+
+    serial_println!("[spawn] Running REAL dash shell statpath `[ -f /bin/dash ] && echo` (ring 3, Path Z) test...");
+
+    let _ = crate::fs::Vfs::mkdir_all("/lib64");
+    let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
+    let _ = crate::fs::Vfs::mkdir_all("/bin");
+    for (src, dst) in [(SRC_LD, DST_LD), (SRC_LIBC, DST_LIBC), (SRC_DASH, DST_DASH)] {
+        match crate::fs::Vfs::read_file(src) {
+            Ok(bytes) => {
+                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
+                    serial_println!(
+                        "[spawn]   real dash statpath: SKIP (staging {} -> {} failed: {:?})",
+                        src, dst, e
+                    );
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                serial_println!("[spawn]   real dash statpath: SKIP (reading {} failed: {:?})", src, e);
+                return Ok(());
+            }
+        }
+    }
+
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+
+    let exe_elf = match crate::fs::Vfs::read_file(DST_DASH) {
+        Ok(b) => b,
+        Err(e) => {
+            serial_println!("[spawn]   real dash statpath: SKIP (re-read {} failed: {:?})", DST_DASH, e);
+            return Ok(());
+        }
+    };
+
+    let argv: &[&[u8]] = &[b"/bin/dash", b"-c", b"[ -f /bin/dash ] && echo HASFILE > /stat-out.txt"];
+    let envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C"];
+    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-dash-statpath",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: Some(DST_DASH.as_bytes()),
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: real dash statpath spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let mut reaped = false;
+    for _ in 0..MAX_YIELDS {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            reaped = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    let out = crate::fs::Vfs::read_file(OUT_PATH);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+
+    if !reaped || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: real dash statpath — shell did not exit within {} yields (state={:?})",
+            MAX_YIELDS, state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECT_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: real dash statpath — exit code={:?}, expected {} (the `[ -f ]` \
+             predicate likely saw ENOENT from a path-based stat)",
+            exit_code, EXPECT_EXIT
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    match out {
+        Ok(bytes) if bytes.as_slice() == EXPECT_OUT => {
+            serial_println!(
+                "[spawn]   REAL dash shell statpath (ring 3: `[ -f /bin/dash ]` stat'd an existing \
+                 path, predicate true, redirect wrote {} bytes == expected, exit {}): OK",
+                bytes.len(), EXPECT_EXIT
+            );
+            Ok(())
+        }
+        Ok(bytes) => {
+            serial_println!(
+                "[spawn]   FAIL: real dash statpath — {} wrote {} bytes {:?}, expected {} bytes {:?}",
+                OUT_PATH, bytes.len(), bytes.as_slice(), EXPECT_OUT.len(), EXPECT_OUT
+            );
+            Err(KernelError::InternalError)
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: real dash statpath — reading {} back failed: {:?} (the `[ -f ]` \
+                 predicate was false, so path-based stat is still broken)",
+                OUT_PATH, e
+            );
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

@@ -2533,6 +2533,142 @@ pub fn build_linux_utimensat_test_elf(
     buf
 }
 
+/// Build a **Linux-ABI** `ET_EXEC` test ELF that exercises the **`chmod(2)`**
+/// and **`chown(2)`** metadata-mutation syscalls from ring 3:
+///
+/// ```text
+///   chmod(&path, mode)
+///   test rax,rax ; jnz fail1            ; success returns 0
+///   chown(&path, uid, gid)
+///   test rax,rax ; jnz fail2
+///   exit(0)
+///   fail1: exit(0xE1)
+///   fail2: exit(0xE2)
+/// ```
+///
+/// The harness pre-creates `path`, then independently reads the file's
+/// metadata back and asserts `permissions == mode & 0o777`, `uid == uid`,
+/// `gid == gid`.  `0xE1` = `chmod` failed, `0xE2` = `chown` failed.
+/// `mode`/`uid`/`gid` are emitted as `imm32`.  Tagged `ELFOSABI_GNU`.
+#[must_use]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
+pub fn build_linux_chmod_chown_test_elf(
+    path_nul: &[u8],
+    mode: u32,
+    uid: u32,
+    gid: u32,
+) -> alloc::vec::Vec<u8> {
+    use alloc::vec;
+
+    let phdr_offset: u64 = 64;
+    let code_offset: u64 = 120;
+    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+
+    let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+
+    // chmod(&path, mode)  [nr 90]
+    code.extend_from_slice(&[0x48, 0xBF]); // movabs rdi, &path
+    let path_imm1 = code.len();
+    code.extend_from_slice(&[0u8; 8]);
+    code.push(0xBE); // mov esi, mode
+    code.extend_from_slice(&mode.to_le_bytes());
+    code.extend_from_slice(&[0xB8, 0x5A, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,90; syscall
+    code.extend_from_slice(&[0x48, 0x85, 0xC0]); // test rax, rax
+    code.extend_from_slice(&[0x75, 0x00]); // jnz fail1
+    let jnz1_rel = code.len() - 1;
+
+    // chown(&path, uid, gid)  [nr 92]
+    code.extend_from_slice(&[0x48, 0xBF]); // movabs rdi, &path
+    let path_imm2 = code.len();
+    code.extend_from_slice(&[0u8; 8]);
+    code.push(0xBE); // mov esi, uid
+    code.extend_from_slice(&uid.to_le_bytes());
+    code.push(0xBA); // mov edx, gid
+    code.extend_from_slice(&gid.to_le_bytes());
+    code.extend_from_slice(&[0xB8, 0x5C, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,92; syscall
+    code.extend_from_slice(&[0x48, 0x85, 0xC0]); // test rax, rax
+    code.extend_from_slice(&[0x75, 0x00]); // jnz fail2
+    let jnz2_rel = code.len() - 1;
+
+    // exit(0)
+    code.extend_from_slice(&[0x31, 0xFF]); // xor edi, edi
+    code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,60; syscall
+
+    // fail1: exit(0xE1)
+    let fail1 = code.len();
+    code.extend_from_slice(&[0xBF, 0xE1, 0x00, 0x00, 0x00]);
+    code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]);
+
+    // fail2: exit(0xE2)
+    let fail2 = code.len();
+    code.extend_from_slice(&[0xBF, 0xE2, 0x00, 0x00, 0x00]);
+    code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]);
+    code.push(0xCC); // int3
+
+    // Patch the two forward rel8 jumps.
+    let jnz1_disp = (fail1 as isize) - (jnz1_rel as isize + 1);
+    let jnz2_disp = (fail2 as isize) - (jnz2_rel as isize + 1);
+    code[jnz1_rel] = jnz1_disp as u8;
+    code[jnz2_rel] = jnz2_disp as u8;
+
+    // --- Data layout (same PT_LOAD, after the code) ---
+    let code_len = code.len();
+    let data_base = code_offset as usize + code_len;
+    let path_off = data_base;
+    let path_end = path_off + path_nul.len();
+    let file_size = path_end;
+
+    let vaddr_of = |fo: usize| -> u64 { load_vaddr + (fo as u64 - code_offset) };
+    let path_vaddr = vaddr_of(path_off);
+    code[path_imm1..path_imm1 + 8].copy_from_slice(&path_vaddr.to_le_bytes());
+    code[path_imm2..path_imm2 + 8].copy_from_slice(&path_vaddr.to_le_bytes());
+
+    // --- File image ---
+    let seg_len = file_size - code_offset as usize;
+    let mut buf = vec![0u8; file_size];
+
+    buf[0] = 0x7F;
+    buf[1] = b'E';
+    buf[2] = b'L';
+    buf[3] = b'F';
+    buf[EI_CLASS] = ELFCLASS64;
+    buf[EI_DATA] = ELFDATA2LSB;
+    buf[EI_VERSION] = EV_CURRENT;
+    buf[EI_OSABI] = ELFOSABI_GNU;
+    write_u16(&mut buf, 16, ET_EXEC);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr); // e_entry
+    write_u64(&mut buf, 32, phdr_offset); // e_phoff
+    write_u64(&mut buf, 40, 0);
+    write_u32(&mut buf, 48, 0);
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, 1);
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0);
+    write_u16(&mut buf, 62, 0);
+
+    let ph = phdr_offset as usize;
+    write_u32(&mut buf, ph, PT_LOAD);
+    write_u32(&mut buf, ph + 4, PF_R | PF_X);
+    write_u64(&mut buf, ph + 8, code_offset);
+    write_u64(&mut buf, ph + 16, load_vaddr);
+    write_u64(&mut buf, ph + 24, 0);
+    write_u64(&mut buf, ph + 32, seg_len as u64);
+    write_u64(&mut buf, ph + 40, seg_len as u64);
+    write_u64(&mut buf, ph + 48, 0x1000);
+
+    buf[code_offset as usize..code_offset as usize + code_len].copy_from_slice(&code);
+    buf[path_off..path_end].copy_from_slice(path_nul);
+
+    buf
+}
+
 /// Build a **Linux-ABI** `ET_EXEC` test ELF that verifies the **`%fs`
 /// (TLS) base survives context switches**.  The process installs a
 /// caller-chosen `sentinel` FS base, then in a loop yields the CPU and

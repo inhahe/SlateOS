@@ -199,6 +199,45 @@ independently asserts the kernel-side `Vfs::metadata` reports
    treated as "leave unchanged". Proper fix needs an `Option<u64>` (or
    explicit "omit" flag) plumbed through `Filesystem::set_times` for every FS.
 
+### B-CHOWN1. Linux-ABI `chmod`/`fchmod`/`fchmodat`/`chown`/`lchown`/`fchown`/`fchownat` returned EROFS unconditionally (stale FS-mutation stubs) — FIXED 2026-06-16
+
+**Symptom:** No ring-3 program could change a file's permission bits or
+ownership. The whole chmod/chown family returned `-EROFS` after input
+validation, even though the VFS tracks Unix mode bits and uid/gid and
+implements `Vfs::set_permissions` / `Vfs::set_owner` across memfs/ext4/fat.
+`install -m`, `chmod +x`, `tar -x` (restores perms/owner), and package
+managers all depend on this.
+
+**Root cause:** Placeholder stubs that validated arguments (faithfully
+reproducing Linux's `ENOENT`/`EBADF`/`EINVAL` input-shape diagnostics —
+batches 483/484) and then hard-coded `linux_err(errno::EROFS)`. The EROFS
+terminal is asserted by those fidelity self-tests in kernel context.
+
+**Fix (proper):** For ring-3 callers each handler resolves the target
+(`resolve_at_path` for the path variants against the caller's cwd/dirfd;
+`handle_path` on the open file for the `fchmod`/`fchown` fd variants and the
+`fchownat(AT_EMPTY_PATH)` form), requires a File-WRITE capability, and calls
+`Vfs::set_permissions` (mode masked to `0o7777`) or `Vfs::set_owner` (uid/gid
+narrowed to 32 bits; the `(uid_t)-1`/`(gid_t)-1` "leave unchanged" sentinels
+are honoured by `Vfs::set_owner`). Kernel context keeps the EROFS terminal.
+`fchmod`/`fchown` on a non-file fd (pipe/console, no backing inode) return
+EINVAL. Regression test: Path Z Part 30 (`self_test_linux_chmod_chown`) — a
+hand-built raw-syscall ELF (`build_linux_chmod_chown_test_elf`) calls
+`chmod("/chmod-chown-test", 0o640)` then `chown(path, 1234, 5678)` from ring 3
+(sentinels `0xE1`/`0xE2`); the harness stages the file on the memfs root and,
+after exit 0, independently asserts `Vfs::metadata` reports
+`permissions == 0o640`, `uid == 1234`, `gid == 5678`.
+
+**Fidelity gaps (minor):**
+1. `lchown` and `fchownat(AT_SYMLINK_NOFOLLOW)` must operate on the symlink
+   itself, but `Vfs::set_owner` always follows the final symlink (same
+   no-follow gap as B-SYM1 for `link`). The common non-symlink case is
+   correct; a proper fix needs a no-follow `lset_owner` VFS variant.
+2. We gate chmod/chown on the generic File-WRITE capability rather than a
+   dedicated `CAP_CHOWN`/`CAP_FOWNER`; any process holding File-WRITE can
+   change mode/owner. This matches the OS's capability model (no per-syscall
+   POSIX capability bits yet) but is laxer than Linux's privilege checks.
+
 ### B-SIG1. dash's `wait` builtin (background-job reap) livelocked: no SIGCHLD on child exit + `rt_sigsuspend` was a stub — FIXED 2026-06-16
 
 **RESOLVED 2026-06-16.** A real glibc `dash` running `/bin/emit > file &

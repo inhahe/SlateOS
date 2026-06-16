@@ -18657,11 +18657,19 @@ fn sys_readlinkat(args: &SyscallArgs) -> SyscallResult {
 // ---------------------------------------------------------------------------
 // chmod / fchmod / fchmodat / chown / lchown / fchown / fchownat
 //
-// Without a writable backing FS or any concept of ownership, all attempts
-// to alter mode or owner are refused with EROFS for path-based variants
-// (the FS itself is read-only) and EROFS after fd validation for the
-// fd-based variants.  Validate inputs first so EFAULT and EBADF surface
-// truthfully.
+// For ring-3 callers these now perform real metadata mutations via
+// `Vfs::set_permissions` / `Vfs::set_owner` (memfs/ext4/fat all implement
+// them, and the VFS tracks Unix mode bits and uid/gid).  The path variants
+// resolve against the caller's cwd/dirfd via `resolve_at_path`; the fd
+// variants resolve the open file's backing path via `handle_path`.  Kernel
+// context (no caller PID) keeps the historical EROFS terminal that the
+// batch-483/484 input-shape fidelity probes assert, and inputs are still
+// validated first so EFAULT/EBADF/ENOENT surface truthfully.
+//
+// Fidelity gap (documented in known-issues B-CHOWN1): `lchown` and
+// `fchownat(AT_SYMLINK_NOFOLLOW)` should operate on the symlink itself, but
+// `Vfs::set_owner` always follows the final symlink (the common non-symlink
+// case is correct).
 // ---------------------------------------------------------------------------
 
 /// `chmod(path, mode)`.
@@ -18676,7 +18684,29 @@ fn sys_chmod(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = check_path_str_nonempty(args.arg0) {
         return linux_err(e);
     }
-    linux_err(errno::EROFS)
+    if caller_pid().is_none() {
+        return linux_err(errno::EROFS);
+    }
+    let path = match resolve_at_path(AT_FDCWD, args.arg0) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    chmod_apply(&path, args.arg1)
+}
+
+/// Apply a `chmod`-style mode change to an already-resolved path for a ring-3
+/// caller.  Masks the Linux `umode_t` to the 12 permission/special bits and
+/// routes to `Vfs::set_permissions` after a File-WRITE capability check.
+fn chmod_apply(path: &str, mode: u64) -> SyscallResult {
+    if let Err(r) = require_fs_write() {
+        return r;
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let perms = (mode & 0o7777) as u16;
+    match crate::fs::Vfs::set_permissions(path, perms) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
 }
 
 /// `fchmod(fd, mode)`.
@@ -18687,10 +18717,19 @@ fn sys_fchmod(args: &SyscallArgs) -> SyscallResult {
         Some(p) => p,
         None => return linux_err(errno::EROFS),
     };
-    if pcb::linux_fd_lookup(pid, fd).is_none() {
-        return linux_err(errno::EBADF);
+    let entry = match pcb::linux_fd_lookup(pid, fd) {
+        Some(e) => e,
+        None => return linux_err(errno::EBADF),
+    };
+    if entry.kind != HandleKind::File {
+        // fchmod on a pipe/console fd has no backing inode → EINVAL.
+        return linux_err(errno::EINVAL);
     }
-    linux_err(errno::EROFS)
+    let path = match crate::fs::handle::handle_path(entry.raw_handle) {
+        Ok(p) => p,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+    chmod_apply(&path, args.arg1)
 }
 
 /// `fchmodat(dirfd, path, mode)` — Linux syscall #268.
@@ -18736,7 +18775,16 @@ fn sys_fchmodat(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = check_path_str_nonempty(args.arg1) {
         return linux_err(e);
     }
-    linux_err(errno::EROFS)
+    if caller_pid().is_none() {
+        return linux_err(errno::EROFS);
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let dirfd = args.arg0 as i32;
+    let path = match resolve_at_path(dirfd, args.arg1) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    chmod_apply(&path, args.arg2)
 }
 
 /// `chown(path, uid, gid)`.
@@ -18749,7 +18797,32 @@ fn sys_chown(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = check_path_str_nonempty(args.arg0) {
         return linux_err(e);
     }
-    linux_err(errno::EROFS)
+    if caller_pid().is_none() {
+        return linux_err(errno::EROFS);
+    }
+    let path = match resolve_at_path(AT_FDCWD, args.arg0) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    chown_apply(&path, args.arg1, args.arg2)
+}
+
+/// Apply a `chown`-style ownership change to an already-resolved path for a
+/// ring-3 caller.  The Linux `uid_t`/`gid_t` are narrowed to 32 bits; the
+/// `(uid_t)-1` / `(gid_t)-1` "leave unchanged" sentinels are honoured by
+/// `Vfs::set_owner` itself.  Requires a File-WRITE capability.
+fn chown_apply(path: &str, uid_arg: u64, gid_arg: u64) -> SyscallResult {
+    if let Err(r) = require_fs_write() {
+        return r;
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let uid = uid_arg as u32;
+    #[allow(clippy::cast_possible_truncation)]
+    let gid = gid_arg as u32;
+    match crate::fs::Vfs::set_owner(path, uid, gid) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
 }
 
 /// `fchown(fd, uid, gid)`.
@@ -18760,10 +18833,19 @@ fn sys_fchown(args: &SyscallArgs) -> SyscallResult {
         Some(p) => p,
         None => return linux_err(errno::EROFS),
     };
-    if pcb::linux_fd_lookup(pid, fd).is_none() {
-        return linux_err(errno::EBADF);
+    let entry = match pcb::linux_fd_lookup(pid, fd) {
+        Some(e) => e,
+        None => return linux_err(errno::EBADF),
+    };
+    if entry.kind != HandleKind::File {
+        // fchown on a pipe/console fd has no backing inode → EINVAL.
+        return linux_err(errno::EINVAL);
     }
-    linux_err(errno::EROFS)
+    let path = match crate::fs::handle::handle_path(entry.raw_handle) {
+        Ok(p) => p,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+    chown_apply(&path, args.arg1, args.arg2)
 }
 
 /// `lchown(path, uid, gid)` — identical to chown without symlink
@@ -18777,7 +18859,17 @@ fn sys_lchown(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = check_path_str_nonempty(args.arg0) {
         return linux_err(e);
     }
-    linux_err(errno::EROFS)
+    if caller_pid().is_none() {
+        return linux_err(errno::EROFS);
+    }
+    let path = match resolve_at_path(AT_FDCWD, args.arg0) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    // Fidelity gap: lchown(2) must NOT follow a final symlink, but
+    // `Vfs::set_owner` always follows (resolve_follow).  The common
+    // non-symlink case is correct; see known-issues B-CHOWN1.
+    chown_apply(&path, args.arg1, args.arg2)
 }
 
 /// `fchownat(dirfd, path, uid, gid, flags)`.
@@ -18807,22 +18899,34 @@ fn sys_fchownat(args: &SyscallArgs) -> SyscallResult {
         return linux_err(errno::EINVAL);
     }
     // AT_EMPTY_PATH may pass an empty path with a valid dirfd; in that
-    // case the operation targets dirfd directly.  Even then we have no
-    // writable FS, so EROFS once dirfd is validated.
+    // case the operation targets the open file referenced by dirfd directly.
     if flags & 0x1000 != 0 {
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         let dirfd = args.arg0 as i32;
-        // AT_FDCWD == -100; accept it without validation.
-        if dirfd != -100 {
-            let pid = match caller_pid() {
+        let pid = match caller_pid() {
+            Some(p) => p,
+            None => return linux_err(errno::EROFS),
+        };
+        // AT_FDCWD with an empty path targets the cwd.
+        let path = if dirfd == AT_FDCWD {
+            match pcb::get_cwd(pid).and_then(|c| alloc::string::String::from_utf8(c).ok()) {
                 Some(p) => p,
-                None => return linux_err(errno::EROFS),
-            };
-            if pcb::linux_fd_lookup(pid, dirfd).is_none() {
-                return linux_err(errno::EBADF);
+                None => return linux_err(errno::ENOENT),
             }
-        }
-        return linux_err(errno::EROFS);
+        } else {
+            let entry = match pcb::linux_fd_lookup(pid, dirfd) {
+                Some(e) => e,
+                None => return linux_err(errno::EBADF),
+            };
+            if entry.kind != HandleKind::File {
+                return linux_err(errno::EINVAL);
+            }
+            match crate::fs::handle::handle_path(entry.raw_handle) {
+                Ok(p) => p,
+                Err(e) => return linux_err(linux_errno_for(e)),
+            }
+        };
+        return chown_apply(&path, args.arg2, args.arg3);
     }
     // Empty-path → ENOENT (batch 483): without AT_EMPTY_PATH,
     // do_fchownat()'s getname(filename) routes through
@@ -18832,7 +18936,18 @@ fn sys_fchownat(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = check_path_str_nonempty(args.arg1) {
         return linux_err(e);
     }
-    linux_err(errno::EROFS)
+    if caller_pid().is_none() {
+        return linux_err(errno::EROFS);
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let dirfd = args.arg0 as i32;
+    let path = match resolve_at_path(dirfd, args.arg1) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    // Fidelity gap: AT_SYMLINK_NOFOLLOW (0x100) is ignored — `Vfs::set_owner`
+    // always follows the final symlink.  See known-issues B-CHOWN1.
+    chown_apply(&path, args.arg2, args.arg3)
 }
 
 // ---------------------------------------------------------------------------

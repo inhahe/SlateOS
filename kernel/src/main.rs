@@ -1353,6 +1353,13 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: Linux utimensat() (ring 3) self-test failed: {:?}", e);
     }
 
+    // Ring-3 test that chmod()/chown() mutate file metadata (the chmod/chown
+    // family now routes to Vfs::set_permissions/set_owner for ring-3 callers
+    // instead of returning EROFS).  Verifies kernel-side mode + owner.
+    if let Err(e) = proc::spawn::self_test_linux_chmod_chown() {
+        serial_println!("WARNING: Linux chmod()/chown() (ring 3) self-test failed: {:?}", e);
+    }
+
     // Ring-3 regression test that IA32_FS_BASE (the glibc %fs/TLS pointer) is
     // saved/restored per task across context switches.  Two concurrent Linux
     // procs install distinct FS bases and assert they survive cooperative

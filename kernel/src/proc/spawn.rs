@@ -3372,6 +3372,112 @@ pub fn self_test_linux_utimensat() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 regression test that **`chmod(2)`/`chown(2)` mutate file metadata**.
+///
+/// Before this wiring, the whole chmod/chown family were EROFS stubs.  They
+/// now route to `Vfs::set_permissions` / `Vfs::set_owner` for ring-3 callers.
+/// This test stages a file on the memfs root, then a ring-3 program calls
+/// `chmod(path, 0o640)` followed by `chown(path, 1234, 5678)`.  After the
+/// process exits 0, the kernel independently reads the file metadata back and
+/// asserts `permissions == 0o640`, `uid == 1234`, `gid == 5678`.
+pub fn self_test_linux_chmod_chown() -> KernelResult<()> {
+    const PATH: &str = "/chmod-chown-test";
+    const PATH_NUL: &[u8] = b"/chmod-chown-test\0";
+    const MODE: u16 = 0o640;
+    const UID: u32 = 1234;
+    const GID: u32 = 5678;
+    const MAX_YIELDS: usize = 256;
+
+    serial_println!("[spawn] Running Linux chmod()/chown() metadata test (ring 3, memfs /)...");
+
+    let _ = crate::fs::Vfs::remove(PATH);
+    if let Err(e) = crate::fs::Vfs::write_file(PATH, b"m") {
+        serial_println!("[spawn]   FAIL: chmod/chown staging write failed: {:?}", e);
+        return Err(e);
+    }
+
+    let exe_elf = elf::build_linux_chmod_chown_test_elf(PATH_NUL, u32::from(MODE), UID, GID);
+    let argv: &[&[u8]] = &[b"spawn-test-linux-chmod-chown"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-chmod-chown",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = crate::fs::Vfs::remove(PATH);
+            serial_println!("[spawn]   FAIL: chmod/chown spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    for _ in 0..MAX_YIELDS {
+        crate::sched::yield_now();
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            break;
+        }
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    let kernel_readback = crate::fs::Vfs::metadata(PATH);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(PATH);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: chmod/chown (ring 3) — process not a zombie after {} yields, got {:?}",
+            MAX_YIELDS, state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: chmod/chown (ring 3) — expected exit 0, got {:?} (0xE1/225 = chmod \
+             failed; 0xE2/226 = chown failed)",
+            exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    match kernel_readback {
+        Ok(ref m) if m.permissions == MODE && m.uid == UID && m.gid == GID => {}
+        Ok(ref m) => {
+            serial_println!(
+                "[spawn]   FAIL: chmod/chown (ring 3) — process exited 0 but kernel readback \
+                 mismatch: permissions=0o{:o} (want 0o{:o}), uid={} (want {}), gid={} (want {})",
+                m.permissions, MODE, m.uid, UID, m.gid, GID
+            );
+            return Err(KernelError::InternalError);
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: chmod/chown (ring 3) — kernel metadata readback failed: {:?}",
+                e
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    serial_println!(
+        "[spawn]   Linux chmod()/chown() (ring 3: set mode 0o640 + owner 1234:5678 on \
+         /chmod-chown-test; kernel confirmed): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 regression test that the **`%fs` (TLS) base is saved/restored
 /// across context switches** between two concurrent Linux processes.
 ///

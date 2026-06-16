@@ -1612,6 +1612,16 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z: a real dash shell runs a background job and reaps it —
+    // `/bin/emit > file & wait` — exercising the async-child + waitpid path
+    // (the `wait` builtin) driven from the shell. No-op without rootfs.ext4.
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_bgjob() {
+        serial_println!(
+            "WARNING: Path-Z real dash shell background-job self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

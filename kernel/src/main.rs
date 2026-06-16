@@ -1601,6 +1601,17 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z: a real dash shell processes a here-document — `read a <<EOF /
+    // HELLO / EOF / echo "$a" > file` — feeding the heredoc body onto fd 0
+    // via the kernel's pipe machinery, then the `read` builtin consumes it.
+    // No-op without rootfs.ext4.
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_heredoc() {
+        serial_println!(
+            "WARNING: Path-Z real dash shell heredoc self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

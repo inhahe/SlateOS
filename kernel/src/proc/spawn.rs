@@ -7796,6 +7796,160 @@ pub fn self_test_linux_real_glibc_shell_pipeline() -> KernelResult<()> {
     }
 }
 
+/// Path Z Part 22: a real glibc `dash` changes its working directory and
+/// reads it back, exercising the kernel's `chdir`/`getcwd` round-trip.
+///
+/// The script `cd /cwdtest && pwd -P > /cwd-out.txt` makes dash issue
+/// `chdir("/cwdtest")` and then — crucially with the `-P` (physical) flag —
+/// call `getcwd()` to obtain the kernel's notion of the current directory,
+/// rather than printing the logical `$PWD` string it tracks internally
+/// (which the default `pwd`/`pwd -L` would do without ever touching the
+/// kernel).  No earlier Path Z test changes the working directory at all,
+/// so this is the first end-to-end exercise of the per-process cwd stored
+/// in the PCB: dash's `chdir` updates it, `getcwd` must read the exact same
+/// canonical path back, and the ABI buffer-sizing / NUL-termination must be
+/// correct or glibc's getcwd wrapper would loop or error.  We pre-create
+/// `/cwdtest` for realism (the current chdir is string-level and does not
+/// require the target to exist, but creating it keeps the test valid if
+/// chdir ever gains an existence check).  The output redirect uses an
+/// absolute path so it lands regardless of the new cwd.  No-op without
+/// rootfs.ext4.
+pub fn self_test_linux_real_glibc_shell_cwd() -> KernelResult<()> {
+    const EXPECT_EXIT: i32 = 0;
+    // `pwd -P` prints the kernel cwd from getcwd(); echo/pwd append a newline.
+    const EXPECT_OUT: &[u8] = b"/cwdtest\n";
+
+    const SRC_LD: &str = "/mnt/lib64/ld-linux-x86-64.so.2";
+    const SRC_LIBC: &str = "/mnt/lib/x86_64-linux-gnu/libc.so.6";
+    const SRC_DASH: &str = "/mnt/bin/dash";
+    const DST_LD: &str = "/lib64/ld-linux-x86-64.so.2";
+    const DST_LIBC: &str = "/lib/x86_64-linux-gnu/libc.so.6";
+    const DST_DASH: &str = "/bin/dash";
+    const CWD_DIR: &str = "/cwdtest";
+    const OUT_PATH: &str = "/cwd-out.txt";
+    const MAX_YIELDS: usize = 262_144;
+
+    if !crate::fs::Vfs::exists(SRC_DASH) {
+        return Ok(());
+    }
+
+    serial_println!("[spawn] Running REAL dash shell cwd `cd /cwdtest && pwd -P` (ring 3, Path Z) test...");
+
+    let _ = crate::fs::Vfs::mkdir_all("/lib64");
+    let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
+    let _ = crate::fs::Vfs::mkdir_all("/bin");
+    for (src, dst) in [(SRC_LD, DST_LD), (SRC_LIBC, DST_LIBC), (SRC_DASH, DST_DASH)] {
+        match crate::fs::Vfs::read_file(src) {
+            Ok(bytes) => {
+                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
+                    serial_println!(
+                        "[spawn]   real dash cwd: SKIP (staging {} -> {} failed: {:?})",
+                        src, dst, e
+                    );
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                serial_println!("[spawn]   real dash cwd: SKIP (reading {} failed: {:?})", src, e);
+                return Ok(());
+            }
+        }
+    }
+
+    let _ = crate::fs::Vfs::mkdir_all(CWD_DIR);
+
+    let exe_elf = match crate::fs::Vfs::read_file(DST_DASH) {
+        Ok(b) => b,
+        Err(e) => {
+            serial_println!("[spawn]   real dash cwd: SKIP (re-read {} failed: {:?})", DST_DASH, e);
+            return Ok(());
+        }
+    };
+
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+
+    let argv: &[&[u8]] = &[b"/bin/dash", b"-c", b"cd /cwdtest && pwd -P > /cwd-out.txt"];
+    let envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C"];
+    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-dash-cwd",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: Some(DST_DASH.as_bytes()),
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: real dash cwd spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let mut reaped = false;
+    for _ in 0..MAX_YIELDS {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            reaped = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    let written = crate::fs::Vfs::read_file(OUT_PATH);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+
+    if !reaped || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: real dash cwd — shell did not exit within {} yields (state={:?})",
+            MAX_YIELDS, state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECT_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: real dash cwd — exit code={:?}, expected {}",
+            exit_code, EXPECT_EXIT
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    match written {
+        Ok(bytes) if bytes.as_slice() == EXPECT_OUT => {
+            serial_println!(
+                "[spawn]   REAL dash shell cwd (ring 3: dash chdir'd to /cwdtest then `pwd -P` \
+                 read the kernel cwd back via getcwd — read back {} bytes == expected, exit {}): OK",
+                bytes.len(), EXPECT_EXIT
+            );
+            Ok(())
+        }
+        Ok(bytes) => {
+            serial_println!(
+                "[spawn]   FAIL: real dash cwd — wrote {} bytes {:?}, expected {} bytes {:?} \
+                 (mismatch means chdir/getcwd disagree on the working directory)",
+                bytes.len(), bytes.as_slice(), EXPECT_OUT.len(), EXPECT_OUT
+            );
+            Err(KernelError::InternalError)
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: real dash cwd — reading the redirected output file back failed: {:?}",
+                e
+            );
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

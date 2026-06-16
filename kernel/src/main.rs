@@ -1557,6 +1557,17 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z: a real dash shell performs pathname expansion (globbing) —
+    // `echo /globdir/* > file` — driving its own opendir/getdents64 directory
+    // read, the first end-to-end exercise of glibc readdir. No-op without
+    // rootfs.ext4.
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_glob() {
+        serial_println!(
+            "WARNING: Path-Z real dash shell glob self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

@@ -6653,6 +6653,186 @@ pub fn self_test_linux_real_glibc_shell_script_stdin() -> KernelResult<()> {
     }
 }
 
+/// Path Z Part 15: a real `dash` shell performs *pathname expansion* (globbing)
+/// — `echo /globdir/* > file` — driving its own `opendir`/`getdents64`-based
+/// directory enumeration.
+///
+/// Every prior Path Z test drove fork/exec/wait, stdio, pipes, or redirection;
+/// none read a *directory*.  Shell globbing is the first end-to-end exercise of
+/// the glibc `opendir`→`open(…, O_DIRECTORY)`→`getdents64`→`readdir` path: dash
+/// expands `/globdir/*` by opening `/globdir`, enumerating its entries, dropping
+/// the leading-dot names (`.`/`..` never match `*`), matching the pattern, and
+/// **sorting** the survivors (POSIX requires sorted pathname-expansion results),
+/// so the output is deterministic regardless of the VFS's directory order.
+///
+/// With a `/globdir` holding exactly `a.txt`, `b.txt`, `c.txt`, the redirected
+/// stdout must be the three sorted paths joined by single spaces (echo's
+/// separator) plus a trailing newline, and dash must exit 0.  A glob that
+/// resolved nothing would instead leave the literal `/globdir/*` (POSIX
+/// no-match rule), so an exact match is a strong proof the directory read
+/// actually returned the entries.
+pub fn self_test_linux_real_glibc_shell_glob() -> KernelResult<()> {
+    const EXPECT_EXIT: i32 = 0;
+    // echo joins argv with single spaces and appends a newline; dash sorts the
+    // glob matches, so a/b/c is deterministic.
+    const EXPECT_OUT: &[u8] = b"/globdir/a.txt /globdir/b.txt /globdir/c.txt\n";
+
+    const SRC_LD: &str = "/mnt/lib64/ld-linux-x86-64.so.2";
+    const SRC_LIBC: &str = "/mnt/lib/x86_64-linux-gnu/libc.so.6";
+    const SRC_DASH: &str = "/mnt/bin/dash";
+    const DST_LD: &str = "/lib64/ld-linux-x86-64.so.2";
+    const DST_LIBC: &str = "/lib/x86_64-linux-gnu/libc.so.6";
+    const DST_DASH: &str = "/bin/dash";
+    const GLOB_DIR: &str = "/globdir";
+    const GLOB_A: &str = "/globdir/a.txt";
+    const GLOB_B: &str = "/globdir/b.txt";
+    const GLOB_C: &str = "/globdir/c.txt";
+    const OUT_PATH: &str = "/glob-out.txt";
+    const MAX_YIELDS: usize = 262_144;
+
+    if !crate::fs::Vfs::exists(SRC_DASH) {
+        return Ok(());
+    }
+
+    serial_println!("[spawn] Running REAL dash shell glob `echo /globdir/* > file` (ring 3, Path Z) test...");
+
+    let _ = crate::fs::Vfs::mkdir_all("/lib64");
+    let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
+    let _ = crate::fs::Vfs::mkdir_all("/bin");
+    for (src, dst) in [(SRC_LD, DST_LD), (SRC_LIBC, DST_LIBC), (SRC_DASH, DST_DASH)] {
+        match crate::fs::Vfs::read_file(src) {
+            Ok(bytes) => {
+                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
+                    serial_println!(
+                        "[spawn]   real dash glob: SKIP (staging {} -> {} failed: {:?})",
+                        src, dst, e
+                    );
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                serial_println!(
+                    "[spawn]   real dash glob: SKIP (reading {} failed: {:?})",
+                    src, e
+                );
+                return Ok(());
+            }
+        }
+    }
+
+    let exe_elf = match crate::fs::Vfs::read_file(DST_DASH) {
+        Ok(b) => b,
+        Err(e) => {
+            serial_println!("[spawn]   real dash glob: SKIP (re-read {} failed: {:?})", DST_DASH, e);
+            return Ok(());
+        }
+    };
+
+    // Build the directory the glob enumerates.  write_file is idempotent, so
+    // re-running the test across boots just overwrites.
+    let _ = crate::fs::Vfs::mkdir_all(GLOB_DIR);
+    for f in [GLOB_A, GLOB_B, GLOB_C] {
+        if let Err(e) = crate::fs::Vfs::write_file(f, b"x") {
+            serial_println!("[spawn]   real dash glob: SKIP (creating {} failed: {:?})", f, e);
+            return Ok(());
+        }
+    }
+
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+
+    // dash opens /globdir, getdents64s it, expands + sorts the matches, then
+    // echoes them to the redirect file.
+    let argv: &[&[u8]] = &[
+        b"/bin/dash",
+        b"-c",
+        b"echo /globdir/* > /glob-out.txt",
+    ];
+    let envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C"];
+    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-dash-glob",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: Some(DST_DASH.as_bytes()),
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: real dash glob spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let mut reaped = false;
+    for _ in 0..MAX_YIELDS {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            reaped = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    let written = crate::fs::Vfs::read_file(OUT_PATH);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+    let _ = crate::fs::Vfs::remove(GLOB_A);
+    let _ = crate::fs::Vfs::remove(GLOB_B);
+    let _ = crate::fs::Vfs::remove(GLOB_C);
+
+    if !reaped || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: real dash glob — shell did not exit within {} yields \
+             (state={:?}); dash's opendir/getdents64 directory read likely hung",
+            MAX_YIELDS, state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECT_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: real dash glob — exit code={:?}, expected {}",
+            exit_code, EXPECT_EXIT
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    match written {
+        Ok(bytes) if bytes.as_slice() == EXPECT_OUT => {
+            serial_println!(
+                "[spawn]   REAL dash shell glob (ring 3: dash opened /globdir, getdents64'd \
+                 it, expanded + sorted `*` to three paths, echoed them — read back {} bytes \
+                 == expected, exit {}): OK",
+                bytes.len(), EXPECT_EXIT
+            );
+            Ok(())
+        }
+        Ok(bytes) => {
+            serial_println!(
+                "[spawn]   FAIL: real dash glob — wrote {} bytes {:?}, expected {} bytes {:?} \
+                 (a literal `/globdir/*` means the directory read returned no matches)",
+                bytes.len(), bytes.as_slice(), EXPECT_OUT.len(), EXPECT_OUT
+            );
+            Err(KernelError::InternalError)
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: real dash glob — reading the redirected output file back failed: {:?}",
+                e
+            );
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

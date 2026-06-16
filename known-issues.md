@@ -295,6 +295,32 @@ leading 4 preserved (`'A'`) and the grown tail zero-filled.
    `O_APPEND`-doesn't-block-truncate nuance. The append/immutable-flag EPERM
    path is not yet plumbed (same capability-model gap as B-CHOWN1).
 
+### B-FALLOC1. Linux-ABI `fallocate` range modes (PUNCH/ZERO/COLLAPSE/INSERT/UNSHARE) return EOPNOTSUPP — KNOWN LIMITATION (acceptable fallback)
+
+**Status:** Not a bug — a documented, spec-acceptable limitation. `sys_fallocate`
+(syscall #285) was wired 2026-06-16 (Path Z Part 33) from a blanket EOPNOTSUPP
+terminal to the real VFS for the two well-defined *allocate* modes: `mode == 0`
+(posix_fallocate grow → `Vfs::file_size`/`Vfs::truncate`, never shrinking) and
+`FALLOC_FL_KEEP_SIZE` (block reservation → `Vfs::fallocate`). MemFd fds grow via
+`ipc::memfd::truncate`. Both enforce `RLIMIT_FSIZE` (EFBIG) and the File-WRITE
+capability.
+
+**Limitation:** The *range* modes — `PUNCH_HOLE`, `ZERO_RANGE`, `COLLAPSE_RANGE`,
+`INSERT_RANGE`, `UNSHARE_RANGE` (and their valid combinations) — still return
+EOPNOTSUPP after passing the full mode-validation gate ladder. This is the same
+answer Linux returns for a filesystem whose `f_op->fallocate` doesn't implement
+the operation, and the well-behaved callers (sqlite, PostgreSQL WAL preallocation)
+treat EOPNOTSUPP as "fall back to writing zeros", so nothing breaks. Implementing
+hole-punching/range-collapse properly requires extent-level support in the VFS
+backends (memfs/ext4/fat), which is out of scope for the syscall-fidelity line.
+
+**Proper fix (deferred):** Add `punch_hole`/`zero_range`/`collapse_range`/
+`insert_range` operations to the `FileSystem` trait and implement them per backend
+(ext4 already has extent support; memfs would need sparse-region bookkeeping), then
+dispatch the range modes here instead of EOPNOTSUPP. Track as a VFS enhancement, not
+a syscall-layer bug. Kernel context (caller_pid None) keeps the EOPNOTSUPP terminal,
+asserted by the batch-536 FMODE_WRITE + vfs_fallocate gate-order self-tests.
+
 ### B-SIG1. dash's `wait` builtin (background-job reap) livelocked: no SIGCHLD on child exit + `rt_sigsuspend` was a stub — FIXED 2026-06-16
 
 **RESOLVED 2026-06-16.** A real glibc `dash` running `/bin/emit > file &

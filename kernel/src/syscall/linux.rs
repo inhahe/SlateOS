@@ -36868,8 +36868,21 @@ fn sys_mremap(args: &SyscallArgs) -> SyscallResult {
 /// Gate 9 (the FMODE_WRITE check) sits AFTER all the mode-validation
 /// gates in `vfs_fallocate`, so a read-only fd with an *invalid* mode
 /// still surfaces the mode error first; only a read-only fd with an
-/// otherwise-valid mode reaches the EBADF.  It precedes the terminal
-/// EOPNOTSUPP we return for "no `f_op->fallocate`".
+/// otherwise-valid mode reaches the EBADF.  It precedes the file-type
+/// gates (FIFO → ESPIPE, non-regular/non-block → ENODEV) and the actual
+/// allocate dispatch.
+///
+/// For ring-3 callers two allocate modes are now backed by the VFS:
+///   * `mode == 0` (posix_fallocate): the file is grown so its logical
+///     size is at least `offset + len`; an already-larger file is left
+///     untouched (fallocate never shrinks).
+///   * `mode == FALLOC_FL_KEEP_SIZE`: blocks for `[0, offset + len)` are
+///     reserved via the VFS without changing the logical size.
+/// Both enforce RLIMIT_FSIZE (EFBIG) and the File-WRITE capability, and a
+/// `checked_add(offset, len)` overflow also surfaces EFBIG.  Every other
+/// surviving mode combination (PUNCH_HOLE, ZERO_RANGE, COLLAPSE_RANGE,
+/// INSERT_RANGE, UNSHARE_RANGE and valid combos) keeps the EOPNOTSUPP
+/// fallback, as does kernel context (caller_pid None — no fd table).
 ///
 /// Note the errno discriminators: unknown-mode-bits and the
 /// PUNCH/ZERO/PUNCH-needs-KEEP_SIZE gates return EOPNOTSUPP (filesystem
@@ -36947,28 +36960,129 @@ fn sys_fallocate(args: &SyscallArgs) -> SyscallResult {
     if mode & UNSHARE_RANGE != 0 && mode & !(UNSHARE_RANGE | KEEP_SIZE) != 0 {
         return linux_err(errno::EINVAL);
     }
-    // (9) FMODE_WRITE check (vfs_fallocate, fs/open.c):
+    // (9) FMODE_WRITE check + real fallocate dispatch (vfs_fallocate,
+    // fs/open.c):
     //   if (!(file->f_mode & FMODE_WRITE)) return -EBADF;
     // positioned AFTER every mode-validation gate above (so an invalid
-    // mode still wins) and BEFORE the terminal EOPNOTSUPP for "no
-    // f_op->fallocate".  A read-only fd with an otherwise-valid mode is
-    // therefore EBADF, not EOPNOTSUPP.  validate_linux_fd already proved
-    // the fd exists; here we re-lookup to read its access mode.  In
-    // kernel context caller_pid() is None (and validate_linux_fd returned
-    // Ok unconditionally), so the access mode is unconsultable there —
-    // real callers always carry a pid.
+    // mode still wins) and BEFORE the file-type/`f_op->fallocate` gates.
+    // A read-only fd with an otherwise-valid mode is therefore EBADF.
+    //
+    // In kernel context caller_pid() is None (and validate_linux_fd
+    // returned Ok unconditionally), so there is no fd table to consult:
+    // we fall straight through to the terminal EOPNOTSUPP below, which is
+    // exactly what a userspace caller saw before fallocate was wired and
+    // what the kernel-context self-tests pin.  Real (ring-3) callers
+    // always carry a pid and take the branch below, where the fd is
+    // resolved, FMODE_WRITE is enforced, the inode kind is classified
+    // (Linux's FIFO->ESPIPE / non-regular->ENODEV gates), and the two
+    // well-defined allocate modes are dispatched to the VFS:
+    //   * mode == 0          (posix_fallocate): grow the file so its
+    //                        logical size is >= offset+len, never shrink.
+    //   * mode == KEEP_SIZE  reserve blocks for [0, offset+len) without
+    //                        changing the logical size.
+    // Every other surviving mode combination (PUNCH_HOLE, ZERO_RANGE,
+    // COLLAPSE_RANGE, INSERT_RANGE, UNSHARE_RANGE and their valid combos)
+    // keeps the spec-acceptable EOPNOTSUPP fallback.
     if let Some(pid) = caller_pid() {
-        if let Some(entry) = pcb::linux_fd_lookup(pid, fd) {
-            if !fd_access_is_writable(entry.status_flags) {
-                return linux_err(errno::EBADF);
+        let entry = match pcb::linux_fd_lookup(pid, fd) {
+            Some(e) => e,
+            None => return linux_err(errno::EBADF),
+        };
+        if !fd_access_is_writable(entry.status_flags) {
+            return linux_err(errno::EBADF);
+        }
+        use crate::proc::linux_fd::HandleKind;
+        // Linux file-type gates (vfs_fallocate): a FIFO is ESPIPE, and
+        // anything that is neither a regular file nor a block device is
+        // ENODEV — both ahead of the `f_op->fallocate` (EOPNOTSUPP) check.
+        match entry.kind {
+            HandleKind::Pipe => return linux_err(errno::ESPIPE),
+            HandleKind::File | HandleKind::MemFd => {}
+            _ => return linux_err(errno::ENODEV),
+        }
+        // end = offset + len; offset >= 0 and len > 0 by gate (2).  A sum
+        // past i64::MAX wraps, so checked_add → EFBIG (the same terminal a
+        // too-large grow hits via RLIMIT_FSIZE below).
+        let end = match offset.checked_add(len) {
+            Some(v) => v,
+            None => return linux_err(errno::EFBIG),
+        };
+        #[allow(clippy::cast_sign_loss)]
+        let end_u64 = end as u64; // end > 0 (offset >= 0, len > 0)
+        // RLIMIT_FSIZE applies to any fallocate that could allocate past
+        // the soft limit (Linux enforces it in vfs_fallocate via
+        // inode_newsize_ok / the rlimit on the backing grow).
+        if let Err(e) = rlimit_fsize_check_size_for_caller(end_u64) {
+            return linux_err(e);
+        }
+        match entry.kind {
+            HandleKind::File => {
+                let path = match crate::fs::handle::handle_path(entry.raw_handle) {
+                    Ok(p) => p,
+                    Err(e) => return linux_err(linux_errno_for(e)),
+                };
+                if let Err(r) = require_fs_write() {
+                    return r;
+                }
+                if mode == 0 {
+                    // posix_fallocate: ensure logical size >= end; never
+                    // shrink a file that is already larger.
+                    let cur = match crate::fs::Vfs::file_size(&path) {
+                        Ok(s) => s,
+                        Err(e) => return linux_err(linux_errno_for(e)),
+                    };
+                    if cur < end_u64 {
+                        return match crate::fs::Vfs::truncate(&path, end_u64) {
+                            Ok(()) => SyscallResult::ok(0),
+                            Err(e) => linux_err(linux_errno_for(e)),
+                        };
+                    }
+                    return SyscallResult::ok(0);
+                }
+                if mode == KEEP_SIZE {
+                    // Reserve blocks for [0, end) without touching the
+                    // logical size — the VFS fallocate is exactly this.
+                    return match crate::fs::Vfs::fallocate(&path, end_u64) {
+                        Ok(()) => SyscallResult::ok(0),
+                        Err(e) => linux_err(linux_errno_for(e)),
+                    };
+                }
+                // PUNCH_HOLE / ZERO_RANGE / COLLAPSE / INSERT / UNSHARE
+                // (and the surviving combos) keep the EOPNOTSUPP fallback.
+                return linux_err(errno::EOPNOTSUPP);
             }
+            HandleKind::MemFd => {
+                let h = crate::ipc::memfd::MemFdHandle::from_raw(entry.raw_handle);
+                if mode == 0 {
+                    let cur = match crate::ipc::memfd::size(h) {
+                        Ok(s) => s,
+                        Err(e) => return linux_err(linux_errno_for(e)),
+                    };
+                    if cur < end_u64 {
+                        return match crate::ipc::memfd::truncate(h, end_u64) {
+                            Ok(()) => SyscallResult::ok(0),
+                            Err(e) => linux_err(linux_errno_for(e)),
+                        };
+                    }
+                    return SyscallResult::ok(0);
+                }
+                if mode == KEEP_SIZE {
+                    // The in-memory backing has no separate block
+                    // reservation; KEEP_SIZE is a successful no-op (the
+                    // logical size is unchanged either way).
+                    return SyscallResult::ok(0);
+                }
+                return linux_err(errno::EOPNOTSUPP);
+            }
+            // Unreachable: the kind match above already narrowed to
+            // File/MemFd, but keep an explicit ENODEV terminal rather than
+            // an unreachable!() so a future kind addition can't panic.
+            _ => return linux_err(errno::ENODEV),
         }
     }
-    // Our VFS doesn't expose fallocate; calls fall through to
-    // ftruncate-equivalent semantics elsewhere.  Most callers (sqlite,
-    // PostgreSQL WAL) treat EOPNOTSUPP as "fs doesn't support
-    // fallocate, write zeros instead" which is the right behaviour
-    // for us.
+    // Kernel-context terminal (caller_pid None): no fd table to consult,
+    // and EOPNOTSUPP is the answer any userspace caller saw before
+    // fallocate was wired — the kernel-context self-tests assert it.
     linux_err(errno::EOPNOTSUPP)
 }
 

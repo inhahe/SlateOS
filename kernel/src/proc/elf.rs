@@ -2979,6 +2979,147 @@ pub fn build_linux_fchmodat2_emptypath_test_elf(
     buf
 }
 
+/// Build a **Linux-ABI** `ET_EXEC` test ELF that exercises
+/// **`fallocate(2)` mode 0 (posix_fallocate grow)** (Linux syscall #285)
+/// from ring 3 — the fd-targeted path whose backing resolution goes
+/// through `handle_path` → `Vfs::truncate`:
+///
+/// ```text
+///   open(&path, O_RDWR, 0)                 ; fd for the target file
+///   test rax,rax ; js  open_fail           ; fd < 0 on error
+///   mov  r8, rax                           ; save fd
+///   fallocate(fd, 0, 0, grow_len)          ; mode=0, offset=0, len=grow
+///   test rax,rax ; jnz falloc_fail         ; success returns 0
+///   exit(0)
+///   open_fail:   exit(0xD1)
+///   falloc_fail: exit(0xD2)
+/// ```
+///
+/// The harness pre-creates `path` with a *smaller* size, then independently
+/// reads the file size back and asserts it grew to exactly `grow_len` (the
+/// posix_fallocate guarantee: logical size becomes at least `offset+len`,
+/// here `0+grow_len`).  A clean `exit(0)` plus the kernel-side size match
+/// proves the `fd → handle_path → Vfs::file_size/Vfs::truncate` grow path
+/// works end-to-end from ring 3.  `grow_len` is emitted as `imm32` into
+/// `r10d` (the 4th syscall arg); `mode` (`esi`) and `offset` (`edx`) are
+/// zeroed.  Sentinels: `0xD1` = `open(O_RDWR)` failed, `0xD2` = `fallocate`
+/// returned non-zero.  Tagged `ELFOSABI_GNU`.
+#[must_use]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
+pub fn build_linux_fallocate_grow_test_elf(
+    path_nul: &[u8],
+    grow_len: u32,
+) -> alloc::vec::Vec<u8> {
+    use alloc::vec;
+
+    let phdr_offset: u64 = 64;
+    let code_offset: u64 = 120;
+    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+
+    let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+
+    // open(&path, O_RDWR, 0)
+    code.extend_from_slice(&[0x48, 0xBF]); // movabs rdi, &path
+    let path_imm = code.len();
+    code.extend_from_slice(&[0u8; 8]);
+    code.extend_from_slice(&[0xBE, 0x02, 0x00, 0x00, 0x00]); // mov esi, 2 (O_RDWR)
+    code.extend_from_slice(&[0x31, 0xD2]); // xor edx, edx (mode = 0)
+    code.extend_from_slice(&[0xB8, 0x02, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,2; syscall
+    code.extend_from_slice(&[0x48, 0x85, 0xC0]); // test rax, rax
+    code.extend_from_slice(&[0x78, 0x00]); // js open_fail
+    let js_open_rel = code.len() - 1;
+    code.extend_from_slice(&[0x49, 0x89, 0xC0]); // mov r8, rax (save fd)
+
+    // fallocate(fd, 0, 0, grow_len)
+    code.extend_from_slice(&[0x4C, 0x89, 0xC7]); // mov rdi, r8
+    code.extend_from_slice(&[0x31, 0xF6]); // xor esi, esi (mode = 0)
+    code.extend_from_slice(&[0x31, 0xD2]); // xor edx, edx (offset = 0)
+    code.push(0x41);
+    code.push(0xBA); // mov r10d, imm32 (grow_len)
+    code.extend_from_slice(&grow_len.to_le_bytes());
+    code.extend_from_slice(&[0xB8, 0x1D, 0x01, 0x00, 0x00, 0x0F, 0x05]); // mov eax,285; syscall
+    code.extend_from_slice(&[0x48, 0x85, 0xC0]); // test rax, rax
+    code.extend_from_slice(&[0x75, 0x00]); // jnz falloc_fail
+    let jnz_falloc_rel = code.len() - 1;
+
+    // exit(0)
+    code.extend_from_slice(&[0x31, 0xFF]); // xor edi, edi
+    code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,60; syscall
+
+    // open_fail: exit(0xD1)
+    let open_fail = code.len();
+    code.extend_from_slice(&[0xBF, 0xD1, 0x00, 0x00, 0x00]);
+    code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]);
+
+    // falloc_fail: exit(0xD2)
+    let falloc_fail = code.len();
+    code.extend_from_slice(&[0xBF, 0xD2, 0x00, 0x00, 0x00]);
+    code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]);
+    code.push(0xCC); // int3 — unreachable trap
+
+    // Patch the two forward rel8 jumps.
+    let js_open_disp = (open_fail as isize) - (js_open_rel as isize + 1);
+    let jnz_falloc_disp = (falloc_fail as isize) - (jnz_falloc_rel as isize + 1);
+    code[js_open_rel] = js_open_disp as u8;
+    code[jnz_falloc_rel] = jnz_falloc_disp as u8;
+
+    // --- Data layout (same PT_LOAD, after the code) ---
+    let code_len = code.len();
+    let data_base = code_offset as usize + code_len;
+    let path_off = data_base;
+    let path_end = path_off + path_nul.len();
+    let file_size = path_end;
+
+    let vaddr_of = |fo: usize| -> u64 { load_vaddr + (fo as u64 - code_offset) };
+    let path_vaddr = vaddr_of(path_off);
+    code[path_imm..path_imm + 8].copy_from_slice(&path_vaddr.to_le_bytes());
+
+    // --- File image ---
+    let seg_len = file_size - code_offset as usize;
+    let mut buf = vec![0u8; file_size];
+
+    buf[0] = 0x7F;
+    buf[1] = b'E';
+    buf[2] = b'L';
+    buf[3] = b'F';
+    buf[EI_CLASS] = ELFCLASS64;
+    buf[EI_DATA] = ELFDATA2LSB;
+    buf[EI_VERSION] = EV_CURRENT;
+    buf[EI_OSABI] = ELFOSABI_GNU;
+    write_u16(&mut buf, 16, ET_EXEC);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr); // e_entry
+    write_u64(&mut buf, 32, phdr_offset); // e_phoff
+    write_u64(&mut buf, 40, 0);
+    write_u32(&mut buf, 48, 0);
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, 1);
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0);
+    write_u16(&mut buf, 62, 0);
+
+    let ph = phdr_offset as usize;
+    write_u32(&mut buf, ph, PT_LOAD);
+    write_u32(&mut buf, ph + 4, PF_R | PF_X);
+    write_u64(&mut buf, ph + 8, code_offset);
+    write_u64(&mut buf, ph + 16, load_vaddr);
+    write_u64(&mut buf, ph + 24, 0);
+    write_u64(&mut buf, ph + 32, seg_len as u64);
+    write_u64(&mut buf, ph + 40, seg_len as u64);
+    write_u64(&mut buf, ph + 48, 0x1000);
+
+    buf[code_offset as usize..code_offset as usize + code_len].copy_from_slice(&code);
+    buf[path_off..path_end].copy_from_slice(path_nul);
+
+    buf
+}
+
 /// Build a **Linux-ABI** `ET_EXEC` test ELF that verifies the **`%fs`
 /// (TLS) base survives context switches**.  The process installs a
 /// caller-chosen `sentinel` FS base, then in a loop yields the CPU and

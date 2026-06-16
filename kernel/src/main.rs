@@ -1375,6 +1375,12 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: Linux fchmodat2(AT_EMPTY_PATH) (ring 3) self-test failed: {:?}", e);
     }
 
+    // Ring-3 regression test for fallocate(mode=0) growing a file via the
+    // posix_fallocate path (fd -> handle_path -> Vfs::file_size/Vfs::truncate).
+    if let Err(e) = proc::spawn::self_test_linux_fallocate() {
+        serial_println!("WARNING: Linux fallocate(mode=0 grow) (ring 3) self-test failed: {:?}", e);
+    }
+
     // Ring-3 regression test that IA32_FS_BASE (the glibc %fs/TLS pointer) is
     // saved/restored per task across context switches.  Two concurrent Linux
     // procs install distinct FS bases and assert they survive cooperative

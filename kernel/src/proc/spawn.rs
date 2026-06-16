@@ -3709,6 +3709,118 @@ pub fn self_test_linux_fchmodat2() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 regression test for **`fallocate(2)` mode 0 (posix_fallocate
+/// grow)** (Linux #285) against the writable memfs root.
+///
+/// The harness stages `/fallocate-test` with a *small* size (4 bytes),
+/// then spawns a [`elf::build_linux_fallocate_grow_test_elf`] process
+/// that `open(O_RDWR)`s the file and calls `fallocate(fd, 0, 0, 10)`.
+/// After the process exits 0, the kernel independently reads the file
+/// size back and asserts it grew to exactly 10 bytes — the
+/// posix_fallocate guarantee (logical size becomes >= offset+len) and
+/// the genuinely new path in the fallocate wiring (`fd → handle_path →
+/// Vfs::file_size/Vfs::truncate`).  It also confirms the original 4
+/// bytes are preserved and the grown tail is zero-filled.
+pub fn self_test_linux_fallocate() -> KernelResult<()> {
+    const PATH: &str = "/fallocate-test";
+    const PATH_NUL: &[u8] = b"/fallocate-test\0";
+    const STAGE_LEN: usize = 4;
+    const GROW_LEN: u32 = 10;
+    const MAX_YIELDS: usize = 256;
+
+    serial_println!("[spawn] Running Linux fallocate(mode=0 grow) test (ring 3, memfs /)...");
+
+    let _ = crate::fs::Vfs::remove(PATH);
+    if let Err(e) = crate::fs::Vfs::write_file(PATH, &[b'A'; STAGE_LEN]) {
+        serial_println!("[spawn]   FAIL: fallocate staging write failed: {:?}", e);
+        return Err(e);
+    }
+
+    let exe_elf = elf::build_linux_fallocate_grow_test_elf(PATH_NUL, GROW_LEN);
+    let argv: &[&[u8]] = &[b"spawn-test-linux-fallocate"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-fallocate",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = crate::fs::Vfs::remove(PATH);
+            serial_println!("[spawn]   FAIL: fallocate spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    for _ in 0..MAX_YIELDS {
+        crate::sched::yield_now();
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            break;
+        }
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    let kernel_readback = crate::fs::Vfs::read_file(PATH);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(PATH);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fallocate (ring 3) — process not a zombie after {} yields, got {:?}",
+            MAX_YIELDS, state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fallocate (ring 3) — expected exit 0, got {:?} (0xD1/209 = \
+             open(O_RDWR) failed; 0xD2/210 = fallocate failed)",
+            exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    match kernel_readback {
+        Ok(ref data)
+            if data.len() == GROW_LEN as usize
+                && data.iter().take(STAGE_LEN).all(|&b| b == b'A')
+                && data.iter().skip(STAGE_LEN).all(|&b| b == 0) => {}
+        Ok(ref data) => {
+            serial_println!(
+                "[spawn]   FAIL: fallocate (ring 3) — process exited 0 but kernel readback \
+                 mismatch: len={} (want {}), bytes={:?}",
+                data.len(), GROW_LEN, data
+            );
+            return Err(KernelError::InternalError);
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fallocate (ring 3) — kernel file readback failed: {:?}",
+                e
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    serial_println!(
+        "[spawn]   Linux fallocate(mode=0) (ring 3: grow /fallocate-test from 4B to 10B via an \
+         O_RDWR fd; kernel confirmed length + zero-fill): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 regression test that the **`%fs` (TLS) base is saved/restored
 /// across context switches** between two concurrent Linux processes.
 ///

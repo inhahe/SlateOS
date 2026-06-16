@@ -42844,6 +42844,12 @@ pub fn self_test_file_mmap() -> crate::error::KernelResult<()> {
     serial_println!("[syscall/linux] Running file-backed mmap self-test...");
 
     let frame_size = FRAME_SIZE as u64;
+    // mmap rounds the mapping length up to whole 4 KiB hardware pages (not the
+    // 16 KiB logical frame): `linux_file_mmap` is 4 KiB-granular so adjacent
+    // shared-object segments packed by glibc (`max-page-size = 0x1000`) get
+    // non-overlapping VMAs.  The test must mirror that or its VMA-span and
+    // RLIMIT_AS assertions will expect the wrong (16 KiB-rounded) extent.
+    let hw_page = page_table::HW_PAGE_SIZE as u64;
 
     // (1) Argument gates — no process or VFS required.  A dummy non-file
     // entry must be rejected before any address-space work.
@@ -42918,7 +42924,8 @@ pub fn self_test_file_mmap() -> crate::error::KernelResult<()> {
         }};
     }
 
-    // Map the whole file (length rounds up to 2 frames).
+    // Map the whole file.  20 000 bytes rounds up to 5 × 4 KiB pages
+    // (0x5000), which spans into the second 16 KiB frame.
     let res = linux_file_mmap(
         &entry,
         pid,
@@ -42936,8 +42943,8 @@ pub fn self_test_file_mmap() -> crate::error::KernelResult<()> {
     #[allow(clippy::cast_sign_loss)]
     let base = res.value as u64;
     let length_aligned = (FILE_LEN as u64)
-        .checked_add(frame_size - 1)
-        .map(|v| v & !(frame_size - 1))
+        .checked_add(hw_page - 1)
+        .map(|v| v & !(hw_page - 1))
         .unwrap_or(0);
     let end = base.saturating_add(length_aligned);
 
@@ -43060,6 +43067,19 @@ pub fn self_test_file_mmap() -> crate::error::KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
+    // The MAP_FIXED File overlay is demand-paged (it registers a FileBacked
+    // VMA but eagerly maps no frames — that is the path that lets a 4 KiB
+    // segment share a 16 KiB frame with a differently-permissioned neighbour),
+    // so the overlaid range is not present until first touch.  Fault the first
+    // page in before reading its content.
+    if !pcb::try_resolve_fault(pid, base, 1 << 2) {
+        teardown!();
+        serial_println!(
+            "[syscall/linux]   FAIL: overlay demand fault unresolved at {:#x}",
+            base
+        );
+        return Err(KernelError::InternalError);
+    }
     // Content of the re-mapped first frame must still match the file.
     let Some(phys0) = page_table::translate(pml4, VirtAddr::new(base)) else {
         teardown!();
@@ -43076,7 +43096,7 @@ pub fn self_test_file_mmap() -> crate::error::KernelResult<()> {
 
     teardown!();
     serial_println!(
-        "[syscall/linux]   file-backed mmap (demand-paged 2 frames + tail zero-fill + MAP_FIXED split): OK"
+        "[syscall/linux]   file-backed mmap (demand-paged 4 KiB-granular map + tail zero-fill + MAP_FIXED split): OK"
     );
     Ok(())
 }

@@ -454,6 +454,22 @@ extern "C" fn kernel_main() -> ! {
     // The slab allocator uses the frame allocator for backing memory.
     mm::heap::init(boot_info.hhdm_offset);
 
+    // Enable slab poisoning immediately, before the first heap allocation.
+    //
+    // Poisoning fills every freed slot with a poison pattern (UAF/double-free
+    // detection) and every freshly-allocated slot with ALLOC_POISON, so the
+    // red-zone overflow check can rely on "every byte past the requested size
+    // is 0xCD".  That invariant ONLY holds if a slot was alloc-poisoned at the
+    // time it was handed out.  If poisoning were enabled later in boot, every
+    // allocation made in the pre-enable window would be unpoisoned; freeing
+    // such a slot after poisoning came online made check_redzone scan stale
+    // (or zeroed) bytes and report spurious "BUFFER OVERFLOW" false positives
+    // (see known-issues B-HEAP1).  Enabling here — before any allocation —
+    // closes that window entirely.  Poison is only ever toggled OFF for the
+    // duration of the heap benchmarks (deferred_bench_task), which free their
+    // own allocations within that window, then back ON afterwards.
+    mm::heap::enable_poison();
+
     // Now that the heap is available, tell the console it can allocate
     // its screen text buffer and scrollback ring.
     console::notify_heap_available();
@@ -3511,11 +3527,11 @@ extern "C" fn kernel_main() -> ! {
     // page fault hot path.
     mm::frame::enable_zero_pool();
 
-    // Step 22f-3: Enable slab poisoning and run its self-test.
-    // Fills freed heap memory with a poison pattern and checks integrity
-    // on reallocation — catches use-after-free bugs automatically.
-    // Enabled during boot self-tests, disabled before benchmarks for speed.
-    mm::heap::enable_poison();
+    // Step 22f-3: Run the slab-poisoning self-test.
+    // Poisoning itself was enabled right after heap init (see above) so that
+    // there is no pre-poison allocation window that would produce spurious
+    // red-zone overflow reports (B-HEAP1).  Here we just exercise the
+    // UAF/double-free/red-zone detectors to confirm they fire correctly.
     mm::heap::poison_self_test();
 
     // Step 22g: I/O scheduler self-test.

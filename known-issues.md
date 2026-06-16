@@ -414,33 +414,41 @@ Two kernel gaps caused the livelock, both fixed properly:
 **Verify:** boot test reaches `BOOT_OK`; the bgjob self-test logs "read
 back 16 bytes == expected, exit 0: OK".
 
-### B-HEAP1. Kernel heap redzone overflow detected during init file-install (`Vfs::write_file`) — OPEN 2026-06-16
+### B-HEAP1. Kernel heap redzone "overflow" reports during init file-install were FALSE POSITIVES from a pre-poison allocation window — FIXED 2026-06-16
 
-**Symptom:** During boot (init step 24, after all self-tests), the debug heap
-allocator's dealloc-time redzone scanner reports several
-`[heap] BUFFER OVERFLOW detected! slot=…, alloc=N, class=C, offset=N` lines,
-e.g. `alloc=10, class=16, offset=10` (right before `[init] Installed /bin/hello`)
-and two `alloc=18, class=32, offset=18`. `offset == alloc` means the first
-redzone byte immediately past an N-byte allocation was overwritten — a one-or-
-more-byte heap buffer overflow. Boot still reaches `BOOT_OK` and all self-tests
-pass, so it is currently non-fatal, but it is real memory corruption of the
-allocator's redzone region (could corrupt an adjacent live allocation in a
-release build with no redzone).
+**Symptom (as originally observed):** During boot (init step 24, after all
+self-tests), the debug heap allocator's dealloc-time redzone scanner reported
+several `[heap] BUFFER OVERFLOW detected! slot=…, alloc=N, class=C, offset=N`
+lines, e.g. `alloc=10, class=16, offset=10` (right before
+`[init] Installed /bin/hello`) and two `alloc=18, class=32, offset=18`. Boot
+still reached `BOOT_OK` and all self-tests passed.
 
-**Where:** `kernel/src/mm/heap.rs` `check_redzone` (the detector, ~line 205);
-the *culprit* is an allocation in the init `/bin` install path
-(`kernel/src/main.rs` ~step 24, the `Vfs::write_file("/bin/hello", …)` /
-`/etc/services` writes) or the VFS/memfs path-string handling underneath it.
-The `alloc=10` size exactly matches the 10-byte path string `"/bin/hello"`,
-strongly suggesting a path-string allocation that gets a trailing byte (NUL?)
-written one past its length, or a `Vec`/slice copy with an off-by-one length.
+**Root cause (NOT a real overflow):** The redzone check relies on the invariant
+"every byte in `[alloc_size, class_size)` is `ALLOC_POISON` (0xCD)". That holds
+only if the slot was `poison_alloc`'d *at the time it was handed out*. But
+`enable_poison()` was called very late in boot (`kernel/src/main.rs` step 22f-3,
+old line ~3518) while the heap is initialized far earlier (`mm::heap::init`,
+~line 455). **Every allocation made in that window was never poison-filled.**
+When such a slot was later freed *after* poisoning came online, `check_redzone`
+scanned whatever bytes the pre-poison occupant had left there — zeroed
+fresh-frame bytes, or stale content from an earlier reuse — and reported them as
+overflow. Captured byte dumps confirmed this: a slot freed with `alloc_size=18`
+held the intact 31-char string `/tmp/tmpwatch_test/delete_me.tmp` filling the
+whole 32-byte class (a former occupant), and `"/bin/hello"+'e'+zeros` showed
+unpoisoned (zero) redzone bytes — neither is possible if the slot had actually
+been alloc-poisoned. So the reports were detector false positives, not memory
+corruption.
 
-**Status:** Not introduced by the Part 34 access/clone work (it fires after the
-self-tests, in a code path those changes don't touch); prior boot logs from
-2026-06-07 show 0 occurrences, so it is a regression introduced somewhere in the
-2026-06-07…06-16 window. Next task: bisect the offending allocation (instrument
-`check_redzone` to dump the path/caller, or audit the memfs `write_file` /
-path-key allocation for an off-by-one) and fix the proper root cause.
+**Fix:** Move `mm::heap::enable_poison()` to immediately after `mm::heap::init()`
+(`kernel/src/main.rs`, step 6), *before the first heap allocation*. With no
+pre-poison allocation window, every slab slot is poison-filled at its first
+alloc and the redzone invariant always holds. The redundant late
+`enable_poison()` at step 22f-3 was removed (the `poison_self_test()` call
+stays). Poison is still toggled OFF only for the duration of the heap
+benchmarks (`deferred_bench_task`), which free their own allocations within that
+window. Note this only affects slab classes (≤ 8192 B); large allocations (the
+actual MB-sized binaries) go through the buddy path and are never poisoned or
+redzone-checked, so the early-enable adds negligible boot cost.
 
 ### B-DP1. `validate_user_range` rejected committed-but-not-yet-faulted-in demand-paged user buffers (EFAULT on large fresh output buffers) — FIXED 2026-06-16
 

@@ -3258,6 +3258,120 @@ pub fn self_test_linux_link() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 regression test that **`utimensat(2)` updates a file's timestamps**.
+///
+/// Before this wiring, `utimensat`/`utimes`/`utime` were EROFS stubs (no
+/// writable-FS terminal).  They now perform a real `Vfs::set_times` for ring-3
+/// callers.  This test runs on the memfs root (which implements `set_times`),
+/// staging a file then having a ring-3 program call `utimensat(AT_FDCWD, path,
+/// {atime, mtime}, 0)` with distinctive epoch-second values.  After the
+/// process exits 0, the kernel independently reads the file metadata back and
+/// asserts both timestamps match exactly (`sec * 1e9`).  This proves the
+/// translation layer parsed the `struct timespec[2]` correctly and routed the
+/// update to the VFS.
+pub fn self_test_linux_utimensat() -> KernelResult<()> {
+    // memfs root supports set_times, so the success path is testable here
+    // (unlike hard links — see self_test_linux_link).
+    const PATH: &str = "/utimensat-test";
+    const PATH_NUL: &[u8] = b"/utimensat-test\0";
+    // Distinctive positive epoch seconds (must fit in i32 for the imm32 store).
+    const ATIME_SEC: i32 = 1_600_000_000;
+    const MTIME_SEC: i32 = 1_500_000_000;
+    const EXPECT_ATIME_NS: u64 = 1_600_000_000_000_000_000;
+    const EXPECT_MTIME_NS: u64 = 1_500_000_000_000_000_000;
+    const MAX_YIELDS: usize = 256;
+
+    serial_println!("[spawn] Running Linux utimensat() timestamp test (ring 3, memfs /)...");
+
+    // Stage the target file; clean any stale copy first.
+    let _ = crate::fs::Vfs::remove(PATH);
+    if let Err(e) = crate::fs::Vfs::write_file(PATH, b"t") {
+        serial_println!("[spawn]   FAIL: utimensat staging write failed: {:?}", e);
+        return Err(e);
+    }
+
+    let exe_elf = elf::build_linux_utimensat_test_elf(PATH_NUL, ATIME_SEC, MTIME_SEC);
+    let argv: &[&[u8]] = &[b"spawn-test-linux-utimensat"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-utimensat",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = crate::fs::Vfs::remove(PATH);
+            serial_println!("[spawn]   FAIL: utimensat spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    for _ in 0..MAX_YIELDS {
+        crate::sched::yield_now();
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            break;
+        }
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    let kernel_readback = crate::fs::Vfs::metadata(PATH);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(PATH);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: utimensat() (ring 3) — process not a zombie after {} yields, got {:?}",
+            MAX_YIELDS, state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: utimensat() (ring 3) — expected exit 0, got {:?} (0xD1/209 = \
+             utimensat returned non-zero)",
+            exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    match kernel_readback {
+        Ok(ref m) if m.accessed_ns == EXPECT_ATIME_NS && m.modified_ns == EXPECT_MTIME_NS => {}
+        Ok(ref m) => {
+            serial_println!(
+                "[spawn]   FAIL: utimensat() (ring 3) — process exited 0 but kernel readback \
+                 timestamps mismatch: accessed_ns={} (want {}), modified_ns={} (want {})",
+                m.accessed_ns, EXPECT_ATIME_NS, m.modified_ns, EXPECT_MTIME_NS
+            );
+            return Err(KernelError::InternalError);
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: utimensat() (ring 3) — kernel metadata readback failed: {:?}",
+                e
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    serial_println!(
+        "[spawn]   Linux utimensat() (ring 3: set atime/mtime on /utimensat-test; kernel \
+         confirmed both timestamps): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 regression test that the **`%fs` (TLS) base is saved/restored
 /// across context switches** between two concurrent Linux processes.
 ///

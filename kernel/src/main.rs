@@ -1345,6 +1345,14 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: Linux link() (ring 3) self-test failed: {:?}", e);
     }
 
+    // Ring-3 test that utimensat() applies file timestamps (the utimensat/
+    // utimes/utime family now performs real Vfs::set_times for ring-3 callers
+    // instead of returning EROFS).  Runs on the memfs root and verifies the
+    // kernel-side metadata matches the requested atime/mtime exactly.
+    if let Err(e) = proc::spawn::self_test_linux_utimensat() {
+        serial_println!("WARNING: Linux utimensat() (ring 3) self-test failed: {:?}", e);
+    }
+
     // Ring-3 regression test that IA32_FS_BASE (the glibc %fs/TLS pointer) is
     // saved/restored per task across context switches.  Two concurrent Linux
     // procs install distinct FS bases and assert they survive cooperative

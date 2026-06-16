@@ -2394,6 +2394,145 @@ pub fn build_linux_link_test_elf(old_nul: &[u8], new_nul: &[u8]) -> alloc::vec::
     buf
 }
 
+/// Build a **Linux-ABI** `ET_EXEC` test ELF that exercises the
+/// **`utimensat(2)`** timestamp-update syscall from ring 3:
+///
+/// ```text
+///   sub  rsp, 64                          ; scratch for struct timespec[2]
+///   mov  qword [rsp+0],  atime_sec        ; times[0].tv_sec
+///   mov  qword [rsp+8],  0                ; times[0].tv_nsec
+///   mov  qword [rsp+16], mtime_sec        ; times[1].tv_sec
+///   mov  qword [rsp+24], 0                ; times[1].tv_nsec
+///   utimensat(AT_FDCWD, &path, rsp, 0)
+///   test rax,rax ; jnz fail               ; success returns 0
+///   exit(0)
+///   fail: exit(0xD1)
+/// ```
+///
+/// The harness pre-creates `path`, then independently reads the file's
+/// metadata back through the VFS and asserts `accessed_ns ==
+/// atime_sec * 1e9` and `modified_ns == mtime_sec * 1e9`.  A clean
+/// `exit(0)` plus the kernel-side timestamp match proves the kernel applied
+/// the requested times.  `0xD1` = `utimensat` returned non-zero.
+///
+/// `atime_sec` / `mtime_sec` are emitted as sign-extended `imm32`, so callers
+/// must keep them in `0..=i32::MAX` (positive epoch seconds).  Tagged
+/// `ELFOSABI_GNU`.
+#[must_use]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+pub fn build_linux_utimensat_test_elf(
+    path_nul: &[u8],
+    atime_sec: i32,
+    mtime_sec: i32,
+) -> alloc::vec::Vec<u8> {
+    use alloc::vec;
+
+    let phdr_offset: u64 = 64;
+    let code_offset: u64 = 120;
+    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+
+    let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+
+    // sub rsp, 64 (struct timespec[2] = 32B + slack)
+    code.extend_from_slice(&[0x48, 0x83, 0xEC, 0x40]);
+
+    // Build the timespec[2] array on the stack.  Encoding for
+    // `mov qword [rsp+disp8], imm32` (imm32 sign-extended to 64): 48 C7 44 24
+    // <disp8> <imm32 LE>.
+    let mut store_qword = |disp: u8, imm: i32| {
+        code.extend_from_slice(&[0x48, 0xC7, 0x44, 0x24, disp]);
+        code.extend_from_slice(&imm.to_le_bytes());
+    };
+    store_qword(0x00, atime_sec); // times[0].tv_sec
+    store_qword(0x08, 0); // times[0].tv_nsec
+    store_qword(0x10, mtime_sec); // times[1].tv_sec
+    store_qword(0x18, 0); // times[1].tv_nsec
+
+    // utimensat(AT_FDCWD, &path, rsp, 0)
+    code.extend_from_slice(&[0x48, 0xBF]); // movabs rdi, AT_FDCWD (-100)
+    code.extend_from_slice(&(-100i64).to_le_bytes());
+    code.extend_from_slice(&[0x48, 0xBE]); // movabs rsi, &path
+    let path_imm = code.len();
+    code.extend_from_slice(&[0u8; 8]);
+    code.extend_from_slice(&[0x48, 0x89, 0xE2]); // mov rdx, rsp (times)
+    code.extend_from_slice(&[0x4D, 0x31, 0xD2]); // xor r10, r10 (flags = 0)
+    code.extend_from_slice(&[0xB8, 0x18, 0x01, 0x00, 0x00, 0x0F, 0x05]); // mov eax,280; syscall
+    code.extend_from_slice(&[0x48, 0x85, 0xC0]); // test rax, rax
+    code.extend_from_slice(&[0x75, 0x00]); // jnz fail
+    let jnz_rel = code.len() - 1;
+
+    // exit(0)
+    code.extend_from_slice(&[0x31, 0xFF]); // xor edi, edi
+    code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,60; syscall
+
+    // fail: exit(0xD1)
+    let fail = code.len();
+    code.extend_from_slice(&[0xBF, 0xD1, 0x00, 0x00, 0x00]); // mov edi, 0xD1
+    code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,60; syscall
+    code.push(0xCC); // int3
+
+    // Patch the forward rel8 jump.
+    let jnz_disp = (fail as isize) - (jnz_rel as isize + 1);
+    code[jnz_rel] = jnz_disp as u8;
+
+    // --- Data layout (same PT_LOAD, after the code) ---
+    let code_len = code.len();
+    let data_base = code_offset as usize + code_len;
+    let path_off = data_base;
+    let path_end = path_off + path_nul.len();
+    let file_size = path_end;
+
+    let vaddr_of = |fo: usize| -> u64 { load_vaddr + (fo as u64 - code_offset) };
+    let path_vaddr = vaddr_of(path_off);
+    code[path_imm..path_imm + 8].copy_from_slice(&path_vaddr.to_le_bytes());
+
+    // --- File image ---
+    let seg_len = file_size - code_offset as usize;
+    let mut buf = vec![0u8; file_size];
+
+    buf[0] = 0x7F;
+    buf[1] = b'E';
+    buf[2] = b'L';
+    buf[3] = b'F';
+    buf[EI_CLASS] = ELFCLASS64;
+    buf[EI_DATA] = ELFDATA2LSB;
+    buf[EI_VERSION] = EV_CURRENT;
+    buf[EI_OSABI] = ELFOSABI_GNU;
+    write_u16(&mut buf, 16, ET_EXEC);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr); // e_entry
+    write_u64(&mut buf, 32, phdr_offset); // e_phoff
+    write_u64(&mut buf, 40, 0);
+    write_u32(&mut buf, 48, 0);
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, 1);
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0);
+    write_u16(&mut buf, 62, 0);
+
+    let ph = phdr_offset as usize;
+    write_u32(&mut buf, ph, PT_LOAD);
+    write_u32(&mut buf, ph + 4, PF_R | PF_X);
+    write_u64(&mut buf, ph + 8, code_offset);
+    write_u64(&mut buf, ph + 16, load_vaddr);
+    write_u64(&mut buf, ph + 24, 0);
+    write_u64(&mut buf, ph + 32, seg_len as u64);
+    write_u64(&mut buf, ph + 40, seg_len as u64);
+    write_u64(&mut buf, ph + 48, 0x1000);
+
+    buf[code_offset as usize..code_offset as usize + code_len].copy_from_slice(&code);
+    buf[path_off..path_end].copy_from_slice(path_nul);
+
+    buf
+}
+
 /// Build a **Linux-ABI** `ET_EXEC` test ELF that verifies the **`%fs`
 /// (TLS) base survives context switches**.  The process installs a
 /// caller-chosen `sentinel` FS base, then in a loop yields the CPU and

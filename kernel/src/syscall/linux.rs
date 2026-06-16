@@ -19471,11 +19471,21 @@ fn sys_linkat(args: &SyscallArgs) -> SyscallResult {
 // ---------------------------------------------------------------------------
 // utimensat / utimes / utime
 //
-// Timestamp-update syscalls.  Without a writable FS we cannot persist any
-// change, so each refuses with EROFS after pointer validation.  utimensat
-// has a special case where path may be NULL (operate on dirfd) and times
-// may be NULL (use current time) — neither makes a write succeed for us,
-// but we honour the input-shape rules so callers see the correct errno.
+// Timestamp-update syscalls.  For ring-3 callers these now perform a real
+// metadata update via `Vfs::set_times` (memfs/ext4/fat all implement it).
+// Kernel context (no caller PID) keeps the historical EROFS terminal that the
+// batch-489 input-shape fidelity probes assert.  utimensat has special cases
+// where path may be NULL (operate on the open file referenced by dirfd) and
+// times may be NULL (use the current wall-clock time), and per-field UTIME_NOW
+// / UTIME_OMIT selectors; all honoured below.
+//
+// Fidelity gaps (documented in known-issues B-UTIME1):
+//   * `Vfs::set_times` always follows symlinks, so `AT_SYMLINK_NOFOLLOW` is a
+//     no-op — a symlink target is touched instead of the link itself.
+//   * The `Timestamp = u64` VFS API uses 0 ("ns since epoch") as the
+//     "leave this field unchanged" sentinel, so a request to set a field to
+//     exactly the Unix epoch (or any pre-epoch / negative instant) is treated
+//     as "leave unchanged" rather than written.
 // ---------------------------------------------------------------------------
 
 /// `utimensat(dirfd, path, times[2], flags)`.
@@ -19611,9 +19621,65 @@ fn sys_utimensat(args: &SyscallArgs) -> SyscallResult {
             return linux_err(errno::EINVAL);
         }
     }
-    // Gate 5: mnt_want_write -> EROFS (terminal — we have no
-    // writable FS to mutate timestamps on).
-    linux_err(errno::EROFS)
+    // Gate 5: mnt_want_write.  Kernel context keeps the EROFS terminal the
+    // batch-489 probe asserts; ring-3 callers perform a real update.
+    if caller_pid().is_none() {
+        return linux_err(errno::EROFS);
+    }
+    // Resolve the target.  A NULL pathname is the futimens(3) form: operate
+    // on the open file referenced by `dirfd` directly.  AT_FDCWD with a NULL
+    // pathname references no file → EBADF (Linux reaches do_utimes_fd with
+    // fd=AT_FDCWD, where fdget yields no file).
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let dirfd = args.arg0 as i32;
+    let target = if args.arg1 == 0 {
+        if dirfd == AT_FDCWD {
+            return linux_err(errno::EBADF);
+        }
+        let entry = match lookup_caller_fd(dirfd) {
+            Ok(e) => e,
+            Err(r) => return r,
+        };
+        if entry.kind != HandleKind::File {
+            // futimens on a non-file fd (pipe/console) has no backing path.
+            return linux_err(errno::EINVAL);
+        }
+        match crate::fs::handle::handle_path(entry.raw_handle) {
+            Ok(p) => p,
+            Err(e) => return linux_err(linux_errno_for(e)),
+        }
+    } else {
+        match resolve_at_path(dirfd, args.arg1) {
+            Ok(p) => p,
+            Err(r) => return r,
+        }
+    };
+    let now = crate::timekeeping::clock_realtime();
+    // Convert a parsed (tv_sec, tv_nsec) into the VFS ns-since-epoch value,
+    // mapping UTIME_OMIT → 0 ("leave unchanged") and UTIME_NOW → wall clock.
+    #[allow(clippy::cast_sign_loss)]
+    let conv = |t: (i64, i64)| -> u64 {
+        match t.1 {
+            UTIME_OMIT => 0,
+            UTIME_NOW => now,
+            _ => {
+                let total = t.0.saturating_mul(NSEC_PER_SEC).saturating_add(t.1);
+                if total <= 0 { 0 } else { total as u64 }
+            }
+        }
+    };
+    let (atime_ns, mtime_ns) = match times {
+        // NULL times → set both to the current time.
+        None => (now, now),
+        Some([t0, t1]) => (conv(t0), conv(t1)),
+    };
+    if let Err(r) = require_fs_write() {
+        return r;
+    }
+    match crate::fs::Vfs::set_times(&target, atime_ns, mtime_ns) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
 }
 
 /// `utimes(path, times[2])` — two `struct timeval` = 32 bytes.
@@ -19636,8 +19702,11 @@ fn sys_utimensat(args: &SyscallArgs) -> SyscallResult {
 /// EINVAL.
 fn sys_utimes(args: &SyscallArgs) -> SyscallResult {
     const USEC_PER_SEC: i64 = 1_000_000;
-    // Gate 1: do_futimesat copies the timeval array first.
-    if args.arg1 != 0 {
+    const NSEC_PER_USEC: i64 = 1_000;
+    const NSEC_PER_SEC: i64 = 1_000_000_000;
+    // Gate 1: do_futimesat copies the timeval array first.  Capture the
+    // parsed (tv_sec, tv_usec) entries so the terminal can apply them.
+    let times: Option<[(i64, i64); 2]> = if args.arg1 != 0 {
         if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 32) {
             return linux_err(linux_errno_for(e));
         }
@@ -19658,12 +19727,15 @@ fn sys_utimes(args: &SyscallArgs) -> SyscallResult {
         // per entry, 32B total.  Gate 2: tv_usec >= USEC_PER_SEC on
         // either entry returns -EINVAL (Linux's explicit pre-
         // do_utimes check).
-        let usec0 = read_i64(8);
-        let usec1 = read_i64(24);
-        if usec0 >= USEC_PER_SEC || usec1 >= USEC_PER_SEC {
+        let t0 = (read_i64(0), read_i64(8));
+        let t1 = (read_i64(16), read_i64(24));
+        if t0.1 >= USEC_PER_SEC || t1.1 >= USEC_PER_SEC {
             return linux_err(errno::EINVAL);
         }
-    }
+        Some([t0, t1])
+    } else {
+        None
+    };
     // Gate 3: do_utimes path resolution via getname (no LOOKUP_EMPTY:
     // sys_utimes calls do_utimes with flags=0, so AT_EMPTY_PATH /
     // LOOKUP_EMPTY are never honoured).  NULL → EFAULT, empty → ENOENT
@@ -19674,8 +19746,40 @@ fn sys_utimes(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = check_path_str_nonempty(args.arg0) {
         return linux_err(e);
     }
-    // Gate 4: mnt_want_write -> EROFS (terminal).
-    linux_err(errno::EROFS)
+    // Gate 4: mnt_want_write.  Kernel context keeps the EROFS terminal;
+    // ring-3 callers perform a real update via the VFS.
+    if caller_pid().is_none() {
+        return linux_err(errno::EROFS);
+    }
+    let target = match resolve_at_path(AT_FDCWD, args.arg0) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let now = crate::timekeeping::clock_realtime();
+    // NULL times → both NOW; otherwise tv_sec*1e9 + tv_usec*1e3.  A
+    // non-positive instant collapses to 0 ("leave unchanged") — see the
+    // module fidelity note.
+    #[allow(clippy::cast_sign_loss)]
+    let (atime_ns, mtime_ns) = match times {
+        None => (now, now),
+        Some([t0, t1]) => {
+            let conv = |t: (i64, i64)| -> u64 {
+                let total = t
+                    .0
+                    .saturating_mul(NSEC_PER_SEC)
+                    .saturating_add(t.1.saturating_mul(NSEC_PER_USEC));
+                if total <= 0 { 0 } else { total as u64 }
+            };
+            (conv(t0), conv(t1))
+        }
+    };
+    if let Err(r) = require_fs_write() {
+        return r;
+    }
+    match crate::fs::Vfs::set_times(&target, atime_ns, mtime_ns) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
 }
 
 /// `utime(path, buf)` — `struct utimbuf { time_t actime; time_t modtime; }`
@@ -19690,18 +19794,63 @@ fn sys_utimes(args: &SyscallArgs) -> SyscallResult {
 /// `check_path_str_nonempty` so the input-shape diagnostic is
 /// preserved before the read-only-FS terminal.
 fn sys_utime(args: &SyscallArgs) -> SyscallResult {
+    const NSEC_PER_SEC: i64 = 1_000_000_000;
     // Gate 1: path resolution via getname (no LOOKUP_EMPTY).
     if let Err(e) = check_path_str_nonempty(args.arg0) {
         return linux_err(e);
     }
-    // Gate 2: utimbuf validation when non-NULL.
-    if args.arg1 != 0 {
+    // Gate 2: utimbuf validation + capture when non-NULL.  struct utimbuf
+    // { time_t actime @0; time_t modtime @8 } = 16B.
+    let times: Option<(i64, i64)> = if args.arg1 != 0 {
         if let Err(e) = crate::mm::user::validate_user_read(args.arg1, 16) {
             return linux_err(linux_errno_for(e));
         }
+        let mut buf = [0u8; 16];
+        // SAFETY: validate_user_read above confirmed 16 bytes readable.
+        if let Err(e) = unsafe {
+            crate::mm::user::copy_from_user(args.arg1, buf.as_mut_ptr(), 16)
+        } {
+            return linux_err(linux_errno_for(e));
+        }
+        // Destructure the fixed 16-byte buffer (no slicing/indexing): the
+        // first 8 bytes are time_t actime, the next 8 are time_t modtime.
+        let [a0, a1, a2, a3, a4, a5, a6, a7, m0, m1, m2, m3, m4, m5, m6, m7] = buf;
+        let actime = i64::from_ne_bytes([a0, a1, a2, a3, a4, a5, a6, a7]);
+        let modtime = i64::from_ne_bytes([m0, m1, m2, m3, m4, m5, m6, m7]);
+        Some((actime, modtime))
+    } else {
+        None
+    };
+    // Gate 3: mnt_want_write.  Kernel context keeps the EROFS terminal;
+    // ring-3 callers perform a real update via the VFS.
+    if caller_pid().is_none() {
+        return linux_err(errno::EROFS);
     }
-    // Gate 3: mnt_want_write -> EROFS (terminal).
-    linux_err(errno::EROFS)
+    let target = match resolve_at_path(AT_FDCWD, args.arg0) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let now = crate::timekeeping::clock_realtime();
+    // NULL utimbuf → both NOW; otherwise seconds → ns.  Non-positive
+    // collapses to 0 ("leave unchanged") — see the module fidelity note.
+    #[allow(clippy::cast_sign_loss)]
+    let (atime_ns, mtime_ns) = match times {
+        None => (now, now),
+        Some((actime, modtime)) => {
+            let conv = |sec: i64| -> u64 {
+                let total = sec.saturating_mul(NSEC_PER_SEC);
+                if total <= 0 { 0 } else { total as u64 }
+            };
+            (conv(actime), conv(modtime))
+        }
+    };
+    if let Err(r) = require_fs_write() {
+        return r;
+    }
+    match crate::fs::Vfs::set_times(&target, atime_ns, mtime_ns) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
 }
 
 // ---------------------------------------------------------------------------

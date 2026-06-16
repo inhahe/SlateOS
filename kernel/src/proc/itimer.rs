@@ -118,7 +118,9 @@ fn real_fire(arg: u64) {
     });
     if should_post {
         // SIGALRM post is IRQ-safe (signal registries mask interrupts).
-        signal::set_pending(pid, SIGALRM);
+        // A timer-generated signal carries si_code = SI_KERNEL (no sender),
+        // matching Linux's ITIMER_REAL delivery.
+        signal::set_pending_info(pid, SIGALRM, signal::SigInfo::kernel());
     }
 }
 

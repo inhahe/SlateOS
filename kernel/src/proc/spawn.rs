@@ -4377,8 +4377,11 @@ pub fn self_test_linux_real_glibc_signal() -> KernelResult<()> {
     use crate::proc::linux_fd::{FdEntry, O_WRONLY};
 
     const EXPECT_EXIT: i32 = 17;
-    // SIGUSR1 = 10 (x86_64); kernel stamps si_code = SI_USER = 0.
-    const EXPECT_OUT: &[u8] = b"SLATE_GLIBC_SIGNAL_OK signo=10 code=0\n";
+    // SIGUSR1 = 10 (x86_64). raise(3) routes through tgkill(2), so the kernel
+    // delivers a thread-directed siginfo: si_code = SI_TKILL (-6) and
+    // si_pid = the caller's pid (the handler checks si_pid == getpid() ->
+    // self=1). This proves sender-faithful siginfo (known-issues.md TD29).
+    const EXPECT_OUT: &[u8] = b"SLATE_GLIBC_SIGNAL_OK signo=10 code=-6 self=1\n";
 
     const SRC_LD: &str = "/mnt/lib64/ld-linux-x86-64.so.2";
     const SRC_LIBC: &str = "/mnt/lib/x86_64-linux-gnu/libc.so.6";

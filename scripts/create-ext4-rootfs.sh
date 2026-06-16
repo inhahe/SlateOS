@@ -232,24 +232,34 @@ readelf -d "$STAGE/bin/pthread" 2>/dev/null | grep -E 'NEEDED|RUNPATH' | sed 's/
 #   - the handler correctly reading a byte-exact `siginfo_t`;
 #   - the return path: handler `ret`s into glibc's `__restore_rt`, which calls
 #     `rt_sigreturn`, restoring the pre-signal context so `main` resumes.
-# Output is deterministic: SIGUSR1 = 10 on x86_64, and the kernel currently
-# stamps si_code = SI_USER (0) for caught signals (sender-faithful si_code is
-# future work), so the line is fixed.  Returns 17 (2 = sigaction failed,
-# 3 = handler never ran, 4 = wrong signo).
+# Output is deterministic: SIGUSR1 = 10 on x86_64.  Because glibc routes
+# raise(3) through tgkill(2), Linux (and now SlateOS) delivers a thread-directed
+# siginfo: si_code = SI_TKILL (-6) and si_pid = the caller's pid.  The handler
+# verifies both (sender-faithful siginfo, known-issues.md TD29) and prints
+# `self=1` when si_pid == getpid().  Returns 17 (2 = sigaction failed,
+# 3 = handler never ran, 4 = wrong signo, 5 = wrong si_code, 6 = wrong si_pid).
 CSRC5="$STAGE/signal.c"
 cat > "$CSRC5" <<'EOF'
 /* SlateOS Path-Z real-glibc signal (SA_SIGINFO handler + rt_sigreturn) test. */
 #include <stdio.h>
 #include <signal.h>
 #include <string.h>
+#include <unistd.h>
+
+/* SI_TKILL is glibc-internal in some header configurations; pin the ABI value. */
+#ifndef SI_TKILL
+#define SI_TKILL (-6)
+#endif
 
 static volatile sig_atomic_t got = 0;
 static volatile int got_signo = -1;
 static volatile int got_code = -1;
+static volatile int got_pid = -1;
 
 static void handler(int signo, siginfo_t *info, void *ucv) {
     got_signo = signo;
     got_code = info ? info->si_code : -99;
+    got_pid = info ? (int)info->si_pid : -99;
     got = 1;
     (void)ucv;
 }
@@ -264,10 +274,13 @@ int main(void) {
 
     raise(SIGUSR1);            /* glibc: tgkill(getpid(), gettid(), SIGUSR1) */
 
-    if (!got) return 3;        /* handler never ran -> delivery broken */
+    if (!got) return 3;            /* handler never ran -> delivery broken */
     if (got_signo != SIGUSR1) return 4;
+    if (got_code != SI_TKILL) return 5;        /* sender-faithful si_code */
+    if (got_pid != (int)getpid()) return 6;    /* sender-faithful si_pid  */
 
-    printf("SLATE_GLIBC_SIGNAL_OK signo=%d code=%d\n", got_signo, got_code);
+    printf("SLATE_GLIBC_SIGNAL_OK signo=%d code=%d self=%d\n",
+           got_signo, got_code, got_pid == (int)getpid());
     return 17;
 }
 EOF

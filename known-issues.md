@@ -918,30 +918,27 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
-### TD29. Linux signal `siginfo` is always stamped `SI_USER` with sender pid/uid 0/0 — APPROXIMATION 2026-06-15
+### TD29. Linux signal `siginfo` sender-class (`si_code`/`si_pid`/`si_uid`) — RESOLVED 2026-06-15
 
-**Where:** `kernel/src/syscall/linux.rs` — `build_linux_rt_frame` builds the
-`LinuxSiginfo` for a delivered caught signal via `LinuxSiginfo::kill(sig, SI_USER, 0, 0)`.
-The pending-signal representation (`kernel/src/proc/signal.rs` pending bitmap) tracks
-*which* signals are pending but not *who* sent each one, so when a Linux-ABI process
-catches a signal the `siginfo_t` handed to its `SA_SIGINFO` handler always reports
-`si_code == SI_USER (0)`, `si_pid == 0`, `si_uid == 0`.
+**Resolution:** Implemented sender-faithful `siginfo`. `SignalState`
+(`kernel/src/proc/signal.rs`) now carries a per-signal `Option<SigInfo>` array co-located
+under the same lock as the pending bitmap, recorded on the clear→set transition
+(coalescing first-wins, matching Linux's standard-signal `struct sigqueue` behaviour) and
+taken at delivery. `SigInfo { code, sender_pid, sender_uid, value }` is threaded through the
+post funnel: `kill(2)` → `SI_USER` + sender pid/uid; `tkill`/`tgkill` (`raise`/`pthread_kill`)
+→ `SI_TKILL` + sender pid; timer expiry (`setitimer`/`alarm` SIGALRM, `kernel/src/proc/itimer.rs`)
+→ `SI_KERNEL`. `build_linux_rt_frame` dequeues the matching record to fill the
+`LinuxSiginfo` handed to an `SA_SIGINFO` handler. Verified by the `siginfo
+record/deliver/coalesce` unit self-test (13 tests pass) and the `/bin/signal` ring-3 glibc
+test, which now asserts `si_code == SI_TKILL (-6)` and `si_pid == getpid()` for `raise()`
+(`SLATE_GLIBC_SIGNAL_OK signo=10 code=-6 self=1`).
 
-**Impact:** Programs that branch on `si->si_code` (e.g. distinguishing `SI_USER` vs.
-`SI_KERNEL` vs. `SI_TKILL` vs. `SI_QUEUE`) or that read `si->si_pid`/`si->si_uid` to
-identify the sender (common in supervisors, `sigqueue(3)`-based IPC) see incorrect
-values. Synchronous fault signals (SIGSEGV/SIGBUS/SIGFPE/SIGILL) that should carry
-`si_addr` and a fault-specific `si_code` are likewise not yet faithful — caught
-faults currently take the same SI_USER path. The common case (a handler that only
-inspects `si_signo`, like `/bin/signal`'s test) works correctly.
-
-**Proper fix:** Extend the pending-signal structure to a per-signal queue of
-`{sender_pid, sender_uid, si_code, si_value/si_addr}` records (Linux `struct
-sigqueue`), populated at `kill`/`tgkill`/`rt_sigqueueinfo`/fault-injection time, and
-have `build_linux_rt_frame` dequeue the matching record to fill `siginfo`. The
-`SI_KERNEL`/`SI_TKILL` constants are already reserved in
-`kernel/src/proc/linux_sigframe.rs::si_code` (currently `#[allow(dead_code)]`) for
-this path. Until then, the `SI_USER`/0/0 stamp is a documented approximation.
+**Remaining (tracked as future work, not this debt):** (1) `SI_QUEUE` `si_value`/`si_ptr`
+payload from `rt_sigqueueinfo(2)`/`sigqueue(3)` — the `value` field and `SI_QUEUE` constant
+exist (`#[allow(dead_code)]`) but no post path stamps them yet. (2) Synchronous fault signals
+(SIGSEGV/SIGBUS/SIGFPE/SIGILL) carrying a fault-specific `si_code` and `si_addr` — caught
+faults do not yet populate `si_addr`. Both are additive on top of the now-correct
+sender-class plumbing.
 
 ### TD28. Linux `munmap` is 16 KiB-frame-granular (delegates to native handler), not 4 KiB-page-granular — DEBT 2026-06-15
 

@@ -3798,6 +3798,20 @@ pub fn sys_signal_register(
 pub fn sys_signal_send(
     args: &super::dispatch::SyscallArgs,
 ) -> super::dispatch::SyscallResult {
+    // Default sender class for a process-directed `kill(2)`.
+    sys_signal_send_with_code(args, crate::proc::signal::si_code::SI_USER)
+}
+
+/// Like [`sys_signal_send`], but stamps an explicit `si_code` into the
+/// delivered `siginfo_t`.
+///
+/// `kill(2)` uses `SI_USER`; `tkill`/`tgkill` (and thus `raise`/`pthread_kill`)
+/// use `SI_TKILL`. The sender pid/uid recorded in the siginfo are the caller's,
+/// matching Linux's `do_send_sig_info`/`do_tkill`.
+pub fn sys_signal_send_with_code(
+    args: &super::dispatch::SyscallArgs,
+    si_code: i32,
+) -> super::dispatch::SyscallResult {
     use crate::proc::{pcb, signal, thread};
     use super::dispatch::SyscallResult;
 
@@ -3842,7 +3856,16 @@ pub fn sys_signal_send(
         _ => {}
     }
 
-    match signal::classify_post(target, sig) {
+    // Record the sender identity (caller pid + real uid) so an SA_SIGINFO
+    // handler on the target sees a faithful siginfo_t.
+    #[allow(clippy::cast_possible_truncation)]
+    let info = signal::SigInfo {
+        code: si_code,
+        sender_pid: caller as u32,
+        sender_uid: pcb::process_uid(caller).unwrap_or(0),
+        value: 0,
+    };
+    match signal::classify_post_info(target, sig, info) {
         signal::PostDecision::Deliver | signal::PostDecision::Drop => {
             SyscallResult::ok(0)
         }
@@ -4310,17 +4333,20 @@ fn deliver_linux_signal(
     use crate::syscall::linux::{self, LinuxDisposition};
 
     loop {
-        let sig = match signal::take_deliverable(pid) {
-            Some(s) => s,
+        let (sig, info) = match signal::take_deliverable_info(pid) {
+            Some(t) => t,
             None => return false,
         };
 
         match linux::linux_disposition(pid, sig) {
             LinuxDisposition::Handler(act) => {
-                // Build a Linux rt_sigframe and enter the handler. On a
-                // stack-placement failure the signal is re-armed inside
-                // build_linux_rt_frame and we fall through to `false`.
-                return linux::build_linux_rt_frame(frame, ret_val, pid, sig, &act);
+                // Build a Linux rt_sigframe and enter the handler, passing the
+                // recorded source metadata so the siginfo_t is sender-faithful.
+                // On a stack-placement failure the signal is re-armed (with its
+                // info) inside build_linux_rt_frame and we fall through to false.
+                return linux::build_linux_rt_frame(
+                    frame, ret_val, pid, sig, &act, info,
+                );
             }
             LinuxDisposition::Ignore => {
                 // Explicit SIG_IGN: drop and check the next signal.

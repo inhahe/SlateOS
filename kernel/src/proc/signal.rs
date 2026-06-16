@@ -211,8 +211,70 @@ pub const SIGNAL_CONTEXT_SIZE: usize = core::mem::size_of::<SignalContext>();
 // Per-process signal state
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Pending-signal source metadata (siginfo)
+// ---------------------------------------------------------------------------
+
+/// `si_code` values stamped into a delivered `siginfo_t`. These are the
+/// POSIX/Linux-ABI standard sender-class codes, the single source of truth
+/// for both the native and the Linux-`rt_sigframe` delivery paths.
+pub mod si_code {
+    /// Sent by `kill(2)` from a user process.
+    pub const SI_USER: i32 = 0;
+    /// Sent by the kernel itself (timer expiry, kernel-injected signals).
+    pub const SI_KERNEL: i32 = 0x80;
+    /// Sent by `sigqueue(3)` / `rt_sigqueueinfo(2)` (carries an `si_value`).
+    // Reserved for future `rt_sigqueueinfo`/`SI_QUEUE` support — part of the
+    // complete ABI constant set; not yet stamped by any post path.
+    #[allow(dead_code)]
+    pub const SI_QUEUE: i32 = -1;
+    /// Sent by `tkill(2)` / `tgkill(2)` (i.e. `raise`/`pthread_kill`).
+    pub const SI_TKILL: i32 = -6;
+}
+
+/// Source metadata recorded when a signal is posted, used to fill the Linux
+/// `siginfo_t` handed to an `SA_SIGINFO` handler at delivery.
+///
+/// Linux records a `struct sigqueue` per queued signal; for standard
+/// (non-real-time) signals only the *first* instance's info is kept — later
+/// posts of an already-pending standard signal coalesce. We mirror that with
+/// one optional record per signal number, set on the clear→set transition and
+/// taken at delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SigInfo {
+    /// `si_code` — the sender class (see [`si_code`]).
+    pub code: i32,
+    /// Sending process pid (`si_pid`); 0 for kernel-generated signals.
+    pub sender_pid: u32,
+    /// Sending real user id (`si_uid`); 0 for kernel-generated signals.
+    pub sender_uid: u32,
+    /// `si_value`/`si_ptr` payload for `SI_QUEUE`; 0 otherwise.
+    pub value: u64,
+}
+
+impl SigInfo {
+    /// A user-directed signal (`kill(2)`): `SI_USER` with the sender identity.
+    #[must_use]
+    pub const fn user(sender_pid: u32, sender_uid: u32) -> Self {
+        Self { code: si_code::SI_USER, sender_pid, sender_uid, value: 0 }
+    }
+
+    /// A thread-directed signal (`tkill`/`tgkill`, i.e. `raise`/`pthread_kill`):
+    /// `SI_TKILL` with the sender identity.
+    #[must_use]
+    pub const fn tkill(sender_pid: u32, sender_uid: u32) -> Self {
+        Self { code: si_code::SI_TKILL, sender_pid, sender_uid, value: 0 }
+    }
+
+    /// A kernel-generated signal (timer expiry): `SI_KERNEL`, no sender.
+    #[must_use]
+    pub const fn kernel() -> Self {
+        Self { code: si_code::SI_KERNEL, sender_pid: 0, sender_uid: 0, value: 0 }
+    }
+}
+
 /// Per-process signal bookkeeping.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 struct SignalState {
     /// Pending set: bit `n-1` set means signal `n` is pending.
     pending: u64,
@@ -220,6 +282,22 @@ struct SignalState {
     blocked: u64,
     /// Userspace trampoline address (0 = not registered).
     trampoline: u64,
+    /// Per-signal source metadata (`siginfo`), indexed by `sig - 1`. A slot is
+    /// `Some` only while the corresponding `pending` bit is set: recorded on the
+    /// clear→set transition and taken at delivery. Standard-signal coalescing
+    /// means at most one record is kept per signal number.
+    infos: [Option<SigInfo>; NSIG as usize],
+}
+
+impl Default for SignalState {
+    fn default() -> Self {
+        Self {
+            pending: 0,
+            blocked: 0,
+            trampoline: 0,
+            infos: [None; NSIG as usize],
+        }
+    }
 }
 
 /// All per-process signal state, keyed by process ID.
@@ -510,6 +588,9 @@ pub fn inherit_for_fork(parent: ProcessId, child: ProcessId) {
                 pending: 0,
                 blocked,
                 trampoline,
+                // POSIX: the child starts with no pending signals, so no
+                // per-signal siginfo records carry over.
+                infos: [None; NSIG as usize],
             },
         );
     });
@@ -559,6 +640,21 @@ pub fn pending(pid: ProcessId) -> u64 {
 /// does **not** make any delivery or termination decision; callers that
 /// need the no-trampoline fallback should consult [`classify_post`].
 pub fn set_pending(pid: ProcessId, sig: u32) -> bool {
+    // No recorded sender: default to a generic user-directed siginfo, which
+    // is the historical (pre-sender-faithful) behaviour. Callers that know
+    // the sender should use [`set_pending_info`].
+    set_pending_info(pid, sig, SigInfo::user(0, 0))
+}
+
+/// Set a signal pending on a process, recording its source metadata for
+/// `siginfo` delivery.
+///
+/// On a clear→set transition the `info` is recorded and `true` is returned.
+/// Re-posting an already-pending standard signal keeps the **first** `info`
+/// (Linux standard-signal coalescing) and returns `false`. Like
+/// [`set_pending`], this is a pure state operation and makes no delivery or
+/// termination decision.
+pub fn set_pending_info(pid: ProcessId, sig: u32, info: SigInfo) -> bool {
     let Some(bit) = signal_bit(sig) else {
         return false;
     };
@@ -566,6 +662,12 @@ pub fn set_pending(pid: ProcessId, sig: u32) -> bool {
         let state = states.entry(pid).or_default();
         if state.pending & bit == 0 {
             state.pending |= bit;
+            // `bit == 1 << (sig - 1)`, so the slot index is `sig - 1`,
+            // computed lint-free from the bit position (0..=63).
+            let idx = bit.trailing_zeros() as usize;
+            if let Some(slot) = state.infos.get_mut(idx) {
+                *slot = Some(info);
+            }
             PENDING_COUNT.fetch_add(1, Ordering::Relaxed);
             true
         } else {
@@ -598,6 +700,16 @@ pub fn clear_pending(pid: ProcessId, mask: u64) {
             let cleared = state.pending & mask;
             if cleared != 0 {
                 state.pending &= !mask;
+                // Drop the recorded siginfo for every signal whose pending bit
+                // just cleared (mutual stop/cont cancellation, etc.).
+                let mut rem = cleared;
+                while rem != 0 {
+                    let idx = rem.trailing_zeros() as usize;
+                    if let Some(slot) = state.infos.get_mut(idx) {
+                        *slot = None;
+                    }
+                    rem &= rem.wrapping_sub(1); // clear lowest set bit
+                }
                 // `count_ones()` is 0..=64 — fits usize without arithmetic.
                 PENDING_COUNT.fetch_sub(cleared.count_ones() as usize, Ordering::Relaxed);
             }
@@ -680,6 +792,14 @@ pub enum PostDecision {
 /// process-kill path) when `Terminate` is returned.
 #[must_use]
 pub fn classify_post(pid: ProcessId, sig: u32) -> PostDecision {
+    classify_post_info(pid, sig, SigInfo::user(0, 0))
+}
+
+/// Like [`classify_post`], but records `info` as the source metadata for the
+/// posted signal (used to fill the delivered `siginfo_t`). Every pending bit
+/// this sets carries the supplied `info`.
+#[must_use]
+pub fn classify_post_info(pid: ProcessId, sig: u32, info: SigInfo) -> PostDecision {
     #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
     let term_code = 128i32.wrapping_add(sig as i32);
 
@@ -695,7 +815,7 @@ pub fn classify_post(pid: ProcessId, sig: u32) -> PostDecision {
     if sig == SIGCONT {
         clear_pending(pid, stop_signals_mask());
         if has_trampoline(pid) {
-            set_pending(pid, sig);
+            set_pending_info(pid, sig, info);
         }
         return PostDecision::Continue;
     }
@@ -712,7 +832,7 @@ pub fn classify_post(pid: ProcessId, sig: u32) -> PostDecision {
     // which a handler may choose to ignore rather than stop. Mark it
     // pending for trampoline delivery.
     if has_trampoline(pid) {
-        set_pending(pid, sig);
+        set_pending_info(pid, sig, info);
         return PostDecision::Deliver;
     }
 
@@ -725,7 +845,7 @@ pub fn classify_post(pid: ProcessId, sig: u32) -> PostDecision {
             // checkpoint once unblocked (deliver_pending_signal). Otherwise
             // stop now, discarding any pending SIGCONT.
             if blocked(pid) & signal_bit(sig).unwrap_or(0) != 0 {
-                set_pending(pid, sig);
+                set_pending_info(pid, sig, info);
                 PostDecision::Drop
             } else {
                 clear_pending(pid, sigcont_bit());
@@ -750,6 +870,16 @@ pub fn classify_post(pid: ProcessId, sig: u32) -> PostDecision {
 /// if nothing is deliverable.
 #[must_use]
 pub fn take_deliverable(pid: ProcessId) -> Option<u32> {
+    take_deliverable_info(pid).map(|(sig, _)| sig)
+}
+
+/// Like [`take_deliverable`], but also returns the recorded source metadata
+/// ([`SigInfo`]) so the Linux `rt_sigframe` delivery path can fill a faithful
+/// `siginfo_t`. The chosen signal's pending bit **and** its info slot are
+/// cleared. Falls back to a generic `SI_USER`/0/0 record if (unexpectedly) no
+/// info was recorded for the pending bit.
+#[must_use]
+pub fn take_deliverable_info(pid: ProcessId) -> Option<(u32, SigInfo)> {
     with_states(|states| {
         let state = states.get_mut(&pid)?;
         let deliverable = state.pending & !state.blocked;
@@ -760,10 +890,15 @@ pub fn take_deliverable(pid: ProcessId) -> Option<u32> {
         let bit_index = deliverable.trailing_zeros();
         let bit = 1u64 << bit_index;
         state.pending &= !bit;
+        let info = state
+            .infos
+            .get_mut(bit_index as usize)
+            .and_then(Option::take)
+            .unwrap_or_else(|| SigInfo::user(0, 0));
         PENDING_COUNT.fetch_sub(1, Ordering::Relaxed);
         // bit_index is 0..=63, so +1 is 1..=64 — a valid signal number.
         // `saturating_add` keeps this arithmetic-side-effect free.
-        Some(bit_index.saturating_add(1))
+        Some((bit_index.saturating_add(1), info))
     })
 }
 
@@ -788,6 +923,10 @@ pub fn take_pending_in_mask(pid: ProcessId, mask: u64) -> Option<u32> {
         let bit_index = eligible.trailing_zeros();
         let bit = 1u64 << bit_index;
         state.pending &= !bit;
+        // Consuming the signal drops its recorded siginfo too.
+        if let Some(slot) = state.infos.get_mut(bit_index as usize) {
+            *slot = None;
+        }
         PENDING_COUNT.fetch_sub(1, Ordering::Relaxed);
         // bit_index is 0..=63, so +1 is 1..=64 — a valid signal number.
         Some(bit_index.saturating_add(1))
@@ -844,8 +983,72 @@ pub fn self_test() -> KernelResult<()> {
     test_signalfd_dequeue()?;
     test_signalfd_waiter_registry()?;
     test_take_all_waiters()?;
+    test_siginfo_record()?;
 
-    serial_println!("[signal] Signal-shim self-test PASSED (12 tests)");
+    serial_println!("[signal] Signal-shim self-test PASSED (13 tests)");
+    Ok(())
+}
+
+/// Verify the per-signal `siginfo` record path: posted source metadata is
+/// recorded on the clear→set transition, coalesces (first-wins) on re-post of
+/// a standard signal, is delivered by `take_deliverable_info`, and is dropped
+/// by `clear_pending`.
+fn test_siginfo_record() -> KernelResult<()> {
+    let p = TEST_PID_BASE + 9;
+    register_trampoline(p, 0x4000);
+
+    // Record SI_TKILL with a sender identity for signal 10.
+    let tk = SigInfo::tkill(4321, 1000);
+    check(set_pending_info(p, 10, tk), "set_pending_info 10 newly")?;
+    // First-wins coalescing: a second post with different info is ignored.
+    check(
+        !set_pending_info(p, 10, SigInfo::user(9, 9)),
+        "re-post 10 coalesces (false)",
+    )?;
+    // Plain set_pending on a fresh signal records the SI_USER/0/0 default.
+    check(set_pending(p, 11), "set_pending 11 newly")?;
+
+    // take_deliverable_info delivers the *first* recorded info (lowest sig first).
+    match take_deliverable_info(p) {
+        Some((10, info)) => {
+            check(info.code == si_code::SI_TKILL, "delivered code SI_TKILL")?;
+            check(info.sender_pid == 4321, "delivered sender_pid")?;
+            check(info.sender_uid == 1000, "delivered sender_uid")?;
+        }
+        other => {
+            serial_println!("[signal]   FAIL: expected (10, SI_TKILL), got {other:?}");
+            return Err(KernelError::InternalError);
+        }
+    }
+    match take_deliverable_info(p) {
+        Some((11, info)) => {
+            check(info.code == si_code::SI_USER, "default code SI_USER")?;
+            check(info.sender_pid == 0 && info.sender_uid == 0, "default no sender")?;
+        }
+        other => {
+            serial_println!("[signal]   FAIL: expected (11, SI_USER), got {other:?}");
+            return Err(KernelError::InternalError);
+        }
+    }
+    check(take_deliverable_info(p).is_none(), "nothing left")?;
+
+    // clear_pending drops the info slot too: a re-post after clear records anew.
+    set_pending_info(p, 12, SigInfo::kernel());
+    clear_pending(p, signal_bit(12).unwrap_or(0));
+    check(pending(p) == 0, "cleared 12")?;
+    check(set_pending_info(p, 12, SigInfo::user(7, 7)), "12 newly again")?;
+    match take_deliverable_info(p) {
+        Some((12, info)) => {
+            check(info.code == si_code::SI_USER && info.sender_pid == 7, "fresh info after clear")?;
+        }
+        other => {
+            serial_println!("[signal]   FAIL: expected (12, SI_USER/7), got {other:?}");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    remove(p);
+    serial_println!("[signal]   siginfo record/deliver/coalesce: OK");
     Ok(())
 }
 

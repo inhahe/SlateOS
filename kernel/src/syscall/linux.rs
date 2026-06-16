@@ -1675,18 +1675,21 @@ pub fn build_linux_rt_frame(
     pid: pcb::ProcessId,
     sig: u32,
     act: &LinuxSigaction,
+    info: crate::proc::signal::SigInfo,
 ) -> bool {
     use crate::proc::linux_sigframe::{
-        self, si_code, FrameLayout, LinuxSigcontext, LinuxStackT, LinuxUcontext,
+        self, FrameLayout, LinuxSigcontext, LinuxStackT, LinuxUcontext,
         RT_SIGFRAME_SIZE,
     };
     use crate::proc::signal;
 
     // Where does the frame land on the user stack?  Underflow ⇒ re-arm.
+    // Re-arm preserves the original `info` so a later successful delivery
+    // still reports the faithful sender/si_code.
     let layout: FrameLayout = match linux_sigframe::compute_layout(frame.user_rsp) {
         Some(l) => l,
         None => {
-            let _ = signal::set_pending(pid, sig);
+            let _ = signal::set_pending_info(pid, sig, info);
             return false;
         }
     };
@@ -1698,7 +1701,7 @@ pub fn build_linux_rt_frame(
     if crate::mm::user::validate_user_write(layout.frame_addr, RT_SIGFRAME_SIZE)
         .is_err()
     {
-        let _ = signal::set_pending(pid, sig);
+        let _ = signal::set_pending_info(pid, sig, info);
         return false;
     }
 
@@ -1765,18 +1768,22 @@ pub fn build_linux_rt_frame(
     };
 
     // ---- build siginfo ----
-    // We don't record the sender pid/uid in the pending bitmap, so we
-    // emit a process-directed siginfo with SI_USER and a zero sender.
-    // (Faithful per-signal si_code/sender tracking is future work — see
-    // known-issues; glibc handlers that only read si_signo are unaffected.)
-    let info = linux_sigframe::LinuxSiginfo::kill(
+    // Fill a process-directed siginfo from the recorded source metadata:
+    // si_code (SI_USER for kill / SI_TKILL for tgkill/raise / SI_KERNEL for
+    // a timer) and the sender pid/uid captured at post time. The SI_QUEUE
+    // si_value payload is not yet threaded (rt_sigqueueinfo still posts a
+    // bare signal — see known-issues.md TD29), so `info.value` is unused here.
+    let siginfo = linux_sigframe::LinuxSiginfo::kill(
         #[allow(clippy::cast_possible_wrap)]
         {
             sig as i32
         },
-        si_code::SI_USER,
-        0,
-        0,
+        info.code,
+        #[allow(clippy::cast_possible_wrap)]
+        {
+            info.sender_pid as i32
+        },
+        info.sender_uid,
     );
 
     // ---- write the frame to user memory ----
@@ -1789,7 +1796,7 @@ pub fn build_linux_rt_frame(
         core::ptr::write_unaligned(layout.uc_addr as *mut LinuxUcontext, uc);
         core::ptr::write_unaligned(
             layout.info_addr as *mut linux_sigframe::LinuxSiginfo,
-            info,
+            siginfo,
         );
     }
 
@@ -6627,6 +6634,14 @@ fn sys_exit_group(args: &SyscallArgs) -> SyscallResult {
 ///     supported; we return -EINVAL the same way the native handler
 ///     does (process groups are a job-control feature we lack).
 fn sys_kill(args: &SyscallArgs) -> SyscallResult {
+    // `kill(2)` posts with sender class SI_USER.
+    kill_common(args, crate::proc::signal::si_code::SI_USER)
+}
+
+/// Shared body of `kill`/`tkill`/`tgkill`. `si_code` selects the sender class
+/// stamped into the delivered `siginfo_t` (`SI_USER` for `kill`, `SI_TKILL`
+/// for the thread-directed variants).
+fn kill_common(args: &SyscallArgs, si_code: i32) -> SyscallResult {
     // Linux signature: `SYSCALL_DEFINE2(kill, pid_t, pid, int, sig)`.
     // Both `pid` and `sig` are `int`, so the x86_64 syscall ABI
     // truncates args.arg0/arg1 to their low 32 bits before the body
@@ -6763,7 +6778,7 @@ fn sys_kill(args: &SyscallArgs) -> SyscallResult {
         arg4: args.arg4,
         arg5: args.arg5,
     };
-    linux_from_native(handlers::sys_signal_send(&send_args))
+    linux_from_native(handlers::sys_signal_send_with_code(&send_args, si_code))
 }
 
 /// `rt_sigpending(set, sigsetsize)` — report the pending-signal mask
@@ -6897,7 +6912,8 @@ fn sys_tkill(args: &SyscallArgs) -> SyscallResult {
         arg1: args.arg1,
         arg2: 0, arg3: 0, arg4: 0, arg5: 0,
     };
-    sys_kill(&kill_args)
+    // tkill is thread-directed: deliver SI_TKILL, matching Linux's do_tkill.
+    kill_common(&kill_args, crate::proc::signal::si_code::SI_TKILL)
 }
 
 /// `tgkill(tgid, tid, sig)` — send `sig` to thread `tid` in thread-
@@ -6954,7 +6970,8 @@ fn sys_tgkill(args: &SyscallArgs) -> SyscallResult {
         arg1: args.arg2,
         arg2: 0, arg3: 0, arg4: 0, arg5: 0,
     };
-    sys_kill(&kill_args)
+    // tgkill is thread-directed: deliver SI_TKILL, matching Linux's do_tkill.
+    kill_common(&kill_args, crate::proc::signal::si_code::SI_TKILL)
 }
 
 /// `umask(mask)` — set the process file-mode creation mask, returning

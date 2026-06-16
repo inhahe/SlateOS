@@ -188,6 +188,23 @@ if [ ! -f "$SWAP_IMG" ]; then
     dd if=/dev/zero of="$SWAP_IMG" bs=1M count=16 status=none 2>/dev/null
 fi
 
+# Step 3b: Attach the Path-Z glibc rootfs (rootfs.ext4) as a second virtio-blk
+# disk when present.  It is enumerated AFTER swap-disk, so it becomes vdb: the
+# kernel's swap loop skips it (ext4 superblock detected) and the /mnt ext4 probe
+# mounts it, enabling the real-glibc dynamic-execution self-test.  Built on the
+# dev box via `wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh`; git-ignored,
+# so the boot test simply omits it (and the self-test no-ops) when it is absent.
+ROOTFS_IMG="$PROJECT_ROOT/rootfs.ext4"
+ROOTFS_ARGS=()
+if [ -f "$ROOTFS_IMG" ]; then
+    ROOTFS_IMG_WIN="$(to_win_path "$ROOTFS_IMG")"
+    ROOTFS_ARGS=(
+        -device virtio-blk-pci,drive=rootfs-disk
+        -drive "id=rootfs-disk,if=none,format=raw,file=$ROOTFS_IMG_WIN"
+    )
+    echo "=== Attaching Path-Z glibc rootfs: $ROOTFS_IMG (vdb) ==="
+fi
+
 # Step 4: Boot QEMU
 echo "=== Booting QEMU (timeout: ${TIMEOUT}s) ==="
 rm -f "$SERIAL_FILE"
@@ -198,6 +215,7 @@ OVMF_WIN="$(to_win_path "$OVMF")"
     -drive "format=raw,file=fat:rw:$ESP_DIR_WIN" \
     -device virtio-blk-pci,drive=swap-disk \
     -drive "id=swap-disk,if=none,format=raw,file=$SWAP_IMG_WIN" \
+    "${ROOTFS_ARGS[@]}" \
     -serial "file:$SERIAL_FILE_WIN" \
     -display none \
     -no-reboot \

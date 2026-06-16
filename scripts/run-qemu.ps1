@@ -24,6 +24,11 @@ $QemuExe     = "C:\Program Files\qemu\qemu-system-x86_64.exe"
 $OvmfCode    = "C:\Program Files\qemu\share\edk2-x86_64-code.fd"
 $OvmfVars    = "$ProjectRoot\build\ovmf-vars.fd"
 $DiskImg     = "$ProjectRoot\disk.img"
+# Path-Z glibc rootfs (real ext4 with ld.so + libc.so.6 + a dynamic test binary).
+# Built on the dev box via `wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh`;
+# git-ignored.  Attached AFTER disk.img so it enumerates as vdb, where the
+# kernel's ext4 probe mounts it at /mnt and the real-glibc self-test runs.
+$RootfsImg   = "$ProjectRoot\rootfs.ext4"
 
 # Step 0: Create OVMF variable store if it doesn't exist.
 #
@@ -98,6 +103,10 @@ if ($Test) {
     if (Test-Path $DiskImg) {
         $argString += " -drive `"file=$DiskImg,if=virtio,format=raw`""
     }
+    # Attach the Path-Z glibc rootfs (vdb) if present, after disk.img (vda).
+    if (Test-Path $RootfsImg) {
+        $argString += " -drive `"file=$RootfsImg,if=virtio,format=raw`""
+    }
 
     # Add virtio-net device with user-mode networking.
     $argString += " -device virtio-net-pci,netdev=net0 -netdev user,id=net0"
@@ -158,6 +167,10 @@ if ($Test) {
     # Add virtio-blk disk if the disk image exists.
     if (Test-Path $DiskImg) {
         $qemuArgs += @("-drive", "file=$DiskImg,if=virtio,format=raw")
+    }
+    # Attach the Path-Z glibc rootfs (vdb) if present, after disk.img (vda).
+    if (Test-Path $RootfsImg) {
+        $qemuArgs += @("-drive", "file=$RootfsImg,if=virtio,format=raw")
     }
     # Add virtio-net device with user-mode networking.
     $qemuArgs += @("-device", "virtio-net-pci,netdev=net0", "-netdev", "user,id=net0")

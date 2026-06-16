@@ -36,10 +36,10 @@
 //! | 2        | open              | wraps `openat(AT_FDCWD, ...)`      |
 //! | 3        | close             | via per-process Linux fd table     |
 //! | 8        | lseek             | only for File handles              |
-//! | 9        | mmap              | anonymous private map only         |
-//! | 10       | mprotect          | no-op success (perms not tracked)  |
+//! | 9        | mmap              | anon private + file-backed + DRM   |
+//! | 10       | mprotect          | real per-4KiB-page PTE flag update |
 //! | 11       | munmap            | passes through to native           |
-//! | 12       | brk               | always returns current brk (NYI)   |
+//! | 12       | brk               | real heap-VMA grow/shrink          |
 //! | 13       | rt_sigaction      | maps to SYS_SIGNAL_REGISTER       |
 //! | 14       | rt_sigprocmask    | maps to SYS_SIGNAL_MASK           |
 //! | 19       | readv             | via per-process Linux fd table     |
@@ -5275,12 +5275,23 @@ fn resolve_mmap_addr_hint(addr: u64, fixed: bool, frame_size: u64) -> Option<u64
     }
 }
 
-/// `mmap(addr, length, prot, flags, fd, offset)` — anonymous private only.
+/// `mmap(addr, length, prot, flags, fd, offset)`.
 ///
-/// Linux flags translation:
-/// - `MAP_PRIVATE` (0x02) + `MAP_ANONYMOUS` (0x20): supported.
-/// - Anything else (file-backed, shared): returns -ENOSYS until the
-///   kernel-side fd table arrives.
+/// Map kinds handled (the kernel-side Linux fd table is long since wired,
+/// so the historical "anonymous only" restriction no longer applies):
+/// - `MAP_ANONYMOUS | MAP_PRIVATE`: anonymous private map (incl. the
+///   4 KiB-granular demand-paged `MAP_FIXED` overlay `ld.so` uses for
+///   bss/zero-fill straddling a 16 KiB frame).
+/// - File-backed (no `MAP_ANONYMOUS`, valid fd): routed through
+///   [`linux_file_mmap`], which backs `ld.so`'s shared-object loading and
+///   `MAP_PRIVATE` data maps. A `/dev/dri/cardN` fd is special-cased to
+///   [`drm_mmap_dumb`] (the dumb-buffer GEM mapping).
+/// - Shared *anonymous* (`MAP_ANONYMOUS` without `MAP_PRIVATE`): `-ENOSYS`.
+/// - File-backed with no fd: `-EBADF`; unaligned `offset`: `-EINVAL`;
+///   `length == 0`: `-EINVAL` — gate order matches x86_64 Linux.
+///
+/// Demand-paged shared-writeback file mmap (`MAP_SHARED` write-back to the
+/// backing file) is a deliberate won't-fix (design-decisions §22).
 fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
     use crate::mm::frame::FRAME_SIZE;
     use crate::mm::page_table::HW_PAGE_SIZE;

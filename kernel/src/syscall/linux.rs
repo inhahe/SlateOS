@@ -4841,6 +4841,7 @@ fn resolve_mmap_addr_hint(addr: u64, fixed: bool, frame_size: u64) -> Option<u64
 ///   kernel-side fd table arrives.
 fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
     use crate::mm::frame::FRAME_SIZE;
+    use crate::mm::page_table::HW_PAGE_SIZE;
 
     const MAP_PRIVATE: u64 = 0x02;
     const MAP_ANONYMOUS: u64 = 0x20;
@@ -4856,12 +4857,14 @@ fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
     // x86_64 SYSCALL_DEFINE6(mmap) (arch/x86/kernel/sys_x86_64.c) opens
     // with `if (off & ~PAGE_MASK) return -EINVAL;` — the byte offset must
     // be page-aligned, and this is the very first gate, ahead of the
-    // anon/file dispatch, the len==0 check, and MAP_FIXED handling.  Our
-    // PAGE_MASK is the 16 KiB frame.  Anonymous maps ignore the offset
-    // functionally, but Linux still rejects an unaligned one here, so we
-    // must too (and before the ENOSYS we report for unsupported map
-    // kinds, since Linux's EINVAL would win the race).
-    if (offset & (FRAME_SIZE as u64).wrapping_sub(1)) != 0 {
+    // anon/file dispatch, the len==0 check, and MAP_FIXED handling.  Linux's
+    // PAGE_SIZE is 4 KiB; standard glibc binaries pass 4 KiB-aligned (not
+    // 16 KiB-aligned) segment offsets to `ld.so`'s `MAP_FIXED` overlays, so
+    // we gate on the 4 KiB hardware page, not our 16 KiB frame.  Anonymous
+    // maps ignore the offset functionally, but Linux still rejects an
+    // unaligned one here, so we must too (and before the ENOSYS we report
+    // for unsupported map kinds, since Linux's EINVAL would win the race).
+    if (offset & (HW_PAGE_SIZE as u64).wrapping_sub(1)) != 0 {
         return linux_err(errno::EINVAL);
     }
 
@@ -4915,11 +4918,36 @@ fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
     }
 
     let frame_size = FRAME_SIZE as u64;
+    let fixed = (flags & MAP_FIXED) != 0;
+
+    // Anonymous `MAP_FIXED` at a 4 KiB-aligned address: ld.so's bss/zero-fill
+    // overlay (`mmap(seg_end, bss_len, RW, MAP_ANON|MAP_FIXED)`) lands at a
+    // 4 KiB-aligned-but-not-16-KiB address (the data segment ends partway into
+    // a 16 KiB frame).  The native handler is 16 KiB-only and would reject it
+    // with `BadAlignment`, so we register a *demand-paged* 4 KiB-granular
+    // `Anonymous` VMA here — the per-subpage fault resolver zero-fills it,
+    // sharing the straddled 16 KiB frame with the adjacent data segment.
+    if fixed {
+        // Unaligned MAP_FIXED address is EINVAL on Linux (get_unmapped_area),
+        // and this gate is independent of process context — run it first so it
+        // fires even in kernel/self-test callers (no owning pid) and matches
+        // Linux's "EINVAL before placement" ordering.  We gate on the 4 KiB
+        // hardware page, not the 16 KiB frame, since ld.so overlays segments
+        // at 4 KiB granularity.
+        if addr_hint & (HW_PAGE_SIZE as u64).wrapping_sub(1) != 0 {
+            return linux_err(errno::EINVAL);
+        }
+        let pid = match caller_pid() {
+            Some(p) => p,
+            None => return linux_err(errno::ENOMEM),
+        };
+        return linux_anon_mmap_fixed(pid, addr_hint, length, prot);
+    }
+
     // Resolve the address hint vs MAP_FIXED, mirroring Linux's
     // get_unmapped_area (mm/mmap.c).  Done BEFORE the RLIMIT_AS charge
     // because Linux's get_unmapped_area — including its unaligned-
     // MAP_FIXED EINVAL — runs ahead of the VM accounting in mmap_region.
-    let fixed = (flags & MAP_FIXED) != 0;
     let addr_hint = match resolve_mmap_addr_hint(addr_hint, fixed, frame_size) {
         Some(a) => a,
         None => return linux_err(errno::EINVAL),
@@ -5021,6 +5049,98 @@ fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
     result
 }
 
+/// Anonymous `MAP_PRIVATE | MAP_FIXED` mmap at 4 KiB granularity — the
+/// zero-fill bss overlay ld.so issues after the data segment of each shared
+/// object (`mmap(seg_end, bss_len, RW, MAP_ANON|MAP_PRIVATE|MAP_FIXED)`).
+///
+/// The target address is 4 KiB-aligned but typically *not* 16 KiB-aligned
+/// (the preceding data segment ends partway into a 16 KiB frame), so this
+/// cannot go through the native 16 KiB-only mmap handler.  Instead we:
+///
+///   1. Compute the net RLIMIT_AS delta vs. whatever VMAs the range already
+///      overlaps (the original ld.so reservation), charging/releasing only
+///      the difference so the overlay doesn't double-count.
+///   2. Clear the range — unmap any present 4 KiB subpages and split/remove
+///      the covering VMAs — exactly as Linux silently replaces a MAP_FIXED
+///      range.
+///   3. Register a *demand-paged* 4 KiB-granular [`VmaKind::Anonymous`] VMA.
+///      The per-subpage fault resolver zero-fills it on touch and shares the
+///      straddled 16 KiB frame with the adjacent file-backed data segment.
+fn linux_anon_mmap_fixed(pid: u64, addr: u64, length: u64, prot: u64) -> SyscallResult {
+    use crate::mm::frame::FRAME_SIZE;
+    use crate::mm::page_table::{HW_PAGE_SIZE, PageFlags};
+    use crate::mm::vma::{Vma, VmaKind};
+
+    const PROT_WRITE: u64 = 0x2;
+    const PROT_EXEC: u64 = 0x4;
+
+    if length == 0 {
+        return linux_err(errno::EINVAL);
+    }
+    let hw_page = HW_PAGE_SIZE as u64;
+    let frame_size = FRAME_SIZE as u64;
+
+    // MAP_FIXED address must be (4 KiB) page-aligned — Linux: EINVAL otherwise.
+    if addr & hw_page.wrapping_sub(1) != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // Round length up to whole 4 KiB hardware pages so the VMA extent is
+    // 4 KiB-granular (matching the file-backed segment VMAs it abuts).
+    let length_aligned = match length
+        .checked_add(hw_page.wrapping_sub(1))
+        .map(|v| v & !hw_page.wrapping_sub(1))
+    {
+        Some(v) if v != 0 => v,
+        _ => return linux_err(errno::ENOMEM),
+    };
+    let base = addr;
+    let end = match base.checked_add(length_aligned) {
+        Some(e) => e,
+        None => return linux_err(errno::ENOMEM),
+    };
+
+    let pml4 = match pcb::get_pml4(pid) {
+        Some(p) if p != 0 => p,
+        _ => return linux_err(errno::ENOMEM),
+    };
+
+    // Net RLIMIT_AS charge: only the delta beyond the bytes the overlapping
+    // (about-to-be-replaced) VMAs already account for.
+    let prior_charge = linux_vma_overlap_bytes(pid, base, end);
+    if length_aligned > prior_charge {
+        if pcb::linux_as_charge(pid, length_aligned.wrapping_sub(prior_charge)).is_err() {
+            return linux_err(errno::ENOMEM);
+        }
+    } else {
+        pcb::linux_as_release(pid, prior_charge.wrapping_sub(length_aligned));
+    }
+
+    // Clear the range (4 KiB-granular unmap + VMA split/remove).
+    unmap_user_range(pml4, base, end, frame_size);
+    if pcb::remove_vma_range(pid, base, end).is_err() {
+        pcb::linux_as_release(pid, length_aligned);
+        return linux_err(errno::ENOMEM);
+    }
+
+    // Page permissions from prot.  Anonymous zero-fill is demand-paged, so the
+    // flags live on the VMA and the fault resolver applies them per subpage.
+    let mut page_flags = PageFlags::PRESENT | PageFlags::USER_ACCESSIBLE;
+    if prot & PROT_WRITE != 0 {
+        page_flags |= PageFlags::WRITABLE;
+    }
+    if prot & PROT_EXEC == 0 {
+        page_flags |= PageFlags::NO_EXECUTE;
+    }
+
+    let vma = Vma { start: base, end, kind: VmaKind::Anonymous, flags: page_flags };
+    if pcb::add_vma(pid, vma).is_err() {
+        pcb::linux_as_release(pid, length_aligned);
+        return linux_err(errno::ENOMEM);
+    }
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(base as i64)
+}
+
 /// `mprotect(addr, len, prot)` — change page protection on a range.
 ///
 /// Walks every 16 KiB frame in `[addr, addr+len)` in the caller's
@@ -5079,28 +5199,32 @@ enum MprotectValidation {
 ///   5. prot & ~PROT_VALID_MASK               → -EINVAL  (arch_validate_prot)
 ///   6. range outside user space              → -ENOMEM  (find_vma_intersection NULL)
 fn mprotect_validate_args(addr: u64, len: u64, prot: u64) -> MprotectValidation {
-    use crate::mm::frame::FRAME_SIZE;
-    use crate::mm::page_table::USER_SPACE_END;
+    use crate::mm::page_table::{HW_PAGE_SIZE, USER_SPACE_END};
 
     const PROT_READ: u64 = 1;
     const PROT_WRITE: u64 = 2;
     const PROT_EXEC: u64 = 4;
     const PROT_VALID_MASK: u64 = PROT_READ | PROT_WRITE | PROT_EXEC;
 
-    let frame_size = FRAME_SIZE as u64;
-    // (1) addr must be frame-aligned.
-    if (addr & (frame_size - 1)) != 0 {
+    // Linux's PAGE_SIZE is 4 KiB, and `mprotect`'s granularity is the
+    // hardware page: glibc's RELRO `mprotect` covers a 4 KiB-aligned (not
+    // 16 KiB-aligned) sub-range, possibly only some subpages of a 16 KiB
+    // frame.  We gate and round on the 4 KiB hardware page so those calls
+    // are accepted and applied per-subpage (see [`change_flags_4k`]).
+    let page = HW_PAGE_SIZE as u64;
+    // (1) addr must be (4 KiB) page-aligned.
+    if (addr & (page - 1)) != 0 {
         return MprotectValidation::Done(linux_err(errno::EINVAL));
     }
     // (2) POSIX: zero-length range succeeds without doing anything.
     if len == 0 {
         return MprotectValidation::Done(SyscallResult::ok(0));
     }
-    // (3) Round len up to whole frames.  Linux silently wraps via
+    // (3) Round len up to whole 4 KiB pages.  Linux silently wraps via
     // PAGE_ALIGN and catches it in (4); we explicitly catch the wrap.
     let len_aligned = match len
-        .checked_add(frame_size - 1)
-        .map(|v| v & !(frame_size - 1))
+        .checked_add(page - 1)
+        .map(|v| v & !(page - 1))
     {
         Some(v) => v,
         None => return MprotectValidation::Done(linux_err(errno::ENOMEM)),
@@ -5124,8 +5248,7 @@ fn mprotect_validate_args(addr: u64, len: u64, prot: u64) -> MprotectValidation 
 }
 
 fn sys_mprotect(args: &SyscallArgs) -> SyscallResult {
-    use crate::mm::frame::FRAME_SIZE;
-    use crate::mm::page_table::{self, PageFlags, VirtAddr};
+    use crate::mm::page_table::{self, HW_PAGE_SIZE, PageFlags, VirtAddr};
 
     const PROT_WRITE: u64 = 2;
     const PROT_EXEC: u64 = 4;
@@ -5139,16 +5262,16 @@ fn sys_mprotect(args: &SyscallArgs) -> SyscallResult {
     // share the exact same gate sequence before its pkey check.
     // See that fn's doc comment for the full Linux gate order.
     //
-    // Address alignment still uses our 16 KiB internal frame size
-    // rather than the 4 KiB Linux ABI PAGE_SIZE; the page tables
-    // genuinely operate at 16 KiB granularity so accepting a
-    // 4-KiB-aligned-but-not-16K input would either fail the VMA walk
-    // or apply the change to too wide a range.
+    // We operate at the 4 KiB hardware-page granularity (Linux's PAGE_SIZE):
+    // glibc's RELRO `mprotect` covers a 4 KiB-aligned (not 16 KiB-aligned)
+    // sub-range that may touch only some subpages of a 16 KiB frame whose
+    // other subpages belong to a differently-permissioned segment.  Each
+    // hardware page's PTE is updated individually via [`change_flags_4k`].
     let end = match mprotect_validate_args(addr, len, prot) {
         MprotectValidation::Proceed { end, len_aligned: _ } => end,
         MprotectValidation::Done(result) => return result,
     };
-    let frame_size = FRAME_SIZE as u64;
+    let page = HW_PAGE_SIZE as u64;
 
     // Resolve the caller's PML4.
     let task_id = crate::sched::current_task_id();
@@ -5170,9 +5293,9 @@ fn sys_mprotect(args: &SyscallArgs) -> SyscallResult {
         if page_table::translate_flags(pml4, virt).is_none() {
             return linux_err(errno::ENOMEM);
         }
-        // Safe: va < end <= USER_SPACE_END so va + frame_size cannot
-        // overflow (USER_SPACE_END = 2^47 is far below u64::MAX).
-        va = va.saturating_add(frame_size);
+        // Safe: va < end <= USER_SPACE_END so va + page cannot overflow
+        // (USER_SPACE_END = 2^47 is far below u64::MAX).
+        va = va.saturating_add(page);
     }
 
     // Second pass: apply the new flags frame by frame.
@@ -5207,16 +5330,16 @@ fn sys_mprotect(args: &SyscallArgs) -> SyscallResult {
         }
 
         // SAFETY: same as translate_flags above — pml4 is valid,
-        // virt is user-space frame-aligned, mapping exists.
-        if let Err(e) = unsafe { page_table::change_flags(pml4, virt, new_flags) } {
+        // virt is user-space 4 KiB-aligned, mapping exists.
+        if let Err(e) = unsafe { page_table::change_flags_4k(pml4, virt, new_flags) } {
             // On partial failure mid-loop, still flush whatever we
             // already modified so other CPUs don't observe stale
-            // permissions for those frames.
+            // permissions for those pages.
             mprotect_flush_range(addr, va);
             return linux_err(linux_errno_for(e));
         }
 
-        va = va.saturating_add(frame_size);
+        va = va.saturating_add(page);
     }
 
     // Single batched TLB shootdown covering the entire modified range
@@ -8826,22 +8949,55 @@ fn drm_mmap_dumb(
 /// allocator-owned (shared/device frames) are skipped.  [`frame::free_frame`]
 /// is refcount-aware, so a CoW-shared reservation frame is decremented rather
 /// than hard-freed.  Each `unmap_frame` performs its own TLB invalidation.
-fn unmap_user_range(pml4: u64, start: u64, end: u64, frame_size: u64) {
-    use crate::mm::frame;
-    use crate::mm::page_table::{self, VirtAddr};
+// Page arithmetic on bounded user addresses; the loop's `checked_add` is the
+// only place an overflow could occur and is handled explicitly.
+#[allow(clippy::arithmetic_side_effects)]
+fn unmap_user_range(pml4: u64, start: u64, end: u64, _frame_size: u64) {
+    use crate::mm::frame::{self, FRAME_SIZE, PhysFrame};
+    use crate::mm::page_table::{self, VirtAddr, HW_PAGES_PER_FRAME, HW_PAGE_SIZE};
+
+    let hw = HW_PAGE_SIZE as u64;
+    let frame_mask = FRAME_SIZE as u64 - 1;
     let mut va = start;
     while va < end {
+        // Unmap this 4 KiB subpage (skipped if absent).  Walking at 4 KiB
+        // granularity is required because a 16 KiB frame may be shared by
+        // segments with different permissions: unmapping the whole frame
+        // would clobber a sibling segment still in use (and the range may
+        // not be 16 KiB-aligned at either end).
+        //
         // SAFETY: `pml4` is the live page table for the caller and `va` is a
-        // user address.  `unmap_frame` reports an absent mapping via `Err`,
-        // which we skip.
-        if let Ok(pf) = unsafe { page_table::unmap_frame(pml4, VirtAddr::new(va)) } {
-            if frame::is_allocator_owned(pf) {
-                // SAFETY: the frame was just unmapped (no PTE references it)
-                // and is allocator-owned; `free_frame` handles the refcount.
-                let _ = unsafe { frame::free_frame(pf) };
+        // user address; `unmap_4k` reports an absent mapping via `Err`.
+        if let Ok(phys4k) = unsafe { page_table::unmap_4k(pml4, VirtAddr::new(va)) } {
+            // Invalidate the stale TLB entry for the page we just cleared.
+            crate::tlb::flush_range(va, 1);
+
+            // The 16 KiB physical frame backs up to 4 subpages.  Free it (and
+            // release its single RSS charge) only once its *last* mapped
+            // subpage is gone — a partial unmap leaves the frame owned by the
+            // siblings still mapped into it.
+            let frame_base_va = va & !frame_mask;
+            let mut still_mapped = false;
+            for i in 0..HW_PAGES_PER_FRAME {
+                let sv = frame_base_va + (i as u64) * hw;
+                if page_table::translate(pml4, VirtAddr::new(sv)).is_some() {
+                    still_mapped = true;
+                    break;
+                }
+            }
+            if !still_mapped {
+                crate::mm::accounting::uncharge(pml4, 1);
+                if let Some(pf) = PhysFrame::from_addr(phys4k & !frame_mask) {
+                    if frame::is_allocator_owned(pf) {
+                        // SAFETY: the frame's last subpage was just unmapped
+                        // (no PTE references it) and it is allocator-owned;
+                        // `free_frame` handles the refcount.
+                        let _ = unsafe { frame::free_frame(pf) };
+                    }
+                }
             }
         }
-        va = match va.checked_add(frame_size) {
+        va = match va.checked_add(hw) {
             Some(v) => v,
             None => break,
         };
@@ -8977,18 +9133,30 @@ fn linux_file_mmap(
     }
 
     let frame_size = FRAME_SIZE as u64;
-    // Round the requested length up to whole frames.
+    let hw_page = crate::mm::page_table::HW_PAGE_SIZE as u64;
+    // Round the requested length up to whole 4 KiB hardware pages.  VMA
+    // extents and the demand-paged file map are 4 KiB-granular so adjacent
+    // shared-object segments that share a 16 KiB frame get *non-overlapping*
+    // VMAs — matching glibc's `max-page-size = 0x1000` segment packing.
+    // (Rounding to the 16 KiB frame would extend each segment's VMA into its
+    // neighbour's frame and overlap the next MAP_FIXED's VMA.)
     let length_aligned = match length
-        .checked_add(frame_size.wrapping_sub(1))
-        .map(|v| v & !frame_size.wrapping_sub(1))
+        .checked_add(hw_page.wrapping_sub(1))
+        .map(|v| v & !hw_page.wrapping_sub(1))
     {
         Some(v) if v != 0 => v,
         _ => return linux_err(errno::ENOMEM),
     };
-    // `checked_div` rather than `/` keeps the arithmetic-side-effects lint
-    // happy; `frame_size` is a nonzero constant so the `None` arm is dead.
-    let want_frames =
-        usize::try_from(length_aligned.checked_div(frame_size).unwrap_or(0)).unwrap_or(usize::MAX);
+    // Number of 16 KiB frames the *eager* fill path must populate to cover
+    // the mapping.  `checked_*` keep the arithmetic-side-effects lint happy;
+    // `frame_size` is a nonzero constant so the `None` arms are dead.
+    let want_frames = usize::try_from(
+        length_aligned
+            .checked_add(frame_size.wrapping_sub(1))
+            .and_then(|v| v.checked_div(frame_size))
+            .unwrap_or(0),
+    )
+    .unwrap_or(usize::MAX);
 
     // Page permissions: always present + user; PROT_WRITE → writable,
     // no PROT_EXEC → no-execute.
@@ -9017,7 +9185,10 @@ fn linux_file_mmap(
     // always eager (overlays — e.g. ld.so's per-segment loader).
     // -------------------------------------------------------------------
     if fixed {
-        if addr_hint & frame_size.wrapping_sub(1) != 0 {
+        // 4 KiB-aligned address: ld.so overlays segments at 4 KiB granularity,
+        // and a segment may begin partway into a 16 KiB frame shared with the
+        // previous segment.
+        if addr_hint & hw_page.wrapping_sub(1) != 0 {
             return linux_err(errno::EINVAL);
         }
         let base = addr_hint;
@@ -9039,13 +9210,43 @@ fn linux_file_mmap(
             pcb::linux_as_release(pid, prior_charge.wrapping_sub(length_aligned));
         }
 
-        // Clear the existing frames and split/remove the covering VMAs.
+        // Clear any existing frames (4 KiB-granular) and split/remove the
+        // covering VMAs — MAP_FIXED silently replaces whatever is there.
         unmap_user_range(pml4, base, end, frame_size);
         if pcb::remove_vma_range(pid, base, end).is_err() {
             pcb::linux_as_release(pid, length_aligned);
             return linux_err(errno::ENOMEM);
         }
 
+        // Private file overlay — ld.so's per-segment shared-object loading
+        // (`_dl_map_segments`).  Register a *demand-paged* `FileBacked` VMA so
+        // the per-subpage fault resolver backs it lazily: this is the only
+        // path that correctly handles a 4 KiB segment sharing a 16 KiB frame
+        // with an adjacent, differently-permissioned segment (an eager
+        // whole-16-KiB-frame fill would clobber the neighbour's subpages).
+        if matches!(entry.kind, HandleKind::File) && private {
+            let mapped_handle = match crate::fs::handle::dup_shared(entry.raw_handle) {
+                Ok(h) => h,
+                Err(_) => {
+                    pcb::linux_as_release(pid, length_aligned);
+                    return linux_err(errno::ENOMEM);
+                }
+            };
+            let kind = VmaKind::FileBacked { handle: mapped_handle, file_offset: offset };
+            if pcb::add_vma(pid, Vma { start: base, end, kind, flags: page_flags }).is_err() {
+                // Drop our reference and refund — the overlay never took.
+                let _ = crate::fs::handle::close(mapped_handle);
+                pcb::linux_as_release(pid, length_aligned);
+                return linux_err(errno::ENOMEM);
+            }
+            #[allow(clippy::cast_possible_wrap)]
+            return SyscallResult::ok(base as i64);
+        }
+
+        // Eager fixed fill (memfd / read-only shared).  Maps whole 16 KiB
+        // frames via `map_frame`, so it requires a 16 KiB-aligned base; a
+        // sub-frame-aligned base here yields `BadAlignment` from the fill
+        // (surfaced as the mapped errno).  glibc never takes this path.
         if let Err(e) = linux_file_mmap_fill(
             pml4, base, want_frames, frame_size, hhdm, entry, offset, page_flags,
         ) {

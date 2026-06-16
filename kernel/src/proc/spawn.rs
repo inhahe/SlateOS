@@ -4153,6 +4153,197 @@ pub fn self_test_linux_real_glibc_full() -> KernelResult<()> {
     }
 }
 
+/// Path Z, part 4: prove the REAL-glibc **pthread (clone + futex + TLS)** path
+/// end-to-end.
+///
+/// `thread_clone.rs`'s own self-test explicitly cannot exercise the IRETQ
+/// trampoline ("the integration path is covered by booting a real Linux binary
+/// that calls `pthread_create`") — this is that test.  It runs `/bin/pthread`,
+/// which spawns 4 worker threads that each increment a shared counter 10000
+/// times under one `pthread_mutex`, then `pthread_join`s all four and sums their
+/// return values.  The output is deterministic regardless of scheduling (the
+/// mutex guarantees no lost updates): `counter=40000 joinsum=10`.  Asserting it
+/// proves the whole multithreading path works through real glibc:
+///   - `clone(CLONE_VM|CLONE_THREAD|CLONE_SETTLS|…)` thread creation
+///     (`thread_clone::clone_thread` + the trampoline);
+///   - per-thread TLS (glibc's `errno` and pthread bookkeeping live in TLS);
+///   - the futex fast path (uncontended adaptive-mutex CAS in userspace) and the
+///     contended path (`futex` wait/wake syscalls under lock contention);
+///   - `pthread_join`, which blocks on the child-tid futex the kernel wakes on
+///     thread exit; and the per-thread `exit(2)` (not `exit_group`) teardown
+///     that leaves the process alive until its last (main) thread exits.
+///
+/// We redirect the child's fd 1 to a capture file before it runs and assert the
+/// exact bytes plus `exit(13)` (2 = pthread_create failed, 3 = pthread_join
+/// failed).  No-op (returns `Ok`) when `/mnt/bin/pthread` is absent.
+pub fn self_test_linux_real_glibc_pthread() -> KernelResult<()> {
+    use crate::fs::handle;
+    use crate::proc::linux_fd::{FdEntry, O_WRONLY};
+
+    const EXPECT_EXIT: i32 = 13;
+    // 4 threads * 10000 increments = 40000; returns 1+2+3+4 = 10.
+    const EXPECT_OUT: &[u8] = b"SLATE_GLIBC_PTHREAD_OK counter=40000 joinsum=10\n";
+
+    const SRC_LD: &str = "/mnt/lib64/ld-linux-x86-64.so.2";
+    const SRC_LIBC: &str = "/mnt/lib/x86_64-linux-gnu/libc.so.6";
+    const SRC_PT: &str = "/mnt/bin/pthread";
+    const DST_LD: &str = "/lib64/ld-linux-x86-64.so.2";
+    const DST_LIBC: &str = "/lib/x86_64-linux-gnu/libc.so.6";
+    const DST_PT: &str = "/bin/pthread";
+    const CAPTURE: &str = "/glibc-pthread-capture.tmp";
+    // Multithreaded workload: generous bound so contention-driven futex
+    // descheduling can't trip a false timeout.  A genuine deadlock still hits
+    // the bound quickly (no ready task → each yield returns immediately).
+    const MAX_YIELDS: usize = 262_144;
+
+    if !crate::fs::Vfs::exists(SRC_PT) {
+        return Ok(());
+    }
+
+    serial_println!("[spawn] Running REAL glibc pthread (clone+futex+TLS) (ring 3, Path Z) test...");
+
+    let _ = crate::fs::Vfs::mkdir_all("/lib64");
+    let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
+    let _ = crate::fs::Vfs::mkdir_all("/bin");
+    for (src, dst) in [(SRC_LD, DST_LD), (SRC_LIBC, DST_LIBC), (SRC_PT, DST_PT)] {
+        match crate::fs::Vfs::read_file(src) {
+            Ok(bytes) => {
+                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
+                    serial_println!(
+                        "[spawn]   real glibc pthread: SKIP (staging {} -> {} failed: {:?})",
+                        src, dst, e
+                    );
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                serial_println!(
+                    "[spawn]   real glibc pthread: SKIP (reading {} failed: {:?})",
+                    src, e
+                );
+                return Ok(());
+            }
+        }
+    }
+
+    let exe_elf = match crate::fs::Vfs::read_file(DST_PT) {
+        Ok(b) => b,
+        Err(e) => {
+            serial_println!("[spawn]   real glibc pthread: SKIP (re-read {} failed: {:?})", DST_PT, e);
+            return Ok(());
+        }
+    };
+
+    let _ = crate::fs::Vfs::remove(CAPTURE);
+    let capture_handle = match handle::open(
+        CAPTURE,
+        handle::OpenFlags::READ
+            .union(handle::OpenFlags::WRITE)
+            .union(handle::OpenFlags::CREATE),
+    ) {
+        Ok(h) => h,
+        Err(e) => {
+            serial_println!("[spawn]   real glibc pthread: SKIP (capture-file open failed: {:?})", e);
+            return Ok(());
+        }
+    };
+
+    let argv: &[&[u8]] = &[b"/bin/pthread"];
+    let envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C"];
+    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-glibc-pthread",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: Some(DST_PT.as_bytes()),
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = handle::close(capture_handle);
+            let _ = crate::fs::Vfs::remove(CAPTURE);
+            serial_println!("[spawn]   FAIL: real glibc pthread spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Redirect fd 1 → capture before the child runs.
+    let _ = pcb::linux_fd_take(result.pid, 1);
+    if let Err(e) = pcb::linux_fd_install_at(result.pid, 1, FdEntry::file(capture_handle, O_WRONLY)) {
+        let _ = handle::close(capture_handle);
+        thread::on_thread_exit(result.task_id);
+        pcb::destroy(result.pid);
+        let _ = crate::fs::Vfs::remove(CAPTURE);
+        serial_println!("[spawn]   FAIL: real glibc pthread — redirecting fd 1 failed: {:?}", e);
+        return Err(KernelError::InternalError);
+    }
+
+    let mut reaped = false;
+    for _ in 0..MAX_YIELDS {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            reaped = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    let captured = crate::fs::Vfs::read_file(CAPTURE);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(CAPTURE);
+
+    if !reaped || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: real glibc pthread — process did not exit within {} yields \
+             (state={:?}); a thread likely deadlocked on a futex or a worker faulted",
+            MAX_YIELDS, state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECT_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: real glibc pthread — exit code={:?}, expected {} (2=pthread_create \
+             failed, 3=pthread_join failed)",
+            exit_code, EXPECT_EXIT
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    match captured {
+        Ok(bytes) if bytes.as_slice() == EXPECT_OUT => {
+            serial_println!(
+                "[spawn]   REAL glibc pthread (ring 3: 4 threads via clone+TLS, 40000 mutex/futex \
+                 ops, pthread_join, captured {} bytes == expected): OK",
+                bytes.len()
+            );
+            Ok(())
+        }
+        Ok(bytes) => {
+            serial_println!(
+                "[spawn]   FAIL: real glibc pthread — captured {} bytes {:?}, expected {:?}",
+                bytes.len(), bytes.as_slice(), EXPECT_OUT
+            );
+            Err(KernelError::InternalError)
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: real glibc pthread — reading capture file back failed: {:?}",
+                e
+            );
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

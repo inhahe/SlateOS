@@ -4153,6 +4153,186 @@ pub fn remove_vma_range(pid: ProcessId, start: u64, end: u64) -> KernelResult<()
     Ok(())
 }
 
+/// Build a sub-range of `orig` spanning `[new_start, new_end)` with the
+/// given `flags`, adjusting a file-backed VMA's `file_offset` so the
+/// piece still maps the correct bytes when its start moves forward.
+///
+/// `new_start` must be `>= orig.start` (every caller carves a sub-range
+/// out of `orig`), so the offset delta is non-negative.
+fn vma_subrange(
+    orig: &Vma,
+    new_start: u64,
+    new_end: u64,
+    flags: crate::mm::page_table::PageFlags,
+) -> Vma {
+    let kind = match orig.kind {
+        VmaKind::FileBacked { handle, file_offset } => VmaKind::FileBacked {
+            handle,
+            // new_start >= orig.start by construction; wrapping_sub keeps
+            // the arithmetic lint satisfied without a panic path.
+            file_offset: file_offset.wrapping_add(new_start.wrapping_sub(orig.start)),
+        },
+        other => other,
+    };
+    Vma { start: new_start, end: new_end, kind, flags }
+}
+
+/// Change the page-protection flags recorded on every VMA intersecting
+/// `[start, end)`, splitting VMAs at the range boundaries so the new
+/// protection applies to exactly `[start, end)` and to no bytes outside
+/// it.  This is the VMA-list half of `mprotect(2)`.
+///
+/// Demand-paged pages take their protection from the covering VMA at
+/// fault time (see [`try_resolve_fault`]/[`resolve_subpaged_fault`]), so
+/// updating the VMA — not just present PTEs — is what makes a region that
+/// has not yet been faulted in honour the new protection.  This is the
+/// fix for glibc's thread-stack setup, which `mmap`s a `PROT_NONE`
+/// region and then `mprotect`s it to `PROT_READ|PROT_WRITE` *before* any
+/// page is touched: with a PTE-only mprotect those pages would later
+/// fault in with the stale `PROT_NONE` flags.
+///
+/// `want_write` / `want_exec` are the requested `PROT_WRITE` /
+/// `PROT_EXEC` bits.  Each covered VMA's other flag bits (PRESENT,
+/// USER_ACCESSIBLE) are preserved; WRITABLE and NO_EXECUTE are recomputed
+/// from the request.
+///
+/// Holes in `[start, end)` not covered by any VMA are left untouched —
+/// they are typically eagerly-mapped ELF segments the kernel loader
+/// placed without a VMA record; `sys_mprotect` handles those via the
+/// PTE-only path and is responsible for the Linux "ENOMEM on a genuine
+/// hole" coverage check (a page with neither a VMA nor a present PTE).
+///
+/// # Errors
+/// - [`KernelError::NoSuchProcess`] if the PID doesn't exist.
+/// - [`KernelError::InvalidArgument`] if `end <= start`.
+pub fn protect_vma_range(
+    pid: ProcessId,
+    start: u64,
+    end: u64,
+    want_write: bool,
+    want_exec: bool,
+) -> KernelResult<()> {
+    use crate::mm::page_table::PageFlags;
+
+    if end <= start {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    // FileBacked VMAs split into multiple surviving pieces need one owned
+    // backing reference each; we accrue the extra retains under the lock
+    // and apply them after releasing it (the open-file lock must never
+    // nest under the process-table lock).
+    let mut retains: Vec<u64> = Vec::new();
+
+    {
+        let mut table = PROCESS_TABLE.lock();
+        let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+
+        // Apply: split at the boundaries, updating flags of the covered
+        // middle.  Mirrors remove_vma_range's surgery but keeps the middle
+        // (with new flags) instead of dropping it.
+        let mut kept: Vec<Vma> = Vec::with_capacity(proc.vmas.len().saturating_add(2));
+        for vma in proc.vmas.drain(..) {
+            if vma.end <= start || vma.start >= end {
+                kept.push(vma);
+                continue;
+            }
+            let is_file = matches!(vma.kind, VmaKind::FileBacked { .. });
+            let mut pieces = 0u32;
+
+            // Left remainder [vma.start, start): keeps original flags.
+            if vma.start < start {
+                kept.push(vma_subrange(&vma, vma.start, start, vma.flags));
+                pieces = pieces.saturating_add(1);
+            }
+
+            // Covered middle: recompute WRITABLE / NO_EXECUTE from prot.
+            let mid_start = core::cmp::max(start, vma.start);
+            let mid_end = core::cmp::min(end, vma.end);
+            let mut new_flags =
+                vma.flags & !PageFlags::WRITABLE & !PageFlags::NO_EXECUTE;
+            if want_write {
+                new_flags |= PageFlags::WRITABLE;
+            }
+            if !want_exec {
+                new_flags |= PageFlags::NO_EXECUTE;
+            }
+            kept.push(vma_subrange(&vma, mid_start, mid_end, new_flags));
+            pieces = pieces.saturating_add(1);
+
+            // Right remainder [end, vma.end): keeps original flags.
+            if vma.end > end {
+                kept.push(vma_subrange(&vma, end, vma.end, vma.flags));
+                pieces = pieces.saturating_add(1);
+            }
+
+            // The original FileBacked VMA owned exactly one backing
+            // reference; each surviving piece needs one, so (pieces - 1)
+            // extra retains are required.
+            if is_file {
+                if let VmaKind::FileBacked { handle, .. } = vma.kind {
+                    for _ in 1..pieces {
+                        retains.push(handle);
+                    }
+                }
+            }
+        }
+        kept.sort_unstable_by_key(|v| v.start);
+        proc.vmas = kept;
+    }
+
+    for handle in retains {
+        let _ = crate::fs::handle::dup_shared(handle);
+    }
+    Ok(())
+}
+
+/// Return the sub-ranges of `[start, end)` that are **not** covered by any
+/// VMA in `pid`'s address space, as `(gap_start, gap_end)` pairs in
+/// ascending order.
+///
+/// An empty vector means the whole range is VMA-backed.  This is the
+/// VMA-list half of `mprotect(2)`/`munmap(2)`'s coverage check: a gap here
+/// is only a genuine hole (→ `ENOMEM`) if it also lacks a present PTE — an
+/// eagerly-mapped ELF segment the kernel loader placed without a VMA
+/// record shows up as a gap but is still validly mapped — so the caller
+/// must cross-check each gap against the page tables.
+///
+/// Returns `None` if the PID has no live process record.
+#[must_use]
+pub fn vma_coverage_gaps(pid: ProcessId, start: u64, end: u64) -> Option<Vec<(u64, u64)>> {
+    if end <= start {
+        return Some(Vec::new());
+    }
+    let table = PROCESS_TABLE.lock();
+    let proc = table.get(&pid)?;
+
+    let mut gaps: Vec<(u64, u64)> = Vec::new();
+    let mut cursor = start;
+    for vma in &proc.vmas {
+        if vma.end <= cursor {
+            continue;
+        }
+        if vma.start >= end {
+            break;
+        }
+        // A VMA starting beyond the cursor leaves [cursor, vma.start) bare.
+        if vma.start > cursor {
+            gaps.push((cursor, vma.start));
+        }
+        if vma.end > cursor {
+            cursor = vma.end;
+        }
+        if cursor >= end {
+            break;
+        }
+    }
+    if cursor < end {
+        gaps.push((cursor, end));
+    }
+    Some(gaps)
+}
+
 /// Drop *all* VMAs from a process's list, releasing any backing
 /// references, as part of `execve` replacing the process image.
 ///

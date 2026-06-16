@@ -159,6 +159,64 @@ EOF
 gcc -O2 -o "$STAGE/bin/full" "$CSRC3" -Wl,-rpath,"$LIBC_DIR" -Wl,--enable-new-dtags
 rm -f "$CSRC3"
 
+# --- the "pthread" test binary: clone + futex + TLS via real glibc ------------
+# This is the integration coverage thread_clone.rs's self-test explicitly cannot
+# provide ("the integration path is covered by booting a real Linux binary that
+# calls pthread_create").  It spawns 4 worker threads, each of which increments
+# a shared counter NITERS times under a single pthread_mutex (so the result is
+# deterministic regardless of scheduling), then joins all four and sums their
+# return values.  This exercises:
+#   - clone(CLONE_VM|CLONE_THREAD|CLONE_SETTLS|...) thread creation;
+#   - per-thread TLS setup (errno + the mutex live in/through TLS);
+#   - the futex fast path (uncontended adaptive-mutex CAS in userspace) AND the
+#     contended path (futex_wait/futex_wake syscalls under lock contention);
+#   - pthread_join, which blocks on the child-tid futex the kernel wakes when a
+#     thread exits.
+# counter == 4*NITERS and joinsum == 1+2+3+4 are deterministic, so the SlateOS
+# self-test redirects fd 1 to a file and asserts the exact output.  Returns 13.
+# glibc >= 2.34 folds pthread into libc.so.6, so no extra library is staged.
+CSRC4="$STAGE/pthread.c"
+cat > "$CSRC4" <<'EOF'
+/* SlateOS Path-Z real-glibc pthread (clone + futex + TLS) test. */
+#include <stdio.h>
+#include <pthread.h>
+
+#define NTHREADS 4
+#define NITERS   10000
+
+static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+static long counter = 0;
+
+static void *worker(void *arg) {
+    long id = (long)arg;
+    for (int i = 0; i < NITERS; i++) {
+        pthread_mutex_lock(&lock);
+        counter += 1;
+        pthread_mutex_unlock(&lock);
+    }
+    return (void *)(id + 1);
+}
+
+int main(void) {
+    pthread_t t[NTHREADS];
+    for (long i = 0; i < NTHREADS; i++) {
+        if (pthread_create(&t[i], NULL, worker, (void *)i) != 0) return 2;
+    }
+    long joinsum = 0;
+    for (int i = 0; i < NTHREADS; i++) {
+        void *ret = NULL;
+        if (pthread_join(t[i], &ret) != 0) return 3;
+        joinsum += (long)ret;
+    }
+    printf("SLATE_GLIBC_PTHREAD_OK counter=%ld joinsum=%ld\n", counter, joinsum);
+    return 13;
+}
+EOF
+gcc -O2 -pthread -o "$STAGE/bin/pthread" "$CSRC4" -Wl,-rpath,"$LIBC_DIR" -Wl,--enable-new-dtags
+rm -f "$CSRC4"
+echo "[rootfs] pthread binary DT_NEEDED:"
+readelf -d "$STAGE/bin/pthread" 2>/dev/null | grep -E 'NEEDED|RUNPATH' | sed 's/^/  /'
+
 echo "[rootfs] staged tree:"
 ( cd "$STAGE" && find lib64 lib bin -type f -printf '  %-44p %10s bytes\n' )
 

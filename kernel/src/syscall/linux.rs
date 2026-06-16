@@ -1044,6 +1044,43 @@ pub fn linux_from_native(res: SyscallResult) -> SyscallResult {
     SyscallResult::ok(-i64::from(errno_val))
 }
 
+/// Translate a *native* futex-wait result into the Linux `FUTEX_WAIT`
+/// ABI return convention.
+///
+/// The native futex-wait handlers ([`handlers::sys_futex_wait`],
+/// [`handlers::sys_futex_wait_bitset`] and their timed variants) report
+/// success with the Slate convention:
+///   * `Ok(1)` — the caller actually blocked and was woken by a matching
+///     `FUTEX_WAKE`.
+///   * `Ok(0)` — the futex word did **not** equal the expected value at
+///     entry, so the wait returned immediately without blocking.
+///   * `Err(TimedOut)` — the (relative) deadline elapsed while blocked.
+///   * `Err(_)` — a real error (e.g. `InvalidAddress` → `EFAULT`).
+///
+/// Linux's `futex(FUTEX_WAIT*)` instead returns `0` when woken (or
+/// spuriously), `-EAGAIN` when the value did not match, `-ETIMEDOUT` on
+/// timeout, and `-EFAULT`/etc. on error.  Crucially, glibc's
+/// `futex_wait`/`lll_futex_wait` wrappers treat **any** other return
+/// value — notably a positive `1` — as `futex_fatal_error()` ("The futex
+/// facility returned an unexpected error code.") and abort the process.
+/// pthread_join's `lll_wait_tid` loop hits exactly this path: when the
+/// joined thread exits, `CLONE_CHILD_CLEARTID` zeroes the tid word and
+/// wakes the joiner, whose `FUTEX_WAIT_BITSET` must return `0`, not `1`.
+///
+/// This is the same mapping `sys_futex_waitv` applies inline; the three
+/// classic wait ops (`FUTEX_WAIT`, `FUTEX_WAIT_BITSET`, `futex2_wait`)
+/// route through here so the convention lives in one place.
+fn linux_from_futex_wait(res: SyscallResult) -> SyscallResult {
+    match res.value {
+        // Blocked and woken (or spurious wake) — Linux success.
+        1 => SyscallResult::ok(0),
+        // Value mismatch at entry — Linux reports EAGAIN.
+        0 => linux_err(errno::EAGAIN),
+        // Negative native error code (incl. TimedOut → ETIMEDOUT).
+        _ => linux_from_native(res),
+    }
+}
+
 /// Recover a [`KernelError`] from its stable integer code.
 ///
 /// This is the inverse of `KernelError::code()`.  Returns `None` if
@@ -5284,61 +5321,94 @@ fn sys_mprotect(args: &SyscallArgs) -> SyscallResult {
         _ => return linux_err(errno::ESRCH),
     };
 
-    // First pass: verify the entire range is mapped.  Linux returns
-    // -ENOMEM if there's a hole, BEFORE making any changes.  This
-    // avoids leaving a half-protected range on a partial failure.
-    let mut va = addr;
-    while va < end {
-        let virt = VirtAddr::new(va);
-        if page_table::translate_flags(pml4, virt).is_none() {
-            return linux_err(errno::ENOMEM);
-        }
-        // Safe: va < end <= USER_SPACE_END so va + page cannot overflow
-        // (USER_SPACE_END = 2^47 is far below u64::MAX).
-        va = va.saturating_add(page);
-    }
-
-    // Second pass: apply the new flags frame by frame.
     let want_write = (prot & PROT_WRITE) != 0;
     let want_exec = (prot & PROT_EXEC) != 0;
 
-    va = addr;
+    // Pass 0 — coverage check (BEFORE any mutation, matching Linux's
+    // mm/mprotect.c which validates the whole range via a VMA walk before
+    // touching a single PTE).  Linux returns -ENOMEM, and makes no change,
+    // when the range contains an unmapped hole.
+    //
+    // Our address space has two flavours of valid mapping:
+    //   1. Regions tracked by a VMA (everything mmap'd via the Linux ABI,
+    //      including ld.so's shared-object segments and demand-paged
+    //      anonymous/stack mappings).
+    //   2. The PIE main executable's PT_LOAD segments, which the kernel
+    //      ELF loader maps *eagerly* (present PTEs) WITHOUT registering a
+    //      VMA — so they look like VMA "holes" but are genuinely mapped.
+    //      glibc's RELRO pass mprotects exactly these segments.
+    //
+    // So a page is "mapped" if it is covered by a VMA OR has a present
+    // PTE.  We ask the VMA layer for the sub-ranges NOT covered by any
+    // VMA, then require every page in those gaps to have a present PTE;
+    // any gap page that is also PTE-absent is a genuine hole → ENOMEM.
+    match crate::proc::pcb::vma_coverage_gaps(pid, addr, end) {
+        None => return linux_err(errno::ESRCH),
+        Some(gaps) => {
+            for (g_start, g_end) in gaps {
+                let mut va = g_start;
+                while va < g_end {
+                    if page_table::translate_flags(pml4, VirtAddr::new(va)).is_none() {
+                        // Genuine hole: no VMA and no present PTE.
+                        return linux_err(errno::ENOMEM);
+                    }
+                    va = va.saturating_add(page);
+                }
+            }
+        }
+    }
+
+    // Pass 1 — VMA bookkeeping.  Update the protection flags recorded on
+    // the VMA(s) covering [addr, end), splitting at the boundaries.  This
+    // makes the new protection apply to *demand-paged pages that have not
+    // yet been faulted in*: the fault resolver reads the VMA's flags, so a
+    // PTE-only mprotect would leave a freshly-mmapped (still unmapped)
+    // region with its stale protection.  This is exactly glibc's
+    // thread-stack path (mmap PROT_NONE, then mprotect to RW before first
+    // touch) — see [`pcb::protect_vma_range`].  VMA-less but PTE-present
+    // ranges (the eagerly-mapped main-exe segments) are left untouched by
+    // this call and handled by the PTE pass below.
+    match crate::proc::pcb::protect_vma_range(pid, addr, end, want_write, want_exec) {
+        Ok(()) => {}
+        Err(e) => return linux_err(linux_errno_for(e)),
+    }
+
+    // Pass 2 — update the PTEs of pages that are *already* present.  Not-
+    // present pages are intentionally skipped: they are demand-paged and
+    // will fault in later with the new protection from the VMA updated
+    // above.  (Linux likewise only walks present PTEs in change_pte_range;
+    // absent entries are handled lazily.)
+    let mut va = addr;
     while va < end {
         let virt = VirtAddr::new(va);
-        // SAFETY: pml4 is the calling process's PML4; the address is
-        // user-space and frame-aligned; we verified the range is
-        // mapped in the first pass.  No other thread can be racing
-        // on this range without the user explicitly serialising —
-        // mprotect on a concurrently-faulting region is racy on
-        // Linux too.
-        let current = match page_table::translate_flags(pml4, virt) {
-            Some(f) => f,
-            None => return linux_err(errno::ENOMEM),
-        };
+        if let Some(current) = page_table::translate_flags(pml4, virt) {
+            // Compute new flags: clear WRITABLE + NO_EXECUTE, then set
+            // them according to prot.  Preserve PRESENT, USER_ACCESSIBLE,
+            // COW, and any other PTE bits.
+            let mut new_flags = current & !PageFlags::WRITABLE & !PageFlags::NO_EXECUTE;
+            // Never set WRITABLE on a CoW page — the CoW fault handler
+            // will upgrade the page on first write.
+            if want_write && !current.contains(PageFlags::COW) {
+                new_flags |= PageFlags::WRITABLE;
+            }
+            if !want_exec {
+                new_flags |= PageFlags::NO_EXECUTE;
+            }
 
-        // Compute new flags: clear WRITABLE + NO_EXECUTE, then set
-        // them according to prot.  Preserve PRESENT, USER_ACCESSIBLE,
-        // COW, and any other PTE bits.
-        let mut new_flags = current & !PageFlags::WRITABLE & !PageFlags::NO_EXECUTE;
-        // Never set WRITABLE on a CoW page — the CoW fault handler
-        // will upgrade the page on first write.
-        if want_write && !current.contains(PageFlags::COW) {
-            new_flags |= PageFlags::WRITABLE;
+            // SAFETY: pml4 is the calling process's PML4; virt is a
+            // user-space 4 KiB-aligned address whose mapping we just
+            // confirmed present.  mprotect on a concurrently-faulting
+            // region is racy on Linux too.
+            if let Err(e) = unsafe { page_table::change_flags_4k(pml4, virt, new_flags) } {
+                // On partial failure mid-loop, still flush whatever we
+                // already modified so other CPUs don't observe stale
+                // permissions for those pages.
+                mprotect_flush_range(addr, va);
+                return linux_err(linux_errno_for(e));
+            }
         }
-        if !want_exec {
-            new_flags |= PageFlags::NO_EXECUTE;
-        }
-
-        // SAFETY: same as translate_flags above — pml4 is valid,
-        // virt is user-space 4 KiB-aligned, mapping exists.
-        if let Err(e) = unsafe { page_table::change_flags_4k(pml4, virt, new_flags) } {
-            // On partial failure mid-loop, still flush whatever we
-            // already modified so other CPUs don't observe stale
-            // permissions for those pages.
-            mprotect_flush_range(addr, va);
-            return linux_err(linux_errno_for(e));
-        }
-
+        // Safe: va < end <= USER_SPACE_END so va + page cannot overflow
+        // (USER_SPACE_END = 2^47 is far below u64::MAX).
         va = va.saturating_add(page);
     }
 
@@ -34125,16 +34195,12 @@ fn sys_futex_waitv(args: &SyscallArgs) -> SyscallResult {
             };
             handlers::sys_futex_wait_timeout(&a)
         };
-        // Map non-error returns to the Linux waitv contract.  Only the
-        // futex_wait family returns 1 (woken) / 0 (value mismatch) in
-        // the success domain — everything else is a native error code
-        // (negative) and goes through linux_from_native for errno
-        // mapping.
-        return match native.value {
-            1 => SyscallResult::ok(0),
-            0 => linux_err(errno::EAGAIN),
-            _ => linux_from_native(native),
-        };
+        // Map non-error returns to the Linux waitv contract.  This is the
+        // same convention as the classic FUTEX_WAIT ops: woken (native 1)
+        // → 0 (the index of the woken waiter, always 0 for nr=1), value
+        // mismatch (native 0) → EAGAIN, everything else a native error
+        // code mapped to errno.  See [`linux_from_futex_wait`].
+        return linux_from_futex_wait(native);
     }
     // nr > 1 — multi-key waitv not yet implemented.
     linux_err(errno::ENOSYS)
@@ -38842,7 +38908,7 @@ fn sys_futex2_wait(args: &SyscallArgs) -> SyscallResult {
         };
         handlers::sys_futex_wait_bitset_timeout(&a)
     };
-    linux_from_native(native)
+    linux_from_futex_wait(native)
 }
 
 /// `creat(path, mode)` — legacy `open(path, O_CREAT|O_WRONLY|O_TRUNC, mode)`.
@@ -40546,7 +40612,7 @@ fn sys_futex(args: &SyscallArgs) -> SyscallResult {
                 };
                 handlers::sys_futex_wait_timeout(&a)
             };
-            linux_from_native(native)
+            linux_from_futex_wait(native)
         }
         FUTEX_WAKE => {
             let a = SyscallArgs {
@@ -40683,7 +40749,7 @@ fn sys_futex(args: &SyscallArgs) -> SyscallResult {
                 };
                 handlers::sys_futex_wait_bitset_timeout(&a)
             };
-            linux_from_native(native)
+            linux_from_futex_wait(native)
         }
         FUTEX_WAKE_BITSET => {
             // Linux rejects mask == 0 with EINVAL here as well.
@@ -74041,24 +74107,26 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 return Err(KernelError::InternalError);
             }
             // FUTEX_WAIT_BITSET with mask=MATCH_ANY, expected=1, value=0,
-            // NULL timeout -> value mismatch -> Ok(false) -> 0.
+            // NULL timeout -> value mismatch.  Linux returns -EAGAIN for a
+            // futex-wait whose word does not equal the expected value at
+            // entry (the native Ok(false) is mapped by linux_from_futex_wait).
             let a = SyscallArgs {
                 arg0: futex_ptr, arg1: FUTEX_WAIT_BITSET_OP,
                 arg2: 1, arg3: 0, arg4: 0, arg5: 0xFFFF_FFFF,
             };
-            if dispatch_linux(nr::FUTEX, &a).value != 0 {
-                serial_println!("[syscall/linux]   FAIL: FUTEX_WAIT_BITSET mismatch not 0");
+            if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EAGAIN) {
+                serial_println!("[syscall/linux]   FAIL: FUTEX_WAIT_BITSET mismatch not EAGAIN");
                 return Err(KernelError::InternalError);
             }
             // FUTEX_WAIT_BITSET with absolute past timeout (ts at (0,0))
             // and value mismatch -> futex_wait_timeout returns Ok(false)
-            // before consulting the deadline -> 0.
+            // (value checked before the deadline) -> Linux -EAGAIN.
             let a = SyscallArgs {
                 arg0: futex_ptr, arg1: FUTEX_WAIT_BITSET_OP,
                 arg2: 1, arg3: ts_ptr, arg4: 0, arg5: 0xFFFF_FFFF,
             };
-            if dispatch_linux(nr::FUTEX, &a).value != 0 {
-                serial_println!("[syscall/linux]   FAIL: FUTEX_WAIT_BITSET past abs not 0");
+            if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EAGAIN) {
+                serial_println!("[syscall/linux]   FAIL: FUTEX_WAIT_BITSET past abs not EAGAIN");
                 return Err(KernelError::InternalError);
             }
             // Flag stripping: FUTEX_WAKE_BITSET | FUTEX_PRIVATE_FLAG with
@@ -74073,16 +74141,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 return Err(KernelError::InternalError);
             }
             // FUTEX_CLOCK_REALTIME selects clock_realtime() in the abs->rel
-            // path.  With ts=(0,0) and value mismatch -> 0.  The wait
-            // path runs to completion exercising the realtime branch.
+            // path.  With ts=(0,0) and value mismatch -> Linux -EAGAIN.
+            // The wait path runs to completion exercising the realtime branch.
             let a = SyscallArgs {
                 arg0: futex_ptr,
                 arg1: FUTEX_WAIT_BITSET_OP | FUTEX_CLOCK_REALTIME_BIT
                     | FUTEX_PRIVATE_FLAG_BIT,
                 arg2: 1, arg3: ts_ptr, arg4: 0, arg5: 0xFFFF_FFFF,
             };
-            if dispatch_linux(nr::FUTEX, &a).value != 0 {
-                serial_println!("[syscall/linux]   FAIL: FUTEX_WAIT_BITSET|REALTIME not 0");
+            if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EAGAIN) {
+                serial_println!("[syscall/linux]   FAIL: FUTEX_WAIT_BITSET|REALTIME not EAGAIN");
                 return Err(KernelError::InternalError);
             }
             // Unknown op (op=14 is past the highest defined FUTEX command,
@@ -74198,13 +74266,15 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 serial_println!("[syscall/linux]   FAIL: FUTEX_WAKE regression not 0");
                 return Err(KernelError::InternalError);
             }
-            // Regression: FUTEX_WAIT value mismatch -> Ok(false) -> 0.
+            // Regression: FUTEX_WAIT value mismatch -> Ok(false) -> Linux
+            // -EAGAIN (the word is 0 here, expected 1; glibc requires the
+            // EAGAIN-on-mismatch contract — a positive return aborts it).
             let a = SyscallArgs {
                 arg0: futex_ptr, arg1: FUTEX_WAIT_OP,
                 arg2: 1, arg3: 0, arg4: 0, arg5: 0,
             };
-            if dispatch_linux(nr::FUTEX, &a).value != 0 {
-                serial_println!("[syscall/linux]   FAIL: FUTEX_WAIT regression not 0");
+            if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EAGAIN) {
+                serial_println!("[syscall/linux]   FAIL: FUTEX_WAIT regression not EAGAIN");
                 return Err(KernelError::InternalError);
             }
 
@@ -74406,15 +74476,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
             // (b) op = 0xFFFF_FFFF_0000_0009 (sign-extended-looking high
             //     half + FUTEX_WAIT_BITSET=9) with mask=0xFFFFFFFF,
-            //     val=1, futex_ptr value=0 (mismatch) -> 0.
-            //     Pre-batch: ENOSYS.
+            //     val=1, futex_ptr value=0 (mismatch) -> -EAGAIN (Linux
+            //     value-mismatch contract; the low-32 op truncation still
+            //     resolves to WAIT_BITSET).  Pre-batch: ENOSYS.
             let a = SyscallArgs {
                 arg0: futex_ptr, arg1: 0xFFFF_FFFF_0000_0009,
                 arg2: 1, arg3: 0, arg4: 0, arg5: 0xFFFF_FFFF,
             };
-            if dispatch_linux(nr::FUTEX, &a).value != 0 {
+            if dispatch_linux(nr::FUTEX, &a).value != -i64::from(errno::EAGAIN) {
                 serial_println!(
-                    "[syscall/linux]   FAIL: FUTEX(sxhigh|WAIT_BITSET) not 0"
+                    "[syscall/linux]   FAIL: FUTEX(sxhigh|WAIT_BITSET) not EAGAIN"
                 );
                 return Err(KernelError::InternalError);
             }
@@ -81481,33 +81552,33 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         // futex2 wait value mismatch (expected=1, buffer=0), no timeout
-        // -> 0 (Ok(false) pre-EAGAIN translation; documented as a
-        // known limitation shared with classic FUTEX_WAIT).
+        // -> Linux -EAGAIN (the native Ok(false) is mapped by
+        // linux_from_futex_wait, exactly as for classic FUTEX_WAIT).
         let a = SyscallArgs {
             arg0: u32_ptr, arg1: 1, arg2: 1, arg3: F2_SIZE_U32, arg4: 0, arg5: 0,
         };
-        if dispatch_linux(nr::FUTEX_WAIT, &a).value != 0 {
-            serial_println!("[syscall/linux]   FAIL: futex2 wait mismatch not 0");
+        if dispatch_linux(nr::FUTEX_WAIT, &a).value != -i64::from(errno::EAGAIN) {
+            serial_println!("[syscall/linux]   FAIL: futex2 wait mismatch not EAGAIN");
             return Err(KernelError::InternalError);
         }
         // futex2 wait value mismatch with past absolute MONOTONIC
-        // deadline (ts=(0,0)) -> 0 (value-mismatch short-circuit
+        // deadline (ts=(0,0)) -> -EAGAIN (value-mismatch short-circuit
         // beats the timeout branch in handlers::sys_futex_wait_timeout).
         let a = SyscallArgs {
             arg0: u32_ptr, arg1: 1, arg2: 1, arg3: F2_SIZE_U32, arg4: ts_ptr, arg5: 0,
         };
-        if dispatch_linux(nr::FUTEX_WAIT, &a).value != 0 {
-            serial_println!("[syscall/linux]   FAIL: futex2 wait past abs MONO not 0");
+        if dispatch_linux(nr::FUTEX_WAIT, &a).value != -i64::from(errno::EAGAIN) {
+            serial_println!("[syscall/linux]   FAIL: futex2 wait past abs MONO not EAGAIN");
             return Err(KernelError::InternalError);
         }
         // futex2 wait value mismatch with past absolute REALTIME
-        // deadline -> 0.
+        // deadline -> -EAGAIN.
         let a = SyscallArgs {
             arg0: u32_ptr, arg1: 1, arg2: 1,
             arg3: F2_SIZE_U32 | F2_PRIVATE, arg4: ts_ptr, arg5: 1,
         };
-        if dispatch_linux(nr::FUTEX_WAIT, &a).value != 0 {
-            serial_println!("[syscall/linux]   FAIL: futex2 wait past abs REAL not 0");
+        if dispatch_linux(nr::FUTEX_WAIT, &a).value != -i64::from(errno::EAGAIN) {
+            serial_println!("[syscall/linux]   FAIL: futex2 wait past abs REAL not EAGAIN");
             return Err(KernelError::InternalError);
         }
         // futex2 wait discriminator A: bogus timespec {tv_sec=-1, 0}

@@ -323,8 +323,7 @@ extern "C" fn syscall_handler_inner(frame: *mut SyscallFrame) -> i64 {
     // mutate the saved register frame (clone snapshots the parent
     // frame for the child trampoline; execve rewrites user_rip/rsp).
     // Returns `None` for any other syscall number and we fall through.
-    let task = crate::sched::current_task_id();
-    let abi_mode = crate::proc::thread::owner_process(task)
+    let abi_mode = crate::proc::thread::owner_process(crate::sched::current_task_id())
         .and_then(crate::proc::pcb::get_abi_mode)
         .unwrap_or(crate::proc::pcb::AbiMode::Native);
 

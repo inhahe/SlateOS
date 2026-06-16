@@ -1401,6 +1401,20 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z, part 4: run a REAL glibc binary (/bin/pthread) that creates 4
+    // worker threads via pthread_create, hammers a shared mutex 40000 times,
+    // and pthread_joins them — exercising clone(CLONE_VM|CLONE_THREAD|SETTLS),
+    // per-thread TLS, the futex wait/wake path, and join's child-tid futex.
+    // fd 1 is captured and the exact deterministic output + exit code (13) are
+    // asserted.  This is the multithreading integration coverage thread_clone.rs
+    // cannot self-test.  No-ops when rootfs.ext4 is absent.
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_pthread() {
+        serial_println!(
+            "WARNING: Path-Z real glibc pthread self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

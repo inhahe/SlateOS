@@ -287,6 +287,86 @@ EOF
 gcc -O2 -o "$STAGE/bin/signal" "$CSRC5" -Wl,-rpath,"$LIBC_DIR" -Wl,--enable-new-dtags
 rm -f "$CSRC5"
 
+# --- the "fault" test binary: synchronous CPU fault -> Linux SIGSEGV -----------
+# The "signal" binary above exercises *asynchronous* signal delivery (raise ->
+# tgkill -> rt_sigframe).  This one exercises the *synchronous* path: a real
+# CPU page fault (#PF) on an unmapped address must be turned into a Linux
+# SIGSEGV delivered to an unmodified glibc SA_SIGINFO handler, with a faithful
+# `siginfo_t`:
+#   - si_signo = SIGSEGV (11);
+#   - si_code  = SEGV_MAPERR (1)  [address not mapped, present bit clear];
+#   - si_addr  = the exact faulting address (= CR2 = 0xDEAD000).
+# 0xDEAD000 is a low, guaranteed-unmapped address: the PIE base is ~0x5555...,
+# ld.so/libc map ~0x7000..., and the stack is ~0x7fff..., so the kernel's
+# demand-fault / stack-growth resolver will never satisfy it -> unrecoverable
+# user fault -> SIGSEGV.  Because returning from the handler would re-execute
+# the faulting store and fault again, the handler uses sigsetjmp/siglongjmp to
+# recover to a safe point instead of relying on rt_sigreturn resuming past the
+# instruction.  This validates, end to end:
+#   - the page-fault ISR building a Linux rt_sigframe from the *interrupt*
+#     register context (not a syscall frame);
+#   - fault-specific si_code classification (present bit -> MAPERR vs ACCERR);
+#   - si_addr carrying CR2;
+#   - the handler reading a byte-exact siginfo_t and longjmp'ing out cleanly.
+# Output is deterministic.  Returns 19 on success (2 = sigaction failed,
+# 3 = handler never ran, 4 = wrong signo, 5 = wrong si_code, 6 = wrong si_addr).
+CSRC6="$STAGE/fault.c"
+cat > "$CSRC6" <<'EOF'
+/* SlateOS Path-Z real-glibc synchronous-fault (#PF -> SIGSEGV) test. */
+#include <stdio.h>
+#include <signal.h>
+#include <string.h>
+#include <unistd.h>
+#include <setjmp.h>
+
+/* SEGV_MAPERR is glibc-internal in some header configurations; pin the ABI value. */
+#ifndef SEGV_MAPERR
+#define SEGV_MAPERR 1
+#endif
+
+#define FAULT_ADDR 0xDEAD000UL
+
+static volatile sig_atomic_t got = 0;
+static volatile int got_signo = -1;
+static volatile int got_code = -1;
+static volatile unsigned long got_addr = 0;
+static sigjmp_buf recover;
+
+static void handler(int signo, siginfo_t *info, void *ucv) {
+    got_signo = signo;
+    got_code = info ? info->si_code : -99;
+    got_addr = info ? (unsigned long)info->si_addr : 0;
+    got = 1;
+    (void)ucv;
+    siglongjmp(recover, 1);    /* can't resume past the faulting store */
+}
+
+int main(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = handler;
+    sa.sa_flags = SA_SIGINFO;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGSEGV, &sa, NULL) != 0) return 2;
+
+    if (sigsetjmp(recover, 1) == 0) {
+        volatile unsigned char *p = (volatile unsigned char *)FAULT_ADDR;
+        *p = 0x42;             /* triggers #PF on an unmapped page */
+    }
+
+    if (!got) return 3;            /* handler never ran -> delivery broken */
+    if (got_signo != SIGSEGV) return 4;
+    if (got_code != SEGV_MAPERR) return 5;     /* fault-specific si_code   */
+    if (got_addr != FAULT_ADDR) return 6;      /* faithful si_addr (= CR2) */
+
+    printf("SLATE_GLIBC_FAULT_OK signo=%d code=%d addr=0x%lx\n",
+           got_signo, got_code, got_addr);
+    return 19;
+}
+EOF
+gcc -O2 -o "$STAGE/bin/fault" "$CSRC6" -Wl,-rpath,"$LIBC_DIR" -Wl,--enable-new-dtags
+rm -f "$CSRC6"
+
 echo "[rootfs] staged tree:"
 ( cd "$STAGE" && find lib64 lib bin -type f -printf '  %-44p %10s bytes\n' )
 

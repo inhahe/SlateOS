@@ -4543,6 +4543,201 @@ pub fn self_test_linux_real_glibc_signal() -> KernelResult<()> {
     }
 }
 
+/// Path Z: prove the REAL-glibc **synchronous-fault** signal path end-to-end.
+///
+/// The [`self_test_linux_real_glibc_signal`] test covers an *asynchronous*
+/// signal (`raise` → `tgkill`, delivered at syscall return).  This one covers
+/// the harder *synchronous* path: a hardware CPU fault delivered as a Linux
+/// signal straight from the page-fault ISR.  It runs `/bin/fault`, which:
+///   - installs a `SA_SIGINFO` handler for `SIGSEGV` via `sigaction(2)`;
+///   - `sigsetjmp`s a recovery point, then writes to an unmapped address
+///     (`0xDEAD000`), taking a not-present `#PF`;
+///   - in the handler, reads `info->si_signo` / `si_code` / `si_addr`, then
+///     `siglongjmp`s back to the recovery point;
+///   - after recovery, prints the captured values and `exit`s.
+///
+/// This proves the kernel:
+///   - detects a ring-3 `AbiMode::Linux` fault, finds the installed `SIGSEGV`
+///     handler, and builds a byte-exact `rt_sigframe` from the *ISR* register
+///     context (not a syscall frame) via
+///     [`crate::syscall::linux::emit_linux_rt_frame`];
+///   - fills a faithful fault `siginfo`: `si_addr` = the faulting address
+///     (CR2 = `0xDEAD000`), `si_code` = `SEGV_MAPERR` (not-present);
+///   - enters the handler and lets `siglongjmp` unwind so the process
+///     survives the fault.
+///
+/// Output is deterministic, so we assert the exact bytes plus `exit(19)`
+/// (2 = sigaction failed, 3 = handler never ran, 4 = wrong signo,
+/// 5 = wrong si_code, 6 = wrong si_addr).  No-op (returns `Ok`) when
+/// `/mnt/bin/fault` is absent.
+pub fn self_test_linux_real_glibc_fault() -> KernelResult<()> {
+    use crate::fs::handle;
+    use crate::proc::linux_fd::{FdEntry, O_WRONLY};
+
+    const EXPECT_EXIT: i32 = 19;
+    // SIGSEGV = 11, SEGV_MAPERR = 1, faulting address = 0xDEAD000.
+    const EXPECT_OUT: &[u8] = b"SLATE_GLIBC_FAULT_OK signo=11 code=1 addr=0xdead000\n";
+
+    const SRC_LD: &str = "/mnt/lib64/ld-linux-x86-64.so.2";
+    const SRC_LIBC: &str = "/mnt/lib/x86_64-linux-gnu/libc.so.6";
+    const SRC_FAULT: &str = "/mnt/bin/fault";
+    const DST_LD: &str = "/lib64/ld-linux-x86-64.so.2";
+    const DST_LIBC: &str = "/lib/x86_64-linux-gnu/libc.so.6";
+    const DST_FAULT: &str = "/bin/fault";
+    const CAPTURE: &str = "/glibc-fault-capture.tmp";
+    // Single-threaded, synchronous fault + siglongjmp — completes promptly.
+    const MAX_YIELDS: usize = 65_536;
+
+    if !crate::fs::Vfs::exists(SRC_FAULT) {
+        return Ok(());
+    }
+
+    serial_println!("[spawn] Running REAL glibc fault-signal (SIGSEGV handler, ring 3, Path Z) test...");
+
+    let _ = crate::fs::Vfs::mkdir_all("/lib64");
+    let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
+    let _ = crate::fs::Vfs::mkdir_all("/bin");
+    for (src, dst) in [(SRC_LD, DST_LD), (SRC_LIBC, DST_LIBC), (SRC_FAULT, DST_FAULT)] {
+        match crate::fs::Vfs::read_file(src) {
+            Ok(bytes) => {
+                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
+                    serial_println!(
+                        "[spawn]   real glibc fault: SKIP (staging {} -> {} failed: {:?})",
+                        src, dst, e
+                    );
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                serial_println!(
+                    "[spawn]   real glibc fault: SKIP (reading {} failed: {:?})",
+                    src, e
+                );
+                return Ok(());
+            }
+        }
+    }
+
+    let exe_elf = match crate::fs::Vfs::read_file(DST_FAULT) {
+        Ok(b) => b,
+        Err(e) => {
+            serial_println!("[spawn]   real glibc fault: SKIP (re-read {} failed: {:?})", DST_FAULT, e);
+            return Ok(());
+        }
+    };
+
+    let _ = crate::fs::Vfs::remove(CAPTURE);
+    let capture_handle = match handle::open(
+        CAPTURE,
+        handle::OpenFlags::READ
+            .union(handle::OpenFlags::WRITE)
+            .union(handle::OpenFlags::CREATE),
+    ) {
+        Ok(h) => h,
+        Err(e) => {
+            serial_println!("[spawn]   real glibc fault: SKIP (capture-file open failed: {:?})", e);
+            return Ok(());
+        }
+    };
+
+    let argv: &[&[u8]] = &[b"/bin/fault"];
+    let envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C"];
+    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-glibc-fault",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: Some(DST_FAULT.as_bytes()),
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = handle::close(capture_handle);
+            let _ = crate::fs::Vfs::remove(CAPTURE);
+            serial_println!("[spawn]   FAIL: real glibc fault spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Redirect fd 1 → capture before the child runs.
+    let _ = pcb::linux_fd_take(result.pid, 1);
+    if let Err(e) = pcb::linux_fd_install_at(result.pid, 1, FdEntry::file(capture_handle, O_WRONLY)) {
+        let _ = handle::close(capture_handle);
+        thread::on_thread_exit(result.task_id);
+        pcb::destroy(result.pid);
+        let _ = crate::fs::Vfs::remove(CAPTURE);
+        serial_println!("[spawn]   FAIL: real glibc fault — redirecting fd 1 failed: {:?}", e);
+        return Err(KernelError::InternalError);
+    }
+
+    let mut reaped = false;
+    for _ in 0..MAX_YIELDS {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            reaped = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    let captured = crate::fs::Vfs::read_file(CAPTURE);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(CAPTURE);
+
+    if !reaped || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: real glibc fault — process did not exit within {} yields \
+             (state={:?}); the SIGSEGV handler likely faulted (bad rt_sigframe built from \
+             the ISR context) or siglongjmp could not unwind",
+            MAX_YIELDS, state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECT_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: real glibc fault — exit code={:?}, expected {} (2=sigaction \
+             failed, 3=handler never ran, 4=wrong signo, 5=wrong si_code, 6=wrong si_addr)",
+            exit_code, EXPECT_EXIT
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    match captured {
+        Ok(bytes) if bytes.as_slice() == EXPECT_OUT => {
+            serial_println!(
+                "[spawn]   REAL glibc fault (ring 3: #PF → SIGSEGV handler entered via Linux \
+                 rt_sigframe built from the page-fault ISR, si_addr/si_code read, siglongjmp \
+                 recovery, captured {} bytes == expected): OK",
+                bytes.len()
+            );
+            Ok(())
+        }
+        Ok(bytes) => {
+            serial_println!(
+                "[spawn]   FAIL: real glibc fault — captured {} bytes {:?}, expected {:?}",
+                bytes.len(), bytes.as_slice(), EXPECT_OUT
+            );
+            Err(KernelError::InternalError)
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: real glibc fault — reading capture file back failed: {:?}",
+                e
+            );
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

@@ -933,12 +933,32 @@ record/deliver/coalesce` unit self-test (13 tests pass) and the `/bin/signal` ri
 test, which now asserts `si_code == SI_TKILL (-6)` and `si_pid == getpid()` for `raise()`
 (`SLATE_GLIBC_SIGNAL_OK signo=10 code=-6 self=1`).
 
-**Remaining (tracked as future work, not this debt):** (1) `SI_QUEUE` `si_value`/`si_ptr`
+**Synchronous fault `si_code`/`si_addr` — RESOLVED 2026-06-16 (follow-on to TD29).**
+CPU faults on an `AbiMode::Linux` process with an installed handler are now delivered as
+real Linux signals with a faithful, fault-specific `siginfo`. A shared emitter
+`emit_linux_rt_frame(pid, sig, act, regs: &LinuxTrapRegs, siginfo) -> Option<RtFrameEntry>`
+(`kernel/src/syscall/linux.rs`) builds the `rt_sigframe` from a neutral register snapshot, so
+it is reused by both the async syscall-return path (`build_linux_rt_frame`, snapshot from the
+`SyscallFrame`) and the synchronous fault path (`try_deliver_linux_fault_signal`,
+`kernel/src/idt.rs`, snapshot read out of the `InterruptStackFrame` + `SavedRegisters` via
+`read_volatile`). `linux_fault_mapping` classifies the trap vector → `(signo, si_code)`:
+`#DE`→`SIGFPE`/`FPE_INTDIV`, `#OF`→`SIGFPE`/`FPE_INTOVF`, `#UD`→`SIGILL`/`ILL_ILLOPN`,
+`#MF`/`#XM`→`SIGFPE`/`FPE_FLTINV`, `#AC`→`SIGBUS`/`BUS_ADRALN`,
+`#BR`/`#NP`/`#SS`/`#GP`→`SIGSEGV`/`SI_KERNEL`; `#PF` is handled in `handle_page_fault`, which
+sets `si_addr = CR2` and `si_code = SEGV_ACCERR` (protection, present bit set) or
+`SEGV_MAPERR` (not mapped). For non-`#PF` faults `si_addr =` faulting RIP. The emitter does
+**not** re-arm on a frame-build failure — the fault caller terminates instead, since resuming
+would immediately re-fault. Native processes keep the SEH-style `SignalContext` trampoline
+(design-decision #4). Verified by the `/bin/fault` ring-3 glibc self-test
+(`self_test_linux_real_glibc_fault`, `kernel/src/proc/spawn.rs`): a real `#PF` store to an
+unmapped `0xDEAD000` enters an unmodified glibc `SA_SIGINFO` `SIGSEGV` handler that reads
+`si_signo==11`/`si_code==SEGV_MAPERR(1)`/`si_addr==0xdead000` and `siglongjmp`s out, printing
+`SLATE_GLIBC_FAULT_OK signo=11 code=1 addr=0xdead000` (boot test PASSED).
+
+**Remaining (tracked as future work, not this debt):** `SI_QUEUE` `si_value`/`si_ptr`
 payload from `rt_sigqueueinfo(2)`/`sigqueue(3)` — the `value` field and `SI_QUEUE` constant
-exist (`#[allow(dead_code)]`) but no post path stamps them yet. (2) Synchronous fault signals
-(SIGSEGV/SIGBUS/SIGFPE/SIGILL) carrying a fault-specific `si_code` and `si_addr` — caught
-faults do not yet populate `si_addr`. Both are additive on top of the now-correct
-sender-class plumbing.
+exist (`#[allow(dead_code)]`) but no post path stamps them yet. Additive on top of the
+now-correct sender-class plumbing.
 
 ### TD28. Linux `munmap` is 16 KiB-frame-granular (delegates to native handler), not 4 KiB-page-granular — DEBT 2026-06-15
 

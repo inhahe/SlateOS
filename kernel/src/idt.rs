@@ -1202,10 +1202,176 @@ fn dispatch_or_kill_userspace(
     //
     // SAFETY: ISR context, single CPU, interrupts disabled, exclusive
     // access to the kernel stack.
+    // For an AbiMode::Linux process with a handler installed for the
+    // corresponding signal, a synchronous fault is delivered as a real Linux
+    // signal (byte-exact rt_sigframe with a faithful fault siginfo) instead of
+    // the native SEH trampoline.  #PF (AccessViolation) is handled separately
+    // by handle_page_fault (it alone knows the present bit for the precise
+    // SEGV_MAPERR/SEGV_ACCERR code), so it is skipped here.
+    if let Some((sig, si_code)) = linux_fault_mapping(code) {
+        // For non-#PF faults the architectural fault address is the trapping
+        // instruction pointer (cr2 only applies to page faults).
+        let addr = frame.rip;
+        if try_deliver_linux_fault_signal(frame, sig, si_code, addr) {
+            return;
+        }
+    }
+
     let frame_ptr = (frame as *const InterruptStackFrame).cast_mut();
     unsafe {
         dispatch_or_kill_userspace_raw(exception_name, frame_ptr, code, aux);
     }
+}
+
+/// Map a kernel [`ExceptionCode`](crate::proc::exception::ExceptionCode) to the
+/// Linux `(signal, si_code)` pair used when delivering a synchronous fault to
+/// an `AbiMode::Linux` process.
+///
+/// Returns `None` for `AccessViolation` (#PF) — delivered directly by
+/// [`handle_page_fault`] with the precise `SEGV_MAPERR`/`SEGV_ACCERR` code,
+/// which alone knows the page-fault present bit — and for any code with no
+/// meaningful Linux signal mapping.
+fn linux_fault_mapping(
+    code: crate::proc::exception::ExceptionCode,
+) -> Option<(u32, i32)> {
+    use crate::proc::exception::ExceptionCode as E;
+    use crate::proc::linux_sigframe::si_fault_code as F;
+    use crate::proc::signal::si_code::SI_KERNEL;
+    // x86_64 Linux signal numbers.
+    const SIGILL: u32 = 4;
+    const SIGFPE: u32 = 8;
+    const SIGBUS: u32 = 7;
+    const SIGSEGV: u32 = 11;
+    Some(match code {
+        E::DivideError => (SIGFPE, F::FPE_INTDIV),
+        E::Overflow => (SIGFPE, F::FPE_INTOVF),
+        E::InvalidOpcode => (SIGILL, F::ILL_ILLOPN),
+        E::FloatingPointError | E::SimdFloatingPoint => (SIGFPE, F::FPE_FLTINV),
+        E::AlignmentCheck => (SIGBUS, F::BUS_ADRALN),
+        // #BR/#NP/#SS/#GP all surface as SIGSEGV with a kernel-origin si_code.
+        E::BoundRangeExceeded
+        | E::SegmentNotPresent
+        | E::StackSegmentFault
+        | E::GeneralProtectionFault => (SIGSEGV, SI_KERNEL),
+        // #PF handled separately with the precise present-bit si_code.
+        E::AccessViolation => return None,
+    })
+}
+
+/// Attempt to deliver a synchronous CPU fault to a ring-3 `AbiMode::Linux`
+/// process as a real Linux signal.
+///
+/// If the faulting process is Linux-ABI and has a handler installed for `sig`
+/// (not `SIG_DFL`/`SIG_IGN`), this builds a byte-exact Linux `rt_sigframe`
+/// carrying a faithful fault `siginfo` (`si_addr` = `addr`, `si_code` =
+/// `si_code`) on the user stack and rewrites the interrupt frame + saved
+/// registers so `IRETQ` enters the handler.  The trapped register state is
+/// preserved in the frame's `uc_mcontext` so `rt_sigreturn` can resume the
+/// faulting instruction (or the handler may `siglongjmp` away).
+///
+/// Returns `true` if delivered (the ISR should return and let `IRETQ` run the
+/// handler).  Returns `false` if the process is native (keeps the SEH
+/// trampoline, design-decision #4), has no handler for `sig`, or the user
+/// stack is unusable — in which case the caller proceeds to native SEH
+/// dispatch / terminate (the kernel default for an undelivered fault).
+fn try_deliver_linux_fault_signal(
+    frame: &InterruptStackFrame,
+    sig: u32,
+    si_code: i32,
+    addr: u64,
+) -> bool {
+    use crate::proc::thread;
+    use crate::syscall::linux::{self, LinuxDisposition, LinuxTrapRegs};
+    use core::ptr::{read_volatile, write_volatile};
+
+    let task_id = sched::current_task_id();
+    let pid = match thread::owner_process(task_id) {
+        Some(pid) if pid != 0 => pid,
+        _ => return false,
+    };
+
+    // Only Linux-ABI processes use rt_sigframe delivery; native processes keep
+    // the SEH-style trampoline (design-decision #4).
+    if crate::proc::pcb::get_abi_mode(pid) != Some(crate::proc::pcb::AbiMode::Linux)
+    {
+        return false;
+    }
+
+    // Resolve the disposition; only a real handler diverts the fault. SIG_DFL /
+    // SIG_IGN fall through to the kernel default (terminate for a fault).
+    let act = match linux::linux_disposition(pid, sig) {
+        LinuxDisposition::Handler(act) => act,
+        LinuxDisposition::Ignore | LinuxDisposition::Default => return false,
+    };
+
+    // Recover raw pointers to the interrupt frame + saved GPRs without forming
+    // an aliasing `&mut` (see `try_dispatch_user_exception` docs).
+    let frame_ptr = (frame as *const InterruptStackFrame).cast_mut();
+    // SAFETY: ISR context; frame_ptr is a valid InterruptStackFrame on the
+    // kernel stack; the saved GPRs sit 128 bytes below it (ISR stub layout).
+    let saved_ptr = unsafe { saved_registers_from_frame(frame_ptr) };
+
+    // SAFETY: both pointers are valid and exclusively ours (interrupts disabled
+    // on this CPU); volatile reads pick up the trapped register state.
+    let regs = unsafe {
+        LinuxTrapRegs {
+            rax: read_volatile(addr_of!((*saved_ptr).rax)),
+            rbx: read_volatile(addr_of!((*saved_ptr).rbx)),
+            rcx: read_volatile(addr_of!((*saved_ptr).rcx)),
+            rdx: read_volatile(addr_of!((*saved_ptr).rdx)),
+            rsi: read_volatile(addr_of!((*saved_ptr).rsi)),
+            rdi: read_volatile(addr_of!((*saved_ptr).rdi)),
+            rbp: read_volatile(addr_of!((*saved_ptr).rbp)),
+            r8: read_volatile(addr_of!((*saved_ptr).r8)),
+            r9: read_volatile(addr_of!((*saved_ptr).r9)),
+            r10: read_volatile(addr_of!((*saved_ptr).r10)),
+            r11: read_volatile(addr_of!((*saved_ptr).r11)),
+            r12: read_volatile(addr_of!((*saved_ptr).r12)),
+            r13: read_volatile(addr_of!((*saved_ptr).r13)),
+            r14: read_volatile(addr_of!((*saved_ptr).r14)),
+            r15: read_volatile(addr_of!((*saved_ptr).r15)),
+            rip: read_volatile(addr_of!((*frame_ptr).rip)),
+            rsp: read_volatile(addr_of!((*frame_ptr).rsp)),
+            rflags: read_volatile(addr_of!((*frame_ptr).rflags)),
+        }
+    };
+
+    let siginfo = crate::proc::linux_sigframe::LinuxSiginfo::fault(
+        #[allow(clippy::cast_possible_wrap)]
+        {
+            sig as i32
+        },
+        si_code,
+        addr,
+    );
+
+    let entry = match linux::emit_linux_rt_frame(pid, sig, &act, &regs, siginfo) {
+        Some(e) => e,
+        None => return false, // user stack unusable — caller terminates.
+    };
+
+    // Redirect IRETQ into the handler.  Volatile writes guarantee the stores
+    // reach the kernel stack the assembly stub restores from.
+    // SAFETY: frame_ptr / saved_ptr are valid and exclusive (ISR context).
+    unsafe {
+        write_volatile(addr_of_mut!((*frame_ptr).rip), entry.rip);
+        write_volatile(addr_of_mut!((*frame_ptr).rsp), entry.rsp);
+        write_volatile(addr_of_mut!((*frame_ptr).rflags), entry.rflags);
+        write_volatile(addr_of_mut!((*saved_ptr).rdi), entry.rdi);
+        write_volatile(addr_of_mut!((*saved_ptr).rsi), entry.rsi);
+        write_volatile(addr_of_mut!((*saved_ptr).rdx), entry.rdx);
+        // Match the syscall delivery path: r10/r8/r9 cleared at handler entry.
+        write_volatile(addr_of_mut!((*saved_ptr).r10), 0);
+        write_volatile(addr_of_mut!((*saved_ptr).r8), 0);
+        write_volatile(addr_of_mut!((*saved_ptr).r9), 0);
+    }
+
+    serial_println!(
+        "[exception] Delivered Linux signal {} (si_code={}, addr={:#x}) to process {} handler {:#x}",
+        sig, si_code, addr, pid, entry.rip
+    );
+
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -1677,7 +1843,8 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
             return; // Stack grew successfully — retry the instruction.
         }
 
-        // Unresolvable user fault — try SEH handler, then kill.
+        // Unresolvable user fault — try a Linux fault signal, then SEH, then
+        // kill.
         mm::fault::record_fatal();
         log_exception(14, frame.rip, cr2);
         let present = if error & 1 != 0 { "present" } else { "not-present" };
@@ -1686,6 +1853,19 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
             "[exception] User page fault (task {}) at {:#x}, addr={:#x} ({}, {}) — trying SEH",
             sched::current_task_id(), frame.rip, cr2, present, write
         );
+
+        // For an AbiMode::Linux process with a SIGSEGV handler, deliver a real
+        // Linux signal carrying si_addr = CR2 and the precise si_code: a
+        // protection violation (present bit set) maps to SEGV_ACCERR, a
+        // not-present access to SEGV_MAPERR.
+        {
+            use crate::proc::linux_sigframe::si_fault_code::{SEGV_ACCERR, SEGV_MAPERR};
+            const SIGSEGV: u32 = 11;
+            let si_code = if error & 1 != 0 { SEGV_ACCERR } else { SEGV_MAPERR };
+            if try_deliver_linux_fault_signal(frame, SIGSEGV, si_code, cr2) {
+                return; // Linux signal delivered — IRETQ into the handler.
+            }
+        }
 
         // Try SEH dispatch with AccessViolation code and CR2 as aux data.
         use crate::proc::exception::ExceptionCode;

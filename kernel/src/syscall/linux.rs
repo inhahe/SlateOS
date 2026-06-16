@@ -1647,6 +1647,180 @@ pub fn linux_disposition(pid: pcb::ProcessId, sig: u32) -> LinuxDisposition {
     }
 }
 
+/// Neutral register snapshot used to populate a Linux `uc_mcontext` when
+/// building an `rt_sigframe`.  Decouples the frame builder from the specific
+/// trap context the registers were captured in — a syscall-entry
+/// [`SyscallFrame`](crate::syscall::entry::SyscallFrame) (asynchronous signal
+/// delivered at syscall return) or a hardware-exception ISR frame
+/// (synchronous fault) — so both paths share one emitter.
+#[derive(Debug, Clone, Copy)]
+pub struct LinuxTrapRegs {
+    pub rax: u64,
+    pub rbx: u64,
+    pub rcx: u64,
+    pub rdx: u64,
+    pub rsi: u64,
+    pub rdi: u64,
+    pub rbp: u64,
+    pub r8: u64,
+    pub r9: u64,
+    pub r10: u64,
+    pub r11: u64,
+    pub r12: u64,
+    pub r13: u64,
+    pub r14: u64,
+    pub r15: u64,
+    pub rip: u64,
+    pub rsp: u64,
+    pub rflags: u64,
+}
+
+/// Register values a caller must install into its trap/syscall frame to enter
+/// a signal handler, returned by [`emit_linux_rt_frame`].
+#[derive(Debug, Clone, Copy)]
+pub struct RtFrameEntry {
+    /// Handler entry point → `rip`.
+    pub rip: u64,
+    /// Frame base (`pretcode` = `sa_restorer`) → `rsp`.
+    pub rsp: u64,
+    /// `rdi` = signal number.
+    pub rdi: u64,
+    /// `rsi` = &siginfo.
+    pub rsi: u64,
+    /// `rdx` = &ucontext.
+    pub rdx: u64,
+    /// `rflags` to enter the handler with (IF set, DF/TF clear).
+    pub rflags: u64,
+}
+
+/// Lay out and write a byte-exact Linux `struct rt_sigframe` onto the user
+/// stack from a neutral register snapshot, returning the register values the
+/// caller must install to enter the handler.
+///
+/// This is the shared core behind both [`build_linux_rt_frame`] (asynchronous
+/// signals delivered at syscall return) and the synchronous fault-delivery
+/// path in the exception ISRs (`crate::idt`).  It performs **no re-arming**
+/// on failure: a `None` return means the frame could not be written (user
+/// stack would underflow or is not writable), and the caller decides the
+/// fallback — re-arm + retry for an asynchronous signal, or force-default
+/// (terminate) for a synchronous fault, which cannot be retried because
+/// resuming would just re-execute the faulting instruction.
+#[must_use]
+pub fn emit_linux_rt_frame(
+    pid: pcb::ProcessId,
+    sig: u32,
+    act: &LinuxSigaction,
+    regs: &LinuxTrapRegs,
+    siginfo: crate::proc::linux_sigframe::LinuxSiginfo,
+) -> Option<RtFrameEntry> {
+    use crate::proc::linux_sigframe::{
+        self, FrameLayout, LinuxSigcontext, LinuxStackT, LinuxUcontext,
+        RT_SIGFRAME_SIZE,
+    };
+    use crate::proc::signal;
+
+    // Where does the frame land on the user stack?  Underflow ⇒ fail.
+    let layout: FrameLayout = linux_sigframe::compute_layout(regs.rsp)?;
+
+    // Validate the whole frame region [frame_addr, frame_addr + size) is
+    // writable user memory before touching it.
+    if crate::mm::user::validate_user_write(layout.frame_addr, RT_SIGFRAME_SIZE)
+        .is_err()
+    {
+        return None;
+    }
+
+    // ---- compute the new blocked mask (effective during the handler) ----
+    // old = mask in effect before delivery (restored on rt_sigreturn).
+    let old_blocked = signal::blocked(pid);
+    let sig_bit = 1u64 << (u64::from(sig).saturating_sub(1) & 63);
+    let mut new_blocked = old_blocked | act.sa_mask;
+    // Unless SA_NODEFER, the delivered signal is blocked during its own
+    // handler so it can't recursively re-enter.
+    if (act.sa_flags & sa_flags::SA_NODEFER) == 0 {
+        new_blocked |= sig_bit;
+    }
+
+    // ---- build the saved machine context (uc_mcontext) ----
+    // fpstate stays 0 (NULL) via Default: no FP context is saved, so
+    // rt_sigreturn skips the FP restore.
+    let sc = LinuxSigcontext {
+        rdi: regs.rdi,
+        rsi: regs.rsi,
+        rdx: regs.rdx,
+        r10: regs.r10,
+        r8: regs.r8,
+        r9: regs.r9,
+        rbx: regs.rbx,
+        rbp: regs.rbp,
+        r12: regs.r12,
+        r13: regs.r13,
+        r14: regs.r14,
+        r15: regs.r15,
+        rip: regs.rip,
+        rsp: regs.rsp,
+        rax: regs.rax,
+        rcx: regs.rcx,
+        r11: regs.r11,
+        eflags: regs.rflags,
+        cs: crate::gdt::USER_CS,
+        ss: crate::gdt::USER_DS,
+        // oldmask is the deprecated low-32 signal mask; glibc reads
+        // uc_sigmask instead, but fill it for completeness.
+        oldmask: old_blocked,
+        ..LinuxSigcontext::default()
+    };
+
+    let uc = LinuxUcontext {
+        uc_flags: 0,
+        uc_link: 0,
+        uc_stack: LinuxStackT {
+            ss_sp: 0,
+            // SS_DISABLE (2): no alternate signal stack installed.
+            ss_flags: 2,
+            _pad: 0,
+            ss_size: 0,
+        },
+        uc_mcontext: sc,
+        // Restored by rt_sigreturn: the mask that was in effect before
+        // the handler ran.
+        uc_sigmask: old_blocked,
+    };
+
+    // ---- write the frame to user memory ----
+    // SAFETY: the region [frame_addr, frame_addr + RT_SIGFRAME_SIZE) was
+    // validated as writable user memory above; uc_addr/info_addr lie
+    // within it (see compute_layout), and CR3 points at this process's
+    // address space.  write_unaligned avoids any alignment assumption.
+    unsafe {
+        core::ptr::write_unaligned(layout.frame_addr as *mut u64, act.sa_restorer);
+        core::ptr::write_unaligned(layout.uc_addr as *mut LinuxUcontext, uc);
+        core::ptr::write_unaligned(
+            layout.info_addr as *mut linux_sigframe::LinuxSiginfo,
+            siginfo,
+        );
+    }
+
+    // ---- apply the new blocked mask ----
+    let _ = signal::set_blocked(pid, new_blocked);
+
+    // ---- SA_RESETHAND: one-shot handler resets to SIG_DFL ----
+    if (act.sa_flags & sa_flags::SA_RESETHAND) != 0 {
+        linux_sigaction_set(pid, sig, LinuxSigaction::default());
+    }
+
+    Some(RtFrameEntry {
+        rip: act.sa_handler,
+        rsp: layout.frame_addr,
+        rdi: u64::from(sig),
+        rsi: layout.info_addr,
+        rdx: layout.uc_addr,
+        // Enter the handler with a clean RFLAGS: IF set, DF/TF cleared (a
+        // handler must run with DF=0 per the SysV ABI).
+        rflags: SIGRETURN_RFLAGS_FORCED,
+    })
+}
+
 /// Build a byte-exact Linux `struct rt_sigframe` on the user stack and
 /// rewrite the syscall frame so the SYSRET path enters the handler.
 ///
@@ -1677,103 +1851,39 @@ pub fn build_linux_rt_frame(
     act: &LinuxSigaction,
     info: crate::proc::signal::SigInfo,
 ) -> bool {
-    use crate::proc::linux_sigframe::{
-        self, FrameLayout, LinuxSigcontext, LinuxStackT, LinuxUcontext,
-        RT_SIGFRAME_SIZE,
-    };
     use crate::proc::signal;
 
-    // Where does the frame land on the user stack?  Underflow ⇒ re-arm.
-    // Re-arm preserves the original `info` so a later successful delivery
-    // still reports the faithful sender/si_code.
-    let layout: FrameLayout = match linux_sigframe::compute_layout(frame.user_rsp) {
-        Some(l) => l,
-        None => {
-            let _ = signal::set_pending_info(pid, sig, info);
-            return false;
-        }
-    };
-
-    // Validate the whole frame region [frame_addr, frame_addr + size) is
-    // writable user memory before touching it.  On failure re-arm and
-    // skip — exactly like the native path (a future sigaltstack would
-    // give a fallback stack here).
-    if crate::mm::user::validate_user_write(layout.frame_addr, RT_SIGFRAME_SIZE)
-        .is_err()
-    {
-        let _ = signal::set_pending_info(pid, sig, info);
-        return false;
-    }
-
-    // ---- compute the new blocked mask (effective during the handler) ----
-    // old = mask in effect before delivery (restored on rt_sigreturn).
-    let old_blocked = signal::blocked(pid);
-    let sig_bit = 1u64 << (u64::from(sig).saturating_sub(1) & 63);
-    let mut new_blocked = old_blocked | act.sa_mask;
-    // Unless SA_NODEFER, the delivered signal is blocked during its own
-    // handler so it can't recursively re-enter.
-    if (act.sa_flags & sa_flags::SA_NODEFER) == 0 {
-        new_blocked |= sig_bit;
-    }
-
-    // ---- build the saved machine context (uc_mcontext) ----
-    // fpstate stays 0 (NULL) via Default: no FP context is saved, so
-    // rt_sigreturn skips the FP restore.
+    // Snapshot the interrupted syscall context.  rcx/r11 are clobbered by the
+    // `syscall` instruction; their architectural values are the return RIP and
+    // saved RFLAGS, so reproduce that.  RAX resumes with the syscall's pending
+    // return value.
     #[allow(clippy::cast_sign_loss)]
-    let sc = LinuxSigcontext {
-        rdi: frame.arg0,
-        rsi: frame.arg1,
+    let regs = LinuxTrapRegs {
+        rax: ret_val as u64,
+        rbx: frame.rbx,
+        rcx: frame.user_rip,
         rdx: frame.arg2,
-        r10: frame.arg3,
+        rsi: frame.arg1,
+        rdi: frame.arg0,
+        rbp: frame.rbp,
         r8: frame.arg4,
         r9: frame.arg5,
-        rbx: frame.rbx,
-        rbp: frame.rbp,
+        r10: frame.arg3,
+        r11: frame.user_rflags,
         r12: frame.r12,
         r13: frame.r13,
         r14: frame.r14,
         r15: frame.r15,
         rip: frame.user_rip,
         rsp: frame.user_rsp,
-        // The interrupted syscall's return value resumes in RAX.
-        rax: ret_val as u64,
-        // rcx/r11 are clobbered by the `syscall` instruction in the
-        // interrupted context; their architectural values there are the
-        // return RIP and saved RFLAGS, so reproduce that.
-        rcx: frame.user_rip,
-        r11: frame.user_rflags,
-        eflags: frame.user_rflags,
-        cs: crate::gdt::USER_CS,
-        ss: crate::gdt::USER_DS,
-        // oldmask is the deprecated low-32 signal mask; glibc reads
-        // uc_sigmask instead, but fill it for completeness.
-        oldmask: old_blocked,
-        ..LinuxSigcontext::default()
+        rflags: frame.user_rflags,
     };
 
-    let uc = LinuxUcontext {
-        uc_flags: 0,
-        uc_link: 0,
-        uc_stack: LinuxStackT {
-            ss_sp: 0,
-            // SS_DISABLE (2): no alternate signal stack installed.
-            ss_flags: 2,
-            _pad: 0,
-            ss_size: 0,
-        },
-        uc_mcontext: sc,
-        // Restored by rt_sigreturn: the mask that was in effect before
-        // the handler ran.
-        uc_sigmask: old_blocked,
-    };
-
-    // ---- build siginfo ----
-    // Fill a process-directed siginfo from the recorded source metadata:
-    // si_code (SI_USER for kill / SI_TKILL for tgkill/raise / SI_KERNEL for
-    // a timer) and the sender pid/uid captured at post time. The SI_QUEUE
-    // si_value payload is not yet threaded (rt_sigqueueinfo still posts a
-    // bare signal — see known-issues.md TD29), so `info.value` is unused here.
-    let siginfo = linux_sigframe::LinuxSiginfo::kill(
+    // Async (process-directed) signal: fill siginfo from the recorded source
+    // metadata (si_code + sender pid/uid captured at post time). The SI_QUEUE
+    // si_value payload is not yet threaded (see known-issues.md), so
+    // `info.value` is unused here.
+    let siginfo = crate::proc::linux_sigframe::LinuxSiginfo::kill(
         #[allow(clippy::cast_possible_wrap)]
         {
             sig as i32
@@ -1786,42 +1896,27 @@ pub fn build_linux_rt_frame(
         info.sender_uid,
     );
 
-    // ---- write the frame to user memory ----
-    // SAFETY: the region [frame_addr, frame_addr + RT_SIGFRAME_SIZE) was
-    // validated as writable user memory above; uc_addr/info_addr lie
-    // within it (see compute_layout), and CR3 points at this process's
-    // address space.  write_unaligned avoids any alignment assumption.
-    unsafe {
-        core::ptr::write_unaligned(layout.frame_addr as *mut u64, act.sa_restorer);
-        core::ptr::write_unaligned(layout.uc_addr as *mut LinuxUcontext, uc);
-        core::ptr::write_unaligned(
-            layout.info_addr as *mut linux_sigframe::LinuxSiginfo,
-            siginfo,
-        );
+    match emit_linux_rt_frame(pid, sig, act, &regs, siginfo) {
+        Some(entry) => {
+            frame.user_rip = entry.rip;
+            frame.user_rsp = entry.rsp;
+            frame.arg0 = entry.rdi; // rdi = signo
+            frame.arg1 = entry.rsi; // rsi = &siginfo
+            frame.arg2 = entry.rdx; // rdx = &ucontext
+            frame.arg3 = 0; // r10
+            frame.arg4 = 0; // r8
+            frame.arg5 = 0; // r9
+            frame.user_rflags = entry.rflags;
+            true
+        }
+        None => {
+            // User stack unusable — re-arm (preserving the faithful `info`)
+            // so a later return-to-user retries delivery, exactly like the
+            // native path (a future sigaltstack would give a fallback stack).
+            let _ = signal::set_pending_info(pid, sig, info);
+            false
+        }
     }
-
-    // ---- apply the new blocked mask ----
-    let _ = signal::set_blocked(pid, new_blocked);
-
-    // ---- SA_RESETHAND: one-shot handler resets to SIG_DFL ----
-    if (act.sa_flags & sa_flags::SA_RESETHAND) != 0 {
-        linux_sigaction_set(pid, sig, LinuxSigaction::default());
-    }
-
-    // ---- rewrite the syscall frame to enter the handler ----
-    frame.user_rip = act.sa_handler;
-    frame.user_rsp = layout.frame_addr;
-    frame.arg0 = u64::from(sig); // rdi = signo
-    frame.arg1 = layout.info_addr; // rsi = &siginfo
-    frame.arg2 = layout.uc_addr; // rdx = &ucontext
-    frame.arg3 = 0; // r10
-    frame.arg4 = 0; // r8
-    frame.arg5 = 0; // r9
-    // Enter the handler with a clean RFLAGS: IF set, DF/TF cleared (a
-    // handler must run with DF=0 per the SysV ABI).
-    frame.user_rflags = SIGRETURN_RFLAGS_FORCED;
-
-    true
 }
 
 /// Linux `fork()` / `vfork()` translation.

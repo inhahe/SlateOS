@@ -192,6 +192,26 @@ impl LinuxSiginfo {
     }
 }
 
+/// Fault-specific `si_code` values for synchronous CPU exceptions delivered
+/// as Linux signals (filled into `siginfo._sigfault.si_code`).  These mirror
+/// the constants in Linux's `<asm-generic/siginfo.h>`.
+pub mod si_fault_code {
+    /// `SEGV_MAPERR` — address not mapped to an object (#PF, not-present).
+    pub const SEGV_MAPERR: i32 = 1;
+    /// `SEGV_ACCERR` — invalid permissions for mapped object (#PF, protection).
+    pub const SEGV_ACCERR: i32 = 2;
+    /// `FPE_INTDIV` — integer divide by zero (#DE).
+    pub const FPE_INTDIV: i32 = 1;
+    /// `FPE_INTOVF` — integer overflow (#OF / divide overflow).
+    pub const FPE_INTOVF: i32 = 2;
+    /// `FPE_FLTINV` — invalid floating-point operation (#MF / #XM).
+    pub const FPE_FLTINV: i32 = 7;
+    /// `ILL_ILLOPN` — illegal operand (#UD).
+    pub const ILL_ILLOPN: i32 = 2;
+    /// `BUS_ADRALN` — invalid address alignment (#AC).
+    pub const BUS_ADRALN: i32 = 1;
+}
+
 /// Size of `struct rt_sigframe` *excluding* any trailing fpstate, i.e. the
 /// `pretcode` word + `ucontext` + `siginfo`.
 pub const RT_SIGFRAME_SIZE: usize = 8

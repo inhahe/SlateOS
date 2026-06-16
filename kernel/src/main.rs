@@ -1430,6 +1430,19 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z: synchronous-fault signal delivery. Proves an AbiMode::Linux
+    // process that installs a SIGSEGV handler, dereferences a bad pointer
+    // (#PF), reads a faithful siginfo (si_addr = bad address, si_code =
+    // SEGV_MAPERR) and recovers via siglongjmp — the kernel delivers a
+    // byte-exact rt_sigframe straight from the page-fault ISR. No-op when
+    // rootfs.ext4 is absent.
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_fault() {
+        serial_println!(
+            "WARNING: Path-Z real glibc fault-signal self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

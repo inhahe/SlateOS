@@ -90,24 +90,36 @@
 //! | 231      | exit_group        | direct (treated like exit)         |
 //! | 318      | getrandom         | from kernel CSPRNG                 |
 //!
-//! Anything else returns `-ENOSYS`.  Expanding the table is purely
-//! additive — see `kernel/src/syscall/linux.rs` change history for the
-//! pattern.
+//! The table above is a **non-exhaustive sample** of the core/early
+//! syscalls — it is not maintained as a full inventory.  The translator
+//! now implements the large majority of the x86_64 Linux syscall table
+//! (process lifecycle, the full socket family, pipe/epoll/eventfd/
+//! signalfd/timerfd, file-backed mmap, the io_uring/IOCP paths, etc.);
+//! genuinely-unimplemented numbers still return `-ENOSYS`.  Expanding
+//! coverage is purely additive — see the `kernel/src/syscall/linux.rs`
+//! change history (Path Z parts / batches) for the established pattern.
+//!
+//! # Frame-modifying syscalls
+//!
+//! `execve` / `execveat` / `fork` / `vfork` / `clone` / `clone3` /
+//! `rt_sigreturn` modify the syscall frame (RIP/RSP), so they are
+//! dispatched by [`dispatch_linux_with_frame`] (the `Some(..)` arm near
+//! the top of this file) rather than the flat [`dispatch_linux`]
+//! value-returning path — they are fully implemented, not deferred.
 //!
 //! # What's deferred
 //!
-//! - **socket family**, **pipe/pipe2**, **poll/epoll**, **eventfd**:
-//!   require additional kernel-side machinery beyond the fd table.
-//! - **execve / fork / vfork / clone / sigreturn**: these modify the
-//!   syscall frame (RIP/RSP).  They have to live in `entry.rs`
-//!   alongside the existing native-ABI frame-modifying paths; the
-//!   `dispatch_linux` flat dispatch returns -ENOSYS for them today.
-//! - **mmap/mprotect with PROT_EXEC + MAP_PRIVATE backed by a file**:
-//!   no fd table yet, so file-backed maps cannot be translated.
-//! - **rt_sigaction**: native sigaction takes a struct, ours takes
-//!   (signum, handler).  Only the handler pointer is forwarded; sa_mask
-//!   and sa_flags are silently ignored (matching the existing native
-//!   signal shim limitations documented in `todo.txt`).
+//! - **Demand-paged shared-writeback file mmap** (`MAP_SHARED` writes
+//!   propagated back to the backing file): a deliberate won't-fix
+//!   (design-decisions §22).  Private/eager file maps and DRM dumb-buffer
+//!   maps are supported; only the shared write-back path is out of scope.
+//! - Ongoing per-syscall behavioural fidelity tuning across the
+//!   implemented set (errno-shape edge cases, register-truncation
+//!   nuances) — tracked incrementally rather than as a single gap.
+//!
+//! `rt_sigaction` now takes the real `struct sigaction` (sa_handler/
+//! sa_mask/sa_flags/sa_restorer all parsed; see the `sa_flags` module
+//! below), so the old "handler pointer only" limitation no longer applies.
 //!
 //! # Errno mapping
 //!

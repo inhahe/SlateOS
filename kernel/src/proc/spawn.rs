@@ -3917,6 +3917,242 @@ pub fn self_test_linux_real_glibc_stdio() -> KernelResult<()> {
     }
 }
 
+/// Path Z, part 3: prove the REAL-glibc **argv + environment + stdin + heap**
+/// paths end-to-end.
+///
+/// The first two real-glibc tests cover dynamic startup (`exit(42)`) and the
+/// stdio *output* path (`printf` → `write(2)`).  This one drives `/bin/full`,
+/// a prebuilt dynamic binary whose `main`:
+///   1. sums `argv[]` string lengths — proves the kernel built the stack argv
+///      vector glibc reads;
+///   2. `getenv("SLATE_TAG")` — proves envp delivery + glibc's `environ` scan;
+///   3. one `fgets()` from stdin — proves the glibc *input* path (`fstat(0)`
+///      buffering choice + `read(2)` on a regular file);
+///   4. 64 rounds of mixed small (brk-arena) and large (>128 KiB, mmap-backed)
+///      `malloc`/`free`, touching every page — stresses brk growth and the
+///      mmap heap path under genuine glibc allocator behaviour.
+///
+/// We redirect the child's fd 0 from the console to a pre-populated input file
+/// and fd 1 to a capture file *before it first runs* (spawning is cooperative).
+/// The output line is deterministic from the fixed argv / env / stdin we supply,
+/// so we assert the exact bytes; the binary returns 11 so the exit-code channel
+/// independently confirms a clean run (a heap crash/OOM returns 2/3 instead).
+///
+/// No-op (returns `Ok`) when the ext4 rootfs is absent (`/mnt/bin/full`
+/// missing) — the image is git-ignored, so most environments lack it.
+pub fn self_test_linux_real_glibc_full() -> KernelResult<()> {
+    use crate::fs::handle;
+    use crate::proc::linux_fd::{FdEntry, O_RDONLY, O_WRONLY};
+
+    const EXPECT_EXIT: i32 = 11;
+    // Deterministic from argv ["/bin/full","alpha","beta"] (argsum 9+5+4=18,
+    // argc 3), env SLATE_TAG=zeta, and stdin "hello-stdin\n".
+    const EXPECT_OUT: &[u8] = b"SLATE_GLIBC_FULL_OK tag=zeta argc=3 argsum=18 in=hello-stdin\n";
+    const STDIN_BYTES: &[u8] = b"hello-stdin\n";
+
+    const SRC_LD: &str = "/mnt/lib64/ld-linux-x86-64.so.2";
+    const SRC_LIBC: &str = "/mnt/lib/x86_64-linux-gnu/libc.so.6";
+    const SRC_FULL: &str = "/mnt/bin/full";
+    const DST_LD: &str = "/lib64/ld-linux-x86-64.so.2";
+    const DST_LIBC: &str = "/lib/x86_64-linux-gnu/libc.so.6";
+    const DST_FULL: &str = "/bin/full";
+    const INPUT: &str = "/glibc-full-input.tmp";
+    const CAPTURE: &str = "/glibc-full-capture.tmp";
+    const MAX_YIELDS: usize = 4096;
+
+    if !crate::fs::Vfs::exists(SRC_FULL) {
+        return Ok(());
+    }
+
+    serial_println!("[spawn] Running REAL glibc argv/env/stdin/heap (ring 3, Path Z) test...");
+
+    // Stage the glibc tree + the binary (idempotent across the other Path-Z tests).
+    let _ = crate::fs::Vfs::mkdir_all("/lib64");
+    let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
+    let _ = crate::fs::Vfs::mkdir_all("/bin");
+    for (src, dst) in [(SRC_LD, DST_LD), (SRC_LIBC, DST_LIBC), (SRC_FULL, DST_FULL)] {
+        match crate::fs::Vfs::read_file(src) {
+            Ok(bytes) => {
+                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
+                    serial_println!(
+                        "[spawn]   real glibc full: SKIP (staging {} -> {} failed: {:?})",
+                        src, dst, e
+                    );
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                serial_println!(
+                    "[spawn]   real glibc full: SKIP (reading {} failed: {:?})",
+                    src, e
+                );
+                return Ok(());
+            }
+        }
+    }
+
+    let exe_elf = match crate::fs::Vfs::read_file(DST_FULL) {
+        Ok(b) => b,
+        Err(e) => {
+            serial_println!("[spawn]   real glibc full: SKIP (re-read {} failed: {:?})", DST_FULL, e);
+            return Ok(());
+        }
+    };
+
+    // Pre-populate the stdin input file, then open a READ-only handle on it that
+    // we will plant at the child's fd 0.  Reading the file by path here and
+    // through the handle later both resolve to the same inode.
+    let _ = crate::fs::Vfs::remove(INPUT);
+    if let Err(e) = crate::fs::Vfs::write_file(INPUT, STDIN_BYTES) {
+        serial_println!("[spawn]   real glibc full: SKIP (writing stdin input failed: {:?})", e);
+        return Ok(());
+    }
+    let stdin_handle = match handle::open(INPUT, handle::OpenFlags::READ) {
+        Ok(h) => h,
+        Err(e) => {
+            let _ = crate::fs::Vfs::remove(INPUT);
+            serial_println!("[spawn]   real glibc full: SKIP (stdin-file open failed: {:?})", e);
+            return Ok(());
+        }
+    };
+
+    // Fresh capture file for fd 1.
+    let _ = crate::fs::Vfs::remove(CAPTURE);
+    let capture_handle = match handle::open(
+        CAPTURE,
+        handle::OpenFlags::READ
+            .union(handle::OpenFlags::WRITE)
+            .union(handle::OpenFlags::CREATE),
+    ) {
+        Ok(h) => h,
+        Err(e) => {
+            let _ = handle::close(stdin_handle);
+            let _ = crate::fs::Vfs::remove(INPUT);
+            serial_println!("[spawn]   real glibc full: SKIP (capture-file open failed: {:?})", e);
+            return Ok(());
+        }
+    };
+
+    let argv: &[&[u8]] = &[b"/bin/full", b"alpha", b"beta"];
+    let envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C", b"SLATE_TAG=zeta"];
+    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-glibc-full",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: Some(DST_FULL.as_bytes()),
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            // We still own both handles — close them so nothing leaks.
+            let _ = handle::close(stdin_handle);
+            let _ = handle::close(capture_handle);
+            let _ = crate::fs::Vfs::remove(INPUT);
+            let _ = crate::fs::Vfs::remove(CAPTURE);
+            serial_println!("[spawn]   FAIL: real glibc full spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Redirect fd 0 (stdin) → input file before the child runs.  After a
+    // successful install_at the handle is owned by the child's fd table.
+    let _ = pcb::linux_fd_take(result.pid, 0);
+    if let Err(e) = pcb::linux_fd_install_at(result.pid, 0, FdEntry::file(stdin_handle, O_RDONLY)) {
+        // fd 0 ownership never transferred: we still own stdin_handle AND
+        // capture_handle (fd 1 not yet touched).  Close both, tear down child.
+        let _ = handle::close(stdin_handle);
+        let _ = handle::close(capture_handle);
+        thread::on_thread_exit(result.task_id);
+        pcb::destroy(result.pid);
+        let _ = crate::fs::Vfs::remove(INPUT);
+        let _ = crate::fs::Vfs::remove(CAPTURE);
+        serial_println!("[spawn]   FAIL: real glibc full — redirecting fd 0 failed: {:?}", e);
+        return Err(KernelError::InternalError);
+    }
+
+    // Redirect fd 1 (stdout) → capture file.
+    let _ = pcb::linux_fd_take(result.pid, 1);
+    if let Err(e) = pcb::linux_fd_install_at(result.pid, 1, FdEntry::file(capture_handle, O_WRONLY)) {
+        // fd 1 ownership never transferred: we still own capture_handle.  The
+        // child now owns stdin_handle (fd 0) — destroying it releases that.
+        let _ = handle::close(capture_handle);
+        thread::on_thread_exit(result.task_id);
+        pcb::destroy(result.pid);
+        let _ = crate::fs::Vfs::remove(INPUT);
+        let _ = crate::fs::Vfs::remove(CAPTURE);
+        serial_println!("[spawn]   FAIL: real glibc full — redirecting fd 1 failed: {:?}", e);
+        return Err(KernelError::InternalError);
+    }
+
+    let mut reaped = false;
+    for _ in 0..MAX_YIELDS {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            reaped = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    // Read the captured output before teardown releases the child's fd 1.
+    let captured = crate::fs::Vfs::read_file(CAPTURE);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid); // closes child fds 0 & 1 → releases both handles
+    let _ = crate::fs::Vfs::remove(INPUT);
+    let _ = crate::fs::Vfs::remove(CAPTURE);
+
+    if !reaped || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: real glibc full — child did not exit within {} yields (state={:?})",
+            MAX_YIELDS, state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECT_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: real glibc full — exit code={:?}, expected {} (2=malloc null, \
+             3=heap loop skipped, other=glibc error path)",
+            exit_code, EXPECT_EXIT
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    match captured {
+        Ok(bytes) if bytes.as_slice() == EXPECT_OUT => {
+            serial_println!(
+                "[spawn]   REAL glibc argv/env/stdin/heap (ring 3: argv vector + getenv + \
+                 fgets(stdin) + 64-round brk/mmap malloc-free, captured {} bytes == expected): OK",
+                bytes.len()
+            );
+            Ok(())
+        }
+        Ok(bytes) => {
+            serial_println!(
+                "[spawn]   FAIL: real glibc full — captured {} bytes {:?}, expected {:?}",
+                bytes.len(), bytes.as_slice(), EXPECT_OUT
+            );
+            Err(KernelError::InternalError)
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: real glibc full — reading capture file back failed: {:?}",
+                e
+            );
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

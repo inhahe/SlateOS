@@ -1388,6 +1388,19 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z, part 3: run a REAL glibc binary (/bin/full) that exercises argv,
+    // getenv, a stdin fgets(), and 64 rounds of mixed brk/mmap malloc-free.
+    // fd 0 is redirected from a pre-populated input file and fd 1 to a capture
+    // file; we assert the exact deterministic output line and exit code (11).
+    // Proves the real-glibc argv/env/input/heap paths.  No-ops when
+    // rootfs.ext4 is absent.  Must run after the glibc tree is staged.
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_full() {
+        serial_println!(
+            "WARNING: Path-Z real glibc argv/env/stdin/heap self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

@@ -103,6 +103,62 @@ EOF
 gcc -O2 -o "$STAGE/bin/stdio" "$CSRC2" -Wl,-rpath,"$LIBC_DIR" -Wl,--enable-new-dtags
 rm -f "$CSRC2"
 
+# --- the "full" test binary: argv + getenv + stdin + heavy malloc/free --------
+# This binary exercises every glibc input/runtime path the first two do not:
+#   - argv delivery   : sums the lengths of all argv[] strings (proves the
+#                       kernel built the stack's argv vector glibc reads).
+#   - environment     : getenv("SLATE_TAG") proves envp delivery + glibc's
+#                       environ scan.
+#   - stdin           : one fgets() from stdin proves the glibc *input* path
+#                       (fstat(0) buffering choice + read(2) on a regular file).
+#   - heap stress     : 64 rounds mixing small (brk arena) and large (>128 KiB,
+#                       mmap-backed) allocations, touching every page, then
+#                       freeing — stresses brk growth and the mmap heap path
+#                       under genuine glibc allocator behaviour.  A crash, OOM,
+#                       or corruption returns a non-11 exit, failing the test.
+# Output is fully deterministic from the fixed argv/env/stdin the SlateOS
+# self-test supplies, so the test asserts the exact bytes.  Returns 11.
+CSRC3="$STAGE/full.c"
+cat > "$CSRC3" <<'EOF'
+/* SlateOS Path-Z real-glibc argv/env/stdin/heap test. */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int main(int argc, char **argv) {
+    long argsum = 0;
+    for (int i = 0; i < argc; i++) argsum += (long)strlen(argv[i]);
+
+    const char *tag = getenv("SLATE_TAG");
+    if (!tag) tag = "none";
+
+    char line[128];
+    if (!fgets(line, sizeof line, stdin)) line[0] = '\0';
+    size_t L = strlen(line);
+    if (L && line[L - 1] == '\n') line[--L] = '\0';
+
+    unsigned long acc = 0;
+    for (int round = 0; round < 64; round++) {
+        size_t n = (round % 8 == 0) ? (256u * 1024u)
+                                    : (size_t)(1024 + round * 48);
+        unsigned char *p = malloc(n);
+        if (!p) return 2;
+        for (size_t j = 0; j < n; j += 256) {
+            p[j] = (unsigned char)(j + round);
+            acc += p[j];
+        }
+        free(p);
+    }
+    if (acc == 0) return 3;
+
+    printf("SLATE_GLIBC_FULL_OK tag=%s argc=%d argsum=%ld in=%s\n",
+           tag, argc, argsum, line);
+    return 11;
+}
+EOF
+gcc -O2 -o "$STAGE/bin/full" "$CSRC3" -Wl,-rpath,"$LIBC_DIR" -Wl,--enable-new-dtags
+rm -f "$CSRC3"
+
 echo "[rootfs] staged tree:"
 ( cd "$STAGE" && find lib64 lib bin -type f -printf '  %-44p %10s bytes\n' )
 

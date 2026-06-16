@@ -121,12 +121,18 @@ struct ForkChildImage {
 /// trampoline forces to 0.  RCX and R11 are intentionally omitted: the
 /// `SYSCALL`/`SYSRET` ABI clobbers them, so userspace never relies on
 /// their values after a syscall returns.
-fn build_reg_image(frame: &SyscallFrame) -> [u64; REG_IMAGE_LEN] {
+///
+/// `rsp_override` is `None` for a plain `fork()` (the child keeps the
+/// parent's stack pointer in its CoW copy of the stack) and `Some(sp)`
+/// for the vfork-style `clone(CLONE_VM | CLONE_VFORK, child_stack, …)`
+/// path, where the `clone(2)` contract requires the child to resume on
+/// the caller-provided stack (see [`fork_process_vfork`]).
+fn build_reg_image(frame: &SyscallFrame, rsp_override: Option<u64>) -> [u64; REG_IMAGE_LEN] {
     [
-        frame.user_rip,                  // 0: RIP
-        u64::from(crate::gdt::USER_CS),  // 1: CS
-        frame.user_rflags,               // 2: RFLAGS
-        frame.user_rsp,                  // 3: RSP
+        frame.user_rip,                       // 0: RIP
+        u64::from(crate::gdt::USER_CS),       // 1: CS
+        frame.user_rflags,                    // 2: RFLAGS
+        rsp_override.unwrap_or(frame.user_rsp), // 3: RSP
         u64::from(crate::gdt::USER_DS),  // 4: SS
         frame.arg0,                      // 5: RDI
         frame.arg1,                      // 6: RSI
@@ -586,6 +592,60 @@ pub fn fork_process_clone(
     frame: &SyscallFrame,
     clone_tid: ForkCloneTid,
 ) -> KernelResult<ProcessId> {
+    fork_process_clone_inner(parent_pid, frame, clone_tid, None)
+}
+
+/// Fork `parent_pid` for the vfork-style `clone(CLONE_VM | CLONE_VFORK,
+/// child_stack, …)` path used by glibc's `posix_spawn(3)` (and the
+/// glibc `vfork()` wrapper).
+///
+/// On real Linux this clone shares the parent's address space and
+/// suspends the parent until the child execve's or `_exit`s.  Our
+/// processes are address-space-isolated, so we degenerate to a normal
+/// copy-on-write fork — exactly like the plain `CLONE_VFORK` case — with
+/// one addition mandated by the `clone(2)` ABI: a non-NULL `child_stack`
+/// means the child must resume on that stack rather than inheriting the
+/// parent's stack pointer.  glibc's clone wrapper relies on this to land
+/// the child on the trampoline (`__spawni_child`) stack it allocated.
+///
+/// Because the child gets a *private* CoW copy of that stack:
+///   * a successful `execve` in the child behaves exactly as
+///     `posix_spawn` intends (the child never writes back to the
+///     parent), and
+///   * an `execve` *failure* loses the errno the child would have
+///     written to the (on Linux, shared) stack for the parent to read —
+///     the parent instead observes the child's `127` exit status via
+///     `wait()`.  This is a documented degradation (tracked in
+///     `todo.txt`), not a correctness bug: every `posix_spawn` caller
+///     already treats a `127` child exit as "exec failed".
+///
+/// `CLONE_VFORK`'s parent-suspend guarantee is, as for plain `vfork()`,
+/// a performance hint we satisfy implicitly: the child owns its copy of
+/// the stack glibc will free, so the parent need not block.
+///
+/// # Errors
+///
+/// Same as [`fork_process_clone`].
+pub fn fork_process_vfork(
+    parent_pid: ProcessId,
+    frame: &SyscallFrame,
+    clone_tid: ForkCloneTid,
+    child_stack: u64,
+) -> KernelResult<ProcessId> {
+    fork_process_clone_inner(parent_pid, frame, clone_tid, Some(child_stack))
+}
+
+/// Shared core of [`fork_process_clone`] and [`fork_process_vfork`].
+///
+/// `rsp_override` is `None` for a plain fork (child keeps the parent's
+/// stack pointer) and `Some(sp)` for the vfork-style clone (child
+/// resumes on `sp`).
+fn fork_process_clone_inner(
+    parent_pid: ProcessId,
+    frame: &SyscallFrame,
+    clone_tid: ForkCloneTid,
+    rsp_override: Option<u64>,
+) -> KernelResult<ProcessId> {
     use crate::syscall::linux::clone_flags;
 
     let child_pid = build_fork_child(parent_pid)?;
@@ -600,7 +660,7 @@ pub fn fork_process_clone(
     };
 
     // Build the child's register image and hand it to the trampoline.
-    let regs = build_reg_image(frame);
+    let regs = build_reg_image(frame, rsp_override);
     let image_raw = Box::into_raw(Box::new(ForkChildImage { regs, settid_ptr })) as u64;
 
     // Inherit the parent thread's effective scheduling priority so the

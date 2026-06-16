@@ -49,6 +49,59 @@ Part 23 (`self_test_linux_real_glibc_shell_relpath`) runs `cd /reltest &&
 echo RELOK > relfile.txt` in ring 3 and asserts the file landed at
 `/reltest/relfile.txt` and **not** at `/relfile.txt`.
 
+### B-ACCESS1. Linux-ABI `access`/`faccessat`/`faccessat2` always returned ENOENT (no-file skeleton-FS stub) — FIXED 2026-06-16
+
+**Symptom:** Every `access`/`faccessat`/`faccessat2` call returned `-ENOENT`
+unconditionally, even for files that exist in the VFS. The headline casualty
+was unmodified GNU `make`: make issues `access("/bin/sh", X_OK)` **before**
+spawning a recipe and, on failure, prints `"/bin/sh: No such file or directory"`
++ `Error 127` and never spawns the recipe shell — so no Makefile recipe could
+run. (Confirmed via `strace` on real Linux: `access(shell, X_OK) = 0` precedes
+the `clone3`.) Same class of stale stub as B-STAT1, but for the accessibility
+probes rather than `stat`.
+
+**Root cause:** `sys_access` / `sys_faccessat` / `sys_faccessat2` validated the
+mode/flag bits and the path pointer, then hard-coded `linux_err(errno::ENOENT)`
+with a comment that "without a backing filesystem there is no path that exists."
+True when written; a silent lie once the VFS gained a backing store.
+
+**Fix (proper):** The three syscalls now share a new `access_path_common`
+back-end (kernel/src/syscall/linux.rs) that canonicalises the path against the
+caller's cwd (`pcb::get_cwd`) and looks it up via `Vfs::metadata` (follow) /
+`Vfs::lmetadata` (`AT_SYMLINK_NOFOLLOW`). Under the no-DAC capability model
+(design-decisions §31) `F_OK`/`R_OK`/`X_OK` succeed for any existing file/dir —
+consistent with `execve`, which ignores on-disk x-bits. Kernel context (no
+caller PID) preserves the ENOENT no-file contract the fidelity self-tests
+assert. Regression test: Path Z Part 34 (`self_test_linux_real_glibc_make`) runs
+real GNU make end-to-end, whose recipe dispatch depends on `access(shell, X_OK)`.
+
+**Known limitation (W_OK):** `W_OK` is granted for any existing file; it does
+not yet consult per-mount read-only state (not tracked at this layer). A
+read-only mount should return `EROFS` for `W_OK`. Low priority — no read-only
+mounts are exposed to ring-3 writers today.
+
+### B-SPAWN1. `posix_spawn`/`vfork` child loses the exec-failure errno under CoW-fork degradation — KNOWN LIMITATION (acceptable)
+
+**Symptom:** When a glibc `posix_spawn(3)` (or `vfork`) child fails its
+`execve` (e.g. the target is missing), the parent observes a child that exited
+with status 127 rather than receiving the precise `errno` glibc's posix_spawn
+normally reports.
+
+**Root cause:** glibc's posix_spawn does `clone3({CLONE_VM|CLONE_VFORK|
+CLONE_CLEAR_SIGHAND, ...})` expecting a **shared** address space: on exec
+failure the child writes `errno` to a stack location the parent then reads. Our
+processes are address-space isolated, so `linux_clone_inner`'s VFORK_SPAWN
+branch degenerates the shared-VM vfork to a copy-on-write fork. The child runs
+on its own copied stack, so a post-fork write to the (formerly shared) errno
+slot is invisible to the parent — only the child's exit status survives. The
+common success case is unaffected (the child execve's and never writes back).
+
+**Proper fix (deferred):** Genuine `CLONE_VM` shared-address-space semantics for
+the vfork window, or a kernel-mediated errno relay from the failing child's
+exec path back to the parent's clone return. Deferred until a workload depends
+on the precise errno; status-127 is the universally-understood "exec failed"
+signal and is what shells display anyway.
+
 ### B-STAT1. Path-based `stat`/`lstat`/`newfstatat`/`statx` always returned ENOENT (no-file skeleton-FS stub) — FIXED 2026-06-16
 
 **Symptom:** Every path-based stat syscall returned `-ENOENT` unconditionally,
@@ -360,6 +413,34 @@ Two kernel gaps caused the livelock, both fixed properly:
 
 **Verify:** boot test reaches `BOOT_OK`; the bgjob self-test logs "read
 back 16 bytes == expected, exit 0: OK".
+
+### B-HEAP1. Kernel heap redzone overflow detected during init file-install (`Vfs::write_file`) — OPEN 2026-06-16
+
+**Symptom:** During boot (init step 24, after all self-tests), the debug heap
+allocator's dealloc-time redzone scanner reports several
+`[heap] BUFFER OVERFLOW detected! slot=…, alloc=N, class=C, offset=N` lines,
+e.g. `alloc=10, class=16, offset=10` (right before `[init] Installed /bin/hello`)
+and two `alloc=18, class=32, offset=18`. `offset == alloc` means the first
+redzone byte immediately past an N-byte allocation was overwritten — a one-or-
+more-byte heap buffer overflow. Boot still reaches `BOOT_OK` and all self-tests
+pass, so it is currently non-fatal, but it is real memory corruption of the
+allocator's redzone region (could corrupt an adjacent live allocation in a
+release build with no redzone).
+
+**Where:** `kernel/src/mm/heap.rs` `check_redzone` (the detector, ~line 205);
+the *culprit* is an allocation in the init `/bin` install path
+(`kernel/src/main.rs` ~step 24, the `Vfs::write_file("/bin/hello", …)` /
+`/etc/services` writes) or the VFS/memfs path-string handling underneath it.
+The `alloc=10` size exactly matches the 10-byte path string `"/bin/hello"`,
+strongly suggesting a path-string allocation that gets a trailing byte (NUL?)
+written one past its length, or a `Vec`/slice copy with an off-by-one length.
+
+**Status:** Not introduced by the Part 34 access/clone work (it fires after the
+self-tests, in a code path those changes don't touch); prior boot logs from
+2026-06-07 show 0 occurrences, so it is a regression introduced somewhere in the
+2026-06-07…06-16 window. Next task: bisect the offending allocation (instrument
+`check_redzone` to dump the path/caller, or audit the memfs `write_file` /
+path-key allocation for an off-by-one) and fix the proper root cause.
 
 ### B-DP1. `validate_user_range` rejected committed-but-not-yet-faulted-in demand-paged user buffers (EFAULT on large fresh output buffers) — FIXED 2026-06-16
 

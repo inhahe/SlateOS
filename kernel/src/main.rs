@@ -1720,6 +1720,13 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z Part 34: run an unmodified prebuilt GNU make that parses a
+    // Makefile and dispatches a recipe via /bin/sh (which fork/execs the
+    // external /bin/emit) — the first rung of the GCC/Make toolchain.
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_make() {
+        serial_println!("WARNING: Path-Z real GNU make self-test failed: {:?}", e);
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

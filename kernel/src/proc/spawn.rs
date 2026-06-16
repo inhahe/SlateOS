@@ -9355,6 +9355,196 @@ pub fn self_test_linux_real_glibc_shell_append() -> KernelResult<()> {
     }
 }
 
+/// Path Z Part 34: run an **unmodified, prebuilt GNU `make`** that builds a
+/// trivial target whose recipe forks a real glibc child.
+///
+/// This is the first rung of the operator-decided "GCC/CMake/Make toolchain"
+/// initiative (design-decisions §9 / §12, Path Z).  Every prior Path-Z test
+/// ran a single program or a shell; this runs `make`, the build *driver* that
+/// orchestrates a real toolchain.  `make` is itself an unmodified glibc PIE
+/// (`DT_NEEDED libc.so.6` only — both it and its interpreter are already
+/// staged), so ld.so loads it, it reads + parses the Makefile, builds the
+/// dependency graph, and to run the recipe `@/bin/emit > /make-out.txt` it
+/// `fork`s and `exec`s `/bin/sh -c '…'` (the recipe contains the shell
+/// metacharacter `>`, so make does **not** take its direct-exec optimisation),
+/// `/bin/sh` (dash) in turn forks/execs the external `/bin/emit` with stdout
+/// redirected to the file, and make `wait4`s its child and propagates the
+/// status.  A correct run therefore exercises, end to end: make's glibc
+/// startup, Makefile `open`/`read`/`stat`, dependency evaluation, recipe
+/// dispatch via `/bin/sh`, the nested fork→exec→redirect→wait chain, and exit
+/// status propagation up through make.  No fd is injected — the test reads the
+/// file the recipe produced back from the VFS.
+///
+/// No-op (returns `Ok(())`) when the rootfs / `/bin/make` / `/bin/sh` /
+/// `/bin/emit` is absent (so a kernel built without the toolchain rootfs still
+/// boots clean).
+///
+/// # Errors
+///
+/// Returns [`KernelError::InternalError`] if make fails to reach `Zombie`,
+/// exits non-zero, or the recipe's output file does not match; propagates
+/// spawn failure.
+pub fn self_test_linux_real_glibc_make() -> KernelResult<()> {
+    const EXPECT_EXIT: i32 = 0;
+    // /bin/emit writes exactly this 16-byte payload (incl. trailing newline).
+    const EXPECT_OUT: &[u8] = b"SLATE_PIPE_BODY\n";
+
+    const SRC_LD: &str = "/mnt/lib64/ld-linux-x86-64.so.2";
+    const SRC_LIBC: &str = "/mnt/lib/x86_64-linux-gnu/libc.so.6";
+    const SRC_MAKE: &str = "/mnt/bin/make";
+    const SRC_SH: &str = "/mnt/bin/sh";
+    const SRC_EMIT: &str = "/mnt/bin/emit";
+    const DST_LD: &str = "/lib64/ld-linux-x86-64.so.2";
+    const DST_LIBC: &str = "/lib/x86_64-linux-gnu/libc.so.6";
+    const DST_MAKE: &str = "/bin/make";
+    const DST_SH: &str = "/bin/sh";
+    const DST_EMIT: &str = "/bin/emit";
+    const MAKEFILE_PATH: &str = "/Makefile";
+    const OUT_PATH: &str = "/make-out.txt";
+    // Recipe line MUST start with a TAB; `@` suppresses make's command echo.
+    const MAKEFILE: &[u8] = b"all:\n\t@/bin/emit > /make-out.txt\n";
+    // make + /bin/sh + /bin/emit is a three-process glibc chain; give the
+    // bounded poll loop extra headroom over the two-process shell tests.
+    const MAX_YIELDS: usize = 524_288;
+
+    if !crate::fs::Vfs::exists(SRC_MAKE) || !crate::fs::Vfs::exists(SRC_SH)
+        || !crate::fs::Vfs::exists(SRC_EMIT)
+    {
+        return Ok(());
+    }
+
+    serial_println!("[spawn] Running REAL GNU make (ring 3, Path Z) test...");
+
+    let _ = crate::fs::Vfs::mkdir_all("/lib64");
+    let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
+    let _ = crate::fs::Vfs::mkdir_all("/bin");
+    for (src, dst) in [
+        (SRC_LD, DST_LD),
+        (SRC_LIBC, DST_LIBC),
+        (SRC_MAKE, DST_MAKE),
+        (SRC_SH, DST_SH),
+        (SRC_EMIT, DST_EMIT),
+    ] {
+        match crate::fs::Vfs::read_file(src) {
+            Ok(bytes) => {
+                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
+                    serial_println!(
+                        "[spawn]   real make: SKIP (staging {} -> {} failed: {:?})",
+                        src, dst, e
+                    );
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                serial_println!("[spawn]   real make: SKIP (reading {} failed: {:?})", src, e);
+                return Ok(());
+            }
+        }
+    }
+
+    // Stage the Makefile and clear any stale recipe output.
+    if let Err(e) = crate::fs::Vfs::write_file(MAKEFILE_PATH, MAKEFILE) {
+        serial_println!("[spawn]   real make: SKIP (writing {} failed: {:?})", MAKEFILE_PATH, e);
+        return Ok(());
+    }
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+
+    let exe_elf = match crate::fs::Vfs::read_file(DST_MAKE) {
+        Ok(b) => b,
+        Err(e) => {
+            serial_println!("[spawn]   real make: SKIP (re-read {} failed: {:?})", DST_MAKE, e);
+            return Ok(());
+        }
+    };
+
+    // `-f /Makefile all`: explicit makefile + target avoids cwd makefile
+    // probing; SHELL=/bin/sh pins the recipe shell so make does not search.
+    let argv: &[&[u8]] = &[b"make", b"-f", b"/Makefile", b"all"];
+    let envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C", b"SHELL=/bin/sh"];
+    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-make",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: Some(DST_MAKE.as_bytes()),
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: real make spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let mut reaped = false;
+    for _ in 0..MAX_YIELDS {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            reaped = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    let out = crate::fs::Vfs::read_file(OUT_PATH);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+    let _ = crate::fs::Vfs::remove(MAKEFILE_PATH);
+
+    if !reaped || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: real make — make did not exit within {} yields (state={:?}); make \
+             startup (ld.so/libc), Makefile parse, or its fork/exec of /bin/sh likely hung",
+            MAX_YIELDS, state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECT_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: real make — exit code={:?}, expected {} (non-zero means make hit an \
+             error parsing the Makefile or its recipe child failed)",
+            exit_code, EXPECT_EXIT
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    match out {
+        Ok(bytes) if bytes.as_slice() == EXPECT_OUT => {
+            serial_println!(
+                "[spawn]   REAL GNU make (ring 3: ld.so loaded make+libc, make parsed the \
+                 Makefile and dispatched its recipe via /bin/sh, which fork/exec'd /bin/emit with \
+                 a `>` redirect; read back {} bytes == expected, exit {}): OK",
+                bytes.len(), EXPECT_EXIT
+            );
+            Ok(())
+        }
+        Ok(bytes) => {
+            serial_println!(
+                "[spawn]   FAIL: real make — {} holds {} bytes {:?}, expected {} bytes {:?}",
+                OUT_PATH, bytes.len(), bytes.as_slice(), EXPECT_OUT.len(), EXPECT_OUT
+            );
+            Err(KernelError::InternalError)
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: real make — reading the recipe output {} back failed: {:?} \
+                 (make's recipe child likely never ran or could not write the file)",
+                OUT_PATH, e
+            );
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

@@ -664,6 +664,25 @@ else
     echo "[rootfs] WARNING: $DASH_SRC not found — shell self-tests will no-op"
 fi
 
+# --- a REAL build tool: GNU make ----------------------------------------------
+# The first rung of the GCC/CMake/Make toolchain initiative (Path Z, design-
+# decisions §9/§12).  make is the build *driver* that orchestrates a toolchain:
+# it parses a Makefile, builds the dependency graph, and fork/execs each
+# recipe via /bin/sh.  It is an unmodified glibc PIE that links ONLY against
+# libc.so.6 + ld-linux (both already staged) — no extra libraries needed.  The
+# SlateOS self-test (self_test_linux_real_glibc_make) writes a trivial Makefile,
+# runs `make`, and asserts the recipe's output, proving make's startup, Makefile
+# parse, and recipe dispatch (make -> /bin/sh -> /bin/emit) all work end to end.
+MAKE_SRC="$(command -v make || true)"
+if [ -n "$MAKE_SRC" ] && [ -e "$MAKE_SRC" ]; then
+    cp -L "$MAKE_SRC" "$STAGE/bin/make"
+    echo "[rootfs] staged build tool: /bin/make ($MAKE_SRC)"
+    echo "[rootfs] make binary DT_NEEDED:"
+    readelf -d "$STAGE/bin/make" 2>/dev/null | grep -E 'NEEDED|RUNPATH' | sed 's/^/  /'
+else
+    echo "[rootfs] WARNING: make not found — the make self-test will no-op"
+fi
+
 echo "[rootfs] staged tree:"
 ( cd "$STAGE" && find lib64 lib bin -type f -printf '  %-44p %10s bytes\n' )
 

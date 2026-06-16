@@ -241,20 +241,46 @@ pub fn unregister_rseq(task_id: TaskId) -> Option<(u64, u32, u32)> {
 }
 
 /// Called from [`super::thread::on_thread_exit`] BEFORE the thread is
-/// detached from its process — at this point CR3 still points at the
-/// dying thread's address space, so `copy_to_user` against the
-/// registered `ctid` pointer is valid.
+/// detached from its process.
 ///
-/// If the task had `CLONE_CHILD_CLEARTID` set:
+/// In the normal self-exit path CR3 still points at the dying thread's
+/// address space, so `copy_to_user` against the registered `ctid`
+/// pointer (and the robust-list / PI-futex walks) resolve.  When the
+/// hook is instead invoked from a *different* address space (a reaper
+/// or boot self-test calling `on_thread_exit` for another task), the
+/// user-memory passes are skipped — see the AS-active guard in the
+/// body — while the in-kernel registration drops still run so the
+/// tables never leak.
+///
+/// If the task had `CLONE_CHILD_CLEARTID` set and its AS is active:
 ///   1. Writes a 32-bit zero to `*ctid` in user space (best-effort —
 ///      a destroyed mapping just produces an EFAULT we ignore).
 ///   2. Wakes one waiter on the futex at `ctid` so a `pthread_join`
 ///      caller spinning on it observes the zero and proceeds.
 pub fn on_thread_exit_hook(task_id: TaskId) {
-    // Robust-mutex + PI-owner cleanup for the dying thread.  CR3 still
-    // points at this thread's address space, so the userspace futex words
-    // resolve.  Two independent recovery passes run (see
-    // `ipc::futex` for the full rationale):
+    // The futex/robust-list/ctid recovery passes all dereference USER
+    // pointers (PI mutex words, the robust-list chain, the ctid word).
+    // Those reads/writes are only valid when the active page tables
+    // belong to the dying thread's process.  In the normal teardown
+    // path (a thread exiting itself) CR3 still points at its own
+    // address space, so they resolve.  But this hook also runs from
+    // cross-address-space cleanup paths — e.g. a boot self-test or a
+    // reaper that calls `thread::on_thread_exit(other_task)` while its
+    // OWN address space is active.  In that case the dying thread's
+    // user pointers (lazily-mapped mmap regions, etc.) are not present
+    // in the active AS, and a blind `read_user` would fault fatally in
+    // ring 0.  Guard the user-memory work behind an AS-active check;
+    // the in-kernel registration drops always run so the tables never
+    // leak regardless of which AS is current.
+    let as_active = match crate::proc::thread::owner_process(task_id) {
+        Some(pid) => crate::proc::pcb::get_pml4(pid)
+            == Some(crate::mm::page_table::active_pml4_phys()),
+        None => false,
+    };
+
+    // Robust-mutex + PI-owner cleanup for the dying thread.  Two
+    // independent recovery passes run (see `ipc::futex` for the full
+    // rationale):
     //
     //   1. Hand off every PI mutex the thread still owns to its
     //      highest-priority kernel-blocked waiter, setting FUTEX_OWNER_DIED.
@@ -267,16 +293,23 @@ pub fn on_thread_exit_hook(task_id: TaskId) {
     // Order matters: the PI handoff runs first so its authoritative
     // ownership transfer is not clobbered by the robust walk (which, seeing
     // a freshly-transferred live owner, leaves that word untouched).
-    crate::ipc::futex::exit_pi_owned_futexes(task_id);
+    //
+    // Both passes touch user memory, so they only run when the dying
+    // thread's address space is the active one.  When it is not, the
+    // process is being torn down from another context and there are no
+    // live waiters in *this* AS to hand off to, so skipping is correct.
     let robust_head = ROBUST_LIST.lock().get(&task_id).map(|&(head, _len)| head);
-    if let Some(head) = robust_head {
-        crate::ipc::futex::exit_robust_list(head, task_id);
+    if as_active {
+        crate::ipc::futex::exit_pi_owned_futexes(task_id);
+        if let Some(head) = robust_head {
+            crate::ipc::futex::exit_robust_list(head, task_id);
+        }
     }
 
     // Drop the robust-list registration so the table does not grow across
     // thread lifetimes.  Removal happens before the CLEAR_CHILD_TID
     // handling, because robust-list cleanup is independent of
-    // CLONE_CHILD_CLEARTID.
+    // CLONE_CHILD_CLEARTID.  This runs unconditionally to avoid leaks.
     ROBUST_LIST.lock().remove(&task_id);
 
     // Drop any rseq registration.  Linux does not zero the userspace
@@ -289,12 +322,18 @@ pub fn on_thread_exit_hook(task_id: TaskId) {
         None => return,
     };
 
+    // The ctid zero-write and wake also touch user memory / are only
+    // meaningful in the dying thread's AS.  Skip them cross-AS.
+    if !as_active {
+        return;
+    }
+
     // 1. Zero the user-visible ctid.
     let zero: i32 = 0;
     // SAFETY: copy_to_user validates the user range and uses STAC/
-    // CLAC for SMAP.  The current address space belongs to the dying
-    // thread (CR3 is unchanged here); if the page has already been
-    // unmapped the copy returns an error which we deliberately
+    // CLAC for SMAP.  We verified above that the active address space
+    // belongs to the dying thread's process; if the page has already
+    // been unmapped the copy returns an error which we deliberately
     // ignore — the thread is exiting anyway.
     let _ = unsafe {
         crate::mm::user::copy_to_user(

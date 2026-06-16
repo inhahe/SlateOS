@@ -4940,6 +4940,85 @@ pub fn parent(pid: ProcessId) -> Option<ProcessId> {
     table.get(&pid).map(|p| p.parent)
 }
 
+/// Close a list of unclaimed initial fd handles (the `(fd, kind, raw)`
+/// tuples set up at spawn before userspace claims them via
+/// `SYS_PROCESS_GET_INITIAL_FDS`).
+///
+/// Console handles are virtual (no kernel resource).  Pipe / eventfd /
+/// stream-socket handles are ref-counted; closing drops just this
+/// process's reference.  File/socket handles close via the open-file
+/// table.  A no-op on an empty slice.
+fn close_initial_fds(initial_fds: &[(i32, u8, u64)]) {
+    for &(_fd, handle_type, handle) in initial_fds {
+        match handle_type {
+            crate::proc::spawn::fd_handle_type::CONSOLE => {
+                // Virtual handle — nothing to close.
+            }
+            crate::proc::spawn::fd_handle_type::PIPE => {
+                crate::ipc::pipe::close(crate::ipc::pipe::PipeHandle::from_raw(handle));
+            }
+            crate::proc::spawn::fd_handle_type::EVENTFD => {
+                crate::ipc::eventfd::close(crate::ipc::eventfd::EventFdHandle::from_raw(handle));
+            }
+            crate::proc::spawn::fd_handle_type::STREAM_SOCKET => {
+                crate::ipc::stream_socket::close(
+                    crate::ipc::stream_socket::StreamSocketHandle::from_raw(handle),
+                );
+            }
+            _ => {
+                // FILE, TCP_SOCKET, UDP_SOCKET, and any unknown types —
+                // close via the file handle table.
+                let _ = crate::fs::handle::close(handle);
+            }
+        }
+    }
+}
+
+/// Close every fd-bearing kernel resource owned by `pid` at the process
+/// **exit** (zombie transition), matching Linux's `exit_files()` in
+/// `do_exit`: a process's open file descriptions are released the moment
+/// it exits, *not* when its parent reaps it with `wait4()`.
+///
+/// This is required for correctness, not just to free resources promptly.
+/// Consider a shell pipeline `a | b`: `b` blocks in `read()` on the pipe
+/// and only returns EOF once the *last* write end closes.  If the write
+/// end held by `a`'s process were not closed until `destroy()` (which
+/// runs during the reaper's `wait4()`), and the reader is the very task
+/// that would call `wait4()`, no one ever closes the write end → the
+/// reader blocks on EOF forever → deadlock.  Closing here fires the pipe
+/// EOF (and broken-pipe / socket-shutdown for other resource types) as
+/// soon as the writer process exits, exactly as Linux does.
+///
+/// `ipc_handles` is the authoritative per-process ownership list (every
+/// Linux-ABI install path registers exactly once per kernel handle per
+/// process; `dup`/`dup2` only alias within the fd table — see
+/// `fork_create`), so closing it releases precisely this process's
+/// reference to each underlying resource.  The fd table is left intact
+/// for `/proc` until `destroy()`; its entries merely alias handles whose
+/// references are accounted here.
+///
+/// Drains both `ipc_handles` and the unclaimed `initial_fds` so the
+/// later `destroy()` cannot double-close them.  Idempotent: a second
+/// call, or `destroy()` on a force-killed process that never reached
+/// this path, finds the lists empty and closes nothing.
+pub fn exit_close_fds(pid: ProcessId) {
+    // Drain the ownership lists under the table lock, then release the
+    // lock before invoking any close (which acquires pipe/fs/socket
+    // locks — see the lock-ordering note on `destroy_process_resources`).
+    let (ipc_handles, initial_fds) = {
+        let mut table = PROCESS_TABLE.lock();
+        let Some(proc) = table.get_mut(&pid) else {
+            return;
+        };
+        (
+            core::mem::take(&mut proc.ipc_handles),
+            core::mem::take(&mut proc.initial_fds),
+        )
+    };
+    crate::ipc::cleanup_handles(&ipc_handles);
+    close_initial_fds(&initial_fds);
+}
+
 /// Internal: release all resources associated with a process.
 ///
 /// Called from `try_reap()` after the process has been removed from
@@ -4974,64 +5053,13 @@ fn destroy_process_resources(
     // would block every other waiter on that path until reboot.
     crate::fs::Vfs::funlock_all(pid);
 
-    // Close all IPC handles owned by this process.
+    // Close all IPC handles owned by this process and any unclaimed
+    // initial fd handles.  In the normal exit path these were already
+    // drained and closed at the zombie transition by `exit_close_fds`
+    // (so the slices are empty here); this still runs for the
+    // force-kill / never-zombied path so no resource leaks.
     crate::ipc::cleanup_handles(ipc_handles);
-
-    // Close any unclaimed initial fd handles.
-    //
-    // If the child process never called SYS_PROCESS_GET_INITIAL_FDS
-    // (e.g., it crashed before init, or is a non-POSIX process), the
-    // duplicated handles are still in the global table.  Close them
-    // now to avoid handle leaks.
-    //
-    // Console handles are virtual (no kernel resource to free).
-    // Pipe and eventfd handles are ref-counted; spawn dup'd the
-    // parent ref into the child, so the child's `close()` only drops
-    // its own reference (not the parent's).
-    // File handles were duped via `fs::handle::dup()` and must be
-    // closed.
-    for &(_fd, handle_type, handle) in initial_fds {
-        match handle_type {
-            crate::proc::spawn::fd_handle_type::CONSOLE => {
-                // Virtual handle — nothing to close.
-            }
-            crate::proc::spawn::fd_handle_type::PIPE => {
-                // Spawn dup'd the parent's pipe ref (per-end refcount);
-                // closing here drops just that ref.  If userspace
-                // already claimed the handle via the initial_fds
-                // syscall, this branch isn't reached (the vec is
-                // emptied at claim time).
-                crate::ipc::pipe::close(
-                    crate::ipc::pipe::PipeHandle::from_raw(handle),
-                );
-            }
-            crate::proc::spawn::fd_handle_type::EVENTFD => {
-                // Spawn dup'd the parent's eventfd ref into the child;
-                // closing here drops that ref.  If userspace already
-                // claimed the handle via SYS_PROCESS_GET_INITIAL_FDS
-                // and put it into the fd-table, the fd-table layer
-                // owns the close instead and this branch is unreached
-                // because `initial_fds` is emptied at claim time.
-                crate::ipc::eventfd::close(
-                    crate::ipc::eventfd::EventFdHandle::from_raw(handle),
-                );
-            }
-            crate::proc::spawn::fd_handle_type::STREAM_SOCKET => {
-                // Spawn dup'd the parent's stream-socket endpoint ref
-                // (per-endpoint refcount); closing here drops just that
-                // ref.  Unreached if userspace already claimed the handle
-                // into its fd-table (initial_fds is emptied at claim).
-                crate::ipc::stream_socket::close(
-                    crate::ipc::stream_socket::StreamSocketHandle::from_raw(handle),
-                );
-            }
-            _ => {
-                // FILE, TCP_SOCKET, UDP_SOCKET, and any unknown types —
-                // close via the file handle table.
-                let _ = crate::fs::handle::close(handle);
-            }
-        }
-    }
+    close_initial_fds(initial_fds);
 
     // Detach from namespace (idempotent — may already be done
     // during zombie transition, but safe to call again).

@@ -415,6 +415,16 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
                     pid
                 );
 
+                // Close all fd-bearing kernel resources NOW, at process
+                // exit — matching Linux's `exit_files()` in `do_exit`.
+                // This must happen before the reaper's `wait4()` (which
+                // is what eventually calls `destroy()`): a pipe write end
+                // held by this process has to close here so a reader
+                // blocked on EOF — possibly the very task that will reap
+                // us — is woken, rather than deadlocking until a reap
+                // that can never come.  See `pcb::exit_close_fds`.
+                pcb::exit_close_fds(pid);
+
                 // Release namespace reference so the namespace can be cleaned up.
                 crate::ipc::namespace::detach(pid);
 

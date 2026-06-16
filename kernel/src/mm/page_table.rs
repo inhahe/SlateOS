@@ -58,10 +58,14 @@ use spin::{Mutex, Once};
 const ENTRIES_PER_TABLE: usize = 512;
 
 /// Size of a single hardware page (`x86_64` base page size).
-const HW_PAGE_SIZE: usize = 4096;
+///
+/// Exposed to the ELF loader, which maps 4 KiB-aligned Linux `PT_LOAD`
+/// segments at this granularity within each 16 KiB logical frame (see
+/// [`map_frame_subpages`]).
+pub(crate) const HW_PAGE_SIZE: usize = 4096;
 
 /// Number of 4 KiB hardware pages per 16 KiB frame.
-const HW_PAGES_PER_FRAME: usize = FRAME_SIZE / HW_PAGE_SIZE;
+pub(crate) const HW_PAGES_PER_FRAME: usize = FRAME_SIZE / HW_PAGE_SIZE;
 
 /// Mask for extracting the physical address from a page table entry.
 /// Bits 12–51 (40 bits) contain the 4 KiB-aligned physical address.
@@ -425,6 +429,17 @@ impl VirtAddr {
     #[allow(clippy::arithmetic_side_effects)]
     pub const fn is_frame_aligned(self) -> bool {
         self.0 & (FRAME_SIZE as u64 - 1) == 0
+    }
+
+    /// Is this address aligned to a 4 KiB hardware-page boundary?
+    ///
+    /// VMA tracking and Linux-ABI file mmap operate at this granularity so
+    /// 4 KiB-aligned shared-object segments (standard glibc `max-page-size
+    /// = 0x1000`) can be placed independently within a 16 KiB frame.
+    #[must_use]
+    #[allow(clippy::arithmetic_side_effects)]
+    pub const fn is_hw_page_aligned(self) -> bool {
+        self.0 & (HW_PAGE_SIZE as u64 - 1) == 0
     }
 }
 
@@ -922,6 +937,55 @@ pub unsafe fn map_frame(
     phys: PhysFrame,
     flags: PageFlags,
 ) -> KernelResult<()> {
+    // Uniform permissions across all 4 hardware pages — the common case
+    // (native binaries, anonymous/heap/stack faults, kernel mappings).
+    // SAFETY: forwarding the caller's invariants to map_frame_subpages.
+    unsafe { map_frame_subpages(pml4_phys, virt, phys, [flags; HW_PAGES_PER_FRAME]) }
+}
+
+/// Map a 16 KiB physical frame with **per-4 KiB-subpage permissions**.
+///
+/// Identical to [`map_frame`] except each of the 4 hardware pages within the
+/// 16 KiB logical frame is given its own [`PageFlags`]: `subpage_flags[i]`
+/// controls the `i`-th 4 KiB page (`phys + i*4096` at `virt + i*4096`).
+///
+/// This is what lets the ELF loader place several **4 KiB-aligned** Linux
+/// `PT_LOAD` segments — each with distinct R/W/X permissions — inside a single
+/// 16 KiB logical frame without violating W^X.  Standard x86-64 Linux binaries
+/// are linked with `max-page-size = 0x1000`, so two adjacent segments (e.g. an
+/// `R-X` text segment and an `RW-` data segment) routinely fall in the same
+/// 16 KiB frame.  Because those segments are 4 KiB-aligned and never overlap at
+/// 4 KiB granularity, every hardware page is covered by at most one segment, so
+/// each PTE receives that segment's *exact* permissions — no page is ever made
+/// simultaneously writable and executable.
+///
+/// A subpage whose flags do **not** include [`PageFlags::PRESENT`] is left
+/// unmapped (its PTE stays empty) — this models a 4 KiB page not covered by any
+/// segment (an inter-segment gap), which Linux likewise leaves unmapped so a
+/// stray access faults.  The frame is charged to the address space's RSS once
+/// if at least one subpage is mapped.
+///
+/// # Errors
+///
+/// Same as [`map_frame`]: `BadAlignment` (virt not 16 KiB aligned),
+/// `InvalidAddress` (non-canonical / huge-page mid-walk), `AlreadyExists` (a
+/// to-be-mapped PTE is already present — rolled back), `OutOfMemory`,
+/// `NotSupported`.
+///
+/// # Safety
+///
+/// Same requirements as [`map_frame`]: `pml4_phys` must be a valid PML4 the
+/// caller owns, `phys` a valid frame, and the caller must flush the TLB for the
+/// mapped addresses if operating on the active address space.
+// Arithmetic: address calculations for 4 consecutive hardware pages.
+// base_pt_index + i is bounded by ENTRIES_PER_TABLE (proof below).
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+pub unsafe fn map_frame_subpages(
+    pml4_phys: u64,
+    virt: VirtAddr,
+    phys: PhysFrame,
+    subpage_flags: [PageFlags; HW_PAGES_PER_FRAME],
+) -> KernelResult<()> {
     let hhdm = hhdm().ok_or(KernelError::NotSupported)?;
 
     if !virt.is_frame_aligned() {
@@ -961,24 +1025,29 @@ pub unsafe fn map_frame(
     debug_assert!(base_pt_index.is_multiple_of(HW_PAGES_PER_FRAME));
     debug_assert!(base_pt_index + HW_PAGES_PER_FRAME <= ENTRIES_PER_TABLE);
 
-    // OPT: Single-pass check-and-write.  Read each existing entry,
-    // verify it's non-present, then write the new entry immediately.
-    // This does 4 reads + 4 writes = 8 memory accesses, versus the
-    // previous two-loop approach that did 4 reads (pre-check) + 4 writes
-    // = 8 reads + 4 writes = 12 memory accesses.  On the page fault
-    // hot path, each saved read shaves ~100-400ns on real hardware.
-    //
-    // If any entry is already present, undo the partial mapping by
-    // clearing entries we've already written, preserving atomicity.
+    // Single-pass check-and-write, one PTE per 4 KiB subpage.  Read each
+    // existing entry, verify it's non-present, then write the new entry.
+    // A subpage whose flags lack PRESENT is skipped (left empty).  If any
+    // present-flagged entry collides with an existing mapping, roll back
+    // every PTE we have written so far so the operation is atomic.
+    let mut any_mapped = false;
     for i in 0..HW_PAGES_PER_FRAME {
+        let flags = subpage_flags[i];
+        if !flags.contains(PageFlags::PRESENT) {
+            // Inter-segment gap: leave this 4 KiB page unmapped.
+            continue;
+        }
+
         // SAFETY: pt is a valid page table, index < 512 (proven above).
         let existing = unsafe { read_entry(pt, base_pt_index + i, hhdm) };
         if existing.is_present() {
-            // Roll back entries written so far.
+            // Roll back the subpages we have already written.
             for j in 0..i {
-                // SAFETY: entries 0..i were just written by us.
-                unsafe {
-                    write_entry(pt, base_pt_index + j, PageTableEntry::EMPTY, hhdm);
+                if subpage_flags[j].contains(PageFlags::PRESENT) {
+                    // SAFETY: entry j was just written by us.
+                    unsafe {
+                        write_entry(pt, base_pt_index + j, PageTableEntry::EMPTY, hhdm);
+                    }
                 }
             }
             return Err(KernelError::AlreadyExists);
@@ -989,10 +1058,14 @@ pub unsafe fn map_frame(
         // SAFETY: pt valid, index < 512, exclusive access guaranteed
         // by caller (single-threaded boot or holding a lock).
         unsafe { write_entry(pt, base_pt_index + i, entry, hhdm); }
+        any_mapped = true;
     }
 
-    // Track per-address-space RSS for OOM killer and diagnostics.
-    super::accounting::charge(pml4_phys, 1);
+    // Track per-address-space RSS for OOM killer and diagnostics.  One
+    // logical 16 KiB frame is consumed whenever any subpage is mapped.
+    if any_mapped {
+        super::accounting::charge(pml4_phys, 1);
+    }
 
     Ok(())
 }
@@ -1200,6 +1273,68 @@ pub unsafe fn change_flags(
         // SAFETY: pt valid, index < 512, exclusive access.
         unsafe { write_entry(pt, base_pt_index + i, updated, hhdm); }
     }
+
+    Ok(())
+}
+
+/// Change the protection flags on a single 4 KiB hardware page.
+///
+/// Unlike [`change_flags`] (which rewrites all four PTEs of a 16 KiB frame
+/// in lock-step), this touches exactly one PTE.  It is the primitive behind
+/// the Linux-ABI `mprotect`, whose page granularity is 4 KiB: standard glibc
+/// binaries link with `max-page-size = 0x1000` and `ld.so` makes the RELRO
+/// sub-segment read-only with a 4 KiB-aligned-but-not-16-KiB range that may
+/// cover only some subpages of a 16 KiB frame (the rest belonging to an
+/// adjacent, differently-permissioned segment).  Rewriting all four PTEs
+/// there would clobber the neighbour's permissions.
+///
+/// The physical address is preserved; the page must currently be present.
+///
+/// # Safety
+///
+/// Same requirements as [`map_frame`].  `virt` must be 4 KiB-aligned and
+/// canonical.  The caller must flush the TLB for this page.
+pub unsafe fn change_flags_4k(
+    pml4_phys: u64,
+    virt: VirtAddr,
+    flags: PageFlags,
+) -> KernelResult<()> {
+    let hhdm = hhdm().ok_or(KernelError::NotSupported)?;
+
+    if !virt.is_hw_page_aligned() {
+        return Err(KernelError::BadAlignment);
+    }
+    if !virt.is_canonical() {
+        return Err(KernelError::InvalidAddress);
+    }
+
+    // Walk to the PT (no creation).
+    // SAFETY for all read_entry calls: each table address is either
+    // pml4_phys (caller-provided, valid per fn safety contract) or from a
+    // present parent entry.  Indices from the canonical virt address.
+    let pml4e = unsafe { read_entry(pml4_phys, virt.pml4_index(), hhdm) };
+    if !pml4e.is_present() {
+        return Err(KernelError::InvalidAddress);
+    }
+    let pdpte = unsafe { read_entry(pml4e.phys_addr(), virt.pdpt_index(), hhdm) };
+    if !pdpte.is_present() || pdpte.is_huge() {
+        return Err(KernelError::InvalidAddress);
+    }
+    let pde = unsafe { read_entry(pdpte.phys_addr(), virt.pd_index(), hhdm) };
+    if !pde.is_present() || pde.is_huge() {
+        return Err(KernelError::InvalidAddress);
+    }
+    let pt = pde.phys_addr();
+    let pt_idx = virt.pt_index();
+
+    // SAFETY: pt valid from present pde, pt_idx < 512 (VirtAddr mask).
+    let pte = unsafe { read_entry(pt, pt_idx, hhdm) };
+    if !pte.is_present() {
+        return Err(KernelError::InvalidAddress);
+    }
+    let updated = PageTableEntry::new(pte.phys_addr(), flags);
+    // SAFETY: pt valid, pt_idx < 512, exclusive access (caller guarantee).
+    unsafe { write_entry(pt, pt_idx, updated, hhdm); }
 
     Ok(())
 }

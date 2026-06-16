@@ -3945,9 +3945,14 @@ pub fn add_vma(pid: ProcessId, vma: Vma) -> KernelResult<()> {
         .get_mut(&pid)
         .ok_or(KernelError::NoSuchProcess)?;
 
-    // Validate alignment.
-    if !VirtAddr::new(vma.start).is_frame_aligned()
-        || !VirtAddr::new(vma.end).is_frame_aligned()
+    // Validate alignment.  VMAs are tracked at 4 KiB (hardware-page)
+    // granularity, not 16 KiB: standard glibc binaries link their
+    // shared-object segments at `max-page-size = 0x1000`, so ld.so maps
+    // adjacent segments with distinct permissions at 4 KiB-aligned
+    // (not necessarily 16 KiB-aligned) addresses.  The per-subpage demand
+    // fault resolver backs such a split 16 KiB frame correctly.
+    if !VirtAddr::new(vma.start).is_hw_page_aligned()
+        || !VirtAddr::new(vma.end).is_hw_page_aligned()
     {
         return Err(KernelError::BadAlignment);
     }
@@ -4245,6 +4250,184 @@ pub fn reset_linux_state_for_exec(pid: ProcessId) {
     proc.linux_securebits &= !LINUX_SECBIT_KEEP_CAPS;
 }
 
+/// A per-4 KiB-subpage fill descriptor for [`resolve_subpaged_fault`].
+///
+/// One of these is produced for each hardware 4 KiB page of a 16 KiB frame
+/// whose coverage is split across multiple VMAs (the glibc shared-object
+/// segment-packing case).
+#[derive(Clone, Copy)]
+struct SubpageFill {
+    /// Page-table flags for this subpage's PTE.  Carries the owning VMA's
+    /// permissions (already includes `PRESENT` / `USER_ACCESSIBLE`).
+    flags: crate::mm::page_table::PageFlags,
+    /// `Some((handle, file_offset))` to fill this subpage from a backing
+    /// file, or `None` for anonymous zero-fill.
+    file: Option<(u64, u64)>,
+}
+
+/// Resolve a demand fault on a 16 KiB frame whose coverage straddles VMA
+/// boundaries at 4 KiB granularity.
+///
+/// Standard x86-64 Linux binaries link with `max-page-size = 0x1000`, so
+/// `ld.so` maps adjacent shared-object segments with *different* permissions
+/// (e.g. an `R--` rodata segment and an `RW-` data segment) into the same
+/// 16 KiB frame via 4 KiB-aligned `MAP_FIXED` overlays.  A single physical
+/// 16 KiB frame backs all four 4 KiB subpages; each gets its own PTE
+/// permissions and (for file-backed VMAs) its own file offset.
+///
+/// The frame is allocated lazily on the first faulting subpage and *reused*
+/// by later faults on its siblings (found via [`page_table::translate`]).
+/// RSS accounting, reclaim registration, and the reverse map are keyed on
+/// the 16 KiB frame base and applied exactly once, matching the fast path's
+/// `map_frame`.
+///
+/// Returns `true` if at least one subpage of the frame is now mapped (the
+/// faulting subpage always is on success, so the instruction can retry).
+fn resolve_subpaged_fault(
+    pml4_phys: u64,
+    frame_base: u64,
+    repr_flags: crate::mm::page_table::PageFlags,
+    subpages: &[Option<SubpageFill>; crate::mm::page_table::HW_PAGES_PER_FRAME],
+) -> bool {
+    use crate::mm::frame::{self, FRAME_SIZE, PhysFrame};
+    use crate::mm::page_table::{
+        self, PageFlags, VirtAddr, HW_PAGES_PER_FRAME, HW_PAGE_SIZE,
+    };
+
+    let hhdm = match page_table::hhdm() {
+        Some(h) => h,
+        None => return false,
+    };
+
+    // Is a physical 16 KiB frame already backing any subpage of this frame?
+    // If so, reuse it (a sibling subpage was mapped by an earlier fault);
+    // otherwise allocate a fresh zeroed frame.  Physical address 0 is never
+    // a valid user frame, so it doubles as the "none found" sentinel.
+    let mut base16: u64 = 0;
+    for i in 0..HW_PAGES_PER_FRAME {
+        #[allow(clippy::arithmetic_side_effects)]
+        let sub_va = frame_base + (i as u64) * (HW_PAGE_SIZE as u64);
+        if let Some(phys4k) = page_table::translate(pml4_phys, VirtAddr::new(sub_va)) {
+            #[allow(clippy::arithmetic_side_effects)]
+            {
+                base16 = phys4k & !(FRAME_SIZE as u64 - 1);
+            }
+            break;
+        }
+    }
+
+    let newly = base16 == 0;
+    let phys_frame = if newly {
+        // Enforce cgroup memory limits before allocating (as the fast path).
+        if crate::cgroup::try_charge_current_mem(1).is_err() {
+            return false;
+        }
+        match frame::alloc_frame_zeroed() {
+            Ok(f) => {
+                base16 = f.addr();
+                f
+            }
+            Err(_) => {
+                crate::cgroup::uncharge_current_mem(1);
+                return false;
+            }
+        }
+    } else {
+        match PhysFrame::from_addr(base16) {
+            Some(f) => f,
+            None => return false,
+        }
+    };
+
+    // Fill and map each covered, not-yet-present subpage.
+    let mut mapped_any = false;
+    for i in 0..HW_PAGES_PER_FRAME {
+        let Some(fill) = subpages[i] else { continue };
+        #[allow(clippy::arithmetic_side_effects)]
+        let sub_va = frame_base + (i as u64) * (HW_PAGE_SIZE as u64);
+        // Skip subpages a sibling fault already populated.
+        if page_table::translate(pml4_phys, VirtAddr::new(sub_va)).is_some() {
+            continue;
+        }
+        #[allow(clippy::arithmetic_side_effects)]
+        let sub_phys = base16 + (i as u64) * (HW_PAGE_SIZE as u64);
+
+        // SAFETY: `sub_phys + hhdm` is the HHDM mapping of a 4 KiB subpage of
+        // a frame we exclusively control for this subpage — it is either
+        // freshly allocated, or shared but this particular subpage is
+        // currently unmapped, so nothing else writes it concurrently.
+        let buf = unsafe {
+            core::slice::from_raw_parts_mut(
+                (sub_phys.wrapping_add(hhdm)) as *mut u8,
+                HW_PAGE_SIZE,
+            )
+        };
+        // Zero first: defends against stale bytes in a reused frame and
+        // tail-zero-fills a short file read (matching Linux page semantics).
+        buf.iter_mut().for_each(|b| *b = 0);
+        if let Some((handle, file_off)) = fill.file {
+            if crate::fs::handle::read_at(handle, file_off, buf).is_err() {
+                if newly && !mapped_any {
+                    crate::cgroup::uncharge_current_mem(1);
+                    // SAFETY: freshly allocated, not mapped anywhere yet.
+                    let _ = unsafe { frame::free_frame(phys_frame) };
+                }
+                return false;
+            }
+        }
+
+        // SAFETY: `pml4_phys` is the process PML4, `sub_va` is 4 KiB-aligned
+        // and canonical (within a VMA), `sub_phys` is a valid 4 KiB-aligned
+        // physical address inside the frame we own.
+        match unsafe {
+            page_table::map_4k_if_absent(
+                pml4_phys,
+                VirtAddr::new(sub_va),
+                sub_phys,
+                fill.flags | PageFlags::PRESENT,
+            )
+        } {
+            Ok(_) => mapped_any = true,
+            Err(_) => {
+                if newly && !mapped_any {
+                    crate::cgroup::uncharge_current_mem(1);
+                    // SAFETY: freshly allocated, not mapped anywhere yet.
+                    let _ = unsafe { frame::free_frame(phys_frame) };
+                }
+                return false;
+            }
+        }
+    }
+
+    if !mapped_any {
+        // Nothing to map (all covered subpages were already present, or none
+        // were covered).  Release a frame we allocated speculatively.
+        if newly {
+            crate::cgroup::uncharge_current_mem(1);
+            // SAFETY: freshly allocated, never mapped.
+            let _ = unsafe { frame::free_frame(phys_frame) };
+        }
+        return false;
+    }
+
+    // Flush the whole frame's TLB entries (cross-CPU shootdown).
+    // SAFETY: TLB invalidation is always safe in ring 0.
+    unsafe {
+        page_table::flush_frame(VirtAddr::new(frame_base));
+    }
+
+    if newly {
+        // Account for the new 16 KiB frame and register it for reclaim and
+        // reverse mapping — once, keyed on the frame base, mirroring the
+        // fast path's `map_frame` + post-map bookkeeping.
+        crate::mm::accounting::charge(pml4_phys, 1);
+        crate::mm::swap::register_reclaimable(pml4_phys, frame_base, repr_flags);
+        crate::mm::rmap::add(base16, pml4_phys, frame_base);
+    }
+
+    true
+}
+
 /// Resolve a user-space page fault against a process's VMA list.
 ///
 /// Called from the page fault handler (IDT vector 14) when a user-mode
@@ -4320,6 +4503,25 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
         return false;
     }
 
+    // Frame geometry: the 16 KiB logical frame containing the fault.
+    #[allow(clippy::arithmetic_side_effects)]
+    let frame_base = fault_addr & !(FRAME_SIZE as u64 - 1);
+    #[allow(clippy::arithmetic_side_effects)]
+    let frame_end = frame_base + FRAME_SIZE as u64;
+
+    let flags = vma.flags;
+    let vma_start = vma.start;
+    let vma_end = vma.end;
+    let pml4_phys = proc.pml4_phys;
+
+    // Permission checks against the faulting VMA.
+    if error.is_write() && !flags.contains(PageFlags::WRITABLE) {
+        return false;
+    }
+    if error.is_instruction_fetch() && flags.contains(PageFlags::NO_EXECUTE) {
+        return false;
+    }
+
     // Decide how to populate the new frame.  Anonymous/Stack pages are
     // left zeroed; FileBacked pages are filled from the backing file.
     // Guard/Fixed faults are never resolvable here.
@@ -4329,16 +4531,51 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
         VmaKind::Guard | VmaKind::Fixed => return false,
     };
 
-    let flags = vma.flags;
-    let vma_start = vma.start;
-    let pml4_phys = proc.pml4_phys;
-
-    // Permission checks.
-    if error.is_write() && !flags.contains(PageFlags::WRITABLE) {
-        return false;
-    }
-    if error.is_instruction_fetch() && flags.contains(PageFlags::NO_EXECUTE) {
-        return false;
+    // Does this single VMA cover the *entire* 16 KiB frame?  Native binaries,
+    // anonymous/stack/heap regions, and whole-frame file maps all do — they
+    // take the uniform-permission fast path below (one 16 KiB alloc +
+    // `map_frame`, no per-subpage work, no perf regression).
+    //
+    // When the faulting frame straddles a VMA boundary (glibc's 4 KiB-aligned
+    // shared-object segment packing), fall to the per-subpage resolver, which
+    // backs all four 4 KiB subpages with one shared physical frame but gives
+    // each its own PTE permissions and file backing.
+    if !(vma_start <= frame_base && vma_end >= frame_end) {
+        use crate::mm::page_table::{HW_PAGES_PER_FRAME, HW_PAGE_SIZE};
+        let mut subpages: [Option<SubpageFill>; HW_PAGES_PER_FRAME] =
+            [None; HW_PAGES_PER_FRAME];
+        for (i, slot) in subpages.iter_mut().enumerate() {
+            #[allow(clippy::arithmetic_side_effects)]
+            let sub_va = frame_base + (i as u64) * (HW_PAGE_SIZE as u64);
+            // Binary-search the sorted VMA list for this subpage's VMA.
+            let sidx = match proc.vmas.binary_search_by_key(&sub_va, |v| v.start) {
+                Ok(j) => j,
+                Err(0) => continue,
+                #[allow(clippy::arithmetic_side_effects)]
+                Err(j) => j - 1,
+            };
+            let Some(sv) = proc.vmas.get(sidx) else { continue };
+            if !sv.contains(sub_va) {
+                continue;
+            }
+            *slot = match sv.kind {
+                VmaKind::Anonymous | VmaKind::Stack | VmaKind::Brk => {
+                    Some(SubpageFill { flags: sv.flags, file: None })
+                }
+                VmaKind::FileBacked { handle, file_offset } => {
+                    #[allow(clippy::arithmetic_side_effects)]
+                    let off = file_offset + (sub_va - sv.start);
+                    Some(SubpageFill { flags: sv.flags, file: Some((handle, off)) })
+                }
+                // A Guard/Fixed subpage is left unmapped (None).
+                VmaKind::Guard | VmaKind::Fixed => None,
+            };
+        }
+        drop(table);
+        if pml4_phys == 0 {
+            return false;
+        }
+        return resolve_subpaged_fault(pml4_phys, frame_base, flags, &subpages);
     }
 
     // Drop the process table lock before doing allocation + mapping
@@ -4356,8 +4593,6 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
         None => return false,
     };
 
-    #[allow(clippy::arithmetic_side_effects)]
-    let frame_base = fault_addr & !(FRAME_SIZE as u64 - 1);
     let virt = VirtAddr::new(frame_base);
 
     // Enforce cgroup memory limits before allocating.

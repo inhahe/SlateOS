@@ -245,8 +245,11 @@ impl AddressSpace {
     /// - [`KernelError::AlreadyExists`] if the range overlaps an
     ///   existing VMA.
     pub fn add_vma(&mut self, vma: Vma) -> KernelResult<()> {
-        let start_aligned = VirtAddr::new(vma.start).is_frame_aligned();
-        let end_aligned = VirtAddr::new(vma.end).is_frame_aligned();
+        // VMAs are tracked at 4 KiB (hardware-page) granularity so
+        // 4 KiB-aligned shared-object segments can share a 16 KiB frame
+        // (see `pcb::add_vma` and `resolve_subpaged_fault`).
+        let start_aligned = VirtAddr::new(vma.start).is_hw_page_aligned();
+        let end_aligned = VirtAddr::new(vma.end).is_hw_page_aligned();
         if !start_aligned || !end_aligned {
             return Err(KernelError::BadAlignment);
         }

@@ -1534,6 +1534,18 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z: a real dash shell runs a `for` LOOP that fork+exec's an external
+    // glibc binary every iteration (`for i in a b c; do /bin/emit; done > file`).
+    // Three back-to-back CoW fork→exec→reap cycles in one parent — the exact
+    // path that surfaced the F18 CoW double-free, so this is both a control-flow
+    // capability proof and a regression guard. No-op without rootfs.ext4.
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_loop() {
+        serial_println!(
+            "WARNING: Path-Z real dash shell loop self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

@@ -6244,6 +6244,182 @@ pub fn self_test_linux_real_glibc_shell_pipe() -> KernelResult<()> {
     }
 }
 
+/// Path Z Part 13: a real `dash` shell runs a `for` loop that fork+exec's an
+/// external glibc binary on every iteration, with the whole compound command's
+/// stdout redirected once to a file.
+///
+/// Where Part 11 proved one fork+exec+wait and Part 12 proved a two-stage
+/// pipeline, this proves the shell's *iteration* primitive: dash parses a
+/// `for` loop, opens the redirect target once, then for each iteration forks a
+/// child (CoW clone of the shell), exec's `/bin/emit` into it (tearing down the
+/// CoW image), and `wait4`s it before the next iteration.  Running the
+/// fork→exec→reap cycle N times back-to-back in a single long-lived parent is
+/// exactly the path that surfaced the F18 CoW-refcount double-free (a
+/// parent-shared frame freed during a child's exec teardown), so this is both a
+/// new capability proof and a direct regression guard for that fix: a stale
+/// double-free would corrupt the shell's image and crash it part-way through
+/// the loop, yielding short/garbled output or a non-zero exit.
+///
+/// `/bin/emit` writes a fixed 16-byte payload per run, so three iterations with
+/// a single outer redirect must produce exactly three concatenated copies and
+/// exit 0.
+pub fn self_test_linux_real_glibc_shell_loop() -> KernelResult<()> {
+    const EXPECT_EXIT: i32 = 0;
+    // /bin/emit writes "SLATE_PIPE_BODY\n" (16 bytes); three loop iterations
+    // sharing one outer redirect append in order.
+    const EXPECT_OUT: &[u8] = b"SLATE_PIPE_BODY\nSLATE_PIPE_BODY\nSLATE_PIPE_BODY\n";
+
+    const SRC_LD: &str = "/mnt/lib64/ld-linux-x86-64.so.2";
+    const SRC_LIBC: &str = "/mnt/lib/x86_64-linux-gnu/libc.so.6";
+    const SRC_DASH: &str = "/mnt/bin/dash";
+    const SRC_EMIT: &str = "/mnt/bin/emit";
+    const DST_LD: &str = "/lib64/ld-linux-x86-64.so.2";
+    const DST_LIBC: &str = "/lib/x86_64-linux-gnu/libc.so.6";
+    const DST_DASH: &str = "/bin/dash";
+    const DST_EMIT: &str = "/bin/emit";
+    const OUT_PATH: &str = "/dash-loop-out.txt";
+    // Three fork+exec+wait cycles under a shell; keep the generous budget.
+    const MAX_YIELDS: usize = 262_144;
+
+    if !crate::fs::Vfs::exists(SRC_DASH) || !crate::fs::Vfs::exists(SRC_EMIT) {
+        return Ok(());
+    }
+
+    serial_println!("[spawn] Running REAL dash shell loop `for i in a b c; do /bin/emit; done > file` (ring 3, Path Z) test...");
+
+    let _ = crate::fs::Vfs::mkdir_all("/lib64");
+    let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
+    let _ = crate::fs::Vfs::mkdir_all("/bin");
+    for (src, dst) in [
+        (SRC_LD, DST_LD),
+        (SRC_LIBC, DST_LIBC),
+        (SRC_DASH, DST_DASH),
+        (SRC_EMIT, DST_EMIT),
+    ] {
+        match crate::fs::Vfs::read_file(src) {
+            Ok(bytes) => {
+                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
+                    serial_println!(
+                        "[spawn]   real dash loop: SKIP (staging {} -> {} failed: {:?})",
+                        src, dst, e
+                    );
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                serial_println!(
+                    "[spawn]   real dash loop: SKIP (reading {} failed: {:?})",
+                    src, e
+                );
+                return Ok(());
+            }
+        }
+    }
+
+    let exe_elf = match crate::fs::Vfs::read_file(DST_DASH) {
+        Ok(b) => b,
+        Err(e) => {
+            serial_println!("[spawn]   real dash loop: SKIP (re-read {} failed: {:?})", DST_DASH, e);
+            return Ok(());
+        }
+    };
+
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+
+    // dash opens the redirect once, then forks+execs /bin/emit each iteration.
+    let argv: &[&[u8]] = &[
+        b"/bin/dash",
+        b"-c",
+        b"for i in a b c; do /bin/emit; done > /dash-loop-out.txt",
+    ];
+    let envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C"];
+    // The shell opens + creates the output file, so File READ|WRITE.
+    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-dash-loop",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: Some(DST_DASH.as_bytes()),
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: real dash loop spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let mut reaped = false;
+    for _ in 0..MAX_YIELDS {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            reaped = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    let written = crate::fs::Vfs::read_file(OUT_PATH);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+
+    if !reaped || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: real dash loop — shell did not exit within {} yields \
+             (state={:?}); a fork/exec/wait iteration likely hung or the shell \
+             crashed mid-loop (e.g. a stale CoW double-free corrupting its image)",
+            MAX_YIELDS, state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECT_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: real dash loop — exit code={:?}, expected {} (non-zero \
+             means a loop iteration's child failed to spawn/exec or the shell \
+             faulted part-way through the loop)",
+            exit_code, EXPECT_EXIT
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    match written {
+        Ok(bytes) if bytes.as_slice() == EXPECT_OUT => {
+            serial_println!(
+                "[spawn]   REAL dash shell loop (ring 3: dash opened the redirect once, \
+                 then forked + exec'd /bin/emit three times — three CoW fork→exec→reap \
+                 cycles in one parent — read back {} bytes == 3x the emit payload, \
+                 exit {}): OK",
+                bytes.len(), EXPECT_EXIT
+            );
+            Ok(())
+        }
+        Ok(bytes) => {
+            serial_println!(
+                "[spawn]   FAIL: real dash loop — wrote {} bytes {:?}, expected {} bytes {:?} \
+                 (short/garbled output points at a fork/exec/wait or CoW-teardown regression)",
+                bytes.len(), bytes.as_slice(), EXPECT_OUT.len(), EXPECT_OUT
+            );
+            Err(KernelError::InternalError)
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: real dash loop — reading the redirected output file back failed: {:?}",
+                e
+            );
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

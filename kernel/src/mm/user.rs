@@ -11,7 +11,11 @@
 //!    the address space (below [`USER_SPACE_END`]).
 //! 2. `ptr + len` must not overflow (wrapping into kernel space).
 //! 3. Every 4 KiB page in the range must be mapped in the current
-//!    process's page table.
+//!    process's page table.  A not-present page that falls inside a
+//!    committed VMA is faulted in on the spot (demand paging), mirroring
+//!    Linux's `get_user_pages()`: a freshly-allocated buffer the process
+//!    has not yet touched is valid, not an error.  Only an address with
+//!    no backing VMA (or insufficient VMA permissions) fails.
 //! 4. For write validation, every mapped page must be writable.  A
 //!    copy-on-write page (present, read-only, COW bit set) counts as
 //!    writable: validation breaks the CoW eagerly (private copy +
@@ -168,9 +172,27 @@ fn validate_user_range(ptr: u64, len: usize, need_writable: bool) -> KernelResul
     while addr < end {
         let virt = VirtAddr::new(addr);
 
-        // translate() returns None if the page is not mapped.
+        // translate() returns None if the page is not mapped.  A
+        // not-present page is not necessarily invalid: it may be a
+        // committed-but-not-yet-populated demand-paged page (a fresh
+        // malloc/mmap buffer the process hasn't touched yet).  A direct
+        // userspace access would fault it in via the #PF handler; when
+        // the kernel writes through the pointer on the process's behalf
+        // it must do the same proactively — exactly what Linux's
+        // get_user_pages() does before a kernel-side access.  This is
+        // the common case for any syscall handed a large fresh output
+        // buffer (e.g. getdents64's glibc-allocated dirent buffer): only
+        // the first page is faulted in, so a strict presence check would
+        // spuriously reject the rest of a perfectly valid region.
         if page_table::translate(pml4, virt).is_none() {
-            return Err(KernelError::InvalidAddress);
+            // Not present — try to fault it in (demand paging), then
+            // re-check.  If it still isn't mapped, the address has no
+            // committed backing and is a genuine fault.
+            let resolved = try_fault_in_user_page(addr, need_writable)
+                && page_table::translate(pml4, virt).is_some();
+            if !resolved {
+                return Err(KernelError::InvalidAddress);
+            }
         }
 
         // If write access is required, check the page flags.
@@ -209,6 +231,38 @@ fn validate_user_range(ptr: u64, len: usize, need_writable: bool) -> KernelResul
     }
 
     Ok(())
+}
+
+/// Fault in a not-present user page that is backed by a committed VMA
+/// but has not been populated yet (demand paging).
+///
+/// Synthesizes a page-fault error code matching the access the kernel is
+/// about to perform and routes it through the per-process fault resolver
+/// ([`crate::proc::pcb::try_resolve_fault`]) — the same path the hardware
+/// #PF handler uses.  Returns `true` only if the resolver mapped the page
+/// (i.e. the address really did fall inside a committed region with
+/// adequate permissions); a genuinely unmapped or permission-violating
+/// address returns `false`, so invalid pointers are still rejected by the
+/// caller's post-check.
+///
+/// Returns `false` for bare kernel tasks (no owning process) — those use
+/// kernel-space pointers and never reach this path because
+/// [`validate_user_range`] is skipped for them via [`is_kernel_context`].
+fn try_fault_in_user_page(addr: u64, need_writable: bool) -> bool {
+    let task_id = sched::current_task_id();
+    let Some(pid) = thread::owner_process(task_id) else {
+        return false;
+    };
+    // x86 page-fault error code bits: bit 0 = present (0 here: the page is
+    // not present), bit 1 = write, bit 2 = user.  We model a user-mode
+    // access; the write bit is set only when the kernel needs to write
+    // through the pointer, so a read-only validation never demands a
+    // writable mapping.
+    let mut error_code: u64 = 1 << 2; // user-mode access
+    if need_writable {
+        error_code |= 1 << 1; // write access
+    }
+    crate::proc::pcb::try_resolve_fault(pid, addr, error_code)
 }
 
 /// Read the page table flags for a virtual address.

@@ -719,6 +719,21 @@ pub fn fstat(handle: u64) -> KernelResult<crate::fs::FileMeta> {
     crate::fs::Vfs::metadata(&file.path)
 }
 
+/// Returns whether an open handle refers to a directory.
+///
+/// Cheap table lookup of the cached `is_directory` flag (no VFS round-trip).
+/// Used by the `fstat`/`statx` syscall translators to report `S_IFDIR` for a
+/// directory fd — without this, an `open(O_DIRECTORY)` handle (which is a
+/// `HandleKind::File` fd) would stat as a regular file, breaking glibc's
+/// `opendir`, which `fstat`s the fd and bails with `ENOTDIR` unless it sees
+/// `S_ISDIR`.  Returns `false` for an unknown handle (the caller then reports
+/// the default regular-file type, matching the pre-existing behaviour).
+#[must_use]
+pub fn is_directory(handle: u64) -> bool {
+    let table = OPEN_FILES.lock();
+    table.get(&handle).is_some_and(|file| file.is_directory)
+}
+
 /// Truncate a file to a given size by handle.
 ///
 /// Requires the handle to be opened with WRITE permission.

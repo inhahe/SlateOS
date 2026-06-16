@@ -17115,6 +17115,7 @@ const STAT_SIZE: usize = 144;
 
 /// Linux S_IF* file-type bits.
 const S_IFREG: u32 = 0o100000;
+const S_IFDIR: u32 = 0o040000;
 const S_IFCHR: u32 = 0o020000;
 const S_IFIFO: u32 = 0o010000;
 
@@ -17129,7 +17130,17 @@ fn fill_stat_for_fd(
     let (mode, blksize): (u32, u64) = match entry.kind {
         HandleKind::Console => (S_IFCHR | 0o620, 1024),
         HandleKind::Pipe => (S_IFIFO | 0o600, 4096),
-        HandleKind::File => (S_IFREG | 0o644, 16 * 1024),
+        // A directory opened with O_DIRECTORY is still a HandleKind::File fd
+        // (the underlying handle is tagged is_directory).  Report S_IFDIR for
+        // it — glibc's opendir fstat()s the fd and bails with ENOTDIR unless it
+        // sees S_ISDIR, which is what broke real-shell globbing.
+        HandleKind::File => {
+            if crate::fs::handle::is_directory(entry.raw_handle) {
+                (S_IFDIR | 0o755, 16 * 1024)
+            } else {
+                (S_IFREG | 0o644, 16 * 1024)
+            }
+        }
         // Linux exposes eventfd via anon_inode: stat reports a regular
         // file with 0600 perms (the inode's i_mode), blocksize 4096.
         HandleKind::EventFd => (S_IFREG | 0o600, 4096),
@@ -17429,7 +17440,16 @@ fn fill_statx_for_fd(
     let (mode_u16, blksize): (u16, u32) = match entry.kind {
         HandleKind::Console => ((S_IFCHR | 0o620) as u16, 1024),
         HandleKind::Pipe => ((S_IFIFO | 0o600) as u16, 4096),
-        HandleKind::File => ((S_IFREG | 0o644) as u16, 16 * 1024),
+        // A directory opened with O_DIRECTORY is a HandleKind::File fd backed
+        // by an is_directory handle — report S_IFDIR so glibc's opendir (which
+        // may probe via statx) sees S_ISDIR rather than bailing with ENOTDIR.
+        HandleKind::File => {
+            if crate::fs::handle::is_directory(entry.raw_handle) {
+                ((S_IFDIR | 0o755) as u16, 16 * 1024)
+            } else {
+                ((S_IFREG | 0o644) as u16, 16 * 1024)
+            }
+        }
         // anon_inode S_IFREG | 0600 — matches Linux's eventfd stat.
         HandleKind::EventFd => ((S_IFREG | 0o600) as u16, 4096),
         // anon_inode S_IFREG | 0600 — same shape as pidfd's

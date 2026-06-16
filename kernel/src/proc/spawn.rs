@@ -5136,6 +5136,235 @@ pub fn self_test_linux_real_glibc_forkexec() -> KernelResult<()> {
     }
 }
 
+/// Path Z: prove a real glibc program can build a `cmd1 | cmd2` pipeline
+/// — `pipe(2)` → `fork(2)` → child `dup2(2)`s the write end onto fd 1 and
+/// `execl(2)`s a writer (`/bin/emit`), parent `read(2)`s the pipe to EOF
+/// and `waitpid(2)`s the child.
+///
+/// This is the next shell primitive after [`self_test_linux_real_glibc_forkexec`]:
+/// it exercises (a) pipe-fd inheritance across the CoW fork, (b) `dup2`
+/// redirection, (c) an open (dup2'd) fd surviving `execve` into a fresh
+/// glibc image (no `CLOEXEC`), and (d) pipe EOF arriving once every write
+/// end is closed.  The parent writes its post-read line to its own fd 1
+/// (a capture file), so the captured bytes are deterministic.
+///
+/// No-op (returns `Ok`) when the Path-Z rootfs (`/mnt/bin/pipe`) is absent.
+pub fn self_test_linux_real_glibc_pipe() -> KernelResult<()> {
+    use crate::fs::handle;
+    use crate::proc::linux_fd::{FdEntry, O_WRONLY};
+
+    const EXPECT_EXIT: i32 = 29;
+    // /bin/emit writes "SLATE_PIPE_BODY\n" (16 bytes) to the pipe; the
+    // parent reports the byte count and echoes the payload.
+    const EXPECT_OUT: &[u8] = b"SLATE_GLIBC_PIPE_OK n=16 body=SLATE_PIPE_BODY\n";
+
+    const SRC_LD: &str = "/mnt/lib64/ld-linux-x86-64.so.2";
+    const SRC_LIBC: &str = "/mnt/lib/x86_64-linux-gnu/libc.so.6";
+    const SRC_EMIT: &str = "/mnt/bin/emit";
+    const SRC_PIPE: &str = "/mnt/bin/pipe";
+    const DST_LD: &str = "/lib64/ld-linux-x86-64.so.2";
+    const DST_LIBC: &str = "/lib/x86_64-linux-gnu/libc.so.6";
+    const DST_EMIT: &str = "/bin/emit";
+    const DST_PIPE: &str = "/bin/pipe";
+    const CAPTURE: &str = "/glibc-pipe-capture.tmp";
+    // pipe + fork + exec + read-to-EOF + wait of a dynamically-linked child:
+    // the child re-runs ld.so, so allow the same generous yield budget as
+    // the forkexec test.  The parent's blocking read returns EOF as soon as
+    // the child exits and the kernel closes its last pipe write end at the
+    // zombie transition (pcb::exit_close_fds), so the parent wakes promptly
+    // once the child finishes its (in-budget) startup.
+    const MAX_YIELDS: usize = 262_144;
+
+    if !crate::fs::Vfs::exists(SRC_PIPE) {
+        return Ok(());
+    }
+
+    serial_println!("[spawn] Running REAL glibc pipe()+fork()+dup2()+execl()+read()+wait (ring 3, Path Z) test...");
+
+    let _ = crate::fs::Vfs::mkdir_all("/lib64");
+    let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
+    let _ = crate::fs::Vfs::mkdir_all("/bin");
+    for (src, dst) in [
+        (SRC_LD, DST_LD),
+        (SRC_LIBC, DST_LIBC),
+        (SRC_EMIT, DST_EMIT),
+        (SRC_PIPE, DST_PIPE),
+    ] {
+        match crate::fs::Vfs::read_file(src) {
+            Ok(bytes) => {
+                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
+                    serial_println!(
+                        "[spawn]   real glibc pipe: SKIP (staging {} -> {} failed: {:?})",
+                        src, dst, e
+                    );
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                serial_println!(
+                    "[spawn]   real glibc pipe: SKIP (reading {} failed: {:?})",
+                    src, e
+                );
+                return Ok(());
+            }
+        }
+    }
+
+    let exe_elf = match crate::fs::Vfs::read_file(DST_PIPE) {
+        Ok(b) => b,
+        Err(e) => {
+            serial_println!("[spawn]   real glibc pipe: SKIP (re-read {} failed: {:?})", DST_PIPE, e);
+            return Ok(());
+        }
+    };
+
+    let _ = crate::fs::Vfs::remove(CAPTURE);
+    let capture_handle = match handle::open(
+        CAPTURE,
+        handle::OpenFlags::READ
+            .union(handle::OpenFlags::WRITE)
+            .union(handle::OpenFlags::CREATE),
+    ) {
+        Ok(h) => h,
+        Err(e) => {
+            serial_println!("[spawn]   real glibc pipe: SKIP (capture-file open failed: {:?})", e);
+            return Ok(());
+        }
+    };
+
+    let argv: &[&[u8]] = &[b"/bin/pipe"];
+    let envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C"];
+    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-glibc-pipe",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: Some(DST_PIPE.as_bytes()),
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = handle::close(capture_handle);
+            let _ = crate::fs::Vfs::remove(CAPTURE);
+            serial_println!("[spawn]   FAIL: real glibc pipe spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Redirect the *parent's* fd 1 → capture before it runs.  The child
+    // rewires its own fd 1 onto the pipe (dup2) before exec, so only the
+    // parent's post-read line lands in the capture file.
+    //
+    // The capture handle must be installed the way a normally-open()ed
+    // file would be, or the forked child destroys it: the child's
+    // `dup2(pipe, 1)` displaces the inherited fd-1 entry and the kernel's
+    // dup2-close path (`sys_dup2_impl` → `close_handle` → `sys_fs_close`)
+    // drops one refcount on the displaced handle.  If we injected the
+    // handle raw (refcount 1, untracked) that single close would take the
+    // shared capture handle to refcount 0 and free it before the parent's
+    // post-read `printf` runs, yielding a 0-byte capture.  To model real
+    // ownership: bump the refcount once for the parent's own reference and
+    // register it in the parent's ipc_handles, so (a) `fork_create`'s
+    // `dup_one` bumps it again for the child, (b) the child's dup2-close
+    // decrements the child's reference only, and (c) the parent retains a
+    // live reference through its `printf`.  The original `handle::open`
+    // reference stays ours, for the read-back + final close below.
+    if let Err(e) = handle::dup_shared(capture_handle) {
+        let _ = handle::close(capture_handle);
+        thread::on_thread_exit(result.task_id);
+        pcb::destroy(result.pid);
+        let _ = crate::fs::Vfs::remove(CAPTURE);
+        serial_println!("[spawn]   FAIL: real glibc pipe — dup_shared(capture) failed: {:?}", e);
+        return Err(KernelError::InternalError);
+    }
+    pcb::register_ipc_handle(result.pid, ResourceType::File, capture_handle);
+    let _ = pcb::linux_fd_take(result.pid, 1);
+    if let Err(e) = pcb::linux_fd_install_at(result.pid, 1, FdEntry::file(capture_handle, O_WRONLY)) {
+        // Drop the parent's reference we just added (register + dup_shared),
+        // then our own; the process never ran so nothing else holds it.
+        pcb::deregister_ipc_handle(result.pid, ResourceType::File, capture_handle);
+        let _ = handle::close(capture_handle);
+        let _ = handle::close(capture_handle);
+        thread::on_thread_exit(result.task_id);
+        pcb::destroy(result.pid);
+        let _ = crate::fs::Vfs::remove(CAPTURE);
+        serial_println!("[spawn]   FAIL: real glibc pipe — redirecting fd 1 failed: {:?}", e);
+        return Err(KernelError::InternalError);
+    }
+
+    let mut reaped = false;
+    for _ in 0..MAX_YIELDS {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            reaped = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    let captured = crate::fs::Vfs::read_file(CAPTURE);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(CAPTURE);
+    // Release our own (open) reference to the capture handle.  The
+    // parent's reference (dup_shared + register above) was already
+    // dropped by `exit_close_fds` at its zombie transition; this final
+    // close balances the refcount back to zero with no leak.
+    let _ = handle::close(capture_handle);
+
+    if !reaped || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: real glibc pipe — process did not exit within {} yields \
+             (state={:?}); pipe inheritance across fork, the child's dup2/exec, the \
+             parent's blocking read, or wait4 likely hung",
+            MAX_YIELDS, state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECT_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: real glibc pipe — exit code={:?}, expected {} (2=pipe \
+             failed, 3=fork failed, 4=waitpid mismatch, 5=child error)",
+            exit_code, EXPECT_EXIT
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    match captured {
+        Ok(bytes) if bytes.as_slice() == EXPECT_OUT => {
+            serial_println!(
+                "[spawn]   REAL glibc pipe (ring 3: pipe() + fork() CoW pipe-fd inherit + \
+                 child dup2(write end -> fd 1) + execl(/bin/emit) preserving the open fd + \
+                 parent read()-to-EOF + waitpid(), captured {} bytes == expected): OK",
+                bytes.len()
+            );
+            Ok(())
+        }
+        Ok(bytes) => {
+            serial_println!(
+                "[spawn]   FAIL: real glibc pipe — captured {} bytes {:?}, expected {:?}",
+                bytes.len(), bytes.as_slice(), EXPECT_OUT
+            );
+            Err(KernelError::InternalError)
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: real glibc pipe — reading capture file back failed: {:?}",
+                e
+            );
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

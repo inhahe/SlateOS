@@ -370,6 +370,76 @@ deny — are now fixed; see F8 and F9.)_
 
 ## Fixed Bugs
 
+### F17. fd-bearing resources were closed at *reap* (`destroy`) instead of at *exit* (zombie) → `cmd1 | cmd2` pipeline deadlock — FIXED 2026-06-16
+
+**Where:** `kernel/src/proc/pcb.rs` — new `exit_close_fds(pid)` + extracted
+`close_initial_fds()`; `kernel/src/proc/thread.rs` — `on_thread_exit` calls
+`pcb::exit_close_fds(pid)` at the zombie transition;
+`kernel/src/proc/pcb.rs::destroy_process_resources` now just calls
+`cleanup_handles` + `close_initial_fds` for the force-kill / never-zombied
+path (the slices are already empty on the normal exit path).
+
+**Symptom:** A real glibc `cmd1 | cmd2` pipeline (`/bin/pipe`: `pipe`→`fork`;
+child `dup2`s the write end onto fd 1 and `execl`s `/bin/emit`; parent closes
+the write end, `read`s the pipe to EOF, then `waitpid`s the child) **hung
+forever** — `self_test_linux_real_glibc_pipe` reported "process did not exit
+within N yields (state=Running)" regardless of the yield budget (a 4×
+budget bump changed nothing — the tell that it was a deadlock, not
+under-budgeting).
+
+**Root cause:** A blocked pipe reader only gets EOF (`read()`→0) when the
+*last* write end closes. The child's exec'd image inherited a copy of the
+pipe write end; that fd's kernel resource was only released by
+`destroy_process_resources`, which ran when the **parent reaped** the child
+via `wait4`. But the parent could not reach `waitpid()` until its `read()`
+returned EOF. EOF ⟸ child's write end closed ⟸ child reaped ⟸ parent past
+`read()` ⟸ EOF. Circular wait → deadlock.
+
+**Fix:** Close every fd-bearing kernel resource (all `ipc_handles` + any
+unclaimed initial fds) the moment a process **exits** (becomes a zombie),
+not when its parent reaps it — matching Linux's `exit_files()` in `do_exit`.
+`exit_close_fds` `core::mem::take`s the two lists out of the PCB under the
+table lock, drops the lock, then dispatches `cleanup_handles` +
+`close_initial_fds`. Idempotent: the reap-time teardown finds the lists
+already drained, so no double-close and no leak; the force-kill path (where
+a process is destroyed without ever zombying) still closes everything.
+
+**Validation:** `self_test_linux_real_glibc_pipe` now passes — the parent
+wakes from `read()` the instant the child zombies, prints
+`SLATE_GLIBC_PIPE_OK n=16 body=SLATE_PIPE_BODY\n` (46 bytes captured ==
+expected) and `exit(29)`; boot test PASSED. This is a general correctness
+fix: it affects every pipe/socket EOF-on-last-writer-exit, not just the
+test. It is also the standing semantics any real shell relies on.
+
+### F16. `on_thread_exit_hook` dereferenced user pointers unconditionally → kernel page-fault panic when thread cleanup ran cross-address-space — FIXED 2026-06-16
+
+**Where:** `kernel/src/proc/thread_clone.rs` — `on_thread_exit_hook(task_id)`.
+
+**Symptom:** `PANIC` — page fault in `read_user` reached via
+`fetch_robust_entry ← exit_robust_list ← on_thread_exit_hook`, with CR2 in a
+glibc-mmap user range, when a boot self-test reaped a real glibc process
+(e.g. the Part 7 pipe test) by calling `thread::on_thread_exit(task_id)` from
+**task 0's (boot) address space** rather than the dying process's.
+
+**Root cause:** The exit hook walked PI-owned futexes, the glibc robust
+list, and zeroed `clear_child_tid` — all of which dereference *user* virtual
+addresses valid only in the dying process's address space. When the hook
+runs from a different active CR3 (cross-AS reap), those addresses point into
+the wrong (or unmapped) address space → faulting kernel read → panic.
+
+**Fix:** AS-active guard. The hook computes
+`as_active = page_table::active_pml4_phys() == pcb::get_pml4(owner_process(task_id))`
+and runs the user-memory operations (PI-futex walk, robust-list walk,
+`clear_child_tid` zero-write + `futex_wake`) **only when `as_active`**. The
+in-kernel bookkeeping removals (`ROBUST_LIST` / `RSEQ` / `CLEAR_CHILD_TID`
+map entries) always run regardless. When not AS-active the hook skips the
+user dereferences and returns after the in-kernel cleanup — correct, because
+the futex-wake/ctid-clear only matter to a live address space, and a process
+being reaped from outside its own AS has no threads left to wake.
+
+**Validation:** the Part 7 pipe boot test no longer panics in the robust-list
+walk; boot test PASSED.
+
 ### F15. Sleep-queue slot leak: an expired entry was only freed when `try_wake` returned `true`, so tasks woken early / destroyed before their deadline leaked a slot permanently — daemons then busy-spun and starved low-priority work — FIXED 2026-06-14
 
 **Where:** `kernel/src/sched/mod.rs` — `process_sleep_wakeups()` and the new

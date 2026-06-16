@@ -1465,6 +1465,18 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z: a real glibc program builds a `cmd1 | cmd2` pipeline —
+    // pipe() + fork() + the child dup2()s the write end onto fd 1 and
+    // execl()s /bin/emit, the parent read()s the pipe to EOF and
+    // waitpid()s. Proves pipe-fd inheritance across fork, dup2, and an
+    // open fd surviving execve. No-op when rootfs.ext4 is absent.
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_pipe() {
+        serial_println!(
+            "WARNING: Path-Z real glibc pipe self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

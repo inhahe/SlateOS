@@ -475,6 +475,77 @@ EOF
 gcc -O2 -o "$STAGE/bin/forkexec" "$CSRC8" -Wl,-rpath,"$LIBC_DIR" -Wl,--enable-new-dtags
 rm -f "$CSRC8"
 
+# --- the "emit" helper: a glibc program that writes a fixed payload to fd 1 ----
+# Used as the downstream end of the pipe test below.  It is exec'd by the pipe
+# test's child with fd 1 already rewired to a pipe write end, so its 16-byte
+# write(2) travels through the pipe to the reading parent -- proving that an
+# open (dup2'd) fd survives execve into a fresh glibc image (no CLOEXEC).
+CSRC9="$STAGE/emit.c"
+cat > "$CSRC9" <<'EOF'
+/* SlateOS Path-Z pipe-downstream helper: write a fixed payload to fd 1. */
+#include <unistd.h>
+
+int main(void) {
+    /* 16 bytes incl. the trailing newline. */
+    (void)write(1, "SLATE_PIPE_BODY\n", 16);
+    return 0;
+}
+EOF
+gcc -O2 -o "$STAGE/bin/emit" "$CSRC9" -Wl,-rpath,"$LIBC_DIR" -Wl,--enable-new-dtags
+rm -f "$CSRC9"
+
+# --- the "pipe" test binary: the `cmd1 | cmd2` shell primitive ----------------
+# A real glibc program that builds the exact plumbing a shell uses for a
+# pipeline: pipe(2) -> fork(2) -> the child dup2(2)s the write end onto fd 1,
+# closes both raw ends, and execl(2)s /bin/emit; the parent closes the write
+# end, read(2)s the pipe to EOF, and waitpid(2)s the child.  This exercises (a)
+# pipe-fd inheritance across the CoW fork, (b) dup2 redirection, (c) open fds
+# surviving execve into a new glibc image, and (d) pipe EOF arriving once every
+# write end (parent's + the exec'd child's) is closed.  The parent then prints
+# what it read to its own fd 1 (the capture file) and returns 29.
+# (2 = pipe failed, 3 = fork failed, 4 = waitpid mismatch, 5 = child error.)
+CSRC10="$STAGE/pipe.c"
+cat > "$CSRC10" <<'EOF'
+/* SlateOS Path-Z real-glibc pipe()+fork()+dup2()+execl()+read()+wait test. */
+#include <stdio.h>
+#include <unistd.h>
+#include <sys/wait.h>
+
+int main(void) {
+    int fds[2];
+    if (pipe(fds) != 0) return 2;            /* pipe failed */
+    pid_t pid = fork();
+    if (pid < 0) return 3;                    /* fork failed */
+    if (pid == 0) {
+        /* child: rewire stdout onto the pipe write end, then exec the writer */
+        if (dup2(fds[1], 1) < 0) _exit(126);
+        close(fds[0]);
+        close(fds[1]);
+        execl("/bin/emit", "/bin/emit", (char *)0);
+        _exit(127);                           /* exec failed */
+    }
+    close(fds[1]);                            /* parent: drop the write end */
+
+    char buf[64];
+    int n = 0, r;
+    while (n < (int)sizeof(buf) &&
+           (r = (int)read(fds[0], buf + n, sizeof(buf) - n)) > 0) {
+        n += r;
+    }
+    close(fds[0]);
+
+    int status = 0;
+    if (waitpid(pid, &status, 0) != pid) return 4;       /* -> wait4 */
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) return 5;
+
+    /* Parent's own fd 1 is the capture file; emit deterministic output. */
+    printf("SLATE_GLIBC_PIPE_OK n=%d body=%.*s", n, n, buf);
+    return 29;
+}
+EOF
+gcc -O2 -o "$STAGE/bin/pipe" "$CSRC10" -Wl,-rpath,"$LIBC_DIR" -Wl,--enable-new-dtags
+rm -f "$CSRC10"
+
 echo "[rootfs] staged tree:"
 ( cd "$STAGE" && find lib64 lib bin -type f -printf '  %-44p %10s bytes\n' )
 

@@ -1661,6 +1661,13 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_append() {
+        serial_println!(
+            "WARNING: Path-Z real dash shell append self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

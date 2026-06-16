@@ -3599,6 +3599,116 @@ pub fn self_test_linux_truncate() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 regression test for **`fchmodat2(2)` with `AT_EMPTY_PATH`**
+/// (the fd-targeted chmod form, Linux #452) against the writable memfs
+/// root.
+///
+/// The harness stages `/fchmodat2-test`, then spawns a
+/// [`elf::build_linux_fchmodat2_emptypath_test_elf`] process that
+/// `open(O_RDWR)`s the file and calls `fchmodat2(fd, "", 0o600,
+/// AT_EMPTY_PATH)`.  After the process exits 0, the kernel independently
+/// reads the metadata back and asserts `permissions == 0o600`, proving
+/// the `AT_EMPTY_PATH → handle_path → Vfs::set_permissions` branch — the
+/// genuinely new path in the fchmodat2 wiring — works end-to-end from
+/// ring 3.
+pub fn self_test_linux_fchmodat2() -> KernelResult<()> {
+    const PATH: &str = "/fchmodat2-test";
+    const PATH_NUL: &[u8] = b"/fchmodat2-test\0";
+    const MODE: u16 = 0o600;
+    const MAX_YIELDS: usize = 256;
+
+    serial_println!(
+        "[spawn] Running Linux fchmodat2(AT_EMPTY_PATH) metadata test (ring 3, memfs /)..."
+    );
+
+    let _ = crate::fs::Vfs::remove(PATH);
+    if let Err(e) = crate::fs::Vfs::write_file(PATH, b"f") {
+        serial_println!("[spawn]   FAIL: fchmodat2 staging write failed: {:?}", e);
+        return Err(e);
+    }
+
+    let exe_elf = elf::build_linux_fchmodat2_emptypath_test_elf(PATH_NUL, u32::from(MODE));
+    let argv: &[&[u8]] = &[b"spawn-test-linux-fchmodat2"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-fchmodat2",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = crate::fs::Vfs::remove(PATH);
+            serial_println!("[spawn]   FAIL: fchmodat2 spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    for _ in 0..MAX_YIELDS {
+        crate::sched::yield_now();
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            break;
+        }
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    let kernel_readback = crate::fs::Vfs::metadata(PATH);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(PATH);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: fchmodat2 (ring 3) — process not a zombie after {} yields, got {:?}",
+            MAX_YIELDS, state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fchmodat2 (ring 3) — expected exit 0, got {:?} (0xE5/229 = \
+             open(O_RDWR) failed; 0xE6/230 = fchmodat2 failed)",
+            exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    match kernel_readback {
+        Ok(ref m) if m.permissions == MODE => {}
+        Ok(ref m) => {
+            serial_println!(
+                "[spawn]   FAIL: fchmodat2 (ring 3) — process exited 0 but kernel readback \
+                 mismatch: permissions=0o{:o} (want 0o{:o})",
+                m.permissions, MODE
+            );
+            return Err(KernelError::InternalError);
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fchmodat2 (ring 3) — kernel metadata readback failed: {:?}",
+                e
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    serial_println!(
+        "[spawn]   Linux fchmodat2(AT_EMPTY_PATH) (ring 3: chmod /fchmodat2-test to 0o600 via an \
+         O_RDWR fd; kernel confirmed): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 regression test that the **`%fs` (TLS) base is saved/restored
 /// across context switches** between two concurrent Linux processes.
 ///

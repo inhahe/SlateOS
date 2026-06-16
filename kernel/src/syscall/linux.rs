@@ -39800,10 +39800,12 @@ fn sys_mount_setattr(args: &SyscallArgs) -> SyscallResult {
 /// `dirfd` directly, not on the pathname).  Batch 485 splits the
 /// branches explicitly:
 ///
-/// - `AT_EMPTY_PATH` set: validate `dirfd` (AT_FDCWD or open fd), no
-///   pathname dereference, EROFS terminal.
+/// - `AT_EMPTY_PATH` set: resolve `dirfd` to its backing path
+///   (AT_FDCWD → cwd, else an open File fd via `handle_path`), then
+///   `chmod_apply`.  Kernel context (no PCB) keeps EROFS.
 /// - `AT_EMPTY_PATH` unset: empty path → ENOENT via
-///   `check_path_str_nonempty`, then EROFS terminal.
+///   `check_path_str_nonempty`; kernel context → EROFS; otherwise
+///   `resolve_at_path` + `chmod_apply` (real `Vfs::set_permissions`).
 fn sys_fchmodat2(args: &SyscallArgs) -> SyscallResult {
     const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
     const AT_EMPTY_PATH: u32 = 0x1000;
@@ -39820,28 +39822,51 @@ fn sys_fchmodat2(args: &SyscallArgs) -> SyscallResult {
     }
 
     if flags & AT_EMPTY_PATH != 0 {
-        // AT_EMPTY_PATH: operation targets dirfd directly; path may
-        // be empty.  AT_FDCWD (-100) is always valid; any other dirfd
-        // must reference an open fd.  Same shape as sys_fchownat's
-        // AT_EMPTY_PATH branch.
-        if dirfd != -100 {
-            let pid = match caller_pid() {
+        // AT_EMPTY_PATH: operation targets dirfd directly; path may be
+        // empty.  AT_FDCWD targets the cwd; any other dirfd must
+        // reference an open File fd.  Same shape as sys_fchownat's
+        // AT_EMPTY_PATH branch.  Kernel context (no PCB) keeps EROFS.
+        let pid = match caller_pid() {
+            Some(p) => p,
+            None => return linux_err(errno::EROFS),
+        };
+        let resolved = if dirfd == AT_FDCWD {
+            match pcb::get_cwd(pid).and_then(|c| alloc::string::String::from_utf8(c).ok()) {
                 Some(p) => p,
-                None => return linux_err(errno::EROFS),
-            };
-            if pcb::linux_fd_lookup(pid, dirfd).is_none() {
-                return linux_err(errno::EBADF);
+                None => return linux_err(errno::ENOENT),
             }
-        }
-        return linux_err(errno::EROFS);
+        } else {
+            let entry = match pcb::linux_fd_lookup(pid, dirfd) {
+                Some(e) => e,
+                None => return linux_err(errno::EBADF),
+            };
+            if entry.kind != HandleKind::File {
+                return linux_err(errno::EINVAL);
+            }
+            match crate::fs::handle::handle_path(entry.raw_handle) {
+                Ok(p) => p,
+                Err(e) => return linux_err(linux_errno_for(e)),
+            }
+        };
+        return chmod_apply(&resolved, args.arg2);
     }
 
     // Non-AT_EMPTY_PATH: empty path → ENOENT (Linux getname empty-path
-    // discrimination), then EROFS terminal.
+    // discrimination), then the real chmod for ring-3 callers.
     if let Err(e) = check_path_str_nonempty(path) {
         return linux_err(e);
     }
-    linux_err(errno::EROFS)
+    if caller_pid().is_none() {
+        return linux_err(errno::EROFS);
+    }
+    let resolved = match resolve_at_path(dirfd, path) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    // Fidelity gap: AT_SYMLINK_NOFOLLOW (0x100) is ignored —
+    // `Vfs::set_permissions` always follows the final symlink.  See
+    // known-issues B-CHOWN1.
+    chmod_apply(&resolved, args.arg2)
 }
 
 /// `futex_wake(uaddr2*, mask, nr, flags)` — futex2 wake (Linux 6.7+).

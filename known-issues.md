@@ -199,7 +199,7 @@ independently asserts the kernel-side `Vfs::metadata` reports
    treated as "leave unchanged". Proper fix needs an `Option<u64>` (or
    explicit "omit" flag) plumbed through `Filesystem::set_times` for every FS.
 
-### B-CHOWN1. Linux-ABI `chmod`/`fchmod`/`fchmodat`/`chown`/`lchown`/`fchown`/`fchownat` returned EROFS unconditionally (stale FS-mutation stubs) — FIXED 2026-06-16
+### B-CHOWN1. Linux-ABI `chmod`/`fchmod`/`fchmodat`/`fchmodat2`/`chown`/`lchown`/`fchown`/`fchownat` returned EROFS unconditionally (stale FS-mutation stubs) — FIXED 2026-06-16
 
 **Symptom:** No ring-3 program could change a file's permission bits or
 ownership. The whole chmod/chown family returned `-EROFS` after input
@@ -227,6 +227,18 @@ hand-built raw-syscall ELF (`build_linux_chmod_chown_test_elf`) calls
 (sentinels `0xE1`/`0xE2`); the harness stages the file on the memfs root and,
 after exit 0, independently asserts `Vfs::metadata` reports
 `permissions == 0o640`, `uid == 1234`, `gid == 5678`.
+
+**Follow-up (`fchmodat2`, syscall #452):** the 4-arg flags-aware chmod
+(`fchmodat2`) was a separate EROFS stub missed by the first pass; it was
+wired in the same idiom as `sys_fchownat` during the truncate-line cleanup.
+`AT_EMPTY_PATH` resolves `dirfd` to its backing path (AT_FDCWD → cwd, else an
+open File fd via `handle_path`); the non-`AT_EMPTY_PATH` branch keeps the
+empty-path → ENOENT discrimination then `resolve_at_path` + `chmod_apply`.
+Kernel context keeps the EROFS terminal (batch-485 self-test still green).
+Regression test: Path Z Part 32 (`self_test_linux_fchmodat2`) —
+`build_linux_fchmodat2_emptypath_test_elf` `open(O_RDWR)`s `/fchmodat2-test`
+and calls `fchmodat2(fd, "", 0o600, AT_EMPTY_PATH)` (sentinels `0xE5`/`0xE6`);
+the harness confirms `Vfs::metadata` reports `permissions == 0o600`.
 
 **Fidelity gaps (minor):**
 1. `lchown` and `fchownat(AT_SYMLINK_NOFOLLOW)` must operate on the symlink

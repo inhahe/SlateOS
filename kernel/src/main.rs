@@ -1368,6 +1368,13 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: Linux truncate()/ftruncate() (ring 3) self-test failed: {:?}", e);
     }
 
+    // Ring-3 test that fchmodat2(AT_EMPTY_PATH) chmods the file an O_RDWR fd
+    // points to (the genuinely new path-resolution branch in the fchmodat2
+    // wiring: dirfd -> handle_path -> Vfs::set_permissions).
+    if let Err(e) = proc::spawn::self_test_linux_fchmodat2() {
+        serial_println!("WARNING: Linux fchmodat2(AT_EMPTY_PATH) (ring 3) self-test failed: {:?}", e);
+    }
+
     // Ring-3 regression test that IA32_FS_BASE (the glibc %fs/TLS pointer) is
     // saved/restored per task across context switches.  Two concurrent Linux
     // procs install distinct FS bases and assert they survive cooperative

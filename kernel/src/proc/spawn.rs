@@ -6833,6 +6833,181 @@ pub fn self_test_linux_real_glibc_shell_glob() -> KernelResult<()> {
     }
 }
 
+/// Path Z Part 16: a real `dash` shell performs *command substitution*
+/// (`echo [$(/bin/emit)]`), where dash itself reads a child's output from a
+/// pipe and substitutes it into the command line.
+///
+/// Part 12 proved dash *plumbing* a pipe between two children (`cmd1 | cmd2`);
+/// here dash is the pipe *reader*: for `$(/bin/emit)` it creates a pipe,
+/// `fork`s a subshell whose stdout is the pipe write end, `execve`s the
+/// external glibc `/bin/emit` (which writes `"SLATE_PIPE_BODY\n"`), then dash
+/// itself `read(2)`s the pipe to EOF into its own buffer, strips the trailing
+/// newline(s) (POSIX command-substitution rule), and splices the captured
+/// `SLATE_PIPE_BODY` into the `echo` builtin's argv.  The whole line's stdout
+/// is redirected to a file so the test can read it back deterministically.
+///
+/// With `/bin/emit` emitting exactly `SLATE_PIPE_BODY\n`, the substitution
+/// yields `SLATE_PIPE_BODY` (newline stripped) and `echo [SLATE_PIPE_BODY]`
+/// writes the 18 bytes `[SLATE_PIPE_BODY]\n` to the redirect file; dash exits
+/// 0.  A failed substitution would instead leave `[]\n` (3 bytes), so an exact
+/// match proves dash read the child's piped output correctly.
+///
+/// # Errors
+///
+/// Returns [`KernelError::InternalError`] if the shell fails to reach
+/// `Zombie`, exits non-zero, or the captured file does not match; propagates
+/// spawn failure.
+pub fn self_test_linux_real_glibc_shell_cmdsub() -> KernelResult<()> {
+    const EXPECT_EXIT: i32 = 0;
+    // /bin/emit writes "SLATE_PIPE_BODY\n"; command substitution strips the
+    // trailing newline, and `echo [X]` re-adds one — so 18 bytes.
+    const EXPECT_OUT: &[u8] = b"[SLATE_PIPE_BODY]\n";
+
+    const SRC_LD: &str = "/mnt/lib64/ld-linux-x86-64.so.2";
+    const SRC_LIBC: &str = "/mnt/lib/x86_64-linux-gnu/libc.so.6";
+    const SRC_DASH: &str = "/mnt/bin/dash";
+    const SRC_EMIT: &str = "/mnt/bin/emit";
+    const DST_LD: &str = "/lib64/ld-linux-x86-64.so.2";
+    const DST_LIBC: &str = "/lib/x86_64-linux-gnu/libc.so.6";
+    const DST_DASH: &str = "/bin/dash";
+    const DST_EMIT: &str = "/bin/emit";
+    const OUT_PATH: &str = "/cmdsub-out.txt";
+    const MAX_YIELDS: usize = 262_144;
+
+    if !crate::fs::Vfs::exists(SRC_DASH) || !crate::fs::Vfs::exists(SRC_EMIT) {
+        return Ok(());
+    }
+
+    serial_println!("[spawn] Running REAL dash shell command substitution `echo [$(/bin/emit)] > file` (ring 3, Path Z) test...");
+
+    let _ = crate::fs::Vfs::mkdir_all("/lib64");
+    let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
+    let _ = crate::fs::Vfs::mkdir_all("/bin");
+    for (src, dst) in [
+        (SRC_LD, DST_LD),
+        (SRC_LIBC, DST_LIBC),
+        (SRC_DASH, DST_DASH),
+        (SRC_EMIT, DST_EMIT),
+    ] {
+        match crate::fs::Vfs::read_file(src) {
+            Ok(bytes) => {
+                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
+                    serial_println!(
+                        "[spawn]   real dash cmdsub: SKIP (staging {} -> {} failed: {:?})",
+                        src, dst, e
+                    );
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                serial_println!(
+                    "[spawn]   real dash cmdsub: SKIP (reading {} failed: {:?})",
+                    src, e
+                );
+                return Ok(());
+            }
+        }
+    }
+
+    let exe_elf = match crate::fs::Vfs::read_file(DST_DASH) {
+        Ok(b) => b,
+        Err(e) => {
+            serial_println!("[spawn]   real dash cmdsub: SKIP (re-read {} failed: {:?})", DST_DASH, e);
+            return Ok(());
+        }
+    };
+
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+
+    let argv: &[&[u8]] = &[
+        b"/bin/dash",
+        b"-c",
+        b"echo [$(/bin/emit)] > /cmdsub-out.txt",
+    ];
+    let envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C"];
+    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-dash-cmdsub",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: Some(DST_DASH.as_bytes()),
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: real dash cmdsub spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let mut reaped = false;
+    for _ in 0..MAX_YIELDS {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            reaped = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    let written = crate::fs::Vfs::read_file(OUT_PATH);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+
+    if !reaped || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: real dash cmdsub — shell did not exit within {} yields \
+             (state={:?}); dash's pipe/fork/exec of /bin/emit or its capture read likely hung",
+            MAX_YIELDS, state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECT_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: real dash cmdsub — exit code={:?}, expected {}",
+            exit_code, EXPECT_EXIT
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    match written {
+        Ok(bytes) if bytes.as_slice() == EXPECT_OUT => {
+            serial_println!(
+                "[spawn]   REAL dash shell command substitution (ring 3: dash piped + \
+                 fork/exec'd /bin/emit, read its stdout to EOF, stripped the trailing \
+                 newline, substituted it into echo — read back {} bytes == expected, \
+                 exit {}): OK",
+                bytes.len(), EXPECT_EXIT
+            );
+            Ok(())
+        }
+        Ok(bytes) => {
+            serial_println!(
+                "[spawn]   FAIL: real dash cmdsub — wrote {} bytes {:?}, expected {} bytes {:?} \
+                 (`[]` means the command substitution captured nothing)",
+                bytes.len(), bytes.as_slice(), EXPECT_OUT.len(), EXPECT_OUT
+            );
+            Err(KernelError::InternalError)
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: real dash cmdsub — reading the redirected output file back failed: {:?}",
+                e
+            );
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

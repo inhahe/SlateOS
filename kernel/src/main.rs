@@ -1568,6 +1568,17 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z: a real dash shell performs command substitution —
+    // `echo [$(/bin/emit)] > file` — where dash itself reads the substituted
+    // command's stdout from a pipe and splices it into the command line. No-op
+    // without rootfs.ext4.
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_cmdsub() {
+        serial_println!(
+            "WARNING: Path-Z real dash shell cmdsub self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

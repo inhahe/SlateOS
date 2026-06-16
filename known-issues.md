@@ -370,6 +370,67 @@ deny — are now fixed; see F8 and F9.)_
 
 ## Fixed Bugs
 
+### F18. CoW refcount granularity mismatch (per-16 KiB-frame refcount vs per-4 KiB-PTE resolution) double-freed a still-shared frame → parent `dash` #GP in a pipeline — FIXED 2026-06-16
+
+**Where:** `kernel/src/mm/cow.rs` (`resolve_cow_fault`, `clone_frame_group`)
+and `kernel/src/mm/page_table.rs` (`clear_user_address_space`).
+
+**Symptom:** A real `dash -c '/bin/emit | /bin/countbytes > /dash-pipe-out.txt'`
+(Path Z Part 12) crashed the *parent* `dash` with a #GP at glibc
+`wait4`'s errno store (`mov %eax,%fs:(%rdx)`, libc+0x110839) — but only
+on the `wait4` *error* path (e.g. `-ECHILD`), which is why the
+single-fork Part 11 never hit it. The faulting `%rdx` was garbage loaded
+from a libc `.got` slot (the errno `R_X86_64_TPOFF64` negative TLS
+offset), so `%fs:(%rdx)` was non-canonical. The `.got` 4 KiB page lived
+at virt `0x6000203000`, sub-page 3 of the 16 KiB frame group based at
+`0x6000200000`.
+
+**Root cause:** CoW refcounting is **per-16 KiB frame** (the buddy
+allocator's unit), but CoW *sharing/resolution* is tracked **per-4 KiB
+PTE** (each 16 KiB frame maps as 4 consecutive PTEs). The ELF loader
+packs a read-only segment tail and a writable segment head into one
+16 KiB frame, so a group can hold a read-only *shared* sub-PTE (no COW
+bit) next to a writable *CoW* sub-PTE — both pointing into the same
+frame. Three operations used **inconsistent** rules for "the group's
+reference to the frame":
+- `clone_frame_group` incremented the refcount once, keyed on the *first
+  present* sibling.
+- `resolve_cow_fault` decremented once per resolve event whenever *any*
+  CoW sibling was copied out — **even though a read-only shared sibling
+  still referenced the old frame**.
+- `clear_user_address_space` freed once per group, keyed on *only the
+  base (sub-page 0)* PTE.
+
+So a forked child that wrote the writable sub-PTE resolved it to a
+private copy and decremented the old frame, *while still mapping the old
+frame via the read-only sub-PTE*. At teardown the child's base PTE still
+pointed at the old frame → it freed it **again** (double-decrement). Two
+such children drove the parent-shared frame's refcount to 0; the freed
+frame was reused (filled with a child's exec image), corrupting the
+parent's `.got` errno slot → garbage `%rdx` → #GP.
+
+**Fix:** Make all three operations agree on one invariant — *each address
+space holds exactly one refcount on each **distinct** 16 KiB frame its
+group's sub-PTEs reference*:
+- `resolve_cow_fault` now drops the old frame's reference (ref_dec + rmap
+  remove) **only if, after the copy loop, no sub-PTE of the group still
+  points into the old frame**. A read-only shared sibling keeps the
+  reference alive; the new private frame is registered in rmap
+  unconditionally.
+- `clone_frame_group` increments the refcount (and adds rmap) once **per
+  distinct frame** found among the group's present siblings (handles a
+  parent that had already partially resolved a group before forking
+  again).
+- `clear_user_address_space` inspects **all four** sub-PTEs of each group
+  and frees each **distinct** frame exactly once (was: only the base
+  PTE), so copied-out private frames are no longer leaked and refcounts
+  stay symmetric with resolve/clone. (The refcount-aware `free_frame`
+  already only returns a frame to the allocator at its last reference.)
+
+**Verification:** Part 12 boot self-test
+`proc::spawn::self_test_linux_real_glibc_shell_pipe` now passes (parent
+`dash` exits 0, `/dash-pipe-out.txt` == `n=16\n`).
+
 ### F17. fd-bearing resources were closed at *reap* (`destroy`) instead of at *exit* (zombie) → `cmd1 | cmd2` pipeline deadlock — FIXED 2026-06-16
 
 **Where:** `kernel/src/proc/pcb.rs` — new `exit_close_fds(pid)` + extracted

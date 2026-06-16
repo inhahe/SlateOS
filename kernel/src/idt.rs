@@ -1107,7 +1107,6 @@ fn kill_userspace_task_with_info(
         "  CS={:#x} RFLAGS={:#x} RSP={:#x} SS={:#x}",
         frame.cs, frame.rflags, frame.rsp, frame.ss
     );
-
     // Record crash info in the PCB before killing the thread.
     // This allows the parent process (service manager) to distinguish
     // crashes from normal exits and get diagnostic details.

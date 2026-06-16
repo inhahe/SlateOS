@@ -143,13 +143,15 @@ pub fn resolve_cow_fault(pml4_phys: u64, fault_addr: u64) -> KernelResult<()> {
     //
     // Refcounting: the per-frame refcount counts *address-space
     // references* to the 16 KiB frame, NOT individual 4 KiB PTEs.  Each
-    // address space that shares the frame contributes exactly one
-    // reference (set to 1 at alloc, +1 per fork via
-    // `clone_address_space_cow`, -1 per teardown via
-    // `clear_user_address_space`, which frees once per frame group).
-    // When this address space copies its pages into a private frame, it
-    // drops its single reference to the old frame — so we decrement
-    // exactly ONCE regardless of how many sibling PTEs were resolved.
+    // address space that maps any sub-PTE of the frame contributes exactly
+    // one reference (set to 1 at alloc, +1 per fork via
+    // `clone_address_space_cow`, -1 when the address space's LAST sub-PTE
+    // leaves the frame — whether via this CoW copy or via teardown in
+    // `clear_user_address_space`).  We therefore only drop our reference
+    // *after* the copy loop, and only if no sibling still points into the
+    // old frame (see the `old_still_referenced` check below).  A
+    // read-only shared sibling that lives in the same frame keeps the
+    // reference alive even though it is not copied here.
     //
     // Based on Linux mm/memory.c do_wp_page() + copy_page_range().  Linux
     // refcounts per `struct page` and adjusts once per shared mapping that
@@ -208,21 +210,50 @@ pub fn resolve_cow_fault(pml4_phys: u64, fault_addr: u64) -> KernelResult<()> {
         pages_resolved += 1;
     }
 
-    // Drop this address space's single reference to the old frame.  The
-    // refcount is per-frame (per address space), not per-PTE, so we
-    // decrement exactly once when at least one sibling was resolved (the
-    // whole frame group belonged to this one address-space reference).
-    // SAFETY: old frame is a valid allocated frame.
-    if pages_resolved > 0 {
-        let _ = unsafe { frame::ref_dec(frame) };
+    if pages_resolved == 0 {
+        // No CoW sibling shared the old frame (e.g. a read-only shared
+        // sibling triggered a spurious lookup) — release the unused copy.
+        // SAFETY: new_frame was just allocated and is unmapped.
+        let _ = unsafe { frame::free_frame(new_frame) };
+        super::fault::record_cow();
+        return Ok(());
     }
 
-    // Update reverse mapping: the new frame is now mapped at this virtual
-    // address in this address space.  Remove the old frame's rmap entry
-    // (it was shared, now we have our own copy).
-    if pages_resolved > 0 {
+    // Determine whether this address space still references the OLD frame
+    // through any sibling in the group.  After a partial resolve, some
+    // sub-PTEs can legitimately remain on the old frame — most commonly a
+    // read-only *shared* sibling (no COW bit) that lives in the same
+    // 16 KiB frame as a writable CoW sibling (the ELF loader packs a
+    // read-only segment tail and a writable segment head into one frame).
+    // Such a sibling was NOT copied above, so this address space keeps a
+    // genuine reference to the old frame.
+    //
+    // The per-frame refcount counts *address-space references*, so we may
+    // only drop our reference (ref_dec + rmap remove) when NO sub-PTE of
+    // the group still points into the old frame.  Decrementing while a
+    // sibling still maps it would under-count the refcount and free a
+    // frame that is still mapped here and in other address spaces — the
+    // Path-Z #12 dash-pipeline #GP was exactly this double-decrement.
+    let mut old_still_referenced = false;
+    for i in 0..HW_PAGES_PER_FRAME {
+        let sibling_virt = VirtAddr::new(group_virt_base + (i as u64 * HW_PAGE_SIZE as u64));
+        // SAFETY: pml4_phys is valid (same address space).
+        if let Ok(p) = unsafe { read_pte(pml4_phys, sibling_virt, hhdm) } {
+            if p.is_present() && (p.phys_addr() & !(FRAME_SIZE as u64 - 1)) == frame_base {
+                old_still_referenced = true;
+                break;
+            }
+        }
+    }
+
+    // The new frame is now mapped at this group's virtual base.
+    super::rmap::add(new_phys, pml4_phys, group_virt_base);
+
+    if !old_still_referenced {
+        // This address space's last reference to the old frame is gone.
         super::rmap::remove(frame_base, pml4_phys, group_virt_base);
-        super::rmap::add(new_phys, pml4_phys, group_virt_base);
+        // SAFETY: old frame is a valid allocated frame.
+        let _ = unsafe { frame::ref_dec(frame) };
     }
 
     // Flush TLB for the entire frame group.
@@ -414,8 +445,12 @@ unsafe fn map_child_pte(
 /// - **Read-only** pages are shared as-is (no COW bit — a write is a
 ///   genuine protection fault, not a CoW event).
 ///
-/// The shared 16 KiB frame's refcount is incremented exactly once (the
-/// child gains one address-space reference to it).
+/// Each *distinct* 16 KiB frame referenced by the group's present
+/// siblings gains exactly one refcount (the child becomes one more
+/// address-space reference to it).  In the common case all four siblings
+/// share a single frame, so this is one increment; but after a partial
+/// CoW resolve in the parent, siblings can point into different frames,
+/// each of which must be counted.
 ///
 /// Returns `true` if the group was shared (at least one PTE present),
 /// `false` if the group was entirely unmapped (nothing to copy — the
@@ -435,9 +470,12 @@ unsafe fn clone_frame_group(
     base_pt_idx: usize,
     hhdm: u64,
 ) -> KernelResult<bool> {
-    let mut frame_ref_taken = false;
     let mut parent_needs_flush = false;
-    let mut group_frame_base: u64 = 0;
+    // Distinct 16 KiB frame bases referenced by this group's siblings.  At
+    // most HW_PAGES_PER_FRAME distinct frames (one per sub-PTE).  We
+    // increment each frame's refcount exactly once for the child.
+    let mut seen_frames: [u64; HW_PAGES_PER_FRAME] = [0; HW_PAGES_PER_FRAME];
+    let mut seen_count = 0usize;
 
     for i in 0..HW_PAGES_PER_FRAME {
         let pt_idx = base_pt_idx + i;
@@ -450,10 +488,17 @@ unsafe fn clone_frame_group(
         let phys = pte.phys_addr();
         let frame_base = phys & !(FRAME_SIZE as u64 - 1);
 
-        // Increment the shared frame's refcount once for the whole group
-        // (the first present sibling we encounter).
-        if !frame_ref_taken {
-            group_frame_base = frame_base;
+        // Increment this frame's refcount once per distinct frame in the
+        // group (each present sibling may, after a partial CoW resolve in
+        // the parent, point into a different 16 KiB frame).
+        let mut already_seen = false;
+        for &seen in seen_frames.iter().take(seen_count) {
+            if seen == frame_base {
+                already_seen = true;
+                break;
+            }
+        }
+        if !already_seen {
             if let Some(frame) = PhysFrame::from_addr(frame_base) {
                 // SAFETY: frame is a valid allocated frame currently mapped
                 // into the parent.
@@ -461,8 +506,15 @@ unsafe fn clone_frame_group(
             }
             // Frames not owned by the allocator (e.g., device MMIO mapped
             // into user space) are shared without refcounting — they are
-            // never returned to the frame allocator.
-            frame_ref_taken = true;
+            // never returned to the frame allocator.  Record the frame and
+            // its child rmap entry regardless so teardown stays symmetric.
+            if let Some(slot) = seen_frames.get_mut(seen_count) {
+                *slot = frame_base;
+                seen_count += 1;
+            }
+            // The child now maps this frame; record the reverse mapping so
+            // the reclaimer/compactor can find it.
+            super::rmap::add(frame_base, child_pml4, group_virt_base);
         }
 
         // Compute child flags and, for writable pages, downgrade the parent
@@ -489,14 +541,10 @@ unsafe fn clone_frame_group(
         unsafe { map_child_pte(child_pml4, hw_virt, child_entry, hhdm)?; }
     }
 
-    if !frame_ref_taken {
+    if seen_count == 0 {
         // Entire group was non-present — nothing shared.
         return Ok(false);
     }
-
-    // The child now maps this frame; record the reverse mapping so the
-    // reclaimer/compactor can find it.
-    super::rmap::add(group_frame_base, child_pml4, group_virt_base);
 
     // Charge the child's RSS for the shared frame (mirrors map_frame).
     super::accounting::charge(child_pml4, 1);

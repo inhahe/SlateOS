@@ -629,6 +629,32 @@ rm -f "$CSRC12"
 # Copied as both /bin/dash and /bin/sh (a copy, not a symlink, so the rootfs
 # need not depend on symlink support in the image builder).  The SlateOS
 # self-tests drive it with `dash -c '<command>'`.
+# --- the "countbytes" pipeline-downstream filter ------------------------------
+# Reads stdin to EOF and prints "n=<bytes>\n".  Used as the *downstream* stage
+# of a real shell pipeline `cmd1 | countbytes`: the shell wires /bin/emit's
+# stdout to this program's stdin through a pipe, so a correct byte count proves
+# the pipe carried every byte across the fork/exec boundary.  Deterministic
+# output ("n=16\n" for /bin/emit's 16-byte payload) lets the self-test assert
+# the exact bytes.  (2 = read error.)
+CSRC13="$STAGE/countbytes.c"
+cat > "$CSRC13" <<'EOF'
+/* SlateOS Path-Z pipeline downstream: count stdin bytes to EOF. */
+#include <unistd.h>
+#include <stdio.h>
+
+int main(void) {
+    char buf[4096];
+    long total = 0;
+    ssize_t n;
+    while ((n = read(0, buf, sizeof buf)) > 0) total += n;
+    if (n < 0) return 2;            /* read error */
+    printf("n=%ld\n", total);
+    return 0;
+}
+EOF
+gcc -O2 -o "$STAGE/bin/countbytes" "$CSRC13" -Wl,-rpath,"$LIBC_DIR" -Wl,--enable-new-dtags
+rm -f "$CSRC13"
+
 DASH_SRC="/bin/dash"
 if [ -e "$DASH_SRC" ]; then
     cp -L "$DASH_SRC" "$STAGE/bin/dash"

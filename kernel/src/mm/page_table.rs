@@ -1763,50 +1763,92 @@ pub unsafe fn clear_user_address_space(pml4_phys: u64) {
                 let pt_phys = pde.phys_addr();
 
                 // Walk PT entries in groups of HW_PAGES_PER_FRAME (4).
-                // Our 16 KiB frames are always mapped as 4 consecutive
-                // 4 KiB PTEs with the first aligned to a multiple of 4.
+                // A 16 KiB frame is normally mapped as 4 consecutive 4 KiB
+                // PTEs aligned to a multiple of 4, but after a *partial* CoW
+                // resolve the four sub-PTEs of a group can point into
+                // different frames (e.g. a read-only shared sibling left on
+                // the original frame while a writable sibling was copied to
+                // a private frame).  We must therefore inspect all four
+                // sub-PTEs and free each *distinct* frame exactly once —
+                // freeing only the base sub-PTE's frame would leak the
+                // copied frames and, worse, under-count refcounts.  This
+                // symmetry with `cow::resolve_cow_fault` (one reference per
+                // address space per distinct frame) is what prevents the
+                // Path-Z #12 dash-pipeline double-free #GP.
                 for base_pt_idx in (0..ENTRIES_PER_TABLE).step_by(HW_PAGES_PER_FRAME) {
-                    // SAFETY: pt_phys is from present pde, index < 512.
-                    let pte = unsafe { read_entry(pt_phys, base_pt_idx, hhdm) };
-                    if !pte.is_present() {
+                    // The mapping key is (frame_phys, pml4_phys, virt_frame
+                    // _base); reconstruct the 16 KiB-aligned user virtual
+                    // address from the walk indices (the user half has bit
+                    // 47 == 0, so no sign extension is needed).
+                    let virt_frame_base = ((pml4_idx as u64) << 39)
+                        | ((pdpt_idx as u64) << 30)
+                        | ((pd_idx as u64) << 21)
+                        | ((base_pt_idx as u64) << 12);
+
+                    // Collect the distinct frame bases referenced by the
+                    // group's four sub-PTEs (at most HW_PAGES_PER_FRAME).
+                    // Const offset mask is evaluated at compile time.
+                    const FRAME_OFFSET_MASK: u64 = FRAME_SIZE as u64 - 1;
+                    let mut seen: [u64; HW_PAGES_PER_FRAME] = [0; HW_PAGES_PER_FRAME];
+                    let mut seen_count = 0usize;
+                    let mut any_present = false;
+
+                    for sub in 0..HW_PAGES_PER_FRAME {
+                        // base_pt_idx is a multiple of 4 and sub < 4, so the
+                        // sum is always < ENTRIES_PER_TABLE; saturating_add
+                        // documents that without an overflow lint.
+                        let pt_idx = base_pt_idx.saturating_add(sub);
+                        // SAFETY: pt_phys is from present pde; pt_idx < 512.
+                        let pte = unsafe { read_entry(pt_phys, pt_idx, hhdm) };
+                        if !pte.is_present() {
+                            continue;
+                        }
+                        any_present = true;
+                        let frame_base = pte.phys_addr() & !FRAME_OFFSET_MASK;
+                        let mut already = false;
+                        for &s in seen.iter().take(seen_count) {
+                            if s == frame_base {
+                                already = true;
+                                break;
+                            }
+                        }
+                        if !already {
+                            if let Some(slot) = seen.get_mut(seen_count) {
+                                *slot = frame_base;
+                                seen_count = seen_count.saturating_add(1);
+                            }
+                        }
+                    }
+
+                    if !any_present {
                         continue;
                     }
 
-                    // The PTE points to a 4 KiB hardware page; the
-                    // 16 KiB frame base is the address aligned down to
-                    // FRAME_SIZE.
-                    let frame_base = pte.phys_addr() & !(FRAME_SIZE as u64 - 1);
-                    if let Some(frame) = PhysFrame::from_addr(frame_base) {
-                        // Drop this frame's reverse-mapping (if any) before
-                        // freeing it.  A demand-faulted user page is registered
-                        // in rmap (proc::pcb fault handler, cow, swap); without
-                        // removing it here the entry would dangle, pointing into
-                        // a physical frame that is about to be freed and handed
-                        // to another address space — compaction/swap could then
-                        // migrate or evict a frame that no longer belongs to
-                        // this process.  rmap::remove is a no-op for frames that
-                        // were never tracked (eagerly-mapped / kernel frames).
-                        //
-                        // The mapping key is (frame_phys, pml4_phys, virt_frame
-                        // _base); reconstruct the 16 KiB-aligned user virtual
-                        // address from the walk indices (the user half has bit
-                        // 47 == 0, so no sign extension is needed).
-                        let virt_frame_base = ((pml4_idx as u64) << 39)
-                            | ((pdpt_idx as u64) << 30)
-                            | ((pd_idx as u64) << 21)
-                            | ((base_pt_idx as u64) << 12);
-                        super::rmap::remove(frame_base, pml4_phys, virt_frame_base);
-                        // Same reasoning for the swap reclaimable set: a
-                        // demand-faulted page is registered there too
-                        // (proc::pcb fault handler), and the bulk teardown here
-                        // bypasses unmap_frame (which is what normally
-                        // unregisters).  Drop it so the Clock reclaimer can
-                        // never select a freed/reused frame.  No-op if absent.
-                        super::swap::unregister_reclaimable(pml4_phys, virt_frame_base);
-                        // SAFETY: This frame was mapped exclusively
-                        // into this process's address space and the
-                        // process is being destroyed / exec'd.
-                        let _ = unsafe { frame::free_frame(frame) };
+                    // Drop the swap reclaimable registration for this group
+                    // once (keyed per (pml4, virt_frame_base)).  A demand-
+                    // faulted page is registered there (proc::pcb fault
+                    // handler); the bulk teardown bypasses unmap_frame (which
+                    // normally unregisters), so drop it here so the Clock
+                    // reclaimer can never select a freed/reused frame.  No-op
+                    // if absent.
+                    super::swap::unregister_reclaimable(pml4_phys, virt_frame_base);
+
+                    for &frame_base in seen.iter().take(seen_count) {
+                        if let Some(frame) = PhysFrame::from_addr(frame_base) {
+                            // Drop this frame's reverse-mapping (if any) before
+                            // freeing it.  Without removing it the entry would
+                            // dangle, pointing into a physical frame about to be
+                            // freed and handed to another address space —
+                            // compaction/swap could then migrate or evict a
+                            // frame that no longer belongs to this process.
+                            // rmap::remove is a no-op for frames that were never
+                            // tracked (eagerly-mapped / kernel frames).
+                            super::rmap::remove(frame_base, pml4_phys, virt_frame_base);
+                            // SAFETY: refcount-aware free; the frame is only
+                            // returned to the allocator when this is its last
+                            // address-space reference.
+                            let _ = unsafe { frame::free_frame(frame) };
+                        }
                     }
                 }
 

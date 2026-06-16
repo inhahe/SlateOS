@@ -438,6 +438,46 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
                 if let Some(waiter) = any_waiter {
                     crate::sched::wake(waiter);
                 }
+
+                // Post SIGCHLD to the parent. This is distinct from the
+                // wait4() wakeups above (which target a thread parked in
+                // wait4()): SIGCHLD drives the *signal* path, used by a
+                // parent running a SIGCHLD handler or parked in
+                // sigsuspend()/pause() — e.g. dash's job-control `wait`
+                // builtin, which arms a SIGCHLD handler then sigsuspends,
+                // reaping with waitpid(WNOHANG) only after the signal wakes
+                // it.  Without this the parent livelocks in sigsuspend.
+                if let Some(parent) = pcb::parent(pid) {
+                    if parent != 0 {
+                        let info = crate::proc::signal::SigInfo::child(
+                            u32::try_from(pid).unwrap_or(0),
+                            0,
+                        );
+                        // Linux-ABI parents deliver SIGCHLD via their
+                        // per-signal rt_sigaction disposition
+                        // (deliver_linux_signal consults linux_disposition),
+                        // so mark it pending directly. Native parents go
+                        // through classify_post so a registered trampoline
+                        // handler runs and a no-handler parent correctly
+                        // drops it (SIGCHLD default action = ignore).
+                        if pcb::get_abi_mode(parent)
+                            == Some(pcb::AbiMode::Linux)
+                        {
+                            crate::proc::signal::set_pending_info(
+                                parent, 17, info,
+                            );
+                        } else {
+                            // Discarding the PostDecision is intentional:
+                            // SIGCHLD's default is ignore, so a no-handler
+                            // native parent yields Drop with no side effect;
+                            // a handler yields Deliver (already marked
+                            // pending). There is no Terminate case for 17.
+                            let _ = crate::proc::signal::classify_post_info(
+                                parent, 17, info,
+                            );
+                        }
+                    }
+                }
             }
         }
         Err(e) => {

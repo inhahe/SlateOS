@@ -1731,10 +1731,21 @@ pub fn emit_linux_rt_frame(
     }
 
     // ---- compute the new blocked mask (effective during the handler) ----
-    // old = mask in effect before delivery (restored on rt_sigreturn).
-    let old_blocked = signal::blocked(pid);
+    // `current_blocked` is the mask in effect right now: normally the
+    // process's blocked mask, but during a `sigsuspend` it is the temporary
+    // suspend mask. The handler runs with `current_blocked | sa_mask | sig`
+    // (Linux `signal_delivered`).
+    //
+    // `restore_blocked` is the mask `rt_sigreturn` restores via `uc_sigmask`.
+    // Normally that equals `current_blocked`, but if a `sigsuspend` saved a
+    // mask (Linux `TIF_RESTORE_SIGMASK`), the *original* pre-suspend mask is
+    // the one to restore — and consuming it here clears the restore flag,
+    // matching Linux clearing the flag in `signal_delivered`.
+    let current_blocked = signal::blocked(pid);
+    let restore_blocked =
+        signal::take_saved_sigmask(pid).unwrap_or(current_blocked);
     let sig_bit = 1u64 << (u64::from(sig).saturating_sub(1) & 63);
-    let mut new_blocked = old_blocked | act.sa_mask;
+    let mut new_blocked = current_blocked | act.sa_mask;
     // Unless SA_NODEFER, the delivered signal is blocked during its own
     // handler so it can't recursively re-enter.
     if (act.sa_flags & sa_flags::SA_NODEFER) == 0 {
@@ -1767,7 +1778,7 @@ pub fn emit_linux_rt_frame(
         ss: crate::gdt::USER_DS,
         // oldmask is the deprecated low-32 signal mask; glibc reads
         // uc_sigmask instead, but fill it for completeness.
-        oldmask: old_blocked,
+        oldmask: restore_blocked,
         ..LinuxSigcontext::default()
     };
 
@@ -1782,9 +1793,9 @@ pub fn emit_linux_rt_frame(
             ss_size: 0,
         },
         uc_mcontext: sc,
-        // Restored by rt_sigreturn: the mask that was in effect before
-        // the handler ran.
-        uc_sigmask: old_blocked,
+        // Restored by rt_sigreturn: the mask in effect before the handler
+        // ran — or, after a sigsuspend, the original pre-suspend mask.
+        uc_sigmask: restore_blocked,
     };
 
     // ---- write the frame to user memory ----
@@ -32186,7 +32197,23 @@ fn sys_map_shadow_stack(_args: &SyscallArgs) -> SyscallResult {
 //     EINVAL (the answer for an unknown timerid_t).
 // ---------------------------------------------------------------------------
 
-/// `rt_sigsuspend(mask*, sigsetsize)`.
+/// `rt_sigsuspend(mask*, sigsetsize)` — atomically install `*mask` as the
+/// blocked set, suspend until a signal whose action runs a handler (or
+/// terminates the process) is delivered, then restore the previous mask and
+/// return `-EINTR`.
+///
+/// This mirrors Linux exactly: the original mask is stashed as the
+/// `saved_sigmask` (cf. `TIF_RESTORE_SIGMASK`) and restored when the signal
+/// is delivered — either by `emit_linux_rt_frame` writing it into the
+/// handler frame's `uc_sigmask` (so `rt_sigreturn` restores it), or by the
+/// no-handler tail of the Linux delivery loop. We park on the same
+/// `signalfd` wait-queue `pause()`/`signalfd`/`rt_sigtimedwait` use, testing
+/// against `pending & !blocked` under the *temporary* mask, so a signal that
+/// is blocked by `*mask` does not wake us (matching Linux).
+///
+/// An in-kernel caller (`caller_pid() == None`, e.g. the boot self-test) has
+/// no signal queue to park on and the boot CPU is single-threaded, so we keep
+/// the documented immediate `EINTR`.
 fn sys_rt_sigsuspend(args: &SyscallArgs) -> SyscallResult {
     if args.arg1 != 8 {
         return linux_err(errno::EINVAL);
@@ -32197,10 +32224,49 @@ fn sys_rt_sigsuspend(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = crate::mm::user::validate_user_read(args.arg0, 8) {
         return linux_err(linux_errno_for(e));
     }
-    // We have no real signal delivery, but EINTR is the documented
-    // wake-up answer when a handler ran during sigsuspend.  Callers all
-    // handle it (it's the only way sigsuspend ever returns).
-    linux_err(errno::EINTR)
+
+    let Some(caller) = caller_pid() else {
+        // No process context (boot self-test): nothing to suspend on.  EINTR
+        // is the only documented sigsuspend return and every caller handles
+        // it.  Return before touching the mask so the contextless path stays
+        // a pure validate-then-EINTR (no copy_from_user dependency).
+        return linux_err(errno::EINTR);
+    };
+
+    // Read the temporary mask to install for the duration of the suspend.
+    let mut buf = [0u8; 8];
+    // SAFETY: [arg0, arg0+8) was validated readable just above.
+    if unsafe { crate::mm::user::copy_from_user(args.arg0, buf.as_mut_ptr(), 8) }
+        .is_err()
+    {
+        return linux_err(errno::EFAULT);
+    }
+    let newmask = u64::from_ne_bytes(buf);
+    let task = crate::sched::current_task_id();
+
+    // Install the temporary mask and remember the original for restore.
+    // set_blocked strips SIGKILL/SIGSTOP from `newmask`, so those stay
+    // deliverable as POSIX requires.
+    let original = crate::proc::signal::set_blocked(caller, newmask);
+    crate::proc::signal::set_saved_sigmask(caller, original);
+
+    // Park until a signal deliverable under the temporary mask is pending.
+    // Register-then-recheck closes the post-before-park race exactly like
+    // sys_pause.  sigsuspend's only exit is EINTR; the saved mask is
+    // restored by the signal-delivery checkpoint that runs right after.
+    loop {
+        let deliverable = !crate::proc::signal::blocked(caller);
+        if crate::proc::signal::has_pending_in_mask(caller, deliverable) {
+            return linux_err(errno::EINTR);
+        }
+        crate::proc::signal::register_signalfd_waiter(caller, task, deliverable);
+        if crate::proc::signal::has_pending_in_mask(caller, deliverable) {
+            crate::proc::signal::deregister_signalfd_waiter(caller, task);
+            continue;
+        }
+        crate::sched::block_current();
+        crate::proc::signal::deregister_signalfd_waiter(caller, task);
+    }
 }
 
 /// `hrtimer` callback waking a parked `rt_sigtimedwait` reader when its

@@ -227,6 +227,8 @@ pub mod si_code {
     pub const SI_QUEUE: i32 = -1;
     /// Sent by `tkill(2)` / `tgkill(2)` (i.e. `raise`/`pthread_kill`).
     pub const SI_TKILL: i32 = -6;
+    /// `SIGCHLD`: child exited normally (`si_code = CLD_EXITED`).
+    pub const CLD_EXITED: i32 = 1;
 }
 
 /// Source metadata recorded when a signal is posted, used to fill the Linux
@@ -268,6 +270,18 @@ impl SigInfo {
     pub const fn kernel() -> Self {
         Self { code: si_code::SI_KERNEL, sender_pid: 0, sender_uid: 0, value: 0 }
     }
+
+    /// A `SIGCHLD` for a child that exited normally: `CLD_EXITED` with the
+    /// child's pid as the sender identity (matching Linux's `si_pid`).
+    #[must_use]
+    pub const fn child(child_pid: u32, child_uid: u32) -> Self {
+        Self {
+            code: si_code::CLD_EXITED,
+            sender_pid: child_pid,
+            sender_uid: child_uid,
+            value: 0,
+        }
+    }
 }
 
 /// Per-process signal bookkeeping.
@@ -284,6 +298,14 @@ struct SignalState {
     /// clear→set transition and taken at delivery. Standard-signal coalescing
     /// means at most one record is kept per signal number.
     infos: [Option<SigInfo>; NSIG as usize],
+    /// Saved blocked mask awaiting restore, set by `sigsuspend`/`rt_sigsuspend`
+    /// (Linux's `saved_sigmask` + `TIF_RESTORE_SIGMASK`). While `Some`, the
+    /// process is running under a *temporary* blocked mask; the saved mask is
+    /// the one to restore. It is consumed (cleared) either by signal delivery
+    /// — `emit_linux_rt_frame` writes it into `uc_sigmask` so `rt_sigreturn`
+    /// restores it — or by the no-handler tail of `deliver_linux_signal`,
+    /// which restores it directly. `None` means no restore is pending.
+    saved_sigmask: Option<u64>,
 }
 
 impl Default for SignalState {
@@ -293,6 +315,7 @@ impl Default for SignalState {
             blocked: 0,
             trampoline: 0,
             infos: [None; NSIG as usize],
+            saved_sigmask: None,
         }
     }
 }
@@ -588,6 +611,8 @@ pub fn inherit_for_fork(parent: ProcessId, child: ProcessId) {
                 // POSIX: the child starts with no pending signals, so no
                 // per-signal siginfo records carry over.
                 infos: [None; NSIG as usize],
+                // No sigsuspend in flight in a freshly-forked child.
+                saved_sigmask: None,
             },
         );
     });
@@ -623,6 +648,30 @@ pub fn blocked(pid: ProcessId) -> u64 {
 #[must_use]
 pub fn pending(pid: ProcessId) -> u64 {
     with_states(|states| states.get(&pid).map(|s| s.pending).unwrap_or(0))
+}
+
+/// Record a *saved* blocked mask awaiting restore (Linux `saved_sigmask` +
+/// `TIF_RESTORE_SIGMASK`).
+///
+/// Called by `rt_sigsuspend` after it installs the temporary suspend mask:
+/// `mask` is the original (pre-suspend) blocked mask to restore once a signal
+/// has been handled. Consumed by [`take_saved_sigmask`] — either by
+/// `emit_linux_rt_frame` (which writes it into `uc_sigmask` for `rt_sigreturn`
+/// to restore) or by the no-handler tail of the Linux delivery loop.
+pub fn set_saved_sigmask(pid: ProcessId, mask: u64) {
+    with_states(|states| {
+        states.entry(pid).or_default().saved_sigmask = Some(mask);
+    });
+}
+
+/// Take (and clear) the saved blocked mask for a process, if one is pending.
+///
+/// Returns `Some(mask)` exactly once per [`set_saved_sigmask`]; subsequent
+/// calls return `None` until the next sigsuspend. A `None` return means no
+/// sigsuspend-style mask restore is outstanding.
+#[must_use]
+pub fn take_saved_sigmask(pid: ProcessId) -> Option<u64> {
+    with_states(|states| states.get_mut(&pid).and_then(|s| s.saved_sigmask.take()))
 }
 
 // ---------------------------------------------------------------------------

@@ -4353,7 +4353,18 @@ fn deliver_linux_signal(
     loop {
         let (sig, info) = match signal::take_deliverable_info(pid) {
             Some(t) => t,
-            None => return false,
+            None => {
+                // No (more) deliverable signal. If a `sigsuspend` saved a
+                // mask but no handler frame consumed it (e.g. the signal
+                // that woke us had a SIG_DFL "ignore" disposition), restore
+                // the original blocked mask now so the suspend's temporary
+                // mask does not leak past the syscall. The handler path
+                // instead restores it via `uc_sigmask` on `rt_sigreturn`.
+                if let Some(orig) = signal::take_saved_sigmask(pid) {
+                    let _ = signal::set_blocked(pid, orig);
+                }
+                return false;
+            }
         };
 
         match linux::linux_disposition(pid, sig) {

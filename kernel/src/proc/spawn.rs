@@ -5698,6 +5698,183 @@ pub fn self_test_linux_real_glibc_redirin() -> KernelResult<()> {
     Ok(())
 }
 
+/// Path Z Part 10: run an **unmodified, prebuilt POSIX shell** (`dash`)
+/// that performs an output redirection itself.
+///
+/// Parts 6–9 proved each shell primitive (fork/exec/waitpid, pipe, `dup2`
+/// onto a pipe, `dup2` of a file onto stdout/stdin) with a bespoke test
+/// binary that issued the syscalls directly.  This is the culmination:
+/// a real `/bin/dash` interprets `echo … > /dash-out.txt` and drives the
+/// redirection logic *itself* — ld.so loads dash + libc, dash's lexer/
+/// parser handles the command + `>` redirection, dash `open(2)`s the
+/// target, `dup2`s it over fd 1 (saving/restoring fd 1 around the
+/// builtin via `dup`/`dup2`/`close`), runs its `echo` builtin, and exits.
+/// `echo` is a dash *builtin*, so this first shell test isolates "the
+/// shell runs and does its own redirection" from external `fork`/`exec`
+/// (proven separately).  No fd is injected — the test reads the file the
+/// shell created back from the VFS.
+///
+/// No-op (returns `Ok(())`) when the rootfs / `/bin/dash` is absent.
+///
+/// # Errors
+///
+/// Returns [`KernelError::InternalError`] if the shell fails to reach
+/// `Zombie`, exits non-zero, or the file it wrote does not match;
+/// propagates spawn failure.
+pub fn self_test_linux_real_glibc_shell_redir() -> KernelResult<()> {
+    const EXPECT_EXIT: i32 = 0;
+    const EXPECT_OUT: &[u8] = b"SLATE_DASH_REDIR_OK marker=4242\n";
+
+    const SRC_LD: &str = "/mnt/lib64/ld-linux-x86-64.so.2";
+    const SRC_LIBC: &str = "/mnt/lib/x86_64-linux-gnu/libc.so.6";
+    const SRC_DASH: &str = "/mnt/bin/dash";
+    const DST_LD: &str = "/lib64/ld-linux-x86-64.so.2";
+    const DST_LIBC: &str = "/lib/x86_64-linux-gnu/libc.so.6";
+    const DST_DASH: &str = "/bin/dash";
+    // The path the shell command opens + redirects stdout onto.
+    const OUT_PATH: &str = "/dash-out.txt";
+    // A real shell does more startup work than a bare binary (locale, stdio
+    // streams, command parsing); keep the same generous budget.
+    const MAX_YIELDS: usize = 262_144;
+
+    if !crate::fs::Vfs::exists(SRC_DASH) {
+        return Ok(());
+    }
+
+    serial_println!("[spawn] Running REAL dash shell `echo > file` redirection (ring 3, Path Z) test...");
+
+    let _ = crate::fs::Vfs::mkdir_all("/lib64");
+    let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
+    let _ = crate::fs::Vfs::mkdir_all("/bin");
+    for (src, dst) in [
+        (SRC_LD, DST_LD),
+        (SRC_LIBC, DST_LIBC),
+        (SRC_DASH, DST_DASH),
+    ] {
+        match crate::fs::Vfs::read_file(src) {
+            Ok(bytes) => {
+                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
+                    serial_println!(
+                        "[spawn]   real dash redir: SKIP (staging {} -> {} failed: {:?})",
+                        src, dst, e
+                    );
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                serial_println!(
+                    "[spawn]   real dash redir: SKIP (reading {} failed: {:?})",
+                    src, e
+                );
+                return Ok(());
+            }
+        }
+    }
+
+    let exe_elf = match crate::fs::Vfs::read_file(DST_DASH) {
+        Ok(b) => b,
+        Err(e) => {
+            serial_println!("[spawn]   real dash redir: SKIP (re-read {} failed: {:?})", DST_DASH, e);
+            return Ok(());
+        }
+    };
+
+    // Clear any stale output so a read-back can only succeed if THIS run
+    // wrote it.
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+
+    // dash -c '<command>' — the shell parses the command and the `>`
+    // redirection itself.  Absolute paths avoid any $PATH / cwd lookup.
+    let argv: &[&[u8]] = &[
+        b"/bin/dash",
+        b"-c",
+        b"echo SLATE_DASH_REDIR_OK marker=4242 > /dash-out.txt",
+    ];
+    let envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C"];
+    // The shell opens + creates the output file, so it needs File READ|WRITE.
+    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-dash-redir",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: Some(DST_DASH.as_bytes()),
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: real dash redir spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let mut reaped = false;
+    for _ in 0..MAX_YIELDS {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            reaped = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    let written = crate::fs::Vfs::read_file(OUT_PATH);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+
+    if !reaped || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: real dash redir — shell did not exit within {} yields \
+             (state={:?}); dash startup (ld.so/libc), command parsing, or its \
+             open()/dup2() redirection likely hung",
+            MAX_YIELDS, state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECT_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: real dash redir — exit code={:?}, expected {} (non-zero \
+             means dash hit an error parsing/running the command or the redirection)",
+            exit_code, EXPECT_EXIT
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    match written {
+        Ok(bytes) if bytes.as_slice() == EXPECT_OUT => {
+            serial_println!(
+                "[spawn]   REAL dash shell (ring 3: ld.so loaded dash+libc, dash parsed \
+                 `echo … > file`, did its own open()/dup2() redirection of the echo \
+                 builtin, read back {} bytes == expected, exit {}): OK",
+                bytes.len(), EXPECT_EXIT
+            );
+            Ok(())
+        }
+        Ok(bytes) => {
+            serial_println!(
+                "[spawn]   FAIL: real dash redir — wrote {} bytes {:?}, expected {:?}",
+                bytes.len(), bytes.as_slice(), EXPECT_OUT
+            );
+            Err(KernelError::InternalError)
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: real dash redir — reading the shell's output file back failed: {:?}",
+                e
+            );
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

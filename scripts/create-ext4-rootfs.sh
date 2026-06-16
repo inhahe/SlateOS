@@ -619,6 +619,25 @@ EOF
 gcc -O2 -o "$STAGE/bin/redirin" "$CSRC12" -Wl,-rpath,"$LIBC_DIR" -Wl,--enable-new-dtags
 rm -f "$CSRC12"
 
+# --- a REAL POSIX shell: dash -------------------------------------------------
+# Path Z's individual shell primitives (fork/exec/waitpid, pipe, dup2 onto a
+# pipe, dup2 of a file onto stdout/stdin) are each proven by a bespoke test
+# binary above.  The culmination is running an *unmodified, prebuilt* POSIX
+# shell that orchestrates those primitives itself.  dash is the cleanest
+# choice: it links only against libc.so.6 + ld-linux (both already staged) and
+# the kernel-provided linux-vdso (no file), so no extra libraries are needed.
+# Copied as both /bin/dash and /bin/sh (a copy, not a symlink, so the rootfs
+# need not depend on symlink support in the image builder).  The SlateOS
+# self-tests drive it with `dash -c '<command>'`.
+DASH_SRC="/bin/dash"
+if [ -e "$DASH_SRC" ]; then
+    cp -L "$DASH_SRC" "$STAGE/bin/dash"
+    cp -L "$DASH_SRC" "$STAGE/bin/sh"
+    echo "[rootfs] staged real shell: /bin/dash (+ /bin/sh)"
+else
+    echo "[rootfs] WARNING: $DASH_SRC not found — shell self-tests will no-op"
+fi
+
 echo "[rootfs] staged tree:"
 ( cd "$STAGE" && find lib64 lib bin -type f -printf '  %-44p %10s bytes\n' )
 

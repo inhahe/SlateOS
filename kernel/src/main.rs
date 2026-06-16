@@ -1501,6 +1501,17 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z: the culmination — a real prebuilt POSIX shell (dash) runs and
+    // performs its OWN `echo > file` redirection. Proves ld.so loads dash,
+    // dash parses the command + `>` redirection, and drives open()/dup2()
+    // itself. No-op without rootfs.ext4 / /bin/dash.
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_redir() {
+        serial_println!(
+            "WARNING: Path-Z real dash shell redir self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

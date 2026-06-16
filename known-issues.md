@@ -918,6 +918,49 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
+### TD28. Linux `munmap` is 16 KiB-frame-granular (delegates to native handler), not 4 KiB-page-granular — DEBT 2026-06-15
+
+**Where:** `kernel/src/syscall/linux.rs` — `sys_munmap` delegates to the native
+`kernel/src/syscall/handlers.rs::sys_munmap`.
+
+**What it is:** the native `munmap` requires a **16 KiB-frame-aligned** start
+(`vaddr.is_multiple_of(FRAME_SIZE)`, else `BadAlignment` → `EINVAL`), rounds the
+length **up** to a whole 16 KiB frame, unmaps at whole-frame granularity, and
+removes only a VMA that *starts exactly* at `vaddr` (`pcb::remove_vma`, not the
+`remove_vma_range` surgery). Linux `munmap(2)` on x86-64 accepts any **4 KiB
+(page)**-aligned start and unmaps an arbitrary page-granular sub-range, splitting
+VMAs at 4 KiB boundaries. So three behaviours diverge from Linux:
+1. A 4 KiB-aligned-but-not-16-KiB-aligned start returns `EINVAL` where Linux
+   succeeds.
+2. A length that is a multiple of 4 KiB but not 16 KiB is rounded **up**, so the
+   unmap can spill 4 KiB sub-pages into an adjacent mapping that shares the
+   straddling 16 KiB frame.
+3. A partial unmap that does not start on a VMA boundary drops no VMA record
+   (leaves a stale `[start,end)` VMA), where Linux would split it.
+
+**Why it is not currently biting:** every base address our `mmap` hands back is
+16 KiB-aligned (we allocate whole frames), and glibc only `munmap`s regions it
+received from `mmap`, so in practice the start is always 16 KiB-aligned and
+adjacent glibc mappings are themselves 16 KiB-aligned — the round-up does not
+cross into a live neighbour. The Path-Z real-glibc tests (hello/stdio/full/
+pthread) all pass with the current handler.
+
+**Proper fix:** give the Linux `sys_munmap` its own 4 KiB-granular path, parallel
+to the 4 KiB-granular `sys_mmap`/`sys_mprotect` work: validate `HW_PAGE_SIZE`
+(4 KiB) alignment, unmap each 4 KiB sub-page PTE via an `unmap_4k` primitive
+(refcount-aware `frame::free_frame` only when the last sub-page of a 16 KiB frame
+is unmapped), and call `pcb::remove_vma_range(pid, start, end)` (already 4 KiB-
+capable — it splits at arbitrary boundaries) for the VMA surgery, refunding
+`RLIMIT_AS` for the actual span. Blocked only by the per-sub-page frame-refcount
+bookkeeping (deciding when a shared 16 KiB frame's last 4 KiB tenant leaves).
+
+**Related fix (2026-06-15):** `remove_vma_range`'s **right** remainder
+`[end, vma.end)` previously kept the original `FileBacked.file_offset` while its
+`start` moved forward from `vma.start` to `end`, so the surviving high-side piece
+of a split file-backed VMA mapped the wrong bytes. Now built via `vma_subrange`
+(which advances `file_offset` by `end - vma.start`), matching the `protect_vma_range`
+surgery. The left remainder was already correct (its start is unchanged).
+
 ### TD27. `mprotect` updates PTE permissions but not VMA flags — a reclaimed-then-refaulted RELRO page restores the old (writable) permission — FIXED 2026-06-15
 
 **Where:** `kernel/src/syscall/linux.rs` — `sys_mprotect`; the VMA surgery lives in

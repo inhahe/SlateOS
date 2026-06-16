@@ -4121,17 +4121,21 @@ pub fn remove_vma_range(pid: ProcessId, start: u64, end: u64) -> KernelResult<()
                 releases.push(handle);
             }
             // Left remainder [vma.start, start) survives an edge/superset
-            // overlap on the low side.
+            // overlap on the low side.  Its start is unchanged, so the
+            // file_offset is correct as-is (vma_subrange's delta is 0).
             if vma.start < start {
-                let rem = Vma { end: start, ..vma };
+                let rem = vma_subrange(&vma, vma.start, start, vma.flags);
                 if let VmaKind::FileBacked { handle, .. } = rem.kind {
                     retains.push(handle);
                 }
                 kept.push(rem);
             }
-            // Right remainder [end, vma.end) survives on the high side.
+            // Right remainder [end, vma.end) survives on the high side.  Its
+            // start moved forward from vma.start to end, so a FileBacked
+            // remainder's file_offset MUST advance by (end - vma.start) to
+            // keep mapping the right bytes — vma_subrange does exactly that.
             if vma.end > end {
-                let rem = Vma { start: end, ..vma };
+                let rem = vma_subrange(&vma, end, vma.end, vma.flags);
                 if let VmaKind::FileBacked { handle, .. } = rem.kind {
                     retains.push(handle);
                 }

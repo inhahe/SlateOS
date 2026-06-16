@@ -3535,6 +3535,184 @@ pub fn self_test_linux_execveat() -> KernelResult<()> {
     Ok(())
 }
 
+/// Path Z end-to-end test: run a **real, prebuilt, dynamically-linked glibc**
+/// Linux binary to completion.
+///
+/// Every prior Linux-ABI self-test runs a *synthetic* ELF this kernel emits
+/// itself ([`elf::build_linux_*`]).  Those validate one mechanism at a time
+/// (PT_INTERP parse, `AT_BASE`/`AT_ENTRY` auxv, PIE bias, SysV stack layout,
+/// `fork`/`execve`/`wait4`) against code we control.  This test instead drives
+/// the *real* glibc dynamic path: it spawns `/bin/hello` — an ordinary
+/// `gcc`-built `int main(void){return 42;}` — whose `PT_INTERP` names
+/// `/lib64/ld-linux-x86-64.so.2`.  A clean exit 42 means the kernel loaded the
+/// real `ld.so` at the ASLR bias, handed it the correct auxv, and `ld.so`
+/// mapped `libc.so.6`, processed relocations, set up TLS, ran
+/// `__libc_start_main`, called `main`, and exited — the entire glibc startup,
+/// end to end, on attacker-uncontrolled binaries (design-decisions.md §25,
+/// roadmap.md line 5089).
+///
+/// **Self-staging from the ext4 rootfs.** The glibc tree lives on a real
+/// driver-compatible ext4 image (`scripts/create-ext4-rootfs.sh` → `rootfs.ext4`,
+/// attached as `vdb` and mounted read-only at `/mnt`).  Because the active root
+/// is a writable mem/FAT fs while `/mnt` is the read-only ext4 rootfs, we copy
+/// `ld.so`, `libc.so.6`, and `hello` into the active root at the exact paths the
+/// binary names (`/lib64/...`, `/lib/x86_64-linux-gnu/...`, `/bin/hello`) so the
+/// loader's `PT_INTERP` and the libc `RUNPATH` resolve without an `ld.so.cache`.
+///
+/// **Skips gracefully** (returns `Ok`) when `/mnt/bin/hello` is absent — the
+/// `rootfs.ext4` image is git-ignored, so CI and any environment without it
+/// simply no-op this test rather than failing.  Must run **after** filesystem
+/// init and the `/mnt` ext4 probe (see `main.rs`).
+///
+/// **Hang-safe.** Real glibc executes hundreds of syscalls, so unlike the
+/// synthetic tests (which yield a fixed handful of times) this harness pumps
+/// the scheduler with a generous but **bounded** `yield_now` poll loop, breaking
+/// the moment the child becomes a zombie and force-destroying it afterward.  A
+/// broken ABI path can therefore only produce a clean failed assertion, never a
+/// boot hang.
+pub fn self_test_linux_real_glibc() -> KernelResult<()> {
+    // gcc-built `int main(void){return 42;}` exits 42 through the full glibc
+    // dynamic startup.  Distinct from every synthetic sentinel above.
+    const EXPECT_EXIT: i32 = 42;
+    // Source paths on the read-only ext4 rootfs mounted at /mnt.
+    const SRC_LD: &str = "/mnt/lib64/ld-linux-x86-64.so.2";
+    const SRC_LIBC: &str = "/mnt/lib/x86_64-linux-gnu/libc.so.6";
+    const SRC_HELLO: &str = "/mnt/bin/hello";
+    // Destination paths in the active (writable) root — the exact paths the
+    // binary's PT_INTERP and libc RUNPATH name, so resolution needs no cache.
+    const DST_LD: &str = "/lib64/ld-linux-x86-64.so.2";
+    const DST_LIBC: &str = "/lib/x86_64-linux-gnu/libc.so.6";
+    const DST_HELLO: &str = "/bin/hello";
+    // glibc startup is hundreds of syscalls; grant generous headroom but stay
+    // bounded so a broken ABI path fails an assertion instead of hanging boot.
+    const MAX_YIELDS: usize = 4096;
+
+    // No rootfs.ext4 attached → nothing staged at /mnt.  No-op (not a failure):
+    // the image is git-ignored, so most environments legitimately lack it.
+    if !crate::fs::Vfs::exists(SRC_HELLO) {
+        return Ok(());
+    }
+
+    serial_println!("[spawn] Running REAL glibc dynamic-execution (ring 3, Path Z) test...");
+
+    // Stage the glibc tree from the read-only ext4 rootfs into the active root
+    // at the loader's expected paths.  mkdir_all is idempotent; a missing parent
+    // dir is the common first-run case, so ignore its "already exists" result.
+    let _ = crate::fs::Vfs::mkdir_all("/lib64");
+    let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
+    let _ = crate::fs::Vfs::mkdir_all("/bin");
+
+    for (src, dst) in [
+        (SRC_LD, DST_LD),
+        (SRC_LIBC, DST_LIBC),
+        (SRC_HELLO, DST_HELLO),
+    ] {
+        match crate::fs::Vfs::read_file(src) {
+            Ok(bytes) => {
+                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
+                    serial_println!(
+                        "[spawn]   real glibc: SKIP (staging {} -> {} failed: {:?})",
+                        src, dst, e
+                    );
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                serial_println!(
+                    "[spawn]   real glibc: SKIP (reading {} failed: {:?})",
+                    src, e
+                );
+                return Ok(());
+            }
+        }
+    }
+
+    // Re-read the staged executable to hand its bytes to the spawner.
+    let exe_elf = match crate::fs::Vfs::read_file(DST_HELLO) {
+        Ok(b) => b,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   real glibc: SKIP (re-read {} failed: {:?})",
+                DST_HELLO, e
+            );
+            return Ok(());
+        }
+    };
+
+    // exe_path names the on-disk executable so the loader/auxv (AT_EXECFN) and
+    // any /proc/self/exe-style lookups resolve to the real path the binary was
+    // launched as, matching what a shell exec would produce.
+    let argv: &[&[u8]] = &[b"/bin/hello"];
+    let envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C"];
+    // The dynamic loader (ld.so) opens the shared libraries it needs from the
+    // VFS at runtime — `/lib/x86_64-linux-gnu/libc.so.6`, the ld.so cache, etc.
+    // Every file syscall is gated on a File capability, so without one ld.so's
+    // openat() calls fail the cap check and it reports "cannot open shared
+    // object file".  Grant READ|WRITE like the other ring-3 file-using tests.
+    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-glibc",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: Some(DST_HELLO.as_bytes()),
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: real glibc spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Bounded poll: drive the scheduler until the glibc child reaches Zombie or
+    // we exhaust the bound.  Each iteration is one non-blocking yield; a healthy
+    // run breaks early after the loader+libc finish.
+    let mut reaped = false;
+    for _ in 0..MAX_YIELDS {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            reaped = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !reaped || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: real glibc — child did not exit within {} yields (state={:?}); \
+             ld.so/libc startup faulted or blocked",
+            MAX_YIELDS, state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECT_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: real glibc — ran to exit but code={:?}, expected {} (a wrong \
+             code means glibc startup reached _exit on an error path)",
+            exit_code, EXPECT_EXIT
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   REAL glibc dynamic execution (ring 3: ld.so mapped libc.so.6, relocated, \
+         set up TLS, __libc_start_main → main → exit({})): OK",
+        EXPECT_EXIT
+    );
+    Ok(())
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

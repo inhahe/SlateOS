@@ -1030,6 +1030,21 @@ extern "C" fn kernel_main() -> ! {
     //
     // Each slot = 16 KiB = 32 sectors.  512 slots = 16 MiB.
     for swap_dev in &["vdb", "vda"] {
+        // Never claim a device that holds a filesystem: `init_disk` writes a
+        // raw swap area over whatever is there, so probing first is the
+        // difference between "use the spare disk" and "destroy the rootfs".
+        // The Path-Z glibc rootfs (rootfs.ext4) is attached as a virtio-blk
+        // device (typically vdb) and must survive untouched for the /mnt mount
+        // below — skip any device that already contains an ext4 superblock.
+        // A raw swap image (swap.img, all zeros) has no ext4 magic and is still
+        // selected here.
+        if fs::ext4::probe(swap_dev) {
+            serial_println!(
+                "[boot] Skipping {} for swap: holds an ext4 filesystem (reserved for rootfs)",
+                swap_dev
+            );
+            continue;
+        }
         if mm::swap::init_disk(swap_dev, 0, 512).is_ok() {
             serial_println!("[boot] Disk swap added on {} (zram + disk tiered)", swap_dev);
             // Run the disk-specific self-test now that a disk backend
@@ -1345,6 +1360,19 @@ extern "C" fn kernel_main() -> ! {
     // transfers control to the target (which exits with a sentinel).
     if let Err(e) = proc::spawn::self_test_linux_execveat() {
         serial_println!("WARNING: Linux execveat(2) (ring 3) self-test failed: {:?}", e);
+    }
+
+    // Path Z: run a REAL, prebuilt, dynamically-linked glibc binary
+    // (/bin/hello, PT_INTERP=ld-linux-x86-64.so.2) end-to-end.  Self-stages the
+    // glibc tree from the read-only ext4 rootfs at /mnt into the active root and
+    // asserts the child exits 42 through the full ld.so + libc startup.  No-ops
+    // when rootfs.ext4 is absent (the image is git-ignored).  Must run after the
+    // /mnt ext4 probe above.
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc() {
+        serial_println!(
+            "WARNING: Path-Z real glibc dynamic-execution self-test failed: {:?}",
+            e
+        );
     }
 
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,

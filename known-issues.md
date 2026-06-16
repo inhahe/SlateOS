@@ -918,6 +918,42 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
+### TD27. `mprotect` updates PTE permissions but not VMA flags — a reclaimed-then-refaulted RELRO page restores the old (writable) permission — DEBT 2026-06-15
+
+**Where:** `kernel/src/syscall/linux.rs` — `sys_mprotect` / `mprotect_validate_args`
+(now 4 KiB-granular, flipping individual PTEs via `page_table::change_flags_4k`).
+The VMA list lives in `proc::pcb` (`proc.vmas: Vec<Vma>`), and the demand-fault
+resolver that reconstructs a PTE from the covering VMA's `flags` is
+`pcb::try_resolve_fault` / `pcb::resolve_subpaged_fault`.
+
+**What it is:** `mprotect(2)` changes the live page-table entries for the range
+but does **not** split/adjust the underlying `Vma.flags`. As long as the page
+stays resident this is invisible. But if a page in the range is later reclaimed
+under memory pressure (e.g. `madvise(MADV_DONTNEED)`, or a future swap/anon
+reclaim path) and then re-faulted, the fault resolver rebuilds the PTE from the
+*VMA's* `flags`, which still carry the pre-`mprotect` permissions — so a page that
+glibc made read-only for RELRO (`mprotect(…, PROT_READ)`) would come back
+**writable**, silently weakening the hardening. This was discovered while landing
+4 KiB-granular `mprotect` for Path-Z real-glibc execution (the RELRO step
+`mprotect(0x…203000, 0x4000, PROT_READ)`).
+
+**Why it doesn't bite today:** the only anonymous reclaim path that exists
+(`madvise(MADV_DONTNEED)`) is issued by the program itself on its *own* heap
+arenas, not on RELRO'd library data; RELRO pages are never the target of a
+DONTNEED. There is no swap yet. So no current code path reclaims a RELRO page and
+re-faults it. The hazard becomes real once anonymous swap or generalized reclaim
+can evict arbitrary resident user pages.
+
+**Proper fix:** make `mprotect` perform per-subpage VMA surgery — split the
+covering VMA(s) at the (4 KiB-aligned) range boundaries (the same
+`__split_vma`-style logic already in `pcb::remove_vma_range`) and store the new
+permission in `Vma.flags` for the affected sub-range, so the fault resolver
+reconstructs the correct permissions after reclaim. This requires `Vma.flags` to
+track 4 KiB-granular permission within a 16 KiB frame (the sub-frame model already
+exists for file-backing in `resolve_subpaged_fault`; extend it to permissions),
+or splitting VMAs at 4 KiB granularity. Substantial but well-scoped refactor;
+gate it together with the swap/reclaim work that makes the hazard live.
+
 ### TD26. User-mode CET shadow-stack state (`IA32_PL3_SSP`, `IA32_U_CET`) will be the next instance of the F13/F14 bug class when user CET is enabled — FORWARD-LOOKING HAZARD 2026-06-14
 
 **Where:** `kernel/src/cet.rs` — `set_user_cet(enable_shstk, enable_ibt, user_ssp)`

@@ -1546,6 +1546,17 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z: a real dash shell reads a multi-command SCRIPT from stdin (no -c,
+    // fd 0 redirected from a file), driving its main read-eval loop — two
+    // sequential external execs + a builtin, EOF→exit 0. No-op without
+    // rootfs.ext4.
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_script_stdin() {
+        serial_println!(
+            "WARNING: Path-Z real dash shell script-from-stdin self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

@@ -6420,6 +6420,239 @@ pub fn self_test_linux_real_glibc_shell_loop() -> KernelResult<()> {
     }
 }
 
+/// Path Z Part 14: a real `dash` shell reads and runs a multi-command *script
+/// from stdin* (no `-c`), with fd 0 redirected from a script file and fd 1
+/// captured.
+///
+/// Parts 10–13 all drove dash via `-c '<one line>'` — a single command string
+/// parsed once.  This instead spawns `/bin/dash` with **no arguments** and fd 0
+/// rewired to a regular file holding several lines, so dash detects a
+/// non-interactive stdin and runs its *main read-eval loop*: read a line from
+/// fd 0, parse it, execute it, repeat until EOF, then exit 0.  That loop — the
+/// shell's actual top-level driver — is the new path here (vs. the one-shot
+/// `-c` string), and the script mixes two sequential external `fork`+`exec`+
+/// `wait4` commands (`/bin/emit`) with a builtin (`echo`), so it also confirms
+/// the children inherit the advanced script-fd offset harmlessly and that EOF
+/// on the redirected stdin terminates the shell cleanly.
+///
+/// The script is `"/bin/emit\n/bin/emit\necho SLATE_DASH_SCRIPT_DONE\n"`, so the
+/// captured stdout must be the two 16-byte `/bin/emit` payloads followed by the
+/// echo line, and dash must exit 0.
+pub fn self_test_linux_real_glibc_shell_script_stdin() -> KernelResult<()> {
+    use crate::fs::handle;
+    use crate::proc::linux_fd::{FdEntry, O_RDONLY, O_WRONLY};
+
+    const EXPECT_EXIT: i32 = 0;
+    const SCRIPT_BYTES: &[u8] = b"/bin/emit\n/bin/emit\necho SLATE_DASH_SCRIPT_DONE\n";
+    // Two /bin/emit payloads ("SLATE_PIPE_BODY\n", 16 bytes each) + the echo line.
+    const EXPECT_OUT: &[u8] = b"SLATE_PIPE_BODY\nSLATE_PIPE_BODY\nSLATE_DASH_SCRIPT_DONE\n";
+
+    const SRC_LD: &str = "/mnt/lib64/ld-linux-x86-64.so.2";
+    const SRC_LIBC: &str = "/mnt/lib/x86_64-linux-gnu/libc.so.6";
+    const SRC_DASH: &str = "/mnt/bin/dash";
+    const SRC_EMIT: &str = "/mnt/bin/emit";
+    const DST_LD: &str = "/lib64/ld-linux-x86-64.so.2";
+    const DST_LIBC: &str = "/lib/x86_64-linux-gnu/libc.so.6";
+    const DST_DASH: &str = "/bin/dash";
+    const DST_EMIT: &str = "/bin/emit";
+    const SCRIPT: &str = "/dash-script.sh";
+    const CAPTURE: &str = "/dash-script-capture.txt";
+    // A script forks + execs two glibc images under a shell; keep the generous
+    // budget used by the other dash tests.
+    const MAX_YIELDS: usize = 262_144;
+
+    if !crate::fs::Vfs::exists(SRC_DASH) || !crate::fs::Vfs::exists(SRC_EMIT) {
+        return Ok(());
+    }
+
+    serial_println!("[spawn] Running REAL dash shell script-from-stdin (no -c; ring 3, Path Z) test...");
+
+    let _ = crate::fs::Vfs::mkdir_all("/lib64");
+    let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
+    let _ = crate::fs::Vfs::mkdir_all("/bin");
+    for (src, dst) in [
+        (SRC_LD, DST_LD),
+        (SRC_LIBC, DST_LIBC),
+        (SRC_DASH, DST_DASH),
+        (SRC_EMIT, DST_EMIT),
+    ] {
+        match crate::fs::Vfs::read_file(src) {
+            Ok(bytes) => {
+                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
+                    serial_println!(
+                        "[spawn]   real dash script: SKIP (staging {} -> {} failed: {:?})",
+                        src, dst, e
+                    );
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                serial_println!(
+                    "[spawn]   real dash script: SKIP (reading {} failed: {:?})",
+                    src, e
+                );
+                return Ok(());
+            }
+        }
+    }
+
+    let exe_elf = match crate::fs::Vfs::read_file(DST_DASH) {
+        Ok(b) => b,
+        Err(e) => {
+            serial_println!("[spawn]   real dash script: SKIP (re-read {} failed: {:?})", DST_DASH, e);
+            return Ok(());
+        }
+    };
+
+    // Write the script file, then open a READ-only handle we'll plant at fd 0.
+    let _ = crate::fs::Vfs::remove(SCRIPT);
+    if let Err(e) = crate::fs::Vfs::write_file(SCRIPT, SCRIPT_BYTES) {
+        serial_println!("[spawn]   real dash script: SKIP (writing script failed: {:?})", e);
+        return Ok(());
+    }
+    let script_handle = match handle::open(SCRIPT, handle::OpenFlags::READ) {
+        Ok(h) => h,
+        Err(e) => {
+            let _ = crate::fs::Vfs::remove(SCRIPT);
+            serial_println!("[spawn]   real dash script: SKIP (script open failed: {:?})", e);
+            return Ok(());
+        }
+    };
+
+    // Fresh capture file for fd 1.
+    let _ = crate::fs::Vfs::remove(CAPTURE);
+    let capture_handle = match handle::open(
+        CAPTURE,
+        handle::OpenFlags::READ
+            .union(handle::OpenFlags::WRITE)
+            .union(handle::OpenFlags::CREATE),
+    ) {
+        Ok(h) => h,
+        Err(e) => {
+            let _ = handle::close(script_handle);
+            let _ = crate::fs::Vfs::remove(SCRIPT);
+            serial_println!("[spawn]   real dash script: SKIP (capture open failed: {:?})", e);
+            return Ok(());
+        }
+    };
+
+    // No `-c`: dash with non-tty stdin runs stdin as a script.
+    let argv: &[&[u8]] = &[b"/bin/dash"];
+    let envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C"];
+    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-dash-script",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: Some(DST_DASH.as_bytes()),
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = handle::close(script_handle);
+            let _ = handle::close(capture_handle);
+            let _ = crate::fs::Vfs::remove(SCRIPT);
+            let _ = crate::fs::Vfs::remove(CAPTURE);
+            serial_println!("[spawn]   FAIL: real dash script spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Redirect fd 0 (stdin) → the script file before dash runs.
+    let _ = pcb::linux_fd_take(result.pid, 0);
+    if let Err(e) = pcb::linux_fd_install_at(result.pid, 0, FdEntry::file(script_handle, O_RDONLY)) {
+        let _ = handle::close(script_handle);
+        let _ = handle::close(capture_handle);
+        thread::on_thread_exit(result.task_id);
+        pcb::destroy(result.pid);
+        let _ = crate::fs::Vfs::remove(SCRIPT);
+        let _ = crate::fs::Vfs::remove(CAPTURE);
+        serial_println!("[spawn]   FAIL: real dash script — redirecting fd 0 failed: {:?}", e);
+        return Err(KernelError::InternalError);
+    }
+
+    // Redirect fd 1 (stdout) → capture file.
+    let _ = pcb::linux_fd_take(result.pid, 1);
+    if let Err(e) = pcb::linux_fd_install_at(result.pid, 1, FdEntry::file(capture_handle, O_WRONLY)) {
+        let _ = handle::close(capture_handle);
+        thread::on_thread_exit(result.task_id);
+        pcb::destroy(result.pid);
+        let _ = crate::fs::Vfs::remove(SCRIPT);
+        let _ = crate::fs::Vfs::remove(CAPTURE);
+        serial_println!("[spawn]   FAIL: real dash script — redirecting fd 1 failed: {:?}", e);
+        return Err(KernelError::InternalError);
+    }
+
+    let mut reaped = false;
+    for _ in 0..MAX_YIELDS {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            reaped = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    let captured = crate::fs::Vfs::read_file(CAPTURE);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(SCRIPT);
+    let _ = crate::fs::Vfs::remove(CAPTURE);
+
+    if !reaped || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: real dash script — shell did not exit within {} yields \
+             (state={:?}); dash's stdin read-eval loop, a script-command fork/exec/wait, \
+             or EOF-driven termination likely hung",
+            MAX_YIELDS, state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECT_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: real dash script — exit code={:?}, expected {} (non-zero \
+             means a script command failed or dash hit a parse/read error)",
+            exit_code, EXPECT_EXIT
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    match captured {
+        Ok(bytes) if bytes.as_slice() == EXPECT_OUT => {
+            serial_println!(
+                "[spawn]   REAL dash shell script-from-stdin (ring 3: dash ran its main \
+                 read-eval loop over a {}-byte script on fd 0 — two sequential /bin/emit \
+                 fork→exec→reap cycles + an echo builtin — captured {} bytes == expected, \
+                 EOF→exit {}): OK",
+                SCRIPT_BYTES.len(), bytes.len(), EXPECT_EXIT
+            );
+            Ok(())
+        }
+        Ok(bytes) => {
+            serial_println!(
+                "[spawn]   FAIL: real dash script — captured {} bytes {:?}, expected {} bytes {:?}",
+                bytes.len(), bytes.as_slice(), EXPECT_OUT.len(), EXPECT_OUT
+            );
+            Err(KernelError::InternalError)
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: real dash script — reading the capture file back failed: {:?}",
+                e
+            );
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

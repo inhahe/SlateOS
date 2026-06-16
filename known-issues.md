@@ -1615,9 +1615,26 @@ from a live path (i.e. when user-mode shadow stacks / IBT are enabled for
 user processes). Until then this is inert dead code and there is nothing to
 fix.
 
-### TD24. `link`/`linkat` return a blanket `EROFS` regardless of mount/filesystem — APPROXIMATION 2026-06-14
+### TD24. `link`/`linkat` return a blanket `EROFS` regardless of mount/filesystem — RESOLVED 2026-06-16 (Path Z Part 28)
 
-**Where:** `sys_link` / `sys_linkat` in `kernel/src/syscall/linux.rs` (both
+**Resolution (2026-06-16, commit 5c8ae3e77 "Wire link/linkat to the VFS"):**
+this is no longer accurate. `link`/`linkat` now do real VFS work for ring-3
+callers: `link_common` (`kernel/src/syscall/linux.rs`) resolves oldpath/newpath
+against the caller's cwd/dirfds via `resolve_at_path`, requires a File-WRITE
+capability, and calls `Vfs::link`. ext4 implements real hard links (the Part 28
+self-test creates one on the `/mnt` ext4 mount and reads it back); memfs cannot
+share an inode between two names, so it correctly reports unsupported (mapped to
+the filesystem-appropriate errno, matching Linux's `EPERM` for an FS without a
+`->link` op — not the misleading `EROFS` this entry was filed against). Only the
+kernel-context path (`caller_pid().is_none()`, no fd table) still returns the
+`EROFS` terminal, which is required to keep the batch-481 syscall-fidelity
+self-test green. The two residual fidelity gaps — `Vfs::link` always follows a
+symlink oldpath (so plain `link(2)`'s no-follow contract and `linkat` without
+`AT_SYMLINK_FOLLOW` are not honoured for the rare symlink-oldpath case) and
+memfs lacking hard-link support (an inode-table refactor) — are tracked under
+**B-SYM1**, not here. The historical analysis below is retained for context.
+
+**Where (historical):** `sys_link` / `sys_linkat` in `kernel/src/syscall/linux.rs` (both
 return `errno::EROFS` after validating their path/flags arguments).
 
 **What it is:** no filesystem in the OS implements hard links, so both syscalls

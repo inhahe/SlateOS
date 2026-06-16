@@ -1579,6 +1579,17 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z: a real dash shell evaluates a conditional compound command —
+    // `x=hello; if [ "$x" = hello ]; then echo EQ; else echo NE; fi > file`
+    // — exercising variable assignment, parameter expansion, the `[`/`test`
+    // builtin, and if/then/else/fi control flow. No-op without rootfs.ext4.
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_cond() {
+        serial_println!(
+            "WARNING: Path-Z real dash shell conditional self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

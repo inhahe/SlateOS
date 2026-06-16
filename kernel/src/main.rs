@@ -1512,6 +1512,17 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z: the full shell-orchestration proof — dash forks + exec's an
+    // EXTERNAL real-glibc binary (/bin/emit) with output redirection. Proves
+    // dash parses `cmd > file`, fork()s, the child redirects fd 1 + execve()s
+    // the external binary, and the parent wait4()s. No-op without rootfs.ext4.
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_exec() {
+        serial_println!(
+            "WARNING: Path-Z real dash shell fork+exec self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

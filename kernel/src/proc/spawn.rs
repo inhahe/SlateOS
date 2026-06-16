@@ -5875,6 +5875,186 @@ pub fn self_test_linux_real_glibc_shell_redir() -> KernelResult<()> {
     }
 }
 
+/// Path Z Part 11: a real `dash` shell **forks + exec's an external
+/// glibc binary** with output redirection (`/bin/emit > file`).
+///
+/// Part 10 ([`self_test_linux_real_glibc_shell_redir`]) ran dash but the
+/// command (`echo`) was a shell *builtin*, so no `fork`/`exec` happened.
+/// This is the full shell-orchestration proof: dash parses
+/// `/bin/emit > /dash-exec-out.txt`, `fork(2)`s, the child `open(2)`s the
+/// redirect target and `dup2`s it over fd 1 then `execve(2)`s the
+/// *external* real-glibc `/bin/emit` (which `write(2)`s its payload to
+/// fd 1 — now the file — and exits), and the parent dash `wait4(2)`s the
+/// child and exits with its status.  Every piece (CoW fork, child-side
+/// redirect, exec into a fresh glibc image, reap) was proven individually
+/// in Parts 6–9; here a real shell drives all of them itself.  No fd is
+/// injected — the test reads the file the exec'd binary wrote back.
+///
+/// No-op (returns `Ok(())`) when the rootfs / `/bin/dash` / `/bin/emit`
+/// is absent.
+///
+/// # Errors
+///
+/// Returns [`KernelError::InternalError`] if the shell fails to reach
+/// `Zombie`, exits non-zero, or the file the exec'd child wrote does not
+/// match; propagates spawn failure.
+pub fn self_test_linux_real_glibc_shell_exec() -> KernelResult<()> {
+    const EXPECT_EXIT: i32 = 0;
+    // /bin/emit writes exactly these 16 bytes (incl. newline) to fd 1.
+    const EXPECT_OUT: &[u8] = b"SLATE_PIPE_BODY\n";
+
+    const SRC_LD: &str = "/mnt/lib64/ld-linux-x86-64.so.2";
+    const SRC_LIBC: &str = "/mnt/lib/x86_64-linux-gnu/libc.so.6";
+    const SRC_DASH: &str = "/mnt/bin/dash";
+    const SRC_EMIT: &str = "/mnt/bin/emit";
+    const DST_LD: &str = "/lib64/ld-linux-x86-64.so.2";
+    const DST_LIBC: &str = "/lib/x86_64-linux-gnu/libc.so.6";
+    const DST_DASH: &str = "/bin/dash";
+    const DST_EMIT: &str = "/bin/emit";
+    // The path the shell command redirects the exec'd binary's stdout onto.
+    const OUT_PATH: &str = "/dash-exec-out.txt";
+    // fork + exec of a second glibc image (re-runs ld.so) under a shell;
+    // keep the generous budget.
+    const MAX_YIELDS: usize = 262_144;
+
+    if !crate::fs::Vfs::exists(SRC_DASH) || !crate::fs::Vfs::exists(SRC_EMIT) {
+        return Ok(());
+    }
+
+    serial_println!("[spawn] Running REAL dash shell fork+exec of external `/bin/emit > file` (ring 3, Path Z) test...");
+
+    let _ = crate::fs::Vfs::mkdir_all("/lib64");
+    let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
+    let _ = crate::fs::Vfs::mkdir_all("/bin");
+    for (src, dst) in [
+        (SRC_LD, DST_LD),
+        (SRC_LIBC, DST_LIBC),
+        (SRC_DASH, DST_DASH),
+        (SRC_EMIT, DST_EMIT),
+    ] {
+        match crate::fs::Vfs::read_file(src) {
+            Ok(bytes) => {
+                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
+                    serial_println!(
+                        "[spawn]   real dash exec: SKIP (staging {} -> {} failed: {:?})",
+                        src, dst, e
+                    );
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                serial_println!(
+                    "[spawn]   real dash exec: SKIP (reading {} failed: {:?})",
+                    src, e
+                );
+                return Ok(());
+            }
+        }
+    }
+
+    let exe_elf = match crate::fs::Vfs::read_file(DST_DASH) {
+        Ok(b) => b,
+        Err(e) => {
+            serial_println!("[spawn]   real dash exec: SKIP (re-read {} failed: {:?})", DST_DASH, e);
+            return Ok(());
+        }
+    };
+
+    // Clear any stale output so a read-back can only succeed if the exec'd
+    // child wrote it THIS run.
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+
+    // dash forks, the child redirects + exec's the external binary.
+    let argv: &[&[u8]] = &[
+        b"/bin/dash",
+        b"-c",
+        b"/bin/emit > /dash-exec-out.txt",
+    ];
+    let envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C"];
+    // dash's child opens + creates the output file, so File READ|WRITE.
+    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-dash-exec",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: Some(DST_DASH.as_bytes()),
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: real dash exec spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let mut reaped = false;
+    for _ in 0..MAX_YIELDS {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            reaped = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    let written = crate::fs::Vfs::read_file(OUT_PATH);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+
+    if !reaped || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: real dash exec — shell did not exit within {} yields \
+             (state={:?}); dash's fork/child-redirect/exec of /bin/emit or its \
+             wait4 likely hung",
+            MAX_YIELDS, state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECT_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: real dash exec — exit code={:?}, expected {} (non-zero \
+             means dash's fork/exec of /bin/emit failed or the child exited non-zero)",
+            exit_code, EXPECT_EXIT
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    match written {
+        Ok(bytes) if bytes.as_slice() == EXPECT_OUT => {
+            serial_println!(
+                "[spawn]   REAL dash shell fork+exec (ring 3: dash parsed `/bin/emit > file`, \
+                 fork()ed, the child redirected fd 1 + execve()d the external glibc /bin/emit, \
+                 parent wait4()ed; read back {} bytes == expected, exit {}): OK",
+                bytes.len(), EXPECT_EXIT
+            );
+            Ok(())
+        }
+        Ok(bytes) => {
+            serial_println!(
+                "[spawn]   FAIL: real dash exec — wrote {} bytes {:?}, expected {:?}",
+                bytes.len(), bytes.as_slice(), EXPECT_OUT
+            );
+            Err(KernelError::InternalError)
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: real dash exec — reading the exec'd child's output file back failed: {:?}",
+                e
+            );
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

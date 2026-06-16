@@ -1590,6 +1590,17 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z: a real dash shell evaluates an arithmetic expansion —
+    // `x=3; y=4; echo $((x * y + 2)) > file` — exercising dash's arithmetic
+    // evaluator (variable lookup in the arithmetic context, `*` before `+`).
+    // No-op without rootfs.ext4.
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_arith() {
+        serial_println!(
+            "WARNING: Path-Z real dash shell arithmetic self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

@@ -7632,6 +7632,170 @@ pub fn self_test_linux_real_glibc_shell_bgjob() -> KernelResult<()> {
     }
 }
 
+/// Path Z Part 21: a real glibc `dash` runs a two-stage pipeline that
+/// connects an external program to a shell-internal reader.
+///
+/// The script `/bin/emit | while read l; do echo "<$l>"; done >
+/// /pipe2-out.txt` makes dash create a pipe, fork `/bin/emit` (an external
+/// glibc binary) with its stdout wired to the pipe's write end, fork a
+/// second child running the `while read`/`echo` loop with its stdin wired
+/// to the pipe's read end (and its stdout redirected to the file), and then
+/// wait for the whole pipeline.  `/bin/emit` writes "SLATE_PIPE_BODY\n";
+/// the loop's `read l` consumes that one line, `echo "<$l>"` wraps it, and
+/// the next `read` hits EOF and ends the loop.  Unlike the bg-job test this
+/// runs two pipeline stages *simultaneously* connected by a kernel pipe, so
+/// it stresses concurrent fd inheritance, pipe blocking/EOF, and dash's
+/// multi-child pipeline wait.  No-op without rootfs.ext4.
+pub fn self_test_linux_real_glibc_shell_pipeline() -> KernelResult<()> {
+    const EXPECT_EXIT: i32 = 0;
+    // emit -> "SLATE_PIPE_BODY\n"; the loop reads "SLATE_PIPE_BODY" and
+    // echoes "<SLATE_PIPE_BODY>\n" (18 bytes).
+    const EXPECT_OUT: &[u8] = b"<SLATE_PIPE_BODY>\n";
+
+    const SRC_LD: &str = "/mnt/lib64/ld-linux-x86-64.so.2";
+    const SRC_LIBC: &str = "/mnt/lib/x86_64-linux-gnu/libc.so.6";
+    const SRC_DASH: &str = "/mnt/bin/dash";
+    const SRC_EMIT: &str = "/mnt/bin/emit";
+    const DST_LD: &str = "/lib64/ld-linux-x86-64.so.2";
+    const DST_LIBC: &str = "/lib/x86_64-linux-gnu/libc.so.6";
+    const DST_DASH: &str = "/bin/dash";
+    const DST_EMIT: &str = "/bin/emit";
+    const OUT_PATH: &str = "/pipe2-out.txt";
+    const MAX_YIELDS: usize = 262_144;
+
+    if !crate::fs::Vfs::exists(SRC_DASH) || !crate::fs::Vfs::exists(SRC_EMIT) {
+        return Ok(());
+    }
+
+    serial_println!("[spawn] Running REAL dash shell pipeline `/bin/emit | while read ...` (ring 3, Path Z) test...");
+
+    let _ = crate::fs::Vfs::mkdir_all("/lib64");
+    let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
+    let _ = crate::fs::Vfs::mkdir_all("/bin");
+    for (src, dst) in [
+        (SRC_LD, DST_LD),
+        (SRC_LIBC, DST_LIBC),
+        (SRC_DASH, DST_DASH),
+        (SRC_EMIT, DST_EMIT),
+    ] {
+        match crate::fs::Vfs::read_file(src) {
+            Ok(bytes) => {
+                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
+                    serial_println!(
+                        "[spawn]   real dash pipeline: SKIP (staging {} -> {} failed: {:?})",
+                        src, dst, e
+                    );
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                serial_println!(
+                    "[spawn]   real dash pipeline: SKIP (reading {} failed: {:?})",
+                    src, e
+                );
+                return Ok(());
+            }
+        }
+    }
+
+    let exe_elf = match crate::fs::Vfs::read_file(DST_DASH) {
+        Ok(b) => b,
+        Err(e) => {
+            serial_println!("[spawn]   real dash pipeline: SKIP (re-read {} failed: {:?})", DST_DASH, e);
+            return Ok(());
+        }
+    };
+
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+
+    let argv: &[&[u8]] = &[
+        b"/bin/dash",
+        b"-c",
+        b"/bin/emit | while read l; do echo \"<$l>\"; done > /pipe2-out.txt",
+    ];
+    let envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C"];
+    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-dash-pipeline",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: Some(DST_DASH.as_bytes()),
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: real dash pipeline spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let mut reaped = false;
+    for _ in 0..MAX_YIELDS {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            reaped = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    let written = crate::fs::Vfs::read_file(OUT_PATH);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+
+    if !reaped || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: real dash pipeline — shell did not exit within {} yields \
+             (state={:?}); the pipeline likely never completed (a stage blocked on the pipe)",
+            MAX_YIELDS, state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECT_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: real dash pipeline — exit code={:?}, expected {}",
+            exit_code, EXPECT_EXIT
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    match written {
+        Ok(bytes) if bytes.as_slice() == EXPECT_OUT => {
+            serial_println!(
+                "[spawn]   REAL dash shell pipeline (ring 3: dash piped external /bin/emit into a \
+                 `while read` loop via a kernel pipe, wrapped the line, redirected the loop's stdout \
+                 — read back {} bytes == expected, exit {}): OK",
+                bytes.len(), EXPECT_EXIT
+            );
+            Ok(())
+        }
+        Ok(bytes) => {
+            serial_println!(
+                "[spawn]   FAIL: real dash pipeline — wrote {} bytes {:?}, expected {} bytes {:?} \
+                 (empty means a pipeline stage never ran or the pipe never delivered EOF)",
+                bytes.len(), bytes.as_slice(), EXPECT_OUT.len(), EXPECT_OUT
+            );
+            Err(KernelError::InternalError)
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: real dash pipeline — reading the redirected output file back failed: {:?}",
+                e
+            );
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

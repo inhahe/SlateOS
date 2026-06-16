@@ -1622,6 +1622,17 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z: a real dash shell runs a two-stage pipeline connecting an
+    // external program to a shell-internal reader — `/bin/emit | while read
+    // l; do echo "<$l>"; done > file` — exercising concurrent pipeline
+    // stages joined by a kernel pipe. No-op without rootfs.ext4.
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_shell_pipeline() {
+        serial_println!(
+            "WARNING: Path-Z real dash shell pipeline self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

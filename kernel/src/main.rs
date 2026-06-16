@@ -1360,6 +1360,14 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: Linux chmod()/chown() (ring 3) self-test failed: {:?}", e);
     }
 
+    // Ring-3 test that truncate()/ftruncate() resize files (both now route to
+    // Vfs::truncate for ring-3 callers instead of returning EROFS).  Shrinks
+    // via the path syscall, grows via a writable fd, and verifies the
+    // kernel-side final length + zero-fill.
+    if let Err(e) = proc::spawn::self_test_linux_truncate() {
+        serial_println!("WARNING: Linux truncate()/ftruncate() (ring 3) self-test failed: {:?}", e);
+    }
+
     // Ring-3 regression test that IA32_FS_BASE (the glibc %fs/TLS pointer) is
     // saved/restored per task across context switches.  Two concurrent Linux
     // procs install distinct FS bases and assert they survive cooperative

@@ -19129,10 +19129,36 @@ fn sys_truncate(args: &SyscallArgs) -> SyscallResult {
         Err(KernelError::NotFound) => return linux_err(errno::ENOENT),
         Err(e) => return linux_err(linux_errno_for(e)),
     }
-    // Gate 6: terminal EROFS — every mount in this kernel is read-only.
-    // Linux's RLIMIT_FSIZE / EFBIG check runs *after* mnt_want_write
-    // and is therefore unreachable here; do not re-insert it pre-mount.
-    linux_err(errno::EROFS)
+    // Gate 6: kernel-context callers (boot self-tests, no PCB) keep the
+    // historical EROFS terminal.  There is no capability context to
+    // satisfy `require_fs_write`, and the batch-447 gate-ladder
+    // self-test asserts EROFS for a *confirmed regular file* probed in
+    // kernel context (Probe F).  Userspace callers fall through to the
+    // real truncate below.
+    if caller_pid().is_none() {
+        return linux_err(errno::EROFS);
+    }
+    // Gate 7: enforce RLIMIT_FSIZE before the resize.  Linux's
+    // `do_truncate` reaches `inode_newsize_ok` (the EFBIG source) only
+    // *after* `mnt_want_write` succeeds — i.e. on a writable mount.  Now
+    // that our mounts are writable the check is live again, so a grow
+    // past the caller's soft FSIZE limit surfaces EFBIG, matching Linux.
+    #[allow(clippy::cast_sign_loss)]
+    let size = length as u64; // length >= 0 guaranteed by Gate 1
+    if let Err(e) = rlimit_fsize_check_size_for_caller(size) {
+        return linux_err(e);
+    }
+    // Gate 8: real truncate for ring-3 callers.  Requires a File-WRITE
+    // capability; `Vfs::truncate` follows symlinks (`resolve_follow`),
+    // re-checks writability, and dispatches to the backing FS, which
+    // grows-with-zeros or shrinks the file to `size` bytes.
+    if let Err(r) = require_fs_write() {
+        return r;
+    }
+    match crate::fs::Vfs::truncate(path_str, size) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
 }
 
 /// `ftruncate(fd, length)` — Linux gate-ladder fidelity for File handles.
@@ -19191,68 +19217,52 @@ fn sys_truncate(args: &SyscallArgs) -> SyscallResult {
 ///
 /// ## Gate ladder (File arm)
 ///
-/// For an unprivileged caller on this kernel — every mount is read-
-/// only:
+/// Writable mounts (memfs root/tmp, ext4 `/mnt`) have landed, so the
+/// File arm now performs a real resize for ring-3 callers:
 ///
 ///   1. `length < 0`                                     -> EINVAL
 ///   2. caller_pid == None (kernel context)              -> EROFS short-circuit
 ///   3. fd not in PCB table                              -> EBADF
 ///   4. (non-File HandleKind: Pipe/Console/EventFd/PidFd)-> EINVAL
-///   5. File handle: terminal **EROFS** — every mount in this kernel
-///      is read-only.  Linux's `inode_newsize_ok` / RLIMIT_FSIZE /
-///      EFBIG check runs *after* `mnt_want_write` and is therefore
-///      dead code in our universe.
+///   5. File/MemFd fd not opened for write (FMODE_WRITE) -> EINVAL
+///   6. File handle: enforce RLIMIT_FSIZE (EFBIG on grow past the soft
+///      limit), resolve the fd's backing path, require a File-WRITE
+///      capability, then `Vfs::truncate(path, length)`.
 ///
-/// ## Divergence table (pre-batch vs Linux vs post-batch 448)
+/// Kernel-context callers (no PCB) still short-circuit to EROFS at gate
+/// 2 — there is no fd table to consult and the batch-448 self-test pins
+/// that terminal.
 ///
-/// | call shape                                  | Linux  | Pre    | Post   |
-/// |---------------------------------------------|--------|--------|--------|
-/// | `ftruncate(fd, -1)`                         | EINVAL | EINVAL | EINVAL |
-/// | `ftruncate(BAD_FD, 0)`                      | EBADF  | EBADF  | EBADF  |
-/// | `ftruncate(pipe_fd, 0)`                     | EINVAL | EINVAL | EINVAL |
-/// | `ftruncate(file_fd, 0)`                     | EROFS  | EROFS  | EROFS  |
-/// | `ftruncate(file_fd, HUGE)` low-rlim         | EROFS  | EFBIG  | EROFS  |
-/// | `ftruncate(memfd, BIG)` low-rlim            | EFBIG  | EFBIG  | EFBIG  |
+/// ## Divergence table (Linux vs ours, post-writable-mount wiring)
 ///
-/// The 5th row is the meaningful behavioural fix: a process that
-/// lowered RLIMIT_FSIZE saw EFBIG where Linux returns EROFS, because
-/// pre-batch we ran the rlim check *before* the EROFS terminal.  Linux
-/// runs `mnt_want_write` (which surfaces EROFS) *before*
-/// `inode_newsize_ok` (which surfaces EFBIG), so on any read-only
-/// mount the rlim check is unreachable.
+/// | call shape                                  | Linux  | Ours   |
+/// |---------------------------------------------|--------|--------|
+/// | `ftruncate(fd, -1)`                         | EINVAL | EINVAL |
+/// | `ftruncate(BAD_FD, 0)`                      | EBADF  | EBADF  |
+/// | `ftruncate(pipe_fd, 0)`                     | EINVAL | EINVAL |
+/// | `ftruncate(ro_file_fd, 0)`                  | EINVAL | EINVAL |
+/// | `ftruncate(rw_file_fd, N)` writable mount   | 0      | 0      |
+/// | `ftruncate(rw_file_fd, HUGE)` low-rlim      | EFBIG  | EFBIG  |
+/// | `ftruncate(memfd, BIG)` low-rlim            | EFBIG  | EFBIG  |
 ///
-/// MemFd is exempted from this fix because memfd has no mount and
-/// therefore no EROFS gate; Linux's shmem_setattr / inode_newsize_ok
-/// path still fires EFBIG on a RLIMIT_FSIZE breach.  The MemFd arm
-/// keeps the rlim check at its original (correct, Linux-shaped)
-/// position.
+/// The EFBIG check (Linux's `inode_newsize_ok`, reached only after
+/// `mnt_want_write` succeeds) now fires at its proper position for both
+/// the File and MemFd arms, since a writable mount makes that path
+/// live.
 ///
 /// ## Why it matters
 ///
 /// - **SIGXFSZ-aware diagnostics**: nginx's `client_max_body_size`
 ///   reserve, sqlite's WAL size cap, and rsync's `--max-size` accumulator
-///   all branch on EFBIG vs EROFS to distinguish "user-imposed quota"
-///   from "FS-imposed RO".  Pre-batch we surfaced EFBIG for both, hiding
-///   the actual cause from the operational telemetry.
-/// - **systemd's `LimitFSIZE=` enforcement**: when a unit lowers FSIZE
-///   and then truncates a log file on a sealed-RO root mount, Linux
-///   returns EROFS (the mount is the cause); pre-batch we returned
-///   EFBIG (claiming the user's own limit was the cause), which made
-///   `LimitFSIZE=infinity` units inexplicably fail on RO roots.
+///   all branch on EFBIG to detect a user-imposed quota breach.  With
+///   the rlim check live before the resize, a grow past the soft FSIZE
+///   limit surfaces EFBIG exactly as on Linux.
+/// - **systemd's `LimitFSIZE=` enforcement**: a unit that lowers FSIZE
+///   and then grows a log file past the limit sees EFBIG; a unit with
+///   `LimitFSIZE=infinity` (RLIM_INFINITY) resizes freely.
 /// - **`./configure` truncation probes** (autoconf's AC_FUNC_FTRUNCATE
-///   on configure's tempfile): when the build dir is on a RO bind-mount,
-///   Linux returns EROFS letting configure fall back; pre-batch we
-///   returned EFBIG, which configure interpreted as "ftruncate broken"
-///   and disabled the feature.
-///
-/// ## Architectural directive
-///
-/// Pure ABI translator fidelity for the File arm — drop the dead rlim
-/// check so EROFS surfaces at the correct gate position.  When/if a
-/// writable backing for File handles is plumbed in, the EFBIG gate
-/// returns at its proper Linux position (between mnt_want_write
-/// success and do_truncate).  MemFd is unchanged: it has no mount,
-/// so EFBIG remains the terminal answer for rlim breaches.
+///   on configure's tempfile): a writable build dir lets the probe
+///   succeed (return 0), so configure enables the feature.
 fn sys_ftruncate(args: &SyscallArgs) -> SyscallResult {
     // Gate 1: negative length -> EINVAL.  Linux declares loff_t for
     // length; arg1 is a 64-bit register so no truncation games.
@@ -19298,14 +19308,29 @@ fn sys_ftruncate(args: &SyscallArgs) -> SyscallResult {
     }
     match entry.kind {
         HandleKind::File => {
-            // Terminal EROFS — every mount in this kernel is read-only.
-            // The pre-batch rlim_fsize_check_size_for_caller call was
-            // removed: Linux's mnt_want_write runs BEFORE
-            // inode_newsize_ok, so EROFS always wins on a RO mount and
-            // the EFBIG arm is dead.  When writable mounts land, the
-            // EFBIG check returns at its proper position (between
-            // mnt_want_write success and do_truncate).
-            linux_err(errno::EROFS)
+            // Writable mounts have landed, so the EFBIG check returns to
+            // its proper Linux position (between the FMODE_WRITE gate
+            // above and `do_truncate`).  Resolve the fd's backing path,
+            // enforce RLIMIT_FSIZE, then dispatch to the real truncate.
+            // Kernel-context callers never reach here — they short-
+            // circuit to EROFS at the `caller_pid` match above, which the
+            // batch-448 self-test pins.
+            #[allow(clippy::cast_sign_loss)]
+            let new_size = length as u64; // length >= 0 guaranteed by Gate 1
+            if let Err(e) = rlimit_fsize_check_size_for_caller(new_size) {
+                return linux_err(e);
+            }
+            let path = match crate::fs::handle::handle_path(entry.raw_handle) {
+                Ok(p) => p,
+                Err(e) => return linux_err(linux_errno_for(e)),
+            };
+            if let Err(r) = require_fs_write() {
+                return r;
+            }
+            match crate::fs::Vfs::truncate(&path, new_size) {
+                Ok(()) => SyscallResult::ok(0),
+                Err(e) => linux_err(linux_errno_for(e)),
+            }
         }
         HandleKind::MemFd => {
             #[allow(clippy::cast_sign_loss)]

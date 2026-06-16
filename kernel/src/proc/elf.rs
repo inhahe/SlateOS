@@ -2669,6 +2669,169 @@ pub fn build_linux_chmod_chown_test_elf(
     buf
 }
 
+/// Build a **Linux-ABI** `ET_EXEC` test ELF that exercises the
+/// **`truncate(2)`** (path-based) and **`ftruncate(2)`** (fd-based)
+/// file-resize syscalls from ring 3:
+///
+/// ```text
+///   truncate(&path, shrink_size)        ; shrink the pre-staged file
+///   test rax,rax ; jnz trunc_fail       ; success returns 0
+///   open(&path, O_RDWR, 0)              ; reopen writable for ftruncate
+///   test rax,rax ; js  open_fail        ; fd < 0 on error
+///   mov  r8, rax                        ; save fd
+///   ftruncate(fd, grow_size)            ; grow (zero-extend) via the fd
+///   test rax,rax ; jnz ftrunc_fail      ; success returns 0
+///   exit(0)
+///   trunc_fail:  exit(0xF1)
+///   open_fail:   exit(0xF2)
+///   ftrunc_fail: exit(0xF3)
+/// ```
+///
+/// The harness pre-creates `path` with a known byte pattern longer than
+/// both sizes, then independently reads the file back through the VFS
+/// and asserts the final length equals `grow_size` (the last resize) with
+/// the leading `shrink_size` bytes preserved and the grown tail zero-
+/// filled.  A clean `exit(0)` plus the kernel-side length/content match
+/// proves both the path and fd resize paths reach the real `Vfs::truncate`.
+///
+/// Sentinels: `0xF1` = `truncate` returned non-zero, `0xF2` = `open(O_RDWR)`
+/// failed (fd < 0), `0xF3` = `ftruncate` returned non-zero.  `shrink_size`
+/// and `grow_size` are emitted as `imm32` (loaded into `esi`, zero-extended
+/// to `rsi`), so callers must keep them in `0..=u32::MAX`.  Tagged
+/// `ELFOSABI_GNU`.
+#[must_use]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
+pub fn build_linux_truncate_test_elf(
+    path_nul: &[u8],
+    shrink_size: u32,
+    grow_size: u32,
+) -> alloc::vec::Vec<u8> {
+    use alloc::vec;
+
+    let phdr_offset: u64 = 64;
+    let code_offset: u64 = 120;
+    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+
+    let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+
+    // truncate(&path, shrink_size)
+    code.extend_from_slice(&[0x48, 0xBF]); // movabs rdi, &path
+    let path_imm1 = code.len();
+    code.extend_from_slice(&[0u8; 8]);
+    code.push(0xBE); // mov esi, imm32 (length)
+    code.extend_from_slice(&shrink_size.to_le_bytes());
+    code.extend_from_slice(&[0xB8, 0x4C, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,76; syscall
+    code.extend_from_slice(&[0x48, 0x85, 0xC0]); // test rax, rax
+    code.extend_from_slice(&[0x75, 0x00]); // jnz trunc_fail
+    let jnz_trunc_rel = code.len() - 1;
+
+    // open(&path, O_RDWR, 0)
+    code.extend_from_slice(&[0x48, 0xBF]); // movabs rdi, &path
+    let path_imm2 = code.len();
+    code.extend_from_slice(&[0u8; 8]);
+    code.extend_from_slice(&[0xBE, 0x02, 0x00, 0x00, 0x00]); // mov esi, 2 (O_RDWR)
+    code.extend_from_slice(&[0x31, 0xD2]); // xor edx, edx (mode = 0)
+    code.extend_from_slice(&[0xB8, 0x02, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,2; syscall
+    code.extend_from_slice(&[0x48, 0x85, 0xC0]); // test rax, rax
+    code.extend_from_slice(&[0x78, 0x00]); // js open_fail (fd < 0)
+    let js_open_rel = code.len() - 1;
+    code.extend_from_slice(&[0x49, 0x89, 0xC0]); // mov r8, rax (save fd)
+
+    // ftruncate(fd, grow_size)
+    code.extend_from_slice(&[0x4C, 0x89, 0xC7]); // mov rdi, r8
+    code.push(0xBE); // mov esi, imm32 (length)
+    code.extend_from_slice(&grow_size.to_le_bytes());
+    code.extend_from_slice(&[0xB8, 0x4D, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,77; syscall
+    code.extend_from_slice(&[0x48, 0x85, 0xC0]); // test rax, rax
+    code.extend_from_slice(&[0x75, 0x00]); // jnz ftrunc_fail
+    let jnz_ftrunc_rel = code.len() - 1;
+
+    // exit(0)
+    code.extend_from_slice(&[0x31, 0xFF]); // xor edi, edi
+    code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,60; syscall
+
+    // trunc_fail: exit(0xF1)
+    let trunc_fail = code.len();
+    code.extend_from_slice(&[0xBF, 0xF1, 0x00, 0x00, 0x00]);
+    code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]);
+
+    // open_fail: exit(0xF2)
+    let open_fail = code.len();
+    code.extend_from_slice(&[0xBF, 0xF2, 0x00, 0x00, 0x00]);
+    code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]);
+
+    // ftrunc_fail: exit(0xF3)
+    let ftrunc_fail = code.len();
+    code.extend_from_slice(&[0xBF, 0xF3, 0x00, 0x00, 0x00]);
+    code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]);
+    code.push(0xCC); // int3 — unreachable trap
+
+    // Patch the three forward rel8 jumps.
+    let jnz_trunc_disp = (trunc_fail as isize) - (jnz_trunc_rel as isize + 1);
+    let js_open_disp = (open_fail as isize) - (js_open_rel as isize + 1);
+    let jnz_ftrunc_disp = (ftrunc_fail as isize) - (jnz_ftrunc_rel as isize + 1);
+    code[jnz_trunc_rel] = jnz_trunc_disp as u8;
+    code[js_open_rel] = js_open_disp as u8;
+    code[jnz_ftrunc_rel] = jnz_ftrunc_disp as u8;
+
+    // --- Data layout (same PT_LOAD, after the code) ---
+    let code_len = code.len();
+    let data_base = code_offset as usize + code_len;
+    let path_off = data_base;
+    let path_end = path_off + path_nul.len();
+    let file_size = path_end;
+
+    let vaddr_of = |fo: usize| -> u64 { load_vaddr + (fo as u64 - code_offset) };
+    let path_vaddr = vaddr_of(path_off);
+    code[path_imm1..path_imm1 + 8].copy_from_slice(&path_vaddr.to_le_bytes());
+    code[path_imm2..path_imm2 + 8].copy_from_slice(&path_vaddr.to_le_bytes());
+
+    // --- File image ---
+    let seg_len = file_size - code_offset as usize;
+    let mut buf = vec![0u8; file_size];
+
+    buf[0] = 0x7F;
+    buf[1] = b'E';
+    buf[2] = b'L';
+    buf[3] = b'F';
+    buf[EI_CLASS] = ELFCLASS64;
+    buf[EI_DATA] = ELFDATA2LSB;
+    buf[EI_VERSION] = EV_CURRENT;
+    buf[EI_OSABI] = ELFOSABI_GNU;
+    write_u16(&mut buf, 16, ET_EXEC);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr); // e_entry
+    write_u64(&mut buf, 32, phdr_offset); // e_phoff
+    write_u64(&mut buf, 40, 0);
+    write_u32(&mut buf, 48, 0);
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, 1);
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0);
+    write_u16(&mut buf, 62, 0);
+
+    let ph = phdr_offset as usize;
+    write_u32(&mut buf, ph, PT_LOAD);
+    write_u32(&mut buf, ph + 4, PF_R | PF_X);
+    write_u64(&mut buf, ph + 8, code_offset);
+    write_u64(&mut buf, ph + 16, load_vaddr);
+    write_u64(&mut buf, ph + 24, 0);
+    write_u64(&mut buf, ph + 32, seg_len as u64);
+    write_u64(&mut buf, ph + 40, seg_len as u64);
+    write_u64(&mut buf, ph + 48, 0x1000);
+
+    buf[code_offset as usize..code_offset as usize + code_len].copy_from_slice(&code);
+    buf[path_off..path_end].copy_from_slice(path_nul);
+
+    buf
+}
+
 /// Build a **Linux-ABI** `ET_EXEC` test ELF that verifies the **`%fs`
 /// (TLS) base survives context switches**.  The process installs a
 /// caller-chosen `sentinel` FS base, then in a loop yields the CPU and

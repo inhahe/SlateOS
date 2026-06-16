@@ -3478,6 +3478,127 @@ pub fn self_test_linux_chmod_chown() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 regression test for the **`truncate(2)`** (path) and
+/// **`ftruncate(2)`** (fd) file-resize syscalls against the writable
+/// memfs root.
+///
+/// The harness stages `/truncate-test` with `STAGE_LEN` bytes of `'A'`,
+/// then spawns a [`elf::build_linux_truncate_test_elf`] process that:
+///   1. `truncate("/truncate-test", SHRINK_LEN)` — shrinks the file;
+///   2. `open(..., O_RDWR)` then `ftruncate(fd, GROW_LEN)` — grows
+///      (zero-extends) the file through a writable fd.
+///
+/// After the process exits 0, the kernel independently reads the file
+/// back and asserts the final length is `GROW_LEN`, the leading
+/// `SHRINK_LEN` bytes survived as `'A'`, and the grown tail is zero-
+/// filled.  This proves both resize paths reach the real `Vfs::truncate`
+/// (path-based via canonicalization, fd-based via `handle_path`) now that
+/// the universal-read-only EROFS terminal has been lifted for ring-3
+/// callers.
+pub fn self_test_linux_truncate() -> KernelResult<()> {
+    const PATH: &str = "/truncate-test";
+    const PATH_NUL: &[u8] = b"/truncate-test\0";
+    const STAGE_LEN: usize = 16;
+    const SHRINK_LEN: u32 = 4;
+    const GROW_LEN: u32 = 10;
+    const MAX_YIELDS: usize = 256;
+
+    serial_println!(
+        "[spawn] Running Linux truncate()/ftruncate() resize test (ring 3, memfs /)..."
+    );
+
+    let _ = crate::fs::Vfs::remove(PATH);
+    let stage = [b'A'; STAGE_LEN];
+    if let Err(e) = crate::fs::Vfs::write_file(PATH, &stage) {
+        serial_println!("[spawn]   FAIL: truncate staging write failed: {:?}", e);
+        return Err(e);
+    }
+
+    let exe_elf = elf::build_linux_truncate_test_elf(PATH_NUL, SHRINK_LEN, GROW_LEN);
+    let argv: &[&[u8]] = &[b"spawn-test-linux-truncate"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-truncate",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = crate::fs::Vfs::remove(PATH);
+            serial_println!("[spawn]   FAIL: truncate spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    for _ in 0..MAX_YIELDS {
+        crate::sched::yield_now();
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            break;
+        }
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    let kernel_readback = crate::fs::Vfs::read_file(PATH);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(PATH);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: truncate (ring 3) — process not a zombie after {} yields, got {:?}",
+            MAX_YIELDS, state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: truncate (ring 3) — expected exit 0, got {:?} (0xF1/241 = truncate \
+             failed; 0xF2/242 = open(O_RDWR) failed; 0xF3/243 = ftruncate failed)",
+            exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    match kernel_readback {
+        Ok(ref data)
+            if data.len() == GROW_LEN as usize
+                && data.iter().take(SHRINK_LEN as usize).all(|&b| b == b'A')
+                && data.iter().skip(SHRINK_LEN as usize).all(|&b| b == 0) => {}
+        Ok(ref data) => {
+            serial_println!(
+                "[spawn]   FAIL: truncate (ring 3) — process exited 0 but kernel readback \
+                 mismatch: len={} (want {}), bytes={:?}",
+                data.len(), GROW_LEN, data
+            );
+            return Err(KernelError::InternalError);
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: truncate (ring 3) — kernel file readback failed: {:?}",
+                e
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    serial_println!(
+        "[spawn]   Linux truncate()/ftruncate() (ring 3: shrink /truncate-test to 4B via path, \
+         grow to 10B via fd; kernel confirmed length + zero-fill): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 regression test that the **`%fs` (TLS) base is saved/restored
 /// across context switches** between two concurrent Linux processes.
 ///

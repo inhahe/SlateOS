@@ -5446,6 +5446,41 @@ pub fn sys_fs_stat(args: &SyscallArgs) -> SyscallResult {
 // ---------------------------------------------------------------------------
 
 /// `SYS_FS_OPEN` — open a file, return a handle.
+/// Open an already-resolved **absolute kernel path** string with the given
+/// native [`OpenFlags`](crate::fs::handle::OpenFlags) bits, returning the raw
+/// open-file handle as the syscall value.
+///
+/// This is the shared core of file opening that works from a kernel-owned
+/// path string rather than a userspace pointer.  The Linux ABI's
+/// `open`/`openat(AT_FDCWD)` path uses it after canonicalising a (possibly
+/// relative) userspace path against the caller's per-process cwd — something
+/// the VFS resolver cannot do on its own because it has no notion of which
+/// process is calling.  `sys_fs_open` keeps its own userspace-pointer path
+/// for the native ABI; this helper does not read userspace memory.
+///
+/// Performs the same File-READ capability check and per-process handle
+/// registration `sys_fs_open` does, so the returned handle is closed on
+/// process exit and refcount-shared across `fork`.
+pub fn fs_open_kernel_path(path: &str, flags_raw: u32) -> SyscallResult {
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::File,
+        crate::cap::Rights::READ,
+    ) {
+        return SyscallResult::err(e);
+    }
+    let flags = crate::fs::handle::OpenFlags::from_bits(flags_raw);
+    match crate::fs::handle::open(path, flags) {
+        Ok(handle) => {
+            if let Some(pid) = caller_pid() {
+                pcb::register_ipc_handle(pid, ResourceType::File, handle);
+            }
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(handle as i64)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 pub fn sys_fs_open(args: &SyscallArgs) -> SyscallResult {
     // Capability: require READ for read-only, WRITE for write.
     // We check the broader File capability — specific rights are

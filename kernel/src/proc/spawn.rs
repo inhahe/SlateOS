@@ -7950,6 +7950,174 @@ pub fn self_test_linux_real_glibc_shell_cwd() -> KernelResult<()> {
     }
 }
 
+/// Path Z Part 23: a real glibc `dash` opens a file by *relative* path after
+/// changing directory, verifying that relative path resolution honours the
+/// per-process cwd.
+///
+/// The script `cd /reltest && echo RELOK > relfile.txt` makes dash
+/// `chdir("/reltest")` and then open `relfile.txt` (a *relative* path) for
+/// the output redirect.  The correct Linux behaviour is that
+/// `openat(AT_FDCWD, "relfile.txt", ...)` resolves against the process cwd,
+/// so the file must be created at `/reltest/relfile.txt` — **not** at
+/// `/relfile.txt`.  This is the regression test for the cwd-resolution fix:
+/// before it, the Linux open path forwarded relative paths to the VFS
+/// verbatim, which normalised them from the filesystem root, so the file
+/// would have landed at `/relfile.txt` and this check (which reads back the
+/// cwd-relative location) would fail.  Complements Part 22 (`pwd -P`, the
+/// read side) by exercising the write side — a relative `open` that must be
+/// canonicalised against the cwd.  No-op without rootfs.ext4.
+pub fn self_test_linux_real_glibc_shell_relpath() -> KernelResult<()> {
+    const EXPECT_EXIT: i32 = 0;
+    const EXPECT_OUT: &[u8] = b"RELOK\n";
+
+    const SRC_LD: &str = "/mnt/lib64/ld-linux-x86-64.so.2";
+    const SRC_LIBC: &str = "/mnt/lib/x86_64-linux-gnu/libc.so.6";
+    const SRC_DASH: &str = "/mnt/bin/dash";
+    const DST_LD: &str = "/lib64/ld-linux-x86-64.so.2";
+    const DST_LIBC: &str = "/lib/x86_64-linux-gnu/libc.so.6";
+    const DST_DASH: &str = "/bin/dash";
+    const REL_DIR: &str = "/reltest";
+    // Where the file MUST land (cwd-relative) and where it would WRONGLY
+    // land if relative resolution ignored the cwd.
+    const GOOD_PATH: &str = "/reltest/relfile.txt";
+    const WRONG_PATH: &str = "/relfile.txt";
+    const MAX_YIELDS: usize = 262_144;
+
+    if !crate::fs::Vfs::exists(SRC_DASH) {
+        return Ok(());
+    }
+
+    serial_println!("[spawn] Running REAL dash shell relpath `cd /reltest && echo > relfile.txt` (ring 3, Path Z) test...");
+
+    let _ = crate::fs::Vfs::mkdir_all("/lib64");
+    let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
+    let _ = crate::fs::Vfs::mkdir_all("/bin");
+    for (src, dst) in [(SRC_LD, DST_LD), (SRC_LIBC, DST_LIBC), (SRC_DASH, DST_DASH)] {
+        match crate::fs::Vfs::read_file(src) {
+            Ok(bytes) => {
+                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
+                    serial_println!(
+                        "[spawn]   real dash relpath: SKIP (staging {} -> {} failed: {:?})",
+                        src, dst, e
+                    );
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                serial_println!("[spawn]   real dash relpath: SKIP (reading {} failed: {:?})", src, e);
+                return Ok(());
+            }
+        }
+    }
+
+    let _ = crate::fs::Vfs::mkdir_all(REL_DIR);
+    // Clear any stale outputs from a prior run so the existence checks below
+    // are meaningful.
+    let _ = crate::fs::Vfs::remove(GOOD_PATH);
+    let _ = crate::fs::Vfs::remove(WRONG_PATH);
+
+    let exe_elf = match crate::fs::Vfs::read_file(DST_DASH) {
+        Ok(b) => b,
+        Err(e) => {
+            serial_println!("[spawn]   real dash relpath: SKIP (re-read {} failed: {:?})", DST_DASH, e);
+            return Ok(());
+        }
+    };
+
+    let argv: &[&[u8]] = &[b"/bin/dash", b"-c", b"cd /reltest && echo RELOK > relfile.txt"];
+    let envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C"];
+    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-dash-relpath",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: Some(DST_DASH.as_bytes()),
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: real dash relpath spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let mut reaped = false;
+    for _ in 0..MAX_YIELDS {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            reaped = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    let good = crate::fs::Vfs::read_file(GOOD_PATH);
+    let wrong_exists = crate::fs::Vfs::exists(WRONG_PATH);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(GOOD_PATH);
+    let _ = crate::fs::Vfs::remove(WRONG_PATH);
+
+    if !reaped || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: real dash relpath — shell did not exit within {} yields (state={:?})",
+            MAX_YIELDS, state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECT_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: real dash relpath — exit code={:?}, expected {}",
+            exit_code, EXPECT_EXIT
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if wrong_exists {
+        serial_println!(
+            "[spawn]   FAIL: real dash relpath — file landed at {} (root) instead of the \
+             cwd-relative {}; relative open ignored the process cwd",
+            WRONG_PATH, GOOD_PATH
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    match good {
+        Ok(bytes) if bytes.as_slice() == EXPECT_OUT => {
+            serial_println!(
+                "[spawn]   REAL dash shell relpath (ring 3: dash chdir'd to /reltest then opened a \
+                 relative `relfile.txt` for redirect — file correctly landed at {}, read back {} \
+                 bytes == expected, exit {}): OK",
+                GOOD_PATH, bytes.len(), EXPECT_EXIT
+            );
+            Ok(())
+        }
+        Ok(bytes) => {
+            serial_println!(
+                "[spawn]   FAIL: real dash relpath — {} wrote {} bytes {:?}, expected {} bytes {:?}",
+                GOOD_PATH, bytes.len(), bytes.as_slice(), EXPECT_OUT.len(), EXPECT_OUT
+            );
+            Err(KernelError::InternalError)
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: real dash relpath — reading {} back failed: {:?} (the relative \
+                 open likely resolved against the wrong directory)",
+                GOOD_PATH, e
+            );
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

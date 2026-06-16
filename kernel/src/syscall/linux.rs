@@ -4807,23 +4807,40 @@ fn open_common(path_ptr: u64, path_len_hint: u64, flags: u32) -> SyscallResult {
             return r;
         }
     }
-    // Honour caller's explicit length when provided.  sys_fs_open
-    // re-reads the path itself from userspace; we forward the user
-    // pointer and length.
-    let user_len = if path_len_hint == 0 || path_len_hint > len as u64 {
-        len as u64
+    // Honour the caller's explicit length when provided, but never read
+    // past the NUL we already located.
+    let effective_len = if path_len_hint == 0 || path_len_hint > len as u64 {
+        len
     } else {
-        path_len_hint
+        (path_len_hint as usize).min(len)
+    };
+    let path_slice = match tmp.get(..effective_len) {
+        Some(s) => s,
+        None => return linux_err(errno::ENOENT),
+    };
+
+    // Resolve a (possibly relative) path against the caller's per-process
+    // cwd before handing it to the VFS.  The native VFS resolver has no
+    // notion of which process is calling, so a bare `open("rel")` after a
+    // `chdir("/dir")` would otherwise resolve against the filesystem root
+    // instead of `/dir` — the standard Linux `openat(AT_FDCWD, ...)`
+    // contract.  Kernel context (no caller PID) uses "/" so existing
+    // root-relative callers are unaffected.
+    let cwd = match caller_pid() {
+        Some(pid) => pcb::get_cwd(pid).unwrap_or_else(|| alloc::vec![b'/']),
+        None => alloc::vec![b'/'],
+    };
+    let canon = match canonicalize_path(&cwd, path_slice) {
+        Ok(p) => p,
+        Err(e) => return linux_err(e),
+    };
+    let canon_str = match core::str::from_utf8(&canon) {
+        Ok(s) => s,
+        Err(_) => return linux_err(errno::EINVAL),
     };
 
     let kernel_flags = translate_open_flags(flags);
-    let open_args = SyscallArgs {
-        arg0: path_ptr,
-        arg1: user_len,
-        arg2: u64::from(kernel_flags),
-        arg3: 0, arg4: 0, arg5: 0,
-    };
-    let r = handlers::sys_fs_open(&open_args);
+    let r = handlers::fs_open_kernel_path(canon_str, kernel_flags);
     if r.value < 0 {
         return linux_from_native(r);
     }
@@ -17763,7 +17780,13 @@ fn resolve_at_path(dirfd: i32, path_ptr: u64) -> Result<alloc::string::String, S
         // first == b'/': absolute path, dirfd ignored — fall through.
     }
 
-    // AT_FDCWD or an absolute path: take the path verbatim.
+    // AT_FDCWD or an absolute path: resolve against the caller's cwd.  An
+    // absolute path is normalised but otherwise unchanged (cwd is unused
+    // when the path starts with '/'); a relative path under AT_FDCWD is
+    // joined onto the caller's cwd — the Linux `openat(AT_FDCWD, ...)`
+    // contract that the native VFS resolver cannot honour on its own.
+    // Kernel context (no caller PID) uses "/" so root-relative callers are
+    // unaffected.
     let bytes = match read_user_cstr(path_ptr, MAX_PATH) {
         Ok(b) => b,
         Err(e) => return Err(linux_err(e)),
@@ -17771,7 +17794,15 @@ fn resolve_at_path(dirfd: i32, path_ptr: u64) -> Result<alloc::string::String, S
     if bytes.is_empty() {
         return Err(linux_err(errno::ENOENT));
     }
-    match alloc::string::String::from_utf8(bytes) {
+    let cwd = match caller_pid() {
+        Some(pid) => pcb::get_cwd(pid).unwrap_or_else(|| alloc::vec![b'/']),
+        None => alloc::vec![b'/'],
+    };
+    let canon = match canonicalize_path(&cwd, &bytes) {
+        Ok(p) => p,
+        Err(e) => return Err(linux_err(e)),
+    };
+    match alloc::string::String::from_utf8(canon) {
         Ok(s) => Ok(s),
         Err(_) => Err(linux_err(errno::EINVAL)),
     }

@@ -1477,6 +1477,18 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z: a real glibc program performs its OWN `cmd > file` output
+    // redirection — open(O_WRONLY|O_CREAT|O_TRUNC) + dup2(fd, 1) + printf.
+    // Proves dup2 of a self-open()ed File handle onto stdout (vs Part 7's
+    // dup2 onto a pipe) and the displaced-console close. No-op without
+    // rootfs.ext4.
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_redir() {
+        serial_println!(
+            "WARNING: Path-Z real glibc redir self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

@@ -5365,6 +5365,179 @@ pub fn self_test_linux_real_glibc_pipe() -> KernelResult<()> {
     }
 }
 
+/// Path Z Part 8: real glibc `cmd > file` output redirection.
+///
+/// Runs a prebuilt glibc binary (`/bin/redir`) that performs its OWN
+/// output redirection the way a shell does for `cmd > file`: it
+/// `open(2)`s a target with `O_WRONLY|O_CREAT|O_TRUNC`, `dup2(2)`s the
+/// resulting fd onto fd 1 (the kernel closes the displaced console fd),
+/// closes the now-redundant original fd, and `printf`s to the redirected
+/// stdout — glibc full-buffers (fd 1 is a regular file) and issues the
+/// `write(2)` at exit.
+///
+/// Part 7 (`self_test_linux_real_glibc_pipe`) proved `dup2` onto a *pipe*
+/// write end; this proves `dup2` of a self-`open()`ed *File* handle onto
+/// stdout, the displaced-Console close, and a glibc program creating and
+/// writing a file it chose.  Unlike the earlier output tests this injects
+/// NO fd from the kernel side — the program opens the file itself, and the
+/// test reads that exact file back from the VFS.
+///
+/// No-op (returns `Ok(())`) when the rootfs / `/bin/redir` is absent.
+///
+/// # Errors
+///
+/// Returns [`KernelError::InternalError`] if the process fails to reach
+/// `Zombie`, exits with the wrong code, or the file it wrote does not
+/// match the expected bytes; propagates spawn failure.
+pub fn self_test_linux_real_glibc_redir() -> KernelResult<()> {
+    const EXPECT_EXIT: i32 = 31;
+    const EXPECT_OUT: &[u8] = b"SLATE_GLIBC_REDIR_OK marker=4242\n";
+
+    const SRC_LD: &str = "/mnt/lib64/ld-linux-x86-64.so.2";
+    const SRC_LIBC: &str = "/mnt/lib/x86_64-linux-gnu/libc.so.6";
+    const SRC_REDIR: &str = "/mnt/bin/redir";
+    const DST_LD: &str = "/lib64/ld-linux-x86-64.so.2";
+    const DST_LIBC: &str = "/lib/x86_64-linux-gnu/libc.so.6";
+    const DST_REDIR: &str = "/bin/redir";
+    // The path the *program* opens + redirects stdout onto.  Must match
+    // the literal in scripts/create-ext4-rootfs.sh's /bin/redir source.
+    const OUT_PATH: &str = "/redir-out.txt";
+    // Dynamically-linked single process (re-runs ld.so); same generous
+    // budget as the other real-glibc tests.
+    const MAX_YIELDS: usize = 262_144;
+
+    if !crate::fs::Vfs::exists(SRC_REDIR) {
+        return Ok(());
+    }
+
+    serial_println!("[spawn] Running REAL glibc `cmd > file` output-redirection (ring 3, Path Z) test...");
+
+    let _ = crate::fs::Vfs::mkdir_all("/lib64");
+    let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
+    let _ = crate::fs::Vfs::mkdir_all("/bin");
+    for (src, dst) in [
+        (SRC_LD, DST_LD),
+        (SRC_LIBC, DST_LIBC),
+        (SRC_REDIR, DST_REDIR),
+    ] {
+        match crate::fs::Vfs::read_file(src) {
+            Ok(bytes) => {
+                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
+                    serial_println!(
+                        "[spawn]   real glibc redir: SKIP (staging {} -> {} failed: {:?})",
+                        src, dst, e
+                    );
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                serial_println!(
+                    "[spawn]   real glibc redir: SKIP (reading {} failed: {:?})",
+                    src, e
+                );
+                return Ok(());
+            }
+        }
+    }
+
+    let exe_elf = match crate::fs::Vfs::read_file(DST_REDIR) {
+        Ok(b) => b,
+        Err(e) => {
+            serial_println!("[spawn]   real glibc redir: SKIP (re-read {} failed: {:?})", DST_REDIR, e);
+            return Ok(());
+        }
+    };
+
+    // Clear any stale output from a prior boot so a read-back can only
+    // succeed if THIS run wrote it.
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+
+    let argv: &[&[u8]] = &[b"/bin/redir"];
+    let envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C"];
+    // The program opens + creates a file, so it needs File READ|WRITE.
+    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-glibc-redir",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: Some(DST_REDIR.as_bytes()),
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: real glibc redir spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let mut reaped = false;
+    for _ in 0..MAX_YIELDS {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            reaped = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    let written = crate::fs::Vfs::read_file(OUT_PATH);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+
+    if !reaped || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: real glibc redir — process did not exit within {} yields \
+             (state={:?}); the program's open()/dup2() redirection or exit-flush \
+             write likely hung",
+            MAX_YIELDS, state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECT_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: real glibc redir — exit code={:?}, expected {} (2=open \
+             failed, 3=dup2 failed)",
+            exit_code, EXPECT_EXIT
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    match written {
+        Ok(bytes) if bytes.as_slice() == EXPECT_OUT => {
+            serial_println!(
+                "[spawn]   REAL glibc redir (ring 3: open(O_WRONLY|O_CREAT|O_TRUNC) + \
+                 dup2(file -> fd 1) + displaced-console close + printf flushed to the \
+                 program's own file, read back {} bytes == expected): OK",
+                bytes.len()
+            );
+            Ok(())
+        }
+        Ok(bytes) => {
+            serial_println!(
+                "[spawn]   FAIL: real glibc redir — wrote {} bytes {:?}, expected {:?}",
+                bytes.len(), bytes.as_slice(), EXPECT_OUT
+            );
+            Err(KernelError::InternalError)
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: real glibc redir — reading the program's output file back failed: {:?}",
+                e
+            );
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

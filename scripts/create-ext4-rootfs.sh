@@ -546,6 +546,40 @@ EOF
 gcc -O2 -o "$STAGE/bin/pipe" "$CSRC10" -Wl,-rpath,"$LIBC_DIR" -Wl,--enable-new-dtags
 rm -f "$CSRC10"
 
+# --- the "redir" test binary: the `cmd > file` shell primitive ----------------
+# A real glibc program that performs its OWN output redirection the way a shell
+# does for `cmd > file`: open(2) a target with O_WRONLY|O_CREAT|O_TRUNC, dup2(2)
+# the resulting fd onto fd 1 (the kernel closes the displaced console fd 1),
+# close the now-redundant original fd, then printf to the redirected stdout.
+# Part 7 (/bin/pipe) proved dup2 onto a *pipe*; this proves dup2 of a
+# self-open()ed *File* handle onto stdout plus glibc's exit-time flush landing
+# in a real file the program chose.  The SlateOS self-test does NOT inject any
+# fd here — it reads the file the program created back from the VFS.  Returns 31
+# so the exit-code channel independently confirms a clean run.
+# (2 = open failed, 3 = dup2 failed.)
+CSRC11="$STAGE/redir.c"
+cat > "$CSRC11" <<'EOF'
+/* SlateOS Path-Z real-glibc `cmd > file` output-redirection test. */
+#include <stdio.h>
+#include <unistd.h>
+#include <fcntl.h>
+
+int main(void) {
+    /* Open the redirect target exactly as a shell does for `> file`. */
+    int fd = open("/redir-out.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) return 2;            /* open failed */
+    /* Point stdout at it; the kernel closes the displaced fd 1 (console). */
+    if (dup2(fd, 1) < 0) return 3;   /* dup2 failed */
+    close(fd);                        /* original fd now redundant */
+    /* fd 1 is a regular file now, so glibc full-buffers and flushes the
+       write(2) at exit. */
+    printf("SLATE_GLIBC_REDIR_OK marker=%d\n", 4242);
+    return 31;
+}
+EOF
+gcc -O2 -o "$STAGE/bin/redir" "$CSRC11" -Wl,-rpath,"$LIBC_DIR" -Wl,--enable-new-dtags
+rm -f "$CSRC11"
+
 echo "[rootfs] staged tree:"
 ( cd "$STAGE" && find lib64 lib bin -type f -printf '  %-44p %10s bytes\n' )
 

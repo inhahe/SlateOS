@@ -1375,6 +1375,19 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z, part 2: run a REAL glibc binary that produces output
+    // (/bin/stdio → printf), redirecting its fd 1 to a capture file and
+    // asserting the exact bytes glibc's full-buffered stdio flushes via
+    // write(2).  Proves the real-glibc output path, not just exit().  No-ops
+    // when rootfs.ext4 is absent.  Must run after self_test_linux_real_glibc
+    // (which stages the glibc tree) and the /mnt ext4 probe.
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_stdio() {
+        serial_println!(
+            "WARNING: Path-Z real glibc stdio-output self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

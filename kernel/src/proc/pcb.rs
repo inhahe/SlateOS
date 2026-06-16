@@ -5320,6 +5320,30 @@ pub fn linux_fd_install(
     Ok(fd)
 }
 
+/// Install `entry` at a specific `fd`, overwriting any existing entry.
+///
+/// The caller is responsible for closing the previous handle if it held
+/// one (use [`linux_fd_take`] first when that matters — a `Console` entry
+/// has no kernel-side resource, so overwriting it directly is safe).
+/// Unlike [`linux_fd_install`] this targets an exact descriptor number
+/// rather than the lowest free one; it is the precise operation needed to
+/// redirect a child's stdio (e.g. point fd 1 at a capture file) before the
+/// child first runs.  Returns `NoSuchProcess` / `InvalidHandle` if the
+/// process or its Linux fd table is gone.
+pub fn linux_fd_install_at(
+    pid: ProcessId,
+    fd: i32,
+    entry: super::linux_fd::FdEntry,
+) -> KernelResult<()> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+    let fd_table = proc
+        .linux_fd_table
+        .as_mut()
+        .ok_or(KernelError::InvalidHandle)?;
+    fd_table.install_at(fd, entry)
+}
+
 /// Remove the entry at `fd` and return it, so the caller can decide
 /// whether to call the appropriate kernel close on the underlying
 /// handle.  Returns `None` if the process has no Linux fd table or

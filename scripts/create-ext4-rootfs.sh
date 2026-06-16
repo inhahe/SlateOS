@@ -82,6 +82,27 @@ EOF
 gcc -O2 -o "$STAGE/bin/hello" "$CSRC" -Wl,-rpath,"$LIBC_DIR" -Wl,--enable-new-dtags
 rm -f "$CSRC"
 
+# --- the stdio test binary: full glibc stdio output path ---------------------
+# `printf` to stdout exercises the part of glibc that `hello` does NOT: stdio
+# stream setup, the fstat(1) call glibc uses to choose buffering, the
+# vfprintf/%d formatting machinery, and the exit-time flush that finally issues
+# the write(2)/writev(2) to fd 1.  The SlateOS self-test wires fd 1 to a file,
+# runs this binary, then reads the file back and asserts the exact bytes — so
+# this proves the real-glibc *output* path, the gate for any program that
+# produces output.  It returns 7 so the exit-code channel independently
+# confirms a clean run.
+CSRC2="$STAGE/stdio.c"
+cat > "$CSRC2" <<'EOF'
+/* SlateOS Path-Z real-glibc stdio (output) test. */
+#include <stdio.h>
+int main(void) {
+    printf("SLATE_GLIBC_STDIO_OK %d\n", 1234);
+    return 7;
+}
+EOF
+gcc -O2 -o "$STAGE/bin/stdio" "$CSRC2" -Wl,-rpath,"$LIBC_DIR" -Wl,--enable-new-dtags
+rm -f "$CSRC2"
+
 echo "[rootfs] staged tree:"
 ( cd "$STAGE" && find lib64 lib bin -type f -printf '  %-44p %10s bytes\n' )
 

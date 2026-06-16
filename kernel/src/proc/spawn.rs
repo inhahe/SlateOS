@@ -3713,6 +3713,210 @@ pub fn self_test_linux_real_glibc() -> KernelResult<()> {
     Ok(())
 }
 
+/// Path Z, part 2: prove the REAL-glibc **stdio output** path end-to-end.
+///
+/// `self_test_linux_real_glibc` above proves dynamic startup runs to
+/// `exit(42)`, but a binary that returns from `main` exercises none of glibc's
+/// output machinery.  This test runs `/bin/stdio` — a prebuilt, dynamically
+/// linked binary whose `main` is `printf("SLATE_GLIBC_STDIO_OK %d\n", 1234)` —
+/// and captures what it writes.
+///
+/// The gating problem: a Linux-ABI process is spawned with fd 1 pre-pointed at
+/// the kernel **console** (`linux_fd_install_stdio`), so its output would vanish
+/// into the serial log with no way for an in-kernel assertion to read it back.
+/// We redirect fd 1 to a capture file *before the child first runs* (spawning is
+/// cooperative — `spawn_process` returns before the child executes a single
+/// instruction): drop the console fd 1 and install a freshly opened VFS file
+/// handle at fd 1.  glibc then `fstat`s fd 1, sees a regular file, picks
+/// full buffering, formats via `vfprintf`, and on exit flushes the buffer with
+/// a real `write(2)`/`writev(2)` to the file.  Reading the file back and finding
+/// the exact expected bytes proves the whole real-glibc output path works — the
+/// gate for any glibc program that produces output.
+///
+/// No-ops (returns `Ok`) when the ext4 rootfs is absent (`/mnt/bin/stdio`
+/// missing) — the image is git-ignored, so most environments lack it.  Must run
+/// after the `/mnt` ext4 probe and after the glibc tree is reachable.
+pub fn self_test_linux_real_glibc_stdio() -> KernelResult<()> {
+    use crate::fs::handle;
+    use crate::proc::linux_fd::{FdEntry, O_WRONLY};
+
+    // The binary returns 7 so the exit-code channel independently confirms a
+    // clean run, distinct from the bytes it prints.
+    const EXPECT_EXIT: i32 = 7;
+    // The exact bytes `printf("SLATE_GLIBC_STDIO_OK %d\n", 1234)` produces.
+    const EXPECT_OUT: &[u8] = b"SLATE_GLIBC_STDIO_OK 1234\n";
+
+    const SRC_LD: &str = "/mnt/lib64/ld-linux-x86-64.so.2";
+    const SRC_LIBC: &str = "/mnt/lib/x86_64-linux-gnu/libc.so.6";
+    const SRC_STDIO: &str = "/mnt/bin/stdio";
+    const DST_LD: &str = "/lib64/ld-linux-x86-64.so.2";
+    const DST_LIBC: &str = "/lib/x86_64-linux-gnu/libc.so.6";
+    const DST_STDIO: &str = "/bin/stdio";
+    const CAPTURE: &str = "/glibc-stdio-capture.tmp";
+    const MAX_YIELDS: usize = 4096;
+
+    if !crate::fs::Vfs::exists(SRC_STDIO) {
+        return Ok(());
+    }
+
+    serial_println!("[spawn] Running REAL glibc stdio (output) (ring 3, Path Z) test...");
+
+    // Stage the glibc tree + the stdio binary at the loader's expected paths.
+    // Idempotent: re-running after `self_test_linux_real_glibc` just overwrites.
+    let _ = crate::fs::Vfs::mkdir_all("/lib64");
+    let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
+    let _ = crate::fs::Vfs::mkdir_all("/bin");
+    for (src, dst) in [(SRC_LD, DST_LD), (SRC_LIBC, DST_LIBC), (SRC_STDIO, DST_STDIO)] {
+        match crate::fs::Vfs::read_file(src) {
+            Ok(bytes) => {
+                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
+                    serial_println!(
+                        "[spawn]   real glibc stdio: SKIP (staging {} -> {} failed: {:?})",
+                        src, dst, e
+                    );
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                serial_println!(
+                    "[spawn]   real glibc stdio: SKIP (reading {} failed: {:?})",
+                    src, e
+                );
+                return Ok(());
+            }
+        }
+    }
+
+    let exe_elf = match crate::fs::Vfs::read_file(DST_STDIO) {
+        Ok(b) => b,
+        Err(e) => {
+            serial_println!("[spawn]   real glibc stdio: SKIP (re-read {} failed: {:?})", DST_STDIO, e);
+            return Ok(());
+        }
+    };
+
+    // Start from a clean capture file so a stale prior run can't be mistaken
+    // for this run's output.  `remove` of a nonexistent file is fine.
+    let _ = crate::fs::Vfs::remove(CAPTURE);
+    let capture_handle = match handle::open(
+        CAPTURE,
+        handle::OpenFlags::READ
+            .union(handle::OpenFlags::WRITE)
+            .union(handle::OpenFlags::CREATE),
+    ) {
+        Ok(h) => h,
+        Err(e) => {
+            serial_println!("[spawn]   real glibc stdio: SKIP (capture-file open failed: {:?})", e);
+            return Ok(());
+        }
+    };
+
+    let argv: &[&[u8]] = &[b"/bin/stdio"];
+    let envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C"];
+    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-glibc-stdio",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: Some(DST_STDIO.as_bytes()),
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            // We still own the capture handle — close it so it doesn't leak.
+            let _ = handle::close(capture_handle);
+            let _ = crate::fs::Vfs::remove(CAPTURE);
+            serial_println!("[spawn]   FAIL: real glibc stdio spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Redirect the child's fd 1 from the console to our capture file BEFORE it
+    // runs.  Dropping the console entry needs no kernel close (it owns no
+    // resource).  After install_at the capture handle is owned by the child's
+    // fd table and is released by its exit teardown — so we must NOT close it
+    // ourselves on the success path.
+    let _ = pcb::linux_fd_take(result.pid, 1);
+    if let Err(e) = pcb::linux_fd_install_at(result.pid, 1, FdEntry::file(capture_handle, O_WRONLY)) {
+        // Install failed: ownership never transferred, so we still own the
+        // handle and must close it.  Tear the child down too.
+        let _ = handle::close(capture_handle);
+        thread::on_thread_exit(result.task_id);
+        pcb::destroy(result.pid);
+        let _ = crate::fs::Vfs::remove(CAPTURE);
+        serial_println!("[spawn]   FAIL: real glibc stdio — redirecting fd 1 failed: {:?}", e);
+        return Err(KernelError::InternalError);
+    }
+
+    let mut reaped = false;
+    for _ in 0..MAX_YIELDS {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            reaped = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    // Read the captured output BEFORE destroying the child.  (The child still
+    // holds fd 1 → capture file until teardown, but reading by path opens an
+    // independent handle onto the same inode, so the bytes it already flushed
+    // are visible.)
+    let captured = crate::fs::Vfs::read_file(CAPTURE);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid); // closes the child's fd 1 → releases capture_handle
+    let _ = crate::fs::Vfs::remove(CAPTURE);
+
+    if !reaped || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: real glibc stdio — child did not exit within {} yields (state={:?})",
+            MAX_YIELDS, state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECT_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: real glibc stdio — exit code={:?}, expected {}",
+            exit_code, EXPECT_EXIT
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    match captured {
+        Ok(bytes) if bytes.as_slice() == EXPECT_OUT => {
+            serial_println!(
+                "[spawn]   REAL glibc stdio output (ring 3: printf → glibc full-buffered stdio → \
+                 write(2) to redirected fd 1, captured {} bytes == expected): OK",
+                bytes.len()
+            );
+            Ok(())
+        }
+        Ok(bytes) => {
+            serial_println!(
+                "[spawn]   FAIL: real glibc stdio — captured {} bytes {:?}, expected {:?}",
+                bytes.len(), bytes.as_slice(), EXPECT_OUT
+            );
+            Err(KernelError::InternalError)
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: real glibc stdio — reading capture file back failed: {:?}",
+                e
+            );
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

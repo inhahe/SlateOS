@@ -2053,6 +2053,167 @@ pub fn build_linux_pipe_fork_dup2_exec_test_elf(path_nul: &[u8]) -> alloc::vec::
     buf
 }
 
+/// Build a **Linux-ABI** `ET_EXEC` test ELF that exercises the
+/// **`symlink(2)` + `readlink(2)`** syscalls end to end from ring 3:
+///
+/// ```text
+///   sub  rsp, 64                     ; [rsp..rsp+64] = readlink output buf
+///   symlink("Z", link)              ; create link -> "Z"
+///   test rax,rax ; jnz symlink_fail ; success returns 0
+///   readlink(link, rsp, 64)         ; read it back
+///   cmp  rax, 1  ; jne  len_fail     ; "Z" is one byte, no trailing NUL
+///   movzx eax, byte [rsp]
+///   cmp  al, 'Z' ; jne content_fail  ; byte must round-trip
+///   exit(0)
+///   symlink_fail: exit(0xB1)
+///   len_fail:     exit(0xB3)
+///   content_fail: exit(0xB4)
+/// ```
+///
+/// The `link_nul` argument is the link pathname (NUL-terminated); the harness
+/// must remove any pre-existing entry at that path first (so `symlink` does
+/// not fail `EEXIST`).  A clean `exit(0)` proves the full chain: the kernel
+/// created a real symlink whose stored target (`"Z"`) was read back verbatim
+/// with the Linux `readlink` contract (count returned, no trailing NUL).
+///
+/// Self-diagnosing sentinels: `0xB1` = `symlink` returned non-zero, `0xB3` =
+/// `readlink` returned a length other than 1, `0xB4` = the byte read back was
+/// not `'Z'`.  Tagged `ELFOSABI_GNU` for the Linux ABI.
+#[must_use]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
+pub fn build_linux_symlink_readlink_test_elf(link_nul: &[u8]) -> alloc::vec::Vec<u8> {
+    use alloc::vec;
+
+    let phdr_offset: u64 = 64;
+    let code_offset: u64 = 120; // 64 (ehdr) + 56 (one phdr)
+    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+
+    let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+
+    // sub rsp, 64  (readlink output buffer)
+    code.extend_from_slice(&[0x48, 0x83, 0xEC, 0x40]);
+
+    // symlink(&target, &link)
+    code.extend_from_slice(&[0x48, 0xBF]); // movabs rdi, &target
+    let target_imm = code.len();
+    code.extend_from_slice(&[0u8; 8]);
+    code.extend_from_slice(&[0x48, 0xBE]); // movabs rsi, &link
+    let link_imm1 = code.len();
+    code.extend_from_slice(&[0u8; 8]);
+    code.extend_from_slice(&[0xB8, 0x58, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,88; syscall
+    code.extend_from_slice(&[0x48, 0x85, 0xC0]); // test rax, rax
+    code.extend_from_slice(&[0x75, 0x00]); // jnz symlink_fail (rel8)
+    let jnz_sym_rel = code.len() - 1;
+
+    // readlink(&link, rsp, 64)
+    code.extend_from_slice(&[0x48, 0xBF]); // movabs rdi, &link
+    let link_imm2 = code.len();
+    code.extend_from_slice(&[0u8; 8]);
+    code.extend_from_slice(&[0x48, 0x89, 0xE6]); // mov rsi, rsp
+    code.extend_from_slice(&[0xBA, 0x40, 0x00, 0x00, 0x00]); // mov edx, 64
+    code.extend_from_slice(&[0xB8, 0x59, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,89; syscall
+    code.extend_from_slice(&[0x48, 0x83, 0xF8, 0x01]); // cmp rax, 1
+    code.extend_from_slice(&[0x75, 0x00]); // jne len_fail (rel8)
+    let jne_len_rel = code.len() - 1;
+
+    // check buf[0] == 'Z'
+    code.extend_from_slice(&[0x0F, 0xB6, 0x04, 0x24]); // movzx eax, byte [rsp]
+    code.extend_from_slice(&[0x3C, 0x5A]); // cmp al, 0x5A ('Z')
+    code.extend_from_slice(&[0x75, 0x00]); // jne content_fail (rel8)
+    let jne_content_rel = code.len() - 1;
+
+    // exit(0)
+    code.extend_from_slice(&[0x31, 0xFF]); // xor edi, edi
+    code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,60; syscall
+
+    // symlink_fail: exit(0xB1)
+    let symlink_fail = code.len();
+    code.extend_from_slice(&[0xBF, 0xB1, 0x00, 0x00, 0x00]); // mov edi, 0xB1
+    code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,60; syscall
+
+    // len_fail: exit(0xB3)
+    let len_fail = code.len();
+    code.extend_from_slice(&[0xBF, 0xB3, 0x00, 0x00, 0x00]); // mov edi, 0xB3
+    code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,60; syscall
+
+    // content_fail: exit(0xB4)
+    let content_fail = code.len();
+    code.extend_from_slice(&[0xBF, 0xB4, 0x00, 0x00, 0x00]); // mov edi, 0xB4
+    code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,60; syscall
+    code.push(0xCC); // int3 — unreachable trap
+
+    // Patch the three forward rel8 jumps (disp from byte after the disp).
+    let jnz_sym_disp = (symlink_fail as isize) - (jnz_sym_rel as isize + 1);
+    let jne_len_disp = (len_fail as isize) - (jne_len_rel as isize + 1);
+    let jne_content_disp = (content_fail as isize) - (jne_content_rel as isize + 1);
+    code[jnz_sym_rel] = jnz_sym_disp as u8;
+    code[jne_len_rel] = jne_len_disp as u8;
+    code[jne_content_rel] = jne_content_disp as u8;
+
+    // --- Data layout (same PT_LOAD, after the code) ---
+    let target: &[u8] = b"Z\0";
+    let code_len = code.len();
+    let data_base = code_offset as usize + code_len;
+    let target_off = data_base;
+    let target_end = target_off + target.len();
+    let link_off = target_end;
+    let link_end = link_off + link_nul.len();
+    let file_size = link_end;
+
+    let vaddr_of = |fo: usize| -> u64 { load_vaddr + (fo as u64 - code_offset) };
+    let target_vaddr = vaddr_of(target_off);
+    let link_vaddr = vaddr_of(link_off);
+    code[target_imm..target_imm + 8].copy_from_slice(&target_vaddr.to_le_bytes());
+    code[link_imm1..link_imm1 + 8].copy_from_slice(&link_vaddr.to_le_bytes());
+    code[link_imm2..link_imm2 + 8].copy_from_slice(&link_vaddr.to_le_bytes());
+
+    // --- File image ---
+    let seg_len = file_size - code_offset as usize;
+    let mut buf = vec![0u8; file_size];
+
+    buf[0] = 0x7F;
+    buf[1] = b'E';
+    buf[2] = b'L';
+    buf[3] = b'F';
+    buf[EI_CLASS] = ELFCLASS64;
+    buf[EI_DATA] = ELFDATA2LSB;
+    buf[EI_VERSION] = EV_CURRENT;
+    buf[EI_OSABI] = ELFOSABI_GNU;
+    write_u16(&mut buf, 16, ET_EXEC);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr); // e_entry
+    write_u64(&mut buf, 32, phdr_offset); // e_phoff
+    write_u64(&mut buf, 40, 0);
+    write_u32(&mut buf, 48, 0);
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, 1);
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0);
+    write_u16(&mut buf, 62, 0);
+
+    let ph = phdr_offset as usize;
+    write_u32(&mut buf, ph, PT_LOAD);
+    write_u32(&mut buf, ph + 4, PF_R | PF_X);
+    write_u64(&mut buf, ph + 8, code_offset);
+    write_u64(&mut buf, ph + 16, load_vaddr);
+    write_u64(&mut buf, ph + 24, 0);
+    write_u64(&mut buf, ph + 32, seg_len as u64);
+    write_u64(&mut buf, ph + 40, seg_len as u64);
+    write_u64(&mut buf, ph + 48, 0x1000);
+
+    buf[code_offset as usize..code_offset as usize + code_len].copy_from_slice(&code);
+    buf[target_off..target_end].copy_from_slice(target);
+    buf[link_off..link_end].copy_from_slice(link_nul);
+
+    buf
+}
+
 /// Build a **Linux-ABI** `ET_EXEC` test ELF that verifies the **`%fs`
 /// (TLS) base survives context switches**.  The process installs a
 /// caller-chosen `sentinel` FS base, then in a loop yields the CPU and

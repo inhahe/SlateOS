@@ -1329,6 +1329,16 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 round-trip test for the symlink()/readlink() syscalls, which were
+    // stale EROFS/EINVAL stubs until wired to the VFS.  Creates a symlink and
+    // reads its target back from ring 3, then confirms it kernel-side.
+    if let Err(e) = proc::spawn::self_test_linux_symlink_readlink() {
+        serial_println!(
+            "WARNING: Linux symlink()+readlink() (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 regression test that IA32_FS_BASE (the glibc %fs/TLS pointer) is
     // saved/restored per task across context switches.  Two concurrent Linux
     // procs install distinct FS bases and assert they survive cooperative

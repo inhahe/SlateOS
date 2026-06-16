@@ -3018,6 +3018,118 @@ pub fn self_test_linux_pipe_fork_dup2_exec() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 regression test for the **`symlink(2)` + `readlink(2)`** syscalls.
+///
+/// These two syscalls were stale stubs (`symlink` → `EROFS`, `readlink` →
+/// `EINVAL`) even though the VFS is fully writable and supports symlinks.
+/// This test wires them to a real round-trip: a hand-built Linux-ABI ELF
+/// ([`elf::build_linux_symlink_readlink_test_elf`]) calls
+/// `symlink("Z", "/sl-rl-link")`, then `readlink("/sl-rl-link", buf, 64)`,
+/// and asserts the call returned exactly one byte equal to `'Z'` (the Linux
+/// `readlink` contract: byte count, no trailing NUL).  A clean `exit_code ==
+/// 0` proves the kernel created a real symlink and read its target back
+/// verbatim through ring 3.
+///
+/// The harness removes any pre-existing entry at the link path first so the
+/// in-process `symlink` does not fail `EEXIST`, and cleans it up afterward.
+/// After the process exits, it independently confirms via `Vfs::readlink`
+/// that the link the ring-3 process created really resolves to `"Z"`.
+///
+/// Self-diagnosing sentinels (process `exit_code`): `0xB1`/177 = `symlink`
+/// returned non-zero, `0xB3`/179 = `readlink` returned a length other than 1,
+/// `0xB4`/180 = the byte read back was not `'Z'`.  Skips gracefully (`Ok`) if
+/// the VFS cannot create/clean the path.  Must run **after** filesystem init.
+pub fn self_test_linux_symlink_readlink() -> KernelResult<()> {
+    const LINK_PATH: &str = "/sl-rl-link";
+    const LINK_PATH_NUL: &[u8] = b"/sl-rl-link\0";
+    const MAX_YIELDS: usize = 256;
+
+    serial_println!("[spawn] Running Linux symlink()+readlink() round-trip test (ring 3)...");
+
+    // Remove any stale link from a prior boot so the in-process symlink()
+    // starts from a clean slate (EEXIST would otherwise abort it as 0xB1).
+    let _ = crate::fs::Vfs::remove(LINK_PATH);
+
+    let exe_elf = elf::build_linux_symlink_readlink_test_elf(LINK_PATH_NUL);
+    let argv: &[&[u8]] = &[b"spawn-test-linux-symlink"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-symlink",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = crate::fs::Vfs::remove(LINK_PATH);
+            serial_println!("[spawn]   FAIL: symlink-readlink spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    for _ in 0..MAX_YIELDS {
+        crate::sched::yield_now();
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            break;
+        }
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    // Independent kernel-side confirmation that the ring-3 process really
+    // created a symlink resolving to "Z" before we tear it down.
+    let kernel_readback = crate::fs::Vfs::readlink(LINK_PATH);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(LINK_PATH);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: symlink()+readlink() (ring 3) — process not a zombie after {} \
+             yields, got {:?}",
+            MAX_YIELDS, state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: symlink()+readlink() (ring 3) — expected exit 0, got {:?} \
+             (0xB1/177 = symlink failed; 0xB3/179 = readlink wrong length; 0xB4/180 = wrong \
+             byte read back)",
+            exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    match kernel_readback {
+        Ok(ref t) if t.as_bytes() == b"Z" => {}
+        other => {
+            serial_println!(
+                "[spawn]   FAIL: symlink()+readlink() (ring 3) — process exited 0 but kernel \
+                 readback of the created link did not resolve to \"Z\": {:?}",
+                other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    serial_println!(
+        "[spawn]   Linux symlink()+readlink() (ring 3: created /sl-rl-link -> \"Z\" and read it \
+         back verbatim; kernel confirmed): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 regression test that the **`%fs` (TLS) base is saved/restored
 /// across context switches** between two concurrent Linux processes.
 ///

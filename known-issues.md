@@ -89,6 +89,53 @@ runs `[ -f /bin/dash ] && echo HASFILE > /stat-out.txt` in ring 3 and asserts
 the redirect fired (8 bytes, exit 0), proving the `-f` predicate's path stat
 now succeeds.
 
+### B-SYM1. Linux-ABI `symlink`/`symlinkat` returned EROFS and `readlink`/`readlinkat` returned EINVAL unconditionally (stale FS-mutation stubs) — FIXED 2026-06-16
+
+**Symptom:** No ring-3 program could create or resolve a symbolic link. Every
+`symlink(2)`/`symlinkat(2)` returned `-EROFS` ("read-only file system") and
+every `readlink(2)`/`readlinkat(2)` returned `-EINVAL` ("not a symlink"),
+regardless of whether the path existed or was actually a symlink, even though
+the VFS is fully writable and natively supports symlinks (`Vfs::symlink`,
+`Vfs::readlink`). This breaks any toolchain that relies on symlinks (build
+systems, `ld` SONAME links, package layouts).
+
+**Root cause:** The four handlers were placeholder stubs left over from before
+the VFS gained symlink support: `sys_symlink`/`sys_symlinkat` validated their
+path arguments and then hard-coded `linux_err(errno::EROFS)`, and
+`sys_readlink`/`sys_readlinkat` hard-coded `linux_err(errno::EINVAL)` after
+the argument gates. The stubs' errno terminals were also (correctly) asserted
+by the batch-478/487 syscall-fidelity self-tests, which call the handlers in
+kernel context with fake pointers — so the fix had to keep those terminals for
+kernel callers while doing real work for ring-3 callers.
+
+**Fix (proper):** Wire all four to the VFS for ring-3 callers.
+`sys_symlink`/`sys_symlinkat` share a new `symlink_common(target_ptr,
+newdirfd, linkpath_ptr)` that stores the `target` *verbatim* (a symlink may
+dangle and may be relative — it is NOT resolved or canonicalised), resolves
+the `linkpath` against the caller's cwd / `newdirfd` via `resolve_at_path`,
+requires a File-WRITE capability (`require_fs_write`), and calls
+`Vfs::symlink`. `sys_readlink`/`sys_readlinkat` share a new
+`do_readlink_copy(path, buf_ptr, bufsiz)` that calls `Vfs::readlink` and
+copies `min(target_len, bufsiz)` bytes with **no** trailing NUL, returning the
+byte count (the Linux `do_readlinkat` contract); the user buffer is validated
+and written only *after* the dentry is confirmed to be a symlink
+(`NotFound`→ENOENT, `InvalidArgument`→EINVAL/"not a symlink"). Kernel context
+(`caller_pid().is_none()`) preserves the prior EROFS/EINVAL terminals;
+`sys_readlink` canonicalises the path against `pcb::get_cwd` first, the `*at`
+variants use `resolve_at_path`. Regression test: Path Z Part 27
+(`self_test_linux_symlink_readlink`) — a hand-built raw-syscall Linux-ABI ELF
+(`build_linux_symlink_readlink_test_elf`) calls `symlink("Z", "/sl-rl-link")`
+then `readlink("/sl-rl-link", buf, 64)` from ring 3 and asserts the call
+returned exactly 1 byte == `'Z'` (self-diagnosing exit sentinels
+`0xB1`/`0xB3`/`0xB4`). The harness pre-removes the link path and, after the
+process exits 0, independently confirms kernel-side via `Vfs::readlink` that
+the created link resolves to `"Z"`. (Raw ELF rather than dash because dash has
+no `ln` builtin and cannot invoke `symlink(2)`/`readlink(2)` directly.)
+**Remaining stubs (not yet wired):** `link`/`linkat` still return EROFS, and
+the `utimensat`/`utimes`/`utime` family still returns EROFS — `Vfs::link` and
+`Vfs::set_times` exist and these can be wired with the same kernel-context /
+ring-3 pattern.
+
 ### B-SIG1. dash's `wait` builtin (background-job reap) livelocked: no SIGCHLD on child exit + `rt_sigsuspend` was a stub — FIXED 2026-06-16
 
 **RESOLVED 2026-06-16.** A real glibc `dash` running `/bin/emit > file &

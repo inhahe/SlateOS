@@ -18518,7 +18518,65 @@ fn sys_readlink(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = check_path_str_nonempty(args.arg0) {
         return linux_err(e);
     }
-    linux_err(errno::EINVAL)
+    // Kernel context (no caller PID): preserve the "not a symlink" EINVAL
+    // terminal the batch-478/487 fidelity self-tests assert.  Ring-3 callers
+    // get a real VFS readlink.
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => return linux_err(errno::EINVAL),
+    };
+    let bytes = match read_user_cstr(args.arg0, 4096) {
+        Ok(b) => b,
+        Err(e) => return linux_err(e),
+    };
+    let cwd = pcb::get_cwd(pid).unwrap_or_else(|| alloc::vec![b'/']);
+    let canon = match canonicalize_path(&cwd, &bytes) {
+        Ok(p) => p,
+        Err(e) => return linux_err(e),
+    };
+    let canon_str = match core::str::from_utf8(&canon) {
+        Ok(s) => s,
+        Err(_) => return linux_err(errno::EINVAL),
+    };
+    #[allow(clippy::cast_sign_loss)]
+    do_readlink_copy(canon_str, args.arg1, bufsiz_i32 as usize)
+}
+
+/// Read a symlink's target into a user buffer, mapping VFS errors to the Linux
+/// errno a `readlink`/`readlinkat` caller expects.
+///
+/// Linux's `do_readlinkat` copies `min(target_len, bufsiz)` bytes and returns
+/// that count *without* a trailing NUL.  `vfs_readlink` is the only point that
+/// touches the user buffer, and it runs only after the dentry is confirmed to
+/// be a symlink — so the buffer pointer is validated here, after a successful
+/// `Vfs::readlink`, never before.  `NotFound`→ENOENT (path gone),
+/// `InvalidArgument`→EINVAL ("not a symlink").
+fn do_readlink_copy(path: &str, buf_ptr: u64, bufsiz: usize) -> SyscallResult {
+    let target = match crate::fs::Vfs::readlink(path) {
+        Ok(t) => t,
+        Err(KernelError::NotFound) => return linux_err(errno::ENOENT),
+        Err(KernelError::InvalidArgument) => return linux_err(errno::EINVAL),
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+    let tbytes = target.as_bytes();
+    let n = core::cmp::min(tbytes.len(), bufsiz);
+    // Symlink confirmed — now the buffer is observed (cp to user).
+    if buf_ptr == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(buf_ptr, n) {
+        return linux_err(linux_errno_for(e));
+    }
+    if n > 0 {
+        // SAFETY: validated as a writable n-byte range above; tbytes has at
+        // least n bytes (n = min(len, bufsiz)).
+        let r = unsafe { crate::mm::user::copy_to_user(tbytes.as_ptr(), buf_ptr, n) };
+        if let Err(e) = r {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(n as i64)
 }
 
 /// `readlinkat(dirfd, path, buf, bufsiz)`.
@@ -18579,9 +18637,21 @@ fn sys_readlinkat(args: &SyscallArgs) -> SyscallResult {
         Err(e) => return linux_err(e),
         Ok(()) => {}
     }
-    // Non-empty pathname: "not a symlink" terminal -EINVAL; buf
-    // never observed.
-    linux_err(errno::EINVAL)
+    // Non-empty pathname.  Kernel context preserves the "not a symlink"
+    // EINVAL terminal the fidelity self-tests assert; ring-3 callers get a
+    // real VFS readlink (resolve_at_path handles dirfd + cwd).
+    if caller_pid().is_none() {
+        return linux_err(errno::EINVAL);
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let dirfd = args.arg0 as i32;
+    let resolved = match resolve_at_path(dirfd, args.arg1) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    // bufsiz_i32 > 0 here (the bufsiz <= 0 gate fired at the top).
+    #[allow(clippy::cast_sign_loss)]
+    do_readlink_copy(&resolved, args.arg2, bufsiz_i32 as usize)
 }
 
 // ---------------------------------------------------------------------------
@@ -19240,7 +19310,39 @@ fn sys_symlink(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = check_path_str_nonempty(args.arg1) {
         return linux_err(e);
     }
-    linux_err(errno::EROFS)
+    symlink_common(args.arg0, AT_FDCWD, args.arg1)
+}
+
+/// Shared `symlink`/`symlinkat` back-end.  The `target` is stored verbatim (a
+/// symlink may dangle and may be relative — it is *not* resolved or
+/// canonicalised), while the `linkpath` is resolved against the caller's cwd /
+/// `newdirfd` like any other created name.  Requires a File-WRITE capability.
+///
+/// Kernel context (no caller PID) preserves the EROFS terminal the fidelity
+/// self-tests assert; ring-3 callers create a real symlink via the VFS.
+fn symlink_common(target_ptr: u64, newdirfd: i32, linkpath_ptr: u64) -> SyscallResult {
+    if caller_pid().is_none() {
+        return linux_err(errno::EROFS);
+    }
+    let target = match read_user_cstr(target_ptr, 4096) {
+        Ok(b) => b,
+        Err(e) => return linux_err(e),
+    };
+    let target_str = match core::str::from_utf8(&target) {
+        Ok(s) => s,
+        Err(_) => return linux_err(errno::EINVAL),
+    };
+    let linkpath = match resolve_at_path(newdirfd, linkpath_ptr) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    if let Err(r) = require_fs_write() {
+        return r;
+    }
+    match crate::fs::Vfs::symlink(&linkpath, target_str) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
 }
 
 /// `symlinkat(target, newdirfd, linkpath)` — same Linux contract as
@@ -19253,7 +19355,9 @@ fn sys_symlinkat(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = check_path_str_nonempty(args.arg2) {
         return linux_err(e);
     }
-    linux_err(errno::EROFS)
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let newdirfd = args.arg1 as i32;
+    symlink_common(args.arg0, newdirfd, args.arg2)
 }
 
 /// `link(oldpath, newpath)` — Linux gate ladder.

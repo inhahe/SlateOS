@@ -736,34 +736,128 @@ pub unsafe fn load_segments_with_bias(
     pml4_phys: u64,
     bias: u64,
 ) -> KernelResult<()> {
-    let hhdm = page_table::hhdm()
-        .ok_or(KernelError::InternalError)?;
+    let hhdm = page_table::hhdm().ok_or(KernelError::InternalError)?;
+    let frame_size = FRAME_SIZE as u64;
+    let hw_size = page_table::HW_PAGE_SIZE as u64;
+    // frame_size is a power of two, so frame_size - 1 is the alignment mask.
+    let frame_mask = frame_size.wrapping_sub(1);
 
+    // --- Pass 1: page span ----------------------------------------------------
+    // Compute the 16 KiB-frame-aligned address range that covers every
+    // `PT_LOAD` segment after applying `bias`.  Standard x86-64 Linux binaries
+    // align segments only to 4 KiB, so two segments routinely share a 16 KiB
+    // frame; loading each segment independently (the old approach) double-mapped
+    // those shared frames and failed with `AlreadyExists`.  Instead we walk the
+    // whole span once, frame by frame.
+    let mut min_page: u64 = u64::MAX;
+    let mut max_end: u64 = 0;
     for seg in elf.loadable_segments()? {
-        // Apply the load bias to the segment's virtual placement.  All of
-        // load_one_segment's address math (frame mapping AND file-overlap
-        // copy) derives from `seg.vaddr`, so shifting it by a constant
-        // bias relocates the whole segment consistently while the file
-        // offsets stay relative.
-        let biased_vaddr = seg
-            .vaddr
-            .checked_add(bias)
-            .ok_or(KernelError::InvalidAddress)?;
-        let seg_end = biased_vaddr
-            .checked_add(seg.mem_size)
-            .ok_or(KernelError::InvalidAddress)?;
-        if seg_end > USER_SPACE_END {
+        let start = seg.vaddr.checked_add(bias).ok_or(KernelError::InvalidAddress)?;
+        let end = start.checked_add(seg.mem_size).ok_or(KernelError::InvalidAddress)?;
+        if end > USER_SPACE_END {
             return Err(KernelError::InvalidAddress);
         }
-        let biased = LoadableSegment {
-            vaddr: biased_vaddr,
-            ..seg
-        };
-        // SAFETY: Forwarding caller's safety requirements — pml4_phys
-        // is valid, no concurrent access.
-        unsafe {
-            load_one_segment(elf, &biased, pml4_phys, hhdm)?;
+        let page_start = start & !frame_mask;
+        let page_end = end
+            .checked_add(frame_mask)
+            .ok_or(KernelError::InvalidAddress)?
+            & !frame_mask;
+        if page_start < min_page {
+            min_page = page_start;
         }
+        if page_end > max_end {
+            max_end = page_end;
+        }
+    }
+    if min_page == u64::MAX {
+        // No loadable segments (a degenerate ELF) — nothing to map.
+        return Ok(());
+    }
+
+    // --- Pass 2: map the span frame by frame ---------------------------------
+    // For each 16 KiB frame in [min_page, max_end): determine which segments
+    // touch it, derive per-4 KiB-subpage permissions from segment coverage,
+    // allocate+zero one frame, copy each overlapping segment's file bytes in,
+    // and map with `map_frame_subpages`.  A frame that no segment touches (an
+    // inter-segment hole ≥ 16 KiB) is left entirely unmapped.
+    let mut page = min_page;
+    while page < max_end {
+        let page_end_addr = page
+            .checked_add(frame_size)
+            .ok_or(KernelError::InvalidAddress)?;
+
+        // Derive per-subpage permission flags.  Each 4 KiB subpage gets the
+        // union of the page flags of every segment whose memory range
+        // intersects it.  Because Linux segments are 4 KiB-aligned and never
+        // overlap at 4 KiB granularity, each subpage is covered by at most one
+        // segment, so this yields each segment's exact R/W/X — preserving W^X.
+        let mut subpage_flags = [PageFlags::empty(); page_table::HW_PAGES_PER_FRAME];
+        let mut page_used = false;
+        for seg in elf.loadable_segments()? {
+            let s = seg.vaddr.checked_add(bias).ok_or(KernelError::InvalidAddress)?;
+            let e = s.checked_add(seg.mem_size).ok_or(KernelError::InvalidAddress)?;
+            // Skip a segment that does not intersect this frame at all.
+            if e <= page || s >= page_end_addr {
+                continue;
+            }
+            let seg_flags = segment_flags_to_page_flags(&seg);
+            for (i, sf) in subpage_flags.iter_mut().enumerate() {
+                let sub_start = page
+                    .checked_add((i as u64).wrapping_mul(hw_size))
+                    .ok_or(KernelError::InvalidAddress)?;
+                let sub_end = sub_start
+                    .checked_add(hw_size)
+                    .ok_or(KernelError::InvalidAddress)?;
+                if s < sub_end && e > sub_start {
+                    *sf |= seg_flags;
+                    page_used = true;
+                }
+            }
+        }
+
+        if !page_used {
+            page = page_end_addr;
+            continue;
+        }
+
+        // Allocate and zero one frame for this page (covers BSS + any
+        // file/page tail past EOF, matching Linux's zero-fill).
+        let phys_frame = frame::alloc_frame()?;
+        let frame_virt = phys_frame.to_virt(hhdm);
+        // SAFETY: freshly allocated, exclusively owned frame mapped via HHDM.
+        unsafe {
+            core::ptr::write_bytes(frame_virt as *mut u8, 0, FRAME_SIZE);
+        }
+
+        // Copy the file-backed bytes of every overlapping segment into the
+        // frame.  `copy_segment_data_to_frame` clips to the overlap of the
+        // segment's file region with this frame, so a large segment is filled
+        // in across successive frames and a small one only touches its bytes.
+        for seg in elf.loadable_segments()? {
+            let biased_vaddr =
+                seg.vaddr.checked_add(bias).ok_or(KernelError::InvalidAddress)?;
+            let biased = LoadableSegment {
+                vaddr: biased_vaddr,
+                ..seg
+            };
+            copy_segment_data_to_frame(elf, &biased, page, frame_virt);
+        }
+
+        // Map the frame with per-subpage permissions.  On failure free the
+        // just-allocated frame (it was never mapped, so address-space teardown
+        // would not find it).
+        let virt = VirtAddr::new(page);
+        // SAFETY: pml4_phys is valid (caller invariant), phys_frame is freshly
+        // allocated and exclusively ours, virt is a frame-aligned user address.
+        if let Err(e) = unsafe {
+            page_table::map_frame_subpages(pml4_phys, virt, phys_frame, subpage_flags)
+        } {
+            // SAFETY: phys_frame was just allocated and never shared.
+            let _ = unsafe { frame::free_frame(phys_frame) };
+            return Err(e);
+        }
+
+        page = page_end_addr;
     }
 
     Ok(())
@@ -808,86 +902,6 @@ pub fn image_end(elf: &ElfFile<'_>, bias: u64) -> KernelResult<u64> {
         }
     }
     Ok(highest)
-}
-
-/// Load a single segment into the target address space.
-///
-/// # Safety
-///
-/// Same requirements as [`load_segments`].
-unsafe fn load_one_segment(
-    elf: &ElfFile<'_>,
-    seg: &LoadableSegment,
-    pml4_phys: u64,
-    hhdm: u64,
-) -> KernelResult<()> {
-    // Calculate frame-aligned boundaries.
-    // We need to map whole frames, but the segment may not start or
-    // end on a frame boundary.
-    let frame_size = FRAME_SIZE as u64;
-    let seg_start = seg.vaddr;
-    let seg_end = seg_start
-        .checked_add(seg.mem_size)
-        .ok_or(KernelError::InvalidAddress)?;
-
-    let frame_start = seg_start & !(frame_size - 1);
-
-    // Round up to next frame boundary.
-    let frame_end = (seg_end
-        .checked_add(frame_size - 1)
-        .ok_or(KernelError::InvalidAddress)?)
-        & !(frame_size - 1);
-
-    let page_flags = segment_flags_to_page_flags(seg);
-
-    // Allocate and map frames, then copy data.
-    let mut current_vaddr = frame_start;
-    while current_vaddr < frame_end {
-        let virt = VirtAddr::new(current_vaddr);
-
-        // Validate user-space address.
-        if !virt.is_user() {
-            return Err(KernelError::InvalidAddress);
-        }
-
-        // Allocate a physical frame.
-        let phys_frame = frame::alloc_frame()?;
-
-        // Zero the entire frame first (covers BSS and partial pages).
-        let frame_virt = phys_frame.to_virt(hhdm);
-        // SAFETY: frame_virt points to a freshly allocated, exclusively
-        // owned frame mapped via the HHDM.
-        unsafe {
-            core::ptr::write_bytes(frame_virt as *mut u8, 0, FRAME_SIZE);
-        }
-
-        // Copy file data that falls within this frame.
-        copy_segment_data_to_frame(
-            elf,
-            seg,
-            current_vaddr,
-            frame_virt,
-        );
-
-        // Map the frame into the target address space.
-        // SAFETY: pml4_phys is valid (caller invariant), phys_frame is
-        // freshly allocated and exclusively ours, virt is in user space.
-        unsafe {
-            if let Err(e) = page_table::map_frame(pml4_phys, virt, phys_frame, page_flags) {
-                // Free the frame we just allocated — it was never mapped,
-                // so destroying the address space won't find it.
-                // SAFETY: phys_frame was just allocated and never shared.
-                let _ = frame::free_frame(phys_frame);
-                return Err(e);
-            }
-        }
-
-        current_vaddr = current_vaddr
-            .checked_add(frame_size)
-            .ok_or(KernelError::InvalidAddress)?;
-    }
-
-    Ok(())
 }
 
 /// Copy the file-backed portion of a segment into a mapped frame.

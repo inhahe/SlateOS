@@ -1454,6 +1454,17 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z: a real glibc program fork()s, execl()s the silent /bin/hello
+    // child, and waitpid()s it — proving glibc's fork (CoW)/exec (child
+    // re-runs ld.so)/wait wrappers work end-to-end, the foundation for a
+    // shell. No-op when rootfs.ext4 is absent.
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_forkexec() {
+        serial_println!(
+            "WARNING: Path-Z real glibc fork/exec/wait self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

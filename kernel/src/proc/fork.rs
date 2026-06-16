@@ -15,8 +15,9 @@
 //!
 //! The parent enters the kernel via `SYSCALL`, so its complete user
 //! register state is saved on the kernel stack in a [`SyscallFrame`].
-//! `fork_process` snapshots that frame into a heap-boxed `[u64; 17]`
-//! register image and spawns the child's thread with
+//! `fork_process` snapshots that frame into a heap-boxed register image
+//! (a `[u64; 17]` plus the optional `CLONE_CHILD_SETTID` pointer) and
+//! spawns the child's thread with
 //! [`fork_child_trampoline`] as its entry.  When the scheduler first
 //! dispatches that thread, the trampoline reconstructs an `IRETQ` frame
 //! from the snapshot and transitions to ring 3 at the parent's
@@ -61,6 +62,49 @@ use super::thread;
 
 /// Number of `u64` slots in the child's saved register image.
 const REG_IMAGE_LEN: usize = 17;
+
+/// Clone-style TID-notification arguments threaded into a fork.
+///
+/// glibc's `fork()` wrapper actually issues
+/// `clone(SIGCHLD | CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID, …)`, so a
+/// faithful fork must honour the three TID-notification bits even though
+/// the address space is *not* shared (unlike a thread clone):
+///
+/// - **`CLONE_PARENT_SETTID`** — write the child's TID into the parent's
+///   memory at `parent_tid_ptr`.  Done in the parent's syscall context
+///   (parent CR3 active) inside [`fork_process_clone`].
+/// - **`CLONE_CHILD_SETTID`** — write the child's TID into the *child's*
+///   memory at `child_tid_ptr`.  This MUST run in the child's own
+///   address space ([`fork_child_trampoline`]); doing it from the parent
+///   would trip copy-on-write and the value would never reach the child.
+/// - **`CLONE_CHILD_CLEARTID`** — register `child_tid_ptr` so the kernel
+///   zeroes it and futex-wakes on the child thread's exit (used by
+///   glibc/pthread to detect termination).
+///
+/// A plain `fork()`/`vfork()` (the native ABI, and the Linux `FORK` /
+/// `VFORK` syscalls) passes [`ForkCloneTid::default`] — all zero — which
+/// disables every notification.
+#[derive(Clone, Copy, Default)]
+pub struct ForkCloneTid {
+    /// The clone flag word (only the TID-notification bits are read).
+    pub flags: u64,
+    /// `CLONE_PARENT_SETTID` target in the parent's address space.
+    pub parent_tid_ptr: u64,
+    /// `CLONE_CHILD_SETTID` / `CLONE_CHILD_CLEARTID` target in the
+    /// child's address space.
+    pub child_tid_ptr: u64,
+}
+
+/// Heap-boxed image handed to [`fork_child_trampoline`] via
+/// [`Box::into_raw`].  Carries the saved register image plus the
+/// `CLONE_CHILD_SETTID` pointer (0 = no write), which the trampoline
+/// honours in the child's own address space before returning to ring 3.
+struct ForkChildImage {
+    regs: [u64; REG_IMAGE_LEN],
+    /// If non-zero, the child's `CLONE_CHILD_SETTID` address; the
+    /// trampoline writes the child's TID here in the child's context.
+    settid_ptr: u64,
+}
 
 // Byte offsets into the register image, used by the inline-asm
 // trampoline.  Keep these in sync with `build_reg_image`.
@@ -110,15 +154,40 @@ fn build_reg_image(frame: &SyscallFrame) -> [u64; REG_IMAGE_LEN] {
 /// This runs on the child thread's freshly allocated kernel stack the
 /// first time the scheduler dispatches it.
 extern "C" fn fork_child_trampoline(image_raw: u64) {
-    // Reclaim the heap-allocated register image and copy it onto our
-    // own stack so we can free the heap allocation before the (never
+    // Reclaim the heap-allocated image and copy the register array onto
+    // our own stack so we can free the heap allocation before the (never
     // returning) IRETQ.
     //
     // SAFETY: `image_raw` was produced by `Box::into_raw` in
-    // `fork_process` for this thread alone.  No other code observes it.
-    let boxed = unsafe { Box::from_raw(image_raw as *mut [u64; REG_IMAGE_LEN]) };
-    let regs: [u64; REG_IMAGE_LEN] = *boxed;
+    // `fork_process_clone` for this thread alone.  No other code observes
+    // it.
+    let boxed = unsafe { Box::from_raw(image_raw as *mut ForkChildImage) };
+    let regs: [u64; REG_IMAGE_LEN] = boxed.regs;
+    let settid_ptr = boxed.settid_ptr;
     drop(boxed); // Free the heap allocation now — IRETQ never returns.
+
+    // CLONE_CHILD_SETTID: now that the child's copy-on-write address
+    // space is active (the scheduler switched CR3 to the child's PML4
+    // before dispatching this thread), write the child's own TID into
+    // `*settid_ptr`.  This MUST happen here, in the child's context: doing
+    // it from the parent during `fork_process_clone` would trip CoW and
+    // the write would land in the parent's private copy, never reaching
+    // the child.  The child's Linux "tid" is its scheduler task id (see
+    // `sys_gettid`), which for the forked main thread is this thread's id.
+    if settid_ptr != 0 {
+        let tid: i32 = i32::try_from(crate::sched::current_task_id()).unwrap_or(0);
+        // SAFETY: copy_to_user validates the user range under SMAP and
+        // uses STAC/CLAC.  A bad address yields -EFAULT, which we ignore:
+        // the child is already committed to running, exactly as Linux
+        // cannot undo a post-clone CHILD_SETTID fault.
+        let _ = unsafe {
+            crate::mm::user::copy_to_user(
+                (&raw const tid).cast::<u8>(),
+                settid_ptr,
+                core::mem::size_of::<i32>(),
+            )
+        };
+    }
 
     let ptr = regs.as_ptr();
 
@@ -496,11 +565,43 @@ fn build_fork_child(parent_pid: ProcessId) -> KernelResult<ProcessId> {
 /// spawning.  On thread-spawn failure the child process and its address
 /// space are destroyed before returning.
 pub fn fork_process(parent_pid: ProcessId, frame: &SyscallFrame) -> KernelResult<ProcessId> {
+    fork_process_clone(parent_pid, frame, ForkCloneTid::default())
+}
+
+/// Fork `parent_pid`, honouring the clone-style TID-notification bits in
+/// `clone_tid` (see [`ForkCloneTid`]).
+///
+/// This is the path taken by the Linux `clone()` fork-equivalent, where
+/// glibc's `fork()` passes
+/// `CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID | SIGCHLD`.  Plain
+/// `fork()`/`vfork()` go through the [`fork_process`] wrapper with an
+/// all-zero [`ForkCloneTid`].
+///
+/// # Errors
+///
+/// Same as [`fork_process`]: propagates [`build_fork_child`] and
+/// thread-spawn failures, tearing down the child on spawn failure.
+pub fn fork_process_clone(
+    parent_pid: ProcessId,
+    frame: &SyscallFrame,
+    clone_tid: ForkCloneTid,
+) -> KernelResult<ProcessId> {
+    use crate::syscall::linux::clone_flags;
+
     let child_pid = build_fork_child(parent_pid)?;
+
+    // CLONE_CHILD_SETTID is honoured in the child's own address space by
+    // the trampoline (a CoW-safe write — see `fork_child_trampoline`), so
+    // thread the target pointer through the heap image.  0 disables it.
+    let settid_ptr = if (clone_tid.flags & clone_flags::CLONE_CHILD_SETTID) != 0 {
+        clone_tid.child_tid_ptr
+    } else {
+        0
+    };
 
     // Build the child's register image and hand it to the trampoline.
     let regs = build_reg_image(frame);
-    let image_raw = Box::into_raw(Box::new(regs)) as u64;
+    let image_raw = Box::into_raw(Box::new(ForkChildImage { regs, settid_ptr })) as u64;
 
     // Inherit the parent thread's effective scheduling priority so the
     // child runs at a comparable urgency; fall back to the default.
@@ -531,6 +632,44 @@ pub fn fork_process(parent_pid: ProcessId, frame: &SyscallFrame) -> KernelResult
         Ok(task_id) => {
             crate::sched::set_task_fs_base(task_id, parent_fs);
             crate::sched::set_task_gs_base(task_id, parent_gs);
+
+            // CLONE_PARENT_SETTID: write the child's TID into the
+            // *parent's* memory at parent_tid_ptr.  We are still running
+            // in the parent's syscall context (parent CR3 active), so the
+            // write lands in the parent's address space as Linux requires.
+            // The child's Linux "tid" is its scheduler task id.
+            if (clone_tid.flags & clone_flags::CLONE_PARENT_SETTID) != 0
+                && clone_tid.parent_tid_ptr != 0
+            {
+                let tid: i32 = i32::try_from(task_id).unwrap_or(0);
+                // SAFETY: copy_to_user validates the user range under SMAP
+                // and uses STAC/CLAC.  A bad pointer yields -EFAULT which
+                // we ignore: the child already exists and Linux likewise
+                // does not unwind a clone for a bad PARENT_SETTID address.
+                let _ = unsafe {
+                    crate::mm::user::copy_to_user(
+                        (&raw const tid).cast::<u8>(),
+                        clone_tid.parent_tid_ptr,
+                        core::mem::size_of::<i32>(),
+                    )
+                };
+            }
+
+            // CLONE_CHILD_CLEARTID: register the child's ctid so the
+            // kernel zeroes it and futex-wakes when the child thread
+            // exits.  Registered against the child task id so
+            // `on_thread_exit_hook` fires for it.  (When the child later
+            // execve's, glibc startup re-registers via set_tid_address,
+            // replacing this entry with one valid in the new image.)
+            if (clone_tid.flags & clone_flags::CLONE_CHILD_CLEARTID) != 0
+                && clone_tid.child_tid_ptr != 0
+            {
+                super::thread_clone::register_clear_child_tid(
+                    task_id,
+                    clone_tid.child_tid_ptr,
+                );
+            }
+
             Ok(child_pid)
         }
         Err(e) => {
@@ -539,7 +678,7 @@ pub fn fork_process(parent_pid: ProcessId, frame: &SyscallFrame) -> KernelResult
             //
             // SAFETY: `image_raw` came from `Box::into_raw` just above
             // and was not consumed (spawn failed before the task ran).
-            drop(unsafe { Box::from_raw(image_raw as *mut [u64; REG_IMAGE_LEN]) });
+            drop(unsafe { Box::from_raw(image_raw as *mut ForkChildImage) });
             // Tear down the child process (frees its address space and
             // closes its inherited handles via the reaper path).
             pcb::destroy(child_pid);

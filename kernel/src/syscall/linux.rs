@@ -1937,6 +1937,18 @@ pub fn build_linux_rt_frame(
 /// against a plain fork.  We pay the CoW page table walk vfork was
 /// trying to avoid, but the program behaves the same.
 fn linux_fork(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
+    linux_fork_common(frame, crate::proc::fork::ForkCloneTid::default())
+}
+
+/// Shared fork body for `linux_fork` (plain `FORK`/`VFORK`) and the
+/// `clone()` fork-equivalent path.  `clone_tid` carries the TID-
+/// notification bits glibc's `fork()` passes
+/// (`CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID`, optionally
+/// `CLONE_PARENT_SETTID`); plain fork/vfork pass an all-zero value.
+fn linux_fork_common(
+    frame: &mut crate::syscall::entry::SyscallFrame,
+    clone_tid: crate::proc::fork::ForkCloneTid,
+) -> i64 {
     use crate::proc::{fork, thread};
 
     let task_id = crate::sched::current_task_id();
@@ -1945,7 +1957,7 @@ fn linux_fork(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
         _ => return -i64::from(errno::ESRCH),
     };
 
-    match fork::fork_process(parent_pid, frame) {
+    match fork::fork_process_clone(parent_pid, frame, clone_tid) {
         Ok(child_pid) => {
             #[allow(clippy::cast_possible_wrap)]
             {
@@ -2078,17 +2090,27 @@ fn linux_clone_inner(
         return -i64::from(errno::ENOSYS);
     }
 
-    const THREAD_BITS: u64 = clone_flags::CLONE_VM
+    // Resource-sharing bits we cannot honour outside the full
+    // thread-creation path: our PCB is per-process, not
+    // per-resource-table, so partial sharing (e.g. CLONE_FILES alone)
+    // is impossible.  CLONE_SETTLS is likewise rejected here — a fork
+    // inherits the parent's FS base via the duplicated address space, so
+    // a *different* TLS base for the child would need trampoline plumbing
+    // we don't have and no real fork() caller requests.
+    //
+    // The TID-notification bits (CLONE_PARENT_SETTID, CLONE_CHILD_SETTID,
+    // CLONE_CHILD_CLEARTID) are intentionally NOT rejected: glibc's
+    // fork() issues clone(CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID |
+    // SIGCHLD, …) and we honour them in fork_process_clone /
+    // fork_child_trampoline.
+    const FORK_REJECTED_SHARE_BITS: u64 = clone_flags::CLONE_VM
         | clone_flags::CLONE_FS
         | clone_flags::CLONE_FILES
         | clone_flags::CLONE_SIGHAND
         | clone_flags::CLONE_THREAD
         | clone_flags::CLONE_SYSVSEM
-        | clone_flags::CLONE_SETTLS
-        | clone_flags::CLONE_PARENT_SETTID
-        | clone_flags::CLONE_CHILD_CLEARTID
-        | clone_flags::CLONE_CHILD_SETTID;
-    if flags & THREAD_BITS != 0 {
+        | clone_flags::CLONE_SETTLS;
+    if flags & FORK_REJECTED_SHARE_BITS != 0 {
         return -i64::from(errno::ENOSYS);
     }
 
@@ -2116,12 +2138,20 @@ fn linux_clone_inner(
     // (see `linux_fork` doc-comment).  Limitation tracked in
     // `todo.txt`.
     //
-    // Everything that remains is just the CSIGNAL byte plus
-    // optionally CLONE_VFORK — fork-equivalent.  glibc fork() passes
-    // SIGCHLD here; we don't actually deliver a signal yet (no
-    // Unix-style signals to userspace), but the kernel already
-    // records parent/child relationships in the PCB.
-    linux_fork(frame)
+    // Everything that remains is just the CSIGNAL byte, optionally
+    // CLONE_VFORK, plus the TID-notification bits — fork-equivalent.
+    // glibc fork() passes SIGCHLD | CLONE_CHILD_SETTID |
+    // CLONE_CHILD_CLEARTID with ctid pointing at the child's TCB tid
+    // slot; thread those through so the child's TID is written and the
+    // exit-time clear/futex-wake is registered.  We don't deliver the
+    // SIGCHLD signal yet (no Unix-style signals to userspace), but the
+    // kernel already records parent/child relationships in the PCB.
+    let clone_tid = crate::proc::fork::ForkCloneTid {
+        flags,
+        parent_tid_ptr,
+        child_tid_ptr,
+    };
+    linux_fork_common(frame, clone_tid)
 }
 
 /// Maximum length of a single NUL-terminated string read from

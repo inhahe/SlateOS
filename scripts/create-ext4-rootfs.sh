@@ -438,6 +438,43 @@ EOF
 gcc -O2 -o "$STAGE/bin/sigqueue" "$CSRC7" -Wl,-rpath,"$LIBC_DIR" -Wl,--enable-new-dtags
 rm -f "$CSRC7"
 
+# --- the "forkexec" test binary: fork()+execl()+waitpid() of a glibc child ----
+# Every other Path-Z binary is a single glibc process.  This one proves a real
+# glibc program can spawn *another* real glibc program and reap it -- the
+# foundation for a shell.  It exercises glibc's fork() (clone(SIGCHLD) with a
+# genuine CoW address-space copy + pthread_atfork/malloc-lock handling),
+# execl() (PATH-less absolute exec marshalling argv/envp), and waitpid()
+# (wrapping wait4) end-to-end.  The child execs the silent /bin/hello (exits 42
+# with no output), so the only bytes written to the shared fd 1 come from the
+# parent *after* the reap -- output stays deterministic.  Returns 27 on success
+# (2 = fork failed, 3 = waitpid mismatch, 4 = child didn't exit normally).
+CSRC8="$STAGE/forkexec.c"
+cat > "$CSRC8" <<'EOF'
+/* SlateOS Path-Z real-glibc fork()+execl()+waitpid() test. */
+#include <stdio.h>
+#include <unistd.h>
+#include <sys/wait.h>
+
+int main(void) {
+    pid_t pid = fork();
+    if (pid < 0) return 2;               /* fork failed */
+    if (pid == 0) {
+        /* child: replace image with the silent real-glibc /bin/hello (exit 42) */
+        execl("/bin/hello", "/bin/hello", (char *)0);
+        _exit(127);                      /* exec failed */
+    }
+    int status = 0;
+    if (waitpid(pid, &status, 0) != pid) return 3;   /* -> wait4 */
+    if (!WIFEXITED(status)) return 4;                /* abnormal child exit */
+
+    /* Only the parent writes to fd 1, and only here, after the reap. */
+    printf("SLATE_GLIBC_FORKEXEC_OK childexit=%d\n", WEXITSTATUS(status));
+    return 27;
+}
+EOF
+gcc -O2 -o "$STAGE/bin/forkexec" "$CSRC8" -Wl,-rpath,"$LIBC_DIR" -Wl,--enable-new-dtags
+rm -f "$CSRC8"
+
 echo "[rootfs] staged tree:"
 ( cd "$STAGE" && find lib64 lib bin -type f -printf '  %-44p %10s bytes\n' )
 

@@ -4935,6 +4935,207 @@ pub fn self_test_linux_real_glibc_sigqueue() -> KernelResult<()> {
     }
 }
 
+/// Path Z: prove a REAL-glibc program can `fork()`+`execl()`+`waitpid()`
+/// another REAL-glibc program — the foundation for a shell.
+///
+/// Every other Path-Z real-glibc test is a *single* glibc process.  This one
+/// runs `/bin/forkexec`, which:
+///   - `fork()`s (glibc → `clone(SIGCHLD)` with a genuine CoW address-space
+///     copy + `pthread_atfork`/malloc-lock handling);
+///   - in the child, `execl("/bin/hello", …)` (the silent real-glibc binary
+///     that `exit_group(42)`s) — replacing the image and marshalling
+///     argv/envp;
+///   - in the parent, `waitpid(pid, &status, 0)` (glibc → `wait4`), reaps the
+///     child, and prints the decoded `WEXITSTATUS`.
+///
+/// Because the child is silent and the parent writes only *after* the reap,
+/// the bytes on the shared fd 1 are deterministic.  This proves the kernel's
+/// Linux-ABI `fork`/`execve`/`wait4` path works under glibc's wrappers (not
+/// just the hand-assembled [`self_test_linux_fork_execve_wait`]), including a
+/// real CoW fork of a dynamically-linked image and a child exec that re-runs
+/// `ld.so`.
+///
+/// Output is deterministic, so we assert the exact bytes plus `exit(27)`
+/// (2 = fork failed, 3 = waitpid mismatch, 4 = child didn't exit normally).
+/// No-op (returns `Ok`) when `/mnt/bin/forkexec` is absent.
+pub fn self_test_linux_real_glibc_forkexec() -> KernelResult<()> {
+    use crate::fs::handle;
+    use crate::proc::linux_fd::{FdEntry, O_WRONLY};
+
+    const EXPECT_EXIT: i32 = 27;
+    // /bin/hello exits 42; the parent decodes WEXITSTATUS and prints it.
+    const EXPECT_OUT: &[u8] = b"SLATE_GLIBC_FORKEXEC_OK childexit=42\n";
+
+    const SRC_LD: &str = "/mnt/lib64/ld-linux-x86-64.so.2";
+    const SRC_LIBC: &str = "/mnt/lib/x86_64-linux-gnu/libc.so.6";
+    const SRC_HELLO: &str = "/mnt/bin/hello";
+    const SRC_FORKEXEC: &str = "/mnt/bin/forkexec";
+    const DST_LD: &str = "/lib64/ld-linux-x86-64.so.2";
+    const DST_LIBC: &str = "/lib/x86_64-linux-gnu/libc.so.6";
+    const DST_HELLO: &str = "/bin/hello";
+    const DST_FORKEXEC: &str = "/bin/forkexec";
+    const CAPTURE: &str = "/glibc-forkexec-capture.tmp";
+    // fork + exec + wait of a dynamically-linked child: more work than the
+    // single-process tests (the child re-runs ld.so), so allow extra yields.
+    const MAX_YIELDS: usize = 262_144;
+
+    if !crate::fs::Vfs::exists(SRC_FORKEXEC) {
+        return Ok(());
+    }
+
+    serial_println!("[spawn] Running REAL glibc fork()+execl()+waitpid() (ring 3, Path Z) test...");
+
+    let _ = crate::fs::Vfs::mkdir_all("/lib64");
+    let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
+    let _ = crate::fs::Vfs::mkdir_all("/bin");
+    for (src, dst) in [
+        (SRC_LD, DST_LD),
+        (SRC_LIBC, DST_LIBC),
+        (SRC_HELLO, DST_HELLO),
+        (SRC_FORKEXEC, DST_FORKEXEC),
+    ] {
+        match crate::fs::Vfs::read_file(src) {
+            Ok(bytes) => {
+                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
+                    serial_println!(
+                        "[spawn]   real glibc forkexec: SKIP (staging {} -> {} failed: {:?})",
+                        src, dst, e
+                    );
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                serial_println!(
+                    "[spawn]   real glibc forkexec: SKIP (reading {} failed: {:?})",
+                    src, e
+                );
+                return Ok(());
+            }
+        }
+    }
+
+    let exe_elf = match crate::fs::Vfs::read_file(DST_FORKEXEC) {
+        Ok(b) => b,
+        Err(e) => {
+            serial_println!("[spawn]   real glibc forkexec: SKIP (re-read {} failed: {:?})", DST_FORKEXEC, e);
+            return Ok(());
+        }
+    };
+
+    let _ = crate::fs::Vfs::remove(CAPTURE);
+    let capture_handle = match handle::open(
+        CAPTURE,
+        handle::OpenFlags::READ
+            .union(handle::OpenFlags::WRITE)
+            .union(handle::OpenFlags::CREATE),
+    ) {
+        Ok(h) => h,
+        Err(e) => {
+            serial_println!("[spawn]   real glibc forkexec: SKIP (capture-file open failed: {:?})", e);
+            return Ok(());
+        }
+    };
+
+    let argv: &[&[u8]] = &[b"/bin/forkexec"];
+    let envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C"];
+    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-glibc-forkexec",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: Some(DST_FORKEXEC.as_bytes()),
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = handle::close(capture_handle);
+            let _ = crate::fs::Vfs::remove(CAPTURE);
+            serial_println!("[spawn]   FAIL: real glibc forkexec spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Redirect fd 1 → capture before the child runs.  The forked child
+    // inherits this fd (it is silent), so only the parent's post-reap line
+    // lands in the capture file.
+    let _ = pcb::linux_fd_take(result.pid, 1);
+    if let Err(e) = pcb::linux_fd_install_at(result.pid, 1, FdEntry::file(capture_handle, O_WRONLY)) {
+        let _ = handle::close(capture_handle);
+        thread::on_thread_exit(result.task_id);
+        pcb::destroy(result.pid);
+        let _ = crate::fs::Vfs::remove(CAPTURE);
+        serial_println!("[spawn]   FAIL: real glibc forkexec — redirecting fd 1 failed: {:?}", e);
+        return Err(KernelError::InternalError);
+    }
+
+    let mut reaped = false;
+    for _ in 0..MAX_YIELDS {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            reaped = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    let captured = crate::fs::Vfs::read_file(CAPTURE);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(CAPTURE);
+
+    if !reaped || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: real glibc forkexec — process did not exit within {} yields \
+             (state={:?}); the CoW fork, the child's ld.so re-exec, or the parent's \
+             wait4 likely hung",
+            MAX_YIELDS, state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECT_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: real glibc forkexec — exit code={:?}, expected {} (2=fork \
+             failed, 3=waitpid mismatch, 4=child not WIFEXITED)",
+            exit_code, EXPECT_EXIT
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    match captured {
+        Ok(bytes) if bytes.as_slice() == EXPECT_OUT => {
+            serial_println!(
+                "[spawn]   REAL glibc forkexec (ring 3: glibc fork() CoW + child execl(/bin/hello) \
+                 re-running ld.so + parent waitpid() reaping WEXITSTATUS=42, captured {} bytes \
+                 == expected): OK",
+                bytes.len()
+            );
+            Ok(())
+        }
+        Ok(bytes) => {
+            serial_println!(
+                "[spawn]   FAIL: real glibc forkexec — captured {} bytes {:?}, expected {:?}",
+                bytes.len(), bytes.as_slice(), EXPECT_OUT
+            );
+            Err(KernelError::InternalError)
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: real glibc forkexec — reading capture file back failed: {:?}",
+                e
+            );
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

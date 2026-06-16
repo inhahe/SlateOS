@@ -131,10 +131,33 @@ returned exactly 1 byte == `'Z'` (self-diagnosing exit sentinels
 process exits 0, independently confirms kernel-side via `Vfs::readlink` that
 the created link resolves to `"Z"`. (Raw ELF rather than dash because dash has
 no `ln` builtin and cannot invoke `symlink(2)`/`readlink(2)` directly.)
-**Remaining stubs (not yet wired):** `link`/`linkat` still return EROFS, and
-the `utimensat`/`utimes`/`utime` family still returns EROFS — `Vfs::link` and
-`Vfs::set_times` exist and these can be wired with the same kernel-context /
-ring-3 pattern.
+**Follow-up — `link`/`linkat` now wired (2026-06-16):** `sys_link`/`sys_linkat`
+share a new `link_common` that resolves both names via `resolve_at_path`,
+requires a File-WRITE capability, and calls `Vfs::link` (kernel context still
+EROFS). Regression test: Path Z Part 28 (`self_test_linux_link`) hard-links
+`/mnt/lnk-dst` to a pre-staged `/mnt/lnk-src` from ring 3 and reads the byte
+back through it.
+
+**memfs does not support hard links (deferred):** the test runs on the **ext4**
+mount at `/mnt`, not the in-memory root (`/`, `/tmp`). memfs stores file data
+inline in by-value tree nodes (`MemFsNodeKind::File(Vec<u8>)` owned by the
+parent's `BTreeMap`), so two directory entries cannot share one inode — which
+is exactly what a hard link requires. memfs therefore correctly returns
+"unsupported" (Linux returns **EPERM** for filesystems without hard-link
+support). Proper fix: refactor memfs to an inode-table model (`MemFs` owns
+`BTreeMap<ino, Inode>`; file/symlink directory entries hold an `ino` instead of
+the body, so multiple names can reference one inode with a shared `nlink`).
+This is a sizeable refactor of a core subsystem with many passing self-tests,
+and ext4 (the design's real root FS) already implements hard links, so it is
+deferred rather than done speculatively. **Fidelity gap (minor):** `Vfs::link`
+always follows a symlink `oldpath`, whereas plain `link(2)` should not follow
+and `linkat` should follow only with `AT_SYMLINK_FOLLOW`; the common
+regular-file case is correct, only the rare hard-link-a-symlink case differs
+(would need a `Vfs::link` no-follow variant to fix properly).
+
+**Remaining stub (not yet wired):** the `utimensat`/`utimes`/`utime`
+timestamp-update family still returns EROFS — `Vfs::set_times` exists and can
+be wired with the same kernel-context / ring-3 pattern.
 
 ### B-SIG1. dash's `wait` builtin (background-job reap) livelocked: no SIGCHLD on child exit + `rt_sigsuspend` was a stub — FIXED 2026-06-16
 

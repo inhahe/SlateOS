@@ -1339,6 +1339,12 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 round-trip test for the link()/linkat() hard-link syscalls, which
+    // were stale EROFS stubs until wired to Vfs::link.
+    if let Err(e) = proc::spawn::self_test_linux_link() {
+        serial_println!("WARNING: Linux link() (ring 3) self-test failed: {:?}", e);
+    }
+
     // Ring-3 regression test that IA32_FS_BASE (the glibc %fs/TLS pointer) is
     // saved/restored per task across context switches.  Two concurrent Linux
     // procs install distinct FS bases and assert they survive cooperative

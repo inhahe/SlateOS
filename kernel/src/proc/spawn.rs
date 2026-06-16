@@ -3130,6 +3130,134 @@ pub fn self_test_linux_symlink_readlink() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 regression test for the **`link(2)`/`linkat(2)`** (hard-link)
+/// syscalls, which were stale `EROFS` stubs until wired to `Vfs::link`.
+///
+/// Hard links require an inode-sharing FS; memfs (the in-memory root) cannot
+/// share an inode between two names, so the test runs on the ext4 mount at
+/// `/mnt`.  The harness pre-creates `/mnt/lnk-src` containing the single byte
+/// `'L'` and removes any stale `/mnt/lnk-dst`.  A hand-built Linux-ABI ELF
+/// ([`elf::build_linux_link_test_elf`]) calls `link("/mnt/lnk-src",
+/// "/mnt/lnk-dst")`, then `open("/mnt/lnk-dst", O_RDONLY)` + `read` one byte
+/// and asserts it is `'L'` — proving the new name shares the source's inode
+/// data.  A clean `exit_code == 0` confirms the hard link was really created
+/// and is readable through the new name.  After the process exits, the harness
+/// independently confirms via `Vfs::read_file` that `/mnt/lnk-dst` reads back
+/// `"L"`.  Skips cleanly when there is no writable `/mnt` ext4 mount.
+///
+/// Self-diagnosing sentinels: `0xC1`/193 = `link` failed, `0xC2`/194 =
+/// `open(new)` failed, `0xC3`/195 = `read` wrong length, `0xC4`/196 = wrong
+/// byte read back.  Skips gracefully (`Ok`) if the VFS cannot stage the
+/// source.  Must run **after** filesystem init.
+pub fn self_test_linux_link() -> KernelResult<()> {
+    // Hard links require an inode-sharing FS.  memfs (the in-memory root /,
+    // /tmp) stores file data inline in by-value tree nodes and cannot share an
+    // inode between two names, so it correctly reports "unsupported" (Linux
+    // returns EPERM for such FSes).  We therefore test the success path on the
+    // ext4 mount at /mnt, which implements hard links.  See known-issues
+    // B-SYM1 for the memfs limitation.
+    const SRC_PATH: &str = "/mnt/lnk-src";
+    const SRC_PATH_NUL: &[u8] = b"/mnt/lnk-src\0";
+    const DST_PATH: &str = "/mnt/lnk-dst";
+    const DST_PATH_NUL: &[u8] = b"/mnt/lnk-dst\0";
+    const MAX_YIELDS: usize = 256;
+
+    serial_println!("[spawn] Running Linux link()/linkat() hard-link test (ring 3, ext4 /mnt)...");
+
+    // Skip cleanly when /mnt isn't an ext4 mount (diskless boot).
+    if !crate::fs::Vfs::exists("/mnt") {
+        serial_println!("[spawn]   Linux link() (ring 3): SKIP (no /mnt ext4 mount)");
+        return Ok(());
+    }
+
+    // Stage the source file with a single known byte; clean any stale dst.
+    if let Err(e) = crate::fs::Vfs::write_file(SRC_PATH, b"L") {
+        serial_println!(
+            "[spawn]   Linux link() (ring 3): SKIP (ext4 /mnt write failed: {:?})",
+            e
+        );
+        return Ok(());
+    }
+    let _ = crate::fs::Vfs::remove(DST_PATH);
+
+    let exe_elf = elf::build_linux_link_test_elf(SRC_PATH_NUL, DST_PATH_NUL);
+    let argv: &[&[u8]] = &[b"spawn-test-linux-link"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-link",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = crate::fs::Vfs::remove(SRC_PATH);
+            let _ = crate::fs::Vfs::remove(DST_PATH);
+            serial_println!("[spawn]   FAIL: link spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    for _ in 0..MAX_YIELDS {
+        crate::sched::yield_now();
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            break;
+        }
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    let kernel_readback = crate::fs::Vfs::read_file(DST_PATH);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(SRC_PATH);
+    let _ = crate::fs::Vfs::remove(DST_PATH);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: link() (ring 3) — process not a zombie after {} yields, got {:?}",
+            MAX_YIELDS, state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: link() (ring 3) — expected exit 0, got {:?} (0xC1/193 = link \
+             failed; 0xC2/194 = open(dst) failed; 0xC3/195 = read wrong length; 0xC4/196 = \
+             wrong byte)",
+            exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    match kernel_readback {
+        Ok(ref d) if d.as_slice() == b"L" => {}
+        other => {
+            serial_println!(
+                "[spawn]   FAIL: link() (ring 3) — process exited 0 but kernel readback of \
+                 /mnt/lnk-dst was not \"L\": {:?}",
+                other.as_ref().map(alloc::vec::Vec::len)
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    serial_println!(
+        "[spawn]   Linux link() (ring 3: hard-linked /mnt/lnk-dst to /mnt/lnk-src and read \"L\" back \
+         through it; kernel confirmed): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 regression test that the **`%fs` (TLS) base is saved/restored
 /// across context switches** between two concurrent Linux processes.
 ///

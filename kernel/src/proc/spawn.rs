@@ -5538,6 +5538,166 @@ pub fn self_test_linux_real_glibc_redir() -> KernelResult<()> {
     }
 }
 
+/// Path Z Part 9: prove program-driven `cmd < file` *input* redirection
+/// with a real prebuilt glibc binary.
+///
+/// The mirror image of [`self_test_linux_real_glibc_redir`]: that test
+/// proved `dup2` of a self-`open()`ed File onto stdout; this proves
+/// `dup2` of a self-`open()`ed *read-only* File onto stdin (fd 0), the
+/// displaced-Console-stdin close, and glibc's buffered *input* path
+/// (`fstat(0)` + `read(2)` + `fgets`) reading from a regular file the
+/// program chose.  The harness pre-creates the input file, injects NO
+/// fd, and verifies success purely through the exit code: `/bin/redirin`
+/// compares the line it reads against a compiled-in literal and returns
+/// `37` only on an exact byte match, so the right exit code is a
+/// byte-exact proof the redirected stdin delivered the correct bytes.
+///
+/// No-op (returns `Ok(())`) when the rootfs / `/bin/redirin` is absent.
+///
+/// # Errors
+///
+/// Returns [`KernelError::InternalError`] if the process fails to reach
+/// `Zombie` or exits with the wrong code; propagates spawn failure.
+pub fn self_test_linux_real_glibc_redirin() -> KernelResult<()> {
+    const EXPECT_EXIT: i32 = 37;
+    // Must match the literal in scripts/create-ext4-rootfs.sh's
+    // /bin/redirin source (the line it strcmp's the stdin read against).
+    const IN_CONTENT: &[u8] = b"SLATE_GLIBC_STDIN_OK marker=7777\n";
+
+    const SRC_LD: &str = "/mnt/lib64/ld-linux-x86-64.so.2";
+    const SRC_LIBC: &str = "/mnt/lib/x86_64-linux-gnu/libc.so.6";
+    const SRC_REDIRIN: &str = "/mnt/bin/redirin";
+    const DST_LD: &str = "/lib64/ld-linux-x86-64.so.2";
+    const DST_LIBC: &str = "/lib/x86_64-linux-gnu/libc.so.6";
+    const DST_REDIRIN: &str = "/bin/redirin";
+    // The path the *program* opens + redirects stdin from.  Must match
+    // the literal in scripts/create-ext4-rootfs.sh's /bin/redirin source.
+    const IN_PATH: &str = "/redir-in.txt";
+    // Dynamically-linked single process (re-runs ld.so); same generous
+    // budget as the other real-glibc tests.
+    const MAX_YIELDS: usize = 262_144;
+
+    if !crate::fs::Vfs::exists(SRC_REDIRIN) {
+        return Ok(());
+    }
+
+    serial_println!("[spawn] Running REAL glibc `cmd < file` input-redirection (ring 3, Path Z) test...");
+
+    let _ = crate::fs::Vfs::mkdir_all("/lib64");
+    let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
+    let _ = crate::fs::Vfs::mkdir_all("/bin");
+    for (src, dst) in [
+        (SRC_LD, DST_LD),
+        (SRC_LIBC, DST_LIBC),
+        (SRC_REDIRIN, DST_REDIRIN),
+    ] {
+        match crate::fs::Vfs::read_file(src) {
+            Ok(bytes) => {
+                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
+                    serial_println!(
+                        "[spawn]   real glibc redirin: SKIP (staging {} -> {} failed: {:?})",
+                        src, dst, e
+                    );
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                serial_println!(
+                    "[spawn]   real glibc redirin: SKIP (reading {} failed: {:?})",
+                    src, e
+                );
+                return Ok(());
+            }
+        }
+    }
+
+    let exe_elf = match crate::fs::Vfs::read_file(DST_REDIRIN) {
+        Ok(b) => b,
+        Err(e) => {
+            serial_println!("[spawn]   real glibc redirin: SKIP (re-read {} failed: {:?})", DST_REDIRIN, e);
+            return Ok(());
+        }
+    };
+
+    // Lay down the exact input the program will read through fd 0.  This
+    // is the file the shell would have opened for `< file`.
+    if let Err(e) = crate::fs::Vfs::write_file(IN_PATH, IN_CONTENT) {
+        serial_println!(
+            "[spawn]   real glibc redirin: SKIP (staging input {} failed: {:?})",
+            IN_PATH, e
+        );
+        return Ok(());
+    }
+
+    let argv: &[&[u8]] = &[b"/bin/redirin"];
+    let envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C"];
+    // The program only opens an existing file O_RDONLY, so File READ is
+    // exactly the authority it needs (the Linux open path gates on READ).
+    let caps = [(ResourceType::File, 1u64, Rights::READ)];
+    let options = SpawnOptions {
+        name: "spawn-test-glibc-redirin",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: Some(DST_REDIRIN.as_bytes()),
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: real glibc redirin spawn returned {:?}", e);
+            let _ = crate::fs::Vfs::remove(IN_PATH);
+            return Err(e);
+        }
+    };
+
+    let mut reaped = false;
+    for _ in 0..MAX_YIELDS {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            reaped = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(IN_PATH);
+
+    if !reaped || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: real glibc redirin — process did not exit within {} yields \
+             (state={:?}); the program's open()/dup2() input redirection or stdin \
+             read likely hung",
+            MAX_YIELDS, state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECT_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: real glibc redirin — exit code={:?}, expected {} (2=open \
+             failed, 3=dup2 failed, 4=fgets EOF, 5=content mismatch)",
+            exit_code, EXPECT_EXIT
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   REAL glibc redirin (ring 3: open(O_RDONLY) + dup2(file -> fd 0) + \
+         displaced-console-stdin close + glibc fgets read {} bytes from the program's \
+         own file == expected, exit {}): OK",
+        IN_CONTENT.len(), EXPECT_EXIT
+    );
+    Ok(())
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

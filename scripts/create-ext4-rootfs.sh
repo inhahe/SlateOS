@@ -580,6 +580,45 @@ EOF
 gcc -O2 -o "$STAGE/bin/redir" "$CSRC11" -Wl,-rpath,"$LIBC_DIR" -Wl,--enable-new-dtags
 rm -f "$CSRC11"
 
+# --- the "redirin" test binary: the `cmd < file` shell primitive --------------
+# The mirror image of /bin/redir: a real glibc program that performs its OWN
+# *input* redirection the way a shell does for `cmd < file`: open(2) a source
+# with O_RDONLY, dup2(2) the resulting fd onto fd 0 (the kernel closes the
+# displaced console fd 0), close the now-redundant original fd, then read a line
+# from the redirected stdin via glibc's buffered fgets (fstat(0) + read(2)).
+# Part 8 (/bin/redir) proved dup2 of a self-open()ed File onto stdout; this
+# proves dup2 onto stdin and the glibc *input* path reading from a real file.
+# The SlateOS self-test pre-creates the input file the program reads, injects NO
+# fd, and confirms success purely via the exit code: the program compares the
+# line it read against a compiled-in literal and returns 37 only on an exact
+# match, so a correct exit code byte-exactly proves the right bytes flowed in.
+# (2 = open failed, 3 = dup2 failed, 4 = fgets failed/EOF, 5 = content mismatch.)
+CSRC12="$STAGE/redirin.c"
+cat > "$CSRC12" <<'EOF'
+/* SlateOS Path-Z real-glibc `cmd < file` input-redirection test. */
+#include <stdio.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <string.h>
+
+int main(void) {
+    /* Open the redirect source exactly as a shell does for `< file`. */
+    int fd = open("/redir-in.txt", O_RDONLY);
+    if (fd < 0) return 2;            /* open failed */
+    /* Point stdin at it; the kernel closes the displaced fd 0 (console). */
+    if (dup2(fd, 0) < 0) return 3;   /* dup2 failed */
+    close(fd);                        /* original fd now redundant */
+    /* fd 0 is a regular file now, so glibc fstat(0)s it, fills its buffer
+       with a read(2), and serves fgets from that buffer. */
+    char buf[64];
+    if (!fgets(buf, sizeof buf, stdin)) return 4;  /* read failed / empty */
+    if (strcmp(buf, "SLATE_GLIBC_STDIN_OK marker=7777\n") != 0) return 5;
+    return 37;                        /* exact-match success */
+}
+EOF
+gcc -O2 -o "$STAGE/bin/redirin" "$CSRC12" -Wl,-rpath,"$LIBC_DIR" -Wl,--enable-new-dtags
+rm -f "$CSRC12"
+
 echo "[rootfs] staged tree:"
 ( cd "$STAGE" && find lib64 lib bin -type f -printf '  %-44p %10s bytes\n' )
 

@@ -1325,7 +1325,7 @@ impl Ext4Driver {
             }
         }
 
-        parse_dir_entries(&data)
+        parse_dir_entries(&data, self.sb.block_size as usize)
     }
 
     /// Look up a name in a directory and return the inode number.
@@ -2656,12 +2656,21 @@ impl Ext4Driver {
 
         // Try to find space in the last block by compacting the last entry.
         let dir_len = dir_data.len();
-        if dir_len > 0 {
-            // Find the last entry in the last block.
-            let last_block_start = (dir_len / block_size) * block_size;
-            if last_block_start < dir_len {
-                // Actually, we need to find the last entry by walking.
-                // The last entry's rec_len extends to the end of the block.
+        if dir_len > 0 && block_size > 0 {
+            // The last directory block begins one block_size before the end of
+            // the directory data (directory size is always a whole number of
+            // blocks).  An earlier version computed `(dir_len / block_size) *
+            // block_size`, which for a block-aligned directory equals dir_len
+            // itself — so the guard `last_block_start < dir_len` was never true
+            // and this in-place-reuse path was DEAD CODE.  Every insert then
+            // fell through to the grow path, appending a fresh block for each
+            // new entry: unbounded directory bloat and fragmentation.  Compute
+            // the real last-block start so free space in the final block is
+            // actually reused.  See known-issues B-EXT4-DIR.
+            let last_block_start = dir_len.saturating_sub(block_size);
+            {
+                // The last entry's rec_len extends to the end of the block;
+                // find_dir_insert_point locates reclaimable trailing space.
                 if let Some(space) = find_dir_insert_point(
                     &dir_data,
                     last_block_start,
@@ -2672,6 +2681,7 @@ impl Ext4Driver {
                     // rec_len and writing the new entry at `space`.
                     insert_dir_entry(
                         &mut dir_data,
+                        last_block_start,
                         space,
                         child_ino,
                         name_bytes,
@@ -4968,45 +4978,64 @@ fn compute_xattr_block_checksum(
 // ---------------------------------------------------------------------------
 
 /// Parse linear directory entries from raw directory block data.
-fn parse_dir_entries(data: &[u8]) -> KernelResult<Vec<(u32, u8, String)>> {
+fn parse_dir_entries(data: &[u8], block_size: usize) -> KernelResult<Vec<(u32, u8, String)>> {
     let mut entries = Vec::new();
-    let mut offset = 0usize;
     let dir_entry_header_size = core::mem::size_of::<Ext4DirEntry2>();
 
-    while offset.saturating_add(dir_entry_header_size) <= data.len() {
-        let hdr_bytes = data.get(offset..offset.saturating_add(dir_entry_header_size))
-            .ok_or(KernelError::IoError)?;
-        let hdr = read_struct::<Ext4DirEntry2>(hdr_bytes)?;
+    // ext4 directory entries never span block boundaries: each `block_size`
+    // chunk is parsed independently, with the last entry's `rec_len` reaching
+    // exactly to the block end.  We therefore walk the directory block by
+    // block.  A `rec_len == 0` (zero-padded / malformed region) must terminate
+    // parsing of ONLY that block and advance to the next — an earlier version
+    // `break`ed out of the whole directory here, which silently hid every
+    // entry in all subsequent blocks (e.g. a freshly added hard-link name in
+    // the last block of a multi-block directory).  See known-issues B-EXT4-DIR.
+    let bs = if block_size == 0 { data.len().max(1) } else { block_size };
 
-        if hdr.rec_len == 0 {
-            // End of directory block.
-            break;
-        }
+    let mut block_start = 0usize;
+    while block_start < data.len() {
+        let block_end = block_start.saturating_add(bs).min(data.len());
+        let mut offset = block_start;
 
-        if hdr.inode != 0 && hdr.name_len > 0 {
-            let name_start = offset.saturating_add(dir_entry_header_size);
-            let name_end = name_start.saturating_add(hdr.name_len as usize);
-            if name_end <= data.len() {
-                if let Some(name_bytes) = data.get(name_start..name_end) {
-                    // Reject non-UTF-8 filenames rather than silently
-                    // corrupting them with lossy replacement characters.
-                    // The proper fix is byte-string DirEntry names (see todo.txt).
-                    match core::str::from_utf8(name_bytes) {
-                        Ok(s) => entries.push((hdr.inode, hdr.file_type, String::from(s))),
-                        Err(_) => {
-                            // Skip this entry — non-UTF-8 filename.
-                            // Log once per directory to avoid spam.
-                            crate::serial_println!(
-                                "[ext4] WARNING: skipping non-UTF-8 directory entry (inode {})",
-                                hdr.inode
-                            );
+        while offset.saturating_add(dir_entry_header_size) <= block_end {
+            let hdr_bytes = match data.get(offset..offset.saturating_add(dir_entry_header_size)) {
+                Some(b) => b,
+                None => break,
+            };
+            let hdr = read_struct::<Ext4DirEntry2>(hdr_bytes)?;
+
+            if hdr.rec_len == 0 {
+                // End of usable entries in this block — move to the next block.
+                break;
+            }
+
+            if hdr.inode != 0 && hdr.name_len > 0 {
+                let name_start = offset.saturating_add(dir_entry_header_size);
+                let name_end = name_start.saturating_add(hdr.name_len as usize);
+                if name_end <= block_end {
+                    if let Some(name_bytes) = data.get(name_start..name_end) {
+                        // Reject non-UTF-8 filenames rather than silently
+                        // corrupting them with lossy replacement characters.
+                        // The proper fix is byte-string DirEntry names (see todo.txt).
+                        match core::str::from_utf8(name_bytes) {
+                            Ok(s) => entries.push((hdr.inode, hdr.file_type, String::from(s))),
+                            Err(_) => {
+                                // Skip this entry — non-UTF-8 filename.
+                                // Log once per directory to avoid spam.
+                                crate::serial_println!(
+                                    "[ext4] WARNING: skipping non-UTF-8 directory entry (inode {})",
+                                    hdr.inode
+                                );
+                            }
                         }
                     }
                 }
             }
+
+            offset = offset.saturating_add(hdr.rec_len as usize);
         }
 
-        offset = offset.saturating_add(hdr.rec_len as usize);
+        block_start = block_start.saturating_add(bs);
     }
 
     Ok(entries)
@@ -5303,36 +5332,30 @@ fn find_dir_insert_point(
 
 /// Insert a directory entry by splitting the space at `offset`.
 ///
+/// `block_start` is the byte offset of the start of the directory block that
+/// contains `offset` (entries never span blocks, so the previous entry we
+/// must shrink lies within `[block_start, offset)`).
+///
 /// `remaining_in_block` is the number of bytes from `offset` to the
 /// end of the block (used for the new entry's rec_len).
 fn insert_dir_entry(
     data: &mut [u8],
+    block_start: usize,
     offset: usize,
     child_ino: u32,
     name: &[u8],
     file_type_byte: u8,
     remaining_in_block: usize,
 ) -> KernelResult<()> {
-    // First, shrink the previous entry's rec_len.
-    // The previous entry ends at `offset`, so find it and update its rec_len.
+    // Shrink the previous entry's rec_len so the new entry fits at `offset`.
+    // The previous entry starts somewhere in `[block_start, offset)`; we scan
+    // forward from the block start (cheap — directory blocks are small) to
+    // find the entry whose rec_len currently reaches past `offset`, then clamp
+    // its rec_len to `offset - that_entry_start`.  (An earlier version derived
+    // `block_start` from `offset / remaining_in_block`, which was incorrect
+    // and could miss the previous entry; the caller now passes the true block
+    // start.)
     let entry_header_size = core::mem::size_of::<Ext4DirEntry2>();
-
-    // Walk backwards from offset to find the previous entry.
-    // Since we know `offset` is the correct insertion point (from
-    // find_dir_insert_point), the previous entry starts at some earlier
-    // offset.  We need to update its rec_len.
-    // Actually, find_dir_insert_point returns last_offset + last_actual_size.
-    // So the previous entry is at last_offset.  We need to set its rec_len
-    // to last_actual_size.
-
-    // For now, we find the entry just before `offset` by scanning.
-    // This is O(n) but directories are typically small.
-    let block_start = (offset / remaining_in_block.max(1)) * remaining_in_block.max(1);
-
-    // Actually, the simplest approach: we know the previous entry should have
-    // rec_len equal to (offset - prev_entry_start).  But since we computed
-    // the insertion point from find_dir_insert_point, let's just update the
-    // previous rec_len to point exactly to our insertion offset.
 
     // Scan to find the entry whose rec_len reaches past `offset`.
     let mut pos = block_start.min(offset);
@@ -5789,7 +5812,7 @@ fn test_parse_dir_entries() -> KernelResult<()> {
     // Entry 3: inode=100, rec_len=100, name_len=9, type=REG, name="hello.txt"
     write_dir_entry_raw(&mut block, 28, 100, b"hello.txt", 1, 100)?;
 
-    let entries = parse_dir_entries(&block)?;
+    let entries = parse_dir_entries(&block, block.len())?;
 
     if entries.len() != 3 {
         crate::serial_println!(
@@ -5830,10 +5853,33 @@ fn test_parse_dir_entries() -> KernelResult<()> {
     let mut block2 = [0u8; 64];
     write_dir_entry_raw(&mut block2, 0, 0, b"deleted", 1, 32)?;
     write_dir_entry_raw(&mut block2, 32, 50, b"alive", 1, 32)?;
-    let entries = parse_dir_entries(&block2)?;
+    let entries = parse_dir_entries(&block2, block2.len())?;
     if entries.len() != 1 || entries[0].0 != 50 {
         crate::serial_println!(
             "[ext4-driver]   FAIL: deleted entry not skipped, got {} entries",
+            entries.len()
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Multi-block directory where an EARLIER block ends with a rec_len==0
+    // zero-padded gap (e.g. an in-place insert that didn't fill the block to
+    // its boundary).  The entry in the LATER block must still be found — this
+    // is the B-EXT4-DIR regression: the old parser `break`ed on the first
+    // rec_len==0 and lost every entry in subsequent blocks.
+    let bs = 64usize;
+    let mut multi = [0u8; 128];
+    // Block 0: one real entry of rec_len 32, then zeros (rec_len==0 at off 32).
+    write_dir_entry_raw(&mut multi, 0, 10, b"first", 1, 32)?;
+    // Block 1 (offset 64): one entry that fills the whole block.
+    write_dir_entry_raw(&mut multi, 64, 20, b"second", 1, 64)?;
+    let entries = parse_dir_entries(&multi, bs)?;
+    if entries.len() != 2
+        || entries.first().map(|e| e.0) != Some(10)
+        || entries.get(1).map(|e| e.0) != Some(20)
+    {
+        crate::serial_println!(
+            "[ext4-driver]   FAIL: multi-block parse lost later block, got {} entries",
             entries.len()
         );
         return Err(KernelError::InternalError);

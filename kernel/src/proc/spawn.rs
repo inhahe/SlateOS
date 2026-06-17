@@ -3170,7 +3170,25 @@ pub fn self_test_linux_link() -> KernelResult<()> {
         return Ok(());
     }
 
-    // Stage the source file with a single known byte; clean any stale dst.
+    // Drain any stale src/dst entries before staging.  The /mnt fixture
+    // (rootfs.ext4) is a persistent disk reused across every boot, so it may
+    // already hold copies — including historical DUPLICATES left by a former
+    // directory bug (see known-issues B-EXT4-DIR).  A single remove() only
+    // unlinks one matching entry, so loop until the name is gone (bounded).
+    fn drain(path: &str) {
+        for _ in 0..64 {
+            if !crate::fs::Vfs::exists(path) {
+                return;
+            }
+            if crate::fs::Vfs::remove(path).is_err() {
+                return;
+            }
+        }
+    }
+    drain(DST_PATH);
+    drain(SRC_PATH);
+
+    // Stage the source file with a single known byte.
     if let Err(e) = crate::fs::Vfs::write_file(SRC_PATH, b"L") {
         serial_println!(
             "[spawn]   Linux link() (ring 3): SKIP (ext4 /mnt write failed: {:?})",
@@ -3178,7 +3196,6 @@ pub fn self_test_linux_link() -> KernelResult<()> {
         );
         return Ok(());
     }
-    let _ = crate::fs::Vfs::remove(DST_PATH);
 
     let exe_elf = elf::build_linux_link_test_elf(SRC_PATH_NUL, DST_PATH_NUL);
     let argv: &[&[u8]] = &[b"spawn-test-linux-link"];

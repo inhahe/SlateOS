@@ -590,17 +590,37 @@ pub fn self_test() {
     let fake_virt: u64 = 0x0000_6000_0000_0000;
     rmap::add(fake_phys, fake_pml4, fake_virt);
 
-    let mut candidates = [0u64; 4];
-    let (found, _next) = rmap::collect_private_frames(&mut candidates, 0);
-    // We should find at least our fake entry among the results.
+    // `collect_private_frames` fills `out` with the first `out.len()` private
+    // frames it encounters in table-index order, starting from the cursor and
+    // wrapping once around the whole table.  The rmap table already holds
+    // entries from other subsystems (a recent boot showed ~16), so a 4-slot
+    // single-page scan from index 0 only sees the four lowest-indexed private
+    // frames — whether our fake entry is among them depends on its hash bucket
+    // relative to the others, making the old assertion flaky across boots.
+    //
+    // Page through the table with a buffer larger than the live entry count
+    // and advance the continuation cursor each page, stopping as soon as we
+    // see the fake frame (or after a hard page cap, so the loop always
+    // terminates even though each call re-sweeps the full table).
+    let mut candidates = [0u64; 32];
     let mut saw_fake = false;
-    for i in 0..found {
-        if candidates[i] == fake_phys {
-            saw_fake = true;
+    let mut scan_idx = 0usize;
+    for _page in 0..64u32 {
+        let (found, next) = rmap::collect_private_frames(&mut candidates, scan_idx);
+        for i in 0..found {
+            if candidates[i] == fake_phys {
+                saw_fake = true;
+            }
         }
+        // Done: found the fake entry, exhausted the table (found == 0), or the
+        // cursor made no forward progress (stuck) — break before spinning.
+        if saw_fake || found == 0 || next == scan_idx {
+            break;
+        }
+        scan_idx = next;
     }
     assert!(saw_fake, "collect_private_frames should find our fake entry");
-    serial_println!("[compact]   collect_private_frames: OK (found={}, saw_fake=true)", found);
+    serial_println!("[compact]   collect_private_frames: OK (saw_fake=true)");
 
     // Clean up fake entry.
     rmap::remove(fake_phys, fake_pml4, fake_virt);

@@ -38,7 +38,7 @@
 //! | 8        | lseek             | only for File handles              |
 //! | 9        | mmap              | anon private + file-backed + DRM   |
 //! | 10       | mprotect          | real per-4KiB-page PTE flag update |
-//! | 11       | munmap            | passes through to native           |
+//! | 11       | munmap            | real per-4KiB-page unmap + VMA split|
 //! | 12       | brk               | real heap-VMA grow/shrink          |
 //! | 13       | rt_sigaction      | maps to SYS_SIGNAL_REGISTER       |
 //! | 14       | rt_sigprocmask    | maps to SYS_SIGNAL_MASK           |
@@ -6294,60 +6294,103 @@ fn madvise_reclaim(pid: u64, pml4: u64, start: u64, end: u64) {
     }
 }
 
-/// `munmap(addr, len)` — passes through to native, then refunds the
-/// equivalent RLIMIT_AS charge.
+/// `munmap(addr, len)` — unmap a 4 KiB-page-granular sub-range.
 ///
-/// The native handler already rounds the request up to the 16 KiB frame
-/// size and unmaps whatever was actually mapped (idempotent for unmapped
-/// pages), so we match its accounting by computing the same aligned
-/// size and refunding it via [`pcb::linux_as_release`].  The refund is
-/// saturating, so a `munmap` that exceeds any prior `mmap` charge
-/// simply clamps `linux_as_bytes` to zero rather than wrapping.
+/// Unlike the SlateOS-native `munmap` (which requires a 16 KiB-frame-aligned
+/// start, rounds the length up to whole 16 KiB frames, and only drops a VMA
+/// that begins exactly at `addr`), the Linux ABI accepts any **4 KiB
+/// (page)-aligned** start and unmaps an arbitrary page-granular sub-range,
+/// splitting the covering VMA(s) at the 4 KiB boundaries.  This path mirrors
+/// the 4 KiB-granular `sys_mmap`/`sys_mprotect` work:
+///
+/// 1. **Validate** Linux's gate order: unaligned start → `EINVAL`; a length
+///    that rounds to zero (incl. `len == 0`) → `EINVAL`; address-arithmetic
+///    overflow or a range leaving user space → `EINVAL` (Linux `do_vmi_munmap`
+///    surfaces all of these as `EINVAL`, not `ENOMEM`).
+/// 2. **Unmap each 4 KiB sub-page** via [`unmap_user_range`], which clears the
+///    PTE at 4 KiB granularity and frees the backing 16 KiB frame only once its
+///    last sub-page tenant is gone (refcount-aware [`frame::free_frame`]) — so
+///    a partial unmap that shares a straddling 16 KiB frame with a live
+///    neighbour leaves that neighbour intact.
+/// 3. **VMA surgery** via [`pcb::remove_vma_range`], which splits the covering
+///    VMA(s) at the arbitrary 4 KiB boundaries (retaining/releasing file
+///    backing references for the surviving/removed pieces).
+/// 4. **Refund `RLIMIT_AS`** for the address-space *actually* released — the
+///    bytes of existing VMAs that overlapped `[addr, end)`, computed *before*
+///    the removal via [`linux_vma_overlap_bytes`].  Eagerly-mapped (VMA-less)
+///    PIE segments contribute nothing, matching that they were never charged
+///    to `linux_as_bytes` at mmap time.  The refund is saturating.
+///
+/// munmap is idempotent: a range with no live mapping unmaps nothing, removes
+/// no VMA, refunds nothing, and still returns success.
 fn sys_munmap(args: &SyscallArgs) -> SyscallResult {
     use crate::mm::frame::FRAME_SIZE;
+    use crate::mm::page_table::{HW_PAGE_SIZE, USER_SPACE_END};
 
+    let addr = args.arg0;
     let len = args.arg1;
+    let page = HW_PAGE_SIZE as u64;
 
-    // Linux do_vmi_munmap (mm/mmap.c) computes
-    //   end = start + PAGE_ALIGN(len);
-    //   if (end == start) return -EINVAL;
-    // so a zero length (PAGE_ALIGN(0) == 0 → end == start) is EINVAL.
-    // Our native munmap treats size==0 as an idempotent no-op (returns 0),
-    // which is the SlateOS-native ABI; the Linux translator must instead
-    // report EINVAL.  An unaligned start also yields EINVAL on Linux
-    // (offset_in_page(start)), which the native handler already maps via
-    // BadAlignment → EINVAL — and when both apply the errno is identical,
-    // so gating len==0 here first is faithful in every case.
-    if len == 0 {
+    // (1) Start must be 4 KiB-page-aligned (Linux: offset_in_page(start)).
+    if (addr & (page - 1)) != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // (2) Round len up to whole 4 KiB pages; overflow → EINVAL.
+    let len_aligned = match len.checked_add(page - 1).map(|v| v & !(page - 1)) {
+        Some(v) => v,
+        None => return linux_err(errno::EINVAL),
+    };
+    // (3) A length that rounds to zero (PAGE_ALIGN(len) == 0, incl. len == 0)
+    //     is EINVAL on Linux (end == start).
+    if len_aligned == 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // (4) end = addr + len_aligned; overflow → EINVAL.
+    let end = match addr.checked_add(len_aligned) {
+        Some(e) => e,
+        None => return linux_err(errno::EINVAL),
+    };
+    // (5) The whole range must lie in user space.
+    if addr >= USER_SPACE_END || end > USER_SPACE_END {
         return linux_err(errno::EINVAL);
     }
 
-    let native_args = SyscallArgs {
-        arg0: args.arg0,
-        arg1: len,
-        arg2: 0,
-        arg3: 0,
-        arg4: 0,
-        arg5: 0,
+    // Resolve the caller's process and PML4 (mirrors sys_mprotect).
+    let task_id = crate::sched::current_task_id();
+    let pid = match crate::proc::thread::owner_process(task_id) {
+        Some(p) if p != 0 => p,
+        _ => return linux_err(errno::ESRCH),
     };
-    let result = linux_from_native(handlers::sys_munmap(&native_args));
+    let pml4 = match crate::proc::pcb::get_pml4(pid) {
+        Some(p) if p != 0 => p,
+        _ => return linux_err(errno::ESRCH),
+    };
 
-    // Only refund on success: a failed munmap (e.g. EINVAL on a bad
-    // address) didn't actually take any pages back.  (len == 0 already
-    // returned EINVAL above, so a success here always has len > 0.)
-    if result.value == 0 {
-        let frame_size = FRAME_SIZE as u64;
-        if let Some(len_aligned) = len
-            .checked_add(frame_size - 1)
-            .map(|v| v & !(frame_size - 1))
-        {
-            if let Some(pid) = caller_pid() {
-                pcb::linux_as_release(pid, len_aligned);
-            }
-        }
+    // Compute the address-space being released *before* the VMA surgery: the
+    // bytes of existing VMAs overlapping [addr, end).  This is the exact
+    // inverse of what mmap charged, so the RLIMIT_AS refund neither over- nor
+    // under-credits (a munmap of a never-mapped or VMA-less range refunds 0).
+    let refund = linux_vma_overlap_bytes(pid, addr, end);
+
+    // Tear down the page tables at 4 KiB granularity (refcount-aware frame
+    // frees; absent sub-pages are skipped, so this is idempotent).
+    unmap_user_range(pml4, addr, end, FRAME_SIZE as u64);
+
+    // VMA bookkeeping: split the covering VMA(s) at the 4 KiB boundaries and
+    // drop the [addr, end) slice.  The only error remove_vma_range can return
+    // is InvalidArgument when end <= start, which validation above ruled out
+    // (len_aligned > 0 ⇒ end > addr); a range covering no VMA succeeds with no
+    // change.  Treat it as fatal only if it somehow fires.
+    if let Err(e) = crate::proc::pcb::remove_vma_range(pid, addr, end) {
+        return linux_err(linux_errno_for(e));
     }
 
-    result
+    // Refund the RLIMIT_AS charge for the span actually removed.
+    if refund > 0 {
+        pcb::linux_as_release(pid, refund);
+    }
+
+    SyscallResult::ok(0)
 }
 
 /// Round `v` up to the next 16 KiB frame boundary.
@@ -61345,6 +61388,78 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
         serial_println!(
             "[syscall/linux]   munmap zero-length EINVAL (batch 533): OK"
+        );
+
+        // munmap 4 KiB-page-granular gate fidelity (batch 533b).  The Linux
+        // munmap path is now 4 KiB-granular (TD28): it accepts any 4 KiB-
+        // page-aligned start (not only 16 KiB-frame-aligned ones) and gates
+        // exactly like Linux do_vmi_munmap.  Verify the pure gate decisions
+        // from the boot task (no user PML4): each case returns before any
+        // address-space mutation, so there are no side effects.
+        {
+            const HW: u64 = crate::mm::page_table::HW_PAGE_SIZE as u64;
+            let einval = i64::from(errno::EINVAL).wrapping_neg();
+            let esrch = i64::from(errno::ESRCH).wrapping_neg();
+
+            // (a) Start not 4 KiB-aligned -> EINVAL at the alignment gate.
+            let a = SyscallArgs {
+                arg0: HW + 0x123, // 4 KiB + 0x123: not page-aligned
+                arg1: HW,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0,
+            };
+            if dispatch_linux(nr::MUNMAP, &a).value != einval {
+                serial_println!("[syscall/linux]   FAIL: munmap 4KiB-unaligned start not EINVAL");
+                return Err(KernelError::InternalError);
+            }
+
+            // (b) Start 4 KiB-aligned but NOT 16 KiB-frame-aligned: the old
+            // native path returned EINVAL (BadAlignment) here; the new path
+            // accepts the alignment and proceeds to pid resolution, which from
+            // the boot task fails with ESRCH (proving the 4 KiB start is no
+            // longer rejected — and still no side effect, as resolution fails
+            // before any unmap/VMA surgery).
+            let a = SyscallArgs {
+                arg0: HW, // exactly one 4 KiB page in: page-aligned, not 16 KiB
+                arg1: HW,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0,
+            };
+            let v = dispatch_linux(nr::MUNMAP, &a).value;
+            if v == einval {
+                serial_println!(
+                    "[syscall/linux]   FAIL: munmap 4KiB-aligned (non-16KiB) start still EINVAL"
+                );
+                return Err(KernelError::InternalError);
+            }
+            if v != esrch {
+                serial_println!(
+                    "[syscall/linux]   FAIL: munmap 4KiB-aligned start (boot task) not ESRCH"
+                );
+                return Err(KernelError::InternalError);
+            }
+
+            // (c) Range leaving user space -> EINVAL (Linux surfaces an
+            // out-of-range munmap as EINVAL, not ENOMEM).
+            let a = SyscallArgs {
+                arg0: crate::mm::page_table::USER_SPACE_END, // start at the ceiling
+                arg1: HW,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0,
+            };
+            if dispatch_linux(nr::MUNMAP, &a).value != einval {
+                serial_println!("[syscall/linux]   FAIL: munmap out-of-range not EINVAL");
+                return Err(KernelError::InternalError);
+            }
+        }
+        serial_println!(
+            "[syscall/linux]   munmap 4 KiB-page-granular gate fidelity (batch 533b): OK"
         );
 
         // readahead FMODE_READ gate (batch 534).  ksys_readahead

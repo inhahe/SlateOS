@@ -1678,7 +1678,7 @@ Verified ring-3 by `/bin/sigqueue` (`sigqueue(getpid(), SIGUSR1, {.sival_int=0x1
 self=1`, boot test PASSED) plus in-kernel forging-gate (EPERM) and SI_QUEUE-bypass
 (ESRCH-before-EINVAL) assertions.
 
-### TD28. Linux `munmap` is 16 KiB-frame-granular (delegates to native handler), not 4 KiB-page-granular — DEBT 2026-06-15
+### TD28. Linux `munmap` is 16 KiB-frame-granular (delegates to native handler), not 4 KiB-page-granular — FIXED 2026-06-16
 
 **Where:** `kernel/src/syscall/linux.rs` — `sys_munmap` delegates to the native
 `kernel/src/syscall/handlers.rs::sys_munmap`.
@@ -1713,6 +1713,29 @@ is unmapped), and call `pcb::remove_vma_range(pid, start, end)` (already 4 KiB-
 capable — it splits at arbitrary boundaries) for the VMA surgery, refunding
 `RLIMIT_AS` for the actual span. Blocked only by the per-sub-page frame-refcount
 bookkeeping (deciding when a shared 16 KiB frame's last 4 KiB tenant leaves).
+
+**Fix (2026-06-16):** `sys_munmap` (`kernel/src/syscall/linux.rs`) now has its own
+4 KiB-granular path and no longer delegates to the native handler. It (1) gates
+exactly like Linux `do_vmi_munmap` — unaligned (to 4 KiB) start → `EINVAL`; a
+length that rounds to zero (incl. `len == 0`) → `EINVAL`; address-arithmetic
+overflow or a range leaving user space → `EINVAL` (Linux surfaces all of these as
+`EINVAL`, **not** `ENOMEM`); (2) tears down each 4 KiB sub-page PTE via the
+existing refcount-aware [`unmap_user_range`] primitive (frees the backing 16 KiB
+frame only once its last sub-page tenant is gone, so a partial unmap sharing a
+straddling frame with a live neighbour leaves the neighbour intact); (3) performs
+4 KiB-boundary VMA surgery via `pcb::remove_vma_range` (splits the covering
+VMA(s), retaining/releasing file-backing references for the surviving/removed
+pieces); and (4) refunds `RLIMIT_AS` for the bytes of VMAs that *actually*
+overlapped `[addr, end)` (computed before the surgery via `linux_vma_overlap_bytes`,
+so a never-mapped or VMA-less range refunds 0 — matching that eagerly-mapped PIE
+segments were never charged to `linux_as_bytes`). The per-sub-page refcount
+bookkeeping that "blocked" this was already solved by `unmap_user_range` (written
+for the `MAP_FIXED` overlay path), so no new frame-accounting code was needed.
+Verified by an in-kernel gate self-test (`linux.rs` batch 533b: 4 KiB-unaligned
+start → EINVAL; 4 KiB-aligned-but-not-16-KiB start no longer EINVAL — reaches pid
+resolution → ESRCH from the boot task, proving the alignment is now accepted with
+no side effect; out-of-range → EINVAL) plus a clean Path-Z boot-test (BOOT_OK,
+0 self-test failures).
 
 **Related fix (2026-06-15):** `remove_vma_range`'s **right** remainder
 `[end, vma.end)` previously kept the original `FileBacked.file_offset` while its

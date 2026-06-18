@@ -8929,7 +8929,28 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      on slow objects; ALWAYS -EINTR (no sentinel) for poll/select/
 ##      epoll_wait and timed recv/send; ERESTART_RESTARTBLOCK for
 ##      nanosleep/clock_nanosleep/futex-with-timeout (needs a saved
-##      restart_block).  NOTE deferred-with-reason:
+##      restart_block).
+##      STATUS 2026-06-18 — TAXONOMY SUBSTANTIALLY COMPLETE: all three groups
+##      are now wired and ring-3 tested for every Linux-reachable blocking
+##      primitive:
+##        * ERESTARTSYS (slow objects): pipe / stream_socket / signalfd /
+##          eventfd / timerfd / inotify / futex(FUTEX_WAIT/_BITSET) / wait4 —
+##          all DONE (see per-entry notes below).
+##        * ALWAYS -EINTR (never restarted): poll / select / epoll_wait — DONE
+##          (see the poll/select/epoll_wait entry).  timed recv/send is N/A:
+##          the socket recv*/send*/accept/connect syscalls are EBADF-returning
+##          argument-validation stubs with no backing socket, so they never
+##          block — nothing to make interruptible until a real Linux-ABI socket
+##          layer exists.
+##        * ERESTART_RESTARTBLOCK: nanosleep / clock_nanosleep — DONE
+##          (nanosleep_core + interruptible_sleep_until + restart_block::
+##          save_nanosleep; restart_syscall resumes to the saved absolute
+##          deadline).  futex-with-timeout intentionally returns -EINTR (a
+##          relative timeout must not be restarted from scratch; glibc
+##          recomputes — see the futex entry).
+##      The only outstanding item is the deferred sigsuspend conversion below;
+##      everything else in the taxonomy is implemented and tested.
+##      NOTE deferred-with-reason:
 ##        - sys_rt_sigsuspend kept at -EINTR (NOT yet ERESTARTNOHAND):
 ##          restarting it would re-run set_blocked/set_saved_sigmask with
 ##          the temp mask already installed, corrupting the saved mask the

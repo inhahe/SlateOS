@@ -657,7 +657,7 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
     use crate::mm::frame::{PhysFrame, FRAME_SIZE};
     use crate::mm::page_table::{self, PageFlags, VirtAddr};
     use crate::proc::{pcb, thread};
-    use super::number::{MAP_EXEC, MAP_LAZY, MAP_MMIO, MAP_NOCACHE, MAP_WRITE};
+    use super::number::{MAP_EXEC, MAP_LAZY, MAP_MMIO, MAP_NOCACHE, MAP_READ, MAP_WRITE};
 
     let vaddr_hint = args.arg0;
     let size = args.arg1;
@@ -707,7 +707,18 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
     }
 
     // Build page flags from mmap flags.
-    let mut page_flags = PageFlags::PRESENT | PageFlags::USER_ACCESSIBLE;
+    //
+    // `USER_ACCESSIBLE` is granted iff the caller requested at least one of
+    // read/write/execute. A request with *none* of those bits is the native
+    // spelling of `PROT_NONE` (the Linux mmap layer translates a Linux
+    // `PROT_NONE` into exactly this — no MAP_READ/WRITE/EXEC): the resulting
+    // VMA/PTE is inaccessible to ring 3, so a touch raises an access violation
+    // rather than demand-paging a zero page (design-decisions §32). Matching
+    // x86-64, `MAP_WRITE`/`MAP_EXEC` alone also imply readability.
+    let mut page_flags = PageFlags::PRESENT;
+    if flags & (MAP_READ | MAP_WRITE | MAP_EXEC) != 0 {
+        page_flags |= PageFlags::USER_ACCESSIBLE;
+    }
     if flags & MAP_WRITE != 0 {
         page_flags |= PageFlags::WRITABLE;
     }

@@ -4196,9 +4196,17 @@ fn vma_subrange(
 /// fault in with the stale `PROT_NONE` flags.
 ///
 /// `want_write` / `want_exec` are the requested `PROT_WRITE` /
-/// `PROT_EXEC` bits.  Each covered VMA's other flag bits (PRESENT,
-/// USER_ACCESSIBLE) are preserved; WRITABLE and NO_EXECUTE are recomputed
-/// from the request.
+/// `PROT_EXEC` bits; `want_access` is `false` only for `PROT_NONE`
+/// (`prot == 0`).  Each covered VMA's `PRESENT` bit is preserved; WRITABLE,
+/// NO_EXECUTE, and USER_ACCESSIBLE are recomputed from the request.
+///
+/// `want_access` is required because `PROT_NONE` and `PROT_READ` are *both*
+/// `want_write == false, want_exec == false` — they are only distinguishable
+/// by whether *any* access is granted.  When `want_access` is false the VMA
+/// loses `USER_ACCESSIBLE`, marking it a reserved-but-inaccessible region the
+/// fault resolver refuses to populate (design-decisions §32); when true the
+/// bit is (re)set, which is what restores access on the glibc
+/// `mmap(PROT_NONE)` → `mprotect(PROT_READ|PROT_WRITE)` thread-stack path.
 ///
 /// Holes in `[start, end)` not covered by any VMA are left untouched —
 /// they are typically eagerly-mapped ELF segments the kernel loader
@@ -4215,6 +4223,7 @@ pub fn protect_vma_range(
     end: u64,
     want_write: bool,
     want_exec: bool,
+    want_access: bool,
 ) -> KernelResult<()> {
     use crate::mm::page_table::PageFlags;
 
@@ -4250,11 +4259,18 @@ pub fn protect_vma_range(
                 pieces = pieces.saturating_add(1);
             }
 
-            // Covered middle: recompute WRITABLE / NO_EXECUTE from prot.
+            // Covered middle: recompute WRITABLE / NO_EXECUTE / USER_ACCESSIBLE
+            // from prot.  USER_ACCESSIBLE encodes PROT_NONE (cleared) vs any
+            // access (set) — see design-decisions §32.
             let mid_start = core::cmp::max(start, vma.start);
             let mid_end = core::cmp::min(end, vma.end);
-            let mut new_flags =
-                vma.flags & !PageFlags::WRITABLE & !PageFlags::NO_EXECUTE;
+            let mut new_flags = vma.flags
+                & !PageFlags::WRITABLE
+                & !PageFlags::NO_EXECUTE
+                & !PageFlags::USER_ACCESSIBLE;
+            if want_access {
+                new_flags |= PageFlags::USER_ACCESSIBLE;
+            }
             if want_write {
                 new_flags |= PageFlags::WRITABLE;
             }
@@ -4705,6 +4721,15 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
     if error.is_instruction_fetch() && flags.contains(PageFlags::NO_EXECUTE) {
         return false;
     }
+    // PROT_NONE gate: a user VMA whose flags lack USER_ACCESSIBLE is a
+    // reserved-but-inaccessible region (PROT_NONE mmap / guard / trap page).
+    // Refuse to demand-page it — returning false propagates as
+    // KernelError::PageFault → SEH-style access violation, instead of faulting
+    // in a zero page (which is what made the old "PROT_NONE ≈ read-only"
+    // approximation wrong for guard pages). See design-decisions §32.
+    if !flags.contains(PageFlags::USER_ACCESSIBLE) {
+        return false;
+    }
 
     // Decide how to populate the new frame.  Anonymous/Stack pages are
     // left zeroed; FileBacked pages are filled from the backing file.
@@ -4740,6 +4765,12 @@ pub fn try_resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64) -> bo
             };
             let Some(sv) = proc.vmas.get(sidx) else { continue };
             if !sv.contains(sub_va) {
+                continue;
+            }
+            // PROT_NONE subpage (no USER_ACCESSIBLE): leave it unmapped so an
+            // access to it faults, even when a sibling subpage of the same
+            // 16 KiB frame is accessible. See design-decisions §32.
+            if !sv.flags.contains(PageFlags::USER_ACCESSIBLE) {
                 continue;
             }
             *slot = match sv.kind {
@@ -5959,7 +5990,110 @@ pub fn self_test() -> KernelResult<()> {
     test_mmap_commit_policy()?;
     test_reserve_unmapped_area()?;
     test_reset_linux_state_for_exec()?;
+    test_prot_none()?;
 
+    Ok(())
+}
+
+/// Test: real `PROT_NONE` — a VMA whose flags lack `USER_ACCESSIBLE` is a
+/// reserved-but-inaccessible region the fault resolver refuses to populate,
+/// and `mprotect`-style protection changes flip `USER_ACCESSIBLE` so the
+/// region round-trips between accessible and inaccessible (design-decisions
+/// §32).
+///
+/// Driven against a throwaway process with a real per-process PML4 (so the
+/// `pml4_phys == 0` short-circuit in [`try_resolve_fault`] does not mask the
+/// PROT_NONE gate — if the gate were removed, the read below would actually
+/// demand-page and the assertion would catch the regression).  Verifies:
+///   - a read fault on a `PROT_NONE` VMA is *not* resolved (the resolver
+///     returns false → caller raises an access violation),
+///   - [`protect_vma_range`] to an accessible prot sets `USER_ACCESSIBLE`
+///     (and `WRITABLE`), after which the same read *is* demand-paged,
+///   - [`protect_vma_range`] back to `PROT_NONE` clears `USER_ACCESSIBLE`
+///     and `WRITABLE` again.
+fn test_prot_none() -> KernelResult<()> {
+    use crate::mm::page_table::PageFlags;
+
+    let frame = crate::mm::frame::FRAME_SIZE as u64;
+    let pid = create("prot-none-test", 0);
+    set_running(pid)?;
+
+    // create() allocates a real PML4; without one the resolver short-circuits
+    // on pml4==0 and the test could not distinguish the gate from that.
+    match get_pml4(pid) {
+        Some(p) if p != 0 => {}
+        _ => {
+            serial_println!("[proc]   FAIL: prot-none test process has no PML4");
+            destroy(pid);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // A single-frame PROT_NONE anonymous VMA: PRESENT, NO_EXECUTE, but NOT
+    // USER_ACCESSIBLE — exactly what linux_prot_to_page_flags(PROT_NONE) builds.
+    let base: u64 = 0x0000_0030_0000_0000; // 192 GiB, clear of other windows
+    let end = base.saturating_add(frame);
+    let none_flags = PageFlags::PRESENT | PageFlags::NO_EXECUTE;
+    if let Err(e) = add_vma(pid, Vma { start: base, end, kind: VmaKind::Anonymous, flags: none_flags }) {
+        serial_println!("[proc]   FAIL: prot-none add_vma {:?}", e);
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    }
+
+    // (1) A user *read* fault (error-code bit 2 = user; not-present, not-write)
+    //     in the PROT_NONE region must NOT resolve.  If it did, the resolver
+    //     would have demand-paged a zero frame — the old wrong behaviour.
+    if try_resolve_fault(pid, base, 1 << 2) {
+        serial_println!("[proc]   FAIL: read of PROT_NONE region was resolved (should fault)");
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    }
+
+    // (2) mprotect → PROT_READ|PROT_WRITE: want_write=true, want_exec=false,
+    //     want_access=true.  The VMA must gain USER_ACCESSIBLE and WRITABLE.
+    if let Err(e) = protect_vma_range(pid, base, end, true, false, true) {
+        serial_println!("[proc]   FAIL: protect_vma_range to RW {:?}", e);
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    }
+    match list_vmas(pid).as_deref() {
+        Some([v])
+            if v.flags.contains(PageFlags::USER_ACCESSIBLE)
+                && v.flags.contains(PageFlags::WRITABLE) => {}
+        _ => {
+            serial_println!("[proc]   FAIL: PROT_NONE→RW did not set USER_ACCESSIBLE|WRITABLE");
+            destroy(pid);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // (3) The same read now resolves (demand-paged into the real PML4).
+    if !try_resolve_fault(pid, base, 1 << 2) {
+        serial_println!("[proc]   FAIL: read of now-accessible region did not resolve");
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    }
+
+    // (4) mprotect back → PROT_NONE: want_access=false clears USER_ACCESSIBLE
+    //     (and WRITABLE).  The VMA marker returns to inaccessible.
+    if let Err(e) = protect_vma_range(pid, base, end, false, false, false) {
+        serial_println!("[proc]   FAIL: protect_vma_range back to PROT_NONE {:?}", e);
+        destroy(pid);
+        return Err(KernelError::InternalError);
+    }
+    match list_vmas(pid).as_deref() {
+        Some([v])
+            if !v.flags.contains(PageFlags::USER_ACCESSIBLE)
+                && !v.flags.contains(PageFlags::WRITABLE) => {}
+        _ => {
+            serial_println!("[proc]   FAIL: RW→PROT_NONE did not clear USER_ACCESSIBLE|WRITABLE");
+            destroy(pid);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    destroy(pid);
+    serial_println!("[proc]   real PROT_NONE (resolver gate + mprotect round-trip): OK");
     Ok(())
 }
 

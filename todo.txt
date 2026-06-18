@@ -8887,14 +8887,16 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      so this is acceptable as a first pass but must be fixed before
 ##      we run anything that actually relies on signal delivery
 ##      semantics.
-##   6. MPROTECT — DONE (with two documented approximations).
+##   6. MPROTECT — DONE.
 ##      sys_mprotect now walks the caller's PML4 and applies
-##      WRITABLE / NO_EXECUTE flag changes per 16 KiB frame, with a
-##      first-pass mapping check that returns -ENOMEM if the range
-##      contains a hole (matches Linux semantics).  Limitation:
-##      PROT_NONE is approximated as "read-only, no-execute" because
-##      clearing the PRESENT bit without VMA tracking would be
-##      indistinguishable from a never-mapped hole on the next fault.
+##      WRITABLE / NO_EXECUTE / USER_ACCESSIBLE flag changes per 16 KiB
+##      frame, with a first-pass mapping check that returns -ENOMEM if
+##      the range contains a hole (matches Linux semantics).  PROT_NONE
+##      is now REAL (see NEXT STEPS #3, DONE 2026-06-17): mprotect clears
+##      USER_ACCESSIBLE on the PTEs and marks the VMA, so a subsequent
+##      access raises an SEH access violation instead of demand-paging a
+##      zero frame.  The old "approximated as read-only" limitation is
+##      gone.
 ##      TLB invalidation is now CROSS-CPU: a single batched shootdown
 ##      at the end of the syscall (flush_range for <=64 4 KiB pages,
 ##      flush_all otherwise) sends an IPI to every other online CPU,
@@ -9139,11 +9141,24 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      smaller page-count for a given byte size.  Boot self-test
 ##      observes crate::tlb::stats() delta to prove small ranges take
 ##      the range path and large ranges promote to full-flush.
-##   3. Real PROT_NONE.  Requires VMA tracking so the page-fault
-##      handler can distinguish "mapped but PROT_NONE" from "never
-##      mapped".  Today PROT_NONE is approximated as read-only +
-##      no-execute, which is wrong for any program that intentionally
-##      uses PROT_NONE as a guard page or trap region.
+##   3. Real PROT_NONE — DONE 2026-06-17.  With full VMA tracking in
+##      place, PROT_NONE is now represented as the ABSENCE of the
+##      USER_ACCESSIBLE page-table flag (the literal x86-64 "no ring-3
+##      access" semantic), NOT a new VMA field — see design-decisions.md
+##      §32 for why we overload the flag rather than add a field.
+##      Enforced at two layers: (a) present pages get U/S cleared on the
+##      PTE (mmap/mprotect build flags via linux_prot_to_page_flags /
+##      handlers::sys_mmap honouring MAP_READ); (b) lazy/demand pages are
+##      gated in pcb::try_resolve_fault, which now returns false (-> SEH
+##      access violation) when the resolving VMA lacks USER_ACCESSIBLE,
+##      instead of demand-paging a zero frame.  CoW is safe: cow.rs ORs
+##      WRITABLE but never adds USER_ACCESSIBLE, so a CoW copy of a
+##      PROT_NONE page stays inaccessible.  mprotect round-trips
+##      losslessly (want_access = prot != 0 recomputes the bit).
+##      procfs render_maps now prints '-' for the read column on
+##      PROT_NONE VMAs ("---p").  Self-tests: proc test_prot_none (read
+##      faults, mprotect RW then back to PROT_NONE) + procfs maps render
+##      "---p" case; both pass under boot-test.
 ##   4. Honour brk properly — RESOLVED 2026-06-14.  brk is now a real
 ##      demand-paged heap (VmaKind::Brk), not a no-op.  See
 ##      known-issues.md TD25.

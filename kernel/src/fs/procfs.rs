@@ -2491,8 +2491,10 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
 ///   of 8 digits (Linux's `%08lx` / `seq_put_hex_ll(.., 8)`); addresses wider
 ///   than 32 bits print their natural width.
 /// - `perms`: exactly four chars `r`/`w`/`x`/(`p`|`s`).  We map `r` from
-///   PRESENT (a mapped page is readable), `w` from WRITABLE, `x` from the
-///   absence of NO_EXECUTE.  All our VMAs are private mappings, so the
+///   PRESENT *and* USER_ACCESSIBLE (a mapped, user-accessible page is
+///   readable), `w` from WRITABLE, `x` from the absence of NO_EXECUTE.  A
+///   `PROT_NONE` VMA carries no USER_ACCESSIBLE, so it renders `---p` like a
+///   guard (design-decisions §32).  All our VMAs are private mappings, so the
 ///   fourth char is always `p`.  Guard VMAs are never backed and carry no
 ///   access rights → `---p`.
 /// - `offset`/`dev`/`inode`: we do not track file-backed mappings yet, so
@@ -2511,7 +2513,17 @@ fn render_maps(vmas: &[crate::mm::vma::Vma]) -> Vec<u8> {
         let f = vma.flags;
         // Guard pages are never mapped (no PRESENT): report no access.
         let is_guard = matches!(vma.kind, VmaKind::Guard);
-        let r = if !is_guard && f.contains(PageFlags::PRESENT) { 'r' } else { '-' };
+        // 'r' requires both PRESENT and USER_ACCESSIBLE: a PROT_NONE region is
+        // PRESENT but not user-accessible, so it must render '-' (design-
+        // decisions §32), exactly like a guard.
+        let r = if !is_guard
+            && f.contains(PageFlags::PRESENT)
+            && f.contains(PageFlags::USER_ACCESSIBLE)
+        {
+            'r'
+        } else {
+            '-'
+        };
         let w = if !is_guard && f.contains(PageFlags::WRITABLE) { 'w' } else { '-' };
         let x = if !is_guard && !f.contains(PageFlags::NO_EXECUTE) { 'x' } else { '-' };
         // All current VMAs are private mappings.
@@ -13678,19 +13690,25 @@ pub fn self_test() -> KernelResult<()> {
         use crate::mm::page_table::PageFlags;
         use crate::mm::vma::{Vma, VmaKind};
         let vmas = [
-            // Anonymous data: present, writable, no-exec → "rw-p", no path.
+            // Anonymous data: present, user, writable, no-exec → "rw-p", no path.
             Vma {
                 start: 0x1_0000,
                 end: 0x2_0000,
                 kind: VmaKind::Anonymous,
-                flags: PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_EXECUTE,
+                flags: PageFlags::PRESENT
+                    | PageFlags::USER_ACCESSIBLE
+                    | PageFlags::WRITABLE
+                    | PageFlags::NO_EXECUTE,
             },
-            // Stack: present, writable, no-exec → "rw-p [stack]".
+            // Stack: present, user, writable, no-exec → "rw-p [stack]".
             Vma {
                 start: 0x10_0000,
                 end: 0x14_0000,
                 kind: VmaKind::Stack,
-                flags: PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_EXECUTE,
+                flags: PageFlags::PRESENT
+                    | PageFlags::USER_ACCESSIBLE
+                    | PageFlags::WRITABLE
+                    | PageFlags::NO_EXECUTE,
             },
             // Guard: never mapped → "---p [guard]".
             Vma {
@@ -13701,12 +13719,22 @@ pub fn self_test() -> KernelResult<()> {
             },
             // Large (>32-bit) address: must print natural width, NOT padded
             // beyond its own digits — verifies the {:08x} minimum-width does
-            // not truncate or over-pad wide addresses (executable text page).
+            // not truncate or over-pad wide addresses (user executable text).
             Vma {
                 start: 0x5555_5555_0000,
                 end: 0x5555_5556_0000,
                 kind: VmaKind::Anonymous,
-                flags: PageFlags::PRESENT,
+                flags: PageFlags::PRESENT | PageFlags::USER_ACCESSIBLE,
+            },
+            // PROT_NONE anonymous: PRESENT but NOT user-accessible → "---p"
+            // (real guard/trap region; the 'r' bit must drop, design-decisions
+            // §32).  NO_EXECUTE is set (no PROT_EXEC) but renders moot since the
+            // region is wholly inaccessible.
+            Vma {
+                start: 0x20_0000,
+                end: 0x21_0000,
+                kind: VmaKind::Anonymous,
+                flags: PageFlags::PRESENT | PageFlags::NO_EXECUTE,
             },
         ];
         let rendered = render_maps(&vmas);
@@ -13720,6 +13748,7 @@ pub fn self_test() -> KernelResult<()> {
             "00100000-00140000 rw-p 00000000 00:00 0 [stack]",
             "000c0000-00100000 ---p 00000000 00:00 0 [guard]",
             "555555550000-555555560000 r-xp 00000000 00:00 0 ",
+            "00200000-00210000 ---p 00000000 00:00 0 ",
         ];
         if lines.len() != expected.len() {
             serial_println!(

@@ -5379,8 +5379,42 @@ fn resolve_mmap_addr_hint(addr: u64, fixed: bool, frame_size: u64) -> Option<u64
 /// - File-backed with no fd: `-EBADF`; unaligned `offset`: `-EINVAL`;
 ///   `length == 0`: `-EINVAL` — gate order matches x86_64 Linux.
 ///
-/// Demand-paged shared-writeback file mmap (`MAP_SHARED` write-back to the
-/// backing file) is a deliberate won't-fix (design-decisions §22).
+/// Translate a Linux `mmap`/`mprotect` `prot` mask into the page-table
+/// flags a freshly-mapped (or demand-paged) page in the region must carry.
+///
+/// - `PRESENT` is always set (the region is part of the address space).
+/// - `USER_ACCESSIBLE` is set **iff** `prot` grants at least one of
+///   read/write/execute. `PROT_NONE` (`prot == 0`) therefore produces a VMA
+///   *without* `USER_ACCESSIBLE` — a reserved-but-inaccessible region (guard
+///   page / trap region). The per-process fault resolver
+///   ([`pcb::try_resolve_fault`]) refuses to demand-page such a VMA, so a read
+///   raises a real access violation instead of faulting in a zero page; and
+///   any present PTE programmed with these flags is unreadable to ring 3 by
+///   the hardware U/S bit. This is the single representation of `PROT_NONE`
+///   (design-decisions §32).
+/// - `WRITABLE` mirrors `PROT_WRITE`; `NO_EXECUTE` is set when `PROT_EXEC` is
+///   absent. On x86-64 there is no read-only-vs-no-read PTE distinction, so a
+///   readable-but-unwritable page is `PRESENT | USER_ACCESSIBLE | NO_EXECUTE`.
+fn linux_prot_to_page_flags(prot: u64) -> crate::mm::page_table::PageFlags {
+    use crate::mm::page_table::PageFlags;
+    const PROT_READ: u64 = 0x1;
+    const PROT_WRITE: u64 = 0x2;
+    const PROT_EXEC: u64 = 0x4;
+
+    let mut flags = PageFlags::PRESENT;
+    // PROT_NONE (no access bit set) ⇒ no USER_ACCESSIBLE ⇒ inaccessible.
+    if prot & (PROT_READ | PROT_WRITE | PROT_EXEC) != 0 {
+        flags |= PageFlags::USER_ACCESSIBLE;
+    }
+    if prot & PROT_WRITE != 0 {
+        flags |= PageFlags::WRITABLE;
+    }
+    if prot & PROT_EXEC == 0 {
+        flags |= PageFlags::NO_EXECUTE;
+    }
+    flags
+}
+
 fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
     use crate::mm::frame::FRAME_SIZE;
     use crate::mm::page_table::HW_PAGE_SIZE;
@@ -5547,6 +5581,7 @@ fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
     // `MAP_FIXED` is conveyed implicitly: the resolved `addr_hint` is passed in
     // arg0, which the native handler honors when non-zero — so no flag bit is
     // needed for it (the old `0x01` did nothing here).
+    const PROT_READ: u64 = 1;
     const PROT_WRITE: u64 = 2;
     const PROT_EXEC: u64 = 4;
     let commit_policy = as_pid
@@ -5562,6 +5597,13 @@ fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
     } else {
         0
     };
+    // Propagate PROT_READ so the native handler can tell a readable mapping
+    // (`USER_ACCESSIBLE`) from a `PROT_NONE` one. Without this, a Linux
+    // `PROT_READ` map (no write, no exec) would carry none of MAP_READ/WRITE/
+    // EXEC and be misread as `PROT_NONE` (design-decisions §32).
+    if prot & PROT_READ != 0 {
+        native_flags |= super::number::MAP_READ;
+    }
     if prot & PROT_WRITE != 0 {
         native_flags |= super::number::MAP_WRITE;
     }
@@ -5610,11 +5652,8 @@ fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
 ///      straddled 16 KiB frame with the adjacent file-backed data segment.
 fn linux_anon_mmap_fixed(pid: u64, addr: u64, length: u64, prot: u64) -> SyscallResult {
     use crate::mm::frame::FRAME_SIZE;
-    use crate::mm::page_table::{HW_PAGE_SIZE, PageFlags};
+    use crate::mm::page_table::HW_PAGE_SIZE;
     use crate::mm::vma::{Vma, VmaKind};
-
-    const PROT_WRITE: u64 = 0x2;
-    const PROT_EXEC: u64 = 0x4;
 
     if length == 0 {
         return linux_err(errno::EINVAL);
@@ -5666,13 +5705,9 @@ fn linux_anon_mmap_fixed(pid: u64, addr: u64, length: u64, prot: u64) -> Syscall
 
     // Page permissions from prot.  Anonymous zero-fill is demand-paged, so the
     // flags live on the VMA and the fault resolver applies them per subpage.
-    let mut page_flags = PageFlags::PRESENT | PageFlags::USER_ACCESSIBLE;
-    if prot & PROT_WRITE != 0 {
-        page_flags |= PageFlags::WRITABLE;
-    }
-    if prot & PROT_EXEC == 0 {
-        page_flags |= PageFlags::NO_EXECUTE;
-    }
+    // A PROT_NONE fixed map carries no USER_ACCESSIBLE, so the resolver refuses
+    // to populate it (real guard/trap region) — see [`linux_prot_to_page_flags`].
+    let page_flags = linux_prot_to_page_flags(prot);
 
     let vma = Vma { start: base, end, kind: VmaKind::Anonymous, flags: page_flags };
     if pcb::add_vma(pid, vma).is_err() {
@@ -5693,13 +5728,18 @@ fn linux_anon_mmap_fixed(pid: u64, addr: u64, length: u64, prot: u64) -> Syscall
 ///   - `PROT_WRITE` clear  -> WRITABLE cleared
 ///   - `PROT_EXEC` set     -> NO_EXECUTE cleared
 ///   - `PROT_EXEC` clear   -> NO_EXECUTE set
+///   - any access bit set  -> USER_ACCESSIBLE on the PTE/VMA
+///   - `PROT_NONE` (prot==0)-> USER_ACCESSIBLE cleared
 ///
-/// `PROT_READ` is the implied "still mapped"; we never clear PRESENT
-/// or USER_ACCESSIBLE.  `PROT_NONE` (prot == 0) is approximated as
-/// "read-only, no-execute" — we don't yet track VMA state and can't
-/// safely flip PRESENT off (it would be indistinguishable from a
-/// never-mapped hole on the next access).  Documented limitation in
-/// `todo.txt`.
+/// `PROT_NONE` is now enforced for real (no longer the old "read-only"
+/// approximation): the covered VMA loses `USER_ACCESSIBLE` so the fault
+/// resolver refuses to demand-page it, and every already-present PTE in the
+/// range has its U/S bit cleared so a ring-3 access faults with a genuine
+/// access violation.  Because `PRESENT` is kept (only U/S is toggled), the
+/// physical frames and their contents survive, so `mprotect` back to an
+/// accessible prot restores access losslessly.  Distinguishing `PROT_NONE`
+/// from `PROT_READ` (both are "no write, no exec") is what the `want_access`
+/// flag carries down to [`pcb::protect_vma_range`].  See design-decisions §32.
 ///
 /// Copy-on-write pages: we never set WRITABLE on a CoW-marked page
 /// even if `PROT_WRITE` was requested.  The CoW fault handler will
@@ -5828,6 +5868,11 @@ fn sys_mprotect(args: &SyscallArgs) -> SyscallResult {
 
     let want_write = (prot & PROT_WRITE) != 0;
     let want_exec = (prot & PROT_EXEC) != 0;
+    // PROT_NONE (no access bit) ⇒ the range becomes user-inaccessible: the VMA
+    // loses USER_ACCESSIBLE and present PTEs have their U/S bit cleared so a
+    // ring-3 touch raises an access violation (design-decisions §32). prot has
+    // already been validated to lie within PROT_READ|PROT_WRITE|PROT_EXEC.
+    let want_access = prot != 0;
 
     // Pass 0 — coverage check (BEFORE any mutation, matching Linux's
     // mm/mprotect.c which validates the whole range via a VMA walk before
@@ -5873,7 +5918,7 @@ fn sys_mprotect(args: &SyscallArgs) -> SyscallResult {
     // touch) — see [`pcb::protect_vma_range`].  VMA-less but PTE-present
     // ranges (the eagerly-mapped main-exe segments) are left untouched by
     // this call and handled by the PTE pass below.
-    match crate::proc::pcb::protect_vma_range(pid, addr, end, want_write, want_exec) {
+    match crate::proc::pcb::protect_vma_range(pid, addr, end, want_write, want_exec, want_access) {
         Ok(()) => {}
         Err(e) => return linux_err(linux_errno_for(e)),
     }
@@ -5887,10 +5932,18 @@ fn sys_mprotect(args: &SyscallArgs) -> SyscallResult {
     while va < end {
         let virt = VirtAddr::new(va);
         if let Some(current) = page_table::translate_flags(pml4, virt) {
-            // Compute new flags: clear WRITABLE + NO_EXECUTE, then set
-            // them according to prot.  Preserve PRESENT, USER_ACCESSIBLE,
-            // COW, and any other PTE bits.
-            let mut new_flags = current & !PageFlags::WRITABLE & !PageFlags::NO_EXECUTE;
+            // Compute new flags: clear WRITABLE + NO_EXECUTE + USER_ACCESSIBLE,
+            // then set them according to prot.  Preserve PRESENT, COW, and any
+            // other PTE bits.  USER_ACCESSIBLE is the hardware enforcement of
+            // PROT_NONE for *already-present* pages: clearing it makes a ring-3
+            // touch fault (present + user-access-denied) while keeping the
+            // frame and its contents, so mprotect back to an accessible prot
+            // restores access losslessly (design-decisions §32).
+            let mut new_flags =
+                current & !PageFlags::WRITABLE & !PageFlags::NO_EXECUTE & !PageFlags::USER_ACCESSIBLE;
+            if want_access {
+                new_flags |= PageFlags::USER_ACCESSIBLE;
+            }
             // Never set WRITABLE on a CoW page — the CoW fault handler
             // will upgrade the page on first write.
             if want_write && !current.contains(PageFlags::COW) {
@@ -9444,7 +9497,7 @@ fn drm_mmap_dumb(
     offset: u64,
 ) -> SyscallResult {
     use crate::mm::frame::{self, FRAME_SIZE, PhysFrame};
-    use crate::mm::page_table::{self, PageFlags, VirtAddr};
+    use crate::mm::page_table::{self, VirtAddr};
 
     const MAP_FIXED: u64 = 0x10;
     const PROT_WRITE: u64 = 0x2;
@@ -9492,15 +9545,9 @@ fn drm_mmap_dumb(
         return linux_err(errno::EINVAL);
     }
 
-    // Derive page permissions from the mmap prot.  Always user-accessible and
-    // present; PROT_WRITE → writable, no PROT_EXEC → no-execute.
-    let mut page_flags = PageFlags::PRESENT | PageFlags::USER_ACCESSIBLE;
-    if prot & PROT_WRITE != 0 {
-        page_flags |= PageFlags::WRITABLE;
-    }
-    if prot & PROT_EXEC == 0 {
-        page_flags |= PageFlags::NO_EXECUTE;
-    }
+    // Derive page permissions from the mmap prot.  PROT_WRITE → writable,
+    // no PROT_EXEC → no-execute, PROT_NONE → no USER_ACCESSIBLE (inaccessible).
+    let page_flags = linux_prot_to_page_flags(prot);
 
     let pml4 = match pcb::get_pml4(pid) {
         Some(p) if p != 0 => p,
@@ -9742,7 +9789,7 @@ fn linux_file_mmap(
     offset: u64,
 ) -> SyscallResult {
     use crate::mm::frame::FRAME_SIZE;
-    use crate::mm::page_table::{self, PageFlags};
+    use crate::mm::page_table;
     use crate::mm::vma::{Vma, VmaKind};
     use crate::proc::linux_fd::HandleKind;
 
@@ -9803,15 +9850,9 @@ fn linux_file_mmap(
     )
     .unwrap_or(usize::MAX);
 
-    // Page permissions: always present + user; PROT_WRITE → writable,
-    // no PROT_EXEC → no-execute.
-    let mut page_flags = PageFlags::PRESENT | PageFlags::USER_ACCESSIBLE;
-    if prot & PROT_WRITE != 0 {
-        page_flags |= PageFlags::WRITABLE;
-    }
-    if prot & PROT_EXEC == 0 {
-        page_flags |= PageFlags::NO_EXECUTE;
-    }
+    // Page permissions: PROT_WRITE → writable, no PROT_EXEC → no-execute,
+    // PROT_NONE → no USER_ACCESSIBLE (reserved-but-inaccessible mapping).
+    let page_flags = linux_prot_to_page_flags(prot);
 
     let hhdm = match page_table::hhdm() {
         Some(h) => h,

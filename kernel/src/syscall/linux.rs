@@ -37781,6 +37781,84 @@ fn sys_mremap(args: &SyscallArgs) -> SyscallResult {
     linux_err(errno::ENOMEM)
 }
 
+/// Zero the byte range `[offset, end)` of a VFS file in 16 KiB chunks —
+/// the generic (non-sparse) implementation of `fallocate`'s `PUNCH_HOLE`
+/// and `ZERO_RANGE` modes.
+///
+/// On a filesystem without sparse-extent support the only externally
+/// observable effect of either mode is "reads of the range return zero";
+/// the disk-space reclamation a true hole-punch provides is an
+/// optimisation we deliberately omit (documented in known-issues.md
+/// B-FALLOC1). Every backend overrides `write_at` efficiently
+/// (ext4/fat/memfs), so the chunked writes never load the whole file.
+///
+/// `keep_size` preserves `i_size` (`PUNCH_HOLE` always, `ZERO_RANGE`
+/// when `FALLOC_FL_KEEP_SIZE` is set): the zeroed region is clamped to
+/// the current file size and a range entirely past EOF is a no-op. When
+/// `keep_size` is false (`ZERO_RANGE` without `KEEP_SIZE`) a range past
+/// EOF grows the file to `end`, zero-filling any gap left by the
+/// extending `write_at`.
+#[allow(clippy::cast_possible_truncation)]
+fn fallocate_zero_vfs(
+    path: &str,
+    offset: u64,
+    end: u64,
+    keep_size: bool,
+) -> crate::error::KernelResult<()> {
+    let size = crate::fs::Vfs::file_size(path)?;
+    let zero_end = if keep_size { end.min(size) } else { end };
+    if offset >= zero_end {
+        return Ok(());
+    }
+    const CHUNK: usize = 16 * 1024;
+    let zeros = alloc::vec![0u8; CHUNK];
+    let mut pos = offset;
+    while pos < zero_end {
+        let remaining = zero_end.saturating_sub(pos);
+        // `this` is bounded by CHUNK, so the cast never truncates.
+        let this = if remaining > CHUNK as u64 {
+            CHUNK
+        } else {
+            remaining as usize
+        };
+        crate::fs::Vfs::write_at(path, pos, zeros.get(..this).unwrap_or(&[]))?;
+        pos = pos.saturating_add(this as u64);
+    }
+    Ok(())
+}
+
+/// `MemFd` counterpart of [`fallocate_zero_vfs`]: zero `[offset, end)` of
+/// an in-memory file. Same `keep_size` semantics. The in-memory backing
+/// never reclaims space, so `PUNCH_HOLE`/`ZERO_RANGE` are likewise just
+/// "reads return zero" on a memfd.
+#[allow(clippy::cast_possible_truncation)]
+fn fallocate_zero_memfd(
+    h: crate::ipc::memfd::MemFdHandle,
+    offset: u64,
+    end: u64,
+    keep_size: bool,
+) -> crate::error::KernelResult<()> {
+    let size = crate::ipc::memfd::size(h)?;
+    let zero_end = if keep_size { end.min(size) } else { end };
+    if offset >= zero_end {
+        return Ok(());
+    }
+    const CHUNK: usize = 16 * 1024;
+    let zeros = alloc::vec![0u8; CHUNK];
+    let mut pos = offset;
+    while pos < zero_end {
+        let remaining = zero_end.saturating_sub(pos);
+        let this = if remaining > CHUNK as u64 {
+            CHUNK
+        } else {
+            remaining as usize
+        };
+        crate::ipc::memfd::write_at(h, pos, zeros.get(..this).unwrap_or(&[]))?;
+        pos = pos.saturating_add(this as u64);
+    }
+    Ok(())
+}
+
 /// `fallocate(fd, mode, offset, len)`.
 ///
 /// Gate order matches Linux's syscall entry + `fs/open.c::vfs_fallocate`:
@@ -37801,18 +37879,28 @@ fn sys_mremap(args: &SyscallArgs) -> SyscallResult {
 /// gates (FIFO → ESPIPE, non-regular/non-block → ENODEV) and the actual
 /// allocate dispatch.
 ///
-/// For ring-3 callers two allocate modes are now backed by the VFS:
+/// For ring-3 callers the following modes are backed by the VFS:
 ///   * `mode == 0` (posix_fallocate): the file is grown so its logical
 ///     size is at least `offset + len`; an already-larger file is left
 ///     untouched (fallocate never shrinks).
 ///   * `mode == FALLOC_FL_KEEP_SIZE`: blocks for `[0, offset + len)` are
 ///     reserved via the VFS without changing the logical size.
+///   * `PUNCH_HOLE` (always with `KEEP_SIZE`) and `ZERO_RANGE` (with or
+///     without `KEEP_SIZE`): the byte range `[offset, offset+len)` is
+///     zeroed so subsequent reads return zero. `i_size` is preserved
+///     unless `ZERO_RANGE` is used without `KEEP_SIZE` and the range
+///     runs past EOF, in which case the file grows to `offset+len`. On
+///     our non-sparse backends this is a chunked zero-write — the
+///     space-reclamation property of a true hole-punch is not provided
+///     (see known-issues.md B-FALLOC1), but the observable read-as-zero
+///     behaviour is correct.
 ///
-/// Both enforce RLIMIT_FSIZE (EFBIG) and the File-WRITE capability, and a
-/// `checked_add(offset, len)` overflow also surfaces EFBIG.  Every other
-/// surviving mode combination (PUNCH_HOLE, ZERO_RANGE, COLLAPSE_RANGE,
-/// INSERT_RANGE, UNSHARE_RANGE and valid combos) keeps the EOPNOTSUPP
-/// fallback, as does kernel context (caller_pid None — no fd table).
+/// All of these enforce RLIMIT_FSIZE (EFBIG) and the File-WRITE
+/// capability, and a `checked_add(offset, len)` overflow also surfaces
+/// EFBIG.  The remaining range modes (COLLAPSE_RANGE, INSERT_RANGE,
+/// UNSHARE_RANGE) keep the EOPNOTSUPP fallback — they shift file
+/// contents and need block-aligned extent surgery in the backends — as
+/// does kernel context (caller_pid None — no fd table).
 ///
 /// Note the errno discriminators: unknown-mode-bits and the
 /// PUNCH/ZERO/PUNCH-needs-KEEP_SIZE gates return EOPNOTSUPP (filesystem
@@ -37939,6 +38027,11 @@ fn sys_fallocate(args: &SyscallArgs) -> SyscallResult {
         };
         #[allow(clippy::cast_sign_loss)]
         let end_u64 = end as u64; // end > 0 (offset >= 0, len > 0)
+        #[allow(clippy::cast_sign_loss)]
+        let offset_u64 = offset as u64; // offset >= 0 by gate (2)
+        // PUNCH_HOLE (gate 5 guarantees KEEP_SIZE) and ZERO_RANGE+KEEP_SIZE
+        // never extend the file; ZERO_RANGE without KEEP_SIZE may.
+        let zero_keep_size = mode & KEEP_SIZE != 0;
         // RLIMIT_FSIZE applies to any fallocate that could allocate past
         // the soft limit (Linux enforces it in vfs_fallocate via
         // inode_newsize_ok / the rlimit on the backing grow).
@@ -37977,8 +38070,21 @@ fn sys_fallocate(args: &SyscallArgs) -> SyscallResult {
                         Err(e) => linux_err(linux_errno_for(e)),
                     };
                 }
-                // PUNCH_HOLE / ZERO_RANGE / COLLAPSE / INSERT / UNSHARE
-                // (and the surviving combos) keep the EOPNOTSUPP fallback.
+                if mode & PUNCH_HOLE != 0 || mode & ZERO_RANGE != 0 {
+                    // Zero the range so reads return zero. PUNCH_HOLE and
+                    // ZERO_RANGE+KEEP_SIZE preserve i_size; ZERO_RANGE
+                    // without KEEP_SIZE extends to `end` when past EOF.
+                    return match fallocate_zero_vfs(
+                        &path,
+                        offset_u64,
+                        end_u64,
+                        zero_keep_size,
+                    ) {
+                        Ok(()) => SyscallResult::ok(0),
+                        Err(e) => linux_err(linux_errno_for(e)),
+                    };
+                }
+                // COLLAPSE / INSERT / UNSHARE keep the EOPNOTSUPP fallback.
                 return linux_err(errno::EOPNOTSUPP);
             }
             HandleKind::MemFd => {
@@ -38001,6 +38107,17 @@ fn sys_fallocate(args: &SyscallArgs) -> SyscallResult {
                     // reservation; KEEP_SIZE is a successful no-op (the
                     // logical size is unchanged either way).
                     return SyscallResult::ok(0);
+                }
+                if mode & PUNCH_HOLE != 0 || mode & ZERO_RANGE != 0 {
+                    return match fallocate_zero_memfd(
+                        h,
+                        offset_u64,
+                        end_u64,
+                        zero_keep_size,
+                    ) {
+                        Ok(()) => SyscallResult::ok(0),
+                        Err(e) => linux_err(linux_errno_for(e)),
+                    };
                 }
                 return linux_err(errno::EOPNOTSUPP);
             }
@@ -44249,6 +44366,125 @@ pub fn self_test_rename_noreplace() -> crate::error::KernelResult<()> {
 /// End-to-end test of the `sendfile(2)` copy path — [`sendfile_core`] and the
 /// File/MemFd source helpers it drives.
 ///
+/// Runs after the `/tmp` memfs mount so it can stage real files.  Exercises
+/// the `fallocate` PUNCH_HOLE / ZERO_RANGE zeroing path ([`fallocate_zero_vfs`]
+/// / [`fallocate_zero_memfd`]) directly, since the syscall entry needs a
+/// per-process Linux fd table absent in kernel boot context.
+///
+/// Coverage:
+///  1. ZERO_RANGE + KEEP_SIZE: zero a middle range, size unchanged.
+///  2. PUNCH_HOLE (always KEEP_SIZE): zero a second range, size unchanged.
+///  3. KEEP_SIZE range entirely past EOF → no-op, size unchanged.
+///  4. ZERO_RANGE without KEEP_SIZE crossing EOF → file grows, gap zeroed.
+///  5. MemFd ZERO_RANGE + KEEP_SIZE: zero a range, size unchanged.
+pub fn self_test_fallocate_range() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+    use crate::serial_println;
+
+    const PATH: &str = "/tmp/__falloc_range__";
+    // 100 bytes of 0xAA.
+    const N: usize = 100;
+    let stage = || -> bool { crate::fs::Vfs::write_file(PATH, &[0xAAu8; N]).is_ok() };
+
+    let _ = crate::fs::Vfs::remove(PATH);
+    if !stage() {
+        serial_println!("[syscall/linux]   fallocate range self-test skipped (/tmp not writable)");
+        return Ok(());
+    }
+
+    // Helper: read the whole file and check size + a predicate over bytes.
+    let check = |want_len: usize, label: &str, pred: &dyn Fn(&[u8]) -> bool| -> bool {
+        match crate::fs::Vfs::read_file(PATH) {
+            Ok(c) if c.len() == want_len && pred(&c) => true,
+            Ok(c) => {
+                serial_println!(
+                    "[syscall/linux]   FAIL: fallocate {} len {} (want {})",
+                    label, c.len(), want_len
+                );
+                false
+            }
+            Err(e) => {
+                serial_println!("[syscall/linux]   FAIL: fallocate {} read {:?}", label, e);
+                false
+            }
+        }
+    };
+
+    // (1) ZERO_RANGE + KEEP_SIZE: zero [20,40), size stays 100.
+    fallocate_zero_vfs(PATH, 20, 40, true)?;
+    if !check(N, "ZERO_RANGE+KEEP", &|c| {
+        c.get(..20).is_some_and(|h| h.iter().all(|&b| b == 0xAA))
+            && c.get(20..40).is_some_and(|h| h.iter().all(|&b| b == 0))
+            && c.get(40..).is_some_and(|h| h.iter().all(|&b| b == 0xAA))
+    }) {
+        let _ = crate::fs::Vfs::remove(PATH);
+        return Err(KernelError::InternalError);
+    }
+
+    // (2) PUNCH_HOLE: zero [50,60), size stays 100, range (1) still zero.
+    fallocate_zero_vfs(PATH, 50, 60, true)?;
+    if !check(N, "PUNCH_HOLE", &|c| {
+        c.get(20..40).is_some_and(|h| h.iter().all(|&b| b == 0))
+            && c.get(50..60).is_some_and(|h| h.iter().all(|&b| b == 0))
+            && c.get(60..).is_some_and(|h| h.iter().all(|&b| b == 0xAA))
+    }) {
+        let _ = crate::fs::Vfs::remove(PATH);
+        return Err(KernelError::InternalError);
+    }
+
+    // (3) KEEP_SIZE range entirely past EOF → no-op, size unchanged.
+    fallocate_zero_vfs(PATH, 200, 250, true)?;
+    if !check(N, "past-EOF-keep-size", &|_| true) {
+        let _ = crate::fs::Vfs::remove(PATH);
+        return Err(KernelError::InternalError);
+    }
+
+    // (4) ZERO_RANGE without KEEP_SIZE crossing EOF: re-stage, zero [90,150)
+    // → size grows to 150, [0,90) intact, [90,150) zeroed.
+    let _ = crate::fs::Vfs::remove(PATH);
+    if !stage() {
+        return Ok(());
+    }
+    fallocate_zero_vfs(PATH, 90, 150, false)?;
+    if !check(150, "ZERO_RANGE-grow", &|c| {
+        c.get(..90).is_some_and(|h| h.iter().all(|&b| b == 0xAA))
+            && c.get(90..150).is_some_and(|h| h.iter().all(|&b| b == 0))
+    }) {
+        let _ = crate::fs::Vfs::remove(PATH);
+        return Err(KernelError::InternalError);
+    }
+    let _ = crate::fs::Vfs::remove(PATH);
+
+    // (5) MemFd ZERO_RANGE + KEEP_SIZE.
+    {
+        let h = crate::ipc::memfd::create_with_flags(b"falloc-test".to_vec(), false);
+        if crate::ipc::memfd::write_at(h, 0, &[0xAAu8; N]).is_err() {
+            crate::ipc::memfd::close(h);
+            serial_println!("[syscall/linux]   FAIL: fallocate memfd stage write");
+            return Err(KernelError::InternalError);
+        }
+        if fallocate_zero_memfd(h, 30, 50, true).is_err() {
+            crate::ipc::memfd::close(h);
+            serial_println!("[syscall/linux]   FAIL: fallocate memfd zero");
+            return Err(KernelError::InternalError);
+        }
+        let mut buf = [0u8; N];
+        let read_ok = matches!(crate::ipc::memfd::read_at(h, 0, &mut buf), Ok(n) if n == N);
+        crate::ipc::memfd::close(h);
+        let ok = read_ok
+            && buf.get(..30).is_some_and(|s| s.iter().all(|&b| b == 0xAA))
+            && buf.get(30..50).is_some_and(|s| s.iter().all(|&b| b == 0))
+            && buf.get(50..).is_some_and(|s| s.iter().all(|&b| b == 0xAA));
+        if !ok {
+            serial_println!("[syscall/linux]   FAIL: fallocate memfd ZERO_RANGE content");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    serial_println!("[syscall/linux]   fallocate PUNCH_HOLE/ZERO_RANGE zeroing: OK");
+    Ok(())
+}
+
 /// Runs after the `/tmp` memfs mount so it can stage real files.  The syscall
 /// entry point ([`sys_sendfile`]) cannot be exercised from kernel boot context
 /// — it dereferences the per-process Linux fd table, which only exists for a

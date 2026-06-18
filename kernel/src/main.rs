@@ -1253,6 +1253,13 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: copy_file_range self-test failed: {:?}", e);
     }
 
+    // fallocate(2) PUNCH_HOLE / ZERO_RANGE zeroing test — drives the
+    // fallocate_zero_vfs / fallocate_zero_memfd path against /tmp files and a
+    // kernel-created memfd (the syscall entry needs a per-process fd table).
+    if let Err(e) = syscall::linux::self_test_fallocate_range() {
+        serial_println!("WARNING: fallocate range self-test failed: {:?}", e);
+    }
+
     // splice(2) data-transfer test — drives splice_core against kernel-opened
     // file handles and kernel-created pipes (non-blocking) since the syscall
     // entry needs a per-process Linux fd table absent in kernel context.

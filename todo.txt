@@ -528,6 +528,11 @@
 ##     [0,-EINVAL,0]).  Verify the exact do_pages_move path (node validity checks + store_status) against v6.6
 ##     and correct the per-page errno in a dedicated batch.  Left as-is this batch to avoid guessing (the pid/ESRCH
 ##     and E2BIG fixes are independently verified and self-contained).
+##   * RESOLVED (verified 2026-06-18, fixed in batch 549): sys_move_pages now stores -ENODEV (not -EINVAL) for any
+##     non-zero target node, mirroring do_pages_move's `err = -ENODEV; if (!node_state(node, N_MEMORY)) store;`
+##     (the -EACCES branch is unreachable on a single-node box since only node 0 has N_MEMORY). See
+##     kernel/src/syscall/linux.rs sys_move_pages (~L31250: `status_chunk[j] = if want==0 {0} else {ENODEV.neg()}`)
+##     and the batch-549 status-array self-test (~L47770, "status must be 0 / -ENODEV / 0").
 ## VERIFIED: build clean; clippy 17463 (DOWN 3 from batch-547's 17466 — removed the E2BIG branch and the changed
 ##   asserts use i64::from(errno).wrapping_neg()); boot-test BOOT_OK + stamp in serial-test.txt + EXIT=0, no SELF-TEST FAILURE.
 

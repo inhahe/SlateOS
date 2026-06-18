@@ -451,31 +451,43 @@ leading 4 preserved (`'A'`) and the grown tail zero-filled.
    `O_APPEND`-doesn't-block-truncate nuance. The append/immutable-flag EPERM
    path is not yet plumbed (same capability-model gap as B-CHOWN1).
 
-### B-FALLOC1. Linux-ABI `fallocate` range modes (PUNCH/ZERO/COLLAPSE/INSERT/UNSHARE) return EOPNOTSUPP — KNOWN LIMITATION (acceptable fallback)
+### B-FALLOC1. Linux-ABI `fallocate` PUNCH_HOLE/ZERO_RANGE now zero the range; COLLAPSE/INSERT/UNSHARE still EOPNOTSUPP — PARTIALLY RESOLVED 2026-06-18
 
-**Status:** Not a bug — a documented, spec-acceptable limitation. `sys_fallocate`
-(syscall #285) was wired 2026-06-16 (Path Z Part 33) from a blanket EOPNOTSUPP
-terminal to the real VFS for the two well-defined *allocate* modes: `mode == 0`
-(posix_fallocate grow → `Vfs::file_size`/`Vfs::truncate`, never shrinking) and
-`FALLOC_FL_KEEP_SIZE` (block reservation → `Vfs::fallocate`). MemFd fds grow via
-`ipc::memfd::truncate`. Both enforce `RLIMIT_FSIZE` (EFBIG) and the File-WRITE
-capability.
+**Status:** `sys_fallocate` (syscall #285) was wired 2026-06-16 (Path Z Part 33)
+from a blanket EOPNOTSUPP terminal to the real VFS for the two *allocate* modes:
+`mode == 0` (posix_fallocate grow → `Vfs::file_size`/`Vfs::truncate`, never
+shrinking) and `FALLOC_FL_KEEP_SIZE` (block reservation → `Vfs::fallocate`).
+MemFd fds grow via `ipc::memfd::truncate`. Both enforce `RLIMIT_FSIZE` (EFBIG)
+and the File-WRITE capability.
 
-**Limitation:** The *range* modes — `PUNCH_HOLE`, `ZERO_RANGE`, `COLLAPSE_RANGE`,
-`INSERT_RANGE`, `UNSHARE_RANGE` (and their valid combinations) — still return
-EOPNOTSUPP after passing the full mode-validation gate ladder. This is the same
-answer Linux returns for a filesystem whose `f_op->fallocate` doesn't implement
-the operation, and the well-behaved callers (sqlite, PostgreSQL WAL preallocation)
-treat EOPNOTSUPP as "fall back to writing zeros", so nothing breaks. Implementing
-hole-punching/range-collapse properly requires extent-level support in the VFS
-backends (memfs/ext4/fat), which is out of scope for the syscall-fidelity line.
+**Update 2026-06-18 — PUNCH_HOLE / ZERO_RANGE implemented.** The two most
+commonly used range modes now do real work instead of returning EOPNOTSUPP. New
+helpers `fallocate_zero_vfs` / `fallocate_zero_memfd` (kernel/src/syscall/linux.rs)
+zero `[offset, offset+len)` in 16 KiB chunks via the backend's efficient
+`write_at` (ext4/fat/memfs all override it). `i_size` is preserved for PUNCH_HOLE
+(always KEEP_SIZE) and ZERO_RANGE+KEEP_SIZE — the zeroed region is clamped to the
+current size and a range entirely past EOF is a no-op; ZERO_RANGE *without*
+KEEP_SIZE grows the file to `offset+len` if the range crosses EOF, zero-filling
+the gap. This is correct **read-as-zero** behaviour; the only thing not provided
+vs. a real hole-punch is **disk-space reclamation** (an optimisation, not a
+correctness property — our backends are non-sparse). Covered by
+`self_test_fallocate_range` (registered in kernel/src/main.rs as a late, post-/tmp
+self-test) which exercises ZERO_RANGE+KEEP_SIZE, PUNCH_HOLE, a past-EOF KEEP_SIZE
+no-op, a ZERO_RANGE grow, and a MemFd ZERO_RANGE — all green at boot.
 
-**Proper fix (deferred):** Add `punch_hole`/`zero_range`/`collapse_range`/
-`insert_range` operations to the `FileSystem` trait and implement them per backend
-(ext4 already has extent support; memfs would need sparse-region bookkeeping), then
-dispatch the range modes here instead of EOPNOTSUPP. Track as a VFS enhancement, not
-a syscall-layer bug. Kernel context (caller_pid None) keeps the EOPNOTSUPP terminal,
-asserted by the batch-536 FMODE_WRITE + vfs_fallocate gate-order self-tests.
+**Remaining limitation:** `COLLAPSE_RANGE`, `INSERT_RANGE`, `UNSHARE_RANGE` (and
+their valid combinations) still return EOPNOTSUPP after passing the mode-validation
+gate ladder. COLLAPSE/INSERT shift file contents and require block-aligned extent
+surgery (offset and len multiples of the fs block size, EINVAL otherwise); UNSHARE
+is a reflink/CoW concept our backends don't have. Well-behaved callers treat
+EOPNOTSUPP as "operation unsupported" and skip it or fall back, so nothing breaks.
+
+**Proper fix (deferred) for the rest:** Add `collapse_range`/`insert_range`
+operations to the `FileSystem` trait with block-alignment validation and implement
+them per backend, then dispatch those modes here instead of EOPNOTSUPP. Track as a
+VFS enhancement, not a syscall-layer bug. Kernel context (caller_pid None) keeps
+the EOPNOTSUPP terminal for every mode, asserted by the batch-536 FMODE_WRITE +
+vfs_fallocate gate-order self-tests.
 
 ### B-SIG1. dash's `wait` builtin (background-job reap) livelocked: no SIGCHLD on child exit + `rt_sigsuspend` was a stub — FIXED 2026-06-16
 

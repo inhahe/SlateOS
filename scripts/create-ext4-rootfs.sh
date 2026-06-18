@@ -683,6 +683,43 @@ else
     echo "[rootfs] WARNING: make not found — the make self-test will no-op"
 fi
 
+# --- a REAL C compiler: tcc (TinyCC) ------------------------------------------
+# The next rung of the GCC/CMake/Make toolchain initiative (Path Z, design-
+# decisions §9/§12): proving an unmodified, prebuilt C *compiler* runs in ring 3
+# and produces a working executable.  tcc is the ideal first compiler: a single
+# self-contained binary that lexes/parses/codegens AND assembles AND links
+# internally (no separate cpp/as/ld needed).  It is a glibc dynamic ELF needing
+# only libc.so.6 + libm.so.6 + ld-linux.  For a `-nostdlib -static` freestanding
+# compile (the self-test's recipe), tcc opens NO support files at all — verified
+# by strace: it reads only the .c source and writes the output ELF, needing
+# neither libtcc1.a nor any headers — so we stage only the tcc binary + libm.
+# (A hosted compile against the staged glibc/crt/headers is a later rung.)
+#
+# tcc is not on a default Ubuntu install and `apt install tcc` needs root, so
+# this script accepts tcc from PATH or from a cached source build at
+# /tmp/tccinstall/bin/tcc (build: git clone https://repo.or.cz/tinycc.git &&
+# ./configure && make && make install prefix=/tmp/tccinstall).  Absent tcc the
+# self-test no-ops, matching the make/dash best-effort pattern above.
+TCC_SRC="$(command -v tcc || true)"
+if [ -z "$TCC_SRC" ] && [ -x /tmp/tccinstall/bin/tcc ]; then
+    TCC_SRC="/tmp/tccinstall/bin/tcc"
+fi
+if [ -n "$TCC_SRC" ] && [ -e "$TCC_SRC" ]; then
+    cp -L "$TCC_SRC" "$STAGE/bin/tcc"
+    # tcc's DT_NEEDED includes libm.so.6 (not staged for the glibc smoke tests);
+    # stage it next to libc.so.6 so ld.so resolves it via the same RUNPATH.
+    if [ -e "$LIBC_DIR/libm.so.6" ]; then
+        cp -L "$LIBC_DIR/libm.so.6" "$STAGE$LIBC_DIR/libm.so.6"
+    else
+        echo "[rootfs] WARNING: libm.so.6 not found — tcc self-test will no-op (tcc won't load)"
+    fi
+    echo "[rootfs] staged C compiler: /bin/tcc ($TCC_SRC)"
+    echo "[rootfs] tcc binary DT_NEEDED:"
+    readelf -d "$STAGE/bin/tcc" 2>/dev/null | grep -E 'NEEDED|RUNPATH' | sed 's/^/  /'
+else
+    echo "[rootfs] WARNING: tcc not found — the C-compiler self-test will no-op"
+fi
+
 echo "[rootfs] staged tree:"
 ( cd "$STAGE" && find lib64 lib bin -type f -printf '  %-44p %10s bytes\n' )
 

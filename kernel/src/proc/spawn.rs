@@ -396,6 +396,41 @@ pub fn spawn_process(
     elf_data: &[u8],
     options: &SpawnOptions<'_>,
 ) -> KernelResult<SpawnResult> {
+    spawn_process_inner(elf_data, options, None)
+}
+
+/// Spawn a process, forcing it to run under an explicit syscall ABI
+/// instead of auto-detecting from the ELF.
+///
+/// `spawn_process` infers the ABI from the binary via
+/// [`elf::ElfFile::detect_linux_abi`], which keys off `EI_OSABI`, a Linux
+/// `PT_INTERP`, or `PT_GNU_PROPERTY`.  A *bare* static Linux binary —
+/// e.g. one a freestanding `tcc -nostdlib -static` build produces — has
+/// none of those markers (OSABI is `SYSV`, no interpreter, no GNU
+/// property note), so auto-detection classifies it as Native and routes
+/// its `syscall`s through the wrong dispatch table.  When the caller
+/// already *knows* the ABI of the binary it is launching (because it just
+/// produced it with a known toolchain), it uses this entry point to state
+/// it explicitly rather than relying on a heuristic that cannot see the
+/// difference.  See `open-questions.md` for the broader question of how
+/// the OS should auto-classify arbitrary bare static ELFs in the wild.
+///
+/// # Errors
+///
+/// Same as [`spawn_process`].
+pub fn spawn_process_with_abi(
+    elf_data: &[u8],
+    options: &SpawnOptions<'_>,
+    abi: pcb::AbiMode,
+) -> KernelResult<SpawnResult> {
+    spawn_process_inner(elf_data, options, Some(abi))
+}
+
+fn spawn_process_inner(
+    elf_data: &[u8],
+    options: &SpawnOptions<'_>,
+    abi_override: Option<pcb::AbiMode>,
+) -> KernelResult<SpawnResult> {
     // Step 1: Parse the ELF binary.
     let elf_file = elf::ElfFile::parse(elf_data)?;
 
@@ -429,9 +464,18 @@ pub fn spawn_process(
     // immediately afterwards — that way the very first userspace
     // `syscall` (e.g. the dynamic loader's startup code) is already
     // routed to the Linux translation layer.
-    let is_linux_abi = elf_file.detect_linux_abi();
+    // An explicit caller-supplied ABI wins over heuristic detection (see
+    // `spawn_process_with_abi`); otherwise infer it from the ELF markers.
+    let is_linux_abi = match abi_override {
+        Some(m) => m == pcb::AbiMode::Linux,
+        None => elf_file.detect_linux_abi(),
+    };
     if is_linux_abi {
-        serial_println!("[spawn] Detected Linux x86_64 ABI binary");
+        if abi_override.is_some() {
+            serial_println!("[spawn] Linux x86_64 ABI (explicit override)");
+        } else {
+            serial_println!("[spawn] Detected Linux x86_64 ABI binary");
+        }
     }
 
     // Step 2: Create the process (allocates a per-process PML4 with
@@ -10350,6 +10394,351 @@ pub fn self_test_linux_real_glibc_make() -> KernelResult<()> {
                 "[spawn]   FAIL: real make — reading the recipe output {} back failed: {:?} \
                  (make's recipe child likely never ran or could not write the file)",
                 OUT_PATH, e
+            );
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
+/// Self-test: run an **unmodified prebuilt C compiler** (TinyCC / `tcc`) in
+/// ring 3 under the Linux ABI compat layer, have it compile a C source file
+/// to a native executable, then run that freshly-compiled executable — also
+/// in ring 3 — and verify it produces the expected output.  This is the next
+/// rung of "Path Z" after GNU make: it proves the OS can host a real
+/// toolchain, not merely run prebuilt binaries.
+///
+/// Flow:
+/// 1. Stage `ld-linux`, `libc.so.6`, `libm.so.6` and `/bin/tcc` from the rootfs
+///    (`/mnt/...`) into the in-memory VFS.  `tcc` is dynamically linked against
+///    libc + libm, so all three .so files must be present for `ld.so` to start
+///    it.
+/// 2. Write a tiny freestanding C program to `/cc-prog.c`.  It has its own
+///    `_start` and issues raw `write(1, ..)`/`exit` syscalls (no libc), so the
+///    compile needs `-nostdlib -static` and pulls in **no** support files
+///    (no crt objects, no headers, no `libtcc1.a`) — `strace` confirmed `tcc`
+///    opens only the `.c` source and writes the output ELF in this mode.
+/// 3. Spawn `tcc -nostdlib -static -o /cc-prog /cc-prog.c`, reap it, and
+///    confirm it exited 0 and produced a valid ELF at `/cc-prog`.
+/// 4. Spawn the freshly-compiled `/cc-prog` directly, redirecting its fd 1 from
+///    the console to `/cc-out.txt` *before it first runs* (`linux_fd_take` +
+///    `linux_fd_install_at` — the same mechanism the real-glibc-stdio test
+///    uses).  The program writes `SLATE_TCC_CC_OK\n` to fd 1.  Running it
+///    directly (rather than via the shell) keeps the test focused on the one
+///    new claim — "tcc produced a working ring-3 ELF" — with no shell layer to
+///    confound the result.
+/// 5. Read `/cc-out.txt` back and assert it equals the expected payload.
+///
+/// Success proves end to end: `ld.so` loaded `tcc`+libc+libm, `tcc` read and
+/// compiled real C source into a working x86_64 ELF, and that freshly-built ELF
+/// ran in ring 3 and produced correct output.
+///
+/// No-op (returns `Ok(())`) when the rootfs / `/bin/tcc` is absent (so a kernel
+/// built without the toolchain rootfs still boots clean).
+///
+/// # Errors
+///
+/// Returns [`KernelError::InternalError`] if `tcc` fails to reach `Zombie`,
+/// exits non-zero, produces no/invalid ELF, the compiled program fails to
+/// run, or its output does not match; propagates spawn failure.
+pub fn self_test_linux_real_glibc_cc() -> KernelResult<()> {
+    const EXPECT_EXIT: i32 = 0;
+    // The freshly-compiled program writes exactly this 16-byte payload.
+    const EXPECT_OUT: &[u8] = b"SLATE_TCC_CC_OK\n";
+
+    const SRC_LD: &str = "/mnt/lib64/ld-linux-x86-64.so.2";
+    const SRC_LIBC: &str = "/mnt/lib/x86_64-linux-gnu/libc.so.6";
+    const SRC_LIBM: &str = "/mnt/lib/x86_64-linux-gnu/libm.so.6";
+    const SRC_TCC: &str = "/mnt/bin/tcc";
+    const DST_LD: &str = "/lib64/ld-linux-x86-64.so.2";
+    const DST_LIBC: &str = "/lib/x86_64-linux-gnu/libc.so.6";
+    const DST_LIBM: &str = "/lib/x86_64-linux-gnu/libm.so.6";
+    const DST_TCC: &str = "/bin/tcc";
+    const SRC_PATH: &str = "/cc-prog.c";
+    const OBJ_PATH: &str = "/cc-prog";
+    const OUT_PATH: &str = "/cc-out.txt";
+
+    // A freestanding C program: own `_start`, raw syscalls, no libc.
+    //   sc3(n,a,b,c) = syscall(n, a, b, c)
+    //   build "SLATE_TCC_CC_OK\n" on the STACK (byte stores, no .rodata), then
+    //   write(1, m, 16)   // fd 1 is redirected to a capture file before run
+    //   exit(0)
+    // The message is built on the stack rather than via a string literal so
+    // the `write` buffer lives in an always-mapped stack page — this is a
+    // diagnostic to isolate whether reads of the binary's second (.data.ro /
+    // .eh_frame) LOAD segment work in ring 3.
+    const CC_SRC: &[u8] = b"static long sc3(long n,long a,long b,long c){long r;\
+__asm__ volatile(\"syscall\":\"=a\"(r):\"a\"(n),\"D\"(a),\"S\"(b),\"d\"(c):\"rcx\",\"r11\",\"memory\");\
+return r;}\n\
+void _start(void){char m[16];m[0]=83;m[1]=76;m[2]=65;m[3]=84;m[4]=69;m[5]=95;m[6]=84;m[7]=67;\
+m[8]=67;m[9]=95;m[10]=67;m[11]=67;m[12]=95;m[13]=79;m[14]=75;m[15]=10;\
+sc3(1,1,(long)m,16);sc3(60,0,0,0);}\n";
+
+    // tcc parses + codegens real C; give the compile a generous yield budget.
+    const COMPILE_MAX_YIELDS: usize = 4_194_304;
+    // The compiled program is tiny; a smaller budget suffices to run it.
+    const RUN_MAX_YIELDS: usize = 524_288;
+
+    if !crate::fs::Vfs::exists(SRC_TCC) {
+        return Ok(());
+    }
+
+    serial_println!("[spawn] Running REAL C compiler (tcc, ring 3, Path Z) test...");
+
+    let _ = crate::fs::Vfs::mkdir_all("/lib64");
+    let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
+    let _ = crate::fs::Vfs::mkdir_all("/bin");
+    for (src, dst) in [
+        (SRC_LD, DST_LD),
+        (SRC_LIBC, DST_LIBC),
+        (SRC_LIBM, DST_LIBM),
+        (SRC_TCC, DST_TCC),
+    ] {
+        match crate::fs::Vfs::read_file(src) {
+            Ok(bytes) => {
+                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
+                    serial_println!(
+                        "[spawn]   real cc: SKIP (staging {} -> {} failed: {:?})",
+                        src, dst, e
+                    );
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                serial_println!("[spawn]   real cc: SKIP (reading {} failed: {:?})", src, e);
+                return Ok(());
+            }
+        }
+    }
+
+    // Stage the C source and clear any stale compiler/program output.
+    if let Err(e) = crate::fs::Vfs::write_file(SRC_PATH, CC_SRC) {
+        serial_println!("[spawn]   real cc: SKIP (writing {} failed: {:?})", SRC_PATH, e);
+        return Ok(());
+    }
+    let _ = crate::fs::Vfs::remove(OBJ_PATH);
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+
+    let tcc_elf = match crate::fs::Vfs::read_file(DST_TCC) {
+        Ok(b) => b,
+        Err(e) => {
+            serial_println!("[spawn]   real cc: SKIP (re-read {} failed: {:?})", DST_TCC, e);
+            return Ok(());
+        }
+    };
+
+    // --- step 1: run tcc to compile /cc-prog.c -> /cc-prog ------------------
+    let cc_argv: &[&[u8]] =
+        &[b"tcc", b"-nostdlib", b"-static", b"-o", b"/cc-prog", b"/cc-prog.c"];
+    let cc_envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C"];
+    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    let cc_options = SpawnOptions {
+        name: "spawn-test-tcc",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv: cc_argv,
+        envp: cc_envp,
+        exe_path: Some(DST_TCC.as_bytes()),
+    };
+
+    let cc_result = match spawn_process(&tcc_elf, &cc_options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: real cc — tcc spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let mut cc_reaped = false;
+    for _ in 0..COMPILE_MAX_YIELDS {
+        if pcb::state(cc_result.pid) == Some(pcb::ProcessState::Zombie) {
+            cc_reaped = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let cc_state = pcb::state(cc_result.pid);
+    let cc_exit = pcb::exit_code(cc_result.pid);
+    thread::on_thread_exit(cc_result.task_id);
+    pcb::destroy(cc_result.pid);
+
+    if !cc_reaped || cc_state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: real cc — tcc did not exit within {} yields (state={:?}); tcc \
+             startup (ld.so/libc/libm) or its compile loop likely hung",
+            COMPILE_MAX_YIELDS, cc_state
+        );
+        let _ = crate::fs::Vfs::remove(SRC_PATH);
+        return Err(KernelError::InternalError);
+    }
+
+    if cc_exit != Some(EXPECT_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: real cc — tcc exit code={:?}, expected {} (non-zero means tcc hit a \
+             compile/link error)",
+            cc_exit, EXPECT_EXIT
+        );
+        let _ = crate::fs::Vfs::remove(SRC_PATH);
+        return Err(KernelError::InternalError);
+    }
+
+    // The compiler must have produced a valid ELF.
+    let obj = match crate::fs::Vfs::read_file(OBJ_PATH) {
+        Ok(b) => b,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: real cc — tcc exited 0 but {} is unreadable: {:?} (no output \
+                 ELF produced)",
+                OBJ_PATH, e
+            );
+            let _ = crate::fs::Vfs::remove(SRC_PATH);
+            return Err(KernelError::InternalError);
+        }
+    };
+    if obj.len() < 4 || &obj[..4] != b"\x7fELF" {
+        serial_println!(
+            "[spawn]   FAIL: real cc — {} is not an ELF ({} bytes, first 4 = {:?})",
+            OBJ_PATH, obj.len(), obj.get(..4)
+        );
+        let _ = crate::fs::Vfs::remove(SRC_PATH);
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   real cc — tcc compiled {} into a {}-byte ELF at {}",
+        SRC_PATH, obj.len(), OBJ_PATH
+    );
+
+    // --- step 2: run the freshly-compiled program directly -----------------
+    // Spawn /cc-prog itself (the binary tcc just produced) and redirect its
+    // fd 1 from the console to a capture file *before it first runs* — the same
+    // proven mechanism `self_test_linux_real_glibc_stdio` uses (`linux_fd_take`
+    // + `linux_fd_install_at`).  This tests exactly the claim we care about —
+    // "tcc produced a working ring-3 ELF" — without the shell/fork/exec layer
+    // confounding the result.  (The make test already proves shell redirects.)
+    use crate::fs::handle;
+    use crate::proc::linux_fd::{FdEntry, O_WRONLY};
+
+    let run_argv: &[&[u8]] = &[b"/cc-prog"];
+    let run_envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C"];
+    let run_options = SpawnOptions {
+        name: "spawn-test-cc-run",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv: run_argv,
+        envp: run_envp,
+        exe_path: Some(OBJ_PATH.as_bytes()),
+    };
+
+    // Open a fresh capture file for the compiled program's fd 1.
+    let capture_handle = match handle::open(
+        OUT_PATH,
+        handle::OpenFlags::READ
+            .union(handle::OpenFlags::WRITE)
+            .union(handle::OpenFlags::CREATE),
+    ) {
+        Ok(h) => h,
+        Err(e) => {
+            serial_println!("[spawn]   real cc: SKIP (capture-file open failed: {:?})", e);
+            let _ = crate::fs::Vfs::remove(SRC_PATH);
+            let _ = crate::fs::Vfs::remove(OBJ_PATH);
+            return Ok(());
+        }
+    };
+
+    // The freshly-built program is a bare static binary tcc emitted for the
+    // Linux ABI (OSABI=SYSV, no PT_INTERP, no GNU property note), so the ELF
+    // carries no marker `detect_linux_abi` can see.  We *know* it is a Linux
+    // binary because we just compiled it as one, so state the ABI explicitly.
+    let run_result = match spawn_process_with_abi(&obj, &run_options, pcb::AbiMode::Linux) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = handle::close(capture_handle);
+            serial_println!(
+                "[spawn]   FAIL: real cc — spawning the freshly-built {} returned {:?}",
+                OBJ_PATH, e
+            );
+            let _ = crate::fs::Vfs::remove(SRC_PATH);
+            let _ = crate::fs::Vfs::remove(OBJ_PATH);
+            let _ = crate::fs::Vfs::remove(OUT_PATH);
+            return Err(e);
+        }
+    };
+
+    // Redirect fd 1 (console) -> capture file before the child runs.  Dropping
+    // the console entry needs no kernel close.  After install_at the capture
+    // handle is owned by the child's fd table (released on its exit), so we
+    // must NOT close it ourselves on the success path.
+    let _ = pcb::linux_fd_take(run_result.pid, 1);
+    if let Err(e) =
+        pcb::linux_fd_install_at(run_result.pid, 1, FdEntry::file(capture_handle, O_WRONLY))
+    {
+        let _ = handle::close(capture_handle);
+        thread::on_thread_exit(run_result.task_id);
+        pcb::destroy(run_result.pid);
+        serial_println!("[spawn]   FAIL: real cc — redirecting the compiled program's fd 1 failed: {:?}", e);
+        let _ = crate::fs::Vfs::remove(SRC_PATH);
+        let _ = crate::fs::Vfs::remove(OBJ_PATH);
+        let _ = crate::fs::Vfs::remove(OUT_PATH);
+        return Err(KernelError::InternalError);
+    }
+
+    let mut run_reaped = false;
+    for _ in 0..RUN_MAX_YIELDS {
+        if pcb::state(run_result.pid) == Some(pcb::ProcessState::Zombie) {
+            run_reaped = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let run_state = pcb::state(run_result.pid);
+    let run_exit = pcb::exit_code(run_result.pid);
+    // Read the captured output BEFORE destroying the child (reading by path
+    // opens an independent handle onto the same inode).
+    let out = crate::fs::Vfs::read_file(OUT_PATH);
+
+    thread::on_thread_exit(run_result.task_id);
+    pcb::destroy(run_result.pid);
+    let _ = crate::fs::Vfs::remove(SRC_PATH);
+    let _ = crate::fs::Vfs::remove(OBJ_PATH);
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+
+    if !run_reaped || run_state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: real cc — the compiled program did not exit within {} yields \
+             (state={:?}); tcc may have produced a broken ELF",
+            RUN_MAX_YIELDS, run_state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    match out {
+        Ok(bytes) if bytes.as_slice() == EXPECT_OUT => {
+            serial_println!(
+                "[spawn]   REAL C compiler (ring 3: ld.so loaded tcc+libc+libm, tcc compiled C \
+                 source into a {}-byte ELF, that freshly-built binary ran in ring 3 and wrote {} \
+                 bytes == expected, exit={:?}): OK",
+                obj.len(), bytes.len(), run_exit
+            );
+            Ok(())
+        }
+        Ok(bytes) => {
+            serial_println!(
+                "[spawn]   FAIL: real cc — {} holds {} bytes {:?}, expected {} bytes {:?} \
+                 (compiled program exit={:?})",
+                OUT_PATH, bytes.len(), bytes.as_slice(), EXPECT_OUT.len(), EXPECT_OUT, run_exit
+            );
+            Err(KernelError::InternalError)
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: real cc — reading the compiled program's output {} back failed: \
+                 {:?} (exit={:?})",
+                OUT_PATH, e, run_exit
             );
             Err(KernelError::InternalError)
         }

@@ -146,6 +146,59 @@ static EVENTFD_TABLE: Mutex<BTreeMap<EventFdId, EventFd>> =
     Mutex::new(BTreeMap::new());
 
 // ---------------------------------------------------------------------------
+// Signal-interruptible blocking helpers
+// ---------------------------------------------------------------------------
+//
+// An eventfd is a slow object: a blocking `read`/`write` that is interrupted
+// by a deliverable signal must wake and return so the signal's handler can run
+// (mapped to ERESTARTSYS at the Linux syscall layer).  Without this a Linux
+// process blocked on an empty/full eventfd could never be interrupted —
+// exactly the hang-bug class fixed for pipes and stream sockets.  These
+// mirror the helpers in `ipc/pipe.rs`.
+
+/// The owning user process id of the current task, or `0` for a kernel task.
+///
+/// Eventfd waits are interruptible by signals only for user processes; kernel
+/// tasks (`pid == 0`) have no signal state and park uninterruptibly, as before.
+fn current_user_pid() -> u64 {
+    crate::proc::thread::owner_process(sched::current_task_id()).unwrap_or(0)
+}
+
+/// `true` if a deliverable (unblocked) signal is pending for `pid`.
+///
+/// Always `false` for `pid == 0` (kernel task — no signal context).
+fn deliverable_signal_pending(pid: u64) -> bool {
+    pid != 0
+        && crate::proc::signal::has_pending_in_mask(pid, !crate::proc::signal::blocked(pid))
+}
+
+/// Park the current task for an eventfd wait, interruptibly for user processes.
+///
+/// For a user process this registers a signal-waiter (so `set_pending` wakes the
+/// park when a deliverable signal arrives) using the register-then-recheck idiom
+/// to close the post-before-park race, blocks, then deregisters.  Kernel tasks
+/// park uninterruptibly.  The caller's surrounding loop must, after this
+/// returns, re-acquire the table lock and re-evaluate both the eventfd state and
+/// [`deliverable_signal_pending`] — a signal wake is reported by the latter, not
+/// by this function.
+fn park_for_eventfd(pid: u64, task: TaskId) {
+    if pid == 0 {
+        sched::block_current();
+        return;
+    }
+    let deliverable = !crate::proc::signal::blocked(pid);
+    crate::proc::signal::register_signalfd_waiter(pid, task, deliverable);
+    if crate::proc::signal::has_pending_in_mask(pid, deliverable) {
+        // A signal arrived between enqueue and registration — don't block; the
+        // caller's loop will observe the pending signal and return Interrupted.
+        crate::proc::signal::deregister_signalfd_waiter(pid, task);
+        return;
+    }
+    sched::block_current();
+    crate::proc::signal::deregister_signalfd_waiter(pid, task);
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -191,6 +244,8 @@ pub fn write(handle: EventFdHandle, value: u64) -> KernelResult<()> {
         return Ok(());
     }
 
+    let pid = current_user_pid();
+    let task = sched::current_task_id();
     loop {
         {
             let mut table = EVENTFD_TABLE.lock();
@@ -220,11 +275,21 @@ pub fn write(handle: EventFdHandle, value: u64) -> KernelResult<()> {
                 return Ok(());
             }
 
+            // Honour a deliverable signal before parking; clear any stale
+            // waiter slot from a prior signal wake.  An interrupted indefinite
+            // eventfd write is restartable (ERESTARTSYS) at the syscall layer.
+            if deliverable_signal_pending(pid) {
+                if efd.writer_waiter == Some(task) {
+                    efd.writer_waiter = None;
+                }
+                return Err(KernelError::Interrupted);
+            }
+
             // Would overflow — block until reader drains.
-            efd.writer_waiter = Some(sched::current_task_id());
+            efd.writer_waiter = Some(task);
         }
 
-        sched::block_current();
+        park_for_eventfd(pid, task);
     }
 }
 
@@ -330,10 +395,12 @@ pub fn write_timeout(handle: EventFdHandle, value: u64, timeout_ns: u64) -> Kern
         }
     }
 
+    let pid = current_user_pid();
+    let task = sched::current_task_id();
     let timer_handle = crate::hrtimer::schedule_ns(
         timeout_ns,
         timeout_wake,
-        sched::current_task_id(),
+        task,
     );
 
     // Block loop.
@@ -373,11 +440,22 @@ pub fn write_timeout(handle: EventFdHandle, value: u64, timeout_ns: u64) -> Kern
                 return Err(KernelError::TimedOut);
             }
 
+            // Honour a deliverable signal before parking; clear any stale
+            // waiter slot from a prior signal wake.  A timed wait maps the
+            // interruption to EINTR (no restart) at the syscall layer.
+            if deliverable_signal_pending(pid) {
+                if efd.writer_waiter == Some(task) {
+                    efd.writer_waiter = None;
+                }
+                crate::hrtimer::cancel(timer_handle);
+                return Err(KernelError::Interrupted);
+            }
+
             // Register as waiter.
-            efd.writer_waiter = Some(sched::current_task_id());
+            efd.writer_waiter = Some(task);
         }
 
-        sched::block_current();
+        park_for_eventfd(pid, task);
     }
 }
 
@@ -392,6 +470,8 @@ pub fn write_timeout(handle: EventFdHandle, value: u64, timeout_ns: u64) -> Kern
 /// - `Err(ChannelClosed)` — eventfd was closed while waiting.
 /// - `Err(InvalidHandle)` — handle not found.
 pub fn read(handle: EventFdHandle) -> KernelResult<u64> {
+    let pid = current_user_pid();
+    let task = sched::current_task_id();
     loop {
         {
             let mut table = EVENTFD_TABLE.lock();
@@ -427,11 +507,21 @@ pub fn read(handle: EventFdHandle) -> KernelResult<u64> {
                 return Err(KernelError::ChannelClosed);
             }
 
+            // Honour a deliverable signal before parking; clear any stale
+            // waiter slot from a prior signal wake.  An interrupted indefinite
+            // eventfd read is restartable (ERESTARTSYS) at the syscall layer.
+            if deliverable_signal_pending(pid) {
+                if efd.reader_waiter == Some(task) {
+                    efd.reader_waiter = None;
+                }
+                return Err(KernelError::Interrupted);
+            }
+
             // Counter is 0 — block.
-            efd.reader_waiter = Some(sched::current_task_id());
+            efd.reader_waiter = Some(task);
         }
 
-        sched::block_current();
+        park_for_eventfd(pid, task);
     }
 }
 
@@ -535,10 +625,12 @@ pub fn read_timeout(handle: EventFdHandle, timeout_ns: u64) -> KernelResult<u64>
         }
     }
 
+    let pid = current_user_pid();
+    let task = sched::current_task_id();
     let timer_handle = crate::hrtimer::schedule_ns(
         timeout_ns,
         timeout_wake,
-        sched::current_task_id(),
+        task,
     );
 
     // Block loop.
@@ -582,11 +674,22 @@ pub fn read_timeout(handle: EventFdHandle, timeout_ns: u64) -> KernelResult<u64>
                 return Err(KernelError::TimedOut);
             }
 
+            // Honour a deliverable signal before parking; clear any stale
+            // waiter slot from a prior signal wake.  A timed wait maps the
+            // interruption to EINTR (no restart) at the syscall layer.
+            if deliverable_signal_pending(pid) {
+                if efd.reader_waiter == Some(task) {
+                    efd.reader_waiter = None;
+                }
+                crate::hrtimer::cancel(timer_handle);
+                return Err(KernelError::Interrupted);
+            }
+
             // Register as waiter.
-            efd.reader_waiter = Some(sched::current_task_id());
+            efd.reader_waiter = Some(task);
         }
 
-        sched::block_current();
+        park_for_eventfd(pid, task);
     }
 }
 

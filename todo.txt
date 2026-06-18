@@ -8969,6 +8969,39 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##              the handler would still run at the post-read checkpoint either
 ##              way).  Build clean (32.10s) + boot-test PASSED (229s); serial
 ##              shows "exit == 61: OK".
+##        - eventfd blocking read/write DONE 2026-06-18: same single-slot-waiter
+##          hang-bug class as pipe/stream_socket/signalfd, Linux-reachable via
+##          eventfd2 (syscall 290).  All 4 block sites in ipc/eventfd.rs (read,
+##          write, read_timeout, write_timeout) parked with a bare
+##          block_current() and a single reader_waiter/writer_waiter slot that
+##          only the opposite side woke — a deliverable signal could never
+##          interrupt them.  Fix (mirror of pipe.rs):
+##            * 3 helpers after EVENTFD_TABLE: current_user_pid(),
+##              deliverable_signal_pending(pid), park_for_eventfd(pid, task)
+##              (register-then-recheck against the signal-waiter set; pid 0 =
+##              kernel task → plain block_current, unchanged).
+##            * Each indefinite block site: check deliverable_signal_pending
+##              before parking — clear our own waiter slot if set, return
+##              Err(Interrupted); replace block_current with park_for_eventfd.
+##            * Each timed block site: same, plus cancel the hrtimer before
+##              returning Interrupted.
+##            * linux.rs dispatch_eventfd_read / dispatch_eventfd_write map
+##              Err(Interrupted) → restart::restart_result(ERESTARTSYS) (eventfd
+##              is a slow object → restartable under SA_RESTART; the -512
+##              sentinel reaches the return path untouched, no CrossDevice
+##              collision since these arms don't pass through linux_from_native).
+##              The dispatch arms only call the indefinite read/write, so only
+##              the ERESTARTSYS mapping is reachable here; the timed variants
+##              return EINTR if/when separately wired.
+##            * Ring-3 test (elf::build_linux_eventfd_interrupt_test_elf +
+##              spawn::self_test_linux_eventfd_interrupt, wired into main.rs):
+##              child installs a NON-SA_RESTART SIGUSR1 handler, creates
+##              eventfd2(0,0) (counter 0), blocks in read(); kernel posts
+##              SIGUSR1; a correct kernel wakes it and read returns -EINTR →
+##              exit(0x2C=44).  A park-uninterruptible regression leaves the
+##              child parked forever (non-zombie → FAIL); draining as data →
+##              exit 0xEE → FAIL.  Build clean (36.77s) + boot-test PASSED;
+##              serial shows "exit == 44: OK".
 ##        - futex(FUTEX_WAIT / FUTEX_WAIT_BITSET) DONE 2026-06-18: was the
 ##          same confirmed bug class as wait4 — the native futex_wait_bitset /
 ##          futex_wait_bitset_timeout paths registered ONLY in the futex bucket

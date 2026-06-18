@@ -1318,6 +1318,15 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: Linux signalfd-read interruptibility (ring 3) self-test failed: {:?}", e);
     }
 
+    // Ring-3 eventfd-read signal-interruptibility test: a child blocks in
+    // read() on an eventfd whose counter is 0, with a non-SA_RESTART SIGUSR1
+    // handler installed; the kernel posts SIGUSR1, the read wakes and returns
+    // -EINTR.  Before the fix the read parked forever (single-slot waiter only
+    // wakeable by a writer), the same hang-bug class as pipe/signalfd.
+    if let Err(e) = proc::spawn::self_test_linux_eventfd_interrupt() {
+        serial_println!("WARNING: Linux eventfd-read interruptibility (ring 3) self-test failed: {:?}", e);
+    }
+
     // Ring-3 test that the SysV stack builder's argv *pointers* (not just the
     // scalar argc) are valid in the mapped user stack: a real Linux-ABI
     // process dereferences argv[0] and exits with its first byte.

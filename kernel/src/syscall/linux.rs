@@ -3769,6 +3769,12 @@ fn dispatch_eventfd_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
         Err(crate::error::KernelError::WouldBlock) => linux_err(errno::EAGAIN),
         Err(crate::error::KernelError::InvalidHandle) => linux_err(errno::EBADF),
         Err(crate::error::KernelError::ChannelClosed) => linux_err(errno::EBADF),
+        // An eventfd is a slow object: an indefinite blocking write
+        // interrupted by a deliverable signal is restartable (SA_RESTART)
+        // via the ERESTARTSYS sentinel.
+        Err(crate::error::KernelError::Interrupted) => {
+            restart::restart_result(restart::ERESTARTSYS)
+        }
         Err(e) => linux_err(linux_errno_for(e)),
     }
 }
@@ -3796,6 +3802,12 @@ fn dispatch_eventfd_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
         Err(crate::error::KernelError::WouldBlock) => return linux_err(errno::EAGAIN),
         Err(crate::error::KernelError::InvalidHandle) => return linux_err(errno::EBADF),
         Err(crate::error::KernelError::ChannelClosed) => return linux_err(errno::EBADF),
+        // An eventfd is a slow object: an indefinite blocking read
+        // interrupted by a deliverable signal is restartable (SA_RESTART)
+        // via the ERESTARTSYS sentinel.
+        Err(crate::error::KernelError::Interrupted) => {
+            return restart::restart_result(restart::ERESTARTSYS);
+        }
         Err(e) => return linux_err(linux_errno_for(e)),
     };
     let bytes = value.to_le_bytes();

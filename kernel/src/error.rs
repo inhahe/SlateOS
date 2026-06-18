@@ -35,6 +35,11 @@ pub enum KernelError {
     /// The operation would deadlock (e.g. locking a PI futex the caller
     /// already owns).  Maps to `EDEADLK`.
     Deadlock = -7,
+    /// A blocking operation was interrupted by a deliverable signal before it
+    /// completed (e.g. a `FUTEX_WAIT` woken by a signal rather than a
+    /// `FUTEX_WAKE`).  Maps to `EINTR`; restartable syscalls translate this to
+    /// an `ERESTART*` sentinel at the syscall layer instead.
+    Interrupted = -8,
 
     // --- Memory (100 - 199) ---
     /// No physical memory available to satisfy the allocation.
@@ -128,6 +133,7 @@ impl KernelError {
             Self::Cancelled => "operation cancelled",
             Self::TimedOut => "operation timed out",
             Self::Deadlock => "operation would deadlock",
+            Self::Interrupted => "interrupted by signal",
             Self::OutOfMemory => "out of memory",
             Self::InvalidAddress => "invalid address",
             Self::PageFault => "unresolvable page fault",

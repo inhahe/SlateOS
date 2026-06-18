@@ -1548,6 +1548,15 @@ pub fn sys_futex_wait(args: &SyscallArgs) -> SyscallResult {
     match futex::futex_wait(addr, expected) {
         Ok(true) => SyscallResult::ok(1),
         Ok(false) => SyscallResult::ok(0),
+        // An indefinite FUTEX_WAIT interrupted by a signal is restartable
+        // (Linux returns ERESTARTSYS): re-running the syscall re-checks the
+        // futex word, so a restart is correct.  The sentinel is resolved by the
+        // signal-delivery checkpoint into a restart or a user-visible EINTR.
+        Err(crate::error::KernelError::Interrupted) => {
+            crate::syscall::linux::restart::restart_result(
+                crate::syscall::linux::restart::ERESTARTSYS,
+            )
+        }
         Err(e) => SyscallResult::err(e),
     }
 }
@@ -1617,6 +1626,13 @@ pub fn sys_futex_wait_bitset(args: &SyscallArgs) -> SyscallResult {
     match futex::futex_wait_bitset(addr, expected, bitset) {
         Ok(true) => SyscallResult::ok(1),
         Ok(false) => SyscallResult::ok(0),
+        // Indefinite FUTEX_WAIT_BITSET interrupted by a signal — restartable
+        // (ERESTARTSYS), resolved by the signal-delivery checkpoint.
+        Err(crate::error::KernelError::Interrupted) => {
+            crate::syscall::linux::restart::restart_result(
+                crate::syscall::linux::restart::ERESTARTSYS,
+            )
+        }
         Err(e) => SyscallResult::err(e),
     }
 }

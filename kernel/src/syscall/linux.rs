@@ -1242,6 +1242,7 @@ pub const fn linux_errno_for(e: KernelError) -> i32 {
         KernelError::Cancelled => errno::ECANCELED,
         KernelError::TimedOut => errno::ETIMEDOUT,
         KernelError::Deadlock => errno::EDEADLK,
+        KernelError::Interrupted => errno::EINTR,
         KernelError::OutOfMemory => errno::ENOMEM,
         KernelError::InvalidAddress => errno::EFAULT,
         KernelError::PageFault => errno::EFAULT,
@@ -1325,6 +1326,14 @@ pub fn linux_from_native(res: SyscallResult) -> SyscallResult {
 /// classic wait ops (`FUTEX_WAIT`, `FUTEX_WAIT_BITSET`, `futex2_wait`)
 /// route through here so the convention lives in one place.
 fn linux_from_futex_wait(res: SyscallResult) -> SyscallResult {
+    // An interrupted indefinite FUTEX_WAIT is reported by the handler as an
+    // `ERESTART*` restart sentinel (negated, e.g. `-512`).  That value must
+    // reach the signal-delivery checkpoint untouched — it must NOT be fed to
+    // `linux_from_native`, where `-512` collides with `KernelError::CrossDevice`
+    // and would be mis-mapped to `EXDEV`.  Pass any restart sentinel through.
+    if restart::is_sentinel(res.value) {
+        return res;
+    }
     match res.value {
         // Blocked and woken (or spurious wake) — Linux success.
         1 => SyscallResult::ok(0),
@@ -1349,6 +1358,7 @@ pub const fn kernel_error_from_code(code: i32) -> Option<KernelError> {
         -5 => Some(KernelError::Cancelled),
         -6 => Some(KernelError::TimedOut),
         -7 => Some(KernelError::Deadlock),
+        -8 => Some(KernelError::Interrupted),
         -100 => Some(KernelError::OutOfMemory),
         -101 => Some(KernelError::InvalidAddress),
         -102 => Some(KernelError::PageFault),
@@ -48483,6 +48493,40 @@ fn self_test_restart_action() -> crate::error::KernelResult<()> {
         restart_block::clear(t1);
         if restart_block::take(t1).is_some() {
             serial_println!("[syscall/linux]   FAIL: restart_block clear did not drop");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Futex signal-interruption plumbing: KernelError::Interrupted maps to
+    // EINTR; an interrupted *indefinite* FUTEX_WAIT instead surfaces an
+    // ERESTARTSYS sentinel, which must pass through linux_from_futex_wait
+    // untouched (it must NOT be mis-mapped as KernelError::CrossDevice == -512).
+    {
+        if linux_errno_for(KernelError::Interrupted) != errno::EINTR {
+            serial_println!("[syscall/linux]   FAIL: Interrupted not mapped to EINTR");
+            return Err(KernelError::InternalError);
+        }
+        if kernel_error_from_code(-8) != Some(KernelError::Interrupted) {
+            serial_println!("[syscall/linux]   FAIL: code -8 not Interrupted");
+            return Err(KernelError::InternalError);
+        }
+        // Indefinite-wait interruption: sentinel passes through unchanged.
+        let sentinel = restart::restart_result(ERESTARTSYS);
+        let passed = linux_from_futex_wait(sentinel);
+        if passed.value != -ERESTARTSYS {
+            serial_println!(
+                "[syscall/linux]   FAIL: linux_from_futex_wait mangled sentinel -> {}",
+                passed.value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Timed-wait interruption: Err(Interrupted) (-8) maps to -EINTR.
+        let timed = linux_from_futex_wait(SyscallResult::err(KernelError::Interrupted));
+        if timed.value != -i64::from(errno::EINTR) {
+            serial_println!(
+                "[syscall/linux]   FAIL: linux_from_futex_wait(Interrupted) -> {}",
+                timed.value
+            );
             return Err(KernelError::InternalError);
         }
     }

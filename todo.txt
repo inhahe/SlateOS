@@ -8939,6 +8939,48 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          the signalfd mask" check added first (it has none today — it
 ##          only wakes for watched signals), then that exit becomes
 ##          ERESTARTSYS.
+##        - futex(FUTEX_WAIT / FUTEX_WAIT_BITSET) DONE 2026-06-18: was the
+##          same confirmed bug class as wait4 — the native futex_wait_bitset /
+##          futex_wait_bitset_timeout paths registered ONLY in the futex bucket
+##          and never as a signal-waiter, and had no signal check, so a thread
+##          blocked in FUTEX_WAIT (e.g. glibc pthread_cond_wait, pthread_join's
+##          lll_wait_tid) could not be interrupted by a signal AT ALL — it slept
+##          forever while the signal stayed pending.  Fix (ipc/futex.rs +
+##          handlers.rs + linux.rs + error.rs):
+##            * New KernelError::Interrupted (-8 → EINTR via linux_errno_for /
+##              kernel_error_from_code).
+##            * remove_self_waiter(addr, addr_space, task) helper: dequeues this
+##              task's lingering futex waiter (original bucket then full scan for
+##              a CMP_REQUEUE move); the timeout path's old inline dequeue was
+##              refactored onto it.
+##            * Indefinite futex_wait_bitset and timed futex_wait_bitset_timeout
+##              now register as signal-waiters (register-then-recheck) for USER
+##              processes only (pid 0 kernel tasks / boot self-tests keep the
+##              unchanged plain block_current), and on a signal wake dequeue
+##              self + return Err(Interrupted).  Spurious wakes (still queued,
+##              no deliverable signal) return Ok(true) so glibc re-checks.
+##            * Handlers: indefinite sys_futex_wait / sys_futex_wait_bitset map
+##              Err(Interrupted) → ERESTARTSYS sentinel (FUTEX_WAIT is
+##              restartable; a restart re-checks *uaddr==val).  The TIMED
+##              handlers pass Err(Interrupted) through → -EINTR (a relative
+##              timeout must NOT be restarted from scratch — that would reset the
+##              clock; Linux uses ERESTART_RESTARTBLOCK with the absolute
+##              deadline, here simplified to EINTR, which glibc tolerates by
+##              recomputing the timeout on retry).
+##            * linux_from_futex_wait now passes any restart sentinel through
+##              untouched — critical, because the negated sentinel -512
+##              (ERESTARTSYS) collides with KernelError::CrossDevice == -512 and
+##              would otherwise be mis-mapped to EXDEV by linux_from_native.
+##            * No-livelock: same argument as wait4 — classify_post only keeps a
+##              signal deliverable-and-pending when it has a handler, so the
+##              ERESTARTSYS always resolves to handler-run + restart/EINTR.
+##            * PI futexes (FUTEX_LOCK_PI / FUTEX_WAIT_REQUEUE_PI) intentionally
+##              NOT touched (priority-inheritance restart semantics differ).
+##            * self_test_restart_action extended: Interrupted→EINTR mapping,
+##              code -8 round-trip, sentinel pass-through, timed→EINTR.
+##            Build + clippy (no new warns) + boot-test PASSED (237s; glibc
+##            pthread/futex unaffected).  Still wants a ring-3 end-to-end test
+##            (step c).
 ##        - wait4 DONE 2026-06-18: was a confirmed bug — the blocking loop
 ##          had NO signal-interruption check and did not register as a
 ##          signal-waiter, so a process blocked in wait4 could not be

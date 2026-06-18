@@ -81,6 +81,64 @@ fn current_addr_space() -> u64 {
     crate::proc::pcb::get_pml4(pid).unwrap_or(0)
 }
 
+/// The owning user process id of the current task, or `0` for a kernel task.
+///
+/// Signal interruptibility only applies to user processes: kernel tasks (boot
+/// self-tests, kworker-style threads) have no signal state, so a `0` here means
+/// "park uninterruptibly, exactly as before".
+fn current_user_pid() -> u64 {
+    let task_id = sched::current_task_id();
+    crate::proc::thread::owner_process(task_id).unwrap_or(0)
+}
+
+/// Remove this task's lingering futex waiter from whatever bucket holds it,
+/// scoped to `addr_space`, and report whether one was found.
+///
+/// A waiter is normally dequeued by its waker (`futex_wake` / a successful
+/// requeue), so finding ourselves *still* queued after a wake means the wake
+/// came from a different source — a timeout or a signal — and we must evict the
+/// stale entry ourselves.  We first probe the original `addr` bucket (the common
+/// case), then fall back to a full scan because `FUTEX_CMP_REQUEUE` may have
+/// moved us to a *different* address (hence a different bucket) before the wake.
+///
+/// Returns `true` iff a waiter for `task` was found and removed.
+fn remove_self_waiter(addr: u64, addr_space: u64, task: u64) -> bool {
+    let mut table = FUTEX_TABLE.lock();
+    let idx = FutexTable::bucket_index(addr, addr_space);
+
+    // SAFETY: idx is masked to NUM_BUCKETS-1 by bucket_index.
+    #[allow(clippy::indexing_slicing)]
+    {
+        let bucket = &mut table.buckets[idx];
+        if let Some(pos) = bucket
+            .iter()
+            .position(|w| w.task_id == task && w.addr == addr && w.addr_space == addr_space)
+        {
+            bucket.remove(pos);
+            return true;
+        }
+    }
+
+    // Requeued elsewhere: scan all buckets for this task within our address
+    // space and evict any lingering entry.
+    for bucket in &mut table.buckets {
+        if let Some(pos) = bucket
+            .iter()
+            .position(|w| w.task_id == task && w.addr_space == addr_space)
+        {
+            bucket.remove(pos);
+            return true;
+        }
+    }
+    false
+}
+
+/// `true` if a deliverable (unblocked) signal is pending for `pid`.
+fn deliverable_signal_pending(pid: u64) -> bool {
+    let deliverable = !crate::proc::signal::blocked(pid);
+    crate::proc::signal::has_pending_in_mask(pid, deliverable)
+}
+
 // ---------------------------------------------------------------------------
 // Waiter and hash table
 // ---------------------------------------------------------------------------
@@ -260,9 +318,41 @@ pub fn futex_wait_bitset(addr: u64, expected: u32, bitset: u32) -> KernelResult<
         // Drop the table lock before blocking.
     }
 
-    // Block the current task.  The scheduler will switch to another
-    // task.  When we're woken (by futex_wake), execution resumes here.
+    let pid = current_user_pid();
+    if pid == 0 {
+        // Kernel task (boot self-test, etc.): no signal context — park
+        // uninterruptibly.  Woken only by futex_wake.
+        sched::block_current();
+        return Ok(true);
+    }
+
+    // User process: make the park interruptible by signals.  Register as a
+    // signal-waiter so a delivered signal wakes us, then recheck for a signal
+    // that may have arrived between enqueue and registration (register-then-
+    // recheck closes that race).
+    let deliverable = !crate::proc::signal::blocked(pid);
+    crate::proc::signal::register_signalfd_waiter(pid, current_task, deliverable);
+    if crate::proc::signal::has_pending_in_mask(pid, deliverable) {
+        crate::proc::signal::deregister_signalfd_waiter(pid, current_task);
+        // A signal is already pending: unwind our queue entry and report the
+        // interruption (unless a racing futex_wake already dequeued us).
+        if remove_self_waiter(addr, addr_space, current_task) {
+            return Err(KernelError::Interrupted);
+        }
+        return Ok(true);
+    }
+
     sched::block_current();
+    crate::proc::signal::deregister_signalfd_waiter(pid, current_task);
+
+    // Woken.  If futex_wake removed us we are no longer queued -> a real wake.
+    // If we are still queued, the wake came from a signal (or was spurious):
+    // evict ourselves, then report Interrupted only when a deliverable signal
+    // is actually pending; otherwise treat it as a spurious wake (the caller
+    // re-checks the futex word).
+    if remove_self_waiter(addr, addr_space, current_task) && deliverable_signal_pending(pid) {
+        return Err(KernelError::Interrupted);
+    }
 
     Ok(true)
 }
@@ -356,64 +446,54 @@ pub fn futex_wait_bitset_timeout(
 
     let timer_handle = crate::hrtimer::schedule_ns(timeout_ns, timeout_wake, current_task);
 
-    // Block until woken (by futex_wake or timer).
-    sched::block_current();
-
-    // We woke up — determine why.
-    // If the timer expired, we're still in the bucket and need to
-    // remove ourselves.  If futex_wake woke us, we were already
-    // removed from the bucket by the waker.
-    let mut was_timed_out = false;
-
-    {
-        let mut table = FUTEX_TABLE.lock();
-        let idx = FutexTable::bucket_index(addr, addr_space);
-
-        // If we're still in the bucket, the timer woke us (not futex_wake).
-        // Match on both addr and addr_space to avoid false positives from
-        // other processes that collide into the same bucket.
-        let found = {
-            // SAFETY: idx is masked to NUM_BUCKETS-1 by bucket_index.
-            #[allow(clippy::indexing_slicing)]
-            let bucket = &mut table.buckets[idx];
-            if let Some(pos) = bucket.iter().position(|w| {
-                w.task_id == current_task && w.addr == addr && w.addr_space == addr_space
-            }) {
-                bucket.remove(pos);
-                true
-            } else {
-                false
+    // Register as a signal-waiter (user processes only) so a delivered signal
+    // wakes the park, then recheck for an already-pending signal that arrived
+    // between enqueue and registration (register-then-recheck).
+    let pid = current_user_pid();
+    if pid != 0 {
+        let deliverable = !crate::proc::signal::blocked(pid);
+        crate::proc::signal::register_signalfd_waiter(pid, current_task, deliverable);
+        if crate::proc::signal::has_pending_in_mask(pid, deliverable) {
+            crate::proc::signal::deregister_signalfd_waiter(pid, current_task);
+            crate::hrtimer::cancel(timer_handle);
+            if remove_self_waiter(addr, addr_space, current_task) {
+                return Err(KernelError::Interrupted);
             }
-        };
-
-        if found {
-            was_timed_out = true;
-        } else {
-            // Not in the original bucket.  Either futex_wake removed us, or
-            // we were requeued to a *different* address (and thus a
-            // different bucket) by futex_requeue before the timer fired.  A
-            // requeued waiter carries the destination addr, so a search keyed
-            // on the original `addr` would miss it and leave a stale entry.
-            // Scan all buckets by task_id (scoped to our address space) and
-            // evict any lingering entry for this task.
-            for bucket in &mut table.buckets {
-                if let Some(pos) = bucket
-                    .iter()
-                    .position(|w| w.task_id == current_task && w.addr_space == addr_space)
-                {
-                    bucket.remove(pos);
-                    was_timed_out = true;
-                    break;
-                }
-            }
+            return Ok(true);
         }
     }
 
+    // Block until woken (by futex_wake, the timer, or a signal).
+    sched::block_current();
+
+    if pid != 0 {
+        crate::proc::signal::deregister_signalfd_waiter(pid, current_task);
+    }
     crate::hrtimer::cancel(timer_handle);
 
-    if was_timed_out && crate::hrtimer::now_ns() >= deadline_ns {
+    // Why did we wake?  A waker (futex_wake / requeue) dequeues us, so if we are
+    // still queued the wake came from the timer or a signal.  remove_self_waiter
+    // probes the original bucket then falls back to a full scan (handling a
+    // requeue that moved us to a different bucket).
+    let still_queued = remove_self_waiter(addr, addr_space, current_task);
+
+    if !still_queued {
+        // A futex_wake (or successful requeue+wake) released us — a real wake.
+        return Ok(true);
+    }
+
+    // Still queued: prefer reporting a signal interruption over a timeout when
+    // both happened (Linux delivers the signal; the timeout is restarted via the
+    // restart_block in the kernel, here simplified to EINTR for the timed case).
+    if pid != 0 && deliverable_signal_pending(pid) {
+        return Err(KernelError::Interrupted);
+    }
+
+    if crate::hrtimer::now_ns() >= deadline_ns {
         Err(KernelError::TimedOut)
     } else {
+        // Spurious early wake with neither signal nor deadline — report woken;
+        // the caller re-checks the futex word and re-waits if needed.
         Ok(true)
     }
 }

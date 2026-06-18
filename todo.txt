@@ -8939,9 +8939,21 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          the signalfd mask" check added first (it has none today — it
 ##          only wakes for watched signals), then that exit becomes
 ##          ERESTARTSYS.
-##        - wait4 blocking loop has no signal-interruption check at all today
-##          (it only wakes on child state changes); add EINTR/ERESTARTSYS on
-##          a deliverable pending signal as a prerequisite.
+##        - wait4 DONE 2026-06-18: was a confirmed bug — the blocking loop
+##          had NO signal-interruption check and did not register as a
+##          signal-waiter, so a process blocked in wait4 could not be
+##          interrupted by a signal at all (set_pending only wakes
+##          signal-waiters; wait4 only registered on the child wait-task
+##          list).  Both the specific-pid and any-child loops now: (1) check
+##          for a deliverable pending signal after the child scan and return
+##          ERESTARTSYS (Linux wait4 is restartable), and (2) register as a
+##          signal-waiter around block_current (register-then-recheck) so a
+##          delivered signal wakes the park.  No-livelock argument: only
+##          handler-backed signals can be pending-and-deliverable at a park
+##          point (classify_post drops no-handler default-ignore signals and
+##          terminates on fatal ones), so the sentinel always resolves to a
+##          handler run + restart/EINTR.  Still wants a ring-3 two-process
+##          end-to-end test (step c below).
 ##      (b) implement the restart_block storage + make the
 ##      restart_syscall(NR=219) trampoline (no-op stub, linux.rs ~31853)
 ##      replay it; (c) a ring-3 end-to-end test (install SA_RESTART

@@ -42156,6 +42156,17 @@ fn sys_wait4(args: &SyscallArgs) -> SyscallResult {
             if nohang {
                 return SyscallResult::ok(0);
             }
+            // A deliverable (handler-backed) signal interrupts the wait.  wait4
+            // is restartable, so emit ERESTARTSYS: the signal-delivery
+            // checkpoint runs the handler and then either restarts wait4
+            // (SA_RESTART) or substitutes -EINTR.  Only handler-backed signals
+            // can be pending-and-deliverable at a park point (classify_post
+            // drops no-handler default-ignore signals and terminates on fatal
+            // ones), so the restart can never spuriously livelock here.
+            let deliverable = !crate::proc::signal::blocked(parent_pid);
+            if crate::proc::signal::has_pending_in_mask(parent_pid, deliverable) {
+                return restart::restart_result(restart::ERESTARTSYS);
+            }
             // Block until a state change (lost-wakeup-safe via set_wait_task +
             // re-check).  A stop/continue wakes this task through the parent
             // waiters that stop_process_for_signal/continue_process signal.
@@ -42183,7 +42194,18 @@ fn sys_wait4(args: &SyscallArgs) -> SyscallResult {
                     Err(e) => return linux_err(linux_errno_for(e)),
                 }
             }
+            // Register as a signal-waiter so a signal delivered while we are
+            // parked wakes us (set_pending wakes signal-waiters); recheck after
+            // registering to close the post-before-park race.  The registration
+            // window is bounded to just around the park — every break/return
+            // path above runs before it, so none can leak the registration.
+            crate::proc::signal::register_signalfd_waiter(parent_pid, task_id, deliverable);
+            if crate::proc::signal::has_pending_in_mask(parent_pid, deliverable) {
+                crate::proc::signal::deregister_signalfd_waiter(parent_pid, task_id);
+                continue;
+            }
             crate::sched::block_current();
+            crate::proc::signal::deregister_signalfd_waiter(parent_pid, task_id);
         }
     } else {
         // pid <= 0: wait for any child.  Same register-before-check
@@ -42226,7 +42248,24 @@ fn sys_wait4(args: &SyscallArgs) -> SyscallResult {
                 pcb::clear_wait_any_task(parent_pid, task_id);
                 return SyscallResult::ok(0);
             }
+            // Interrupted by a deliverable (handler-backed) signal — wait4 is
+            // restartable; clear the any-child registration and emit
+            // ERESTARTSYS (see the specific-pid branch for the no-livelock
+            // argument).
+            let deliverable = !crate::proc::signal::blocked(parent_pid);
+            if crate::proc::signal::has_pending_in_mask(parent_pid, deliverable) {
+                pcb::clear_wait_any_task(parent_pid, task_id);
+                return restart::restart_result(restart::ERESTARTSYS);
+            }
+            // Register as a signal-waiter for the park (register-then-recheck),
+            // bounded around block_current so no exit path leaks it.
+            crate::proc::signal::register_signalfd_waiter(parent_pid, task_id, deliverable);
+            if crate::proc::signal::has_pending_in_mask(parent_pid, deliverable) {
+                crate::proc::signal::deregister_signalfd_waiter(parent_pid, task_id);
+                continue;
+            }
             crate::sched::block_current();
+            crate::proc::signal::deregister_signalfd_waiter(parent_pid, task_id);
         }
     };
 

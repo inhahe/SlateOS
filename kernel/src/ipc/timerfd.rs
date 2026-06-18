@@ -515,6 +515,51 @@ fn timerfd_wake(tid: u64) {
     }
 }
 
+/// The owning user process id of the current task, or `0` for a kernel task.
+///
+/// Timerfd reads are interruptible by signals only for user processes; kernel
+/// tasks (`pid == 0`) have no signal state and park uninterruptibly.
+fn current_user_pid() -> u64 {
+    crate::proc::thread::owner_process(sched::current_task_id()).unwrap_or(0)
+}
+
+/// `true` if a deliverable (unblocked) signal is pending for `pid`.
+///
+/// Always `false` for `pid == 0` (kernel task — no signal context).
+fn deliverable_signal_pending(pid: u64) -> bool {
+    pid != 0
+        && crate::proc::signal::has_pending_in_mask(pid, !crate::proc::signal::blocked(pid))
+}
+
+/// Park the current task for a blocking timerfd read, interruptibly for user
+/// processes.
+///
+/// The caller has already armed the expiry [`crate::hrtimer`] (if the timer is
+/// armed) — that is one wake source.  This adds the signal-waiter registration
+/// (so [`crate::proc::signal::set_pending`] wakes the park when a deliverable
+/// signal arrives), using the register-then-recheck idiom to close the
+/// post-before-park race, blocks, then deregisters.  Kernel tasks park
+/// uninterruptibly.  After this returns the caller's loop must re-evaluate both
+/// the timerfd state and [`deliverable_signal_pending`] — a signal wake is
+/// reported by the latter, not by this function.
+fn park_for_timerfd(pid: u64, task: u64) {
+    if pid == 0 {
+        sched::block_current();
+        return;
+    }
+    let deliverable = !crate::proc::signal::blocked(pid);
+    crate::proc::signal::register_signalfd_waiter(pid, task, deliverable);
+    if crate::proc::signal::has_pending_in_mask(pid, deliverable) {
+        // A signal arrived between waiter registration and the signal-waiter
+        // registration — don't block; the caller's loop observes it and
+        // returns Interrupted.
+        crate::proc::signal::deregister_signalfd_waiter(pid, task);
+        return;
+    }
+    sched::block_current();
+    crate::proc::signal::deregister_signalfd_waiter(pid, task);
+}
+
 /// Outcome of a blocking timerfd read ([`read_expirations_blocking`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockingRead {
@@ -549,6 +594,8 @@ pub enum BlockingRead {
 /// [`KernelError::InvalidHandle`] if the handle becomes stale (e.g. the last
 /// reference is closed) while blocked.
 pub fn read_expirations_blocking(handle: TimerFdHandle) -> KernelResult<BlockingRead> {
+    let pid = current_user_pid();
+    let task = sched::current_task_id();
     loop {
         // Read the clock before taking the lock (leaf-lock discipline).
         let cid = clockid(handle).ok_or(KernelError::InvalidHandle)?;
@@ -581,9 +628,22 @@ pub fn read_expirations_blocking(handle: TimerFdHandle) -> KernelResult<Blocking
                 return Ok(BlockingRead::Expirations(count));
             }
 
+            // Honour a deliverable signal before parking; clear any stale
+            // waiter slot from a prior signal wake.  A timerfd is a slow object
+            // with no inherent deadline at this point (the wait may be
+            // indefinite when disarmed), so an interrupted blocking read is
+            // restartable (SA_RESTART) — the syscall layer maps Interrupted to
+            // ERESTARTSYS.
+            if deliverable_signal_pending(pid) {
+                if tfd.reader_waiter == Some(task) {
+                    tfd.reader_waiter = None;
+                }
+                return Err(KernelError::Interrupted);
+            }
+
             // Not yet due — register as the parked reader and capture the
             // deadline (if armed) before dropping the lock.
-            tfd.reader_waiter = Some(sched::current_task_id());
+            tfd.reader_waiter = Some(task);
             next_remaining = if tfd.expiry_ns == 0 {
                 None
             } else {
@@ -595,14 +655,14 @@ pub fn read_expirations_blocking(handle: TimerFdHandle) -> KernelResult<Blocking
 
         // Arm a wakeup `hrtimer` for the armed case; the disarmed case relies on
         // `settime` waking `reader_waiter`.
-        let timer = next_remaining.map(|rem| {
-            crate::hrtimer::schedule_ns(rem.max(1), timerfd_wake, sched::current_task_id())
-        });
+        let timer = next_remaining
+            .map(|rem| crate::hrtimer::schedule_ns(rem.max(1), timerfd_wake, task));
 
-        sched::block_current();
+        park_for_timerfd(pid, task);
 
-        // Woken (timer fired, settime re-armed, or spurious) — cancel any
-        // pending wakeup timer (harmless if it already fired) and re-evaluate.
+        // Woken (timer fired, settime re-armed, signal, or spurious) — cancel
+        // any pending wakeup timer (harmless if it already fired) and
+        // re-evaluate.
         if let Some(th) = timer {
             crate::hrtimer::cancel(th);
         }

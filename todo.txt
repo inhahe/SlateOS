@@ -9002,6 +9002,34 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##              child parked forever (non-zombie → FAIL); draining as data →
 ##              exit 0xEE → FAIL.  Build clean (36.77s) + boot-test PASSED;
 ##              serial shows "exit == 44: OK".
+##        - timerfd blocking read DONE 2026-06-18: same single-slot-waiter
+##          hang-bug class as pipe/eventfd/signalfd, Linux-reachable via
+##          timerfd_create (283) + read.  read_expirations_blocking (ipc/
+##          timerfd.rs) parked with a bare block_current() and a single
+##          reader_waiter slot woken only by settime / the expiry hrtimer — a
+##          deliverable signal could never interrupt it (a disarmed-timerfd read
+##          blocks indefinitely, so this hung forever).  Fix (mirror of pipe.rs):
+##            * 3 helpers (current_user_pid, deliverable_signal_pending,
+##              park_for_timerfd) after timerfd_wake.  park_for_timerfd registers
+##              a signal-waiter via the register-then-recheck idiom (the expiry
+##              hrtimer remains a separate wake source); pid 0 → plain
+##              block_current.
+##            * The block loop checks deliverable_signal_pending before parking
+##              (clearing its own reader_waiter slot, returning Err(Interrupted))
+##              and parks via park_for_timerfd.
+##            * dispatch_timerfd_read (linux.rs) maps Err(Interrupted) →
+##              restart::restart_result(ERESTARTSYS) (timerfd is a slow object →
+##              restartable under SA_RESTART; -512 sentinel bypasses
+##              linux_from_native so no CrossDevice collision).
+##            * Ring-3 test (elf::build_linux_timerfd_interrupt_test_elf +
+##              spawn::self_test_linux_timerfd_interrupt, wired into main.rs):
+##              child installs a NON-SA_RESTART SIGUSR1 handler, creates a
+##              timerfd_create(CLOCK_MONOTONIC,0) it never arms, blocks in
+##              read(); kernel posts SIGUSR1; correct kernel wakes it and read
+##              returns -EINTR → exit(0x1B=27).  Park-uninterruptible regression
+##              → parked forever (non-zombie → FAIL); count-as-data → 0xEE →
+##              FAIL.  Build clean (31.43s) + boot-test PASSED; serial shows
+##              "exit == 27: OK".
 ##        - futex(FUTEX_WAIT / FUTEX_WAIT_BITSET) DONE 2026-06-18: was the
 ##          same confirmed bug class as wait4 — the native futex_wait_bitset /
 ##          futex_wait_bitset_timeout paths registered ONLY in the futex bucket

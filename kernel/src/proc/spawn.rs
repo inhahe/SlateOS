@@ -2861,6 +2861,119 @@ pub fn self_test_linux_eventfd_interrupt() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test that a **blocking `timerfd` read is interruptible
+/// by a deliverable signal**.
+///
+/// Spawns [`elf::build_linux_timerfd_interrupt_test_elf`]: the child installs
+/// a `SIGUSR1` handler *without* `SA_RESTART`, creates a `timerfd_create`d
+/// timer that it **never arms**, and blocks in `read()` on it (a disarmed
+/// timerfd read blocks indefinitely).  We post `SIGUSR1` and yield.  A correct
+/// kernel wakes the blocked read, runs the handler, and the read returns
+/// `-EINTR`; the child detects the negative return and exits with `sentinel`.
+///
+/// This distinguishes the fix from the bug: before the fix the timerfd read
+/// parked with a bare `block_current()` and a single-slot waiter that only
+/// `settime`/the expiry hrtimer woke, so `SIGUSR1` never woke it.  The child
+/// would park forever (the handler runs only at the syscall-return checkpoint,
+/// which a parked read never reaches) → it never becomes a zombie → the state
+/// check below fails.
+pub fn self_test_linux_timerfd_interrupt() -> KernelResult<()> {
+    // Distinct from brk(109)/argv0(0x51)/sa_restart(0x7E)/mmap(91)/
+    // interp(42)/signalfd-intr(0x3D)/eventfd-intr(0x2C).  0x1B = 27.
+    const SENTINEL: u8 = 0x1B;
+
+    serial_println!(
+        "[spawn] Running Linux timerfd-read signal-interruptibility (ring 3) test..."
+    );
+
+    let exe_elf = elf::build_linux_timerfd_interrupt_test_elf(SENTINEL);
+    let argv: &[&[u8]] = &[b"tfdintr"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-timerfd-intr",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: timerfd-intr spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Let the child install its handler + timerfd and park in read(tfd, ...).
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+
+    let pre = pcb::state(result.pid);
+    if pre == Some(pcb::ProcessState::Zombie) {
+        thread::on_thread_exit(result.task_id);
+        let code = pcb::exit_code(result.pid);
+        pcb::destroy(result.pid);
+        serial_println!(
+            "[spawn]   FAIL: timerfd-intr (ring 3) — child exited (code {:?}) before the \
+             signal was posted; the timerfd read did not block",
+            code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Post SIGUSR1.  A correct kernel interrupts the blocked read; the buggy
+    // one ignores it and the child stays parked forever (disarmed timerfd).
+    crate::proc::signal::set_pending(result.pid, 10);
+
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: timerfd-intr (ring 3) — expected Zombie, got {:?} (the blocked \
+             timerfd read was NOT interrupted by SIGUSR1 — it parked forever; this is exactly \
+             the hang bug the fix addresses)",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code == Some(0xEE) {
+        serial_println!(
+            "[spawn]   FAIL: timerfd-intr (ring 3) — read returned a count (>=0) instead of \
+             -EINTR; the signal interruption was not surfaced"
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(i32::from(SENTINEL)) {
+        serial_println!(
+            "[spawn]   FAIL: timerfd-intr (ring 3) — expected exit {} (read returned -EINTR), \
+             got {:?}",
+            SENTINEL, exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   Linux timerfd-read interruptibility (ring 3: block in read(disarmed timerfd) → \
+         SIGUSR1 wakes it → handler runs → read returns -EINTR, exit == {}): OK",
+        SENTINEL
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test that the SysV initial stack's **argv pointers** are
 /// valid in the mapped user stack — not just the scalar `argc`.
 ///

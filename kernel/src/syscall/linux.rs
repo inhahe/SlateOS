@@ -4025,6 +4025,14 @@ fn dispatch_timerfd_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
             Ok(crate::ipc::timerfd::BlockingRead::Cancelled) => {
                 return linux_err(errno::ECANCELED);
             }
+            // A timerfd is a slow object: an indefinite blocking read
+            // interrupted by a deliverable signal is restartable (SA_RESTART)
+            // via the ERESTARTSYS sentinel.  The -512 sentinel reaches the
+            // signal-delivery checkpoint untouched (this arm does not pass
+            // through linux_from_native, so no CrossDevice collision).
+            Err(crate::error::KernelError::Interrupted) => {
+                return restart::restart_result(restart::ERESTARTSYS);
+            }
             Err(_) => return linux_err(errno::EBADF),
         }
     };

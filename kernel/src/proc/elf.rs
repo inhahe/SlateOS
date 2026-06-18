@@ -4301,6 +4301,147 @@ pub fn build_linux_eventfd_interrupt_test_elf(sentinel: u8) -> alloc::vec::Vec<u
     buf
 }
 
+/// Build a **Linux-ABI** `ET_EXEC` test ELF that validates a **blocking
+/// `timerfd` read is interruptible by a deliverable signal** — the timerfd
+/// analogue of the slow-object interruptibility fixes.
+///
+/// The payload:
+/// 1. Installs a `SIGUSR1` handler with `SA_RESTORER` but **without**
+///    `SA_RESTART` (so an interrupted slow syscall surfaces `EINTR`).  The
+///    handler body is a bare `ret`.
+/// 2. Creates a `timerfd_create(CLOCK_MONOTONIC, 0)` — fd 3 — and *never arms
+///    it* (no `timerfd_settime`).  A read of a disarmed timerfd blocks
+///    indefinitely (until armed or interrupted), which is the cleanest
+///    indefinite-block case to interrupt.
+/// 3. Blocks in `read(tfd, buf, 8)`.
+/// 4. The orchestrator posts `SIGUSR1`.  A correct kernel wakes the blocked
+///    read, the handler runs, and the read returns `-EINTR`.
+/// 5. `exit(sentinel)` if the read returned a negative value (the expected
+///    `-EINTR`); `exit(0xEE)` if it unexpectedly returned a count.
+///
+/// This *distinguishes* the fix from the bug: before the fix the timerfd read
+/// parked with a bare `block_current()` and a single-slot reader waiter that
+/// only `settime`/the expiry hrtimer woke, so `SIGUSR1` never woke it — the
+/// thread parked forever (the handler runs only at the syscall-return
+/// checkpoint, which a parked read never reaches), so the child never becomes
+/// a zombie and the orchestrator's state check fails.  Used by
+/// [`crate::proc::spawn::self_test_linux_timerfd_interrupt`].
+#[must_use]
+pub fn build_linux_timerfd_interrupt_test_elf(sentinel: u8) -> alloc::vec::Vec<u8> {
+    use alloc::vec;
+
+    let phdr_offset: u64 = 64;
+    let code_offset: u64 = 120; // 64 (ehdr) + 56 (one phdr)
+    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+
+    // Hand-assembled x86_64.  Linux ABI numbers: rt_sigaction=13,
+    // timerfd_create=283 (0x11B), read=0, exit=60, rt_sigreturn=15.
+    // SIGUSR1=10.  CLOCK_MONOTONIC=1.  sa_flags = SA_RESTORER only
+    // (0x04000000) — deliberately NO SA_RESTART so the interrupted read
+    // yields EINTR.
+    //
+    // Stack frame (after `sub rsp, 256`):
+    //   [rsp+16] struct kernel_sigaction (32 bytes)
+    //   [rsp+64] timerfd read buffer (8 bytes)
+    let mut code: [u8; 148] = [
+        // _start:
+        0x48, 0x81, 0xEC, 0x00, 0x01, 0x00, 0x00, // sub rsp, 256             @0
+        0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, //       mov rax, handler_addr    @7 (imm@9)
+        0x48, 0x89, 0x44, 0x24, 0x10, //             mov [rsp+16], rax        @17
+        0x48, 0xC7, 0x44, 0x24, 0x18, 0x00, 0x00, 0x00, 0x04, // mov qword [rsp+24],0x04000000 @22
+        0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, //       mov rax, restorer_addr   @31 (imm@33)
+        0x48, 0x89, 0x44, 0x24, 0x20, //             mov [rsp+32], rax        @41
+        0x48, 0xC7, 0x44, 0x24, 0x28, 0x00, 0x00, 0x00, 0x00, // mov qword [rsp+40],0 (mask)  @46
+        0xBF, 0x0A, 0x00, 0x00, 0x00, //             mov edi, 10  (SIGUSR1)   @55
+        0x48, 0x8D, 0x74, 0x24, 0x10, //             lea rsi, [rsp+16] (&act) @60
+        0x31, 0xD2, //                               xor edx, edx (oact=NULL) @65
+        0x41, 0xBA, 0x08, 0x00, 0x00, 0x00, //       mov r10d, 8  (sigsetsz)  @67
+        0xB8, 0x0D, 0x00, 0x00, 0x00, //             mov eax, 13 (rt_sigaction)@73
+        0x0F, 0x05, //                               syscall                  @78
+        // timerfd_create(CLOCK_MONOTONIC, 0):
+        0xBF, 0x01, 0x00, 0x00, 0x00, //             mov edi, 1  (CLOCK_MONO) @80
+        0x31, 0xF6, //                               xor esi, esi (flags=0)   @85
+        0xB8, 0x1B, 0x01, 0x00, 0x00, //             mov eax, 283(timerfd_cr) @87
+        0x0F, 0x05, //                               syscall                  @92
+        0x48, 0x89, 0xC3, //                         mov rbx, rax (tfd)       @94
+        // read(tfd, buf, 8) — disarmed timer ⇒ blocks indefinitely:
+        0x48, 0x89, 0xDF, //                         mov rdi, rbx (fd)        @97
+        0x48, 0x8D, 0x74, 0x24, 0x40, //             lea rsi, [rsp+64] (buf)  @100
+        0xBA, 0x08, 0x00, 0x00, 0x00, //             mov edx, 8   (count)     @105
+        0x31, 0xC0, //                               xor eax, eax (SYS_read)  @110
+        0x0F, 0x05, //                               syscall  (blocks)        @112
+        0x48, 0x85, 0xC0, //                         test rax, rax            @114
+        0x78, 0x07, //                               js ok (+7 -> @126)       @117
+        0xBF, 0xEE, 0x00, 0x00, 0x00, //             mov edi, 0xEE (unexpected)@119
+        0xEB, 0x05, //                               jmp exit_syscall (+5)    @124
+        // ok:                                                                @126
+        0xBF, 0x00, 0x00, 0x00, 0x00, //             mov edi, sentinel        @126 (imm@127)
+        // exit_syscall:                                                      @131
+        0xB8, 0x3C, 0x00, 0x00, 0x00, //             mov eax, 60 (SYS_exit)   @131
+        0x0F, 0x05, //                               syscall                  @136
+        0xCC, //                                     int3 (unreachable)       @138
+        // handler:                                                           @139
+        0xC3, //                                     ret -> restorer (pretcode)@139
+        // restorer:                                                          @140
+        0xB8, 0x0F, 0x00, 0x00, 0x00, //             mov eax, 15 (rt_sigreturn)@140
+        0x0F, 0x05, //                               syscall                  @145
+        0xCC, //                                     int3 (unreachable)       @147
+    ];
+
+    // Patch absolute addresses + the sentinel exit-code immediate.
+    let handler_addr = load_vaddr.wrapping_add(139);
+    let restorer_addr = load_vaddr.wrapping_add(140);
+    code[9..17].copy_from_slice(&handler_addr.to_le_bytes());
+    code[33..41].copy_from_slice(&restorer_addr.to_le_bytes());
+    code[127] = sentinel; // low byte of `mov edi, sentinel` imm32
+    let code_len = code.len(); // 148
+
+    let seg_data_len = code_len;
+    let file_size = code_offset as usize + seg_data_len;
+    let mut buf = vec![0u8; file_size];
+
+    // --- ELF header ---
+    buf[0] = 0x7F;
+    buf[1] = b'E';
+    buf[2] = b'L';
+    buf[3] = b'F';
+    buf[EI_CLASS] = ELFCLASS64;
+    buf[EI_DATA] = ELFDATA2LSB;
+    buf[EI_VERSION] = EV_CURRENT;
+    buf[EI_OSABI] = ELFOSABI_GNU;
+
+    write_u16(&mut buf, 16, ET_EXEC);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr); // e_entry
+    write_u64(&mut buf, 32, phdr_offset); // e_phoff
+    write_u64(&mut buf, 40, 0); // e_shoff
+    write_u32(&mut buf, 48, 0); // e_flags
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, 1); // e_phnum
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0);
+    write_u16(&mut buf, 62, 0);
+
+    // --- Program header (PT_LOAD: R+X covering the code) ---
+    let ph = phdr_offset as usize;
+    write_u32(&mut buf, ph, PT_LOAD);
+    write_u32(&mut buf, ph + 4, PF_R | PF_X);
+    write_u64(&mut buf, ph + 8, code_offset);
+    write_u64(&mut buf, ph + 16, load_vaddr);
+    write_u64(&mut buf, ph + 24, 0);
+    write_u64(&mut buf, ph + 32, seg_data_len as u64);
+    write_u64(&mut buf, ph + 40, seg_data_len as u64);
+    write_u64(&mut buf, ph + 48, 0x1000);
+
+    // --- Code ---
+    let cs = code_offset as usize;
+    buf[cs..cs + code_len].copy_from_slice(&code);
+
+    buf
+}
+
 /// Build a "Hello from userspace!" ELF that calls SYS_CONSOLE_WRITE
 /// then SYS_EXIT(0).
 ///

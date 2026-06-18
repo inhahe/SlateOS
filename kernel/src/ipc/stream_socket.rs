@@ -281,6 +281,55 @@ impl Pair {
 static PAIRS: Mutex<BTreeMap<PairId, Pair>> = Mutex::new(BTreeMap::new());
 
 // ---------------------------------------------------------------------------
+// Signal-interruptible blocking helpers
+// ---------------------------------------------------------------------------
+//
+// A Unix stream socket is a *slow* object with no inherent timeout, so a
+// blocking send/recv that has not yet transferred a byte must be
+// interruptible by a deliverable signal (SA_RESTART): the syscall layer
+// turns the resulting `Interrupted` into the ERESTARTSYS sentinel.  These
+// helpers mirror the pipe subsystem exactly (see `ipc::pipe`).
+
+/// The owning user process id of the current task, or `0` for a kernel
+/// task (boot self-tests).  Kernel tasks have no signal state and park
+/// uninterruptibly, exactly as before.
+fn current_user_pid() -> u64 {
+    crate::proc::thread::owner_process(sched::current_task_id()).unwrap_or(0)
+}
+
+/// `true` if a deliverable (unblocked) signal is pending for `pid`.
+/// Always `false` for `pid == 0` (kernel task — no signal context).
+fn deliverable_signal_pending(pid: u64) -> bool {
+    pid != 0
+        && crate::proc::signal::has_pending_in_mask(pid, !crate::proc::signal::blocked(pid))
+}
+
+/// Park the current task for a stream-socket wait, interruptibly for user
+/// processes.  Registers a signal-waiter with the register-then-recheck
+/// idiom (so `set_pending` wakes the park when a deliverable signal
+/// arrives), blocks, then deregisters.  Kernel tasks (`pid == 0`) park
+/// uninterruptibly.  The caller's surrounding loop must, after this
+/// returns, re-acquire `PAIRS` and re-evaluate both the ring state and
+/// [`deliverable_signal_pending`] — a signal wake is reported by the
+/// latter, not by this function.
+fn park_for_socket(pid: u64, task: u64) {
+    if pid == 0 {
+        sched::block_current();
+        return;
+    }
+    let deliverable = !crate::proc::signal::blocked(pid);
+    crate::proc::signal::register_signalfd_waiter(pid, task, deliverable);
+    if crate::proc::signal::has_pending_in_mask(pid, deliverable) {
+        // A signal arrived between enqueue and registration — don't block;
+        // the caller's loop will observe it and return Interrupted.
+        crate::proc::signal::deregister_signalfd_waiter(pid, task);
+        return;
+    }
+    sched::block_current();
+    crate::proc::signal::deregister_signalfd_waiter(pid, task);
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -320,6 +369,8 @@ pub fn send(handle: StreamSocketHandle, data: &[u8]) -> KernelResult<usize> {
     }
     let e = handle.endpoint();
     let peer = e ^ 1;
+    let pid = current_user_pid();
+    let task = sched::current_task_id();
 
     loop {
         {
@@ -343,11 +394,20 @@ pub fn send(handle: StreamSocketHandle, data: &[u8]) -> KernelResult<usize> {
                 return Ok(written);
             }
 
-            pair.ep[e].writer_waiter = Some(sched::current_task_id());
+            // Honour a deliverable signal before parking; clear any stale
+            // waiter slot left by a prior signal wake.
+            if deliverable_signal_pending(pid) {
+                if pair.ep[e].writer_waiter == Some(task) {
+                    pair.ep[e].writer_waiter = None;
+                }
+                return Err(KernelError::Interrupted);
+            }
+
+            pair.ep[e].writer_waiter = Some(task);
         }
 
         super::stats::stream_socket_write_block();
-        sched::block_current();
+        park_for_socket(pid, task);
     }
 }
 
@@ -411,6 +471,8 @@ pub fn recv(handle: StreamSocketHandle, buf: &mut [u8]) -> KernelResult<usize> {
     }
     let e = handle.endpoint();
     let peer = e ^ 1;
+    let pid = current_user_pid();
+    let task = sched::current_task_id();
 
     loop {
         {
@@ -434,11 +496,20 @@ pub fn recv(handle: StreamSocketHandle, buf: &mut [u8]) -> KernelResult<usize> {
                 return Ok(0);
             }
 
-            pair.ep[e].reader_waiter = Some(sched::current_task_id());
+            // Honour a deliverable signal before parking; clear any stale
+            // waiter slot left by a prior signal wake.
+            if deliverable_signal_pending(pid) {
+                if pair.ep[e].reader_waiter == Some(task) {
+                    pair.ep[e].reader_waiter = None;
+                }
+                return Err(KernelError::Interrupted);
+            }
+
+            pair.ep[e].reader_waiter = Some(task);
         }
 
         super::stats::stream_socket_read_block();
-        sched::block_current();
+        park_for_socket(pid, task);
     }
 }
 
@@ -545,8 +616,9 @@ pub fn recv_timeout(
         }
     }
 
-    let timer_handle =
-        crate::hrtimer::schedule_ns(timeout_ns, timeout_wake, sched::current_task_id());
+    let pid = current_user_pid();
+    let task = sched::current_task_id();
+    let timer_handle = crate::hrtimer::schedule_ns(timeout_ns, timeout_wake, task);
 
     loop {
         {
@@ -578,11 +650,22 @@ pub fn recv_timeout(
                 return Err(KernelError::TimedOut);
             }
 
-            pair.ep[e].reader_waiter = Some(sched::current_task_id());
+            // Honour a deliverable signal before parking; clear any stale
+            // waiter slot.  A timed wait maps the interruption to EINTR (no
+            // restart) at the syscall layer.
+            if deliverable_signal_pending(pid) {
+                if pair.ep[e].reader_waiter == Some(task) {
+                    pair.ep[e].reader_waiter = None;
+                }
+                crate::hrtimer::cancel(timer_handle);
+                return Err(KernelError::Interrupted);
+            }
+
+            pair.ep[e].reader_waiter = Some(task);
         }
 
         super::stats::stream_socket_read_block();
-        sched::block_current();
+        park_for_socket(pid, task);
     }
 }
 
@@ -644,8 +727,9 @@ pub fn send_timeout(
         }
     }
 
-    let timer_handle =
-        crate::hrtimer::schedule_ns(timeout_ns, timeout_wake, sched::current_task_id());
+    let pid = current_user_pid();
+    let task = sched::current_task_id();
+    let timer_handle = crate::hrtimer::schedule_ns(timeout_ns, timeout_wake, task);
 
     loop {
         {
@@ -677,11 +761,22 @@ pub fn send_timeout(
                 return Err(KernelError::TimedOut);
             }
 
-            pair.ep[e].writer_waiter = Some(sched::current_task_id());
+            // Honour a deliverable signal before parking; clear any stale
+            // waiter slot.  A timed wait maps the interruption to EINTR (no
+            // restart) at the syscall layer.
+            if deliverable_signal_pending(pid) {
+                if pair.ep[e].writer_waiter == Some(task) {
+                    pair.ep[e].writer_waiter = None;
+                }
+                crate::hrtimer::cancel(timer_handle);
+                return Err(KernelError::Interrupted);
+            }
+
+            pair.ep[e].writer_waiter = Some(task);
         }
 
         super::stats::stream_socket_write_block();
-        sched::block_current();
+        park_for_socket(pid, task);
     }
 }
 

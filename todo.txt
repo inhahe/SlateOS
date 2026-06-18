@@ -9019,6 +9019,27 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##              →ERESTARTSYS, (0)→0 passthrough, (ChannelClosed)→EPIPE.
 ##            Build clean + boot-test PASSED (229s).  Still wants the ring-3
 ##            end-to-end test (step c).
+##        - Unix stream socket (socketpair) send/recv DONE 2026-06-18: the
+##          blocking ipc/stream_socket.rs primitives (send/recv and the timed
+##          send_timeout/recv_timeout) had the identical hang bug as pipes —
+##          bare block_current() with a single-slot reader/writer_waiter, no
+##          signal-waiter registration, no signal check.  Applied the same fix:
+##          current_user_pid / deliverable_signal_pending / park_for_socket
+##          helpers (mirroring ipc::pipe), and all 4 block sites now clear a
+##          stale waiter slot + return Err(Interrupted) on a deliverable signal
+##          (timed sites also cancel the hrtimer) and park via park_for_socket.
+##          NOTE — currently LATENT: the Linux ABI socketpair(AF_UNIX) still
+##          returns ENOSYS (no Linux-side backend wired), so these primitives
+##          are reachable only via the native SYS_SOCKETPAIR_* syscalls, which
+##          return Err(Interrupted) (-8) directly — there is no Linux signal
+##          frame / ERESTARTSYS translation on the native path, so no
+##          linux_from_slow_io mapping was added.  When socketpair is wired to
+##          the Linux fd table (read/write + recv/send via dispatch_*), route
+##          its Pipe-like arms through linux_from_slow_io for SA_RESTART, exactly
+##          as the pipe arms do.  Fix is safe/inert until then (identical
+##          behaviour when no signal is pending; boot self-tests run as pid 0 →
+##          uninterruptible park, unchanged).  Build clean + boot-test PASSED
+##          (232s).
 ##        - wait4 DONE 2026-06-18: was a confirmed bug — the blocking loop
 ##          had NO signal-interruption check and did not register as a
 ##          signal-waiter, so a process blocked in wait4 could not be

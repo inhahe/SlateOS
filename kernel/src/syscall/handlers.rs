@@ -5591,7 +5591,18 @@ pub fn sys_fs_read(args: &SyscallArgs) -> SyscallResult {
     let buf_ptr = args.arg1 as *mut u8;
     let buf_cap = args.arg2 as usize;
 
-    if buf_ptr.is_null() || buf_cap == 0 {
+    // POSIX/Linux: a zero-length read returns 0 with no other effect.  It does
+    // not touch the buffer (so the pointer is *not* validated — `read(fd, NULL,
+    // 0)` is legal and returns 0) and does not advance the file offset.  We must
+    // return 0 here rather than EINVAL: tcc's `full_read` reads exactly `count`
+    // bytes and then issues a *terminal* `read(fd, buf, 0)`, expecting 0 to
+    // signal completion.  Returning EINVAL made that terminal read look like a
+    // failure, so `tcc_object_type` saw a short ehdr read and rejected every
+    // relocatable object as "unrecognized file type" (Path-Z hosted compile).
+    if buf_cap == 0 {
+        return SyscallResult::ok(0);
+    }
+    if buf_ptr.is_null() {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
     if let Err(e) = crate::mm::user::validate_user_write(args.arg1, buf_cap) {

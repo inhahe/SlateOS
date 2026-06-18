@@ -1297,6 +1297,17 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: Linux brk(2) heap (ring 3) self-test failed: {:?}", e);
     }
 
+    // Ring-3 end-to-end test of the SA_RESTART transparent-restart path — the
+    // capstone for the slow-object signal-interruptibility work.  A real
+    // Linux-ABI process blocks in read() on its own empty pipe with an
+    // SA_RESTART SIGUSR1 handler installed; the kernel posts SIGUSR1, the
+    // interrupted read returns ERESTARTSYS, the handler writes a byte into the
+    // pipe, and the read is transparently restarted to return it.  Proves the
+    // park is interruptible AND that SA_RESTART resumes the syscall.
+    if let Err(e) = proc::spawn::self_test_linux_sa_restart() {
+        serial_println!("WARNING: Linux SA_RESTART (ring 3) self-test failed: {:?}", e);
+    }
+
     // Ring-3 test that the SysV stack builder's argv *pointers* (not just the
     // scalar argc) are valid in the mapped user stack: a real Linux-ABI
     // process dereferences argv[0] and exits with its first byte.

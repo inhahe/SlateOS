@@ -8979,8 +8979,8 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##            * self_test_restart_action extended: Interrupted→EINTR mapping,
 ##              code -8 round-trip, sentinel pass-through, timed→EINTR.
 ##            Build + clippy (no new warns) + boot-test PASSED (237s; glibc
-##            pthread/futex unaffected).  Still wants a ring-3 end-to-end test
-##            (step c).
+##            pthread/futex unaffected).  Ring-3 end-to-end test (step c)
+##            now DONE 2026-06-18 — see (c) below.
 ##        - pipe read/write DONE 2026-06-18: same confirmed bug class — the
 ##          blocking pipe primitives (ipc/pipe.rs read/write/wait_readable and
 ##          the timed read_timeout/write_timeout) all parked with a bare
@@ -9017,8 +9017,8 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##              EINTR is safe; left for a later pass if it ever bites.
 ##            * self_test_restart_action extended: linux_from_slow_io(Interrupted)
 ##              →ERESTARTSYS, (0)→0 passthrough, (ChannelClosed)→EPIPE.
-##            Build clean + boot-test PASSED (229s).  Still wants the ring-3
-##            end-to-end test (step c).
+##            Build clean + boot-test PASSED (229s).  Ring-3 end-to-end test
+##            (step c) now DONE 2026-06-18 — see (c) below.
 ##        - Unix stream socket (socketpair) send/recv DONE 2026-06-18: the
 ##          blocking ipc/stream_socket.rs primitives (send/recv and the timed
 ##          send_timeout/recv_timeout) had the identical hang bug as pipes —
@@ -9053,8 +9053,9 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          handler-backed signals can be pending-and-deliverable at a park
 ##          point (classify_post drops no-handler default-ignore signals and
 ##          terminates on fatal ones), so the sentinel always resolves to a
-##          handler run + restart/EINTR.  Still wants a ring-3 two-process
-##          end-to-end test (step c below).
+##          handler run + restart/EINTR.  Ring-3 end-to-end test (step c) now
+##          DONE 2026-06-18 — see (c) below (single-process self-contained
+##          pipe design, no two-process fd sharing needed).
 ##      (b) DONE 2026-06-18: restart_block storage + restart_syscall replay.
 ##        - New restart_block module (linux.rs, sibling of `restart`): a
 ##          per-TaskId BTreeMap<NanosleepBlock{deadline_ns, rem_ptr}> with
@@ -9079,10 +9080,30 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##        - self_test_restart_action extended: restart_block save/take(single-
 ##          shot)/cross-task-isolation/clear-drops coverage.
 ##        Build clean + boot-test PASSED (222s).
-##      (c) STILL TODO: a ring-3 end-to-end test (install SA_RESTART
-##      handler, block in a syscall, deliver a signal, observe the syscall
-##      resume rather than return EINTR).  Lower priority than it looks —
-##      most programs tolerate EINTR with a retry loop.
+##      (c) DONE 2026-06-18: ring-3 end-to-end SA_RESTART transparent-restart
+##      test.  elf::build_linux_sa_restart_test_elf(sentinel) — a self-
+##      contained hand-assembled Linux-ABI payload that needs no kernel<->child
+##      fd sharing: _start does pipe(rsp) (read end fd 3, write end fd 4 since
+##      stdio occupies 0/1/2), builds a 32-byte struct kernel_sigaction on the
+##      stack (sa_handler=embedded handler addr, sa_flags=SA_RESTART|SA_RESTORER
+##      =0x14000000, sa_restorer=embedded rt_sigreturn trampoline, sa_mask=0),
+##      rt_sigaction(SIGUSR1=10,&act,NULL,8), then read(3,buf,1) which blocks on
+##      the empty pipe.  The handler does write(4,&sentinel,1) then ret into the
+##      restorer (mov eax,15; syscall = rt_sigreturn).  spawn::
+##      self_test_linux_sa_restart() spawns it, yields until it parks in read,
+##      asserts it is NOT already a zombie (the read actually blocked), posts
+##      SIGUSR1 via signal::set_pending, yields, and asserts Zombie +
+##      exit_code==sentinel(0x7E).  A correct kernel: interrupts the parked read
+##      (-> ERESTARTSYS), runs the handler (writes one byte into the pipe), then
+##      because SA_RESTART is set transparently restarts the read, which now
+##      returns that byte -> exit(sentinel).  A park-uninterruptible regression
+##      leaves the child Running (never wakes); a missing/wrong restart-sentinel
+##      mapping surfaces EINTR with buf untouched -> wrong exit code.  Wired into
+##      main.rs after self_test_linux_brk.  Build clean (36.19s) + boot-test
+##      PASSED (229s); serial log shows "exit == 126: OK".  This is the capstone
+##      validation for the whole slow-object interruptibility sweep (wait4,
+##      nanosleep, futex, pipe, stream_socket) — previously only unit-tested at
+##      the restart-sentinel mapping level.
 ##   6. MPROTECT — DONE.
 ##      sys_mprotect now walks the caller's PML4 and applies
 ##      WRITABLE / NO_EXECUTE / USER_ACCESSIBLE flag changes per 16 KiB

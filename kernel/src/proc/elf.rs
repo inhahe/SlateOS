@@ -3877,6 +3877,149 @@ pub fn build_linux_brk_test_elf(sentinel: u8) -> alloc::vec::Vec<u8> {
     buf
 }
 
+/// Build a **Linux-ABI** `ET_EXEC` test ELF that validates the full
+/// **SA_RESTART transparent-restart** path end-to-end in ring 3.
+///
+/// The payload is entirely self-contained (no kernel↔child fd sharing
+/// required), proving the slow-object interruptibility fix
+/// (`read` on an empty pipe → `ERESTARTSYS` → handler runs → transparent
+/// restart returns the handler-written byte):
+///
+/// 1. `pipe(fds)` creates a fresh pipe.  Since the child's stdio occupies
+///    fds 0/1/2, the read end is fd 3 and the write end is fd 4
+///    (deterministic), so they're hardcoded.
+/// 2. `rt_sigaction(SIGUSR1, &act, NULL, 8)` installs a handler with
+///    `SA_RESTART | SA_RESTORER`; `sa_restorer` points at an embedded
+///    `rt_sigreturn` trampoline.
+/// 3. `read(3, buf, 1)` blocks on the empty pipe.
+/// 4. The orchestrator posts `SIGUSR1`.  The blocked read is interrupted,
+///    returns `ERESTARTSYS`, the kernel builds the signal frame and runs
+///    the handler.
+/// 5. The handler does `write(4, &sentinel, 1)` — depositing one byte into
+///    the pipe — then `ret`s into the restorer, which issues
+///    `rt_sigreturn`.
+/// 6. Because `SA_RESTART` was set, the kernel transparently restarts the
+///    `read`, which now finds the handler-written byte and returns it.
+/// 7. `exit(buf[0])` — so a correct SA_RESTART path yields exit code
+///    `sentinel`.  A *broken* path would instead surface `EINTR` from the
+///    read (buf untouched), yielding a different exit code, or hang.
+///
+/// Used by [`crate::proc::spawn::self_test_linux_sa_restart`].
+#[must_use]
+pub fn build_linux_sa_restart_test_elf(sentinel: u8) -> alloc::vec::Vec<u8> {
+    use alloc::vec;
+
+    let phdr_offset: u64 = 64;
+    let code_offset: u64 = 120; // 64 (ehdr) + 56 (one phdr)
+    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+
+    // Hand-assembled x86_64.  Linux ABI syscall numbers: pipe=22,
+    // rt_sigaction=13, read=0, exit=60, write=1, rt_sigreturn=15.
+    // SIGUSR1=10.  SA_RESTART|SA_RESTORER = 0x14000000.
+    //
+    // Stack frame (after `sub rsp, 64`):
+    //   [rsp+0]  pipe fd array (rfd@+0, wfd@+4)   — fds become 3/4
+    //   [rsp+8]  read buffer (1 byte)
+    //   [rsp+16] struct kernel_sigaction (32 bytes):
+    //            +16 sa_handler, +24 sa_flags, +32 sa_restorer, +40 sa_mask
+    let mut code: [u8; 156] = [
+        // _start:
+        0x48, 0x83, 0xEC, 0x40, //             sub rsp, 64                 @0
+        0x48, 0x89, 0xE7, //                   mov rdi, rsp  (fd array)    @4
+        0xB8, 0x16, 0x00, 0x00, 0x00, //       mov eax, 22   (SYS_pipe)    @7
+        0x0F, 0x05, //                         syscall                     @12
+        0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, // mov rax, handler_addr       @14 (imm@16)
+        0x48, 0x89, 0x44, 0x24, 0x10, //       mov [rsp+16], rax           @24
+        0x48, 0xC7, 0x44, 0x24, 0x18, 0x00, 0x00, 0x00, 0x14, // mov qword [rsp+24],0x14000000 @29
+        0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, // mov rax, restorer_addr      @38 (imm@40)
+        0x48, 0x89, 0x44, 0x24, 0x20, //       mov [rsp+32], rax           @48
+        0x48, 0xC7, 0x44, 0x24, 0x28, 0x00, 0x00, 0x00, 0x00, // mov qword [rsp+40],0 (mask)   @53
+        0xBF, 0x0A, 0x00, 0x00, 0x00, //       mov edi, 10   (SIGUSR1)     @62
+        0x48, 0x8D, 0x74, 0x24, 0x10, //       lea rsi, [rsp+16] (&act)    @67
+        0x31, 0xD2, //                         xor edx, edx  (oact=NULL)   @72
+        0x41, 0xBA, 0x08, 0x00, 0x00, 0x00, // mov r10d, 8   (sigsetsize)  @74
+        0xB8, 0x0D, 0x00, 0x00, 0x00, //       mov eax, 13   (rt_sigaction)@80
+        0x0F, 0x05, //                         syscall                     @85
+        0xBF, 0x03, 0x00, 0x00, 0x00, //       mov edi, 3    (rfd)         @87
+        0x48, 0x8D, 0x74, 0x24, 0x08, //       lea rsi, [rsp+8] (buf)      @92
+        0xBA, 0x01, 0x00, 0x00, 0x00, //       mov edx, 1    (count)       @97
+        0x31, 0xC0, //                         xor eax, eax  (SYS_read)    @102
+        0x0F, 0x05, //                         syscall  (blocks)           @104
+        0x0F, 0xB6, 0x7C, 0x24, 0x08, //       movzx edi, byte [rsp+8]     @106
+        0xB8, 0x3C, 0x00, 0x00, 0x00, //       mov eax, 60   (SYS_exit)    @111
+        0x0F, 0x05, //                         syscall                     @116
+        0xCC, //                               int3 (unreachable)          @118
+        // handler:                                                        @119
+        0xBF, 0x04, 0x00, 0x00, 0x00, //       mov edi, 4    (wfd)         @119
+        0x48, 0xBE, 0, 0, 0, 0, 0, 0, 0, 0, // mov rsi, sentinel_addr      @124 (imm@126)
+        0xBA, 0x01, 0x00, 0x00, 0x00, //       mov edx, 1    (count)       @134
+        0xB8, 0x01, 0x00, 0x00, 0x00, //       mov eax, 1    (SYS_write)   @139
+        0x0F, 0x05, //                         syscall                     @144
+        0xC3, //                               ret -> restorer (pretcode)  @146
+        // restorer:                                                       @147
+        0xB8, 0x0F, 0x00, 0x00, 0x00, //       mov eax, 15   (rt_sigreturn)@147
+        0x0F, 0x05, //                         syscall                     @152
+        0xCC, //                               int3 (unreachable)          @154
+        // sentinel:                                                       @155
+        0x00, //                               <sentinel byte>             @155
+    ];
+
+    // Patch absolute addresses (segment is mapped at a fixed vaddr).
+    let handler_addr = load_vaddr.wrapping_add(119);
+    let restorer_addr = load_vaddr.wrapping_add(147);
+    let sentinel_addr = load_vaddr.wrapping_add(155);
+    code[16..24].copy_from_slice(&handler_addr.to_le_bytes());
+    code[40..48].copy_from_slice(&restorer_addr.to_le_bytes());
+    code[126..134].copy_from_slice(&sentinel_addr.to_le_bytes());
+    code[155] = sentinel;
+    let code_len = code.len(); // 156
+
+    let seg_data_len = code_len;
+    let file_size = code_offset as usize + seg_data_len;
+    let mut buf = vec![0u8; file_size];
+
+    // --- ELF header ---
+    buf[0] = 0x7F;
+    buf[1] = b'E';
+    buf[2] = b'L';
+    buf[3] = b'F';
+    buf[EI_CLASS] = ELFCLASS64;
+    buf[EI_DATA] = ELFDATA2LSB;
+    buf[EI_VERSION] = EV_CURRENT;
+    buf[EI_OSABI] = ELFOSABI_GNU; // tag Linux/GNU so detect_linux_abi() is true
+
+    write_u16(&mut buf, 16, ET_EXEC);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr); // e_entry
+    write_u64(&mut buf, 32, phdr_offset); // e_phoff
+    write_u64(&mut buf, 40, 0); // e_shoff
+    write_u32(&mut buf, 48, 0); // e_flags
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, 1); // e_phnum
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0);
+    write_u16(&mut buf, 62, 0);
+
+    // --- Program header (PT_LOAD: R+X covering the code) ---
+    let ph = phdr_offset as usize;
+    write_u32(&mut buf, ph, PT_LOAD);
+    write_u32(&mut buf, ph + 4, PF_R | PF_X);
+    write_u64(&mut buf, ph + 8, code_offset);
+    write_u64(&mut buf, ph + 16, load_vaddr);
+    write_u64(&mut buf, ph + 24, 0);
+    write_u64(&mut buf, ph + 32, seg_data_len as u64);
+    write_u64(&mut buf, ph + 40, seg_data_len as u64);
+    write_u64(&mut buf, ph + 48, 0x1000);
+
+    // --- Code ---
+    let cs = code_offset as usize;
+    buf[cs..cs + code_len].copy_from_slice(&code);
+
+    buf
+}
+
 /// Build a "Hello from userspace!" ELF that calls SYS_CONSOLE_WRITE
 /// then SYS_EXIT(0).
 ///

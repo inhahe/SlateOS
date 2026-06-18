@@ -2516,6 +2516,125 @@ pub fn self_test_linux_brk() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the **SA_RESTART transparent-restart** path —
+/// the capstone validation for the slow-object signal-interruptibility work
+/// (interruptible `read`/`write`/`wait4`/`futex` now return `ERESTARTSYS`
+/// rather than parking uninterruptibly).
+///
+/// Spawns [`elf::build_linux_sa_restart_test_elf`], a self-contained payload
+/// that: creates its own pipe (read end fd 3, write end fd 4), installs an
+/// `SA_RESTART` `SIGUSR1` handler, then blocks in `read(3, buf, 1)` on the
+/// empty pipe.  We let it reach the read park, post `SIGUSR1`, and yield.
+///
+/// A correct kernel: interrupts the parked read (→ `ERESTARTSYS`), runs the
+/// handler (which writes one `sentinel` byte into the pipe), then — because
+/// `SA_RESTART` is set — transparently restarts the `read`, which now returns
+/// that byte.  The child exits with `buf[0] == sentinel`.
+///
+/// Failure modes this catches:
+/// * Park-uninterruptible regression → the read never wakes, the child never
+///   exits → still `Running` after the yields (test fails on the state check).
+/// * Missing/incorrect restart-sentinel mapping → the read surfaces `EINTR`
+///   with `buf` untouched, or the handler frame/restorer is malformed → a
+///   wrong exit code or a fault (non-zombie state).
+pub fn self_test_linux_sa_restart() -> KernelResult<()> {
+    // Exit code on success == the byte the handler writes into the pipe.
+    // Distinct from brk(109)/argv0(0x51)/mmap(91)/interp(42)/execveat(58).
+    const SENTINEL: u8 = 0x7E; // 126
+
+    serial_println!("[spawn] Running Linux SA_RESTART transparent-restart (ring 3) test...");
+
+    let exe_elf = elf::build_linux_sa_restart_test_elf(SENTINEL);
+    let argv: &[&[u8]] = &[b"sarestart"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-sa-restart",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: sa-restart spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Let the child run far enough to install its handler and park in
+    // read(3, ...) on the empty pipe.  Posting the signal *before* the
+    // handler is installed would let the default action (terminate) fire at
+    // the prior syscall return, so we must reach the read park first.  One
+    // yield runs pipe → rt_sigaction → read(park); a couple extra are cheap
+    // insurance.
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+
+    // Verify the child is genuinely blocked (not already exited) before
+    // posting — a sanity check that the read actually parked.
+    let pre = pcb::state(result.pid);
+    if pre == Some(pcb::ProcessState::Zombie) {
+        thread::on_thread_exit(result.task_id);
+        let code = pcb::exit_code(result.pid);
+        pcb::destroy(result.pid);
+        serial_println!(
+            "[spawn]   FAIL: SA_RESTART (ring 3) — child exited (code {:?}) before the \
+             signal was posted; the read did not block on the empty pipe",
+            code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Post SIGUSR1.  This wakes the pipe park's registered signal-waiter; on
+    // resume the read observes the deliverable signal, returns ERESTARTSYS,
+    // and the syscall-return path builds the handler frame.
+    crate::proc::signal::set_pending(result.pid, 10);
+
+    // Run the handler (write 1 byte) → rt_sigreturn → restarted read returns
+    // the byte → exit(byte).  None of these block, so a couple yields suffice.
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: SA_RESTART (ring 3) — expected Zombie, got {:?} (a non-zombie \
+             state means the interrupted read never resumed — the park was uninterruptible — \
+             or the signal frame/restorer faulted)",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(i32::from(SENTINEL)) {
+        serial_println!(
+            "[spawn]   FAIL: SA_RESTART (ring 3) — expected exit {} (handler-written byte via \
+             transparently-restarted read), got {:?} (a wrong code means the read surfaced \
+             EINTR with buf untouched instead of restarting)",
+            SENTINEL, exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   Linux SA_RESTART (ring 3: read on empty pipe → SIGUSR1 → handler writes \
+         byte → ERESTARTSYS transparent restart returns it, exit == {}): OK",
+        SENTINEL
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test that the SysV initial stack's **argv pointers** are
 /// valid in the mapped user stack — not just the scalar `argc`.
 ///

@@ -716,12 +716,51 @@ if [ -n "$TCC_SRC" ] && [ -e "$TCC_SRC" ]; then
     echo "[rootfs] staged C compiler: /bin/tcc ($TCC_SRC)"
     echo "[rootfs] tcc binary DT_NEEDED:"
     readelf -d "$STAGE/bin/tcc" 2>/dev/null | grep -E 'NEEDED|RUNPATH' | sed 's/^/  /'
+
+    # --- hosted-compile support files (Path Z Part 36) ------------------------
+    # The next rung after the freestanding `-nostdlib -static` compile: a *hosted*
+    # compile that links the program against real glibc with crt startup
+    # (crt1.o -> __libc_start_main -> main) and runs through ld-linux.  `tcc -vv`
+    # shows the exact file set tcc opens for `tcc -o out out.c`:
+    #   /usr/lib/x86_64-linux-gnu/crt1.o, crti.o, crtn.o
+    #   /usr/lib/x86_64-linux-gnu/libc.so          (GNU-ld linker script)
+    #   /lib/x86_64-linux-gnu/libc.so.6            (already staged)
+    #   /usr/lib/x86_64-linux-gnu/libc_nonshared.a
+    #   /lib64/ld-linux-x86-64.so.2                (already staged, AS_NEEDED)
+    #   <tcc install dir>/libtcc1.a
+    # Stage each at the EXACT absolute path tcc searches so they resolve
+    # unchanged inside SlateOS (the libc.so script GROUPs the .so.6 + nonshared.a
+    # + ld-linux by absolute path).  We declare prototypes via `extern` in the
+    # self-test C source, so NO glibc header tree is needed.
+    CRT_DIR="/usr/lib/x86_64-linux-gnu"
+    mkdir -p "$STAGE$CRT_DIR"
+    for f in crt1.o crti.o crtn.o libc_nonshared.a libc.so; do
+        if [ -e "$CRT_DIR/$f" ]; then
+            cp -L "$CRT_DIR/$f" "$STAGE$CRT_DIR/$f"
+        else
+            echo "[rootfs] WARNING: $CRT_DIR/$f missing — tcc hosted self-test will no-op"
+        fi
+    done
+    # libtcc1.a lives in tcc's compiled-in install dir; stage it at that exact
+    # absolute path so tcc finds it unchanged in the VFS.
+    TCC_LIBDIR="$("$TCC_SRC" -print-search-dirs 2>/dev/null | sed -n 's/^install: //p' | head -1)"
+    if [ -z "$TCC_LIBDIR" ]; then
+        TCC_LIBDIR="$(dirname "$TCC_SRC")/../lib/tcc"
+    fi
+    if [ -e "$TCC_LIBDIR/libtcc1.a" ]; then
+        ABS_LIBDIR="$(cd "$TCC_LIBDIR" && pwd)"
+        mkdir -p "$STAGE$ABS_LIBDIR"
+        cp -L "$TCC_LIBDIR/libtcc1.a" "$STAGE$ABS_LIBDIR/libtcc1.a"
+        echo "[rootfs] staged hosted-compile support: crt objects + libc.so script + libtcc1.a ($ABS_LIBDIR)"
+    else
+        echo "[rootfs] WARNING: libtcc1.a not found ($TCC_LIBDIR) — tcc hosted self-test will no-op"
+    fi
 else
     echo "[rootfs] WARNING: tcc not found — the C-compiler self-test will no-op"
 fi
 
 echo "[rootfs] staged tree:"
-( cd "$STAGE" && find lib64 lib bin -type f -printf '  %-44p %10s bytes\n' )
+( cd "$STAGE" && find . -type f -printf '  %-52p %10s bytes\n' )
 
 # --- pack into a driver-compatible ext4 image --------------------------------
 # -b 4096 : the driver reads/writes at 4 KiB ext4-block granularity.

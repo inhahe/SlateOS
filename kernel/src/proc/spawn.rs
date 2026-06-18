@@ -10745,6 +10745,390 @@ sc3(1,1,(long)m,16);sc3(60,0,0,0);}\n";
     }
 }
 
+/// Path Z Part 36 — host a real C compiler producing a **hosted, glibc-linked**
+/// executable, and run that freshly-built dynamic binary in ring 3.
+///
+/// Where [`self_test_linux_real_glibc_cc`] proves the *freestanding* case
+/// (`tcc -nostdlib -static`, own `_start`, raw syscalls, a bare static ELF),
+/// this proves the *realistic* case: `tcc -o out out.c` linking the program
+/// against the real glibc with crt startup (`crt1.o` → `__libc_start_main` →
+/// `main`), calling a libc function (`puts`), producing a **dynamically-linked
+/// ELF** (`PT_INTERP = /lib64/ld-linux-x86-64.so.2`), and that binary running
+/// through `ld.so` in ring 3.  Because the output carries a Linux `PT_INTERP`,
+/// the loader auto-classifies it as the Linux ABI — no explicit-ABI override is
+/// needed (contrast the freestanding case, which carries no marker at all; see
+/// open-questions.md Q9 / known-issues B-ABI1).
+///
+/// Flow:
+/// 1. Stage `ld-linux`, `libc.so.6`, `libm.so.6`, `/bin/tcc` **and** the hosted-
+///    compile support set that `tcc -vv` opens for `tcc -o out out.c`: the crt
+///    objects (`crt1.o`/`crti.o`/`crtn.o`), the `libc.so` GNU-ld linker script
+///    (which `GROUP`s `libc.so.6` + `libc_nonshared.a` + AS_NEEDED `ld-linux`),
+///    `libc_nonshared.a`, and tcc's own `libtcc1.a` — each at the exact absolute
+///    path tcc searches, so they resolve unchanged in the VFS.
+/// 2. Write a hosted C program to `/hosted-prog.c`.  It declares `puts` via an
+///    `extern` prototype (so **no** glibc header tree is needed) and `return`s
+///    from `main` (so libc's startup/teardown — including the exit-time stdio
+///    flush that actually emits the buffered `puts` output — is exercised).
+/// 3. Spawn `tcc -o /hosted-prog /hosted-prog.c`, reap it, confirm exit 0 and a
+///    valid, *dynamically-linked* ELF (has a `PT_INTERP`).
+/// 4. Spawn `/hosted-prog` via the normal auto-detecting [`spawn_process`] (the
+///    `PT_INTERP` makes the loader pick the Linux ABI), redirecting fd 1 to
+///    `/hosted-out.txt` before it runs.  glibc fully buffers stdout when it is
+///    not a tty, so the payload is flushed on exit.
+/// 5. Read `/hosted-out.txt` back and assert it equals `SLATE_TCC_HOSTED_OK\n`.
+///
+/// No-op (returns `Ok(())`) when the rootfs / `/bin/tcc` / the hosted support
+/// set is absent (so a kernel built without the full toolchain rootfs still
+/// boots clean).
+///
+/// # Errors
+///
+/// Returns [`KernelError::InternalError`] if `tcc` fails to reach `Zombie`,
+/// exits non-zero, produces no/invalid/non-dynamic ELF, the compiled program
+/// fails to run, or its output does not match; propagates spawn failure.
+pub fn self_test_linux_real_glibc_cc_hosted() -> KernelResult<()> {
+    const EXPECT_EXIT: i32 = 0;
+    const EXPECT_OUT: &[u8] = b"SLATE_TCC_HOSTED_OK\n";
+
+    // (src in /mnt rootfs, dst in VFS) staging pairs.  ld + libc + libm + tcc
+    // are shared with the other Path-Z tests; the crt objects, libc.so script,
+    // libc_nonshared.a and libtcc1.a are the hosted-compile additions.  Each
+    // dst is the exact absolute path tcc opens (verified via `tcc -vv`).
+    const STAGE: &[(&str, &str)] = &[
+        (
+            "/mnt/lib64/ld-linux-x86-64.so.2",
+            "/lib64/ld-linux-x86-64.so.2",
+        ),
+        (
+            "/mnt/lib/x86_64-linux-gnu/libc.so.6",
+            "/lib/x86_64-linux-gnu/libc.so.6",
+        ),
+        (
+            "/mnt/lib/x86_64-linux-gnu/libm.so.6",
+            "/lib/x86_64-linux-gnu/libm.so.6",
+        ),
+        ("/mnt/bin/tcc", "/bin/tcc"),
+        (
+            "/mnt/usr/lib/x86_64-linux-gnu/crt1.o",
+            "/usr/lib/x86_64-linux-gnu/crt1.o",
+        ),
+        (
+            "/mnt/usr/lib/x86_64-linux-gnu/crti.o",
+            "/usr/lib/x86_64-linux-gnu/crti.o",
+        ),
+        (
+            "/mnt/usr/lib/x86_64-linux-gnu/crtn.o",
+            "/usr/lib/x86_64-linux-gnu/crtn.o",
+        ),
+        (
+            "/mnt/usr/lib/x86_64-linux-gnu/libc.so",
+            "/usr/lib/x86_64-linux-gnu/libc.so",
+        ),
+        (
+            "/mnt/usr/lib/x86_64-linux-gnu/libc_nonshared.a",
+            "/usr/lib/x86_64-linux-gnu/libc_nonshared.a",
+        ),
+        (
+            "/mnt/tmp/tccinstall/lib/tcc/libtcc1.a",
+            "/tmp/tccinstall/lib/tcc/libtcc1.a",
+        ),
+    ];
+    const DST_TCC: &str = "/bin/tcc";
+    const SRC_PATH: &str = "/hosted-prog.c";
+    const OBJ_PATH: &str = "/hosted-prog";
+    const OUT_PATH: &str = "/hosted-out.txt";
+
+    // A hosted C program: declares `puts` via an `extern` prototype (no header
+    // tree needed) and returns from `main` so libc's startup AND the exit-time
+    // stdio flush (which actually emits the buffered `puts` output) both run.
+    const HOSTED_SRC: &[u8] =
+        b"extern int puts(const char *s);\nint main(void){puts(\"SLATE_TCC_HOSTED_OK\");return 0;}\n";
+
+    const COMPILE_MAX_YIELDS: usize = 4_194_304;
+    const RUN_MAX_YIELDS: usize = 524_288;
+
+    // The hosted compile needs the whole support set; if tcc itself or any
+    // support file is missing, no-op (matches the rootfs best-effort pattern).
+    if !crate::fs::Vfs::exists("/mnt/bin/tcc")
+        || !crate::fs::Vfs::exists("/mnt/usr/lib/x86_64-linux-gnu/crt1.o")
+        || !crate::fs::Vfs::exists("/mnt/tmp/tccinstall/lib/tcc/libtcc1.a")
+    {
+        return Ok(());
+    }
+
+    serial_println!("[spawn] Running REAL C compiler (tcc, HOSTED glibc link, ring 3, Path Z) test...");
+
+    let _ = crate::fs::Vfs::mkdir_all("/lib64");
+    let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
+    let _ = crate::fs::Vfs::mkdir_all("/bin");
+    let _ = crate::fs::Vfs::mkdir_all("/usr/lib/x86_64-linux-gnu");
+    let _ = crate::fs::Vfs::mkdir_all("/tmp/tccinstall/lib/tcc");
+    for (src, dst) in STAGE {
+        match crate::fs::Vfs::read_file(src) {
+            Ok(bytes) => {
+                if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
+                    serial_println!(
+                        "[spawn]   hosted cc: SKIP (staging {} -> {} failed: {:?})",
+                        src, dst, e
+                    );
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                serial_println!("[spawn]   hosted cc: SKIP (reading {} failed: {:?})", src, e);
+                return Ok(());
+            }
+        }
+    }
+
+    if let Err(e) = crate::fs::Vfs::write_file(SRC_PATH, HOSTED_SRC) {
+        serial_println!("[spawn]   hosted cc: SKIP (writing {} failed: {:?})", SRC_PATH, e);
+        return Ok(());
+    }
+    let _ = crate::fs::Vfs::remove(OBJ_PATH);
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+
+    let tcc_elf = match crate::fs::Vfs::read_file(DST_TCC) {
+        Ok(b) => b,
+        Err(e) => {
+            serial_println!("[spawn]   hosted cc: SKIP (re-read {} failed: {:?})", DST_TCC, e);
+            return Ok(());
+        }
+    };
+
+    // --- step 1: run tcc to compile + glibc-link /hosted-prog.c -------------
+    let cc_argv: &[&[u8]] = &[b"tcc", b"-o", b"/hosted-prog", b"/hosted-prog.c"];
+    let cc_envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C"];
+    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    let cc_options = SpawnOptions {
+        name: "spawn-test-tcc-hosted",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv: cc_argv,
+        envp: cc_envp,
+        exe_path: Some(DST_TCC.as_bytes()),
+    };
+
+    let cc_result = match spawn_process(&tcc_elf, &cc_options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: hosted cc — tcc spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let mut cc_reaped = false;
+    for _ in 0..COMPILE_MAX_YIELDS {
+        if pcb::state(cc_result.pid) == Some(pcb::ProcessState::Zombie) {
+            cc_reaped = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let cc_state = pcb::state(cc_result.pid);
+    let cc_exit = pcb::exit_code(cc_result.pid);
+    thread::on_thread_exit(cc_result.task_id);
+    pcb::destroy(cc_result.pid);
+
+    if !cc_reaped || cc_state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: hosted cc — tcc did not exit within {} yields (state={:?}); tcc \
+             startup or its compile/link loop likely hung",
+            COMPILE_MAX_YIELDS, cc_state
+        );
+        let _ = crate::fs::Vfs::remove(SRC_PATH);
+        return Err(KernelError::InternalError);
+    }
+
+    if cc_exit != Some(EXPECT_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: hosted cc — tcc exit code={:?}, expected {} (non-zero means tcc hit a \
+             compile/link error — e.g. a crt object or libc.so script it could not open/parse)",
+            cc_exit, EXPECT_EXIT
+        );
+        let _ = crate::fs::Vfs::remove(SRC_PATH);
+        return Err(KernelError::InternalError);
+    }
+
+    let obj = match crate::fs::Vfs::read_file(OBJ_PATH) {
+        Ok(b) => b,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: hosted cc — tcc exited 0 but {} is unreadable: {:?}",
+                OBJ_PATH, e
+            );
+            let _ = crate::fs::Vfs::remove(SRC_PATH);
+            return Err(KernelError::InternalError);
+        }
+    };
+    if obj.len() < 4 || &obj[..4] != b"\x7fELF" {
+        serial_println!(
+            "[spawn]   FAIL: hosted cc — {} is not an ELF ({} bytes, first 4 = {:?})",
+            OBJ_PATH, obj.len(), obj.get(..4)
+        );
+        let _ = crate::fs::Vfs::remove(SRC_PATH);
+        return Err(KernelError::InternalError);
+    }
+    // The whole point of the hosted rung: the output must be *dynamically
+    // linked* (carry a PT_INTERP), unlike the freestanding case's bare static
+    // ELF.  Parse it and confirm an interpreter is present.
+    match elf::ElfFile::parse(&obj) {
+        Ok(ef) => match ef.interp_path() {
+            Some(interp) => serial_println!(
+                "[spawn]   hosted cc — tcc produced a {}-byte dynamic ELF (PT_INTERP={:?})",
+                obj.len(),
+                core::str::from_utf8(interp).unwrap_or("<non-utf8>")
+            ),
+            None => {
+                serial_println!(
+                    "[spawn]   FAIL: hosted cc — {} has no PT_INTERP; expected a dynamically-linked \
+                     ELF (the hosted compile should link against glibc + ld-linux)",
+                    OBJ_PATH
+                );
+                let _ = crate::fs::Vfs::remove(SRC_PATH);
+                let _ = crate::fs::Vfs::remove(OBJ_PATH);
+                return Err(KernelError::InternalError);
+            }
+        },
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: hosted cc — output ELF {} failed to parse: {:?}",
+                OBJ_PATH, e
+            );
+            let _ = crate::fs::Vfs::remove(SRC_PATH);
+            let _ = crate::fs::Vfs::remove(OBJ_PATH);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // --- step 2: run the freshly-built dynamic binary ----------------------
+    // It carries a PT_INTERP, so the normal auto-detecting spawn_process picks
+    // the Linux ABI (giving it a Linux fd table) and loads ld-linux for it.
+    use crate::fs::handle;
+    use crate::proc::linux_fd::{FdEntry, O_WRONLY};
+
+    let run_argv: &[&[u8]] = &[b"/hosted-prog"];
+    let run_envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C"];
+    let run_options = SpawnOptions {
+        name: "spawn-test-hosted-run",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv: run_argv,
+        envp: run_envp,
+        exe_path: Some(OBJ_PATH.as_bytes()),
+    };
+
+    let capture_handle = match handle::open(
+        OUT_PATH,
+        handle::OpenFlags::READ
+            .union(handle::OpenFlags::WRITE)
+            .union(handle::OpenFlags::CREATE),
+    ) {
+        Ok(h) => h,
+        Err(e) => {
+            serial_println!("[spawn]   hosted cc: SKIP (capture-file open failed: {:?})", e);
+            let _ = crate::fs::Vfs::remove(SRC_PATH);
+            let _ = crate::fs::Vfs::remove(OBJ_PATH);
+            return Ok(());
+        }
+    };
+
+    let run_result = match spawn_process(&obj, &run_options) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = handle::close(capture_handle);
+            serial_println!(
+                "[spawn]   FAIL: hosted cc — spawning the freshly-built {} returned {:?}",
+                OBJ_PATH, e
+            );
+            let _ = crate::fs::Vfs::remove(SRC_PATH);
+            let _ = crate::fs::Vfs::remove(OBJ_PATH);
+            let _ = crate::fs::Vfs::remove(OUT_PATH);
+            return Err(e);
+        }
+    };
+
+    // Redirect fd 1 (console) -> capture file before the child runs.
+    let _ = pcb::linux_fd_take(run_result.pid, 1);
+    if let Err(e) =
+        pcb::linux_fd_install_at(run_result.pid, 1, FdEntry::file(capture_handle, O_WRONLY))
+    {
+        let _ = handle::close(capture_handle);
+        thread::on_thread_exit(run_result.task_id);
+        pcb::destroy(run_result.pid);
+        serial_println!(
+            "[spawn]   FAIL: hosted cc — redirecting the compiled program's fd 1 failed: {:?}",
+            e
+        );
+        let _ = crate::fs::Vfs::remove(SRC_PATH);
+        let _ = crate::fs::Vfs::remove(OBJ_PATH);
+        let _ = crate::fs::Vfs::remove(OUT_PATH);
+        return Err(KernelError::InternalError);
+    }
+
+    let mut run_reaped = false;
+    for _ in 0..RUN_MAX_YIELDS {
+        if pcb::state(run_result.pid) == Some(pcb::ProcessState::Zombie) {
+            run_reaped = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let run_state = pcb::state(run_result.pid);
+    let run_exit = pcb::exit_code(run_result.pid);
+    let out = crate::fs::Vfs::read_file(OUT_PATH);
+
+    thread::on_thread_exit(run_result.task_id);
+    pcb::destroy(run_result.pid);
+    let _ = crate::fs::Vfs::remove(SRC_PATH);
+    let _ = crate::fs::Vfs::remove(OBJ_PATH);
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+
+    if !run_reaped || run_state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: hosted cc — the compiled program did not exit within {} yields \
+             (state={:?}); ld.so startup or libc init for the freshly-built binary likely hung",
+            RUN_MAX_YIELDS, run_state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    match out {
+        Ok(bytes) if bytes.as_slice() == EXPECT_OUT => {
+            serial_println!(
+                "[spawn]   REAL C compiler HOSTED (ring 3: tcc compiled+glibc-linked C into a \
+                 {}-byte dynamic ELF, ld.so loaded that binary + libc, it called puts() and the \
+                 exit-time stdio flush wrote {} bytes == expected, exit={:?}): OK",
+                obj.len(), bytes.len(), run_exit
+            );
+            Ok(())
+        }
+        Ok(bytes) => {
+            serial_println!(
+                "[spawn]   FAIL: hosted cc — {} holds {} bytes {:?}, expected {} bytes {:?} \
+                 (compiled program exit={:?})",
+                OUT_PATH, bytes.len(), bytes.as_slice(), EXPECT_OUT.len(), EXPECT_OUT, run_exit
+            );
+            Err(KernelError::InternalError)
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: hosted cc — reading the compiled program's output {} back failed: \
+                 {:?} (exit={:?})",
+                OUT_PATH, e, run_exit
+            );
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
 /// Test 1: Spawn a process from a valid ELF binary.
 ///
 /// The test ELF contains real x86_64 code that calls SYS_EXIT(0) via

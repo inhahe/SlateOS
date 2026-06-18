@@ -1824,6 +1824,14 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: Path-Z real C compiler (tcc) self-test failed: {:?}", e);
     }
 
+    // Path Z Part 36: the *hosted* compile rung — tcc links a C program against
+    // real glibc (crt startup -> __libc_start_main -> main, calling puts), then
+    // that freshly-built *dynamic* binary runs through ld.so in ring 3.  This is
+    // the realistic compile mode (vs Part 35's freestanding -nostdlib -static).
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_hosted() {
+        serial_println!("WARNING: Path-Z hosted C compiler (tcc) self-test failed: {:?}", e);
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

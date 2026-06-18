@@ -2974,6 +2974,119 @@ pub fn self_test_linux_timerfd_interrupt() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test that a **blocking `inotify` read is interruptible
+/// by a deliverable signal**.
+///
+/// Spawns [`elf::build_linux_inotify_interrupt_test_elf`]: the child installs
+/// a `SIGUSR1` handler *without* `SA_RESTART`, creates an `inotify_init1`d
+/// instance with no watches, and blocks in `read()` on it (a read of an
+/// inotify fd with no queued events blocks indefinitely).  We post `SIGUSR1`
+/// and yield.  A correct kernel wakes the blocked read, runs the handler, and
+/// the read returns `-EINTR`; the child detects the negative return and exits
+/// with `sentinel`.
+///
+/// This distinguishes the fix from the bug: before the fix the inotify read
+/// registered only a notify-waiter and parked with a bare `block_current()`,
+/// so `SIGUSR1` never woke it.  The child would park forever (the handler runs
+/// only at the syscall-return checkpoint, which a parked read never reaches) →
+/// it never becomes a zombie → the state check below fails.
+pub fn self_test_linux_inotify_interrupt() -> KernelResult<()> {
+    // Distinct from brk(109)/argv0(0x51)/sa_restart(0x7E)/mmap(91)/
+    // interp(42)/signalfd(0x3D)/eventfd(0x2C)/timerfd(0x1B).  0x66 = 102.
+    const SENTINEL: u8 = 0x66;
+
+    serial_println!(
+        "[spawn] Running Linux inotify-read signal-interruptibility (ring 3) test..."
+    );
+
+    let exe_elf = elf::build_linux_inotify_interrupt_test_elf(SENTINEL);
+    let argv: &[&[u8]] = &[b"inintr"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-inotify-intr",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: inotify-intr spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Let the child install its handler + inotify and park in read(ifd, ...).
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+
+    let pre = pcb::state(result.pid);
+    if pre == Some(pcb::ProcessState::Zombie) {
+        thread::on_thread_exit(result.task_id);
+        let code = pcb::exit_code(result.pid);
+        pcb::destroy(result.pid);
+        serial_println!(
+            "[spawn]   FAIL: inotify-intr (ring 3) — child exited (code {:?}) before the \
+             signal was posted; the inotify read did not block",
+            code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Post SIGUSR1.  A correct kernel interrupts the blocked read; the buggy
+    // one ignores it and the child stays parked forever (no events queued).
+    crate::proc::signal::set_pending(result.pid, 10);
+
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: inotify-intr (ring 3) — expected Zombie, got {:?} (the blocked \
+             inotify read was NOT interrupted by SIGUSR1 — it parked forever; this is exactly \
+             the hang bug the fix addresses)",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code == Some(0xEE) {
+        serial_println!(
+            "[spawn]   FAIL: inotify-intr (ring 3) — read returned data (>=0) instead of \
+             -EINTR; the signal interruption was not surfaced"
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(i32::from(SENTINEL)) {
+        serial_println!(
+            "[spawn]   FAIL: inotify-intr (ring 3) — expected exit {} (read returned -EINTR), \
+             got {:?}",
+            SENTINEL, exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   Linux inotify-read interruptibility (ring 3: block in read(inotify, no events) \
+         → SIGUSR1 wakes it → handler runs → read returns -EINTR, exit == {}): OK",
+        SENTINEL
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test that the SysV initial stack's **argv pointers** are
 /// valid in the mapped user stack — not just the scalar `argc`.
 ///

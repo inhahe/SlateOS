@@ -1337,6 +1337,16 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: Linux timerfd-read interruptibility (ring 3) self-test failed: {:?}", e);
     }
 
+    // Ring-3 inotify-read signal-interruptibility test: a child blocks in
+    // read() on an inotify fd with no events queued (blocks indefinitely), with
+    // a non-SA_RESTART SIGUSR1 handler installed; the kernel posts SIGUSR1, the
+    // read wakes and returns -EINTR.  Before the fix the read registered only a
+    // notify-waiter and parked uninterruptibly, the same hang-bug class as
+    // pipe/signalfd/eventfd/timerfd.
+    if let Err(e) = proc::spawn::self_test_linux_inotify_interrupt() {
+        serial_println!("WARNING: Linux inotify-read interruptibility (ring 3) self-test failed: {:?}", e);
+    }
+
     // Ring-3 test that the SysV stack builder's argv *pointers* (not just the
     // scalar argc) are valid in the mapped user stack: a real Linux-ABI
     // process dereferences argv[0] and exits with its first byte.

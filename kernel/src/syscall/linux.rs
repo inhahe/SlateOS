@@ -21334,6 +21334,9 @@ fn dispatch_inotify_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
     let handle = crate::ipc::inotify::InotifyHandle::from_raw(entry.raw_handle);
     let budget = cap as usize;
     let nonblock = (entry.status_flags & oflags::O_NONBLOCK) != 0;
+    // Owning user process (None / kernel task ⇒ no signal context, parks
+    // uninterruptibly as before).
+    let caller = caller_pid();
 
     let events = loop {
         match crate::ipc::inotify::read_into(handle, budget) {
@@ -21343,20 +21346,48 @@ fn dispatch_inotify_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
                 if nonblock {
                     return linux_err(errno::EAGAIN);
                 }
+                // An inotify read is a slow object: a blocking read interrupted
+                // by a deliverable signal is restartable (SA_RESTART) via the
+                // ERESTARTSYS sentinel.  Honour a pending deliverable signal
+                // before parking.  (The sentinel reaches the signal-delivery
+                // checkpoint untouched — this function returns its SyscallResult
+                // raw through dispatch_read/sys_read, with no linux_from_native
+                // wrap, so there is no -512/CrossDevice collision.)
+                let deliverable = caller.map_or(0, |p| !crate::proc::signal::blocked(p));
+                if let Some(p) = caller
+                    && crate::proc::signal::has_pending_in_mask(p, deliverable)
+                {
+                    return restart::restart_result(restart::ERESTARTSYS);
+                }
                 // Block until a watch fires.  Register on the instance's owner
                 // token (handle.raw()) BEFORE re-checking readability so an
                 // event arriving in the gap is not lost (register-then-recheck);
                 // notify::emit wakes us when any owned watch queues an event.
+                // Also register a signal-waiter so a deliverable signal wakes the
+                // park (the same register-then-recheck idiom closes its race).
                 let token = handle.raw();
                 let task = crate::sched::current_task_id();
                 crate::fs::notify::register_notify_waiter(token, task);
-                if crate::ipc::inotify::is_readable(handle) {
+                if let Some(p) = caller {
+                    crate::proc::signal::register_signalfd_waiter(p, task, deliverable);
+                }
+                let racey_signal = caller
+                    .is_some_and(|p| crate::proc::signal::has_pending_in_mask(p, deliverable));
+                if crate::ipc::inotify::is_readable(handle) || racey_signal {
                     crate::fs::notify::deregister_notify_waiter(token, task);
+                    if let Some(p) = caller {
+                        crate::proc::signal::deregister_signalfd_waiter(p, task);
+                    }
                     continue;
                 }
                 crate::sched::block_current();
                 crate::fs::notify::deregister_notify_waiter(token, task);
-                // Loop to re-drain (matching event arrived, or spurious wake).
+                if let Some(p) = caller {
+                    crate::proc::signal::deregister_signalfd_waiter(p, task);
+                }
+                // Loop to re-drain (matching event arrived, signal, or spurious
+                // wake — a signal is caught by the deliverable check at the top
+                // of this branch on the next iteration).
             }
             // Buffer too small for the first event (events left queued).
             Err(KernelError::InvalidArgument) => return linux_err(errno::EINVAL),

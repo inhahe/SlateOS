@@ -9030,6 +9030,42 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##              → parked forever (non-zombie → FAIL); count-as-data → 0xEE →
 ##              FAIL.  Build clean (31.43s) + boot-test PASSED; serial shows
 ##              "exit == 27: OK".
+##        - inotify blocking read DONE 2026-06-18: same hang-bug class, Linux-
+##          reachable via inotify_init1 (294) + read.  dispatch_inotify_read
+##          (linux.rs) parked with a bare block_current() and registered ONLY a
+##          notify-waiter (fs::notify::register_notify_waiter) — a deliverable
+##          signal could never interrupt it (a read of an inotify fd with no
+##          queued events blocks indefinitely, so it hung forever).  Fix is
+##          inline in dispatch_inotify_read (not a pipe.rs mirror — this is a
+##          syscall-layer loop, not an ipc module):
+##            * Before parking, check has_pending_in_mask(caller, deliverable)
+##              (deliverable = !blocked(caller)); if pending, return
+##              restart::restart_result(ERESTARTSYS).
+##            * Register a signal-waiter (register_signalfd_waiter) ALONGSIDE the
+##              notify-waiter, with the same register-then-recheck idiom (recheck
+##              both is_readable AND has_pending_in_mask before parking);
+##              deregister both on every exit path.  A signal wake re-drains the
+##              loop and the top-of-branch deliverable check returns ERESTARTSYS.
+##            * inotify read returns its SyscallResult raw through
+##              dispatch_read/sys_read (no linux_from_native wrap), so the -512
+##              sentinel reaches the return path untouched (no CrossDevice
+##              collision).
+##            * Ring-3 test (elf::build_linux_inotify_interrupt_test_elf +
+##              spawn::self_test_linux_inotify_interrupt, wired into main.rs):
+##              child installs a NON-SA_RESTART SIGUSR1 handler, creates
+##              inotify_init1(0) with no watches, blocks in read(); kernel posts
+##              SIGUSR1; correct kernel wakes it and read returns -EINTR →
+##              exit(0x66=102).  Park-uninterruptible regression → parked forever
+##              (non-zombie → FAIL); data-instead-of-EINTR → 0xEE → FAIL.  Build
+##              clean (31.62s) + boot-test PASSED; serial shows "exit == 102: OK".
+##          NOTE: DrmCard read is non-blocking (EAGAIN when no event, never
+##          parks) — no bug.  AlsaPcm capture returns silence (never parks).
+##          MemFd is memory-backed (never parks).  The native Slate IPC
+##          semaphore / channel / completion primitives are NOT on the Linux-ABI
+##          read path (separate native syscalls), so they are outside this
+##          SA_RESTART taxonomy.  This completes the Linux-reachable slow-object
+##          blocking-read sweep: pipe / stream_socket / signalfd / eventfd /
+##          timerfd / inotify (+ futex / wait4 done earlier).
 ##        - futex(FUTEX_WAIT / FUTEX_WAIT_BITSET) DONE 2026-06-18: was the
 ##          same confirmed bug class as wait4 — the native futex_wait_bitset /
 ##          futex_wait_bitset_timeout paths registered ONLY in the futex bucket

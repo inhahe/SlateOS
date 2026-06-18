@@ -8880,13 +8880,34 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      bytes that look random to a stub caller) but is NOT
 ##      cryptographically secure.  When a kernel CSPRNG exists, swap
 ##      it in.
-##   5. SIGACTION SA_MASK / SA_FLAGS.  Only the handler pointer is
-##      recorded.  Linux semantics for sa_mask (blocked-signal set
-##      during handler) and sa_flags (SA_RESTART, SA_SIGINFO, etc.)
-##      are ignored.  Most CRT startup code installs trivial handlers
-##      so this is acceptable as a first pass but must be fixed before
-##      we run anything that actually relies on signal delivery
-##      semantics.
+##   5. SIGACTION SA_MASK / SA_FLAGS — SUBSTANTIALLY DONE (verified
+##      2026-06-18).  The full `struct sigaction` is parsed and stored
+##      per-process/per-signal (linux_sigaction_table) and consumed at
+##      delivery time in linux.rs build_rt_sigframe:
+##        - sa_mask  -> ORed into the blocked mask in effect during the
+##          handler (`new_blocked = current_blocked | sa_mask | sig`),
+##          restored by rt_sigreturn via uc_sigmask.
+##        - SA_NODEFER -> when clear, the delivered signal is blocked
+##          during its own handler (prevents recursive re-entry); when
+##          set, it isn't.
+##        - SA_RESETHAND -> one-shot: handler resets to SIG_DFL after
+##          first delivery.
+##        - SA_SIGINFO -> siginfo_t is built and passed in rsi (3-arg
+##          handler form); ucontext in rdx.
+##        - sa_restorer -> written as the frame return trampoline.
+##        - Unknown sa_flags bits are rejected with -EINVAL at sigaction
+##          time (matches Linux), validated against sa_flags::MASK.
+##      REMAINING GAP: SA_RESTART syscall-restart semantics.  The flag
+##      is recognized/validated/stored, but a *slow* syscall interrupted
+##      by a signal whose handler has SA_RESTART is NOT auto-restarted —
+##      it still returns -EINTR.  Wiring real restart requires every
+##      interruptible syscall to return an ERESTARTSYS-class sentinel,
+##      the signal-delivery path to rewind RIP to the syscall
+##      instruction (or stash a restart block) when SA_RESTART is set,
+##      and the restart_syscall(NR=219) trampoline (currently a no-op
+##      stub, linux.rs ~31853) to replay the saved args.  Tracked as its
+##      own follow-up; most programs tolerate EINTR with a retry loop so
+##      this is lower priority than it looks.
 ##   6. MPROTECT — DONE.
 ##      sys_mprotect now walks the caller's PML4 and applies
 ##      WRITABLE / NO_EXECUTE / USER_ACCESSIBLE flag changes per 16 KiB

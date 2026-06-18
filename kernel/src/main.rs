@@ -1347,6 +1347,14 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: Linux inotify-read interruptibility (ring 3) self-test failed: {:?}", e);
     }
 
+    // Ring-3 test that a blocking poll() is signal-interruptible and surfaces
+    // -EINTR (the "always-EINTR, never restarted" branch of the SA_RESTART
+    // taxonomy).  Before the fix, poll_core busy-polled in sleep_ms slices and
+    // never checked for a pending signal, so the thread parked forever.
+    if let Err(e) = proc::spawn::self_test_linux_poll_interrupt() {
+        serial_println!("WARNING: Linux poll() interruptibility (ring 3) self-test failed: {:?}", e);
+    }
+
     // Ring-3 test that the SysV stack builder's argv *pointers* (not just the
     // scalar argc) are valid in the mapped user stack: a real Linux-ABI
     // process dereferences argv[0] and exits with its first byte.

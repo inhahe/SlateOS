@@ -28361,6 +28361,81 @@ fn poll_compute_revents(pid: Option<u64>, fd: i32, events: u16) -> u16 {
     poll_revents_from_entry(entry, events, Some(pid))
 }
 
+/// `true` if the caller process has a deliverable (unblocked) signal pending.
+///
+/// Used by the readiness-multiplexing syscalls (poll / select / epoll_wait and
+/// their `p`-variants) to break out of their re-poll wait with `-EINTR` when a
+/// signal is delivered.  Per the Linux SA_RESTART taxonomy these syscalls are
+/// **always** interrupted by `-EINTR` and are **never** restarted (even under
+/// `SA_RESTART`), so the caller returns a plain `-EINTR` rather than a restart
+/// sentinel.  A kernel task (`pid == None`) has no signal context and is never
+/// interrupted.  (The no-livelock invariant guarantees a pending *unblocked*
+/// signal always has a registered handler — `classify_post` drops no-handler
+/// default-ignore signals and terminates on fatal ones — so this never spuriously
+/// reports an ignored signal.)
+fn caller_has_deliverable_signal(pid: Option<u64>) -> bool {
+    match pid {
+        Some(p) => {
+            crate::proc::signal::has_pending_in_mask(p, !crate::proc::signal::blocked(p))
+        }
+        None => false,
+    }
+}
+
+/// Sleep for `slice_ms` while registered as a signal-waiter, returning `true`
+/// if a deliverable signal is (or becomes) pending — in which case the caller
+/// must return `-EINTR`.
+///
+/// poll/select/epoll wait in short timer slices and re-poll fd readiness when
+/// each slice expires (another task can change a polled fd's state without
+/// waking us, so a periodic re-poll is the readiness mechanism).  But a posted
+/// signal must interrupt the wait *promptly*, not after the full slice:
+/// `set_pending` wakes registered signal-waiters, so we register before
+/// parking and `try_wake` pulls us out of the timed sleep early.  The
+/// register-then-recheck closes the race where the signal is posted between
+/// the readiness re-poll and the park (it would otherwise be lost until the
+/// slice expired).  For an in-kernel caller (`pid == None`) there is no signal
+/// queue, so we just sleep.
+fn interruptible_wait_slice(pid: Option<u64>, slice_ms: u64) -> bool {
+    let Some(p) = pid else {
+        crate::sched::sleep_ms(slice_ms);
+        return false;
+    };
+    let deliverable = !crate::proc::signal::blocked(p);
+    let task = crate::sched::current_task_id();
+    crate::proc::signal::register_signalfd_waiter(p, task, deliverable);
+    // Recheck after registering: a signal posted in the gap before the park
+    // already woke (a now-removed) waiter, so observe it here instead of
+    // sleeping through it.
+    if crate::proc::signal::has_pending_in_mask(p, deliverable) {
+        crate::proc::signal::deregister_signalfd_waiter(p, task);
+        return true;
+    }
+    crate::sched::sleep_ms(slice_ms);
+    crate::proc::signal::deregister_signalfd_waiter(p, task);
+    crate::proc::signal::has_pending_in_mask(p, deliverable)
+}
+
+/// Sleep up to `total_ms` in ≤10 ms slices, returning `true` if a deliverable
+/// signal arrived (the sleep was interrupted).  Used by the `nfds == 0`
+/// quick paths of poll/select so a pure timed wait is still interruptible by
+/// signals, matching Linux (`poll(NULL, 0, timeout)` returns `-EINTR` when a
+/// signal is delivered).
+fn interruptible_sleep_ms(pid: Option<u64>, total_ms: u64) -> bool {
+    let mut remaining = total_ms;
+    while remaining > 0 {
+        if caller_has_deliverable_signal(pid) {
+            return true;
+        }
+        let slice = core::cmp::min(remaining, 10);
+        if interruptible_wait_slice(pid, slice) {
+            return true;
+        }
+        remaining = remaining.saturating_sub(slice);
+    }
+    caller_has_deliverable_signal(pid)
+}
+
 /// Shared core for `sys_poll` / `sys_ppoll` — the user pointer validation
 /// is done by the caller (which knows whether timeout is `int` ms or a
 /// `struct timespec`).  This function does the read-compute-write loop
@@ -28379,7 +28454,9 @@ fn poll_core(fds_ptr: u64, nfds: u64, timeout_ms_signed: i64) -> SyscallResult {
     if nfds == 0 {
         if timeout_ms_signed > 0 {
             #[allow(clippy::cast_sign_loss)]
-            crate::sched::sleep_ms(timeout_ms_signed as u64);
+            if interruptible_sleep_ms(caller_pid(), timeout_ms_signed as u64) {
+                return linux_err(errno::EINTR);
+            }
         }
         return SyscallResult::ok(0);
     }
@@ -28434,15 +28511,22 @@ fn poll_core(fds_ptr: u64, nfds: u64, timeout_ms_signed: i64) -> SyscallResult {
             }
             return SyscallResult::ok(count);
         }
-        // Slice the wait into 10 ms chunks so we re-poll fast enough to
-        // catch pipe state changes from another task.
+        // No fd is ready yet and we still have time to wait.  Slice the wait
+        // into 10 ms chunks so we re-poll fast enough to catch pipe state
+        // changes from another task.  A deliverable signal interrupts the wait
+        // with -EINTR (poll is never restarted, even under SA_RESTART); the
+        // handler runs at the syscall-return checkpoint.  `interruptible_wait_slice`
+        // registers a signal-waiter so a signal posted mid-slice wakes us
+        // immediately instead of after the full 10 ms.
         let slice_ms: u64 = if remaining_ms < 0 {
             10
         } else {
             #[allow(clippy::cast_sign_loss)]
             core::cmp::min(remaining_ms as u64, 10)
         };
-        crate::sched::sleep_ms(slice_ms);
+        if interruptible_wait_slice(pid, slice_ms) {
+            return linux_err(errno::EINTR);
+        }
         if remaining_ms > 0 {
             #[allow(clippy::cast_possible_wrap)]
             let consumed = slice_ms as i64;
@@ -28609,7 +28693,9 @@ fn select_core(
     if nfds == 0 || len == 0 {
         if timeout_ms_signed > 0 {
             #[allow(clippy::cast_sign_loss)]
-            crate::sched::sleep_ms(timeout_ms_signed as u64);
+            if interruptible_sleep_ms(caller_pid(), timeout_ms_signed as u64) {
+                return linux_err(errno::EINTR);
+            }
         }
         return SyscallResult::ok(0);
     }
@@ -28753,14 +28839,20 @@ fn select_core(
             return SyscallResult::ok(count);
         }
 
-        // Same 10 ms slicing as poll_core.
+        // No fd is ready yet and we still have time to wait.  A deliverable
+        // signal interrupts select with -EINTR (never restarted, even under
+        // SA_RESTART); the handler runs at the syscall-return checkpoint.
+        // Same 10 ms slicing as poll_core; `interruptible_wait_slice` registers
+        // a signal-waiter so a signal posted mid-slice wakes us immediately.
         let slice_ms: u64 = if remaining_ms < 0 {
             10
         } else {
             #[allow(clippy::cast_sign_loss)]
             core::cmp::min(remaining_ms as u64, 10)
         };
-        crate::sched::sleep_ms(slice_ms);
+        if interruptible_wait_slice(pid, slice_ms) {
+            return linux_err(errno::EINTR);
+        }
         if remaining_ms > 0 {
             #[allow(clippy::cast_possible_wrap)]
             let consumed = slice_ms as i64;
@@ -29262,15 +29354,21 @@ fn epoll_wait_core(
             return SyscallResult::ok(count as i64);
         }
 
-        // Nothing ready yet and we have time left — sleep in 10 ms slices
-        // so a state change from another task is picked up promptly.
+        // Nothing ready yet and we still have time to wait.  A deliverable
+        // signal interrupts epoll_wait with -EINTR (never restarted, even under
+        // SA_RESTART); the handler runs at the syscall-return checkpoint.
+        // Sleep in 10 ms slices so a state change from another task is picked
+        // up promptly; `interruptible_wait_slice` registers a signal-waiter so
+        // a signal posted mid-slice wakes us immediately.
         let slice_ms: u64 = if remaining_ms < 0 {
             10
         } else {
             #[allow(clippy::cast_sign_loss)]
             core::cmp::min(remaining_ms as u64, 10)
         };
-        crate::sched::sleep_ms(slice_ms);
+        if interruptible_wait_slice(Some(caller), slice_ms) {
+            return linux_err(errno::EINTR);
+        }
         if remaining_ms > 0 {
             #[allow(clippy::cast_possible_wrap)]
             let consumed = slice_ms as i64;

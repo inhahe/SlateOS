@@ -9066,6 +9066,57 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          SA_RESTART taxonomy.  This completes the Linux-reachable slow-object
 ##          blocking-read sweep: pipe / stream_socket / signalfd / eventfd /
 ##          timerfd / inotify (+ futex / wait4 done earlier).
+##        - poll / select / epoll_wait DONE 2026-06-18: the "always -EINTR,
+##          NEVER restarted (even under SA_RESTART)" branch of the taxonomy.
+##          These three wait primitives (poll_core / select_core /
+##          epoll_wait_core in syscall/linux.rs) busy-polled fd readiness in
+##          ≤10 ms sched::sleep_ms slices and NEVER checked for a pending
+##          signal, so a process blocked in poll/select/epoll_wait could not be
+##          interrupted at all — it slept forever while the signal stayed
+##          pending (same hang-bug class as the slow-object reads, but the fix
+##          surfaces -EINTR, not a restart sentinel: per POSIX/Linux these are
+##          on the always-fail-with-EINTR list and are never transparently
+##          restarted).  Fix (syscall/linux.rs):
+##            * caller_has_deliverable_signal(pid: Option<u64>) =
+##              has_pending_in_mask(p, !blocked(p)); None (in-kernel caller) →
+##              false.
+##            * interruptible_wait_slice(pid, slice_ms): registers a
+##              signal-waiter (register_signalfd_waiter, mask = !blocked) around
+##              the sleep so set_pending WAKES THE WAIT PROMPTLY via try_wake
+##              instead of after the full 10 ms slice (Linux waitqueue
+##              semantics).  Register-then-recheck closes the post-before-park
+##              race; deregister on every exit path; returns true iff a
+##              deliverable signal is pending (→ caller returns -EINTR).  The
+##              10 ms slice is retained purely as the fd-readiness re-poll
+##              mechanism (another task can change a polled fd's state without
+##              waking us).  pid None → plain sleep_ms (kernel task, no signal
+##              queue).
+##            * interruptible_sleep_ms (the nfds==0 pure-timed-wait quick path
+##              of poll/select) now loops over interruptible_wait_slice, so
+##              poll(NULL,0,timeout) / select with no fds is also interruptible.
+##            * All three cores' wait loops: replaced the bare
+##              `sleep_ms(slice)` (and the now-redundant leading
+##              caller_has_deliverable_signal check) with
+##              `if interruptible_wait_slice(pid, slice) { return EINTR }`.
+##            * These return linux_err(EINTR) (-4), NOT a restart sentinel, so
+##              there is no -512/CrossDevice collision concern and SA_RESTART
+##              cannot resurrect the call — correct per the taxonomy.
+##            * Ring-3 test (elf::build_linux_poll_interrupt_test_elf +
+##              spawn::self_test_linux_poll_interrupt, wired into main.rs):
+##              child installs a SIGUSR1 handler, eventfd2(0,0) (never
+##              POLLIN-ready), poll(&pollfd,1,-1) blocks; kernel posts SIGUSR1;
+##              correct kernel wakes the registered signal-waiter and poll
+##              returns -EINTR → exit(0x4B=75).  Parked-forever regression →
+##              non-zombie FAIL; data-instead-of-EINTR (poll returned >=0) →
+##              0xEE FAIL.  Build clean (33.87s) + boot-test PASSED; serial
+##              shows "exit == 75: OK".
+##          NOTE: select_core/epoll_wait_core share interruptible_wait_slice and
+##          got the identical loop edit, so they are covered by the same fix
+##          (the poll ring-3 test exercises the shared helper end-to-end).
+##          Pre-existing, OUT OF SCOPE for signal interruptibility: poll(NULL,0,
+##          -1) (nfds==0, infinite timeout) returns ok(0) immediately instead of
+##          blocking forever — the nfds==0 quick path only sleeps for a positive
+##          finite timeout.  Not fixed here (not a signal-interruptibility bug).
 ##        - futex(FUTEX_WAIT / FUTEX_WAIT_BITSET) DONE 2026-06-18: was the
 ##          same confirmed bug class as wait4 — the native futex_wait_bitset /
 ##          futex_wait_bitset_timeout paths registered ONLY in the futex bucket

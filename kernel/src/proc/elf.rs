@@ -4719,6 +4719,124 @@ pub fn build_linux_poll_interrupt_test_elf(sentinel: u8) -> alloc::vec::Vec<u8> 
     buf
 }
 
+/// Build a ring-3 ELF that exercises the **`poll(NULL, 0, -1)` empty-set,
+/// infinite-timeout** path: it must *block* until a signal, then return
+/// `-EINTR` — not return `0` immediately.
+///
+/// The child installs a SIGUSR1 handler, then calls `poll(NULL, 0, -1)` (no
+/// fds, wait forever).  With no fds to watch, only a delivered signal can end
+/// the wait.  A correct kernel blocks, is interrupted by SIGUSR1, and `poll`
+/// returns `-EINTR`; the child exits with `sentinel`.  The pre-fix bug
+/// returned `ok(0)` immediately (the `nfds == 0` quick path only slept for a
+/// positive timeout), so `poll` returned `0` *before* the signal was posted
+/// and the child exited `0xEE` (or never blocked at all).  Used by
+/// [`crate::proc::spawn::self_test_linux_poll_empty_infinite`].
+#[must_use]
+pub fn build_linux_poll_empty_infinite_test_elf(sentinel: u8) -> alloc::vec::Vec<u8> {
+    use alloc::vec;
+
+    let phdr_offset: u64 = 64;
+    let code_offset: u64 = 120; // 64 (ehdr) + 56 (one phdr)
+    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+
+    // Hand-assembled x86_64.  Linux ABI: rt_sigaction=13, poll=7, exit=60,
+    // rt_sigreturn=15.  SIGUSR1=10.  poll(fds, nfds, timeout): rdi/rsi/rdx.
+    //
+    // Stack frame (after `sub rsp, 256`):
+    //   [rsp+16] struct kernel_sigaction (32 bytes)
+    let mut code: [u8; 130] = [
+        // _start:
+        0x48, 0x81, 0xEC, 0x00, 0x01, 0x00, 0x00, // sub rsp, 256             @0
+        0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, //       mov rax, handler_addr    @7 (imm@9)
+        0x48, 0x89, 0x44, 0x24, 0x10, //             mov [rsp+16], rax        @17
+        0x48, 0xC7, 0x44, 0x24, 0x18, 0x00, 0x00, 0x00, 0x04, // mov qword [rsp+24],0x04000000 @22
+        0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, //       mov rax, restorer_addr   @31 (imm@33)
+        0x48, 0x89, 0x44, 0x24, 0x20, //             mov [rsp+32], rax        @41
+        0x48, 0xC7, 0x44, 0x24, 0x28, 0x00, 0x00, 0x00, 0x00, // mov qword [rsp+40],0 (mask)  @46
+        0xBF, 0x0A, 0x00, 0x00, 0x00, //             mov edi, 10  (SIGUSR1)   @55
+        0x48, 0x8D, 0x74, 0x24, 0x10, //             lea rsi, [rsp+16] (&act) @60
+        0x31, 0xD2, //                               xor edx, edx (oact=NULL) @65
+        0x41, 0xBA, 0x08, 0x00, 0x00, 0x00, //       mov r10d, 8  (sigsetsz)  @67
+        0xB8, 0x0D, 0x00, 0x00, 0x00, //             mov eax, 13 (rt_sigaction)@73
+        0x0F, 0x05, //                               syscall                  @78
+        // poll(NULL, 0, -1):
+        0x31, 0xFF, //                               xor edi, edi (fds=NULL)  @80
+        0x31, 0xF6, //                               xor esi, esi (nfds=0)    @82
+        0xBA, 0xFF, 0xFF, 0xFF, 0xFF, //             mov edx, -1  (timeout)   @84
+        0xB8, 0x07, 0x00, 0x00, 0x00, //             mov eax, 7   (poll)      @89
+        0x0F, 0x05, //                               syscall  (blocks)        @94
+        0x48, 0x85, 0xC0, //                         test rax, rax            @96
+        0x78, 0x07, //                               js ok (+7 -> @108)       @99
+        0xBF, 0xEE, 0x00, 0x00, 0x00, //             mov edi, 0xEE (returned 0)@101
+        0xEB, 0x05, //                               jmp exit_syscall (+5)    @106
+        // ok:                                                                @108
+        0xBF, 0x00, 0x00, 0x00, 0x00, //             mov edi, sentinel        @108 (imm@109)
+        // exit_syscall:                                                      @113
+        0xB8, 0x3C, 0x00, 0x00, 0x00, //             mov eax, 60 (SYS_exit)   @113
+        0x0F, 0x05, //                               syscall                  @118
+        0xCC, //                                     int3 (unreachable)       @120
+        // handler:                                                           @121
+        0xC3, //                                     ret -> restorer          @121
+        // restorer:                                                          @122
+        0xB8, 0x0F, 0x00, 0x00, 0x00, //             mov eax, 15 (rt_sigreturn)@122
+        0x0F, 0x05, //                               syscall                  @127
+        0xCC, //                                     int3 (unreachable)       @129
+    ];
+
+    // Patch absolute addresses + the sentinel exit-code immediate.
+    let handler_addr = load_vaddr.wrapping_add(121);
+    let restorer_addr = load_vaddr.wrapping_add(122);
+    code[9..17].copy_from_slice(&handler_addr.to_le_bytes());
+    code[33..41].copy_from_slice(&restorer_addr.to_le_bytes());
+    code[109] = sentinel; // low byte of `mov edi, sentinel` imm32
+    let code_len = code.len(); // 130
+
+    let seg_data_len = code_len;
+    let file_size = code_offset as usize + seg_data_len;
+    let mut buf = vec![0u8; file_size];
+
+    // --- ELF header ---
+    buf[0] = 0x7F;
+    buf[1] = b'E';
+    buf[2] = b'L';
+    buf[3] = b'F';
+    buf[EI_CLASS] = ELFCLASS64;
+    buf[EI_DATA] = ELFDATA2LSB;
+    buf[EI_VERSION] = EV_CURRENT;
+    buf[EI_OSABI] = ELFOSABI_GNU;
+
+    write_u16(&mut buf, 16, ET_EXEC);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr); // e_entry
+    write_u64(&mut buf, 32, phdr_offset); // e_phoff
+    write_u64(&mut buf, 40, 0); // e_shoff
+    write_u32(&mut buf, 48, 0); // e_flags
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, 1); // e_phnum
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0);
+    write_u16(&mut buf, 62, 0);
+
+    // --- Program header (PT_LOAD: R+X covering the code) ---
+    let ph = phdr_offset as usize;
+    write_u32(&mut buf, ph, PT_LOAD);
+    write_u32(&mut buf, ph + 4, PF_R | PF_X);
+    write_u64(&mut buf, ph + 8, code_offset);
+    write_u64(&mut buf, ph + 16, load_vaddr);
+    write_u64(&mut buf, ph + 24, 0);
+    write_u64(&mut buf, ph + 32, seg_data_len as u64);
+    write_u64(&mut buf, ph + 40, seg_data_len as u64);
+    write_u64(&mut buf, ph + 48, 0x1000);
+
+    // --- Code ---
+    let cs = code_offset as usize;
+    buf[cs..cs + code_len].copy_from_slice(&code);
+
+    buf
+}
+
 /// Build a "Hello from userspace!" ELF that calls SYS_CONSOLE_WRITE
 /// then SYS_EXIT(0).
 ///

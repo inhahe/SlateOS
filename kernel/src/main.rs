@@ -1355,6 +1355,14 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: Linux poll() interruptibility (ring 3) self-test failed: {:?}", e);
     }
 
+    // Ring-3 test that poll(NULL, 0, -1) (no fds, infinite timeout) BLOCKS
+    // until a signal and returns -EINTR, rather than returning 0 immediately
+    // (the empty-set infinite-wait quick-path bug fixed alongside the
+    // poll/select/epoll signal-interruptibility work).
+    if let Err(e) = proc::spawn::self_test_linux_poll_empty_infinite() {
+        serial_println!("WARNING: Linux poll(NULL,0,-1) empty-set infinite-wait (ring 3) self-test failed: {:?}", e);
+    }
+
     // Ring-3 test that the SysV stack builder's argv *pointers* (not just the
     // scalar argc) are valid in the mapped user stack: a real Linux-ABI
     // process dereferences argv[0] and exits with its first byte.

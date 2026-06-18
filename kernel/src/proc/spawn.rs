@@ -3201,6 +3201,115 @@ pub fn self_test_linux_poll_interrupt() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test for the **`poll(NULL, 0, -1)` empty-set,
+/// infinite-timeout** path: it must *block* until a signal, then return
+/// `-EINTR` — not return `0` immediately.
+///
+/// With no fds to watch and an infinite timeout, only a delivered signal can
+/// end the wait (Linux treats this like `pause()`).  The pre-fix `nfds == 0`
+/// quick path in `poll_core` only slept for a *positive* timeout and returned
+/// `ok(0)` for a negative one, so `poll(NULL, 0, -1)` spun / returned 0
+/// instead of blocking.  The child here installs a SIGUSR1 handler and calls
+/// `poll(NULL, 0, -1)`; a correct kernel blocks it (so it is NOT a zombie
+/// before the signal), is interrupted by SIGUSR1, and `poll` returns `-EINTR`
+/// → exit(sentinel).  The bug manifests as the child exiting `0xEE` (poll
+/// returned 0) before the signal is even posted.
+pub fn self_test_linux_poll_empty_infinite() -> KernelResult<()> {
+    // Distinct from the other interrupt sentinels (…/poll(0x4B)).  0x5C = 92.
+    const SENTINEL: u8 = 0x5C;
+
+    serial_println!(
+        "[spawn] Running Linux poll(NULL,0,-1) empty-set infinite-wait (ring 3) test..."
+    );
+
+    let exe_elf = elf::build_linux_poll_empty_infinite_test_elf(SENTINEL);
+    let argv: &[&[u8]] = &[b"pollnull"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-poll-null",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: poll-null spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Let the child install its handler and park in poll(NULL,0,-1).
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+
+    let pre = pcb::state(result.pid);
+    if pre == Some(pcb::ProcessState::Zombie) {
+        thread::on_thread_exit(result.task_id);
+        let code = pcb::exit_code(result.pid);
+        pcb::destroy(result.pid);
+        serial_println!(
+            "[spawn]   FAIL: poll-null (ring 3) — child exited (code {:?}) before the \
+             signal was posted; poll(NULL,0,-1) did NOT block (the empty-set infinite-wait \
+             bug: it returned 0 immediately instead of waiting)",
+            code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Post SIGUSR1.  A correct kernel wakes the registered signal-waiter and
+    // poll returns -EINTR.
+    crate::proc::signal::set_pending(result.pid, 10);
+
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: poll-null (ring 3) — expected Zombie, got {:?} (poll(NULL,0,-1) \
+             was NOT interrupted by SIGUSR1 — it parked forever)",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code == Some(0xEE) {
+        serial_println!(
+            "[spawn]   FAIL: poll-null (ring 3) — poll returned 0 (>=0) instead of -EINTR; \
+             the empty-set infinite wait returned immediately instead of blocking"
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(i32::from(SENTINEL)) {
+        serial_println!(
+            "[spawn]   FAIL: poll-null (ring 3) — expected exit {} (poll returned -EINTR), \
+             got {:?}",
+            SENTINEL, exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   Linux poll(NULL,0,-1) empty-set infinite-wait (ring 3: blocks with no fds \
+         → SIGUSR1 wakes it → poll returns -EINTR, exit == {}): OK",
+        SENTINEL
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test that the SysV initial stack's **argv pointers** are
 /// valid in the mapped user stack — not just the scalar `argc`.
 ///

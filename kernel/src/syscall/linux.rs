@@ -28436,6 +28436,43 @@ fn interruptible_sleep_ms(pid: Option<u64>, total_ms: u64) -> bool {
     caller_has_deliverable_signal(pid)
 }
 
+/// The `nfds == 0` quick path shared by `poll_core` / `select_core`: a wait
+/// with no fds to watch reduces to a pure timed (or infinite) sleep that only
+/// a signal can interrupt.
+///
+/// * `timeout == 0` — instantaneous, returns `ok(0)`.
+/// * `timeout > 0`  — sleep the bounded time; `-EINTR` if a signal arrives.
+/// * `timeout < 0`  — block indefinitely (Linux `poll(NULL, 0, -1)` is
+///   equivalent to `pause()`: with no fds, only a signal ends the wait, then
+///   it returns `-EINTR`).  Previously this returned `ok(0)` immediately,
+///   which is non-conformant — a caller using `poll(NULL, 0, -1)` as a
+///   signal-wait spun instead of blocking.
+///
+/// An in-kernel caller (`pid == None`, e.g. a boot self-test) has no signal
+/// queue, so blocking forever on the infinite case would be an unbreakable
+/// hang; that contextless case returns `ok(0)` to stay safe.
+fn empty_set_wait(timeout_ms_signed: i64) -> SyscallResult {
+    if timeout_ms_signed == 0 {
+        return SyscallResult::ok(0);
+    }
+    let pid = caller_pid();
+    if timeout_ms_signed < 0 {
+        if pid.is_none() {
+            return SyscallResult::ok(0);
+        }
+        loop {
+            if interruptible_wait_slice(pid, 10) {
+                return linux_err(errno::EINTR);
+            }
+        }
+    }
+    #[allow(clippy::cast_sign_loss)]
+    if interruptible_sleep_ms(pid, timeout_ms_signed as u64) {
+        return linux_err(errno::EINTR);
+    }
+    SyscallResult::ok(0)
+}
+
 /// Shared core for `sys_poll` / `sys_ppoll` — the user pointer validation
 /// is done by the caller (which knows whether timeout is `int` ms or a
 /// `struct timespec`).  This function does the read-compute-write loop
@@ -28450,15 +28487,9 @@ fn interruptible_sleep_ms(pid: Option<u64>, total_ms: u64) -> bool {
 fn poll_core(fds_ptr: u64, nfds: u64, timeout_ms_signed: i64) -> SyscallResult {
     use alloc::{vec, vec::Vec};
 
-    // Quick path: no fds, just a timed sleep.
+    // Quick path: no fds, just a timed (or infinite) sleep.
     if nfds == 0 {
-        if timeout_ms_signed > 0 {
-            #[allow(clippy::cast_sign_loss)]
-            if interruptible_sleep_ms(caller_pid(), timeout_ms_signed as u64) {
-                return linux_err(errno::EINTR);
-            }
-        }
-        return SyscallResult::ok(0);
+        return empty_set_wait(timeout_ms_signed);
     }
 
     #[allow(clippy::cast_possible_truncation)]
@@ -28689,15 +28720,9 @@ fn select_core(
 ) -> SyscallResult {
     use alloc::{vec, vec::Vec};
 
-    // Quick path: no fds, just a timed sleep.
+    // Quick path: no fds, just a timed (or infinite) sleep.
     if nfds == 0 || len == 0 {
-        if timeout_ms_signed > 0 {
-            #[allow(clippy::cast_sign_loss)]
-            if interruptible_sleep_ms(caller_pid(), timeout_ms_signed as u64) {
-                return linux_err(errno::EINTR);
-            }
-        }
-        return SyscallResult::ok(0);
+        return empty_set_wait(timeout_ms_signed);
     }
 
     // Snapshot the three input fd_sets.  Each is `len` bytes.  An

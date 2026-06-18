@@ -9134,10 +9134,23 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          NOTE: select_core/epoll_wait_core share interruptible_wait_slice and
 ##          got the identical loop edit, so they are covered by the same fix
 ##          (the poll ring-3 test exercises the shared helper end-to-end).
-##          Pre-existing, OUT OF SCOPE for signal interruptibility: poll(NULL,0,
-##          -1) (nfds==0, infinite timeout) returns ok(0) immediately instead of
-##          blocking forever — the nfds==0 quick path only sleeps for a positive
-##          finite timeout.  Not fixed here (not a signal-interruptibility bug).
+##        - poll(NULL,0,-1) / select empty-set infinite-wait DONE 2026-06-18:
+##          the nfds==0 (and select nfds==0||len==0) quick paths only slept for
+##          a POSITIVE timeout and returned ok(0) for a negative (infinite)
+##          one, so poll(NULL,0,-1) returned 0 immediately instead of blocking
+##          until a signal (Linux treats an empty-set infinite poll like
+##          pause()).  Fix: new empty_set_wait(timeout) helper shared by
+##          poll_core/select_core — timeout==0 → ok(0); timeout>0 →
+##          interruptible_sleep_ms (unchanged); timeout<0 → loop on
+##          interruptible_wait_slice until a deliverable signal → -EINTR.  An
+##          in-kernel caller (pid None) returns ok(0) for the infinite case
+##          rather than hanging unbreakably (no signal queue to wake it).  Ring-3
+##          test (elf::build_linux_poll_empty_infinite_test_elf +
+##          spawn::self_test_linux_poll_empty_infinite, wired into main.rs):
+##          child installs a SIGUSR1 handler, poll(NULL,0,-1) blocks; kernel
+##          posts SIGUSR1; poll returns -EINTR → exit(0x5C=92).  Bug regression
+##          → child exits 0xEE (poll returned 0) before the signal is posted.
+##          Build clean (34.77s) + boot-test PASSED; serial shows "exit==92:OK".
 ##        - futex(FUTEX_WAIT / FUTEX_WAIT_BITSET) DONE 2026-06-18: was the
 ##          same confirmed bug class as wait4 — the native futex_wait_bitset /
 ##          futex_wait_bitset_timeout paths registered ONLY in the futex bucket

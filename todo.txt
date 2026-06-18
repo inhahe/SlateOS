@@ -8981,6 +8981,44 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##            Build + clippy (no new warns) + boot-test PASSED (237s; glibc
 ##            pthread/futex unaffected).  Still wants a ring-3 end-to-end test
 ##            (step c).
+##        - pipe read/write DONE 2026-06-18: same confirmed bug class — the
+##          blocking pipe primitives (ipc/pipe.rs read/write/wait_readable and
+##          the timed read_timeout/write_timeout) all parked with a bare
+##          sched::block_current() and a single-slot reader_waiter/writer_waiter,
+##          with NO signal-waiter registration and NO signal check, so a process
+##          blocked on an empty/full pipe (e.g. a shell pipeline stage) could
+##          never be interrupted by a signal — it slept forever while the signal
+##          stayed pending.  Fix (ipc/pipe.rs + syscall/linux.rs):
+##            * Three helpers after `static PIPES`: current_user_pid() (owner pid
+##              or 0 for a kernel task), deliverable_signal_pending(pid) (pending
+##              ∩ !blocked, always false for pid 0), and park_for_pipe(pid,task)
+##              — registers a signal-waiter with the register-then-recheck idiom,
+##              blocks, then deregisters; pid 0 parks uninterruptibly as before.
+##            * All 5 block sites: before parking, if deliverable_signal_pending
+##              they clear any stale waiter slot (reader/writer_waiter == self)
+##              and return Err(Interrupted); the indefinite sites then park via
+##              park_for_pipe.  The 2 TIMED sites additionally cancel the hrtimer
+##              before returning Interrupted.
+##            * Slot-clear on signal wake is the key subtlety: the waker .take()s
+##              the slot before waking, so a signal wake (not a peer wake) leaves
+##              the slot set — the interrupted task must clear its own slot.
+##            * New linux_from_slow_io() in linux.rs: maps native Interrupted (-8)
+##              → ERESTARTSYS sentinel (slow object, SA_RESTART-restartable);
+##              everything else (success, EOF=0, real errors) passes through
+##              linux_from_native.  Wired into dispatch_read/dispatch_write Pipe
+##              arms (so read/write AND readv/writev, which loop over those, are
+##              covered).  The timed pipe paths return Interrupted but are reached
+##              only by non-read/write callers and map to plain EINTR — correct,
+##              a relative timeout must not restart from scratch.
+##            * NOTE/edge: splice/sendfile pipe sources (splice_read/splice_write)
+##              still map Interrupted → EINTR via linux_from_native (not the
+##              ERESTARTSYS sentinel).  splice IS restartable on Linux, but the
+##              blocking window is tiny (allow_block only on the first read) and
+##              EINTR is safe; left for a later pass if it ever bites.
+##            * self_test_restart_action extended: linux_from_slow_io(Interrupted)
+##              →ERESTARTSYS, (0)→0 passthrough, (ChannelClosed)→EPIPE.
+##            Build clean + boot-test PASSED (229s).  Still wants the ring-3
+##            end-to-end test (step c).
 ##        - wait4 DONE 2026-06-18: was a confirmed bug — the blocking loop
 ##          had NO signal-interruption check and did not register as a
 ##          signal-waiter, so a process blocked in wait4 could not be

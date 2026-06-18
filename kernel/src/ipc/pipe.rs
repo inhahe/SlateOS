@@ -312,6 +312,53 @@ impl Pipe {
 static PIPES: Mutex<BTreeMap<PipeId, Pipe>> = Mutex::new(BTreeMap::new());
 
 // ---------------------------------------------------------------------------
+// Signal-interruptible blocking helpers
+// ---------------------------------------------------------------------------
+
+/// The owning user process id of the current task, or `0` for a kernel task.
+///
+/// Pipe waits are interruptible by signals only for user processes; kernel
+/// tasks (`pid == 0`) have no signal state and park uninterruptibly, exactly as
+/// before.
+fn current_user_pid() -> u64 {
+    crate::proc::thread::owner_process(sched::current_task_id()).unwrap_or(0)
+}
+
+/// `true` if a deliverable (unblocked) signal is pending for `pid`.
+///
+/// Always `false` for `pid == 0` (kernel task — no signal context).
+fn deliverable_signal_pending(pid: u64) -> bool {
+    pid != 0
+        && crate::proc::signal::has_pending_in_mask(pid, !crate::proc::signal::blocked(pid))
+}
+
+/// Park the current task for a pipe wait, interruptibly for user processes.
+///
+/// For a user process this registers a signal-waiter (so `set_pending` wakes the
+/// park when a deliverable signal arrives) using the register-then-recheck idiom
+/// to close the post-before-park race, blocks, then deregisters.  Kernel tasks
+/// park uninterruptibly.  The caller's surrounding loop must, after this
+/// returns, re-acquire the pipe lock and re-evaluate both the pipe state and
+/// [`deliverable_signal_pending`] — a signal wake is reported by the latter, not
+/// by this function.
+fn park_for_pipe(pid: u64, task: u64) {
+    if pid == 0 {
+        sched::block_current();
+        return;
+    }
+    let deliverable = !crate::proc::signal::blocked(pid);
+    crate::proc::signal::register_signalfd_waiter(pid, task, deliverable);
+    if crate::proc::signal::has_pending_in_mask(pid, deliverable) {
+        // A signal arrived between enqueue and registration — don't block; the
+        // caller's loop will observe the pending signal and return Interrupted.
+        crate::proc::signal::deregister_signalfd_waiter(pid, task);
+        return;
+    }
+    sched::block_current();
+    crate::proc::signal::deregister_signalfd_waiter(pid, task);
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -353,6 +400,9 @@ pub fn write(handle: PipeHandle, data: &[u8]) -> KernelResult<usize> {
         return Err(KernelError::InvalidArgument);
     }
 
+    let pid = current_user_pid();
+    let task = sched::current_task_id();
+
     loop {
         {
             let mut table = PIPES.lock();
@@ -386,13 +436,24 @@ pub fn write(handle: PipeHandle, data: &[u8]) -> KernelResult<usize> {
                 return Ok(written);
             }
 
-            // Buffer is full — block until space is available.
-            pipe.writer_waiter = Some(sched::current_task_id());
+            // Buffer is full.  Before parking, honour a deliverable signal —
+            // otherwise a blocked writer could never be interrupted.  Clear any
+            // stale waiter slot left by a prior signal wake.
+            if deliverable_signal_pending(pid) {
+                if pipe.writer_waiter == Some(task) {
+                    pipe.writer_waiter = None;
+                }
+                return Err(KernelError::Interrupted);
+            }
+
+            // Block until space is available.
+            pipe.writer_waiter = Some(task);
         }
 
-        // Block.  The reader will wake us when it drains some data.
+        // Block (interruptibly for user processes).  The reader wakes us when it
+        // drains data; a signal wakes us via the registered signal-waiter.
         super::stats::pipe_write_block();
-        sched::block_current();
+        park_for_pipe(pid, task);
 
         // Re-check on wake (loop back to top).
     }
@@ -465,6 +526,9 @@ pub fn read(handle: PipeHandle, buf: &mut [u8]) -> KernelResult<usize> {
         return Err(KernelError::InvalidArgument);
     }
 
+    let pid = current_user_pid();
+    let task = sched::current_task_id();
+
     loop {
         {
             let mut table = PIPES.lock();
@@ -498,13 +562,24 @@ pub fn read(handle: PipeHandle, buf: &mut [u8]) -> KernelResult<usize> {
                 return Ok(0);
             }
 
-            // Buffer empty, writer still open — block.
-            pipe.reader_waiter = Some(sched::current_task_id());
+            // Buffer empty, writer still open.  Honour a deliverable signal
+            // before parking (otherwise a blocked reader is uninterruptible);
+            // clear any stale waiter slot left by a prior signal wake.
+            if deliverable_signal_pending(pid) {
+                if pipe.reader_waiter == Some(task) {
+                    pipe.reader_waiter = None;
+                }
+                return Err(KernelError::Interrupted);
+            }
+
+            // Block.
+            pipe.reader_waiter = Some(task);
         }
 
-        // Block.  The writer will wake us when it writes data.
+        // Block (interruptibly for user processes).  The writer wakes us when it
+        // writes data; a signal wakes us via the registered signal-waiter.
         super::stats::pipe_read_block();
-        sched::block_current();
+        park_for_pipe(pid, task);
     }
 }
 
@@ -600,6 +675,8 @@ pub fn wait_readable(handle: PipeHandle) -> KernelResult<bool> {
     if handle.end() != PipeEnd::Read {
         return Err(KernelError::InvalidHandle);
     }
+    let pid = current_user_pid();
+    let task = sched::current_task_id();
     loop {
         {
             let mut table = PIPES.lock();
@@ -612,11 +689,19 @@ pub fn wait_readable(handle: PipeHandle) -> KernelResult<bool> {
             if pipe.write_closed {
                 return Ok(false);
             }
-            // Empty, writer still open — register and block.
-            pipe.reader_waiter = Some(sched::current_task_id());
+            // Empty, writer still open.  Honour a deliverable signal before
+            // parking; clear any stale waiter slot from a prior signal wake.
+            if deliverable_signal_pending(pid) {
+                if pipe.reader_waiter == Some(task) {
+                    pipe.reader_waiter = None;
+                }
+                return Err(KernelError::Interrupted);
+            }
+            // Register and block.
+            pipe.reader_waiter = Some(task);
         }
         super::stats::pipe_read_block();
-        sched::block_current();
+        park_for_pipe(pid, task);
     }
 }
 
@@ -681,11 +766,9 @@ pub fn read_timeout(handle: PipeHandle, buf: &mut [u8], timeout_ns: u64) -> Kern
         }
     }
 
-    let timer_handle = crate::hrtimer::schedule_ns(
-        timeout_ns,
-        timeout_wake,
-        sched::current_task_id(),
-    );
+    let pid = current_user_pid();
+    let task = sched::current_task_id();
+    let timer_handle = crate::hrtimer::schedule_ns(timeout_ns, timeout_wake, task);
 
     // Block loop.
     loop {
@@ -721,12 +804,23 @@ pub fn read_timeout(handle: PipeHandle, buf: &mut [u8], timeout_ns: u64) -> Kern
                 return Err(KernelError::TimedOut);
             }
 
+            // Honour a deliverable signal before parking; clear any stale
+            // waiter slot from a prior signal wake.  A timed wait maps the
+            // interruption to EINTR (no restart) at the syscall layer.
+            if deliverable_signal_pending(pid) {
+                if pipe.reader_waiter == Some(task) {
+                    pipe.reader_waiter = None;
+                }
+                crate::hrtimer::cancel(timer_handle);
+                return Err(KernelError::Interrupted);
+            }
+
             // Register as waiter.
-            pipe.reader_waiter = Some(sched::current_task_id());
+            pipe.reader_waiter = Some(task);
         }
 
         super::stats::pipe_read_block();
-        sched::block_current();
+        park_for_pipe(pid, task);
     }
 }
 
@@ -789,11 +883,9 @@ pub fn write_timeout(handle: PipeHandle, data: &[u8], timeout_ns: u64) -> Kernel
         }
     }
 
-    let timer_handle = crate::hrtimer::schedule_ns(
-        timeout_ns,
-        timeout_wake,
-        sched::current_task_id(),
-    );
+    let pid = current_user_pid();
+    let task = sched::current_task_id();
+    let timer_handle = crate::hrtimer::schedule_ns(timeout_ns, timeout_wake, task);
 
     // Block loop.
     loop {
@@ -829,12 +921,23 @@ pub fn write_timeout(handle: PipeHandle, data: &[u8], timeout_ns: u64) -> Kernel
                 return Err(KernelError::TimedOut);
             }
 
+            // Honour a deliverable signal before parking; clear any stale
+            // waiter slot from a prior signal wake.  A timed wait maps the
+            // interruption to EINTR (no restart) at the syscall layer.
+            if deliverable_signal_pending(pid) {
+                if pipe.writer_waiter == Some(task) {
+                    pipe.writer_waiter = None;
+                }
+                crate::hrtimer::cancel(timer_handle);
+                return Err(KernelError::Interrupted);
+            }
+
             // Register as waiter.
-            pipe.writer_waiter = Some(sched::current_task_id());
+            pipe.writer_waiter = Some(task);
         }
 
         super::stats::pipe_write_block();
-        sched::block_current();
+        park_for_pipe(pid, task);
     }
 }
 

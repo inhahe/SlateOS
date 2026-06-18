@@ -1299,6 +1299,34 @@ pub fn linux_from_native(res: SyscallResult) -> SyscallResult {
     SyscallResult::ok(-i64::from(errno_val))
 }
 
+/// Translate a *native* result from a **slow** I/O object (pipe/FIFO,
+/// socket, tty — anything with no inherent timeout) into the Linux ABI
+/// form, honouring SA_RESTART.
+///
+/// These objects block indefinitely waiting for the peer, so a signal
+/// that interrupts the wait is restartable: per Linux's taxonomy, an
+/// interrupted `read`/`write` on a slow object returns the
+/// `ERESTARTSYS` restart sentinel (which the signal-delivery checkpoint
+/// turns into either a transparent restart when the handler has
+/// `SA_RESTART`, or `-EINTR` otherwise).  The blocking pipe primitives
+/// report this interruption as [`KernelError::Interrupted`] (native code
+/// `-8`); we recognise that one code here and substitute the sentinel.
+///
+/// Every other result — success, `EOF`, or any real error — passes
+/// straight through [`linux_from_native`].  In particular a *timed* pipe
+/// wait that is interrupted must NOT be restarted (restarting would reset
+/// the relative timeout from scratch); those call sites map `Interrupted`
+/// to `-EINTR` directly via [`linux_from_native`] and never reach here.
+#[must_use]
+pub fn linux_from_slow_io(res: SyscallResult) -> SyscallResult {
+    // Native `Interrupted` (-8): a deliverable signal woke the blocking
+    // wait before any byte was transferred.  Surface the restart sentinel.
+    if res.value == KernelError::Interrupted as i64 {
+        return restart::restart_result(restart::ERESTARTSYS);
+    }
+    linux_from_native(res)
+}
+
 /// Translate a *native* futex-wait result into the Linux `FUTEX_WAIT`
 /// ABI return convention.
 ///
@@ -3617,7 +3645,9 @@ fn dispatch_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
                 arg0: entry.raw_handle, arg1: buf, arg2: len,
                 arg3: 0, arg4: 0, arg5: 0,
             };
-            linux_from_native(handlers::sys_pipe_write(&a))
+            // A pipe is a slow object: an interrupted blocking write is
+            // restartable (SA_RESTART) via the ERESTARTSYS sentinel.
+            linux_from_slow_io(handlers::sys_pipe_write(&a))
         }
         HandleKind::EventFd => dispatch_eventfd_write(entry, buf, len),
         // signalfd, timerfd and inotify are read-only: write(2) → EINVAL.
@@ -3805,7 +3835,9 @@ fn dispatch_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
                 arg0: entry.raw_handle, arg1: buf, arg2: cap,
                 arg3: 0, arg4: 0, arg5: 0,
             };
-            linux_from_native(handlers::sys_pipe_read(&a))
+            // A pipe is a slow object: an interrupted blocking read is
+            // restartable (SA_RESTART) via the ERESTARTSYS sentinel.
+            linux_from_slow_io(handlers::sys_pipe_read(&a))
         }
         HandleKind::EventFd => dispatch_eventfd_read(entry, buf, cap),
         // The ALSA control device is ioctl-only: read(2) → EINVAL.
@@ -48526,6 +48558,31 @@ fn self_test_restart_action() -> crate::error::KernelResult<()> {
             serial_println!(
                 "[syscall/linux]   FAIL: linux_from_futex_wait(Interrupted) -> {}",
                 timed.value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Slow-object I/O (pipe read/write): an interrupted blocking
+        // transfer maps Interrupted -> ERESTARTSYS sentinel for SA_RESTART.
+        let slow = linux_from_slow_io(SyscallResult::err(KernelError::Interrupted));
+        if slow.value != -ERESTARTSYS {
+            serial_println!(
+                "[syscall/linux]   FAIL: linux_from_slow_io(Interrupted) -> {}",
+                slow.value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // A real error on a slow object still maps normally (EOF/0 and
+        // success pass through unchanged).
+        let slow_eof = linux_from_slow_io(SyscallResult::ok(0));
+        if slow_eof.value != 0 {
+            serial_println!("[syscall/linux]   FAIL: linux_from_slow_io(0) -> non-zero");
+            return Err(KernelError::InternalError);
+        }
+        let slow_err = linux_from_slow_io(SyscallResult::err(KernelError::ChannelClosed));
+        if slow_err.value != -i64::from(errno::EPIPE) {
+            serial_println!(
+                "[syscall/linux]   FAIL: linux_from_slow_io(ChannelClosed) -> {}",
+                slow_err.value
             );
             return Err(KernelError::InternalError);
         }

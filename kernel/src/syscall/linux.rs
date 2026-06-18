@@ -1124,6 +1124,52 @@ pub mod restart {
     }
 }
 
+/// Per-task saved `restart_block` for syscalls that resume via
+/// `restart_syscall(2)` — currently `nanosleep` / `clock_nanosleep`.
+///
+/// Linux keeps this in `task_struct.restart_block`; we key a small global
+/// registry by task id.  Only the `ERESTART_RESTARTBLOCK` no-handler path
+/// populates it (an interrupted `nanosleep` saves the remaining deadline);
+/// [`sys_restart_syscall`] then consumes it exactly once via [`restart_block::take`].
+/// A direct userspace `restart_syscall` with nothing saved gets `-EINTR`,
+/// matching Linux's `do_no_restart_syscall`.
+pub mod restart_block {
+    use crate::sched::task::TaskId;
+    use alloc::collections::BTreeMap;
+    use spin::Mutex;
+
+    /// A saved `nanosleep`-family resume: the absolute hrtimer-clock deadline
+    /// to sleep until, and the user `rem` pointer (0 = none) to update if the
+    /// resumed sleep is interrupted again.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct NanosleepBlock {
+        /// Absolute deadline on the `hrtimer::now_ns()` monotonic clock.
+        pub deadline_ns: u64,
+        /// User pointer to a `struct timespec` for the remaining time, or 0.
+        pub rem_ptr: u64,
+    }
+
+    static BLOCKS: Mutex<BTreeMap<TaskId, NanosleepBlock>> = Mutex::new(BTreeMap::new());
+
+    /// Save (overwriting) the calling task's nanosleep restart block.
+    pub fn save_nanosleep(task: TaskId, block: NanosleepBlock) {
+        BLOCKS.lock().insert(task, block);
+    }
+
+    /// Take (remove and return) the task's saved restart block, if any.
+    #[must_use]
+    pub fn take(task: TaskId) -> Option<NanosleepBlock> {
+        BLOCKS.lock().remove(&task)
+    }
+
+    /// Drop any saved restart block for a task without consuming it as a
+    /// resume (e.g. when the task makes an unrelated blocking syscall, or on
+    /// exit), so a later stray `restart_syscall` can't replay a stale sleep.
+    pub fn clear(task: TaskId) {
+        BLOCKS.lock().remove(&task);
+    }
+}
+
 /// Resolve a restart sentinel at the **no-handler** return-to-user checkpoint.
 ///
 /// Called from [`crate::syscall::entry::syscall_handler_inner`] after
@@ -2096,8 +2142,13 @@ pub fn build_linux_rt_frame(
                 // With a handler running, RestartBlock collapses to EINTR
                 // (restart_action returns Eintr for it when has_handler=true);
                 // both arms therefore yield the user-visible -EINTR at the
-                // unchanged RIP.
+                // unchanged RIP.  A handler-delivered EINTR also means no
+                // restart_syscall will be issued, so invalidate any saved
+                // restart block (e.g. an interrupted nanosleep's) — matching
+                // Linux resetting restart_block.fn to do_no_restart_syscall —
+                // so a later stray restart_syscall can't replay a stale sleep.
                 restart::RestartAction::RestartBlock | restart::RestartAction::Eintr => {
+                    restart_block::clear(crate::sched::current_task_id());
                     ((-i64::from(errno::EINTR)) as u64, frame.user_rip)
                 }
             }
@@ -7144,10 +7195,110 @@ fn sys_sched_yield(_args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(0)
 }
 
-/// `nanosleep(req, rem)` — sleep for the requested timespec.
+/// Sleep the current task until `deadline_ns` (absolute `hrtimer::now_ns()`
+/// monotonic clock), interruptible by a deliverable signal.
 ///
-/// `rem` (remainder on signal interruption) is left untouched — our
-/// sleep is not currently interruptible.
+/// Returns `true` if the deadline was reached (slept to completion), or
+/// `false` if a deliverable (handler-backed) signal arrived first.  Only
+/// handler-backed signals can be pending-and-deliverable here (`classify_post`
+/// drops no-handler default-ignore signals and terminates/stops on the rest),
+/// so a `false` return always corresponds to a real interruption.
+///
+/// Race handling mirrors `sys_pause`: an hrtimer is armed for the remaining
+/// time and the task registers as a signal-waiter (register-then-recheck) so
+/// either source wakes the park.  The timer is cancelled after each park; a
+/// stale wake that slips through is absorbed by `block_current`'s pending-wake
+/// handling on the next park (and is harmless on the return path).
+fn interruptible_sleep_until(
+    pid: crate::proc::pcb::ProcessId,
+    task: u64,
+    deadline_ns: u64,
+) -> bool {
+    fn wake_callback(task_id_arg: u64) {
+        if !crate::sched::try_wake(task_id_arg) {
+            crate::sched::defer_wake(task_id_arg);
+        }
+    }
+    loop {
+        let now = crate::hrtimer::now_ns();
+        if now >= deadline_ns {
+            return true; // slept to completion
+        }
+        let deliverable = !crate::proc::signal::blocked(pid);
+        if crate::proc::signal::has_pending_in_mask(pid, deliverable) {
+            return false; // interrupted before parking
+        }
+        let remaining = deadline_ns - now;
+        let handle = crate::hrtimer::schedule_ns(remaining, wake_callback, task);
+        // Register-then-recheck: a signal posted between the check above and
+        // the park must not be lost (set_pending wakes signal-waiters).
+        crate::proc::signal::register_signalfd_waiter(pid, task, deliverable);
+        if crate::proc::signal::has_pending_in_mask(pid, deliverable) {
+            crate::proc::signal::deregister_signalfd_waiter(pid, task);
+            let _ = crate::hrtimer::cancel(handle); // discard: nothing to wake
+            return false;
+        }
+        crate::sched::block_current();
+        crate::proc::signal::deregister_signalfd_waiter(pid, task);
+        // Cancel the timer if it has not fired; harmless (false) if it already
+        // did.  The next loop iteration decides completed-vs-interrupted.
+        let _ = crate::hrtimer::cancel(handle);
+    }
+}
+
+/// Shared `nanosleep` / `clock_nanosleep` / `restart_syscall` core: sleep until
+/// `deadline_ns` (absolute monotonic hrtimer clock), interruptibly.
+///
+/// * Slept to completion → `ok(0)` (and any stale restart block is dropped).
+/// * Interrupted by a deliverable signal → write the remaining time to
+///   `rem_ptr` (if non-0, Linux `rmtp`), save a [`restart_block`] so
+///   `restart_syscall` can resume to the same deadline, and return the
+///   `ERESTART_RESTARTBLOCK` sentinel.  The delivery checkpoint resolves it: a
+///   handler run → `-EINTR` (remaining already written); no handler →
+///   `restart_syscall` resumes the sleep.
+///
+/// With no calling process (boot self-test) there is no signal context, so it
+/// falls back to the non-interruptible [`crate::sched::sleep_ns`].
+fn nanosleep_core(deadline_ns: u64, rem_ptr: u64) -> SyscallResult {
+    let Some(pid) = caller_pid() else {
+        let now = crate::hrtimer::now_ns();
+        if deadline_ns > now {
+            crate::sched::sleep_ns(deadline_ns - now);
+        }
+        return SyscallResult::ok(0);
+    };
+    let task = crate::sched::current_task_id();
+    if interruptible_sleep_until(pid, task, deadline_ns) {
+        restart_block::clear(task);
+        return SyscallResult::ok(0);
+    }
+    // Interrupted.  Compute and (if requested) write back the remaining time.
+    let now = crate::hrtimer::now_ns();
+    let remaining = deadline_ns.saturating_sub(now);
+    if rem_ptr != 0 {
+        const NSEC_PER_SEC: u64 = 1_000_000_000;
+        #[allow(clippy::cast_possible_wrap)]
+        let ts = LinuxTimespec {
+            tv_sec: (remaining / NSEC_PER_SEC) as i64,
+            tv_nsec: (remaining % NSEC_PER_SEC) as i64,
+        };
+        if let Err(e) = write_timespec(rem_ptr, ts) {
+            return linux_err(linux_errno_for(e));
+        }
+    }
+    restart_block::save_nanosleep(
+        task,
+        restart_block::NanosleepBlock { deadline_ns, rem_ptr },
+    );
+    restart::restart_result(restart::ERESTART_RESTARTBLOCK)
+}
+
+/// `nanosleep(req, rem)` — sleep for the requested timespec, interruptibly.
+///
+/// On signal interruption the remaining time is written to `rem` (if non-NULL)
+/// and the sleep resumes via `restart_syscall` under `SA_RESTART`, or returns
+/// `-EINTR` to a handler without it (Linux `hrtimer_nanosleep`, CLOCK_MONOTONIC
+/// relative).
 fn sys_nanosleep(args: &SyscallArgs) -> SyscallResult {
     // Linux's `SYSCALL_DEFINE2(nanosleep)` (kernel/time/hrtimer.c):
     //   if (get_timespec64(&tu, rqtp)) return -EFAULT;
@@ -7160,6 +7311,7 @@ fn sys_nanosleep(args: &SyscallArgs) -> SyscallResult {
     // returns -EINVAL.
     const NSEC_PER_SEC: i64 = 1_000_000_000;
     let req_ptr = args.arg0;
+    let rem_ptr = args.arg1;
     let req = match read_timespec(req_ptr) {
         Ok(t) => t,
         Err(e) => return linux_err(linux_errno_for(e)),
@@ -7172,8 +7324,8 @@ fn sys_nanosleep(args: &SyscallArgs) -> SyscallResult {
         crate::sched::yield_now();
         return SyscallResult::ok(0);
     }
-    crate::sched::sleep_ns(ns);
-    SyscallResult::ok(0)
+    let deadline_ns = crate::hrtimer::now_ns().saturating_add(ns);
+    nanosleep_core(deadline_ns, rem_ptr)
 }
 
 /// `getpid()` — current process ID.
@@ -32075,13 +32227,19 @@ fn handle_kind_ord(k: crate::proc::linux_fd::HandleKind) -> u64 {
     }
 }
 
-/// `restart_syscall()` — internal trampoline, should never be called
-/// directly by userspace.  Linux returns the saved syscall's value; if
-/// nothing is saved, the kernel returns -EINTR.
+/// `restart_syscall()` — internal trampoline, should never be called directly
+/// by userspace.  The kernel re-enters it (via [`resolve_syscall_restart`]
+/// rewriting RAX) after a syscall returned `ERESTART_RESTARTBLOCK` with no
+/// handler, to resume the interrupted call.  Currently only `nanosleep`-family
+/// sleeps register a restart block: we consume it and resume the sleep to the
+/// saved deadline.  With nothing saved (e.g. a direct/stale userspace call) we
+/// return `-EINTR`, matching Linux's `do_no_restart_syscall`.
 fn sys_restart_syscall(_args: &SyscallArgs) -> SyscallResult {
-    // No saved syscall in our kernel; treat a direct call as EINTR which
-    // is what Linux returns for a stale restart frame.
-    linux_err(errno::EINTR)
+    let task = crate::sched::current_task_id();
+    match restart_block::take(task) {
+        Some(block) => nanosleep_core(block.deadline_ns, block.rem_ptr),
+        None => linux_err(errno::EINTR),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -43370,6 +43528,9 @@ fn sys_clock_nanosleep(args: &SyscallArgs) -> SyscallResult {
         0 => crate::timekeeping::clock_realtime(),
         _ => crate::hrtimer::now_ns(),
     };
+    // TIMER_ABSTIME suppresses the remainder write (Linux sets rmtp = NULL on
+    // the absolute path); a relative sleep reports the remainder via arg3.
+    let rem_ptr = if (flags & TIMER_ABSTIME) != 0 { 0 } else { args.arg3 };
     let ns = if (flags & TIMER_ABSTIME) != 0 {
         target_ns.saturating_sub(now_ns)
     } else {
@@ -43377,10 +43538,15 @@ fn sys_clock_nanosleep(args: &SyscallArgs) -> SyscallResult {
     };
     if ns == 0 {
         crate::sched::yield_now();
-    } else {
-        crate::sched::sleep_ns(ns);
+        return SyscallResult::ok(0);
     }
-    SyscallResult::ok(0)
+    // Convert the (possibly realtime-relative) duration to an absolute
+    // monotonic hrtimer deadline.  NOTE: for an absolute CLOCK_REALTIME sleep
+    // this snapshots the offset at call time and does not track later realtime
+    // clock steps — an accepted simplification (the previous code likewise
+    // slept on the monotonic hrtimer for the computed duration).
+    let deadline_ns = crate::hrtimer::now_ns().saturating_add(ns);
+    nanosleep_core(deadline_ns, rem_ptr)
 }
 
 /// `getrandom(buf, buflen, flags)` — fill `buf` with random bytes.
@@ -48282,6 +48448,41 @@ fn self_test_restart_action() -> crate::error::KernelResult<()> {
             serial_println!(
                 "[syscall/linux]   FAIL: restart_action({sentinel},{has_handler},{sa_restart}) = {got:?}, want {want:?}"
             );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // restart_block storage: save → take consumes exactly once; clear drops
+    // without consuming; an unrelated task's slot is unaffected.  Use synthetic
+    // task ids unlikely to collide with a live task.
+    {
+        use crate::syscall::linux::restart_block::{self, NanosleepBlock};
+        let t1: u64 = 0xFFFF_FFFF_FFFF_FF01;
+        let t2: u64 = 0xFFFF_FFFF_FFFF_FF02;
+        restart_block::clear(t1);
+        restart_block::clear(t2);
+        let b = NanosleepBlock { deadline_ns: 1_234_567, rem_ptr: 0xdead_beef };
+        restart_block::save_nanosleep(t1, b);
+        if restart_block::take(t2).is_some() {
+            serial_println!("[syscall/linux]   FAIL: restart_block cross-task leak");
+            return Err(KernelError::InternalError);
+        }
+        match restart_block::take(t1) {
+            Some(got) if got == b => {}
+            _ => {
+                serial_println!("[syscall/linux]   FAIL: restart_block save/take mismatch");
+                return Err(KernelError::InternalError);
+            }
+        }
+        if restart_block::take(t1).is_some() {
+            serial_println!("[syscall/linux]   FAIL: restart_block take not single-shot");
+            return Err(KernelError::InternalError);
+        }
+        // clear after save also yields nothing on take.
+        restart_block::save_nanosleep(t1, b);
+        restart_block::clear(t1);
+        if restart_block::take(t1).is_some() {
+            serial_println!("[syscall/linux]   FAIL: restart_block clear did not drop");
             return Err(KernelError::InternalError);
         }
     }

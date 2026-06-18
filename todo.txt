@@ -8954,9 +8954,31 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          terminates on fatal ones), so the sentinel always resolves to a
 ##          handler run + restart/EINTR.  Still wants a ring-3 two-process
 ##          end-to-end test (step c below).
-##      (b) implement the restart_block storage + make the
-##      restart_syscall(NR=219) trampoline (no-op stub, linux.rs ~31853)
-##      replay it; (c) a ring-3 end-to-end test (install SA_RESTART
+##      (b) DONE 2026-06-18: restart_block storage + restart_syscall replay.
+##        - New restart_block module (linux.rs, sibling of `restart`): a
+##          per-TaskId BTreeMap<NanosleepBlock{deadline_ns, rem_ptr}> with
+##          save_nanosleep/take(single-shot)/clear.
+##        - interruptible_sleep_until(pid,task,deadline_ns)->bool helper:
+##          arms hrtimer + registers signal-waiter (register-then-recheck),
+##          cancels the timer after each park; returns true if the deadline
+##          was reached, false if a deliverable signal interrupted.
+##        - nanosleep_core(deadline_ns, rem_ptr): boot-self-test path (no
+##          caller_pid) falls back to plain sleep_ns; otherwise interruptible
+##          sleep.  On completion -> restart_block::clear + ok(0).  On
+##          interruption -> writes remaining timespec to rem_ptr (if non-NULL),
+##          save_nanosleep, returns ERESTART_RESTARTBLOCK.
+##        - sys_nanosleep / sys_clock_nanosleep rewritten to compute an
+##          absolute deadline_ns and call nanosleep_core.  ABSTIME path passes
+##          rem_ptr=0 (Linux writes no remaining for absolute sleeps).
+##        - sys_restart_syscall(NR=219) now take()s the saved block and resumes
+##          nanosleep_core(block.deadline_ns, block.rem_ptr); no block -> EINTR.
+##        - build_linux_rt_frame Eintr/RestartBlock handler arm clears any saved
+##          block (a handler interrupting the sleep invalidates a later stray
+##          restart_syscall so it can't replay a stale deadline).
+##        - self_test_restart_action extended: restart_block save/take(single-
+##          shot)/cross-task-isolation/clear-drops coverage.
+##        Build clean + boot-test PASSED (222s).
+##      (c) STILL TODO: a ring-3 end-to-end test (install SA_RESTART
 ##      handler, block in a syscall, deliver a signal, observe the syscall
 ##      resume rather than return EINTR).  Lower priority than it looks —
 ##      most programs tolerate EINTR with a retry loop.

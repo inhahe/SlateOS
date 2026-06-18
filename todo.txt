@@ -8916,13 +8916,33 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      self_test_restart_action covers the full decision table + sentinel
 ##      helpers.  This is INERT until syscalls opt in — nothing returns a
 ##      sentinel yet, so behaviour is unchanged.
-##      REMAINING (follow-up): (a) make interruptible blocking syscalls
-##      return the right sentinel instead of -EINTR, following Linux's
-##      taxonomy — ERESTARTSYS for read/write/wait4/futex(FUTEX_WAIT) on
-##      slow objects; ALWAYS -EINTR (no sentinel) for poll/select/
+##      PER-SYSCALL WIRING — IN PROGRESS:
+##      * sys_pause DONE 2026-06-18: now returns ERESTARTNOHAND (via
+##        restart::restart_result) instead of -EINTR on signal wakeup.
+##        Matches arch-generic Linux sys_pause.  Handler case collapses
+##        to -EINTR (NOHAND ignores SA_RESTART); no-handler case restarts
+##        pause() = the re-park we want.  Helper restart::restart_result
+##        added; self_test_restart_action now spot-checks the round-trip.
+##      REMAINING (follow-up): (a) finish converting the other interruptible
+##      blocking syscalls to the right sentinel instead of -EINTR, following
+##      Linux's taxonomy — ERESTARTSYS for read/write/wait4/futex(FUTEX_WAIT)
+##      on slow objects; ALWAYS -EINTR (no sentinel) for poll/select/
 ##      epoll_wait and timed recv/send; ERESTART_RESTARTBLOCK for
 ##      nanosleep/clock_nanosleep/futex-with-timeout (needs a saved
-##      restart_block); (b) implement the restart_block storage + make the
+##      restart_block).  NOTE deferred-with-reason:
+##        - sys_rt_sigsuspend kept at -EINTR (NOT yet ERESTARTNOHAND):
+##          restarting it would re-run set_blocked/set_saved_sigmask with
+##          the temp mask already installed, corrupting the saved mask the
+##          delivery checkpoint restores.  Needs the checkpoint to restore
+##          the saved mask BEFORE a restart re-installs it; do that first.
+##        - signalfd blocking read: needs an "interrupted by a signal NOT in
+##          the signalfd mask" check added first (it has none today — it
+##          only wakes for watched signals), then that exit becomes
+##          ERESTARTSYS.
+##        - wait4 blocking loop has no signal-interruption check at all today
+##          (it only wakes on child state changes); add EINTR/ERESTARTSYS on
+##          a deliverable pending signal as a prerequisite.
+##      (b) implement the restart_block storage + make the
 ##      restart_syscall(NR=219) trampoline (no-op stub, linux.rs ~31853)
 ##      replay it; (c) a ring-3 end-to-end test (install SA_RESTART
 ##      handler, block in a syscall, deliver a signal, observe the syscall

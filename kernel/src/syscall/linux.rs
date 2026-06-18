@@ -1109,6 +1109,19 @@ pub mod restart {
             ret
         }
     }
+
+    /// Build the in-kernel return value for an interrupted blocking syscall that
+    /// should participate in `SA_RESTART` semantics.  `sentinel` is one of the
+    /// `ERESTART*` constants in this module; the result carries it in negated
+    /// `-VALUE` form, exactly like any `-errno`, so the signal-delivery
+    /// checkpoint ([`build_linux_rt_frame`] for the handler case,
+    /// [`super::resolve_syscall_restart`] for the no-handler case) can resolve
+    /// it into either a restart or a user-visible `-EINTR`.  It is never
+    /// returned directly to ring 3 — the backstops above guarantee that.
+    #[must_use]
+    pub const fn restart_result(sentinel: i64) -> super::SyscallResult {
+        super::SyscallResult::ok(-sentinel)
+    }
 }
 
 /// Resolve a restart sentinel at the **no-handler** return-to-user checkpoint.
@@ -17388,7 +17401,13 @@ fn sys_pause(_args: &SyscallArgs) -> SyscallResult {
         // Deliverable = pending and not blocked.
         let deliverable = !crate::proc::signal::blocked(caller);
         if crate::proc::signal::has_pending_in_mask(caller, deliverable) {
-            return linux_err(errno::EINTR);
+            // Linux returns -ERESTARTNOHAND from pause() (arch-generic
+            // sys_pause -> -ERESTARTNOHAND).  The signal-delivery checkpoint
+            // resolves it: a handler that runs collapses it to -EINTR
+            // (ERESTARTNOHAND never honours SA_RESTART when a handler ran),
+            // while a default/no-handler disposition restarts pause() — which
+            // is exactly the re-park we want.
+            return restart::restart_result(restart::ERESTARTNOHAND);
         }
         // Register-then-recheck so a signal posted in the gap before we
         // park is not lost (set_pending wakes registered waiters whose
@@ -48181,6 +48200,21 @@ fn self_test_restart_action() -> crate::error::KernelResult<()> {
     if restart::leaked_sentinel_to_eintr(-ERESTARTSYS) != -i64::from(errno::EINTR) {
         serial_println!("[syscall/linux]   FAIL: leaked backstop didn't convert");
         return Err(KernelError::InternalError);
+    }
+
+    // restart_result carries the sentinel as a negated -VALUE (like any
+    // -errno) so the delivery checkpoint can resolve it.  pause() emits
+    // ERESTARTNOHAND, so spot-check that the round-trip recovers the sentinel.
+    for &s in &[ERESTARTSYS, ERESTARTNOHAND, ERESTART_RESTARTBLOCK] {
+        let r = restart::restart_result(s);
+        if r.value != -s {
+            serial_println!("[syscall/linux]   FAIL: restart_result({s}).value = {}", r.value);
+            return Err(KernelError::InternalError);
+        }
+        if restart::sentinel_magnitude(r.value) != Some(s) {
+            serial_println!("[syscall/linux]   FAIL: restart_result({s}) not a sentinel");
+            return Err(KernelError::InternalError);
+        }
     }
 
     // Decision table: (sentinel, has_handler, sa_restart) -> action.

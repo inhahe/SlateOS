@@ -8900,14 +8900,34 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      REMAINING GAP: SA_RESTART syscall-restart semantics.  The flag
 ##      is recognized/validated/stored, but a *slow* syscall interrupted
 ##      by a signal whose handler has SA_RESTART is NOT auto-restarted —
-##      it still returns -EINTR.  Wiring real restart requires every
-##      interruptible syscall to return an ERESTARTSYS-class sentinel,
-##      the signal-delivery path to rewind RIP to the syscall
-##      instruction (or stash a restart block) when SA_RESTART is set,
-##      and the restart_syscall(NR=219) trampoline (currently a no-op
-##      stub, linux.rs ~31853) to replay the saved args.  Tracked as its
-##      own follow-up; most programs tolerate EINTR with a retry loop so
-##      this is lower priority than it looks.
+##      it still returns -EINTR.
+##      CORE MECHANISM DONE 2026-06-18: linux.rs `restart` module adds the
+##      kernel-internal sentinels (ERESTARTSYS=512 / ERESTARTNOINTR=513 /
+##      ERESTARTNOHAND=514 / ERESTART_RESTARTBLOCK=516, never user-visible)
+##      and a pure `restart_action(sentinel, has_handler, sa_restart)`
+##      decision fn mirroring arch/x86 handle_signal/do_signal.  The
+##      handler path (build_linux_rt_frame) and the no-handler path
+##      (entry.rs syscall_handler_inner -> linux::resolve_syscall_restart)
+##      both consume sentinels: restart rewinds user_rip by 2 (the
+##      `syscall` insn) and reloads RAX with the original nr (the SYSRET
+##      asm restores the saved arg regs from the frame, so re-exec is
+##      correct); non-restart converts to -EINTR.  Native delivery path
+##      has a leak guard (leaked_sentinel_to_eintr).  Boot self-test
+##      self_test_restart_action covers the full decision table + sentinel
+##      helpers.  This is INERT until syscalls opt in — nothing returns a
+##      sentinel yet, so behaviour is unchanged.
+##      REMAINING (follow-up): (a) make interruptible blocking syscalls
+##      return the right sentinel instead of -EINTR, following Linux's
+##      taxonomy — ERESTARTSYS for read/write/wait4/futex(FUTEX_WAIT) on
+##      slow objects; ALWAYS -EINTR (no sentinel) for poll/select/
+##      epoll_wait and timed recv/send; ERESTART_RESTARTBLOCK for
+##      nanosleep/clock_nanosleep/futex-with-timeout (needs a saved
+##      restart_block); (b) implement the restart_block storage + make the
+##      restart_syscall(NR=219) trampoline (no-op stub, linux.rs ~31853)
+##      replay it; (c) a ring-3 end-to-end test (install SA_RESTART
+##      handler, block in a syscall, deliver a signal, observe the syscall
+##      resume rather than return EINTR).  Lower priority than it looks —
+##      most programs tolerate EINTR with a retry loop.
 ##   6. MPROTECT — DONE.
 ##      sys_mprotect now walks the caller's PML4 and applies
 ##      WRITABLE / NO_EXECUTE / USER_ACCESSIBLE flag changes per 16 KiB

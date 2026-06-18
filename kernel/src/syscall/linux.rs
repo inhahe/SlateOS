@@ -980,6 +980,189 @@ pub mod errno {
 }
 
 // ---------------------------------------------------------------------------
+// SA_RESTART — kernel-internal syscall-restart sentinels and decision logic
+// ---------------------------------------------------------------------------
+
+/// Kernel-internal "should this syscall be restarted?" sentinels.
+///
+/// Mirrors Linux `include/linux/errno.h` (values 512–516).  An interruptible
+/// blocking syscall that is woken by a pending signal returns one of these
+/// (in negated `-VALUE` form, like any `-errno`) **instead of** `-EINTR`.
+/// The signal-delivery checkpoint then decides — based on whether a handler
+/// runs and that handler's `SA_RESTART` flag — whether to transparently
+/// restart the syscall (rewind `%rip` to the `syscall` instruction and reload
+/// `%rax` with the original syscall number) or to convert the sentinel to the
+/// user-visible `-EINTR`.
+///
+/// These values MUST NEVER reach userspace: every path that returns a value to
+/// ring 3 ([`crate::syscall::entry`]) runs them through [`restart_action`] and
+/// either restarts or substitutes `-EINTR`.  [`leaked_sentinel_to_eintr`] is
+/// the final backstop.
+pub mod restart {
+    use super::errno;
+
+    /// Restart iff the interrupting handler has `SA_RESTART` (the common case
+    /// for `read`/`write`/`wait4`/`futex` on slow objects).
+    pub const ERESTARTSYS: i64 = 512;
+    /// Always restart, regardless of `SA_RESTART` (e.g. a stop signal that was
+    /// just a job-control bounce — the syscall must not observe EINTR).
+    pub const ERESTARTNOINTR: i64 = 513;
+    /// Restart only when **no** handler runs; if a handler runs, give EINTR
+    /// (used where restarting after a user handler would be wrong, e.g.
+    /// `accept`-class calls in some configurations).
+    pub const ERESTARTNOHAND: i64 = 514;
+    /// Restart via the `restart_syscall(2)` trampoline using a saved
+    /// `restart_block` (e.g. `nanosleep`, which must resume with the
+    /// *remaining* time, not from scratch).
+    pub const ERESTART_RESTARTBLOCK: i64 = 516;
+
+    /// The `syscall` instruction is two bytes (`0F 05`); the saved user RIP
+    /// points just past it, so a restart rewinds RIP by this amount to
+    /// re-execute the instruction.
+    pub const SYSCALL_INSN_LEN: u64 = 2;
+
+    /// Is `ret` (a raw syscall return value, normally negative `-errno`) one of
+    /// the restart sentinels?  Accepts either sign so callers don't have to
+    /// normalise first.
+    #[must_use]
+    pub fn is_sentinel(ret: i64) -> bool {
+        matches!(
+            ret.unsigned_abs() as i64,
+            ERESTARTSYS | ERESTARTNOINTR | ERESTARTNOHAND | ERESTART_RESTARTBLOCK
+        )
+    }
+
+    /// The positive sentinel magnitude of `ret`, or `None` if `ret` is not a
+    /// restart sentinel.
+    #[must_use]
+    pub fn sentinel_magnitude(ret: i64) -> Option<i64> {
+        let m = ret.unsigned_abs() as i64;
+        if is_sentinel(m) { Some(m) } else { None }
+    }
+
+    /// What the delivery checkpoint should do with a restart sentinel.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum RestartAction {
+        /// Re-execute the original syscall (rewind RIP, reload RAX = nr).
+        Restart,
+        /// Re-execute via the `restart_syscall` trampoline (RAX = nr_restart).
+        RestartBlock,
+        /// Do not restart; the user sees `-EINTR`.
+        Eintr,
+    }
+
+    /// Decide the restart action, mirroring Linux `handle_signal()` /
+    /// `do_signal()` (`arch/x86/kernel/signal.c`).
+    ///
+    /// * `sentinel` — the positive sentinel magnitude (512/513/514/516).
+    /// * `has_handler` — a userspace handler is about to run for the signal.
+    /// * `sa_restart` — that handler's `SA_RESTART` flag (irrelevant when
+    ///   `has_handler` is false).
+    #[must_use]
+    pub fn restart_action(sentinel: i64, has_handler: bool, sa_restart: bool) -> RestartAction {
+        match sentinel {
+            // Unconditional restart.
+            ERESTARTNOINTR => RestartAction::Restart,
+            // restart_block: only the no-handler case resumes (with the saved
+            // block); a handler turns it into EINTR.
+            ERESTART_RESTARTBLOCK => {
+                if has_handler {
+                    RestartAction::Eintr
+                } else {
+                    RestartAction::RestartBlock
+                }
+            }
+            // NOHAND: restart only when no handler ran.
+            ERESTARTNOHAND => {
+                if has_handler {
+                    RestartAction::Eintr
+                } else {
+                    RestartAction::Restart
+                }
+            }
+            // ERESTARTSYS (and any unexpected value, treated conservatively as
+            // ERESTARTSYS): restart iff SA_RESTART, or unconditionally when no
+            // handler runs.
+            _ => {
+                if has_handler {
+                    if sa_restart {
+                        RestartAction::Restart
+                    } else {
+                        RestartAction::Eintr
+                    }
+                } else {
+                    RestartAction::Restart
+                }
+            }
+        }
+    }
+
+    /// Final backstop: if `ret` is a restart sentinel that somehow reached a
+    /// return-to-user path without being resolved, substitute `-EINTR` so the
+    /// internal value can never leak to ring 3.  Non-sentinel values pass
+    /// through unchanged.
+    #[must_use]
+    pub fn leaked_sentinel_to_eintr(ret: i64) -> i64 {
+        if is_sentinel(ret) {
+            -i64::from(errno::EINTR)
+        } else {
+            ret
+        }
+    }
+}
+
+/// Resolve a restart sentinel at the **no-handler** return-to-user checkpoint.
+///
+/// Called from [`crate::syscall::entry::syscall_handler_inner`] after
+/// `deliver_pending_signal` returned `false` (no userspace handler frame was
+/// built — either nothing was deliverable, or every pending signal was ignored
+/// or had a non-fatal default).
+///
+/// If `ret` is a [`restart`] sentinel this is the "no handler ran" case, where
+/// Linux restarts the syscall unconditionally:
+///
+///   * `ERESTARTSYS` / `ERESTARTNOINTR` / `ERESTARTNOHAND` → restart the
+///     original syscall.  We rewind `frame.user_rip` to the `syscall`
+///     instruction and return the original syscall number so the SYSRET path
+///     (which reloads the saved argument registers from the frame) re-executes
+///     it.
+///   * `ERESTART_RESTARTBLOCK` → restart via the `restart_syscall(2)`
+///     trampoline: same RIP rewind, but RAX is set to `nr::RESTART_SYSCALL` so
+///     the resumed call consults the saved `restart_block` (e.g. `nanosleep`
+///     resuming with the remaining time).
+///
+/// A non-sentinel value is returned unchanged.  A sentinel is **never**
+/// returned to userspace.
+#[must_use]
+pub fn resolve_syscall_restart(
+    frame: &mut crate::syscall::entry::SyscallFrame,
+    ret: i64,
+) -> i64 {
+    let Some(sentinel) = restart::sentinel_magnitude(ret) else {
+        return ret;
+    };
+    match restart::restart_action(sentinel, false, false) {
+        restart::RestartAction::Restart => {
+            frame.user_rip = frame.user_rip.wrapping_sub(restart::SYSCALL_INSN_LEN);
+            #[allow(clippy::cast_possible_wrap)]
+            {
+                frame.syscall_nr as i64
+            }
+        }
+        restart::RestartAction::RestartBlock => {
+            frame.user_rip = frame.user_rip.wrapping_sub(restart::SYSCALL_INSN_LEN);
+            #[allow(clippy::cast_possible_wrap)]
+            {
+                nr::RESTART_SYSCALL as i64
+            }
+        }
+        // restart_action never yields Eintr when has_handler == false, but stay
+        // total: convert to EINTR rather than ever leaking the sentinel.
+        restart::RestartAction::Eintr => -i64::from(errno::EINTR),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Native KernelError → Linux errno
 // ---------------------------------------------------------------------------
 
@@ -1883,15 +2066,41 @@ pub fn build_linux_rt_frame(
 ) -> bool {
     use crate::proc::signal;
 
+    // SA_RESTART: a handler is about to run, so resolve any restart sentinel
+    // the interrupted syscall returned.  Either we rewind so the syscall
+    // re-executes after the handler returns (RAX = original nr, RIP = the
+    // `syscall` instruction), or we convert the sentinel to the user-visible
+    // -EINTR.  A non-sentinel return value is passed through unchanged.  See
+    // [`restart::restart_action`].
+    let (saved_rax, saved_rip) = match restart::sentinel_magnitude(ret_val) {
+        Some(sentinel) => {
+            let sa_restart = (act.sa_flags & sa_flags::SA_RESTART) != 0;
+            match restart::restart_action(sentinel, true, sa_restart) {
+                restart::RestartAction::Restart => (
+                    frame.syscall_nr,
+                    frame.user_rip.wrapping_sub(restart::SYSCALL_INSN_LEN),
+                ),
+                // With a handler running, RestartBlock collapses to EINTR
+                // (restart_action returns Eintr for it when has_handler=true);
+                // both arms therefore yield the user-visible -EINTR at the
+                // unchanged RIP.
+                restart::RestartAction::RestartBlock | restart::RestartAction::Eintr => {
+                    ((-i64::from(errno::EINTR)) as u64, frame.user_rip)
+                }
+            }
+        }
+        #[allow(clippy::cast_sign_loss)]
+        None => (ret_val as u64, frame.user_rip),
+    };
+
     // Snapshot the interrupted syscall context.  rcx/r11 are clobbered by the
     // `syscall` instruction; their architectural values are the return RIP and
     // saved RFLAGS, so reproduce that.  RAX resumes with the syscall's pending
-    // return value.
-    #[allow(clippy::cast_sign_loss)]
+    // return value (or, on restart, the original syscall number).
     let regs = LinuxTrapRegs {
-        rax: ret_val as u64,
+        rax: saved_rax,
         rbx: frame.rbx,
-        rcx: frame.user_rip,
+        rcx: saved_rip,
         rdx: frame.arg2,
         rsi: frame.arg1,
         rdi: frame.arg0,
@@ -1904,7 +2113,7 @@ pub fn build_linux_rt_frame(
         r13: frame.r13,
         r14: frame.r14,
         r15: frame.r15,
-        rip: frame.user_rip,
+        rip: saved_rip,
         rsp: frame.user_rsp,
         rflags: frame.user_rflags,
     };
@@ -47931,6 +48140,83 @@ fn self_test_sigaction_table() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+/// SA_RESTART core mechanism: the pure [`restart::restart_action`] decision
+/// table and the sentinel-classification helpers.
+///
+/// This exercises the foundation of syscall restart independently of any
+/// userspace handler delivery: every (sentinel × has_handler × SA_RESTART)
+/// combination must map to the Linux-correct action (`arch/x86/kernel/signal.c`
+/// `handle_signal` / `do_signal`), and the sentinel helpers must accept both
+/// the positive and the negated (`-errno`) forms a syscall actually returns.
+#[inline(never)]
+fn self_test_restart_action() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+    use restart::{restart_action, RestartAction, ERESTARTNOHAND, ERESTARTNOINTR,
+        ERESTARTSYS, ERESTART_RESTARTBLOCK};
+
+    // is_sentinel / sentinel_magnitude accept either sign; -EINTR and ordinary
+    // returns are not sentinels.
+    for &s in &[ERESTARTSYS, ERESTARTNOINTR, ERESTARTNOHAND, ERESTART_RESTARTBLOCK] {
+        if !restart::is_sentinel(s) || !restart::is_sentinel(-s) {
+            serial_println!("[syscall/linux]   FAIL: restart is_sentinel({s})");
+            return Err(KernelError::InternalError);
+        }
+        if restart::sentinel_magnitude(-s) != Some(s) {
+            serial_println!("[syscall/linux]   FAIL: restart sentinel_magnitude({s})");
+            return Err(KernelError::InternalError);
+        }
+    }
+    // Non-sentinels: -EINTR(4), 0, a normal positive return, a real -errno.
+    for &n in &[-i64::from(errno::EINTR), 0, 42, -i64::from(errno::EAGAIN)] {
+        if restart::is_sentinel(n) || restart::sentinel_magnitude(n).is_some() {
+            serial_println!("[syscall/linux]   FAIL: restart false-positive on {n}");
+            return Err(KernelError::InternalError);
+        }
+        if restart::leaked_sentinel_to_eintr(n) != n {
+            serial_println!("[syscall/linux]   FAIL: leaked backstop mutated {n}");
+            return Err(KernelError::InternalError);
+        }
+    }
+    // Backstop turns a stray sentinel into -EINTR.
+    if restart::leaked_sentinel_to_eintr(-ERESTARTSYS) != -i64::from(errno::EINTR) {
+        serial_println!("[syscall/linux]   FAIL: leaked backstop didn't convert");
+        return Err(KernelError::InternalError);
+    }
+
+    // Decision table: (sentinel, has_handler, sa_restart) -> action.
+    let cases: &[(i64, bool, bool, RestartAction)] = &[
+        // ERESTARTSYS: restart iff a handler runs with SA_RESTART; otherwise
+        // EINTR with a handler, and unconditional restart with no handler.
+        (ERESTARTSYS, true, true, RestartAction::Restart),
+        (ERESTARTSYS, true, false, RestartAction::Eintr),
+        (ERESTARTSYS, false, false, RestartAction::Restart),
+        (ERESTARTSYS, false, true, RestartAction::Restart),
+        // ERESTARTNOINTR: always restart.
+        (ERESTARTNOINTR, true, false, RestartAction::Restart),
+        (ERESTARTNOINTR, true, true, RestartAction::Restart),
+        (ERESTARTNOINTR, false, false, RestartAction::Restart),
+        // ERESTARTNOHAND: restart only when no handler runs.
+        (ERESTARTNOHAND, true, true, RestartAction::Eintr),
+        (ERESTARTNOHAND, true, false, RestartAction::Eintr),
+        (ERESTARTNOHAND, false, false, RestartAction::Restart),
+        // ERESTART_RESTARTBLOCK: trampoline restart only with no handler.
+        (ERESTART_RESTARTBLOCK, true, true, RestartAction::Eintr),
+        (ERESTART_RESTARTBLOCK, false, false, RestartAction::RestartBlock),
+    ];
+    for &(sentinel, has_handler, sa_restart, want) in cases {
+        let got = restart_action(sentinel, has_handler, sa_restart);
+        if got != want {
+            serial_println!(
+                "[syscall/linux]   FAIL: restart_action({sentinel},{has_handler},{sa_restart}) = {got:?}, want {want:?}"
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    serial_println!("[syscall/linux]   SA_RESTART restart-decision table: OK");
+    Ok(())
+}
+
 /// TD4 extraction: rt_sigaction validation self-test (incl. Batch 353
 /// sig int-truncation).
 ///
@@ -50754,6 +51040,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     //   because dispatch_linux's rt_sigaction needs a live caller pid
     //   to record state, which the boot self-test doesn't have.
     self_test_sigaction_table()?;
+
+    // SA_RESTART core mechanism — pure restart-decision table + sentinel
+    // helpers (independent of any userspace handler delivery).
+    self_test_restart_action()?;
 
     // rt_sigaction validation via dispatch_linux:
     //   - sig == 0 -> EINVAL

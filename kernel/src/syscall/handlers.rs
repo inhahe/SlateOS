@@ -4288,6 +4288,13 @@ pub fn deliver_pending_signal(
         return false;
     }
 
+    // A restart sentinel must never be saved into the native trampoline
+    // context: native processes have no per-signal SA_RESTART disposition, so
+    // convert any sentinel to the user-visible -EINTR. (No native syscall emits
+    // a sentinel today; this keeps the never-leak invariant safe-by-
+    // construction if one ever does.)
+    let ret_val = crate::syscall::linux::restart::leaked_sentinel_to_eintr(ret_val);
+
     let ctx = SignalContext {
         signum: u64::from(sig),
         rax: ret_val as u64,

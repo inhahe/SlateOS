@@ -348,12 +348,22 @@ extern "C" fn syscall_handler_inner(frame: *mut SyscallFrame) -> i64 {
     // ready and the process registered a trampoline. This rewrites the
     // frame to jump to the handler; the interrupted syscall's return
     // value (result.value) is preserved in the SignalContext for
-    // SYS_SIGNAL_RETURN to restore.
+    // SYS_SIGNAL_RETURN to restore.  When a handler frame is built the
+    // restart sentinel (if any) is already resolved inside the delivery
+    // path (rewind-to-restart or convert-to-EINTR baked into the saved
+    // context), so we just return.
     if super::handlers::deliver_pending_signal(f, result.value) {
         return 0;
     }
 
-    result.value
+    // No handler frame was built (no deliverable signal, or every pending
+    // signal was ignored / had a non-fatal default).  This is the "no handler"
+    // case of SA_RESTART: if the syscall returned a restart sentinel, restart
+    // it transparently here (rewind RIP to the `syscall` instruction and reload
+    // RAX with the original syscall number — the SYSRET path below reloads the
+    // original argument registers from the frame).  Any sentinel that is not
+    // restarted is converted to -EINTR so it can never leak to ring 3.
+    super::linux::resolve_syscall_restart(f, result.value)
 }
 
 // ---------------------------------------------------------------------------

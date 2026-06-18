@@ -19077,6 +19077,63 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          pass.
 ##
 ##      Build clean; boot test PASSED (BOOT_OK at 23s).
+##
+##      UPDATE (2026-06-18): multi-key wait (nr > 1) is now IMPLEMENTED;
+##      the "still returns ENOSYS" notes above are superseded.  A new
+##      futex primitive `crate::ipc::futex::futex_wait_multiple(keys,
+##      timeout_ns)` parks the caller on N futex keys at once and is
+##      atomically un-parked by whichever key is woken first:
+##
+##        * Setup is atomic under the single global FUTEX_TABLE lock:
+##          all keys' values are compared against their expected words,
+##          and only if every one matches is a Waiter enqueued per key
+##          (each tagged with its array index via the new
+##          `Waiter.multi_index`).  Any value mismatch returns
+##          WaitvOutcome::Mismatch (-EAGAIN) without queuing anything.
+##          The single-lock design sidesteps Linux's per-bucket-lock
+##          ordering dance (futex2, 5.16).
+##        * A waker (futex_wake_bitset) records the woken key's index in
+##          a leaf-locked `MULTI_WOKEN: BTreeMap<TaskId,u32>` registry
+##          BEFORE calling sched::wake, first-writer-wins; the parker
+##          reads-and-clears it after block_current returns and evicts
+##          all of its remaining queued entries via the new
+##          `remove_all_self_waiters(task)`.
+##        * Outcomes: Woken(idx) -> ok(idx); Mismatch -> EAGAIN;
+##          TimedOut -> ETIMEDOUT; Interrupted (deliverable signal) ->
+##          ERESTARTSYS sentinel (futex_waitv has no restart_block, so
+##          restartable under SA_RESTART, else EINTR).  Signal-wait is
+##          wired the same way as the single-key timed path
+##          (register_signalfd_waiter + register-then-recheck).
+##        * The relative timeout is converted from futex_waitv's
+##          absolute deadline by the syscall layer (clockid 0/1) and an
+##          absolute deadline is computed once so spurious-wake retries
+##          shrink the remaining budget rather than resetting it.
+##
+##      linux.rs `sys_futex_waitv` now factors a shared
+##      `parse_futex_waitv_entry(addr) -> (uaddr, expected)` helper
+##      (struct read + __reserved/flags/size/NUMA + 4-byte-align +
+##      readability validation) used by BOTH the nr==1 fast path and the
+##      nr>1 loop.  nr==1 still dispatches through the single-key
+##      handlers (preserving its EINTR-on-timed / ERESTARTSYS-on-
+##      indefinite signal semantics); nr>1 builds a Vec<WaitvKey> and
+##      calls futex_wait_multiple.
+##
+##      Tests: the early futex self_test() gained `test_wait_multiple`
+##      (value-mismatch fast path, both first- and second-key, inline —
+##      safe with no hrtimer/scheduler context).  The blocking outcomes
+##      need the hrtimer, so `test_wait_multiple_timeout` (10ms →
+##      TimedOut) and `test_wait_multiple_woken` (spawned waker wakes the
+##      2nd key → Woken(1)) were added to the late-boot
+##      `self_test_timeout()` and run directly on the driver thread (the
+##      same context where the existing PI/timeout tests block).  The
+##      linux.rs self-test's two stale "nr>1 -> ENOSYS"
+##      assertions were corrected (zero-entry nr=2 -> EINVAL via the
+##      per-entry SIZE_U8 gate; truncation nr=2 -> EAGAIN against a
+##      fresh 2-entry buffer whose entry 0 value-mismatches — the old
+##      test reused a far-away `valid` whose stack slot a raw pointer
+##      does not keep alive) and a new no-block functional gate added
+##      (two valid SIZE_U32 entries, second value mismatching ->
+##      EAGAIN).  Build clean; boot test PASSED.
 
 ## 161. Linux ABI: io_uring_enter(2) / io_uring_register(2) input
 ##      validation (batch 132).

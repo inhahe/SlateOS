@@ -44,7 +44,7 @@
 //!
 //! Lock ordering: `FUTEX_TABLE` → `SCHED` (wake calls `sched::wake()`).
 
-use alloc::collections::VecDeque;
+use alloc::collections::{BTreeMap, VecDeque};
 use crate::error::{KernelError, KernelResult};
 use crate::mm::user::{read_user, validate_user_write};
 use crate::sched::{self, task::TaskId};
@@ -133,6 +133,36 @@ fn remove_self_waiter(addr: u64, addr_space: u64, task: u64) -> bool {
     false
 }
 
+/// Remove **all** of `task`'s lingering futex waiter entries from every
+/// bucket, returning the number removed.
+///
+/// A `futex_waitv` parker enqueues one [`Waiter`] per key (all sharing its
+/// `task_id`); when it resumes it must evict every entry it queued — the
+/// waker only dequeued the single key that fired (or, on a timeout/signal,
+/// none were dequeued).  Matching on `task_id` alone is sufficient: a
+/// `TaskId` is unique to one task within one process, so there is no
+/// cross-address-space aliasing to guard against.
+fn remove_all_self_waiters(task: u64) -> usize {
+    let mut table = FUTEX_TABLE.lock();
+    let mut removed = 0usize;
+    for bucket in &mut table.buckets {
+        // retain() can't easily count, so filter in place via a scan.
+        let mut i = 0;
+        while i < bucket.len() {
+            if bucket.get(i).is_some_and(|w| w.task_id == task) {
+                bucket.remove(i);
+                #[allow(clippy::arithmetic_side_effects)]
+                { removed += 1; }
+                // Next element shifted down into slot `i`.
+                continue;
+            }
+            #[allow(clippy::arithmetic_side_effects)]
+            { i += 1; }
+        }
+    }
+    removed
+}
+
 /// `true` if a deliverable (unblocked) signal is pending for `pid`.
 fn deliverable_signal_pending(pid: u64) -> bool {
     let deliverable = !crate::proc::signal::blocked(pid);
@@ -177,6 +207,13 @@ struct Waiter {
     /// not alter it); the requeue wake phase itself uses the wildcard, so
     /// the stored value only gates direct `FUTEX_WAKE_BITSET` calls.
     bitset: u32,
+    /// For a `futex_waitv` (multi-key) parker, the index of this entry in
+    /// the caller's waiter array (`0..nr`).  A single task enqueues one
+    /// `Waiter` per key, all sharing its `task_id`; when any waker dequeues
+    /// one, it records this index so the woken parker can report *which*
+    /// futex woke it (Linux `futex_waitv` returns the woken index).  `None`
+    /// for an ordinary single-key `FUTEX_WAIT`.
+    multi_index: Option<u32>,
 }
 
 /// Global futex wait table.
@@ -186,6 +223,22 @@ struct Waiter {
 ///
 /// Lock ordering: `FUTEX_TABLE` → `SCHED`.
 static FUTEX_TABLE: Mutex<FutexTable> = Mutex::new(FutexTable::new());
+
+/// Woken-index registry for `futex_waitv` (multi-key) parkers.
+///
+/// Maps a multi-key parker's `TaskId` to the array index of the futex that
+/// woke it.  A waker ([`futex_wake_bitset`]) inserts the index *before*
+/// waking the task; the parker reads-and-clears its entry after
+/// [`sched::block_current`] returns to learn which futex fired (Linux's
+/// `futex_waitv` returns that index).  Insertion is first-writer-wins
+/// (`or_insert`): if two futexes the task waited on are woken concurrently,
+/// either index is an acceptable answer, matching Linux's "a futex that was
+/// woken" contract.
+///
+/// Lock ordering: this lock is a leaf — it is taken only briefly to
+/// insert/remove a single `u32`, never while holding `FUTEX_TABLE`, and
+/// never around a `block_current`/`wake`.
+static MULTI_WOKEN: Mutex<BTreeMap<TaskId, u32>> = Mutex::new(BTreeMap::new());
 
 /// Hash table for futex waiters.
 struct FutexTable {
@@ -313,6 +366,7 @@ pub fn futex_wait_bitset(addr: u64, expected: u32, bitset: u32) -> KernelResult<
             addr_space,
             task_id: current_task,
             bitset,
+            multi_index: None,
         });
 
         // Drop the table lock before blocking.
@@ -432,6 +486,7 @@ pub fn futex_wait_bitset_timeout(
             addr_space,
             task_id: current_task,
             bitset,
+            multi_index: None,
         });
     }
 
@@ -498,6 +553,172 @@ pub fn futex_wait_bitset_timeout(
     }
 }
 
+/// One key of a [`futex_wait_multiple`] (Linux `futex_waitv`) request: a
+/// 32-bit futex word address and the value the caller expects to find there.
+///
+/// The caller (syscall layer) is responsible for validating that `uaddr` is
+/// a readable, 4-byte-aligned user pointer before passing it here; this
+/// mirrors the contract of the single-key [`futex_wait`] family.
+#[derive(Clone, Copy, Debug)]
+pub struct WaitvKey {
+    /// Address of the 32-bit futex word.
+    pub uaddr: u64,
+    /// Expected current value at `uaddr`.
+    pub expected: u32,
+}
+
+/// Outcome of a [`futex_wait_multiple`] call (Linux `futex_waitv` contract).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaitvOutcome {
+    /// A futex was woken; the payload is its index in the `keys` array.
+    Woken(u32),
+    /// At least one futex word did not hold its expected value at setup
+    /// (Linux returns `-EAGAIN`).
+    Mismatch,
+    /// The timeout elapsed before any futex was woken (`-ETIMEDOUT`).
+    TimedOut,
+    /// A deliverable signal interrupted the wait (the syscall layer turns
+    /// this into the restart sentinel / `-EINTR`).
+    Interrupted,
+}
+
+/// Block the current task on **multiple** futex keys, waking when any one of
+/// them is woken (Linux `futex_waitv`).
+///
+/// Semantics:
+/// * Under a single `FUTEX_TABLE` critical section, every key's value is
+///   compared against its `expected`.  If any differs, **nothing** is queued
+///   and [`WaitvOutcome::Mismatch`] is returned (Linux `-EAGAIN`).  Holding
+///   the table lock across all the compares makes the whole setup atomic
+///   w.r.t. concurrent wakes — simpler than Linux's per-bucket-lock dance
+///   because we have a single global table lock.
+/// * Otherwise one [`Waiter`] per key is enqueued (all tagged with this
+///   task's id and the key's index), and the task parks.
+/// * A waker records the woken key's index in [`MULTI_WOKEN`] before waking;
+///   on resume the index is read-and-cleared and **all** of this task's
+///   queued entries are evicted ([`remove_all_self_waiters`]).
+/// * A signal (user processes only) or the optional timeout can also end the
+///   park.  A spurious wake (none of woken/signal/deadline) re-runs the whole
+///   setup+park loop, re-validating values — so a value that changed during a
+///   spurious wake correctly surfaces as `Mismatch`.
+///
+/// `timeout_ns` is a **relative** nanosecond budget (`None` = wait forever);
+/// the syscall layer converts `futex_waitv`'s absolute deadline to a relative
+/// value first.  `keys` must be non-empty (the syscall layer rejects `nr==0`).
+pub fn futex_wait_multiple(keys: &[WaitvKey], timeout_ns: Option<u64>) -> WaitvOutcome {
+    let current_task = sched::current_task_id();
+    let addr_space = current_addr_space();
+    let pid = current_user_pid();
+
+    // Absolute deadline (if timed), computed once so the per-iteration timer
+    // budget shrinks across spurious-wake retries instead of resetting.
+    let deadline_ns = timeout_ns.map(|ns| crate::hrtimer::now_ns().saturating_add(ns));
+
+    fn timeout_wake(tid: u64) {
+        if !sched::try_wake(tid) {
+            sched::defer_wake(tid);
+        }
+    }
+
+    loop {
+        // ---- setup: value-check all keys, then enqueue all, atomically ----
+        {
+            let mut table = FUTEX_TABLE.lock();
+            for key in keys {
+                // SAFETY: the syscall layer validated each `uaddr` as a
+                // readable, 4-byte-aligned user pointer; we read atomically
+                // (Acquire) to observe concurrent writers, exactly as the
+                // single-key path does.
+                let actual = unsafe {
+                    let ptr = key.uaddr as *const AtomicU32;
+                    (*ptr).load(Ordering::Acquire)
+                };
+                if actual != key.expected {
+                    super::stats::futex_spurious();
+                    return WaitvOutcome::Mismatch;
+                }
+            }
+            super::stats::futex_wait();
+            for (i, key) in keys.iter().enumerate() {
+                let bidx = FutexTable::bucket_index(key.uaddr, addr_space);
+                #[allow(clippy::cast_possible_truncation)]
+                let index = i as u32;
+                // SAFETY: bidx is masked to NUM_BUCKETS-1 by bucket_index.
+                #[allow(clippy::indexing_slicing)]
+                table.buckets[bidx].push_back(Waiter {
+                    addr: key.uaddr,
+                    addr_space,
+                    task_id: current_task,
+                    bitset: FUTEX_BITSET_MATCH_ANY,
+                    multi_index: Some(index),
+                });
+            }
+        }
+
+        // ---- arm timer (if any time left) ----
+        let timer_handle = if let Some(dl) = deadline_ns {
+            let now = crate::hrtimer::now_ns();
+            if now >= dl {
+                // Deadline already passed: unwind and report timeout.
+                let _ = remove_all_self_waiters(current_task);
+                MULTI_WOKEN.lock().remove(&current_task);
+                return WaitvOutcome::TimedOut;
+            }
+            Some(crate::hrtimer::schedule_ns(dl.saturating_sub(now), timeout_wake, current_task))
+        } else {
+            None
+        };
+
+        // ---- register signal-waiter + recheck (user processes only) ----
+        if pid != 0 {
+            let deliverable = !crate::proc::signal::blocked(pid);
+            crate::proc::signal::register_signalfd_waiter(pid, current_task, deliverable);
+            if crate::proc::signal::has_pending_in_mask(pid, deliverable) {
+                crate::proc::signal::deregister_signalfd_waiter(pid, current_task);
+                if let Some(h) = timer_handle {
+                    crate::hrtimer::cancel(h);
+                }
+                let _ = remove_all_self_waiters(current_task);
+                MULTI_WOKEN.lock().remove(&current_task);
+                return WaitvOutcome::Interrupted;
+            }
+        }
+
+        // ---- park ----
+        sched::block_current();
+
+        if pid != 0 {
+            crate::proc::signal::deregister_signalfd_waiter(pid, current_task);
+        }
+        if let Some(h) = timer_handle {
+            crate::hrtimer::cancel(h);
+        }
+
+        // ---- determine why we woke ----
+        // Read-and-clear the woken index (a waker recorded it before waking),
+        // then evict every entry we queued (the waker removed only the one key
+        // that fired; a timeout/signal removed none).
+        let woken = MULTI_WOKEN.lock().remove(&current_task);
+        let _removed = remove_all_self_waiters(current_task);
+
+        if let Some(index) = woken {
+            return WaitvOutcome::Woken(index);
+        }
+        // No futex fired: prefer a signal over a timeout (Linux delivers the
+        // signal; futex_waitv has no restart_block, so the syscall layer maps
+        // Interrupted to the restart sentinel / EINTR).
+        if pid != 0 && deliverable_signal_pending(pid) {
+            return WaitvOutcome::Interrupted;
+        }
+        if let Some(dl) = deadline_ns
+            && crate::hrtimer::now_ns() >= dl
+        {
+            return WaitvOutcome::TimedOut;
+        }
+        // Spurious wake: loop and re-run setup (re-validating values).
+    }
+}
+
 /// Wake up to `max_wake` tasks blocked on `addr`.
 ///
 /// Returns the number of tasks actually woken.
@@ -536,9 +757,10 @@ pub fn futex_wake_bitset(addr: u64, max_wake: u32, bitset: u32) -> u32 {
 
     let addr_space = current_addr_space();
 
-    // Collect task IDs to wake while holding the table lock, then
-    // wake them outside the lock to respect lock ordering.
-    let mut to_wake: [TaskId; 32] = [0; 32];
+    // Collect (task, multi_index) pairs to wake while holding the table
+    // lock, then record indices + wake outside the lock to respect lock
+    // ordering.  `multi_index` is `Some` only for a `futex_waitv` parker.
+    let mut to_wake: [(TaskId, Option<u32>); 32] = [(0, None); 32];
     let mut wake_count: usize = 0;
 
     {
@@ -563,7 +785,7 @@ pub fn futex_wake_bitset(addr: u64, max_wake: u32, bitset: u32) -> u32 {
                 && let Some(removed) = bucket.remove(i)
             {
                 if let Some(slot) = to_wake.get_mut(wake_count) {
-                    *slot = removed.task_id;
+                    *slot = (removed.task_id, removed.multi_index);
                 }
                 #[allow(clippy::arithmetic_side_effects)]
                 { wake_count += 1; }
@@ -575,8 +797,18 @@ pub fn futex_wake_bitset(addr: u64, max_wake: u32, bitset: u32) -> u32 {
         }
     }
 
+    // Record the woken index for any multi-key (`futex_waitv`) parker
+    // *before* waking it, so the parker observes its index once it resumes.
+    // First-writer-wins: a concurrent waker on another of the parker's keys
+    // may also try to record — keep the earliest (either index is valid).
+    for (task_id, multi_index) in to_wake.get(..wake_count).unwrap_or(&[]) {
+        if let Some(index) = multi_index {
+            MULTI_WOKEN.lock().entry(*task_id).or_insert(*index);
+        }
+    }
+
     // Wake the collected tasks outside the FUTEX_TABLE lock.
-    for task_id in to_wake.get(..wake_count).unwrap_or(&[]) {
+    for (task_id, _) in to_wake.get(..wake_count).unwrap_or(&[]) {
         sched::wake(*task_id);
     }
 
@@ -2331,6 +2563,9 @@ pub fn futex_cmp_requeue_pi(
 /// 1. `futex_wait` with non-matching value (returns immediately).
 /// 2. `futex_wake` with no waiters (returns 0).
 /// 3. Blocking wait + wake via spawned task.
+/// 3b. `futex_waitv` multi-key value-mismatch fast path (no block).  The
+///     blocking multi-key outcomes (timeout / woken-by-index) need the
+///     hrtimer and live in [`self_test_timeout`].
 /// 4. Priority inheritance: high-prio task boosts low-prio lock holder.
 /// 5. Robust dead-owner protocol (pure bit logic + OWNER_DIED relock).
 /// 6. PI owner-death handoff: a blocked `FUTEX_LOCK_PI` waiter inherits a
@@ -2341,6 +2576,7 @@ pub fn self_test() -> KernelResult<()> {
     test_wait_value_mismatch()?;
     test_wake_no_waiters()?;
     test_blocking_wait_wake()?;
+    test_wait_multiple()?;
     test_wake_bitset()?;
     test_requeue()?;
     test_wake_op()?;
@@ -2928,6 +3164,48 @@ fn test_blocking_wait_wake() -> KernelResult<()> {
     Ok(())
 }
 
+/// Test: `futex_waitv` multi-key value-mismatch fast path.
+///
+/// When any key's word does not hold its expected value at setup, the call
+/// must return [`WaitvOutcome::Mismatch`] (Linux `EAGAIN`) immediately
+/// without parking — safe to exercise inline on the boot thread.  The
+/// blocking outcomes (TimedOut / Woken-by-index) require the hrtimer and a
+/// real scheduler context, so they live in [`self_test_timeout`].
+fn test_wait_multiple() -> KernelResult<()> {
+    let wa = AtomicU32::new(7); // != expected 1
+    let wb = AtomicU32::new(1);
+    let mkeys = [
+        WaitvKey { uaddr: (&raw const wa) as u64, expected: 1 },
+        WaitvKey { uaddr: (&raw const wb) as u64, expected: 1 },
+    ];
+    match futex_wait_multiple(&mkeys, None) {
+        WaitvOutcome::Mismatch => {}
+        other => {
+            serial_println!("[futex]   FAIL: waitv mismatch = {:?} (expected Mismatch)", other);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Also confirm the *second* key being the mismatching one is detected
+    // (the setup loop checks every key, not just the first).
+    let xa = AtomicU32::new(1);
+    let xb = AtomicU32::new(9); // != expected 1
+    let xkeys = [
+        WaitvKey { uaddr: (&raw const xa) as u64, expected: 1 },
+        WaitvKey { uaddr: (&raw const xb) as u64, expected: 1 },
+    ];
+    match futex_wait_multiple(&xkeys, None) {
+        WaitvOutcome::Mismatch => {}
+        other => {
+            serial_println!("[futex]   FAIL: waitv 2nd-key mismatch = {:?}", other);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    serial_println!("[futex]   Multi-key waitv mismatch (EAGAIN, no block): OK");
+    Ok(())
+}
+
 /// Bitset bits used by the `FUTEX_WAKE_BITSET` self-test.  Disjoint so a
 /// wake targeting one cannot accidentally match the other.
 const BITSET_TEST_A: u32 = 0x0000_0001;
@@ -3400,8 +3678,80 @@ pub fn self_test_timeout() -> KernelResult<()> {
     test_timeout_woken_before_deadline()?;
     test_timeout_zero_nonblocking()?;
     test_lock_pi_timeout()?;
+    test_wait_multiple_timeout()?;
+    test_wait_multiple_woken()?;
 
     serial_println!("[futex]   Wait timeout: OK");
+    Ok(())
+}
+
+// --- futex_waitv (multi-key) blocking self-tests (late boot) -------------
+
+/// Two static words used by the multi-key woken-by-index test.  They must
+/// be static (not stack locals) because the waker task wakes them by
+/// address after this driver frame may have moved on.
+static MWAITV_WORD_A: AtomicU32 = AtomicU32::new(1);
+static MWAITV_WORD_B: AtomicU32 = AtomicU32::new(1);
+
+/// Waker for [`test_wait_multiple_woken`]: after a brief delay (to let the
+/// driver park on both keys), wakes the *second* key (`MWAITV_WORD_B`,
+/// index 1) so the driver's `futex_wait_multiple` returns `Woken(1)`.
+extern "C" fn waitv_multi_waker(_arg: u64) {
+    sched::yield_now();
+    sched::yield_now();
+    MWAITV_WORD_B.store(0, Ordering::Release);
+    futex_wake((&raw const MWAITV_WORD_B) as u64, 1);
+}
+
+/// Multi-key timeout: park on two matching keys with a 10ms timeout and no
+/// waker — `futex_wait_multiple` must return [`WaitvOutcome::TimedOut`].
+/// Runs directly on the driver thread (hrtimer is up by now), mirroring
+/// [`test_timeout_expires`].
+fn test_wait_multiple_timeout() -> KernelResult<()> {
+    let wa = AtomicU32::new(1);
+    let wb = AtomicU32::new(1);
+    let keys = [
+        WaitvKey { uaddr: (&raw const wa) as u64, expected: 1 },
+        WaitvKey { uaddr: (&raw const wb) as u64, expected: 1 },
+    ];
+    match futex_wait_multiple(&keys, Some(10_000_000)) {
+        WaitvOutcome::TimedOut => {}
+        other => {
+            serial_println!("[futex]   FAIL: waitv timeout = {:?} (expected TimedOut)", other);
+            return Err(KernelError::InternalError);
+        }
+    }
+    serial_println!("[futex]   Multi-key waitv timeout (ETIMEDOUT): OK");
+    Ok(())
+}
+
+/// Multi-key woken-by-index: park indefinitely on two keys; a spawned
+/// waker wakes the second key, so `futex_wait_multiple` must return
+/// [`WaitvOutcome::Woken`] with index `1`.
+fn test_wait_multiple_woken() -> KernelResult<()> {
+    MWAITV_WORD_A.store(1, Ordering::SeqCst);
+    MWAITV_WORD_B.store(1, Ordering::SeqCst);
+
+    let keys = [
+        WaitvKey { uaddr: (&raw const MWAITV_WORD_A) as u64, expected: 1 },
+        WaitvKey { uaddr: (&raw const MWAITV_WORD_B) as u64, expected: 1 },
+    ];
+    sched::spawn(b"waitv-wk", 16, waitv_multi_waker, 0, 0)?;
+    match futex_wait_multiple(&keys, None) {
+        WaitvOutcome::Woken(1) => {}
+        WaitvOutcome::Woken(other) => {
+            serial_println!("[futex]   FAIL: waitv woken index={} (expected 1)", other);
+            return Err(KernelError::InternalError);
+        }
+        other => {
+            serial_println!("[futex]   FAIL: waitv woken = {:?} (expected Woken(1))", other);
+            return Err(KernelError::InternalError);
+        }
+    }
+    // Let the waker task exit, then reap it.
+    sched::yield_now();
+    sched::reap_dead_tasks();
+    serial_println!("[futex]   Multi-key waitv woken-by-index: OK");
     Ok(())
 }
 

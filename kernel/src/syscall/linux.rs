@@ -36105,6 +36105,74 @@ fn sys_eventfd2(args: &SyscallArgs) -> SyscallResult {
     eventfd_create_with_flags(initval, flags)
 }
 
+/// Parse and validate one `struct futex_waitv` entry at `entry_addr`,
+/// returning `(uaddr, expected)` on success or a ready-to-return error
+/// `SyscallResult` on failure.
+///
+/// `struct futex_waitv { __u64 val; __u64 uaddr; __u32 flags; __u32 __reserved; }`
+/// (24 bytes).  Validation mirrors Linux `futex_parse_waitv`:
+///   * `__reserved` must be zero (else `EINVAL`).
+///   * Only `FUTEX2_SIZE_U32` is an accepted size class; `FUTEX2_PRIVATE`
+///     is accepted (all our futexes are private); `FUTEX2_NUMA` and any
+///     other bit are rejected with `EINVAL`.
+///   * `uaddr` must be 4-byte aligned and readable (`EINVAL` / `EFAULT`).
+///
+/// The caller must have already proven the 24-byte range at `entry_addr`
+/// is mapped readable (via `validate_user_read`).
+fn parse_futex_waitv_entry(entry_addr: u64) -> Result<(u64, u32), SyscallResult> {
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct FutexWaitv {
+        val: u64,
+        uaddr: u64,
+        flags: u32,
+        __reserved: u32,
+    }
+    let mut entry = FutexWaitv { val: 0, uaddr: 0, flags: 0, __reserved: 0 };
+    // SAFETY: the caller validated the 24-byte range as mapped readable;
+    // copy_from_user re-validates under SMAP and writes into a kernel-owned
+    // buffer of matching size.
+    if let Err(e) = unsafe {
+        crate::mm::user::copy_from_user(
+            entry_addr,
+            (&raw mut entry).cast::<u8>(),
+            core::mem::size_of::<FutexWaitv>(),
+        )
+    } {
+        return Err(linux_err(linux_errno_for(e)));
+    }
+    if entry.__reserved != 0 {
+        return Err(linux_err(errno::EINVAL));
+    }
+    const FUTEX2_SIZE_MASK: u32 = 0x03;
+    const FUTEX2_SIZE_U32: u32 = 0x02;
+    const FUTEX2_NUMA: u32 = 0x04;
+    const FUTEX2_PRIVATE: u32 = 0x80;
+    const FUTEX2_VALID_MASK: u32 = FUTEX2_SIZE_MASK | FUTEX2_NUMA | FUTEX2_PRIVATE;
+    if (entry.flags & !FUTEX2_VALID_MASK) != 0 {
+        return Err(linux_err(errno::EINVAL));
+    }
+    if (entry.flags & FUTEX2_SIZE_MASK) != FUTEX2_SIZE_U32 {
+        // U8 / U16 / U64 size classes — not implemented.
+        return Err(linux_err(errno::EINVAL));
+    }
+    if (entry.flags & FUTEX2_NUMA) != 0 {
+        // NUMA-keyed waits not supported.
+        return Err(linux_err(errno::EINVAL));
+    }
+    // The futex word must be 4-byte aligned (SIZE_U32) and readable.
+    if entry.uaddr & 0x3 != 0 {
+        return Err(linux_err(errno::EINVAL));
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(entry.uaddr, 4) {
+        return Err(linux_err(linux_errno_for(e)));
+    }
+    // SIZE_U32: only the low 32 bits of val participate in the compare.
+    #[allow(clippy::cast_possible_truncation)]
+    let expected = entry.val as u32;
+    Ok((entry.uaddr, expected))
+}
+
 /// `futex_waitv(waiters*, nr_waiters, flags, timeout*, clockid)`.
 fn sys_futex_waitv(args: &SyscallArgs) -> SyscallResult {
     // Linux kernel/futex/syscalls.c SYSCALL_DEFINE5(futex_waitv) gate
@@ -36185,74 +36253,21 @@ fn sys_futex_waitv(args: &SyscallArgs) -> SyscallResult {
     // wait on the one entry.  This covers the common glibc / musl /
     // libstd primitive that uses futex_waitv as a "wait with one of
     // CLOCK_REALTIME or CLOCK_MONOTONIC" picker without actually
-    // multiplexing on multiple addresses.
+    // multiplexing on multiple addresses.  It dispatches through the
+    // single-key handlers so its timeout/value/signal semantics stay
+    // bit-identical to plain SYS_FUTEX (notably: a timed wait maps an
+    // interrupting signal to EINTR, while the indefinite wait maps it to
+    // the restart sentinel — see [`linux_from_futex_wait`]).
     //
-    // Multi-entry waitv (nr > 1) requires a kernel waitqueue that can
-    // be parked on N futex keys simultaneously and atomically un-parked
-    // by any one of them.  Our futex subsystem only supports one key
-    // per parker today, so nr > 1 still returns ENOSYS (the honest
-    // answer until multi-key wait is implemented — tracked in todo.txt).
+    // nr > 1 uses the dedicated multi-key parker
+    // [`crate::ipc::futex::futex_wait_multiple`]: one waiter is queued per
+    // key and the task is un-parked by whichever futex is woken first.
     // ------------------------------------------------------------------
     if nr == 1 {
-        // struct futex_waitv {
-        //   __u64 val;
-        //   __u64 uaddr;
-        //   __u32 flags;       // FUTEX2_SIZE_* | FUTEX2_PRIVATE | FUTEX2_NUMA
-        //   __u32 __reserved;
-        // }
-        #[repr(C)]
-        #[derive(Clone, Copy)]
-        struct FutexWaitv {
-            val: u64,
-            uaddr: u64,
-            flags: u32,
-            __reserved: u32,
-        }
-        let mut entry = FutexWaitv { val: 0, uaddr: 0, flags: 0, __reserved: 0 };
-        // SAFETY: validate_user_read above proved the 24-byte range is
-        // mapped readable; copy_from_user re-validates under SMAP and
-        // writes into a kernel-owned buffer of matching size.
-        if let Err(e) = unsafe {
-            crate::mm::user::copy_from_user(
-                args.arg0,
-                (&raw mut entry).cast::<u8>(),
-                core::mem::size_of::<FutexWaitv>(),
-            )
-        } {
-            return linux_err(linux_errno_for(e));
-        }
-        // __reserved must be zero (Linux rejects with EINVAL).
-        if entry.__reserved != 0 {
-            return linux_err(errno::EINVAL);
-        }
-        // Per-entry flags: FUTEX2_SIZE_U32 is the only supported size
-        // class today.  Linux additionally accepts FUTEX2_PRIVATE
-        // (process-private hint; we treat all futexes as private since
-        // we don't support cross-process named futexes yet) and
-        // FUTEX2_NUMA (NUMA-aware key; rejected — we don't expose NUMA
-        // metadata to userspace).  Any other bit → EINVAL.
-        const FUTEX2_SIZE_MASK: u32 = 0x03;
-        const FUTEX2_SIZE_U32: u32 = 0x02;
-        const FUTEX2_NUMA: u32 = 0x04;
-        const FUTEX2_PRIVATE: u32 = 0x80;
-        const FUTEX2_VALID_MASK: u32 =
-            FUTEX2_SIZE_MASK | FUTEX2_NUMA | FUTEX2_PRIVATE;
-        if (entry.flags & !FUTEX2_VALID_MASK) != 0 {
-            return linux_err(errno::EINVAL);
-        }
-        if (entry.flags & FUTEX2_SIZE_MASK) != FUTEX2_SIZE_U32 {
-            // U8 / U16 / U64 size classes — not implemented.
-            return linux_err(errno::EINVAL);
-        }
-        if (entry.flags & FUTEX2_NUMA) != 0 {
-            // NUMA-keyed waits not supported.
-            return linux_err(errno::EINVAL);
-        }
-        // SIZE_U32 means the futex word is 32-bit; only the low 32 bits
-        // of val participate in the value compare.
-        #[allow(clippy::cast_possible_truncation)]
-        let expected = entry.val as u32;
-        let uaddr = entry.uaddr;
+        let (uaddr, expected) = match parse_futex_waitv_entry(args.arg0) {
+            Ok(parsed) => parsed,
+            Err(result) => return result,
+        };
         // Dispatch via the same handlers as plain SYS_FUTEX so the
         // waitqueue, page-fault validation and timeout semantics stay
         // bit-identical.  Translate the per-call return into Linux's
@@ -36311,8 +36326,57 @@ fn sys_futex_waitv(args: &SyscallArgs) -> SyscallResult {
         // code mapped to errno.  See [`linux_from_futex_wait`].
         return linux_from_futex_wait(native);
     }
-    // nr > 1 — multi-key waitv not yet implemented.
-    linux_err(errno::ENOSYS)
+    // ------------------------------------------------------------------
+    // nr > 1 — multi-key wait.  Parse and validate every entry into a
+    // WaitvKey list, compute the relative timeout (if any), then park on
+    // all keys via futex_wait_multiple, which wakes on whichever futex
+    // fires first and reports its index.
+    // ------------------------------------------------------------------
+    let mut keys: alloc::vec::Vec<crate::ipc::futex::WaitvKey> =
+        alloc::vec::Vec::with_capacity(nr as usize);
+    for i in 0..(nr as usize) {
+        // Each entry is 24 bytes; the whole [args.arg0, +nr*24) range was
+        // already validate_user_read above.
+        let entry_addr = args.arg0.saturating_add((i as u64).saturating_mul(24));
+        let (uaddr, expected) = match parse_futex_waitv_entry(entry_addr) {
+            Ok(parsed) => parsed,
+            Err(result) => return result,
+        };
+        keys.push(crate::ipc::futex::WaitvKey { uaddr, expected });
+    }
+
+    // Relative timeout budget: None for an indefinite wait, else the
+    // ns-until the absolute deadline on the selected clock (clamped to 0
+    // if already in the past so a parked-with-deadline-passed returns
+    // ETIMEDOUT promptly).
+    let timeout_ns: Option<u64> = if args.arg3 == 0 {
+        None
+    } else {
+        let ts = match read_timespec(args.arg3) {
+            Ok(t) => t,
+            Err(e) => return linux_err(linux_errno_for(e)),
+        };
+        let abs_ns = ts.to_nanos();
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let clockid = args.arg4 as i32;
+        let now_ns = if clockid == 0 {
+            crate::timekeeping::clock_realtime()
+        } else {
+            crate::timekeeping::clock_monotonic()
+        };
+        Some(abs_ns.saturating_sub(now_ns))
+    };
+
+    use crate::ipc::futex::WaitvOutcome;
+    match crate::ipc::futex::futex_wait_multiple(&keys, timeout_ns) {
+        WaitvOutcome::Woken(index) => SyscallResult::ok(i64::from(index)),
+        WaitvOutcome::Mismatch => linux_err(errno::EAGAIN),
+        WaitvOutcome::TimedOut => linux_err(errno::ETIMEDOUT),
+        // futex_waitv has no restart_block: Linux returns -ERESTARTSYS and
+        // relies on the absolute deadline being re-supplied on restart, so
+        // it is restartable when SA_RESTART is set, otherwise EINTR.
+        WaitvOutcome::Interrupted => restart::restart_result(restart::ERESTARTSYS),
+    }
 }
 
 /// `pkey_alloc(flags, access_rights)`.
@@ -79162,10 +79226,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: futex_waitv nr=1 SIZE_U8 not EINVAL");
             return Err(KernelError::InternalError);
         }
-        // futex_waitv nr > 1 -> ENOSYS (multi-key wait not yet implemented).
+        // futex_waitv nr > 1 with a zero-filled entry buffer: multi-key
+        // wait is now implemented, and per-entry validation runs for every
+        // entry — entry 0's SIZE_MASK == SIZE_U8 is rejected at parse time,
+        // so the call returns EINVAL before any parking.
         let a = SyscallArgs { arg0: waitv_ptr, arg1: 2, arg2: 0, arg3: ts_ptr, arg4: 1, arg5: 0 };
-        if dispatch_linux(nr::FUTEX_WAITV, &a).value != -i64::from(errno::ENOSYS) {
-            serial_println!("[syscall/linux]   FAIL: futex_waitv nr=2 not ENOSYS");
+        if dispatch_linux(nr::FUTEX_WAITV, &a).value != -i64::from(errno::EINVAL) {
+            serial_println!("[syscall/linux]   FAIL: futex_waitv nr=2 zero-entry not EINVAL");
             return Err(KernelError::InternalError);
         }
         // ---------- futex_waitv nr=1 fast path (batch 131) ----------
@@ -79275,19 +79342,67 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         // (d) high-only with nr=2: flags=0x1_0000_0000 truncates to 0,
-        //     the nr/waiters gate accepts nr=2, and the nr>1 path
-        //     returns ENOSYS (multi-key wait not yet implemented).
-        //     Distinct terminal from (a) confirms the flag mask doesn't
-        //     accidentally re-trip an EINVAL downstream.
-        let a = SyscallArgs { arg0: v_ptr, arg1: 2, arg2: 0x1_0000_0000, arg3: 0, arg4: 0, arg5: 0 };
-        if dispatch_linux(nr::FUTEX_WAITV, &a).value != -i64::from(errno::ENOSYS) {
+        //     the nr/waiters gate accepts nr=2, and the nr>1 multi-key
+        //     path is reached.  We use a freshly-built, adjacent 2-entry
+        //     buffer (rather than the far-away `valid`, whose stack slot
+        //     a raw pointer does NOT keep alive) so entry 0's value
+        //     mismatches its expected word → futex_wait_multiple returns
+        //     Mismatch (-EAGAIN) without parking.  EAGAIN is a distinct
+        //     terminal from the EINVAL cases, confirming the flag mask
+        //     truncated to 0 and didn't re-trip an EINVAL downstream.
+        let tw0 = core::sync::atomic::AtomicU32::new(5);
+        let tw1 = core::sync::atomic::AtomicU32::new(6);
+        let tmk = [
+            WaitvEntry { val: 999, uaddr: (&raw const tw0).cast::<u8>() as u64, flags: 2, __reserved: 0 }, // 5 != 999
+            WaitvEntry { val: 6, uaddr: (&raw const tw1).cast::<u8>() as u64, flags: 2, __reserved: 0 },
+        ];
+        core::hint::black_box((&tw0, &tw1, &tmk));
+        let tmk_ptr = tmk.as_ptr() as u64;
+        let a = SyscallArgs { arg0: tmk_ptr, arg1: 2, arg2: 0x1_0000_0000, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FUTEX_WAITV, &a).value != -i64::from(errno::EAGAIN) {
             serial_println!(
-                "[syscall/linux]   FAIL: futex_waitv flags=0x1_0000_0000 nr=2 not ENOSYS (truncation)"
+                "[syscall/linux]   FAIL: futex_waitv flags=0x1_0000_0000 nr=2 not EAGAIN (truncation)"
             );
             return Err(KernelError::InternalError);
         }
         serial_println!(
             "[syscall/linux]   futex_waitv unsigned-int truncation (high-half ignored): OK"
+        );
+
+        // ---------- futex_waitv nr>1 multi-key (no-block path) ----------
+        // Two valid SIZE_U32 entries pointing at real words; the second
+        // word's value != expected, so futex_wait_multiple returns
+        // Mismatch (-EAGAIN) without parking — exercises the multi-key
+        // dispatch end-to-end on the boot thread.  The blocking outcomes
+        // (woken-by-index / timeout) are covered by the futex subsystem
+        // self-test, which uses spawned worker tasks.
+        let mw0 = core::sync::atomic::AtomicU32::new(10);
+        let mw1 = core::sync::atomic::AtomicU32::new(20);
+        let mk = [
+            WaitvEntry {
+                val: 10,
+                uaddr: (&raw const mw0).cast::<u8>() as u64,
+                flags: 2,
+                __reserved: 0,
+            },
+            WaitvEntry {
+                val: 999, // 20 != 999 → Mismatch
+                uaddr: (&raw const mw1).cast::<u8>() as u64,
+                flags: 2,
+                __reserved: 0,
+            },
+        ];
+        core::hint::black_box((&mw0, &mw1, &mk));
+        let mk_ptr = mk.as_ptr() as u64;
+        let a = SyscallArgs { arg0: mk_ptr, arg1: 2, arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        if dispatch_linux(nr::FUTEX_WAITV, &a).value != -i64::from(errno::EAGAIN) {
+            serial_println!(
+                "[syscall/linux]   FAIL: futex_waitv nr=2 value mismatch not EAGAIN"
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[syscall/linux]   futex_waitv nr>1 multi-key (value-mismatch EAGAIN): OK"
         );
 
         // pkey_alloc bad flags -> EINVAL.

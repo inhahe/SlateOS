@@ -3933,23 +3933,44 @@ fn dispatch_signalfd_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
             return SyscallResult::ok(n as i64);
         }
 
-        // Nothing to deliver.
+        // Nothing in the acceptance mask to deliver.
         if nonblock {
             return linux_err(errno::EAGAIN);
         }
 
+        // A deliverable signal that is NOT in the signalfd's acceptance mask
+        // interrupts the blocking read: Linux's signalfd_read is an
+        // *interruptible* sleep, so any other signal that must act on the
+        // thread (run a handler, or take a default action) breaks the wait.
+        // Return the ERESTARTSYS sentinel — the syscall-return checkpoint then
+        // either restarts the read (SA_RESTART handler) or surfaces -EINTR (and
+        // for a no-handler default-terminate signal, terminates the process).
+        // Without this the thread would park forever for a signal it isn't
+        // watching, since the handler only runs at the syscall-return
+        // checkpoint, which a parked read never reaches.
+        let deliverable = !crate::proc::signal::blocked(caller);
+        let interrupt_mask = deliverable & !mask;
+        if crate::proc::signal::has_pending_in_mask(caller, interrupt_mask) {
+            return restart::restart_result(restart::ERESTARTSYS);
+        }
+
         // Blocking: register as a waiter, then re-check before parking so a
         // signal that arrives in the gap is not lost (register-then-recheck).
+        // Wake for *either* a watched signal (to drain into records) or any
+        // other deliverable signal (to be interrupted per the rule above), so
+        // the park covers both the drain and the interrupt cases.
         let task = crate::sched::current_task_id();
-        crate::proc::signal::register_signalfd_waiter(caller, task, mask);
-        if crate::proc::signal::has_pending_in_mask(caller, mask) {
-            // Raced with an arriving signal — drain it on the next iteration.
+        let wait_mask = mask | deliverable;
+        crate::proc::signal::register_signalfd_waiter(caller, task, wait_mask);
+        if crate::proc::signal::has_pending_in_mask(caller, wait_mask) {
+            // Raced with an arriving signal — re-evaluate (drain or interrupt)
+            // on the next iteration.
             crate::proc::signal::deregister_signalfd_waiter(caller, task);
             continue;
         }
         crate::sched::block_current();
-        // Woken (matching signal arrived, or spurious) — deregister (a no-op if
-        // the waker already removed us) and loop to re-drain.
+        // Woken (watched/other signal arrived, or spurious) — deregister (a
+        // no-op if the waker already removed us) and loop to re-evaluate.
         crate::proc::signal::deregister_signalfd_waiter(caller, task);
     }
 }

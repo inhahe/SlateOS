@@ -8935,10 +8935,40 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          the temp mask already installed, corrupting the saved mask the
 ##          delivery checkpoint restores.  Needs the checkpoint to restore
 ##          the saved mask BEFORE a restart re-installs it; do that first.
-##        - signalfd blocking read: needs an "interrupted by a signal NOT in
-##          the signalfd mask" check added first (it has none today — it
-##          only wakes for watched signals), then that exit becomes
-##          ERESTARTSYS.
+##        - signalfd blocking read DONE 2026-06-18: was the same hang-bug
+##          class — dispatch_signalfd_read (linux.rs) registered its
+##          signal-waiter with ONLY the fd's acceptance mask, so a deliverable
+##          signal NOT in that mask (e.g. SIGUSR1 with a handler installed)
+##          could never wake the parked read.  The handler runs only at the
+##          syscall-return checkpoint, which a parked read never reaches, so the
+##          thread blocked forever.  Fix:
+##            * Park with wait_mask = acceptance-mask | deliverable (deliverable
+##              = !blocked(caller)), so set_pending wakes the park for EITHER a
+##              watched signal (to drain into records) OR any other deliverable
+##              signal (to be interrupted).
+##            * After the drain produces 0 records, before re-parking, check
+##              interrupt_mask = deliverable & !acceptance-mask; if a signal is
+##              pending there, return restart::restart_result(ERESTARTSYS).  The
+##              syscall-return checkpoint then runs the handler + restarts
+##              (SA_RESTART) or surfaces -EINTR (and for a no-handler default-
+##              terminate signal, terminates).  signalfd read returns its
+##              SyscallResult raw through dispatch_read/sys_read (no
+##              linux_from_native wrap), so the -512 sentinel reaches the return
+##              path untouched (no CrossDevice collision).  readv path passes a
+##              first-iov sentinel through and truncates on partial data —
+##              matching Linux.
+##            * Ring-3 test (elf::build_linux_signalfd_interrupt_test_elf +
+##              spawn::self_test_linux_signalfd_interrupt, wired into main.rs):
+##              child installs a NON-SA_RESTART SIGUSR1 handler, creates a
+##              signalfd watching only SIGUSR2, blocks in read(); kernel posts
+##              the out-of-mask SIGUSR1; a correct kernel wakes it and the read
+##              returns -EINTR → exit(0x3D).  A park-uninterruptible regression
+##              leaves the child parked forever (non-zombie → FAIL); draining the
+##              signal as data → exit 0xEE → FAIL.  This DISTINGUISHES the fix
+##              from the bug (a restart-based two-signal design would not, since
+##              the handler would still run at the post-read checkpoint either
+##              way).  Build clean (32.10s) + boot-test PASSED (229s); serial
+##              shows "exit == 61: OK".
 ##        - futex(FUTEX_WAIT / FUTEX_WAIT_BITSET) DONE 2026-06-18: was the
 ##          same confirmed bug class as wait4 — the native futex_wait_bitset /
 ##          futex_wait_bitset_timeout paths registered ONLY in the futex bucket

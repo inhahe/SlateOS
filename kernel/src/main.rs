@@ -1308,6 +1308,16 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: Linux SA_RESTART (ring 3) self-test failed: {:?}", e);
     }
 
+    // Ring-3 test that a blocking signalfd read is interrupted by a signal NOT
+    // in the fd's acceptance mask (the signalfd analogue of the slow-object
+    // interruptibility fixes): a Linux-ABI process blocks in read() on a
+    // signalfd watching only SIGUSR2 with a non-SA_RESTART SIGUSR1 handler
+    // installed; the kernel posts SIGUSR1, the read wakes and returns -EINTR.
+    // Before the fix the read parked forever for the out-of-mask signal.
+    if let Err(e) = proc::spawn::self_test_linux_signalfd_interrupt() {
+        serial_println!("WARNING: Linux signalfd-read interruptibility (ring 3) self-test failed: {:?}", e);
+    }
+
     // Ring-3 test that the SysV stack builder's argv *pointers* (not just the
     // scalar argc) are valid in the mapped user stack: a real Linux-ABI
     // process dereferences argv[0] and exits with its first byte.

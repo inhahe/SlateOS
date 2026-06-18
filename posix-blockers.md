@@ -32,10 +32,22 @@ Syscalls: `SYS_SIGNAL_REGISTER=522`, `SYS_SIGNAL_SEND=523`,
 Roadmap: `roadmap.md` lines 1225–1227.
 
 Documented limitations (in `todo.txt` under *Judgment Calls*): only
-64 signals deliverable asynchronously; the signal being delivered is
-not auto-masked during its handler; `sigaltstack` is accepted but
+64 signals deliverable asynchronously; `sigaltstack` is accepted but
 ignored; the host test harness cannot exercise the syscall-issuing
 delivery path (only the pure router / mapper logic).
+
+Note (2026-06-18): an earlier draft of this list claimed "the signal
+being delivered is not auto-masked during its handler" — that note was
+**stale**. Auto-masking was implemented on 2026-05-29 at the correct
+layer (the userspace POSIX runtime: `dispatch_self_signal` /
+`plan_self_dispatch` in `posix/`), which unions the delivered signal
+(unless `SA_NODEFER`) plus the handler's `sa_mask` into the blocked
+mask, mirrors it to the kernel via `SYS_SIGNAL_MASK` for the handler's
+duration, then restores it on return. The per-signal `SA_NODEFER` /
+`sa_mask` flags live only in the userspace `sigaction` table; the
+kernel native shim deliberately tracks no per-signal disposition
+(`signal.rs` module docs), so the masking decision must — and does —
+stay in userspace. See `todo.txt` *Judgment Calls* for the full entry.
 
 ---
 

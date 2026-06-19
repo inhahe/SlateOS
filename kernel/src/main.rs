@@ -1832,6 +1832,16 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: Path-Z hosted C compiler (tcc) self-test failed: {:?}", e);
     }
 
+    // Path Z Part 37: the hosted compile rung exercising more of the glibc ABI
+    // through a freshly-tcc-built dynamic binary — a malloc/free heap round-trip
+    // plus printf's variadic format machinery (%s pointer arg, %d int format).
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_hosted_stdio() {
+        serial_println!(
+            "WARNING: Path-Z hosted C compiler (tcc, printf/malloc) self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

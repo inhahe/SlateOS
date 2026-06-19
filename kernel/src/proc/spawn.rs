@@ -10787,9 +10787,22 @@ sc3(1,1,(long)m,16);sc3(60,0,0,0);}\n";
 /// Returns [`KernelError::InternalError`] if `tcc` fails to reach `Zombie`,
 /// exits non-zero, produces no/invalid/non-dynamic ELF, the compiled program
 /// fails to run, or its output does not match; propagates spawn failure.
-pub fn self_test_linux_real_glibc_cc_hosted() -> KernelResult<()> {
+/// Shared back-end for the hosted-glibc-compile self-tests.
+///
+/// Stages the full glibc support set (ld + libc + libm + tcc + the crt
+/// objects + libc.so linker-script + libc_nonshared.a + libtcc1.a) from the
+/// /mnt ext4 rootfs, compiles `hosted_src` with `tcc -o /hosted-prog
+/// /hosted-prog.c` (a real glibc-linked, dynamically-linked build), asserts
+/// the output ELF carries a `PT_INTERP`, then runs that freshly-built binary
+/// in ring 3 with its fd 1 redirected to a capture file and asserts the
+/// captured bytes equal `expect_out`.  `label` names the libc surface the
+/// program exercises (e.g. "puts", "printf/malloc") for the serial log.
+///
+/// No-ops cleanly (returns `Ok`) if the glibc support set is absent so the
+/// test is a silent skip on a rootfs that wasn't built with hosted-compile
+/// support.
+fn run_hosted_cc_case(label: &str, hosted_src: &[u8], expect_out: &[u8]) -> KernelResult<()> {
     const EXPECT_EXIT: i32 = 0;
-    const EXPECT_OUT: &[u8] = b"SLATE_TCC_HOSTED_OK\n";
 
     // (src in /mnt rootfs, dst in VFS) staging pairs.  ld + libc + libm + tcc
     // are shared with the other Path-Z tests; the crt objects, libc.so script,
@@ -10839,12 +10852,6 @@ pub fn self_test_linux_real_glibc_cc_hosted() -> KernelResult<()> {
     const OBJ_PATH: &str = "/hosted-prog";
     const OUT_PATH: &str = "/hosted-out.txt";
 
-    // A hosted C program: declares `puts` via an `extern` prototype (no header
-    // tree needed) and returns from `main` so libc's startup AND the exit-time
-    // stdio flush (which actually emits the buffered `puts` output) both run.
-    const HOSTED_SRC: &[u8] =
-        b"extern int puts(const char *s);\nint main(void){puts(\"SLATE_TCC_HOSTED_OK\");return 0;}\n";
-
     const COMPILE_MAX_YIELDS: usize = 4_194_304;
     const RUN_MAX_YIELDS: usize = 524_288;
 
@@ -10857,7 +10864,10 @@ pub fn self_test_linux_real_glibc_cc_hosted() -> KernelResult<()> {
         return Ok(());
     }
 
-    serial_println!("[spawn] Running REAL C compiler (tcc, HOSTED glibc link, ring 3, Path Z) test...");
+    serial_println!(
+        "[spawn] Running REAL C compiler (tcc, HOSTED glibc link, {}, ring 3, Path Z) test...",
+        label
+    );
 
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
@@ -10882,7 +10892,7 @@ pub fn self_test_linux_real_glibc_cc_hosted() -> KernelResult<()> {
         }
     }
 
-    if let Err(e) = crate::fs::Vfs::write_file(SRC_PATH, HOSTED_SRC) {
+    if let Err(e) = crate::fs::Vfs::write_file(SRC_PATH, hosted_src) {
         serial_println!("[spawn]   hosted cc: SKIP (writing {} failed: {:?})", SRC_PATH, e);
         return Ok(());
     }
@@ -11101,20 +11111,20 @@ pub fn self_test_linux_real_glibc_cc_hosted() -> KernelResult<()> {
     }
 
     match out {
-        Ok(bytes) if bytes.as_slice() == EXPECT_OUT => {
+        Ok(bytes) if bytes.as_slice() == expect_out => {
             serial_println!(
-                "[spawn]   REAL C compiler HOSTED (ring 3: tcc compiled+glibc-linked C into a \
-                 {}-byte dynamic ELF, ld.so loaded that binary + libc, it called puts() and the \
-                 exit-time stdio flush wrote {} bytes == expected, exit={:?}): OK",
-                obj.len(), bytes.len(), run_exit
+                "[spawn]   REAL C compiler HOSTED ({}) (ring 3: tcc compiled+glibc-linked C into a \
+                 {}-byte dynamic ELF, ld.so loaded that binary + libc, it ran the {} libc path and \
+                 the exit-time stdio flush wrote {} bytes == expected, exit={:?}): OK",
+                label, obj.len(), label, bytes.len(), run_exit
             );
             Ok(())
         }
         Ok(bytes) => {
             serial_println!(
-                "[spawn]   FAIL: hosted cc — {} holds {} bytes {:?}, expected {} bytes {:?} \
+                "[spawn]   FAIL: hosted cc ({}) — {} holds {} bytes {:?}, expected {} bytes {:?} \
                  (compiled program exit={:?})",
-                OUT_PATH, bytes.len(), bytes.as_slice(), EXPECT_OUT.len(), EXPECT_OUT, run_exit
+                label, OUT_PATH, bytes.len(), bytes.as_slice(), expect_out.len(), expect_out, run_exit
             );
             Err(KernelError::InternalError)
         }
@@ -11127,6 +11137,46 @@ pub fn self_test_linux_real_glibc_cc_hosted() -> KernelResult<()> {
             Err(KernelError::InternalError)
         }
     }
+}
+
+/// Path Z Part 36 — hosted glibc-linked compile (minimal `puts` surface).
+///
+/// The smallest possible end-to-end proof: a hosted C program that declares
+/// `puts` via an `extern` prototype (no header tree needed) and returns from
+/// `main`, so libc's startup *and* the exit-time stdio flush (which actually
+/// emits the buffered `puts` output) both run.  Exercises crt startup →
+/// `__libc_start_main` → `main` → libc `puts` → stdio buffer flush → exit.
+pub fn self_test_linux_real_glibc_cc_hosted() -> KernelResult<()> {
+    const HOSTED_SRC: &[u8] =
+        b"extern int puts(const char *s);\nint main(void){puts(\"SLATE_TCC_HOSTED_OK\");return 0;}\n";
+    run_hosted_cc_case("puts", HOSTED_SRC, b"SLATE_TCC_HOSTED_OK\n")
+}
+
+/// Path Z Part 37 — hosted glibc-linked compile (`printf` varargs + heap).
+///
+/// Strengthens Part 36 by exercising materially more of the glibc ABI through
+/// a freshly-tcc-built dynamic binary: a `malloc`/`free` heap round-trip and
+/// `printf`'s variadic format machinery (`%s` consumes a pointer argument,
+/// `%d` formats an int).  The program builds a string on the heap, prints it
+/// with a formatted integer, frees it, and returns 0.  Because fd 1 is
+/// redirected to a regular file (not a tty) glibc makes stdout fully buffered,
+/// so the `printf` output is emitted by the exit-time flush — the same path
+/// Part 36 validates for `puts`.
+pub fn self_test_linux_real_glibc_cc_hosted_stdio() -> KernelResult<()> {
+    // extern prototypes avoid needing the glibc header tree on the target.
+    // size_t is `unsigned long` on x86_64, matching malloc's signature.
+    const HOSTED_SRC: &[u8] = b"extern int printf(const char *fmt, ...);\n\
+extern void *malloc(unsigned long n);\n\
+extern void free(void *p);\n\
+int main(void){\n\
+  char *p = (char*)malloc(8);\n\
+  if(!p) return 2;\n\
+  p[0]='S'; p[1]='L'; p[2]='A'; p[3]='T'; p[4]='E'; p[5]=0;\n\
+  printf(\"%s-%d\\n\", p, 1234);\n\
+  free(p);\n\
+  return 0;\n\
+}\n";
+    run_hosted_cc_case("printf/malloc", HOSTED_SRC, b"SLATE-1234\n")
 }
 
 /// Test 1: Spawn a process from a valid ELF binary.

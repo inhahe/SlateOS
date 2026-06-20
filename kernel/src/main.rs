@@ -1239,6 +1239,10 @@ extern "C" fn kernel_main() -> ! {
     if let Err(e) = blkdev::self_test_discard() {
         serial_println!("WARNING: blkdev discard self-test failed: {:?}", e);
     }
+    // FAT fstrim (free-space discard) self-test on a scratch RAM disk.
+    if let Err(e) = fs::fat::trim_self_test() {
+        serial_println!("WARNING: FAT fstrim self-test failed: {:?}", e);
+    }
 
     // End-to-end dynamically-linked Linux launch test (needs a writable VFS,
     // so it runs here rather than in proc::self_test() which precedes VFS

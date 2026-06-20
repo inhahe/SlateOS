@@ -706,6 +706,23 @@ pub trait FileSystem: Send {
         })
     }
 
+    /// Discard (TRIM) the filesystem's free space on the backing device.
+    ///
+    /// Walks the free-space metadata and issues
+    /// [`BlockDevice::discard`](crate::blkdev::BlockDevice::discard) for every
+    /// run of free blocks, hinting to an SSD that those blocks may be released.
+    /// This is the kernel side of `fstrim(8)`: it is **non-destructive** — only
+    /// blocks the filesystem considers free are discarded; live file data is
+    /// never touched.
+    ///
+    /// Returns the number of bytes discarded.  The default implementation
+    /// returns `Ok(0)`: virtual filesystems (procfs, sysfs, devfs, memfs) and
+    /// any filesystem whose backing device does not support discard have
+    /// nothing to trim, which is a successful no-op rather than an error.
+    fn trim(&mut self) -> KernelResult<u64> {
+        Ok(0)
+    }
+
     /// Create a hard link.
     ///
     /// `existing` is the path to the existing file.
@@ -2616,6 +2633,26 @@ impl Vfs {
         let mut vfs = VFS.lock();
         let (mp, _relative) = find_mount(&mut vfs, &path)?;
         mp.fs.statvfs()
+    }
+
+    /// Discard (TRIM) the free space of the filesystem containing `path`.
+    ///
+    /// Resolves `path` to its mount point and asks that filesystem to issue
+    /// discard for every run of free blocks on its backing device (the kernel
+    /// side of `fstrim(8)`).  Returns the number of bytes discarded.  This is
+    /// non-destructive: only free blocks are trimmed.  Read-only mounts and
+    /// filesystems whose backing device does not support discard return
+    /// `Ok(0)` (nothing to do).
+    pub fn trim(path: &str) -> KernelResult<u64> {
+        let path = Self::resolve_follow(path)?;
+        let mut vfs = VFS.lock();
+        let (mp, _relative) = find_mount(&mut vfs, &path)?;
+        // A read-only mount has no business mutating the device; treat it as a
+        // no-op rather than letting the filesystem attempt discards.
+        if mp.options.read_only {
+            return Ok(0);
+        }
+        mp.fs.trim()
     }
 
     /// List all mount points with their filesystem info.

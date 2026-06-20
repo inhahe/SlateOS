@@ -1437,6 +1437,124 @@ impl FatFs {
         Ok((free_count, u64::from(total_clusters)))
     }
 
+    /// Discard (TRIM) every run of free clusters on the backing device.
+    ///
+    /// The kernel side of `fstrim(8)` for FAT: scans the FAT, coalesces
+    /// contiguous free clusters into runs, and issues
+    /// [`crate::blkdev::discard`] for each run's sectors (after dropping any
+    /// cached copies so stale free-space data cannot resurface).  Only free
+    /// clusters are touched, so this never affects live file data.
+    ///
+    /// Returns the number of bytes discarded.  Returns `Ok(0)` if the backing
+    /// device does not support discard (nothing to do — a successful no-op).
+    #[allow(clippy::arithmetic_side_effects)]
+    fn trim_free_clusters(&mut self) -> KernelResult<u64> {
+        // Nothing to do if the device can't discard.
+        if crate::blkdev::supports_discard(&self.device_name) != Some(true) {
+            return Ok(0);
+        }
+
+        let data_sectors = self.bpb.total_sectors()
+            .saturating_sub(u32::from(self.bpb.reserved_sectors))
+            .saturating_sub(u32::from(self.bpb.num_fats) * self.bpb.sectors_per_fat())
+            .saturating_sub(self.bpb.root_dir_sectors());
+        let total_clusters = data_sectors / u32::from(self.bpb.sectors_per_cluster);
+
+        let bps = u32::from(self.bpb.bytes_per_sector);
+        let entry_bytes: u32 = match self.bpb.fat_type {
+            FatType::Fat16 => 2,
+            FatType::Fat32 => 4,
+        };
+        let fat_start = self.bpb.fat_start_lba();
+        let max_cluster = match self.bpb.fat_type {
+            FatType::Fat16 => (total_clusters + 2).min(0xFFEF),
+            FatType::Fat32 => (total_clusters + 2).min(0x0FFF_FFEF),
+        };
+        let sectors_per_cluster = u64::from(self.bpb.sectors_per_cluster);
+        let sector_size = u64::from(self.bpb.bytes_per_sector);
+
+        let mut total_discarded: u64 = 0;
+        let mut sector_buf = [0u8; SECTOR_SIZE];
+        let mut last_sector = u32::MAX;
+
+        // Current run of contiguous free clusters: [run_start, run_start+run_len).
+        let mut run_start: u32 = 0;
+        let mut run_len: u32 = 0;
+
+        // Helper closure can't borrow self mutably while we iterate, so the
+        // flush is inlined below at each run boundary.
+        for cluster in 2..max_cluster {
+            let fat_offset = cluster * entry_bytes;
+            let sector_num = fat_start + fat_offset / bps;
+
+            if sector_num != last_sector {
+                self.read_sector(u64::from(sector_num), &mut sector_buf)?;
+                last_sector = sector_num;
+            }
+
+            let offset = (fat_offset % bps) as usize;
+            let is_free = match self.bpb.fat_type {
+                FatType::Fat16 => read_u16(&sector_buf, offset) == 0x0000,
+                FatType::Fat32 => (read_u32(&sector_buf, offset) & 0x0FFF_FFFF) == 0,
+            };
+
+            if is_free {
+                if run_len == 0 {
+                    run_start = cluster;
+                }
+                run_len += 1;
+            } else if run_len > 0 {
+                total_discarded = total_discarded.saturating_add(
+                    self.discard_cluster_run(run_start, run_len, sectors_per_cluster, sector_size)?,
+                );
+                run_len = 0;
+            }
+        }
+        // Flush a trailing run.
+        if run_len > 0 {
+            total_discarded = total_discarded.saturating_add(
+                self.discard_cluster_run(run_start, run_len, sectors_per_cluster, sector_size)?,
+            );
+        }
+
+        Ok(total_discarded)
+    }
+
+    /// Discard one run of `count` contiguous free clusters starting at
+    /// `start_cluster`.  Returns the number of bytes discarded (0 if the
+    /// device rejects the discard, which is treated as non-fatal).
+    fn discard_cluster_run(
+        &mut self,
+        start_cluster: u32,
+        count: u32,
+        sectors_per_cluster: u64,
+        sector_size: u64,
+    ) -> KernelResult<u64> {
+        let start_lba = u64::from(self.bpb.cluster_to_lba(start_cluster));
+        let sector_count = u64::from(count)
+            .checked_mul(sectors_per_cluster)
+            .ok_or(KernelError::InvalidArgument)?;
+        if sector_count == 0 {
+            return Ok(0);
+        }
+
+        // Drop any cached copies of these soon-to-be-discarded sectors so a
+        // later read cannot resurface stale free-space contents.
+        let _ = super::cache::invalidate_range(&self.device_name, start_lba, sector_count);
+
+        match crate::blkdev::discard(&self.device_name, start_lba, sector_count) {
+            // Device discarded the run: account the bytes.
+            Some(Ok(())) => sector_count
+                .checked_mul(sector_size)
+                .ok_or(KernelError::InvalidArgument),
+            // Device declined (e.g. NotSupported between the capability check
+            // and here): treat as nothing discarded rather than failing trim.
+            Some(Err(_)) => Ok(0),
+            // Device vanished from the registry: nothing to discard.
+            None => Ok(0),
+        }
+    }
+
     /// Read the root directory entries.
     ///
     /// FAT16: reads the fixed-size root directory area.
@@ -2845,6 +2963,10 @@ impl FileSystem for FatFs {
             max_name_len,
             read_only: false,
         })
+    }
+
+    fn trim(&mut self) -> KernelResult<u64> {
+        self.trim_free_clusters()
     }
 
     fn readdir(&mut self, path: &str) -> KernelResult<Vec<DirEntry>> {
@@ -5562,6 +5684,80 @@ pub fn fsck_self_test() -> KernelResult<()> {
 
     result?;
     serial_println!("[fat] fsck self-test PASSED");
+    Ok(())
+}
+
+/// Boot self-test for the FAT `fstrim` (free-space discard) path.
+///
+/// Formats a scratch RAM disk, poisons a high data-area sector with a
+/// non-zero pattern directly on the device (bypassing the cache), mounts the
+/// volume and runs [`FatFs::trim`], then verifies that (a) trim reports a
+/// non-zero discard on a near-empty volume and (b) the poisoned free-cluster
+/// sector reads back as zero (proving the free run was actually discarded).
+///
+/// Runs on the bare-metal target where `#[cfg(test)]` does not, so the FAT
+/// trim path is exercised end-to-end on every boot.
+pub fn trim_self_test() -> KernelResult<()> {
+    use crate::serial_println;
+
+    serial_println!("[fat] Running fstrim self-test...");
+
+    let dev = "trimtest0";
+
+    // Clean up any leftovers from a previous run.
+    let _ = crate::fs::cache::invalidate(dev);
+    let _ = crate::blkdev::unregister(dev);
+
+    // 8192 sectors * 512 B = 4 MiB → mkfs auto-selects FAT16.
+    crate::blkdev::register(dev, alloc::boxed::Box::new(crate::blkdev::RamBlockDevice::new(8192)));
+
+    let result = (|| -> KernelResult<()> {
+        mkfs_fat(dev, Some("TRIMTEST"))?;
+
+        // Poison a high data-area sector (well past metadata, certainly inside
+        // a free cluster on an empty volume) with 0xAB, written straight to the
+        // device so it is independent of the buffer cache.
+        let test_lba = 8000u64;
+        let poison = [0xABu8; SECTOR_SIZE];
+        crate::blkdev::with_device(dev, |d| d.write_sector(test_lba, &poison))
+            .ok_or(KernelError::NotFound)??;
+        let mut buf = [0u8; SECTOR_SIZE];
+        crate::blkdev::with_device(dev, |d| d.read_sector(test_lba, &mut buf))
+            .ok_or(KernelError::NotFound)??;
+        if !buf.iter().all(|&b| b == 0xAB) {
+            serial_println!("[fat]   FAIL: poison sector did not take");
+            return Err(KernelError::InternalError);
+        }
+
+        // Mount and run fstrim.
+        let mut fs = FatFs::mount(dev)?;
+        let discarded = fs.trim()?;
+        serial_println!("[fat]   fstrim discarded {} bytes", discarded);
+        if discarded == 0 {
+            serial_println!("[fat]   FAIL: trim discarded nothing on a near-empty volume");
+            return Err(KernelError::InternalError);
+        }
+
+        // The poisoned free-cluster sector must now read back zero on the
+        // device.  Drop any cached copies first so this reflects the device.
+        let _ = crate::fs::cache::invalidate(dev);
+        let mut buf2 = [0u8; SECTOR_SIZE];
+        crate::blkdev::with_device(dev, |d| d.read_sector(test_lba, &mut buf2))
+            .ok_or(KernelError::NotFound)??;
+        if !buf2.iter().all(|&b| b == 0) {
+            serial_println!("[fat]   FAIL: free sector still holds data after trim");
+            return Err(KernelError::InternalError);
+        }
+
+        Ok(())
+    })();
+
+    // Tear down regardless of outcome.
+    let _ = crate::fs::cache::invalidate(dev);
+    let _ = crate::blkdev::unregister(dev);
+
+    result?;
+    serial_println!("[fat] fstrim self-test PASSED");
     Ok(())
 }
 

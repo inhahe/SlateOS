@@ -869,6 +869,54 @@ pub fn invalidate(device: &str) -> KernelResult<()> {
     Ok(())
 }
 
+/// Drop cached entries for sectors `[start_lba, start_lba + count)` on
+/// `device` **without** writing them back.
+///
+/// Used by the discard/`fstrim` path: the sectors are about to be discarded
+/// on the device, so any cached copy (even a dirty one) is moot — keeping it
+/// would let stale free-space data resurface on a later read and diverge from
+/// the now-discarded device contents.  Dirty entries in the range are dropped,
+/// not flushed, because flushing them would defeat the discard.
+///
+/// Returns the number of cache entries dropped.
+pub fn invalidate_range(device: &str, start_lba: u64, count: u64) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    let end_lba = match start_lba.checked_add(count) {
+        Some(e) => e,
+        None => return 0, // Overflow: caller passed a bogus range; do nothing.
+    };
+
+    let mut cache = CACHE.lock();
+    let dev_id = match cache.device_id(device) {
+        Some(id) => id,
+        None => return 0,
+    };
+
+    let mut dropped = 0usize;
+    for i in 0..cache.entries.len() {
+        if cache.entries[i].valid
+            && cache.entries[i].device_id == dev_id
+            && cache.entries[i].lba >= start_lba
+            && cache.entries[i].lba < end_lba
+        {
+            let lba = cache.entries[i].lba;
+            cache.index.remove(&(dev_id, lba));
+            cache.valid_count = cache.valid_count.saturating_sub(1);
+            if cache.entries[i].dirty {
+                cache.dirty_count = cache.dirty_count.saturating_sub(1);
+            }
+            cache.entries[i].valid = false;
+            cache.entries[i].dirty = false;
+            cache.free_slots.push(i);
+            dropped = dropped.saturating_add(1);
+        }
+    }
+
+    dropped
+}
+
 /// Invalidate all cache entries without flushing.
 ///
 /// **Danger**: discards dirty data.  Only use during shutdown or

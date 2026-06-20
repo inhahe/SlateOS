@@ -1697,7 +1697,7 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
-### TD30. Console TTY line discipline: `^C`/`^\`/`^Z` now signal the fg pgrp; `VTIME` still missing — PARTIALLY RESOLVED 2026-06-20
+### TD30. Console TTY line discipline: `^C`/`^\`/`^Z` signal the fg pgrp, `VMIN`/`VTIME` honoured; only orphan-pgrp SIGHUP + raw-mode ISIG remain — MOSTLY RESOLVED 2026-06-20
 
 **Where:** `kernel/src/tty.rs` — `feed()` (canonical line editor) and
 `raw_read()` (non-canonical reader); driven by `dispatch_console_read` /
@@ -1719,23 +1719,6 @@ isn't in the fg group (or the handler has `SA_RESTART`), otherwise the
 default action / `-EINTR`. With no foreground group installed
 (`pgid == 0`) no signal is generated and the read simply restarts.
 
-**Still missing:**
-
-2. **`VTIME` inter-byte timer.** `raw_read()` honours `VMIN` (0 ⇒ poll,
-   ≥1 ⇒ block for the first byte then drain what's ready) but ignores
-   `VTIME`. Programs that set `VMIN=0,VTIME>0` (a bounded read timeout) or
-   `VMIN>0,VTIME>0` (inter-byte timeout) get "block until VMIN bytes"
-   behaviour instead of timing out. cfmakeraw's default `VMIN=1,VTIME=0`
-   is handled correctly, so most raw-mode programs are unaffected.
-
-3. **Orphaned-process-group `SIGHUP`/`SIGCONT`** on session-leader exit is
-   not implemented.
-
-4. **Raw-mode `ISIG`.** `raw_read()` does not call `feed()`, so `^C` in a
-   non-canonical terminal generates no signal even when `ISIG` is still
-   set. (Correct when the app cleared `ISIG`, as full-screen apps do, but
-   a raw read with `ISIG` set should still signal.)
-
 **RESOLVED — Ctrl-Z (`VSUSP`) → `SIGTSTP`:** `feed()` now recognises
 `VSUSP` under `ISIG` (default `^Z`) and returns `LineStep::Signal(20)`,
 flushing the in-progress line like `^C`/`^\`. `deliver_console_signal`
@@ -1743,13 +1726,33 @@ routes `SIGTSTP` to the foreground pgrp, whose `DefaultAction::Stop`
 (already implemented in `proc::signal`) suspends the job; a later
 `SIGCONT` (shell `fg`/`bg`) resumes it. `NOFLSH` is not yet honoured.
 
-**Proper fix for the remainder:** (2) wire `VTIME` to a timer
-(HPET/`timerfd`-style deadline) in `raw_read` so the drain loop wakes on
-either a byte or the deadline; (3)/(4) follow-ups as job control matures.
+**RESOLVED — `VTIME`:** `raw_read()` now honours all four `(VMIN, VTIME)`
+combinations per POSIX. A new `keyboard::read_char_timeout(deadline_ns)`
+(HLT-yield loop bounded by an `hrtimer::now_ns()` deadline) backs the two
+timed cases: `VMIN=0,VTIME>0` (bounded read timeout on the first byte) and
+`VMIN>0,VTIME>0` (inter-byte timer restarted after each byte, first byte
+blocking). `VMIN=0,VTIME=0` (poll) and `VMIN>0,VTIME=0` (count) are
+unchanged. VTIME is interpreted in deciseconds.
 
-**Severity:** low — raw-mode read timeouts are the main remaining affected
-behaviour; interactive `^C`/`^\`/`^Z` now work once a shell installs a
-foreground pgrp via `tcsetpgrp`.
+**Still missing:**
+
+1. **Orphaned-process-group `SIGHUP`/`SIGCONT`** on session-leader exit is
+   not implemented.
+
+2. **Raw-mode `ISIG`.** `raw_read()` does not call `feed()`, so `^C` in a
+   non-canonical terminal generates no signal even when `ISIG` is still
+   set. (Correct when the app cleared `ISIG`, as full-screen apps do, but
+   a raw read with `ISIG` set should still signal.)
+
+**Proper fix for the remainder:** (1) on session-leader exit, send
+`SIGHUP`+`SIGCONT` to each newly-orphaned process group; (2) consult
+`ISIG` in `raw_read` so a raw read with `ISIG` set still generates
+terminal signals. Both are follow-ups as job control matures.
+
+**Severity:** low — the orphan-pgrp SIGHUP edge case and raw-mode-with-ISIG
+signalling are the only remaining gaps; interactive `^C`/`^\`/`^Z` and
+`VMIN`/`VTIME` raw reads now work (the latter once a shell installs a
+foreground pgrp via `tcsetpgrp`).
 
 ### TD29. Linux signal `siginfo` sender-class (`si_code`/`si_pid`/`si_uid`) — RESOLVED 2026-06-15
 

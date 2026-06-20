@@ -591,10 +591,9 @@ pub enum ConsoleRead {
 /// In canonical mode this blocks until a full line (terminated by `\n` or
 /// `VEOF`) is available, then returns up to `out.len()` bytes of it (stashing
 /// any remainder for the next call).  A `^D` on an empty line returns `0`
-/// (end of file).  In non-canonical (raw) mode it honours `VMIN`: `VMIN == 0`
-/// polls and returns whatever is immediately available (possibly `0`), while
-/// `VMIN >= 1` blocks for the first byte and then drains what is ready, up to
-/// `out.len()`.  (`VTIME` inter-byte timing is not yet implemented.)
+/// (end of file).  In non-canonical (raw) mode it honours both `VMIN` and
+/// `VTIME` per POSIX (a pure poll, a read timeout, a byte count, or an
+/// inter-byte timer depending on the `(VMIN, VTIME)` pair) — see [`raw_read`].
 ///
 /// Echo is performed by the keyboard driver, which this function first syncs
 /// to the termios `ECHO` bit so that raw/no-echo programs (password prompts,
@@ -657,41 +656,103 @@ fn canonical_read(t: &Termios, out: &mut [u8]) -> ConsoleRead {
     ConsoleRead::Data(p.drain_into(out))
 }
 
-/// Non-canonical (raw) read honouring `VMIN` (see [`console_read`]).
+/// Non-canonical (raw) read honouring both `VMIN` and `VTIME` (see
+/// [`console_read`]).
+///
+/// The four `(VMIN, VTIME)` combinations follow POSIX (`termios(3)` "Canonical
+/// and noncanonical mode"):
+///
+/// * **`MIN==0, TIME==0`** — pure poll: return whatever is immediately
+///   available (possibly `0`), never blocking.
+/// * **`MIN==0, TIME>0`** — read timeout: block up to `TIME` deciseconds for
+///   the first byte; if any arrives, drain what is ready and return; on
+///   timeout return `0`.
+/// * **`MIN>0, TIME==0`** — count: block until `MIN` bytes (or the buffer
+///   fills), then drain any extra bytes already ready.
+/// * **`MIN>0, TIME>0`** — inter-byte timer: block indefinitely for the first
+///   byte, then restart a `TIME`-decisecond timer after each byte; return when
+///   `MIN` bytes are collected, the buffer fills, or the timer expires (which
+///   can only happen once at least one byte has been read).
 fn raw_read(t: &Termios, out: &mut [u8]) -> usize {
+    let cap = out.len();
+    if cap == 0 {
+        return 0;
+    }
     let vmin = t.vmin() as usize;
+    // VTIME is in deciseconds (tenths of a second).
+    const DECISECOND_NS: u64 = 100_000_000;
+    let vtime_ns = u64::from(t.vtime()).saturating_mul(DECISECOND_NS);
     let mut n = 0usize;
 
-    if vmin == 0 {
-        // Pure poll: return whatever is immediately available (may be zero).
-        while n < out.len() {
-            match crate::keyboard::try_read_char() {
-                Some(c) => {
-                    if let Some(slot) = out.get_mut(n) {
-                        *slot = c;
-                    }
-                    n = n.saturating_add(1);
-                }
-                None => break,
-            }
+    // Store one byte at the current cursor, advancing it.
+    let mut store = |slot_n: usize, c: u8| {
+        if let Some(slot) = out.get_mut(slot_n) {
+            *slot = c;
         }
-        return n;
-    }
+    };
 
-    // VMIN >= 1: block for the first `vmin` bytes, then drain what is ready.
-    while n < out.len() {
-        let next = if n >= vmin {
-            match crate::keyboard::try_read_char() {
-                Some(c) => c,
-                None => break,
+    match (vmin == 0, vtime_ns == 0) {
+        // MIN=0, TIME=0: pure poll.
+        (true, true) => {
+            while n < cap {
+                match crate::keyboard::try_read_char() {
+                    Some(c) => {
+                        store(n, c);
+                        n = n.saturating_add(1);
+                    }
+                    None => break,
+                }
             }
-        } else {
-            crate::keyboard::read_char()
-        };
-        if let Some(slot) = out.get_mut(n) {
-            *slot = next;
         }
-        n = n.saturating_add(1);
+        // MIN=0, TIME>0: bounded read timeout on the first byte.
+        (true, false) => {
+            let deadline = crate::hrtimer::now_ns().saturating_add(vtime_ns);
+            if let Some(c) = crate::keyboard::read_char_timeout(deadline) {
+                store(n, c);
+                n = n.saturating_add(1);
+                // Drain any bytes already buffered alongside the first.
+                while n < cap {
+                    match crate::keyboard::try_read_char() {
+                        Some(c) => {
+                            store(n, c);
+                            n = n.saturating_add(1);
+                        }
+                        None => break,
+                    }
+                }
+            }
+        }
+        // MIN>0, TIME=0: block for VMIN bytes, then drain ready extras.
+        (false, true) => {
+            while n < cap {
+                let next = if n >= vmin {
+                    match crate::keyboard::try_read_char() {
+                        Some(c) => c,
+                        None => break,
+                    }
+                } else {
+                    crate::keyboard::read_char()
+                };
+                store(n, next);
+                n = n.saturating_add(1);
+            }
+        }
+        // MIN>0, TIME>0: block for the first byte, then inter-byte timer.
+        (false, false) => {
+            let first = crate::keyboard::read_char();
+            store(n, first);
+            n = n.saturating_add(1);
+            while n < cap && n < vmin {
+                let deadline = crate::hrtimer::now_ns().saturating_add(vtime_ns);
+                match crate::keyboard::read_char_timeout(deadline) {
+                    Some(c) => {
+                        store(n, c);
+                        n = n.saturating_add(1);
+                    }
+                    None => break, // inter-byte timer expired
+                }
+            }
+        }
     }
     n
 }

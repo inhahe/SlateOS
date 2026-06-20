@@ -551,6 +551,33 @@ pub fn read_char() -> u8 {
     }
 }
 
+/// Read one character, blocking until either a character is available or the
+/// monotonic clock reaches `deadline_ns` (an [`crate::hrtimer::now_ns`]
+/// timestamp).  Returns `Some(ch)` on input, `None` on timeout.
+///
+/// Like [`read_char`] this yields the CPU via `HLT` between polls (waking on
+/// the keyboard IRQ or the timer tick), so it does not hot-spin.  It is the
+/// primitive behind the terminal `VTIME` read timeout: a `VMIN=0,VTIME>0`
+/// bounded read and the inter-byte timer of a `VMIN>0,VTIME>0` read.
+///
+/// A `deadline_ns` already in the past returns immediately — `Some(ch)` if a
+/// character happens to be buffered, else `None` — so callers can use it as a
+/// non-blocking poll with `deadline_ns = now`.
+pub fn read_char_timeout(deadline_ns: u64) -> Option<u8> {
+    loop {
+        poll_usb_keyboard();
+        if let Some(ch) = try_read_char_raw() {
+            return Some(ch);
+        }
+        if crate::hrtimer::now_ns() >= deadline_ns {
+            return None;
+        }
+        // Yield until the next interrupt (keyboard IRQ or the periodic timer
+        // tick, which bounds how long we sleep past the deadline).
+        crate::cpu::hlt();
+    }
+}
+
 /// Enable or disable keyboard echo.
 ///
 /// When echo is disabled, the keyboard driver pushes characters into the

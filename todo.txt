@@ -9489,10 +9489,15 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          proc::signal) suspends the job (SIGCONT resumes).  Tested:
 ##          tty self-test feed VQUIT/VSUSP cases + ISIG-off literal ^C; boot
 ##          test PASSED.  NOFLSH not yet honoured.
+##          UPDATE 2026-06-20 (Increment E): VTIME now RESOLVED.  raw_read()
+##          honours all four (VMIN,VTIME) combos per POSIX via a new
+##          keyboard::read_char_timeout(deadline_ns) (HLT-yield loop bounded by
+##          hrtimer::now_ns()): VMIN=0/VTIME>0 = bounded read timeout,
+##          VMIN>0/VTIME>0 = inter-byte timer (first byte blocking), the two
+##          VTIME=0 cases unchanged.  Build + clippy clean; boot PASSED.
 ##      STILL DEFERRED (TD30 remainder):
-##          (1) VTIME inter-byte timer in raw_read (VMIN handled; VTIME ignored).
-##          (2) Orphaned-process-group SIGHUP/SIGCONT on session leader exit.
-##          (3) Raw-mode ISIG: raw_read() does not call feed() so ^C in a raw
+##          (1) Orphaned-process-group SIGHUP/SIGCONT on session leader exit.
+##          (2) Raw-mode ISIG: raw_read() does not call feed() so ^C in a raw
 ##              (non-canonical) terminal generates no signal even with ISIG set;
 ##              revisit when an app needs it.
 ##

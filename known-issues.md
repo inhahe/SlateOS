@@ -2438,11 +2438,13 @@ client-side number correction:
   returning ENOSYS; `canonical_fstype` maps user fstype names to kernel
   fstypes, bind/remount are rejected (unsupported by the ABI), and mount
   options emit a "not yet honoured" warning. Host unit tests: `cargo test -p
-  mount --target x86_64-pc-windows-gnu` (6 pass). **Remaining note:** the
-  separate `userspace/mount-cli` demo tool still prints *fabricated* mount
-  listings and pretends mount/umount succeed without issuing any syscall — it
-  should be rewired to the real ABI or removed (it duplicates `mount`); tracked
-  as a residual sub-item here.
+  mount --target x86_64-pc-windows-gnu` (6 pass). The redundant
+  `userspace/mount-cli` demo tool (which printed *fabricated* mount listings and
+  fake-succeeded without a syscall) was **removed 2026-06-20** — all three of
+  its personalities are already covered by real, non-fabricating tools:
+  `mount`/`umount` (the tool above) and the standalone `userspace/findmnt`
+  (reads `/proc/mounts`). Nothing referenced `mount-cli`. (Judgment call —
+  removal is reversible via git; see todo.txt.)
 - **mkfs/fsck/diskutil**: no `FS_FORMAT`/`FS_VERIFY`/`FS_REPAIR`/`FS_TRIM`
   syscall (650–655 are `SEEK_DATA`/`SEEK_HOLE` + unassigned). **Format-path
   aliasing neutered 2026-06-14** — `mkfs` and `diskutil` defined

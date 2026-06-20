@@ -8034,7 +8034,17 @@ Remaining net improvements (diminishing returns):
 
 ## Judgment Calls
 
-- (2026-06-13) DRM dumb-buffer mmap not ref-tracked across `fork()`.
+- (2026-06-20) Removed the redundant `userspace/mount-cli` tool. It was a
+  multi-personality demo (mount/umount/findmnt) that printed *fabricated*
+  mount listings (hardcoded /dev/sda2, /dev/sda3, etc.) and fake-succeeded on
+  mount/umount without issuing any syscall — i.e. it produced false output,
+  which violates the no-fabrication rule. Now that `userspace/mount` issues the
+  real SYS_FS_MOUNT/SYS_FS_UMOUNT syscalls and `userspace/findmnt` reads the
+  real `/proc/mounts`, mount-cli was pure redundancy. Nothing referenced it
+  (no workspace Cargo.toml listing — it was only pulled in by the `userspace/*`
+  glob — and no script/manifest staged its binary). Removal is fully
+  reversible via git. If a busybox-style multicall `mount` applet is wanted
+  later, it should delegate to the real syscalls rather than fabricate.
   Commit 7 of the Linux DRM/KMS shim (MAP_DUMB + mmap-on-/dev/dri-fd)
   maps a dumb buffer's GEM frames into the calling process by
   `frame::ref_inc`-ing each frame before `map_frame`, so process-exit

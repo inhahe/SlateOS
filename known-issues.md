@@ -1697,7 +1697,7 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
-### TD30. Console TTY line discipline: `^C`/`^\`/`^Z` signal the fg pgrp (canonical + raw), `VMIN`/`VTIME` honoured; only orphan-pgrp SIGHUP remains — MOSTLY RESOLVED 2026-06-20
+### TD30. Console TTY line discipline: `^C`/`^\`/`^Z` signal the fg pgrp (canonical + raw), `VMIN`/`VTIME` honoured, orphan-pgrp `SIGHUP`/`SIGCONT` — RESOLVED 2026-06-20
 
 **Where:** `kernel/src/tty.rs` — `feed()` (canonical line editor) and
 `raw_read()` (non-canonical reader); driven by `dispatch_console_read` /
@@ -1741,16 +1741,29 @@ bytes collected so far in the call (input flush; `NOFLSH` not yet
 honoured).  Apps that clear `ISIG` (most full-screen programs) still get
 the characters as literal data.
 
-**Still missing:**
+**RESOLVED — orphaned-process-group `SIGHUP`/`SIGCONT`:** POSIX requires
+that when a process exit orphans a process group that still contains a
+*stopped* member, that group be sent `SIGHUP` then `SIGCONT` so wedged
+jobs are not stuck forever with no shell able to continue them. Now
+implemented in the process-exit path rather than tied to a
+controlling-terminal model: `pcb::guarded_child_pgrps(pid)` captures the
+distinct groups `pid` *guards* (children in a different group but the same
+session) **before** `remove_thread` reparents them to init;
+`thread::on_thread_exit` re-checks each captured group after the process
+zombifies via `pcb::pgrp_orphaned_with_stopped(pgid)` — true only when no
+live member has a guardian (a live parent in a different group of the same
+session; zombies count as neither member nor guardian) *and* some member
+is stopped — and calls `handlers::kill_orphaned_pgrp(pgid)`, which sends
+`SIGHUP` then `SIGCONT` to every member via the authority-free
+`handlers::deliver_kernel_signal` (classify → default action). Covered by
+the `pcb::test_orphaned_pgrp` boot self-test (guarded-vs-orphaned and the
+no-stopped-member negative case).
 
-1. **Orphaned-process-group `SIGHUP`/`SIGCONT`** on session-leader exit is
-   not implemented. On session-leader exit, each newly-orphaned process
-   group that contains a stopped member should receive `SIGHUP` then
-   `SIGCONT`.
-
-**Severity:** low — only the orphan-pgrp `SIGHUP` edge case remains;
-interactive `^C`/`^\`/`^Z` (canonical and raw) and `VMIN`/`VTIME` raw
-reads now work (once a shell installs a foreground pgrp via `tcsetpgrp`).
+**Severity:** none remaining — interactive `^C`/`^\`/`^Z` (canonical and
+raw), `VMIN`/`VTIME` raw reads, and orphaned-process-group hangup all work
+(once a shell installs a foreground pgrp via `tcsetpgrp`). Remaining minor
+nicety: `NOFLSH` is not yet honoured (input is always flushed on a signal
+char); tracked separately if it ever matters.
 
 ### TD29. Linux signal `siginfo` sender-class (`si_code`/`si_pid`/`si_uid`) — RESOLVED 2026-06-15
 

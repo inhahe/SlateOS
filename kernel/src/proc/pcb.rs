@@ -2610,6 +2610,78 @@ pub fn pids_in_group(pgid: ProcessId) -> Vec<ProcessId> {
         .collect()
 }
 
+/// Collect the distinct process groups of `pid`'s children that `pid`
+/// currently *guards* — children in a different process group but the same
+/// session as `pid`.
+///
+/// These are exactly the groups whose orphan status can change when `pid`
+/// exits: while `pid` is alive it is a parent outside the group but inside the
+/// session, so it keeps each such group from being orphaned.  POSIX requires
+/// that, when a process exit orphans a process group containing stopped
+/// members, that group receive `SIGHUP` then `SIGCONT`; the caller captures
+/// this candidate set *before* the exit reparents the children, then re-checks
+/// each group with [`pgrp_orphaned_with_stopped`] afterwards.
+#[must_use]
+pub fn guarded_child_pgrps(pid: ProcessId) -> Vec<ProcessId> {
+    let table = PROCESS_TABLE.lock();
+    let Some(me) = table.get(&pid) else {
+        return Vec::new();
+    };
+    let (my_pgid, my_sid) = (me.pgid, me.sid);
+    let mut out: Vec<ProcessId> = Vec::new();
+    for c in table.values() {
+        if c.parent == pid
+            && c.pid != pid
+            && c.sid == my_sid
+            && c.pgid != my_pgid
+            && !out.contains(&c.pgid)
+        {
+            out.push(c.pgid);
+        }
+    }
+    out
+}
+
+/// Whether process group `pgid` is **orphaned** (POSIX) *and* contains at
+/// least one stopped member.
+///
+/// A process group is orphaned when no live member has a parent that is both
+/// in a *different* group and in the *same session* (a "guardian"); zombie
+/// processes count neither as members nor as guardians.  An orphaned group
+/// with stopped jobs must be sent `SIGHUP`+`SIGCONT` so those jobs are not
+/// wedged forever with no shell to continue them (`termios(3)`, `setpgid(2)`,
+/// POSIX "Orphaned Process Group").
+///
+/// Returns `false` for an empty group, a group with a live guardian, or a
+/// group with no stopped member.
+#[must_use]
+pub fn pgrp_orphaned_with_stopped(pgid: ProcessId) -> bool {
+    let table = PROCESS_TABLE.lock();
+    let mut has_member = false;
+    let mut has_stopped = false;
+    for m in table.values() {
+        if m.pgid != pgid || m.state == ProcessState::Zombie {
+            continue;
+        }
+        has_member = true;
+        if m.stopped {
+            has_stopped = true;
+        }
+        // A guardian is a live parent outside this group but in the same
+        // session.  Any guardian means the group is not orphaned.
+        if let Some(p) = table.get(&m.parent) {
+            if p.pid != m.pid
+                && p.pgid != pgid
+                && p.sid == m.sid
+                && p.state != ProcessState::Zombie
+            {
+                return false;
+            }
+        }
+    }
+    has_member && has_stopped
+}
+
 /// Read the per-mm `membarrier(2)` registration READY bitmask for `pid`.
 ///
 /// Returns `None` if `pid` is unknown (e.g. a kernel-context caller with no
@@ -6239,6 +6311,7 @@ pub fn self_test() -> KernelResult<()> {
     test_io_accounting()?;
     test_job_control_state()?;
     test_process_groups()?;
+    test_orphaned_pgrp()?;
     test_mmap_commit_policy()?;
     test_reserve_unmapped_area()?;
     test_reset_linux_state_for_exec()?;
@@ -6805,6 +6878,70 @@ fn test_process_groups() -> KernelResult<()> {
     destroy(parent);
 
     serial_println!("[proc]   process-group/session model: OK");
+    Ok(())
+}
+
+/// Test: POSIX orphaned-process-group detection
+/// ([`guarded_child_pgrps`] + [`pgrp_orphaned_with_stopped`]).
+///
+/// Models a shell that has put a job into its own process group within the
+/// shell's session, then verifies:
+///   - while the shell is alive it *guards* the job's group (the group is not
+///     orphaned, even once the job stops), and `guarded_child_pgrps` reports
+///     exactly that group;
+///   - once the shell is gone (guardian removed), a stopped job's group is
+///     detected as orphaned — the condition that triggers `SIGHUP`+`SIGCONT`;
+///   - an orphaned group with no stopped member is *not* flagged (no hangup).
+fn test_orphaned_pgrp() -> KernelResult<()> {
+    fn fail(msg: &str, pids: &[ProcessId]) -> KernelResult<()> {
+        serial_println!("[proc]   FAIL: orphaned-pgrp: {}", msg);
+        for &p in pids {
+            destroy(p);
+        }
+        Err(KernelError::InternalError)
+    }
+
+    // shell: leads its own session and group.
+    let shell = create("orphan-shell", 0);
+    set_running(shell)?;
+    // job: forked child (inherits shell's pgid/sid), then moved into its own
+    // group — still inside the shell's session.
+    let job = fork_create(shell, 0, Vec::new(), Vec::new())?;
+    set_running(job)?;
+    set_pgid(shell, job, job)?;
+
+    // The shell is a guardian of the job's group (parent in a different group
+    // but the same session), so the group is not orphaned and the shell
+    // reports it as guarded.
+    if pgrp_orphaned_with_stopped(job) {
+        return fail("guarded group reported orphaned", &[shell, job]);
+    }
+    if guarded_child_pgrps(shell) != alloc::vec![job] {
+        return fail("guarded_child_pgrps did not list the job group", &[shell, job]);
+    }
+
+    // Stop the job. A *guarded* stopped group must still not be orphaned.
+    record_jc_stopped(job, 20)?;
+    if pgrp_orphaned_with_stopped(job) {
+        return fail("guarded stopped group reported orphaned", &[shell, job]);
+    }
+
+    // The guardian exits: with the shell removed, the job's parent lookup
+    // fails — no live guardian remains — so the stopped group is orphaned.
+    destroy(shell);
+    if !pgrp_orphaned_with_stopped(job) {
+        return fail("orphaned stopped group not detected", &[job]);
+    }
+
+    // Continue the job: an orphaned group with no stopped member is left
+    // alone (no SIGHUP/SIGCONT is owed).
+    record_jc_continued(job)?;
+    if pgrp_orphaned_with_stopped(job) {
+        return fail("orphaned group without a stopped member reported", &[job]);
+    }
+
+    destroy(job);
+    serial_println!("[proc]   orphaned-process-group detection: OK");
     Ok(())
 }
 

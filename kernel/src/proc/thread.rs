@@ -406,6 +406,14 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
         nivcsw: exit_niv,
     };
 
+    // POSIX orphaned-process-group hangup: capture the process groups this
+    // process currently *guards* (children in a different group of the same
+    // session) BEFORE `remove_thread` reparents them to init. If this exit
+    // zombifies the process, each captured group may have just become orphaned;
+    // we re-check and SIGHUP+SIGCONT any with stopped jobs after the zombie
+    // bookkeeping completes (outside the PROCESS_TABLE lock).
+    let guarded_pgrps = pcb::guarded_child_pgrps(pid);
+
     // Remove from the process's thread list.
     match pcb::remove_thread(pid, task_id, acct) {
         Ok((is_zombie, wake_task, any_waiter)) => {
@@ -477,6 +485,14 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
                             );
                         }
                     }
+                }
+
+                // Now that this process is a zombie and its children have
+                // been reparented to init, any group it used to guard may be
+                // orphaned. Send SIGHUP+SIGCONT to each that is now orphaned
+                // and holds stopped jobs (POSIX "Orphaned Process Group").
+                for pgrp in &guarded_pgrps {
+                    crate::syscall::handlers::kill_orphaned_pgrp(*pgrp);
                 }
             }
         }

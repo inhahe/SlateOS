@@ -9500,10 +9500,28 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          is set (all four VMIN/VTIME arms) and returns ConsoleRead::Signal,
 ##          discarding bytes collected so far (input flush; NOFLSH TODO).  Apps
 ##          that clear ISIG still get the chars as data.  Boot PASSED.
-##      STILL DEFERRED (TD30 remainder):
-##          (1) Orphaned-process-group SIGHUP/SIGCONT on session leader exit:
-##              on session-leader exit, each newly-orphaned pgrp containing a
-##              stopped member should get SIGHUP then SIGCONT.
+##      Increment G (orphaned-process-group SIGHUP/SIGCONT — TD30 final gap):
+##          DONE.  On any process exit that zombifies the process, POSIX requires
+##          newly-orphaned process groups containing a STOPPED member to receive
+##          SIGHUP then SIGCONT.  Implemented WITHOUT a controlling-terminal model:
+##          - pcb::guarded_child_pgrps(pid): distinct pgids of pid's children that
+##            are in a different group but the same session (the groups pid guards).
+##          - pcb::pgrp_orphaned_with_stopped(pgid): true iff no live member has a
+##            guardian (live parent in a different group, same session; zombies are
+##            neither member nor guardian) AND some member is stopped.
+##          - handlers::deliver_kernel_signal(pid, sig): authority-free post +
+##            default action (Terminate/Stop/Continue), skips zombie/unknown.
+##          - handlers::kill_orphaned_pgrp(pgid): if orphaned-with-stopped, SIGHUP
+##            then SIGCONT to every pids_in_group member.
+##          - thread::on_thread_exit captures guarded_child_pgrps(pid) BEFORE
+##            remove_thread reparents the children, then after the zombie branch
+##            calls kill_orphaned_pgrp for each captured group.
+##          - signal::SIGHUP (=1) const added.
+##          Boot self-test pcb::test_orphaned_pgrp (guarded-not-orphaned,
+##          orphaned-with-stopped, and orphaned-without-stopped negative case)
+##          PASSED; full boot PASSED (321s).  TD30 now fully RESOLVED.
+##          Remaining nicety only: NOFLSH not honoured (input always flushed on a
+##          signal char).
 ##
 ## TESTING:
 ##   - linux::self_test() at boot exercises: errno mapping (16 KernelError

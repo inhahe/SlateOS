@@ -62,6 +62,11 @@ use spin::Mutex;
 /// We support a 64-bit pending set, so signals 1..=64.
 pub const NSIG: u32 = 64;
 
+/// `SIGHUP` — hangup. Sent to an orphaned process group's stopped members
+/// (with `SIGCONT`) and, classically, to a session on controlling-terminal
+/// loss. Default action terminates. Standard Linux number.
+pub const SIGHUP: u32 = 1;
+
 /// `SIGKILL` — always fatal, never catchable. Standard Linux number.
 pub const SIGKILL: u32 = 9;
 

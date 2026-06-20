@@ -4186,6 +4186,90 @@ fn continue_process(pid: crate::proc::pcb::ProcessId) {
     serial_println!("[signal] Process {} continued", pid);
 }
 
+/// Post a kernel-originated signal to `pid` and carry out its default action.
+///
+/// This is the authority-free sibling of [`sys_signal_send_with_info`]: there
+/// is no caller, so no parent/capability check is performed. It is used for
+/// signals the kernel itself raises against a process it is not "calling" from
+/// — currently the orphaned-process-group `SIGHUP`/`SIGCONT` on session-leader
+/// exit. Zombie/unknown targets are skipped silently (the process raced us to
+/// exit, which is exactly the orphan case we are handling).
+///
+/// The signal is classified with [`signal::classify_post_info`] and acted on
+/// identically to the user-`kill` path: a userspace handler simply leaves the
+/// signal pending (`Deliver`); the default action terminates, stops, or
+/// continues the process. There is never a self-stop here (the caller is the
+/// exiting thread, not a member of the target group), so `stop_process_for_signal`
+/// is always called with `None`.
+pub fn deliver_kernel_signal(pid: crate::proc::pcb::ProcessId, sig: u32) {
+    use crate::proc::{pcb, signal, thread};
+
+    if !signal::is_valid_signal(sig) {
+        return;
+    }
+    // Skip dead/unknown targets: a zombie cannot be signalled and an absent
+    // pid has nothing to receive.
+    match pcb::state(pid) {
+        Some(pcb::ProcessState::Zombie) | None => return,
+        _ => {}
+    }
+
+    match signal::classify_post_info(pid, sig, signal::SigInfo::kernel()) {
+        signal::PostDecision::Deliver | signal::PostDecision::Drop => {}
+        signal::PostDecision::Terminate(code) => {
+            if pcb::set_exit_code(pid, code).is_ok() {
+                thread::kill_process_threads(pid);
+                serial_println!(
+                    "[signal] Process {} terminated by kernel signal {}",
+                    pid, sig
+                );
+            }
+        }
+        signal::PostDecision::Stop(s) => {
+            stop_process_for_signal(pid, s, None);
+        }
+        signal::PostDecision::Continue => {
+            continue_process(pid);
+        }
+    }
+}
+
+/// POSIX orphaned-process-group hangup: if `pgid` is now an orphaned process
+/// group (no live member has a parent in a different group of the same
+/// session) that still contains a **stopped** member, send `SIGHUP` followed
+/// by `SIGCONT` to every member.
+///
+/// This is the action required by POSIX "Orphaned Process Group" semantics
+/// (`setpgid(2)`, `termios(3)`): when a controlling process / guardian exits
+/// and leaves a process group with stopped jobs and no shell able to continue
+/// them, the kernel hangs the group up and then continues it so the jobs are
+/// not wedged forever. Groups that are not orphaned, are empty, or have no
+/// stopped member are left untouched.
+///
+/// Call after the orphaning exit has completed (i.e. once the exiting process
+/// is a zombie and its children reparented) so the orphan re-check sees the
+/// post-exit topology.
+pub fn kill_orphaned_pgrp(pgid: crate::proc::pcb::ProcessId) {
+    use crate::proc::{pcb, signal};
+
+    if !pcb::pgrp_orphaned_with_stopped(pgid) {
+        return;
+    }
+    serial_println!(
+        "[signal] Orphaned process group {} with stopped jobs: SIGHUP+SIGCONT",
+        pgid
+    );
+    // SIGHUP first (default-terminates members without a handler), then
+    // SIGCONT to wake any that stopped and survived (a member with a SIGHUP
+    // handler stays alive and must still be continued).
+    for member in pcb::pids_in_group(pgid) {
+        deliver_kernel_signal(member, signal::SIGHUP);
+    }
+    for member in pcb::pids_in_group(pgid) {
+        deliver_kernel_signal(member, signal::SIGCONT);
+    }
+}
+
 /// Deliver a pending signal to the current process on the way back to
 /// userspace, if one is deliverable.
 ///

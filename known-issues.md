@@ -1697,7 +1697,7 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
-### TD30. Console TTY line discipline: `^C`/`^\`/`^Z` signal the fg pgrp, `VMIN`/`VTIME` honoured; only orphan-pgrp SIGHUP + raw-mode ISIG remain — MOSTLY RESOLVED 2026-06-20
+### TD30. Console TTY line discipline: `^C`/`^\`/`^Z` signal the fg pgrp (canonical + raw), `VMIN`/`VTIME` honoured; only orphan-pgrp SIGHUP remains — MOSTLY RESOLVED 2026-06-20
 
 **Where:** `kernel/src/tty.rs` — `feed()` (canonical line editor) and
 `raw_read()` (non-canonical reader); driven by `dispatch_console_read` /
@@ -1734,25 +1734,23 @@ timed cases: `VMIN=0,VTIME>0` (bounded read timeout on the first byte) and
 blocking). `VMIN=0,VTIME=0` (poll) and `VMIN>0,VTIME=0` (count) are
 unchanged. VTIME is interpreted in deciseconds.
 
+**RESOLVED — raw-mode `ISIG`:** `raw_read()` now classifies each byte
+against `VINTR`/`VQUIT`/`VSUSP` when `ISIG` is set (in all four
+`(VMIN,VTIME)` arms) and returns `ConsoleRead::Signal`, discarding any
+bytes collected so far in the call (input flush; `NOFLSH` not yet
+honoured).  Apps that clear `ISIG` (most full-screen programs) still get
+the characters as literal data.
+
 **Still missing:**
 
 1. **Orphaned-process-group `SIGHUP`/`SIGCONT`** on session-leader exit is
-   not implemented.
+   not implemented. On session-leader exit, each newly-orphaned process
+   group that contains a stopped member should receive `SIGHUP` then
+   `SIGCONT`.
 
-2. **Raw-mode `ISIG`.** `raw_read()` does not call `feed()`, so `^C` in a
-   non-canonical terminal generates no signal even when `ISIG` is still
-   set. (Correct when the app cleared `ISIG`, as full-screen apps do, but
-   a raw read with `ISIG` set should still signal.)
-
-**Proper fix for the remainder:** (1) on session-leader exit, send
-`SIGHUP`+`SIGCONT` to each newly-orphaned process group; (2) consult
-`ISIG` in `raw_read` so a raw read with `ISIG` set still generates
-terminal signals. Both are follow-ups as job control matures.
-
-**Severity:** low — the orphan-pgrp SIGHUP edge case and raw-mode-with-ISIG
-signalling are the only remaining gaps; interactive `^C`/`^\`/`^Z` and
-`VMIN`/`VTIME` raw reads now work (the latter once a shell installs a
-foreground pgrp via `tcsetpgrp`).
+**Severity:** low — only the orphan-pgrp `SIGHUP` edge case remains;
+interactive `^C`/`^\`/`^Z` (canonical and raw) and `VMIN`/`VTIME` raw
+reads now work (once a shell installs a foreground pgrp via `tcsetpgrp`).
 
 ### TD29. Linux signal `siginfo` sender-class (`si_code`/`si_pid`/`si_uid`) — RESOLVED 2026-06-15
 

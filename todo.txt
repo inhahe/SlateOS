@@ -9495,11 +9495,15 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          hrtimer::now_ns()): VMIN=0/VTIME>0 = bounded read timeout,
 ##          VMIN>0/VTIME>0 = inter-byte timer (first byte blocking), the two
 ##          VTIME=0 cases unchanged.  Build + clippy clean; boot PASSED.
+##          UPDATE 2026-06-20 (Increment F): raw-mode ISIG now RESOLVED.
+##          raw_read() classifies each byte against VINTR/VQUIT/VSUSP when ISIG
+##          is set (all four VMIN/VTIME arms) and returns ConsoleRead::Signal,
+##          discarding bytes collected so far (input flush; NOFLSH TODO).  Apps
+##          that clear ISIG still get the chars as data.  Boot PASSED.
 ##      STILL DEFERRED (TD30 remainder):
-##          (1) Orphaned-process-group SIGHUP/SIGCONT on session leader exit.
-##          (2) Raw-mode ISIG: raw_read() does not call feed() so ^C in a raw
-##              (non-canonical) terminal generates no signal even with ISIG set;
-##              revisit when an app needs it.
+##          (1) Orphaned-process-group SIGHUP/SIGCONT on session leader exit:
+##              on session-leader exit, each newly-orphaned pgrp containing a
+##              stopped member should get SIGHUP then SIGCONT.
 ##
 ## TESTING:
 ##   - linux::self_test() at boot exercises: errno mapping (16 KernelError

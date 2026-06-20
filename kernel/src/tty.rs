@@ -593,7 +593,9 @@ pub enum ConsoleRead {
 /// any remainder for the next call).  A `^D` on an empty line returns `0`
 /// (end of file).  In non-canonical (raw) mode it honours both `VMIN` and
 /// `VTIME` per POSIX (a pure poll, a read timeout, a byte count, or an
-/// inter-byte timer depending on the `(VMIN, VTIME)` pair) — see [`raw_read`].
+/// inter-byte timer depending on the `(VMIN, VTIME)` pair) and still applies
+/// `ISIG` signal characters — see [`raw_read`].  A `^C`/`^\`/`^Z` in either
+/// mode yields [`ConsoleRead::Signal`].
 ///
 /// Echo is performed by the keyboard driver, which this function first syncs
 /// to the termios `ECHO` bit so that raw/no-echo programs (password prompts,
@@ -622,7 +624,7 @@ pub fn console_read(out: &mut [u8]) -> ConsoleRead {
     if t.is_canonical() {
         canonical_read(&t, out)
     } else {
-        ConsoleRead::Data(raw_read(&t, out))
+        raw_read(&t, out)
     }
 }
 
@@ -673,16 +675,42 @@ fn canonical_read(t: &Termios, out: &mut [u8]) -> ConsoleRead {
 ///   byte, then restart a `TIME`-decisecond timer after each byte; return when
 ///   `MIN` bytes are collected, the buffer fills, or the timer expires (which
 ///   can only happen once at least one byte has been read).
-fn raw_read(t: &Termios, out: &mut [u8]) -> usize {
+///
+/// `ISIG` still applies in non-canonical mode: a `VINTR`/`VQUIT`/`VSUSP`
+/// character generates the corresponding signal and aborts the read (returning
+/// [`ConsoleRead::Signal`]), discarding any bytes collected so far in this call
+/// — matching Linux's input flush on a signal char (`NOFLSH` not yet honoured).
+/// Programs that want the signal characters delivered as literal data (most
+/// full-screen apps) clear `ISIG`, in which case no signal is generated.
+fn raw_read(t: &Termios, out: &mut [u8]) -> ConsoleRead {
     let cap = out.len();
     if cap == 0 {
-        return 0;
+        return ConsoleRead::Data(0);
     }
     let vmin = t.vmin() as usize;
     // VTIME is in deciseconds (tenths of a second).
     const DECISECOND_NS: u64 = 100_000_000;
     let vtime_ns = u64::from(t.vtime()).saturating_mul(DECISECOND_NS);
     let mut n = 0usize;
+
+    // Signal-character classification (only when ISIG is set).  Returns the
+    // signal number for VINTR/VQUIT/VSUSP, else None.
+    let isig = t.c_lflag & lflag::ISIG != 0;
+    let g = |idx: usize, dflt: u8| t.c_cc.get(idx).copied().unwrap_or(dflt);
+    let vintr = g(cc::VINTR, 3);
+    let vquit = g(cc::VQUIT, 28);
+    let vsusp = g(cc::VSUSP, 26);
+    let sig_for = |ch: u8| -> Option<u8> {
+        if !isig {
+            return None;
+        }
+        match ch {
+            c if c == vintr => Some(2),  // SIGINT
+            c if c == vquit => Some(3),  // SIGQUIT
+            c if c == vsusp => Some(20), // SIGTSTP
+            _ => None,
+        }
+    };
 
     // Store one byte at the current cursor, advancing it.
     let mut store = |slot_n: usize, c: u8| {
@@ -697,6 +725,9 @@ fn raw_read(t: &Termios, out: &mut [u8]) -> usize {
             while n < cap {
                 match crate::keyboard::try_read_char() {
                     Some(c) => {
+                        if let Some(s) = sig_for(c) {
+                            return ConsoleRead::Signal(s);
+                        }
                         store(n, c);
                         n = n.saturating_add(1);
                     }
@@ -708,12 +739,18 @@ fn raw_read(t: &Termios, out: &mut [u8]) -> usize {
         (true, false) => {
             let deadline = crate::hrtimer::now_ns().saturating_add(vtime_ns);
             if let Some(c) = crate::keyboard::read_char_timeout(deadline) {
+                if let Some(s) = sig_for(c) {
+                    return ConsoleRead::Signal(s);
+                }
                 store(n, c);
                 n = n.saturating_add(1);
                 // Drain any bytes already buffered alongside the first.
                 while n < cap {
                     match crate::keyboard::try_read_char() {
                         Some(c) => {
+                            if let Some(s) = sig_for(c) {
+                                return ConsoleRead::Signal(s);
+                            }
                             store(n, c);
                             n = n.saturating_add(1);
                         }
@@ -733,6 +770,9 @@ fn raw_read(t: &Termios, out: &mut [u8]) -> usize {
                 } else {
                     crate::keyboard::read_char()
                 };
+                if let Some(s) = sig_for(next) {
+                    return ConsoleRead::Signal(s);
+                }
                 store(n, next);
                 n = n.saturating_add(1);
             }
@@ -740,12 +780,18 @@ fn raw_read(t: &Termios, out: &mut [u8]) -> usize {
         // MIN>0, TIME>0: block for the first byte, then inter-byte timer.
         (false, false) => {
             let first = crate::keyboard::read_char();
+            if let Some(s) = sig_for(first) {
+                return ConsoleRead::Signal(s);
+            }
             store(n, first);
             n = n.saturating_add(1);
             while n < cap && n < vmin {
                 let deadline = crate::hrtimer::now_ns().saturating_add(vtime_ns);
                 match crate::keyboard::read_char_timeout(deadline) {
                     Some(c) => {
+                        if let Some(s) = sig_for(c) {
+                            return ConsoleRead::Signal(s);
+                        }
                         store(n, c);
                         n = n.saturating_add(1);
                     }
@@ -754,7 +800,7 @@ fn raw_read(t: &Termios, out: &mut [u8]) -> usize {
             }
         }
     }
-    n
+    ConsoleRead::Data(n)
 }
 
 // ---------------------------------------------------------------------------

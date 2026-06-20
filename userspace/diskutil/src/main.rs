@@ -7,10 +7,10 @@
 //! Reads from `/sys/block/`, `/proc/partitions`, and `/proc/mounts`.
 //!
 //! NOTE: `format` is wired to `SYS_FS_FORMAT` (654), `verify`/`repair` to
-//! `SYS_FS_CHECK` (655) (both for the FAT family), and `usage` to the real
-//! `SYS_FS_STATVFS` (608). Only `trim` still lacks a kernel ABI and honestly
-//! reports `ENOSYS` until a discard syscall lands. All read-only
-//! listing/info logic works via sysfs/procfs.
+//! `SYS_FS_CHECK` (655) (both for the FAT family), `usage` to the real
+//! `SYS_FS_STATVFS` (608), and `trim` to `SYS_FS_TRIM` (656, fstrim — discards
+//! the free space of the mounted filesystem). All read-only listing/info logic
+//! works via sysfs/procfs.
 //!
 //! # Usage
 //!
@@ -68,13 +68,18 @@ const SYS_FS_STATVFS: u64 = 608;
 /// Size of the `SYS_FS_STATVFS` output buffer, in bytes.
 const FS_STATVFS_SIZE: usize = 64;
 
-/// Result code for fs-admin operations that still have no syscall.
+/// `SYS_FS_TRIM` — discard the free space of a mounted filesystem (fstrim).
 ///
-/// `format` is wired to `SYS_FS_FORMAT` (654), `verify`/`repair` to
-/// `SYS_FS_CHECK` (655), and `usage` to `SYS_FS_STATVFS` (608); only `trim`
-/// still lacks a kernel ABI (needs a discard syscall) and resolves to this
-/// honest `ENOSYS` until it lands.
-const ENOSYS: i64 = -38;
+/// ABI: arg0/arg1 = device-name ptr+len (registry name, not a `/dev/` path).
+/// Returns the number of bytes discarded (>= 0) or a negative `KernelError`
+/// (e.g. the device is not mounted). Non-destructive: only free blocks are
+/// trimmed. Root-only.
+const SYS_FS_TRIM: u64 = 656;
+
+// All fs-admin subcommands are now wired to real syscalls: `format` to
+// `SYS_FS_FORMAT` (654), `verify`/`repair` to `SYS_FS_CHECK` (655), `usage` to
+// `SYS_FS_STATVFS` (608), and `trim` to `SYS_FS_TRIM` (656). The host-build
+// syscall fallback returns -38 (ENOSYS) directly.
 
 /// Raw 6-argument native syscall. Returns the kernel's `i64` result (negative
 /// values are `-KernelError` codes).
@@ -1488,10 +1493,30 @@ fn cmd_trim(device_name: &str) {
     println!("Issuing TRIM to /dev/{}...", dev.name);
     println!("  Size: {}", format_size(dev.size_bytes()));
 
-    // No fs-trim syscall exists yet (see ENOSYS note); fail honestly rather
-    // than issue a real but unrelated syscall and claim the TRIM happened.
-    eprintln!("TRIM failed: {}", syscall_error_msg(ENOSYS));
-    process::exit(1);
+    // fstrim semantics: discard the *free* space of the filesystem mounted on
+    // this device (non-destructive). The kernel resolves the device to its
+    // mount and walks the free-space metadata, so the device must be mounted.
+    let dev_bytes = dev.name.as_bytes();
+    let ret = syscall6(
+        SYS_FS_TRIM,
+        dev_bytes.as_ptr() as u64,
+        dev_bytes.len() as u64,
+        0,
+        0,
+        0,
+        0,
+    );
+
+    if ret < 0 {
+        eprintln!("TRIM failed: {}", syscall_error_msg(ret));
+        eprintln!("  (fstrim needs the device to be mounted; only free space is discarded.)");
+        process::exit(1);
+    }
+
+    // Non-negative return is the number of bytes discarded.
+    let discarded = ret as u64;
+    println!("  Discarded: {}", format_size(discarded));
+    println!("TRIM complete.");
 }
 
 // ============================================================================

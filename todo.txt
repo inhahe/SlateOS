@@ -9741,6 +9741,14 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##              Deferred because it can't be boot-tested without a QEMU virtio-blk
 ##              discard=on config and a wrong discard range could corrupt a real
 ##              disk — wanted the testable RAM path landed first.
+##              NOTE (scoping, found 2026-06-20): our virtio-blk driver is
+##              LEGACY (PCI device id 0x1001, I/O-port transport,
+##              set_guest_features(0)).  VIRTIO_BLK_F_DISCARD (feature bit 13)
+##              is only offered by MODERN virtio-blk (device id 0x1042, MMIO/
+##              capability transport).  So virtio discard is GATED on modern
+##              virtio-blk support — a separate, larger driver initiative, not a
+##              quick add.  Until then fstrim on virtio devices is a correct
+##              no-op (0 bytes).
 ##            - ext4 still uses the default trim() no-op (no free-block-bitmap
 ##              enumeration).  Proper fix: walk the ext4 block bitmaps (see
 ##              fs/ext4/balloc.rs) for free runs and issue blkdev::discard,

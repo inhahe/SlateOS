@@ -58,6 +58,12 @@ use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 use guitk::style::CornerRadii;
 
+pub mod scene;
+pub use scene::{
+    SceneFrame, SceneSession, SceneWindow, WindowSnapshot, apply_scene_frame, decode_scene_frame,
+    encode_scene_frame,
+};
+
 // ============================================================================
 // Protocol constants
 // ============================================================================
@@ -179,6 +185,8 @@ pub enum DecodeError {
     BadFontWeight(u8),
     /// A string field was not valid UTF-8.
     BadUtf8,
+    /// A scene frame's window or removed-id count exceeds [`scene::MAX_WINDOWS_PER_FRAME`].
+    TooManyWindows(u32),
 }
 
 impl core::fmt::Display for DecodeError {
@@ -197,6 +205,13 @@ impl core::fmt::Display for DecodeError {
             Self::BadTag(b) => write!(f, "unknown command tag {b:#04x}"),
             Self::BadFontWeight(b) => write!(f, "unknown font-weight tag {b:#04x}"),
             Self::BadUtf8 => write!(f, "string field was not valid UTF-8"),
+            Self::TooManyWindows(n) => {
+                write!(
+                    f,
+                    "scene window/removed count {n} exceeds limit {}",
+                    scene::MAX_WINDOWS_PER_FRAME
+                )
+            }
         }
     }
 }

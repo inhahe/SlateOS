@@ -49,11 +49,10 @@ use guitk::style::CornerRadii;
 
 mod buffer;
 pub use buffer::{BufferFormat, SharedBuffer};
-mod stream;
-pub use stream::{
-    StreamFrame, StreamSession, StreamWindow, WindowSnapshot, apply_frame, decode_commands,
-    decode_frame, encode_commands, encode_frame, tree_from_commands,
-};
+// Remote draw-command streaming uses the shared `guiremote` crate's scene
+// protocol (multi-window deltas built on its single-window RenderCommand wire
+// codec), rather than a compositor-local duplicate.
+use guiremote::scene::{SceneFrame, SceneSession, WindowSnapshot};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -1880,7 +1879,7 @@ pub struct Compositor {
     /// Active remote draw-command stream sessions, keyed by stream id. Each
     /// tracks its own per-window delta state so multiple remote viewers can be
     /// served independently.
-    stream_sessions: BTreeMap<u64, StreamSession>,
+    stream_sessions: BTreeMap<u64, SceneSession>,
     /// Monotonic allocator for stream session ids.
     next_stream_id: u64,
 }
@@ -3385,7 +3384,7 @@ impl Compositor {
     /// vector commands to forward, so such windows stream as empty command
     /// lists — pixel forwarding for those is the video-encoded fallback's job,
     /// not this path's.
-    pub fn capture_stream_frame(&self, session: &mut StreamSession) -> StreamFrame {
+    pub fn capture_stream_frame(&self, session: &mut SceneSession) -> SceneFrame {
         let mut snaps: Vec<WindowSnapshot<'_>> = Vec::with_capacity(self.z_stack.len());
         for &id in &self.z_stack {
             if let Some(win) = self.window_ref(id) {
@@ -3399,7 +3398,7 @@ impl Compositor {
                     width: win.width,
                     height: win.height,
                     opacity: win.opacity,
-                    commands: &win.render_tree.commands,
+                    commands: &win.render_tree,
                 });
             }
         }
@@ -3412,7 +3411,7 @@ impl Compositor {
     pub fn start_stream(&mut self) -> u64 {
         let id = self.next_stream_id;
         self.next_stream_id = self.next_stream_id.wrapping_add(1);
-        self.stream_sessions.insert(id, StreamSession::new());
+        self.stream_sessions.insert(id, SceneSession::new());
         id
     }
 
@@ -3427,7 +3426,7 @@ impl Compositor {
             .remove(&stream_id)
             .ok_or(CompositorError::StreamNotFound(stream_id))?;
         let frame = self.capture_stream_frame(&mut session);
-        let bytes = stream::encode_frame(&frame);
+        let bytes = guiremote::scene::encode_scene_frame(&frame);
         self.stream_sessions.insert(stream_id, session);
         Ok(bytes)
     }
@@ -4234,7 +4233,8 @@ mod tests {
             CompositorResponse::StreamFrame { data } => data,
             other => panic!("expected StreamFrame, got {other:?}"),
         };
-        let frame = decode_frame(&data).expect("decode captured frame");
+        let frame =
+            guiremote::scene::decode_scene_frame(&data).expect("decode captured frame");
         assert_eq!(frame.sequence, 0);
         assert_eq!(frame.display_width, 400);
         assert_eq!(frame.display_height, 300);
@@ -4273,23 +4273,26 @@ mod tests {
         let stream_id = comp.start_stream();
 
         // First capture: the window is new to the session → commands present.
-        let f0 = decode_frame(&comp.capture_stream(stream_id).unwrap()).unwrap();
+        let f0 =
+            guiremote::scene::decode_scene_frame(&comp.capture_stream(stream_id).unwrap()).unwrap();
         assert_eq!(f0.windows.len(), 1);
         assert_eq!(f0.windows[0].id, id.raw());
         let cmds = f0.windows[0]
             .commands
             .as_ref()
             .expect("new window forwards commands");
-        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds.commands.len(), 1);
 
         // Second capture with unchanged content: geometry-only delta.
-        let f1 = decode_frame(&comp.capture_stream(stream_id).unwrap()).unwrap();
+        let f1 =
+            guiremote::scene::decode_scene_frame(&comp.capture_stream(stream_id).unwrap()).unwrap();
         assert_eq!(f1.sequence, 1);
         assert!(f1.windows[0].commands.is_none());
 
         // Destroying the window makes the next frame report it as removed.
         assert!(comp.destroy_window(id).is_ok());
-        let f2 = decode_frame(&comp.capture_stream(stream_id).unwrap()).unwrap();
+        let f2 =
+            guiremote::scene::decode_scene_frame(&comp.capture_stream(stream_id).unwrap()).unwrap();
         assert!(f2.windows.is_empty());
         assert_eq!(f2.removed, vec![id.raw()]);
     }

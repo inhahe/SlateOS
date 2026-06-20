@@ -1700,6 +1700,7 @@ version = "0.1.0"
 name = "compositor"
 version = "0.1.0"
 dependencies = [
+ "guiremote",
  "guitk",
 ]
 

@@ -35,6 +35,7 @@
 // — every primitive needs every arg.
 #![allow(clippy::too_many_arguments)]
 
+use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -134,6 +135,8 @@ pub enum CompositorError {
     InvalidBuffer(String),
     /// A client shared buffer exceeds the supported pixel cap.
     BufferTooLarge { width: u32, height: u32 },
+    /// The referenced remote stream session id is not active.
+    StreamNotFound(u64),
 }
 
 impl std::fmt::Display for CompositorError {
@@ -159,6 +162,7 @@ impl std::fmt::Display for CompositorError {
                 "shared buffer too large: {}x{} (max {}x{})",
                 width, height, MAX_FB_WIDTH, MAX_FB_HEIGHT
             ),
+            Self::StreamNotFound(id) => write!(f, "stream session not found: {}", id),
         }
     }
 }
@@ -918,6 +922,12 @@ pub enum CompositorRequest {
     SetOpacity { window_id: WindowId, opacity: f32 },
     /// Query display information.
     GetDisplayInfo,
+    /// Begin a remote draw-command stream session (returns a stream id).
+    StreamStart,
+    /// Capture the current scene for a stream session as an encoded wire frame.
+    StreamCapture { stream_id: u64 },
+    /// End a remote draw-command stream session.
+    StreamStop { stream_id: u64 },
 }
 
 /// Responses from the compositor to clients.
@@ -936,6 +946,10 @@ pub enum CompositorResponse {
         refresh_rate: u32,
         scale_factor: f32,
     },
+    /// A remote stream session was started.
+    StreamStarted { stream_id: u64 },
+    /// An encoded draw-command stream frame (see [`stream`] wire format).
+    StreamFrame { data: Vec<u8> },
 }
 
 /// Notifications sent from the compositor to clients (events).
@@ -1863,6 +1877,12 @@ pub struct Compositor {
     full_recomposite: bool,
     /// How the last presented frame was produced (composited vs direct scanout).
     scanout: Scanout,
+    /// Active remote draw-command stream sessions, keyed by stream id. Each
+    /// tracks its own per-window delta state so multiple remote viewers can be
+    /// served independently.
+    stream_sessions: BTreeMap<u64, StreamSession>,
+    /// Monotonic allocator for stream session ids.
+    next_stream_id: u64,
 }
 
 impl Compositor {
@@ -1895,6 +1915,8 @@ impl Compositor {
             pending_notifications: VecDeque::new(),
             full_recomposite: true,
             scanout: Scanout::Composited,
+            stream_sessions: BTreeMap::new(),
+            next_stream_id: 1,
         })
     }
 
@@ -3219,6 +3241,27 @@ impl Compositor {
                     }
                 }
             }
+            CompositorRequest::StreamStart => {
+                let stream_id = self.start_stream();
+                CompositorResponse::StreamStarted { stream_id }
+            }
+            CompositorRequest::StreamCapture { stream_id } => {
+                match self.capture_stream(stream_id) {
+                    Ok(data) => CompositorResponse::StreamFrame { data },
+                    Err(e) => CompositorResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
+            CompositorRequest::StreamStop { stream_id } => {
+                if self.stop_stream(stream_id) {
+                    CompositorResponse::Ok
+                } else {
+                    CompositorResponse::Error {
+                        message: CompositorError::StreamNotFound(stream_id).to_string(),
+                    }
+                }
+            }
         }
     }
 
@@ -3361,6 +3404,44 @@ impl Compositor {
             }
         }
         session.build_frame(self.framebuffer.width, self.framebuffer.height, &snaps)
+    }
+
+    /// Begin a remote draw-command stream session and return its id. A remote
+    /// desktop service calls this once per connected viewer, then polls
+    /// [`capture_stream`](Self::capture_stream) each frame.
+    pub fn start_stream(&mut self) -> u64 {
+        let id = self.next_stream_id;
+        self.next_stream_id = self.next_stream_id.wrapping_add(1);
+        self.stream_sessions.insert(id, StreamSession::new());
+        id
+    }
+
+    /// Capture the current scene for stream `stream_id` and return the encoded
+    /// wire frame (geometry-only deltas for unchanged windows). Errors if the
+    /// id is unknown (e.g. the session was already stopped).
+    pub fn capture_stream(&mut self, stream_id: u64) -> CompositorResult<Vec<u8>> {
+        // Take ownership of the session so capture_stream_frame can borrow
+        // &self immutably while mutating the (now-local) session; reinsert after.
+        let mut session = self
+            .stream_sessions
+            .remove(&stream_id)
+            .ok_or(CompositorError::StreamNotFound(stream_id))?;
+        let frame = self.capture_stream_frame(&mut session);
+        let bytes = stream::encode_frame(&frame);
+        self.stream_sessions.insert(stream_id, session);
+        Ok(bytes)
+    }
+
+    /// Stop a stream session, freeing its delta-tracking state. Returns whether
+    /// a session with that id existed.
+    pub fn stop_stream(&mut self, stream_id: u64) -> bool {
+        self.stream_sessions.remove(&stream_id).is_some()
+    }
+
+    /// Number of active stream sessions (for diagnostics/tests).
+    #[must_use]
+    pub fn stream_session_count(&self) -> usize {
+        self.stream_sessions.len()
     }
 
     /// Focus the topmost visible window.
@@ -4135,6 +4216,82 @@ mod tests {
         // A translucent fullscreen window must blend with what's beneath, so it
         // cannot be scanned out directly.
         assert!(!comp.is_scanout_bypassed());
+    }
+
+    #[test]
+    fn test_stream_ipc_lifecycle() {
+        let mut comp = Compositor::new(400, 300, 60).unwrap();
+
+        // Start a stream via IPC.
+        let stream_id = match comp.handle_request(CompositorRequest::StreamStart) {
+            CompositorResponse::StreamStarted { stream_id } => stream_id,
+            other => panic!("expected StreamStarted, got {other:?}"),
+        };
+        assert_eq!(comp.stream_session_count(), 1);
+
+        // Capture produces a decodable wire frame.
+        let data = match comp.handle_request(CompositorRequest::StreamCapture { stream_id }) {
+            CompositorResponse::StreamFrame { data } => data,
+            other => panic!("expected StreamFrame, got {other:?}"),
+        };
+        let frame = decode_frame(&data).expect("decode captured frame");
+        assert_eq!(frame.sequence, 0);
+        assert_eq!(frame.display_width, 400);
+        assert_eq!(frame.display_height, 300);
+
+        // Stop frees the session; a second stop reports an error.
+        assert!(matches!(
+            comp.handle_request(CompositorRequest::StreamStop { stream_id }),
+            CompositorResponse::Ok
+        ));
+        assert_eq!(comp.stream_session_count(), 0);
+        assert!(matches!(
+            comp.handle_request(CompositorRequest::StreamStop { stream_id }),
+            CompositorResponse::Error { .. }
+        ));
+        // Capturing a stopped session is an error, not a panic.
+        assert!(matches!(
+            comp.handle_request(CompositorRequest::StreamCapture { stream_id }),
+            CompositorResponse::Error { .. }
+        ));
+    }
+
+    #[test]
+    fn test_stream_capture_forwards_window_commands() {
+        let mut comp = Compositor::new(200, 150, 60).unwrap();
+        let id = comp.create_window("Streamed".to_string(), 100, 80, 1);
+        let commands = vec![RenderCommand::FillRect {
+            x: 0.0,
+            y: 0.0,
+            width: 40.0,
+            height: 30.0,
+            color: Color::RED,
+            corner_radii: CornerRadii::ZERO,
+        }];
+        assert!(comp.submit_render(id, commands).is_ok());
+
+        let stream_id = comp.start_stream();
+
+        // First capture: the window is new to the session → commands present.
+        let f0 = decode_frame(&comp.capture_stream(stream_id).unwrap()).unwrap();
+        assert_eq!(f0.windows.len(), 1);
+        assert_eq!(f0.windows[0].id, id.raw());
+        let cmds = f0.windows[0]
+            .commands
+            .as_ref()
+            .expect("new window forwards commands");
+        assert_eq!(cmds.len(), 1);
+
+        // Second capture with unchanged content: geometry-only delta.
+        let f1 = decode_frame(&comp.capture_stream(stream_id).unwrap()).unwrap();
+        assert_eq!(f1.sequence, 1);
+        assert!(f1.windows[0].commands.is_none());
+
+        // Destroying the window makes the next frame report it as removed.
+        assert!(comp.destroy_window(id).is_ok());
+        let f2 = decode_frame(&comp.capture_stream(stream_id).unwrap()).unwrap();
+        assert!(f2.windows.is_empty());
+        assert_eq!(f2.removed, vec![id.raw()]);
     }
 
     #[test]

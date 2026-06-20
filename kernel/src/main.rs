@@ -1252,6 +1252,12 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: rename_noreplace self-test failed: {:?}", e);
     }
 
+    // statfs(2) against the real mounted root (the in-self_test() version can
+    // only check error paths since it runs before any filesystem is mounted).
+    if let Err(e) = syscall::linux::self_test_statfs_root() {
+        serial_println!("WARNING: statfs(/) self-test failed: {:?}", e);
+    }
+
     // sendfile(2) data-transfer test (needs a writable VFS to stage files;
     // the syscall entry can't run in kernel context since it dereferences the
     // per-process Linux fd table, so this drives the sendfile_core copy path

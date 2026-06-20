@@ -16813,27 +16813,77 @@ fn fill_statfs_default(buf: &mut [u8; STATFS_SIZE]) {
         0,                  // f_flags
         0, 0, 0, 0,         // f_spare[4]
     ];
-    debug_assert_eq!(fields.len() * 8, STATFS_SIZE);
-    for (i, v) in fields.iter().enumerate() {
-        let off = i * 8;
-        let bytes = v.to_ne_bytes();
-        #[allow(clippy::indexing_slicing)]
-        buf[off..off + 8].copy_from_slice(&bytes);
+    write_statfs_fields(buf, &fields);
+}
+
+/// Pack 15 little-/native-endian `u64` `statfs` fields into the byte buffer.
+///
+/// Uses `chunks_exact_mut` so there is no manual index arithmetic (avoids the
+/// indexing/overflow lints) and any size mismatch simply leaves the tail zero.
+fn write_statfs_fields(buf: &mut [u8; STATFS_SIZE], fields: &[u64; 15]) {
+    for (chunk, v) in buf.chunks_exact_mut(8).zip(fields.iter()) {
+        chunk.copy_from_slice(&v.to_ne_bytes());
     }
 }
 
-/// `statfs(path, buf)` — fill `buf` with synthetic filesystem stats.
+/// Map a SlateOS filesystem-type name to the Linux `f_type` super-magic that
+/// userspace expects from `statfs`/`fstatfs`.
+///
+/// Programs key off `f_type` to detect the backing filesystem (e.g. glibc's
+/// `__statfs_*` family, util-linux). Unknown types fall back to `TMPFS_MAGIC`,
+/// a neutral value that never claims a more specific on-disk format than we can
+/// honour.
+fn statfs_magic_for(fs_type: &str) -> u64 {
+    match fs_type {
+        "ext4" | "ext3" | "ext2" => 0xEF53,         // EXT4_SUPER_MAGIC
+        "fat16" | "fat32" | "vfat" | "fat" | "msdos" => 0x4d44, // MSDOS_SUPER_MAGIC
+        "iso9660" => 0x9660,                        // ISOFS_SUPER_MAGIC
+        "procfs" | "proc" => 0x9fa0,                // PROC_SUPER_MAGIC
+        "sysfs" => 0x6265_6572,                     // SYSFS_MAGIC
+        // devfs/devtmpfs/memfs all present as in-memory filesystems.
+        _ => TMPFS_MAGIC,
+    }
+}
+
+/// Fill a Linux `struct statfs` buffer from real [`FsInfo`] returned by the VFS.
+///
+/// The 15-`u64` layout matches `fill_statfs_default` (and x86_64 Linux's
+/// `struct statfs`). Virtual filesystems report 0 blocks/inodes (correct —
+/// they have no on-disk capacity); a 0 block size is replaced with the 16 KiB
+/// frame size so userspace never divides by zero.
+fn fill_statfs_from_info(buf: &mut [u8; STATFS_SIZE], info: &crate::fs::vfs::FsInfo) {
+    const ST_RDONLY: u64 = 1; // Linux ST_RDONLY mount flag.
+    let bsize = if info.block_size > 0 {
+        info.block_size
+    } else {
+        16 * 1024
+    };
+    let fields: [u64; 15] = [
+        statfs_magic_for(&info.fs_type), // f_type
+        bsize,                           // f_bsize
+        info.total_blocks,               // f_blocks
+        info.free_blocks,                // f_bfree
+        info.free_blocks,                // f_bavail (no separate unpriv reserve)
+        info.total_inodes,               // f_files
+        info.free_inodes,                // f_ffree
+        0,                               // f_fsid
+        info.max_name_len,               // f_namelen
+        bsize,                           // f_frsize
+        if info.read_only { ST_RDONLY } else { 0 }, // f_flags
+        0, 0, 0, 0,                      // f_spare[4]
+    ];
+    write_statfs_fields(buf, &fields);
+}
+
+/// `statfs(path, buf)` — report real filesystem stats for the FS backing
+/// `path`, resolved via the VFS (falls back to neutral defaults only when the
+/// path resolves but the filesystem can't report capacity).
 fn sys_statfs(args: &SyscallArgs) -> SyscallResult {
     let path_ptr = args.arg0;
     let buf_ptr = args.arg1;
 
-    // Path must be a non-NULL user pointer; we don't yet resolve paths,
-    // but we still EFAULT if the pointer itself is bad.
     if path_ptr == 0 {
         return linux_err(errno::EFAULT);
-    }
-    if let Err(e) = crate::mm::user::validate_user_read(path_ptr, 1) {
-        return linux_err(linux_errno_for(e));
     }
     if buf_ptr == 0 {
         return linux_err(errno::EFAULT);
@@ -16842,8 +16892,33 @@ fn sys_statfs(args: &SyscallArgs) -> SyscallResult {
         return linux_err(linux_errno_for(e));
     }
 
+    // Read and canonicalise the path against the caller's cwd, mirroring the
+    // other path-based Linux syscalls (stat/access/...).
+    const PATH_MAX: usize = 4096;
+    let path_bytes = match read_user_cstr(path_ptr, PATH_MAX) {
+        Ok(b) => b,
+        Err(e) => return linux_err(e),
+    };
+    let cwd = match caller_pid() {
+        Some(pid) => pcb::get_cwd(pid).unwrap_or_else(|| alloc::vec![b'/']),
+        None => alloc::vec![b'/'],
+    };
+    let canon = match canonicalize_path(&cwd, &path_bytes) {
+        Ok(p) => p,
+        Err(e) => return linux_err(e),
+    };
+    let path_str = match core::str::from_utf8(&canon) {
+        Ok(s) => s,
+        Err(_) => return linux_err(errno::EINVAL),
+    };
+
     let mut buf = [0u8; STATFS_SIZE];
-    fill_statfs_default(&mut buf);
+    match crate::fs::Vfs::statvfs(path_str) {
+        Ok(info) => fill_statfs_from_info(&mut buf, &info),
+        Err(KernelError::NotFound) => return linux_err(errno::ENOENT),
+        Err(e) => return linux_err(linux_errno_for(e)),
+    }
+
     // SAFETY: validated as a writable STATFS_SIZE-byte range above.
     let r = unsafe {
         crate::mm::user::copy_to_user(buf.as_ptr(), buf_ptr, STATFS_SIZE)
@@ -16854,17 +16929,21 @@ fn sys_statfs(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(0)
 }
 
-/// `fstatfs(fd, buf)` — fill `buf` with synthetic filesystem stats.
+/// `fstatfs(fd, buf)` — report real filesystem stats for the FS backing an open
+/// fd. Resolves the fd's VFS handle to a path, then queries the VFS.
 fn sys_fstatfs(args: &SyscallArgs) -> SyscallResult {
     let fd = args.arg0 as i32;
     let buf_ptr = args.arg1;
 
-    // Validate the fd belongs to the caller (or skip if no caller).
-    if let Some(pid) = caller_pid()
-        && pcb::linux_fd_lookup(pid, fd).is_none()
-    {
-        return linux_err(errno::EBADF);
-    }
+    // Look up the fd; capture its backing handle if it is a VFS file.
+    let entry = match caller_pid() {
+        Some(pid) => match pcb::linux_fd_lookup(pid, fd) {
+            Some(e) => Some(e),
+            None => return linux_err(errno::EBADF),
+        },
+        // Kernel/self-test context: no fd table to consult.
+        None => None,
+    };
 
     if buf_ptr == 0 {
         return linux_err(errno::EFAULT);
@@ -16874,7 +16953,34 @@ fn sys_fstatfs(args: &SyscallArgs) -> SyscallResult {
     }
 
     let mut buf = [0u8; STATFS_SIZE];
-    fill_statfs_default(&mut buf);
+    // For a VFS-file fd, resolve the handle to a path and query the real FS.
+    // Non-file fds (pipes, eventfd, sockets, ...) have no on-disk filesystem;
+    // Linux reports them against an anonymous/pipe pseudo-fs, so neutral
+    // defaults are the honest answer there.
+    let filled = if let Some(entry) = entry {
+        if entry.kind == crate::proc::linux_fd::HandleKind::File {
+            match crate::fs::handle::handle_path(entry.raw_handle) {
+                Ok(path) => match crate::fs::Vfs::statvfs(&path) {
+                    Ok(info) => {
+                        fill_statfs_from_info(&mut buf, &info);
+                        true
+                    }
+                    Err(KernelError::NotFound) => return linux_err(errno::ENOENT),
+                    Err(e) => return linux_err(linux_errno_for(e)),
+                },
+                // Handle no longer resolvable — fall back to defaults.
+                Err(_) => false,
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    if !filled {
+        fill_statfs_default(&mut buf);
+    }
+
     // SAFETY: validated as a writable STATFS_SIZE-byte range above.
     let r = unsafe {
         crate::mm::user::copy_to_user(buf.as_ptr(), buf_ptr, STATFS_SIZE)
@@ -44797,6 +44903,57 @@ fn caller_pid() -> Option<u64> {
 ///  4. `RENAME_EXCHANGE` atomically swaps two existing entries' contents;
 ///  5. `RENAME_EXCHANGE` with a missing operand → `NotFound` (ENOENT), leaving
 ///     the surviving entry untouched (all-or-nothing).
+/// Post-mount validation of the Linux `statfs(2)` translation against a real,
+/// mounted filesystem.
+///
+/// The main `self_test()` runs before any filesystem is mounted, so it can only
+/// check the NULL-pointer error paths. This runs from `main.rs` *after* the
+/// root and virtual filesystems are mounted, and verifies that `statfs("/")`
+/// routes through `Vfs::statvfs` (returning a real super-magic + non-zero
+/// `f_namelen`) rather than the old fixed synthetic block.
+pub fn self_test_statfs_root() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+    use crate::serial_println;
+
+    let path = b"/\0";
+    let mut out = [0u8; STATFS_SIZE];
+    let a = SyscallArgs {
+        arg0: path.as_ptr() as u64,
+        arg1: out.as_mut_ptr() as u64,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let r = dispatch_linux(nr::STATFS, &a).value;
+    if r != 0 {
+        serial_println!("[syscall/linux]   FAIL: statfs(/) returned {r}");
+        return Err(KernelError::InternalError);
+    }
+    // f_type (offset 0) must be a real super-magic and f_namelen
+    // (field 8 -> byte offset 64) must be non-zero — proves we routed
+    // through Vfs::statvfs rather than zero-filling.
+    let f_type = out
+        .get(0..8)
+        .and_then(|s| <[u8; 8]>::try_from(s).ok())
+        .map_or(0u64, u64::from_ne_bytes);
+    let f_namelen = out
+        .get(64..72)
+        .and_then(|s| <[u8; 8]>::try_from(s).ok())
+        .map_or(0u64, u64::from_ne_bytes);
+    if f_type == 0 || f_namelen == 0 {
+        serial_println!(
+            "[syscall/linux]   FAIL: statfs(/) empty fields \
+             (f_type={f_type:#x}, f_namelen={f_namelen})"
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[syscall/linux]   statfs(/) OK (f_type={f_type:#x}, f_namelen={f_namelen})"
+    );
+    Ok(())
+}
+
 pub fn self_test_rename_noreplace() -> crate::error::KernelResult<()> {
     use crate::error::KernelError;
     use crate::serial_println;
@@ -62826,6 +62983,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(KernelError::InternalError);
         }
     }
+    // NOTE: the positive statfs("/") path is validated by
+    // `statfs_post_mount_self_test()` instead — this self-test runs before
+    // any filesystem is mounted, so `Vfs::statvfs("/")` would (correctly)
+    // return ENOENT here.
         Ok(())
     }
 

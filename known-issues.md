@@ -2506,6 +2506,24 @@ client-side number correction:
   tests: `diskutil` 5 pass (`read_u64_le` LE-parse + bounds, `syscall_error_msg`,
   `format_size`). The kernel exposes a single free count (no separate
   "available-to-unprivileged"), so diskutil reports available == free.
+- **Linux-ABI `statfs`/`fstatfs` returned fixed synthetic data — RESOLVED
+  2026-06-20** — `sys_statfs`/`sys_fstatfs` (`kernel/src/syscall/linux.rs`) never
+  resolved the path/fd; they always `fill_statfs_default()`'d a hardcoded block
+  (TMPFS_MAGIC, 16 GiB total / 8 GiB free, 64K inodes) regardless of the real
+  filesystem. So Linux programs calling `statfs("/")` or `df`-style tools got
+  bogus capacity. Now `sys_statfs` canonicalises the path against the caller's
+  cwd and routes through `Vfs::statvfs`, and `sys_fstatfs` resolves the fd's VFS
+  handle to a path (`fs::handle::handle_path`) and does the same; a new
+  `fill_statfs_from_info` maps `FsInfo` → the 15-`u64` `struct statfs` layout
+  with a real `f_type` super-magic (`statfs_magic_for`: ext4 0xEF53, FAT 0x4d44,
+  iso9660 0x9660, procfs 0x9fa0, sysfs, else TMPFS_MAGIC). NotFound → ENOENT;
+  non-VFS fds (pipes/eventfd/…) and virtual filesystems still get neutral
+  defaults (honest — they have no on-disk capacity). The field-packing loop was
+  refactored to `chunks_exact_mut` (no index arithmetic). Validated by a new
+  post-mount boot self-test `self_test_statfs_root()` (called from main.rs after
+  the root is mounted, since the in-`self_test()` checks run pre-mount) asserting
+  `statfs("/")` returns 0 with a non-zero `f_type` + `f_namelen`; the pre-mount
+  self-test keeps the NULL→EFAULT checks. Boot PASSED.
 - **diskutil trim**: still no `FS_TRIM`/discard syscall. diskutil's `trim`
   remains an honest ENOSYS stub until a discard ABI lands.
 - **chroot**: no `CHROOT`/`CHDIR`/`SETUID`/`SETGID`/`SETGROUPS` syscall — needs a

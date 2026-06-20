@@ -9686,6 +9686,30 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          clippy clean for x86_64-slateos.  RESIDUAL (still TD18): diskutil
 ##          trim (needs a discard syscall) is the only remaining fs-admin stub.
 ##
+##      Increment M (Linux-ABI statfs/fstatfs returned fake data — kernel bug):
+##          DONE.  sys_statfs/sys_fstatfs (kernel/src/syscall/linux.rs) NEVER
+##          resolved the path/fd — they always fill_statfs_default()'d a
+##          hardcoded block (TMPFS_MAGIC, 16 GiB total / 8 GiB free, 64K inodes)
+##          regardless of the real filesystem, so Linux df/statfs callers got
+##          bogus capacity.  Fixed: sys_statfs canonicalises the path vs the
+##          caller cwd (mirroring stat/access) and routes through Vfs::statvfs;
+##          sys_fstatfs resolves the fd's VFS handle to a path via
+##          fs::handle::handle_path then queries Vfs::statvfs.  New
+##          fill_statfs_from_info maps FsInfo -> the 15-u64 struct statfs layout
+##          with a real f_type via statfs_magic_for (ext4 0xEF53, FAT 0x4d44,
+##          iso9660 0x9660, procfs 0x9fa0, sysfs 0x62656572, else TMPFS_MAGIC);
+##          NotFound -> ENOENT; non-VFS fds (pipes/eventfd/...) and virtual FS
+##          keep neutral defaults (honest — no on-disk capacity).  Field packing
+##          refactored from manual i*8 indexing to chunks_exact_mut (kills the
+##          indexing/arithmetic lints) via a shared write_statfs_fields helper.
+##          The pre-mount linux::self_test() keeps only the NULL->EFAULT checks
+##          (it runs before any FS is mounted, so a positive statfs("/") would
+##          correctly ENOENT there); a NEW post-mount pub fn
+##          self_test_statfs_root() — called from main.rs after the root mount,
+##          alongside self_test_rename_noreplace — asserts statfs("/") returns 0
+##          with non-zero f_type + f_namelen (proves it routes through statvfs,
+##          not zero-fill).  Kernel build + clippy clean; boot PASSED.
+##
 ## TESTING:
 ##   - linux::self_test() at boot exercises: errno mapping (16 KernelError
 ##     variants); linux_from_native round-trip; unknown nr -> -ENOSYS;

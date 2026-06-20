@@ -2444,7 +2444,18 @@ client-side number correction:
   its personalities are already covered by real, non-fabricating tools:
   `mount`/`umount` (the tool above) and the standalone `userspace/findmnt`
   (reads `/proc/mounts`). Nothing referenced `mount-cli`. (Judgment call —
-  removal is reversible via git; see todo.txt.)
+  removal is reversible via git; see todo.txt.) The analogous
+  `userspace/mkfs-cli` and `userspace/fsck-cli` demo shims (which *fabricated*
+  mkfs/fsck success — fake UUIDs, "done", "clean, NNN/NNN files" — without
+  issuing any syscall, telling the user a format/check succeeded when nothing
+  happened) were **removed 2026-06-20** for the same reason: all their
+  personalities are already covered by the real, syscall-backed `userspace/mkfs`
+  (argv0 `mkfs.<type>` detection → `SYS_FS_FORMAT`) and `userspace/fsck` (argv0
+  `fsck.<type>` detection → `SYS_FS_CHECK`). The shims' extra aliases
+  (`e2fsck`/`xfs_repair`/`mkswap`) were pure fabrication for filesystems we don't
+  support; reintroducing any as a real alias is a future task with real backing.
+  Nothing referenced either crate. (Judgment call — removal is reversible via
+  git; see todo.txt.)
 - **mkfs/diskutil format: RESOLVED 2026-06-20** — added a real
   `SYS_FS_FORMAT=654` (`kernel/src/syscall/number.rs`), dispatched in
   `dispatch.rs`, handled in `handlers.rs` (`sys_fs_format`, root-gated via
@@ -2484,9 +2495,19 @@ client-side number correction:
   args; now uses `655` + `FS_CHECK_REPAIR=1<<0`) and `userspace/diskutil`
   (`verify` = `fs_check(false)`, `repair` = `fs_check(true)`) now issue the real
   syscall. Host tests: `fsck` 39 pass, `mkfs` 35 pass, `diskutil` 0.
-- **diskutil trim, statfs**: still no `FS_TRIM`/`STATFS` syscall. diskutil's
-  `trim` and the statfs query remain honest ENOSYS stubs (trim needs a discard
-  ABI; statfs needs a real free/used-block query).
+- **diskutil usage/statfs: RESOLVED 2026-06-20** — diskutil's `usage` was an
+  ENOSYS stub falling back to a sysfs size estimate, but a real native
+  `SYS_FS_STATVFS=608` syscall already existed (`sys_fs_statvfs` in handlers.rs,
+  backed by the fully-implemented `Vfs::statvfs(path) -> FsInfo` across
+  FAT/ext4/memfs/devfs/iso9660/procfs/sysfs). `cmd_usage` now calls it
+  (`fs_statvfs(path)`: path ptr+len + 64-byte buffer → block_size/total/free
+  blocks + inodes), printing exact Total/Used/Free/Available/inode figures; it
+  only falls back to the sysfs estimate if the syscall genuinely fails. Host
+  tests: `diskutil` 5 pass (`read_u64_le` LE-parse + bounds, `syscall_error_msg`,
+  `format_size`). The kernel exposes a single free count (no separate
+  "available-to-unprivileged"), so diskutil reports available == free.
+- **diskutil trim**: still no `FS_TRIM`/discard syscall. diskutil's `trim`
+  remains an honest ENOSYS stub until a discard ABI lands.
 - **chroot**: no `CHROOT`/`CHDIR`/`SETUID`/`SETGID`/`SETGROUPS` syscall — needs a
   real process-credential + filesystem-root ABI. **Already neutered** — `chroot`
   carries ENOSYS stubs and a comment about the earlier fake syscall numbers.

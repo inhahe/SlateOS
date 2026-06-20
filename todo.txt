@@ -8045,6 +8045,21 @@ Remaining net improvements (diminishing returns):
   glob — and no script/manifest staged its binary). Removal is fully
   reversible via git. If a busybox-style multicall `mount` applet is wanted
   later, it should delegate to the real syscalls rather than fabricate.
+- (2026-06-20) Removed the redundant `userspace/mkfs-cli` and `userspace/fsck-cli`
+  tools for the same reason as mount-cli. Both were multi-personality demos that
+  *fabricated* success output without issuing any syscall: mkfs-cli printed fake
+  ext4/xfs/btrfs/fat/swap creation (made-up UUIDs "abcdef12-...", "done",
+  superblock-backup block lists) and fsck-cli printed fake "clean, NNN/NNN files"
+  / e2fsck-pass / xfs_repair-phase output — i.e. they told the user a format or
+  check succeeded when nothing happened, which is the no-fabrication violation.
+  The real `userspace/mkfs` (argv0 `mkfs.<type>` detection → SYS_FS_FORMAT=654,
+  honest errors for unsupported types) and `userspace/fsck` (argv0 `fsck.<type>`
+  detection → SYS_FS_CHECK=655) now cover every personality the shims claimed.
+  The shims' extra aliases not covered by the real tools (`e2fsck`, `xfs_repair`,
+  `mkswap`) were pure fabrication for filesystems we don't actually support;
+  reintroducing any as a real argv0 alias is a future task with real backing.
+  Nothing referenced either crate (only the `userspace/*` glob; no manifest staged
+  their binaries). Removal is fully reversible via git.
   Commit 7 of the Linux DRM/KMS shim (MAP_DUMB + mmap-on-/dev/dri-fd)
   maps a dumb buffer's GEM frames into the calling process by
   `frame::ref_inc`-ing each frame before `map_frame`, so process-exit
@@ -9641,6 +9656,35 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          Both build for x86_64-slateos and pass clippy.  RESIDUAL (still TD18):
 ##          diskutil trim (needs discard ABI) + statfs (needs free/used-block
 ##          query) have no syscall yet.
+##
+##      Increment L (diskutil usage -> real statvfs; remove the two fabricating
+##          mkfs-cli/fsck-cli shims — TD18 cleanup):
+##          DONE.  Two parts.
+##          (1) Removed userspace/mkfs-cli and userspace/fsck-cli: pure-fabrication
+##          multi-personality demo shims (mkfs.ext4/xfs/btrfs/fat/mkswap;
+##          fsck/e2fsck/xfs_repair) that printed fake UUIDs, "done", "clean,
+##          NNN/NNN files" WITHOUT issuing any syscall — telling the user a
+##          format/check succeeded when nothing happened (same no-fabrication
+##          violation as the already-removed mount-cli).  Every personality is
+##          already covered by the real syscall-backed userspace/mkfs (argv0
+##          mkfs.<type> -> SYS_FS_FORMAT=654) and userspace/fsck (argv0
+##          fsck.<type> -> SYS_FS_CHECK=655).  Logged under Judgment Calls.
+##          (2) diskutil `usage`: was an ENOSYS stub falling back to a sysfs
+##          SIZE estimate, but a real native SYS_FS_STATVFS=608 already existed
+##          (sys_fs_statvfs, backed by the fully-implemented Vfs::statvfs(path) ->
+##          FsInfo across FAT/ext4/memfs/devfs/iso9660/procfs/sysfs).  cmd_usage
+##          now calls it via fs_statvfs(path): arg0/arg1 = path ptr+len, arg2 =
+##          64-byte out buffer (off 0 block_size, 8 total_blocks, 16 free_blocks,
+##          24 total_inodes, 32 free_inodes, 40 max_name_len, 48 read_only u8),
+##          returns 0 / negative KernelError.  Prints exact Total/Used/Free/
+##          Available/inodes; falls back to the sysfs estimate ONLY on real
+##          syscall failure.  Kernel exposes one free count (no separate
+##          available-to-unprivileged), so diskutil reports available == free.
+##          Added diskutil host tests (first ones): read_u64_le LE-parse +
+##          out-of-range-is-zero, syscall_error_msg kernel-code mapping,
+##          format_size sanity — cargo test -p diskutil -> 5 pass.  Build +
+##          clippy clean for x86_64-slateos.  RESIDUAL (still TD18): diskutil
+##          trim (needs a discard syscall) is the only remaining fs-admin stub.
 ##
 ## TESTING:
 ##   - linux::self_test() at boot exercises: errno mapping (16 KernelError

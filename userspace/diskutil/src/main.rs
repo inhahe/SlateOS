@@ -6,11 +6,11 @@
 //!
 //! Reads from `/sys/block/`, `/proc/partitions`, and `/proc/mounts`.
 //!
-//! NOTE: `format` is wired to `SYS_FS_FORMAT` (654) and `verify`/`repair` to
-//! `SYS_FS_CHECK` (655), both for the FAT family. The remaining operations
-//! (trim, statfs) still lack a kernel ABI and honestly report `ENOSYS` until the
-//! corresponding syscalls (discard, statfs) land. All read-only
-//! listing/info/usage logic works via sysfs/procfs.
+//! NOTE: `format` is wired to `SYS_FS_FORMAT` (654), `verify`/`repair` to
+//! `SYS_FS_CHECK` (655) (both for the FAT family), and `usage` to the real
+//! `SYS_FS_STATVFS` (608). Only `trim` still lacks a kernel ABI and honestly
+//! reports `ENOSYS` until a discard syscall lands. All read-only
+//! listing/info logic works via sysfs/procfs.
 //!
 //! # Usage
 //!
@@ -56,11 +56,24 @@ const SYS_FS_CHECK: u64 = 655;
 /// Repair-mode flag bit for `SYS_FS_CHECK` (arg2 bit 0).
 const FS_CHECK_REPAIR: u64 = 1 << 0;
 
+/// `SYS_FS_STATVFS` — query filesystem space/config for the FS backing a path.
+///
+/// ABI: arg0/arg1 = path ptr+len (any path on the target filesystem), arg2 =
+/// pointer to a 64-byte output buffer. Returns 0 on success or a negative
+/// `KernelError`. Buffer layout (little-endian, all `u64` unless noted):
+/// off 0 = block_size, 8 = total_blocks, 16 = free_blocks, 24 = total_inodes,
+/// 32 = free_inodes, 40 = max_name_len, 48 = read_only (`u8`).
+const SYS_FS_STATVFS: u64 = 608;
+
+/// Size of the `SYS_FS_STATVFS` output buffer, in bytes.
+const FS_STATVFS_SIZE: usize = 64;
+
 /// Result code for fs-admin operations that still have no syscall.
 ///
-/// `format` is wired to `SYS_FS_FORMAT` (654) and `verify`/`repair` to
-/// `SYS_FS_CHECK` (655), but trim/statfs still lack a kernel ABI; those ops
-/// resolve to this honest `ENOSYS` until the corresponding syscalls land.
+/// `format` is wired to `SYS_FS_FORMAT` (654), `verify`/`repair` to
+/// `SYS_FS_CHECK` (655), and `usage` to `SYS_FS_STATVFS` (608); only `trim`
+/// still lacks a kernel ABI (needs a discard syscall) and resolves to this
+/// honest `ENOSYS` until it lands.
 const ENOSYS: i64 = -38;
 
 /// Raw 6-argument native syscall. Returns the kernel's `i64` result (negative
@@ -998,22 +1011,54 @@ fn cmd_repair(device_name: &str) {
 // Subcommand: usage
 // ============================================================================
 
-/// Statfs result structure for the SYS_FS_STATFS syscall.
-#[repr(C)]
-#[allow(dead_code)]
-struct StatfsResult {
-    /// Total data blocks in filesystem.
-    total_blocks: u64,
-    /// Free blocks in filesystem.
-    free_blocks: u64,
-    /// Free blocks available to unprivileged user.
-    avail_blocks: u64,
-    /// Total file nodes in filesystem.
-    total_inodes: u64,
-    /// Free file nodes in filesystem.
-    free_inodes: u64,
-    /// Filesystem block size.
+/// Parsed result of a `SYS_FS_STATVFS` call (see the syscall doc for the
+/// on-wire 64-byte buffer layout).
+struct FsStatvfs {
+    /// Fundamental block (allocation-unit) size in bytes.
     block_size: u64,
+    /// Total number of blocks on the filesystem.
+    total_blocks: u64,
+    /// Number of free blocks. The kernel has no separate
+    /// "available to unprivileged" count, so available == free here.
+    free_blocks: u64,
+    /// Total inodes / directory entries (0 if the concept doesn't apply).
+    total_inodes: u64,
+    /// Free inodes / directory entries.
+    free_inodes: u64,
+}
+
+/// Read a `u64` from a little-endian byte slice at `off`, or 0 if out of range.
+fn read_u64_le(buf: &[u8], off: usize) -> u64 {
+    buf.get(off..off + 8)
+        .and_then(|s| <[u8; 8]>::try_from(s).ok())
+        .map_or(0, u64::from_le_bytes)
+}
+
+/// Query filesystem space info for `path` via `SYS_FS_STATVFS`.
+///
+/// Returns the parsed stats on success, or the negative `KernelError` code the
+/// syscall returned on failure (so callers can render an honest message).
+fn fs_statvfs(path: &str) -> Result<FsStatvfs, i64> {
+    let mut buf = [0u8; FS_STATVFS_SIZE];
+    let ret = syscall6(
+        SYS_FS_STATVFS,
+        path.as_ptr() as u64,
+        path.len() as u64,
+        buf.as_mut_ptr() as u64,
+        0,
+        0,
+        0,
+    );
+    if ret < 0 {
+        return Err(ret);
+    }
+    Ok(FsStatvfs {
+        block_size: read_u64_le(&buf, 0),
+        total_blocks: read_u64_le(&buf, 8),
+        free_blocks: read_u64_le(&buf, 16),
+        total_inodes: read_u64_le(&buf, 24),
+        free_inodes: read_u64_le(&buf, 32),
+    })
 }
 
 /// Show disk space usage for a mount point or path.
@@ -1053,28 +1098,18 @@ fn cmd_usage(path: &str) {
     }
     println!();
 
-    // Issue statfs syscall on the path.
-    let result = StatfsResult {
-        total_blocks: 0,
-        free_blocks: 0,
-        avail_blocks: 0,
-        total_inodes: 0,
-        free_inodes: 0,
-        block_size: 0,
+    // Issue the real statvfs syscall on the path.
+    let result = match fs_statvfs(path) {
+        Ok(r) => r,
+        Err(ret) => {
+            eprintln!(
+                "  (statvfs syscall failed: {}; showing estimate from sysfs)",
+                syscall_error_msg(ret)
+            );
+            show_usage_estimate(path, &best_dev);
+            return;
+        }
     };
-
-    // Slate OS has no statfs syscall yet (see ENOSYS note). Skip the kernel
-    // round-trip and show the sysfs-based estimate. The exact-usage formatting
-    // below is retained, ready to wire up once a real statfs ABI exists.
-    let ret = ENOSYS;
-    if ret < 0 {
-        eprintln!(
-            "  (statfs syscall unavailable: {}; showing estimate from sysfs)",
-            syscall_error_msg(ret)
-        );
-        show_usage_estimate(path, &best_dev);
-        return;
-    }
 
     let block_size = if result.block_size > 0 {
         result.block_size
@@ -1084,7 +1119,8 @@ fn cmd_usage(path: &str) {
 
     let total_bytes = result.total_blocks.saturating_mul(block_size);
     let free_bytes = result.free_blocks.saturating_mul(block_size);
-    let avail_bytes = result.avail_blocks.saturating_mul(block_size);
+    // The kernel exposes a single free count; available == free here.
+    let avail_bytes = free_bytes;
     let used_bytes = total_bytes.saturating_sub(free_bytes);
 
     let used_pct = if total_bytes > 0 {
@@ -1724,5 +1760,55 @@ fn main() {
             eprintln!("  Run 'diskutil --help' for usage.");
             process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_size, read_u64_le, syscall_error_msg};
+
+    #[test]
+    fn read_u64_le_basic() {
+        let buf = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+        assert_eq!(read_u64_le(&buf, 0), 0x0807_0605_0403_0201);
+    }
+
+    #[test]
+    fn read_u64_le_offset_and_zero() {
+        // A 64-byte statvfs buffer laid out like the kernel writes it:
+        // block_size@0, total_blocks@8, free_blocks@16.
+        let mut buf = [0u8; 64];
+        buf[0..8].copy_from_slice(&4096u64.to_le_bytes());
+        buf[8..16].copy_from_slice(&1000u64.to_le_bytes());
+        buf[16..24].copy_from_slice(&250u64.to_le_bytes());
+        assert_eq!(read_u64_le(&buf, 0), 4096);
+        assert_eq!(read_u64_le(&buf, 8), 1000);
+        assert_eq!(read_u64_le(&buf, 16), 250);
+        // Inodes left at zero.
+        assert_eq!(read_u64_le(&buf, 24), 0);
+    }
+
+    #[test]
+    fn read_u64_le_out_of_range_is_zero() {
+        let buf = [0u8; 4];
+        // Not enough bytes for a full u64 -> 0 rather than a panic.
+        assert_eq!(read_u64_le(&buf, 0), 0);
+        assert_eq!(read_u64_le(&buf, 100), 0);
+    }
+
+    #[test]
+    fn syscall_error_msg_maps_kernel_codes() {
+        assert_eq!(syscall_error_msg(-400), "permission denied — must be root");
+        assert_eq!(syscall_error_msg(-601), "no such device");
+        assert_eq!(syscall_error_msg(-38), "function not implemented");
+    }
+
+    #[test]
+    fn format_size_is_human_readable() {
+        // Sanity: 4096 blocks * 4096 bytes worth of formatting doesn't panic
+        // and produces a non-empty, byte-sensible string.
+        assert!(!format_size(0).is_empty());
+        assert!(!format_size(4096).is_empty());
+        assert!(!format_size(1024 * 1024 * 1024).is_empty());
     }
 }

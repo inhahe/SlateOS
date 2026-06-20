@@ -9710,6 +9710,42 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          with non-zero f_type + f_namelen (proves it routes through statvfs,
 ##          not zero-fill).  Kernel build + clippy clean; boot PASSED.
 ##
+##      Increment N (diskutil trim -> real fstrim — last fs-admin stub): DONE.
+##          Built the full fstrim stack bottom-up:
+##          (1) blkdev discard primitive: BlockDevice::supports_discard()/
+##              discard(start_lba,count) (default NotSupported); RamBlockDevice
+##              zeroes the range (bounds/overflow-checked); registry helpers
+##              blkdev::supports_discard()/discard(); boot self_test_discard().
+##          (2) FileSystem::trim() (default Ok(0)) + Vfs::trim(path); FatFs::trim
+##              walks the FAT, coalesces free-cluster runs, issues blkdev::discard
+##              per run after cache::invalidate_range (so stale free-space data
+##              can't resurface).  NON-DESTRUCTIVE: only free clusters touched.
+##          (3) FileSystem::device_name() (FatFs -> registry name) +
+##              Vfs::trim_device(dev) for device->mount resolution.
+##          (4) SYS_FS_TRIM (656, root-only via require_trim_authority) wired to
+##              Vfs::trim_device; returns bytes discarded (i64, clamped).
+##          (5) diskutil cmd_trim issues SYS_FS_TRIM and prints bytes discarded;
+##              dropped the now-unused ENOSYS const.
+##          Tests: 3 boot self-tests (blkdev discard; FAT fstrim end-to-end via
+##          Vfs::trim_device incl. poison-a-free-sector + verify-zeroed; unknown-
+##          device rejection) + 5 diskutil host tests.  Kernel + diskutil build/
+##          clippy clean; boot PASSED (fstrim discarded 4,160,512 bytes).
+##          RESIDUAL (TD18 follow-ups, NOT blocking):
+##            - virtio-blk does not negotiate VIRTIO_BLK_F_DISCARD, so on real/
+##              virtio devices supports_discard()=false and fstrim is a successful
+##              no-op (0 bytes); discard only actually fires on RamBlockDevice.
+##              Proper fix: negotiate the discard feature, parse the discard
+##              config (max_discard_sectors/alignment), implement the
+##              VIRTIO_BLK_T_DISCARD (type 11) command in kernel/src/virtio/blk.rs,
+##              and override supports_discard()/discard() in the blkdev impl.
+##              Deferred because it can't be boot-tested without a QEMU virtio-blk
+##              discard=on config and a wrong discard range could corrupt a real
+##              disk — wanted the testable RAM path landed first.
+##            - ext4 still uses the default trim() no-op (no free-block-bitmap
+##              enumeration).  Proper fix: walk the ext4 block bitmaps (see
+##              fs/ext4/balloc.rs) for free runs and issue blkdev::discard,
+##              mirroring FatFs::trim_free_clusters.
+##
 ## TESTING:
 ##   - linux::self_test() at boot exercises: errno mapping (16 KernelError
 ##     variants); linux_from_native round-trip; unknown nr -> -ENOSYS;

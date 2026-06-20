@@ -2524,8 +2524,26 @@ client-side number correction:
   the root is mounted, since the in-`self_test()` checks run pre-mount) asserting
   `statfs("/")` returns 0 with a non-zero `f_type` + `f_namelen`; the pre-mount
   self-test keeps the NULL→EFAULT checks. Boot PASSED.
-- **diskutil trim**: still no `FS_TRIM`/discard syscall. diskutil's `trim`
-  remains an honest ENOSYS stub until a discard ABI lands.
+- **diskutil trim** — **RESOLVED 2026-06-20.** Built the full fstrim stack:
+  (1) a block-layer discard primitive — `BlockDevice::supports_discard()`/
+  `discard(start_lba, count)` (default not-supported) with a real
+  `RamBlockDevice` impl (zeroes the range, fully bounds/overflow-checked) and
+  registry helpers `blkdev::supports_discard()/discard()`; (2) `FileSystem::trim()`
+  (default no-op `Ok(0)`) + `FatFs::trim()` which walks the FAT, coalesces
+  contiguous free clusters into runs and issues `blkdev::discard` for each
+  (after `cache::invalidate_range` drops cached copies so stale free-space data
+  can't resurface) — **non-destructive**, only free blocks are touched;
+  (3) `FileSystem::device_name()` + `Vfs::trim_device(dev)` for device→mount
+  resolution; (4) `SYS_FS_TRIM` (656, root-only) wired to `Vfs::trim_device`,
+  returning bytes discarded; (5) `diskutil trim` issues the syscall and reports
+  the byte count. Three boot self-tests (block-layer discard, FAT fstrim via
+  `Vfs::trim_device`, unknown-device rejection) + 5 diskutil host tests. Boot
+  PASSED (fstrim discarded 4,160,512 bytes on a 4 MiB scratch volume).
+  **Follow-ups (TD18 residual):** virtio-blk does not yet negotiate
+  `VIRTIO_BLK_F_DISCARD`, so on real/virtio devices `supports_discard()` is
+  false and fstrim is a successful no-op (0 bytes) — discard only actually
+  fires on `RamBlockDevice` today; and ext4 still uses the default `trim()`
+  no-op (no free-block-bitmap enumeration yet). See todo.txt.
 - **chroot**: no `CHROOT`/`CHDIR`/`SETUID`/`SETGID`/`SETGROUPS` syscall — needs a
   real process-credential + filesystem-root ABI. **Already neutered** — `chroot`
   carries ENOSYS stubs and a comment about the earlier fake syscall numbers.

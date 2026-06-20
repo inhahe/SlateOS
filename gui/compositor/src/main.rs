@@ -46,6 +46,9 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 
+mod buffer;
+pub use buffer::{BufferFormat, SharedBuffer};
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -122,6 +125,10 @@ pub enum CompositorError {
     IpcError(String),
     /// Display configuration error.
     DisplayError(String),
+    /// A client supplied an invalid shared buffer (bad geometry/stride/size).
+    InvalidBuffer(String),
+    /// A client shared buffer exceeds the supported pixel cap.
+    BufferTooLarge { width: u32, height: u32 },
 }
 
 impl std::fmt::Display for CompositorError {
@@ -141,6 +148,12 @@ impl std::fmt::Display for CompositorError {
             Self::RenderError(msg) => write!(f, "render error: {}", msg),
             Self::IpcError(msg) => write!(f, "ipc error: {}", msg),
             Self::DisplayError(msg) => write!(f, "display error: {}", msg),
+            Self::InvalidBuffer(msg) => write!(f, "invalid shared buffer: {}", msg),
+            Self::BufferTooLarge { width, height } => write!(
+                f,
+                "shared buffer too large: {}x{} (max {}x{})",
+                width, height, MAX_FB_WIDTH, MAX_FB_HEIGHT
+            ),
         }
     }
 }
@@ -317,6 +330,10 @@ pub struct Window {
     pub client_pid: u64,
     /// The most recently submitted render tree from the client.
     pub render_tree: RenderTree,
+    /// An attached shared pixel buffer (DMA-BUF path). When `Some`, the
+    /// compositor blits these pixels into the client area instead of replaying
+    /// `render_tree`; the client renders directly into shared memory.
+    pub buffer: Option<SharedBuffer>,
     /// Position and size before maximizing (for restore).
     pub restore_rect: Option<Rect>,
     /// Whether the window needs to be redrawn.
@@ -341,6 +358,7 @@ impl Window {
             opacity: DEFAULT_OPACITY,
             client_pid,
             render_tree: RenderTree::new(),
+            buffer: None,
             restore_rect: None,
             dirty: true,
         }
@@ -2086,6 +2104,75 @@ impl Compositor {
     }
 
     // -----------------------------------------------------------------------
+    // Shared-buffer (DMA-BUF) surface path
+    // -----------------------------------------------------------------------
+
+    /// Import a client-shared pixel buffer and attach it to a window.
+    ///
+    /// While a buffer is attached, the compositor blits it directly into the
+    /// window's client area each frame instead of replaying the render tree.
+    /// The buffer is validated against hostile geometry by
+    /// [`SharedBuffer::import`].
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] if the window is gone, or any error
+    /// from [`SharedBuffer::import`] if the client's geometry is invalid.
+    pub fn attach_buffer(
+        &mut self,
+        window_id: WindowId,
+        handle: u64,
+        width: u32,
+        height: u32,
+        stride: u32,
+        format: BufferFormat,
+        bytes: &[u8],
+    ) -> CompositorResult<()> {
+        // Validate before touching window state so a bad buffer is a no-op.
+        let buffer = SharedBuffer::import(handle, width, height, stride, format, bytes)?;
+        let window = self
+            .window_mut(window_id)
+            .ok_or(CompositorError::WindowNotFound(window_id))?;
+        window.buffer = Some(buffer);
+        window.dirty = true;
+        self.damage_window(window_id);
+        Ok(())
+    }
+
+    /// Detach any shared buffer from a window, reverting to the render-tree
+    /// path. Returns the detached buffer's handle if one was attached.
+    pub fn detach_buffer(&mut self, window_id: WindowId) -> Option<u64> {
+        let handle = {
+            let window = self.window_mut(window_id)?;
+            let h = window.buffer.take().map(|b| b.handle());
+            if h.is_some() {
+                window.dirty = true;
+            }
+            h
+        };
+        if handle.is_some() {
+            self.damage_window(window_id);
+        }
+        handle
+    }
+
+    /// Drain the handles of all buffers the compositor has finished reading
+    /// since the last call, clearing their release flags. The IPC layer sends a
+    /// `wl_buffer.release`-style notification per handle so clients may reuse
+    /// the shared memory.
+    pub fn take_released_buffer_handles(&mut self) -> Vec<u64> {
+        let mut handles = Vec::new();
+        for window in &mut self.windows {
+            if let Some(buf) = window.buffer.as_mut()
+                && let Some(h) = buf.take_release()
+            {
+                handles.push(h);
+            }
+        }
+        handles
+    }
+
+    // -----------------------------------------------------------------------
     // Input routing
     // -----------------------------------------------------------------------
 
@@ -2509,12 +2596,14 @@ impl Compositor {
                     win.focused,
                     win.title.clone(),
                     win.render_tree.commands.clone(),
+                    win.buffer.is_some(),
                 )
             }
             _ => return,
         };
 
-        let (win_x, win_y, win_width, win_height, opacity, focused, title, commands) = win_data;
+        let (win_x, win_y, win_width, win_height, opacity, focused, title, commands, has_buffer) =
+            win_data;
 
         // 1. Draw window shadow.
         self.render_shadow(win_x, win_y, win_width, win_height, opacity);
@@ -2532,31 +2621,88 @@ impl Compositor {
             win_x, win_y, win_width, focused, &title, opacity,
         );
 
-        // 4. Fill client area background (white).
-        self.render_engine.fill_rect(
-            &mut self.framebuffer,
-            win_x,
-            win_y,
-            win_width,
-            win_height,
-            0xFF_FF_FF_FF,
-            opacity,
-        );
+        if has_buffer {
+            // Shared-buffer (DMA-BUF) path: blit the client's pixels directly.
+            // Disjoint field borrows: `windows` for the buffer, `framebuffer`
+            // for the destination — distinct fields, so this is sound.
+            if let Some(win) = self.windows.iter_mut().find(|w| w.id == window_id)
+                && let Some(buf) = win.buffer.as_mut()
+            {
+                Self::blit_buffer(
+                    &mut self.framebuffer,
+                    buf,
+                    win_x,
+                    win_y,
+                    win_width,
+                    win_height,
+                    opacity,
+                );
+                // The compositor is done reading this buffer for the frame;
+                // flag it for a wl_buffer.release-style notification.
+                buf.mark_released();
+            }
+        } else {
+            // 4. Fill client area background (white).
+            self.render_engine.fill_rect(
+                &mut self.framebuffer,
+                win_x,
+                win_y,
+                win_width,
+                win_height,
+                0xFF_FF_FF_FF,
+                opacity,
+            );
 
-        // 5. Execute client render commands.
-        self.render_engine.execute(
-            &mut self.framebuffer,
-            &commands,
-            win_x,
-            win_y,
-            win_width,
-            win_height,
-            opacity,
-        );
+            // 5. Execute client render commands.
+            self.render_engine.execute(
+                &mut self.framebuffer,
+                &commands,
+                win_x,
+                win_y,
+                win_width,
+                win_height,
+                opacity,
+            );
+        }
 
         // Mark window as no longer dirty.
         if let Some(win) = self.window_mut(window_id) {
             win.dirty = false;
+        }
+    }
+
+    /// Blit an attached shared buffer into a window's client area.
+    ///
+    /// The buffer is top-left aligned and clipped to the overlap of the buffer
+    /// dimensions and the client rectangle; pixels are alpha-blended through
+    /// `Framebuffer::blend_pixel` honoring the window opacity, so per-pixel
+    /// alpha (ARGB) and translucent windows both compose correctly. All writes
+    /// are bounds-checked and offscreen (negative) coordinates are skipped.
+    fn blit_buffer(
+        fb: &mut Framebuffer,
+        buf: &SharedBuffer,
+        win_x: i32,
+        win_y: i32,
+        win_width: u32,
+        win_height: u32,
+        opacity: f32,
+    ) {
+        let cols = buf.width().min(win_width);
+        let rows = buf.height().min(win_height);
+        for row in 0..rows {
+            let sy = win_y.saturating_add(row as i32);
+            if sy < 0 {
+                continue;
+            }
+            for col in 0..cols {
+                let sx = win_x.saturating_add(col as i32);
+                if sx < 0 {
+                    continue;
+                }
+                if let Some(px) = buf.pixel(col, row) {
+                    fb.blend_pixel(sx as u32, sy as u32, px, opacity);
+                }
+            }
         }
     }
 
@@ -3417,6 +3563,98 @@ mod tests {
         assert!(comp.submit_render(id, commands).is_ok());
         // Compose should succeed with the submitted content.
         assert!(comp.compose_frame());
+    }
+
+    /// Build `w*h` tightly-packed (stride = w*4) ARGB bytes all of `color`.
+    fn solid_buffer_bytes(w: u32, h: u32, color: u32) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity((w * h * 4) as usize);
+        for _ in 0..(w * h) {
+            bytes.extend_from_slice(&color.to_le_bytes());
+        }
+        bytes
+    }
+
+    #[test]
+    fn test_attach_buffer_blits_pixels() {
+        let mut comp = Compositor::new(400, 300, 60).unwrap();
+        // First window: client area lands at (100, 80).
+        let id = comp.create_window("Buf".to_string(), 8, 8, 1);
+
+        let color = 0xFF11_2233u32;
+        let bytes = solid_buffer_bytes(4, 4, color);
+        assert!(comp
+            .attach_buffer(id, 55, 4, 4, 16, BufferFormat::Argb8888, &bytes)
+            .is_ok());
+        assert!(comp.compose_frame());
+
+        // The 4x4 buffer should have been blitted at the client origin (100,80).
+        let front = comp.framebuffer.front_buffer();
+        let stride = 400usize;
+        assert_eq!(front[80 * stride + 100], color, "buffer top-left pixel");
+        assert_eq!(front[83 * stride + 103], color, "buffer bottom-right pixel");
+        // Beyond the 4x4 buffer (within the 8x8 client area) is NOT buffer
+        // content — the client owns its surface, uncovered area stays cleared.
+        assert_ne!(front[80 * stride + 106], color, "outside buffer extent");
+    }
+
+    #[test]
+    fn test_attach_buffer_rejects_bad_geometry() {
+        let mut comp = Compositor::new(400, 300, 60).unwrap();
+        let id = comp.create_window("Buf".to_string(), 8, 8, 1);
+
+        // Stride too small for width 4 (needs 16 bytes/row).
+        let bytes = vec![0u8; 64];
+        assert!(matches!(
+            comp.attach_buffer(id, 1, 4, 4, 8, BufferFormat::Argb8888, &bytes),
+            Err(CompositorError::InvalidBuffer(_))
+        ));
+        // The failed attach must leave the window on the render-tree path.
+        assert!(comp.window_ref(id).unwrap().buffer.is_none());
+    }
+
+    #[test]
+    fn test_attach_buffer_window_not_found() {
+        let mut comp = Compositor::new(400, 300, 60).unwrap();
+        let bytes = solid_buffer_bytes(2, 2, 0xFFFFFFFF);
+        assert!(matches!(
+            comp.attach_buffer(WindowId(424242), 1, 2, 2, 8, BufferFormat::Argb8888, &bytes),
+            Err(CompositorError::WindowNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn test_detach_buffer_reverts_to_commands() {
+        let mut comp = Compositor::new(400, 300, 60).unwrap();
+        let id = comp.create_window("Buf".to_string(), 8, 8, 1);
+        let bytes = solid_buffer_bytes(4, 4, 0xFF00FF00);
+
+        assert!(comp
+            .attach_buffer(id, 77, 4, 4, 16, BufferFormat::Argb8888, &bytes)
+            .is_ok());
+        assert!(comp.window_ref(id).unwrap().buffer.is_some());
+
+        assert_eq!(comp.detach_buffer(id), Some(77));
+        assert!(comp.window_ref(id).unwrap().buffer.is_none());
+        // Detaching again returns None (nothing attached).
+        assert_eq!(comp.detach_buffer(id), None);
+    }
+
+    #[test]
+    fn test_buffer_release_notification() {
+        let mut comp = Compositor::new(400, 300, 60).unwrap();
+        let id = comp.create_window("Buf".to_string(), 8, 8, 1);
+        let bytes = solid_buffer_bytes(4, 4, 0xFF334455);
+
+        assert!(comp
+            .attach_buffer(id, 0xABCD, 4, 4, 16, BufferFormat::Argb8888, &bytes)
+            .is_ok());
+        // Before compositing, nothing has been read yet.
+        assert!(comp.take_released_buffer_handles().is_empty());
+
+        assert!(comp.compose_frame());
+        // After compositing, the buffer is released exactly once.
+        assert_eq!(comp.take_released_buffer_handles(), vec![0xABCD]);
+        assert!(comp.take_released_buffer_handles().is_empty());
     }
 
     #[test]

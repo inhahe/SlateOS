@@ -3397,10 +3397,6 @@ name = "fsck"
 version = "0.1.0"
 
 [[package]]
-name = "fsck-cli"
-version = "0.1.0"
-
-[[package]]
 name = "fscrypt"
 version = "0.1.0"
 
@@ -6339,10 +6335,6 @@ name = "mkfs"
 version = "0.1.0"
 
 [[package]]
-name = "mkfs-cli"
-version = "0.1.0"
-
-[[package]]
 name = "mkinitcpio-cli"
 version = "0.1.0"
 
@@ -6472,10 +6464,6 @@ version = "0.1.0"
 
 [[package]]
 name = "mount"
-version = "0.1.0"
-
-[[package]]
-name = "mount-cli"
 version = "0.1.0"
 
 [[package]]

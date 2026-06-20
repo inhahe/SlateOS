@@ -706,6 +706,16 @@ pub trait FileSystem: Send {
         })
     }
 
+    /// Name of the block device backing this filesystem, if any.
+    ///
+    /// Disk-backed filesystems (FAT, ext4) return the registry name of their
+    /// device (e.g. `"vda"`); virtual filesystems (procfs, sysfs, devfs,
+    /// memfs) return `None`.  Used by the device-oriented `fstrim` entry point
+    /// to find the mount backed by a given device.
+    fn device_name(&self) -> Option<&str> {
+        None
+    }
+
     /// Discard (TRIM) the filesystem's free space on the backing device.
     ///
     /// Walks the free-space metadata and issues
@@ -2653,6 +2663,28 @@ impl Vfs {
             return Ok(0);
         }
         mp.fs.trim()
+    }
+
+    /// Discard (TRIM) the free space of the filesystem backed by `device`.
+    ///
+    /// Finds the mount whose backing block device is `device` (e.g. `"vda"`)
+    /// and trims its free space (the kernel side of `fstrim` invoked by
+    /// device name rather than mount path).  Returns the number of bytes
+    /// discarded.  A read-only mount is a no-op (`Ok(0)`).  Returns
+    /// [`KernelError::NotFound`] if no mounted filesystem is backed by that
+    /// device — fstrim needs the free-space metadata of a live mount, so an
+    /// unmounted device cannot be trimmed this way.
+    pub fn trim_device(device: &str) -> KernelResult<u64> {
+        let mut vfs = VFS.lock();
+        for mp in vfs.mounts.iter_mut() {
+            if mp.fs.device_name() == Some(device) {
+                if mp.options.read_only {
+                    return Ok(0);
+                }
+                return mp.fs.trim();
+            }
+        }
+        Err(KernelError::NotFound)
     }
 
     /// List all mount points with their filesystem info.

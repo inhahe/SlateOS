@@ -243,6 +243,23 @@ fn require_fsck_authority() -> Result<(), KernelError> {
     require_root_authority()
 }
 
+/// Check that the calling process is privileged enough to discard (TRIM) the
+/// free space of a mounted filesystem (`SYS_FS_TRIM`).
+///
+/// fstrim issues device-level discard for free blocks — a
+/// `CAP_SYS_ADMIN`-class operation that maps to root (uid 0) on our
+/// user/group model.  Kept distinct from [`require_fsck_authority`] so a
+/// future storage daemon could be granted trim-but-not-fsck rights.
+///
+/// Kernel tasks (no owning process, or PID 0) bypass the check.
+///
+/// # Errors
+///
+/// - `PermissionDenied` — the calling process is not root.
+fn require_trim_authority() -> Result<(), KernelError> {
+    require_root_authority()
+}
+
 // ---------------------------------------------------------------------------
 // Kernel-core handlers (0–199)
 // ---------------------------------------------------------------------------
@@ -6139,6 +6156,41 @@ pub fn sys_fs_check(args: &SyscallArgs) -> SyscallResult {
             };
             SyscallResult::ok(i64::from(outstanding))
         }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_TRIM` — discard the free space of a mounted filesystem (fstrim).
+///
+/// ABI: `arg0`/`arg1` = device-name ptr+len (the block-device registry name,
+/// e.g. "vda" — **not** a `/dev/` path).
+///
+/// Root-only.  Locates the mounted filesystem backed by the named device and
+/// trims its free space.  Returns (as a non-negative success value) the number
+/// of bytes discarded; 0 if the filesystem cannot trim (e.g. the backing
+/// device does not support discard).  A negative return is a `KernelError`
+/// (e.g. the device is not mounted, or the name is invalid).
+pub fn sys_fs_trim(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_trim_authority() {
+        return SyscallResult::err(e);
+    }
+
+    // Device name is mandatory.
+    if args.arg1 == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    let mut dev_buf = [0u8; 64];
+    let device = match read_user_str(args.arg0, args.arg1 as usize, 64, &mut dev_buf) {
+        Ok(s) => s,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    match crate::fs::Vfs::trim_device(device) {
+        // Clamp to i64::MAX rather than overflow the signed return; a discard
+        // larger than 8 EiB is not physically reachable, so this never loses
+        // real information.
+        Ok(bytes) => SyscallResult::ok(i64::try_from(bytes).unwrap_or(i64::MAX)),
         Err(e) => SyscallResult::err(e),
     }
 }

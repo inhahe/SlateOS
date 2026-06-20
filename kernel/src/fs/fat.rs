@@ -2965,6 +2965,10 @@ impl FileSystem for FatFs {
         })
     }
 
+    fn device_name(&self) -> Option<&str> {
+        Some(&self.device_name)
+    }
+
     fn trim(&mut self) -> KernelResult<u64> {
         self.trim_free_clusters()
     }
@@ -5703,8 +5707,10 @@ pub fn trim_self_test() -> KernelResult<()> {
     serial_println!("[fat] Running fstrim self-test...");
 
     let dev = "trimtest0";
+    let mp = "/_trim_selftest";
 
     // Clean up any leftovers from a previous run.
+    let _ = crate::fs::Vfs::unmount(mp);
     let _ = crate::fs::cache::invalidate(dev);
     let _ = crate::blkdev::unregister(dev);
 
@@ -5713,6 +5719,11 @@ pub fn trim_self_test() -> KernelResult<()> {
 
     let result = (|| -> KernelResult<()> {
         mkfs_fat(dev, Some("TRIMTEST"))?;
+
+        // Mount the formatted volume so the device→mount resolution used by
+        // SYS_FS_TRIM (via Vfs::trim_device) is exercised end-to-end.
+        let fs = FatFs::mount(dev)?;
+        crate::fs::Vfs::mount(mp, alloc::boxed::Box::new(fs))?;
 
         // Poison a high data-area sector (well past metadata, certainly inside
         // a free cluster on an empty volume) with 0xAB, written straight to the
@@ -5729,9 +5740,8 @@ pub fn trim_self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
-        // Mount and run fstrim.
-        let mut fs = FatFs::mount(dev)?;
-        let discarded = fs.trim()?;
+        // Run fstrim by device name — the same call the syscall makes.
+        let discarded = crate::fs::Vfs::trim_device(dev)?;
         serial_println!("[fat]   fstrim discarded {} bytes", discarded);
         if discarded == 0 {
             serial_println!("[fat]   FAIL: trim discarded nothing on a near-empty volume");
@@ -5749,10 +5759,18 @@ pub fn trim_self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
+        // Trimming an unmounted/unknown device must be reported, not silently
+        // succeed.
+        if crate::fs::Vfs::trim_device("nosuchdev0").is_ok() {
+            serial_println!("[fat]   FAIL: trim of unknown device unexpectedly succeeded");
+            return Err(KernelError::InternalError);
+        }
+
         Ok(())
     })();
 
     // Tear down regardless of outcome.
+    let _ = crate::fs::Vfs::unmount(mp);
     let _ = crate::fs::cache::invalidate(dev);
     let _ = crate::blkdev::unregister(dev);
 

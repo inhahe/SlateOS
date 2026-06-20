@@ -43,7 +43,7 @@ use super::number::{
     SYS_FS_COPY, SYS_FS_APPEND, SYS_FS_FTRUNCATE, SYS_FS_DUP, SYS_FS_HANDLE_PATH,
     SYS_FS_READDIR_AT, SYS_FS_TMPFILE,
     SYS_FS_FALLOCATE, SYS_FS_SEEK_DATA, SYS_FS_SEEK_HOLE,
-    SYS_FS_MOUNT, SYS_FS_UMOUNT, SYS_FS_FORMAT, SYS_FS_CHECK,
+    SYS_FS_MOUNT, SYS_FS_UMOUNT, SYS_FS_FORMAT, SYS_FS_CHECK, SYS_FS_TRIM,
     SYS_FS_WRITE_FILE,
     SYS_FS_OPEN, SYS_FS_CLOSE, SYS_FS_READ, SYS_FS_WRITE,
     SYS_FS_SEEK, SYS_FS_TRUNCATE, SYS_FS_RENAME, SYS_FS_FSTAT,
@@ -459,6 +459,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_FS_UMOUNT as usize] = Some(handlers::sys_fs_umount);
     handlers[SYS_FS_FORMAT as usize] = Some(handlers::sys_fs_format);
     handlers[SYS_FS_CHECK as usize] = Some(handlers::sys_fs_check);
+    handlers[SYS_FS_TRIM as usize] = Some(handlers::sys_fs_trim);
 
     // Filesystem — handle-based (610–699).
     handlers[SYS_FS_OPEN as usize] = Some(handlers::sys_fs_open);

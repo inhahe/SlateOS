@@ -2044,6 +2044,21 @@ pub const SYS_FS_FORMAT: u64 = 654;
 /// the volume is not a recognised FAT filesystem).
 pub const SYS_FS_CHECK: u64 = 655;
 
+/// Discard (TRIM) the free space of a mounted filesystem (fstrim).
+///
+/// `arg0`: pointer to block-device name string (e.g. "vda"; a leading
+///         "/dev/" is accepted and stripped by the userspace tool).
+/// `arg1`: device name length (bytes).
+///
+/// Root-only (requires disk-administration authority). Finds the mounted
+/// filesystem backed by the named device and issues discard for every run of
+/// free blocks (non-destructive — only free space is trimmed, live file data
+/// is never touched). Returns, as a non-negative value, the number of bytes
+/// discarded (0 if the device's filesystem cannot trim, e.g. the backing
+/// device does not support discard). A negative return is a `KernelError`
+/// (e.g. the device is not mounted, or the name is invalid).
+pub const SYS_FS_TRIM: u64 = 656;
+
 /// Open a file and return a handle.
 ///
 /// `arg0`: pointer to path string.

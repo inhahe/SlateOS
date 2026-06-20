@@ -172,6 +172,38 @@ fn require_clock_authority() -> Result<(), KernelError> {
     }
 }
 
+/// Check that the calling process is privileged enough to mount or unmount
+/// filesystems (`SYS_FS_MOUNT` / `SYS_FS_UMOUNT`).
+///
+/// Mounting changes the global filesystem namespace: it can shadow existing
+/// paths, expose attacker-controlled on-disk data at a trusted location, or
+/// hide files from other processes.  In POSIX terms this requires
+/// `CAP_SYS_ADMIN`, which on our system maps to running as root (uid 0).
+///
+/// Kernel tasks (no owning process, or PID 0) bypass the check, mirroring
+/// [`require_cap_type`] and [`require_clock_authority`].
+///
+/// # Errors
+///
+/// - `PermissionDenied` — the calling process is not root.
+fn require_mount_authority() -> Result<(), KernelError> {
+    let pid = match caller_pid() {
+        Some(pid) => pid,
+        None => return Ok(()), // Bare kernel task — bypass.
+    };
+    if pid == 0 {
+        return Ok(()); // Kernel process — implicit authority.
+    }
+    match crate::proc::pcb::get_credentials(pid) {
+        // Only root may change the mount namespace.
+        Some(creds) if creds.is_root() => Ok(()),
+        // A live, non-root process: deny.
+        Some(_) => Err(KernelError::PermissionDenied),
+        // No credentials record (process exited out from under us): fail closed.
+        None => Err(KernelError::PermissionDenied),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Kernel-core handlers (0–199)
 // ---------------------------------------------------------------------------
@@ -5849,6 +5881,126 @@ pub fn sys_fs_rename(args: &SyscallArgs) -> SyscallResult {
     };
 
     match crate::fs::Vfs::rename(from_path, to_path) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// Read and validate a user-space string argument (ptr + len pair).
+///
+/// Clamps the length to `max_len` bytes, validates the user read, and
+/// decodes as UTF-8.  Returns an empty string when `len == 0` (used for
+/// the optional source/device argument of pseudo-filesystems).
+///
+/// # Errors
+///
+/// - `InvalidArgument` — null pointer with non-zero length, or invalid UTF-8.
+/// - Any error from [`crate::mm::user::validate_user_read`].
+fn read_user_str<'a>(
+    ptr_arg: u64,
+    len: usize,
+    max_len: usize,
+    buf: &'a mut [u8],
+) -> Result<&'a str, KernelError> {
+    if len == 0 {
+        return Ok("");
+    }
+    let ptr = ptr_arg as *const u8;
+    if ptr.is_null() {
+        return Err(KernelError::InvalidArgument);
+    }
+    let safe_len = len.min(max_len);
+    crate::mm::user::validate_user_read(ptr_arg, safe_len)?;
+    // SAFETY: validated above for `safe_len` bytes in user space.
+    let src = unsafe { core::slice::from_raw_parts(ptr, safe_len) };
+    let dst = match buf.get_mut(..safe_len) {
+        Some(d) => d,
+        None => return Err(KernelError::InvalidArgument),
+    };
+    dst.copy_from_slice(src);
+    core::str::from_utf8(dst).map_err(|_| KernelError::InvalidArgument)
+}
+
+/// `SYS_FS_MOUNT` — mount a filesystem at a target path.
+///
+/// Root-only.  Dispatches on the filesystem-type string to the matching
+/// in-kernel backend.  All six argument slots are consumed by three
+/// string pairs (source, target, fstype); mount flags are deferred to a
+/// future versioned extension.
+pub fn sys_fs_mount(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_mount_authority() {
+        return SyscallResult::err(e);
+    }
+
+    // Target and fstype are mandatory; source may be empty (pseudo-fs).
+    if args.arg3 == 0 || args.arg5 == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    let mut src_buf = [0u8; 256];
+    let mut tgt_buf = [0u8; 256];
+    let mut fst_buf = [0u8; 64];
+
+    let source = match read_user_str(args.arg0, args.arg1 as usize, 256, &mut src_buf)
+    {
+        Ok(s) => s,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let target = match read_user_str(args.arg2, args.arg3 as usize, 256, &mut tgt_buf)
+    {
+        Ok(s) => s,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let fstype = match read_user_str(args.arg4, args.arg5 as usize, 64, &mut fst_buf)
+    {
+        Ok(s) => s,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    let result = match fstype {
+        "ext4" => crate::fs::ext4::mount(source, target),
+        "tmpfs" | "memfs" | "ramfs" => crate::fs::memfs::mount(target),
+        "iso9660" | "iso" | "cd9660" => crate::fs::iso9660::mount(source, target),
+        "devfs" | "dev" => crate::fs::devfs::mount(target),
+        "proc" | "procfs" => crate::fs::procfs::mount(target),
+        "sysfs" | "sys" => crate::fs::sysfs::mount(target),
+        "vfat" | "fat" | "fat32" | "fat16" | "msdos" => {
+            match crate::fs::fat::FatFs::mount(source) {
+                Ok(fs) => crate::fs::Vfs::mount(target, alloc::boxed::Box::new(fs)),
+                Err(e) => Err(e),
+            }
+        }
+        // Unknown filesystem type.
+        _ => Err(KernelError::NotSupported),
+    };
+
+    match result {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_UMOUNT` — unmount the filesystem at a target path.
+///
+/// Root-only.  Refuses to unmount the root filesystem and refuses if
+/// sub-mounts exist beneath the target (`DeviceBusy`).
+pub fn sys_fs_umount(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_mount_authority() {
+        return SyscallResult::err(e);
+    }
+
+    if args.arg1 == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    let mut tgt_buf = [0u8; 256];
+    let target = match read_user_str(args.arg0, args.arg1 as usize, 256, &mut tgt_buf)
+    {
+        Ok(s) => s,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    match crate::fs::Vfs::unmount(target) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }

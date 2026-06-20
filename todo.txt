@@ -9530,6 +9530,39 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          #[cfg(test)] unit test added; boot PASSED.  TD30 now FULLY resolved
 ##          with no remaining gaps.
 ##
+##      Increment I (mount/umount native ABI — TD18 mount/umount sub-item):
+##          DONE.  Added two native syscalls: SYS_FS_MOUNT=652 and
+##          SYS_FS_UMOUNT=653 (kernel/src/syscall/number.rs, doc-commented;
+##          registered in dispatch.rs; handlers in handlers.rs).  SYS_FS_MOUNT
+##          takes three ptr+len string pairs (source/target/fstype, consuming
+##          all six arg slots -> mount flags deferred to a future versioned
+##          extension) and dispatches on the fstype string to the existing
+##          kernel fs backends: ext4 / tmpfs|memfs|ramfs / iso9660 / devfs /
+##          proc|procfs / sysfs / vfat|fat|fat32|fat16|msdos.  SYS_FS_UMOUNT
+##          takes target ptr+len and calls Vfs::unmount (which refuses "/" and
+##          refuses busy mounts with sub-mounts).  Both root-gated via a new
+##          require_mount_authority() helper (mirrors require_clock_authority,
+##          keyed on creds.is_root(); kernel/PID-0 tasks bypass).  A shared
+##          read_user_str() helper validates+copies+UTF-8-decodes each user
+##          string (clamped to 256/64 bytes).  Boot self-test:
+##          fs::vfs::mount_self_test() runs unconditionally (called from
+##          main.rs in the virtual-fs self-test section, NOT inside the
+##          fat_ok-gated block) — mounts a scratch tmpfs at /_mount_selftest,
+##          does a write/read roundtrip, confirms unmount("/") is refused,
+##          unmounts, verifies it's gone; boot PASSED (serial shows all OK).
+##          Userspace: userspace/mount now issues the real syscalls via a
+##          syscall6 inline-asm helper instead of returning ENOSYS;
+##          canonical_fstype() maps user fstype names -> kernel fstypes (auto
+##          -> None, since the kernel has no auto-detect), bind/remount are
+##          rejected (ABI carries no flags), other options warn "not yet
+##          honoured".  kernel_errstr() maps negative kernel codes to messages.
+##          Old ENOSYS tests replaced with helper unit tests; cargo test -p
+##          mount --target x86_64-pc-windows-gnu -> 6 pass.  RESIDUAL: the
+##          separate userspace/mount-cli demo tool STILL prints fabricated
+##          mount listings and fake-succeeds without any syscall — should be
+##          rewired to the real ABI or deleted (it duplicates mount); logged in
+##          known-issues TD18 mount/umount sub-item.
+##
 ## TESTING:
 ##   - linux::self_test() at boot exercises: errno mapping (16 KernelError
 ##     variants); linux_from_native round-trip; unknown nr -> -ENOSYS;

@@ -1222,6 +1222,11 @@ extern "C" fn kernel_main() -> ! {
     if let Err(e) = fs::sysfs::self_test() {
         serial_println!("WARNING: SysFs self-test failed: {:?}", e);
     }
+    // Mount/unmount self-test (exercises the SYS_FS_MOUNT/SYS_FS_UMOUNT
+    // backend dispatch on a scratch tmpfs mount — runs on any root).
+    if let Err(e) = fs::vfs::mount_self_test() {
+        serial_println!("WARNING: VFS mount/unmount self-test failed: {:?}", e);
+    }
 
     // End-to-end dynamically-linked Linux launch test (needs a writable VFS,
     // so it runs here rather than in proc::self_test() which precedes VFS

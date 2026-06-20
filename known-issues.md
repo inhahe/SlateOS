@@ -2422,10 +2422,27 @@ client-side number correction:
   fails. The intended operation never happens either way. **Write-path harm
   neutered 2026-06-14** for all six net-config tools (`ifconfig`/`ip`/`route`
   then `dhcpcd`/`fw`/`nft`) — see the dedicated bullets below.
-- **mount/umount**: no `MOUNT`/`UMOUNT` syscall (620/621 are
-  `FS_TRASH_RESTORE`/`FS_TRASH_EMPTY`). **Already neutered** — `mount`/`umount`
-  carry an explicit comment about the 620/621 trash-syscall aliasing and return
-  ENOSYS rather than issuing it.
+- **mount/umount**: **RESOLVED 2026-06-20.** Real native syscalls now exist —
+  `SYS_FS_MOUNT=652` and `SYS_FS_UMOUNT=653` (`kernel/src/syscall/number.rs`),
+  dispatched in `dispatch.rs`, handled in `handlers.rs`
+  (`sys_fs_mount`/`sys_fs_umount`, root-gated via `require_mount_authority`).
+  `SYS_FS_MOUNT` takes three ptr+len string pairs (source/target/fstype —
+  consuming all six arg slots, so mount *flags* are deferred to a future
+  versioned extension) and dispatches on the fstype string to the existing
+  in-kernel backends (ext4/tmpfs(memfs)/iso9660/devfs/proc/sysfs/vfat).
+  `SYS_FS_UMOUNT` takes target ptr+len and refuses `/` and busy mounts. Kernel
+  boot self-test: `fs::vfs::mount_self_test()` (mounts a scratch tmpfs at
+  `/_mount_selftest`, write/read roundtrip, confirms `/` is unmountable-refused,
+  unmounts) — runs unconditionally on any root. The `userspace/mount` tool now
+  issues these real syscalls (via a `syscall6` inline-asm helper) instead of
+  returning ENOSYS; `canonical_fstype` maps user fstype names to kernel
+  fstypes, bind/remount are rejected (unsupported by the ABI), and mount
+  options emit a "not yet honoured" warning. Host unit tests: `cargo test -p
+  mount --target x86_64-pc-windows-gnu` (6 pass). **Remaining note:** the
+  separate `userspace/mount-cli` demo tool still prints *fabricated* mount
+  listings and pretends mount/umount succeed without issuing any syscall — it
+  should be rewired to the real ABI or removed (it duplicates `mount`); tracked
+  as a residual sub-item here.
 - **mkfs/fsck/diskutil**: no `FS_FORMAT`/`FS_VERIFY`/`FS_REPAIR`/`FS_TRIM`
   syscall (650–655 are `SEEK_DATA`/`SEEK_HOLE` + unassigned). **Format-path
   aliasing neutered 2026-06-14** — `mkfs` and `diskutil` defined

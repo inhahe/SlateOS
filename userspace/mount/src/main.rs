@@ -22,54 +22,193 @@ use std::fs;
 use std::process;
 
 // ============================================================================
-// DESIGN GAP -- mount/umount have no kernel ABI yet
+// Native mount/umount ABI
 // ============================================================================
 //
-// The Slate OS kernel does **not** expose mount(2) or umount(2) syscalls. There
-// is no SYS_MOUNT or SYS_UMOUNT in kernel/src/syscall/number.rs.
+// The Slate OS kernel exposes two native syscalls for filesystem namespace
+// management (see kernel/src/syscall/number.rs):
 //
-// An earlier version of this file hardcoded SYS_MOUNT=620 and SYS_UMOUNT=621
-// and fired them via a raw `syscall` instruction. Both numbers map to
-// **DESTRUCTIVE** unrelated filesystem syscalls on SlateOS:
+//   * SYS_FS_MOUNT  = 652  — mount a filesystem at a target path.
+//       arg0/arg1 = source/device string ptr+len (may be empty for pseudo-fs)
+//       arg2/arg3 = target mount-point path ptr+len
+//       arg4/arg5 = filesystem-type string ptr+len
+//     All six argument slots are consumed by the three string pairs, so mount
+//     flags/options are not yet part of the ABI (deferred to a versioned
+//     extension). Root-only.
 //
-//   * 620 = SYS_FS_TRASH_RESTORE — "mount /dev/sda1 /mnt" would call
-//     fs::trash::restore(low_bits_of_src_ptr_as_filename_ptr, ...) and
-//     attempt to restore a file from the trash bin using arbitrary
-//     filename bytes.
-//   * 621 = SYS_FS_TRASH_EMPTY — "umount /mnt" would call
-//     fs::trash::empty(), **permanently deleting every file currently
-//     in the user's recycle bin**. This is catastrophic data loss
-//     gated only by a File-WRITE capability, which every admin tool
-//     already holds. A sysadmin running `umount /mnt` to clear a stuck
-//     mount would silently nuke the trash without warning.
+//   * SYS_FS_UMOUNT = 653  — unmount the filesystem at a target path.
+//       arg0/arg1 = target mount-point path ptr+len
+//     Refuses to unmount "/" and refuses if sub-mounts exist (DeviceBusy).
+//     Root-only.
 //
-// The safe and correct interim behavior is to fail with a clear "not
-// implemented" error. The tool stays in the tree so it's ready when the
-// kernel ABI lands. See todo.txt for the tracking entry.
+// An earlier version of this file collided with the trash syscalls (620/621);
+// those numbers are NOT used here. The real syscalls above are issued via the
+// native SYSCALL convention (rax=nr, rdi/rsi/rdx/r10/r8/r9 = arg0..arg5).
 
-/// Stub return for every mount/umount operation in this tool.
-#[inline]
-fn enosys(op: &str) -> Result<(), String> {
-    Err(format!(
-        "{op}: not implemented in this kernel \
-         (no SYS_MOUNT / SYS_UMOUNT ABI yet)"
-    ))
+/// `SYS_FS_MOUNT` — mount a filesystem at a target path.
+const SYS_FS_MOUNT: u64 = 652;
+
+/// `SYS_FS_UMOUNT` — unmount the filesystem at a target path.
+const SYS_FS_UMOUNT: u64 = 653;
+
+/// Translate a negative kernel error code into a human-readable message.
+fn kernel_errstr(code: i64) -> &'static str {
+    match code {
+        -2 => "operation not supported (unknown or unsupported filesystem type)",
+        -3 => "invalid argument",
+        -400 => "permission denied (mount/umount require root)",
+        -500 => "no such file or directory",
+        -501 => "already mounted / target exists",
+        -601 => "no such device",
+        -602 => "device busy (in use or has sub-mounts)",
+        -509 => "read-only filesystem",
+        _ => "mount operation failed",
+    }
 }
 
-/// Mount a filesystem.
+/// Invoke a 6-argument native syscall via inline x86_64 assembly.
 ///
-/// **Currently fails with ENOSYS-equivalent.** See the DESIGN GAP block
-/// above for why the previous implementation was removed.
+/// Uses the SlateOS native SYSCALL convention: number in `rax`, arguments in
+/// `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9`. `rcx`/`r11` are clobbered by the
+/// `syscall` instruction itself.
+#[cfg(target_arch = "x86_64")]
+unsafe fn syscall6(
+    nr: u64,
+    a1: u64,
+    a2: u64,
+    a3: u64,
+    a4: u64,
+    a5: u64,
+    a6: u64,
+) -> i64 {
+    let ret: i64;
+    // SAFETY: the caller guarantees that any pointer arguments reference
+    // live, correctly-sized buffers for the duration of the call. The kernel
+    // validates all user pointers before dereferencing them.
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            inlateout("rax") nr as i64 => ret,
+            in("rdi") a1,
+            in("rsi") a2,
+            in("rdx") a3,
+            in("r10") a4,
+            in("r8") a5,
+            in("r9") a6,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+/// Map a kernel fstype hint to the canonical string the kernel mount
+/// dispatcher recognises. Returns `None` for "auto"/unknown — the kernel
+/// has no auto-detection, so the caller must specify a type.
+fn canonical_fstype(fstype: &str) -> Option<&'static str> {
+    match fstype {
+        "ext4" => Some("ext4"),
+        "tmpfs" | "ramfs" | "memfs" => Some("tmpfs"),
+        "iso9660" | "iso" | "cd9660" | "udf" => Some("iso9660"),
+        "devfs" | "dev" => Some("devfs"),
+        "proc" | "procfs" => Some("proc"),
+        "sysfs" | "sys" => Some("sysfs"),
+        "vfat" | "fat" | "fat32" | "fat16" | "msdos" => Some("vfat"),
+        _ => None,
+    }
+}
+
+/// Mount a filesystem via `SYS_FS_MOUNT`.
+///
+/// `flags`/`data` are accepted for command-line compatibility but the kernel
+/// ABI does not yet carry mount options, so unsupported flags (bind, remount)
+/// are rejected up front rather than silently ignored.
+#[cfg(target_arch = "x86_64")]
+fn do_mount(source: &str, target: &str, fstype: &str, flags: u64, _data: &str) -> Result<(), String> {
+    if flags & MS_BIND != 0 {
+        return Err("mount: bind mounts are not supported by the kernel ABI".to_string());
+    }
+    if flags & MS_REMOUNT != 0 {
+        return Err("mount: remount is not supported by the kernel ABI".to_string());
+    }
+    if flags & (MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC) != 0 {
+        eprintln!(
+            "mount: warning: mount options are not yet honoured by the kernel \
+             (mounting read-write)"
+        );
+    }
+
+    let kfstype = match canonical_fstype(fstype) {
+        Some(t) => t,
+        None => {
+            return Err(format!(
+                "mount: cannot determine filesystem type '{fstype}' \
+                 (the kernel has no auto-detection; specify -t <type>: \
+                 ext4, vfat, iso9660, tmpfs, proc, sysfs, devfs)"
+            ));
+        }
+    };
+
+    // Pseudo-filesystems ignore the source; pass it through regardless so a
+    // device-backed fs (ext4/vfat/iso9660) receives its block-device name.
+    let src = source.as_bytes();
+    let tgt = target.as_bytes();
+    let fst = kfstype.as_bytes();
+
+    // SAFETY: all three slices stay live across the call; the kernel validates
+    // each pointer+length before reading user memory.
+    let ret = unsafe {
+        syscall6(
+            SYS_FS_MOUNT,
+            src.as_ptr() as u64,
+            src.len() as u64,
+            tgt.as_ptr() as u64,
+            tgt.len() as u64,
+            fst.as_ptr() as u64,
+            fst.len() as u64,
+        )
+    };
+
+    if ret < 0 {
+        return Err(format!("mount: {} (code {ret})", kernel_errstr(ret)));
+    }
+    Ok(())
+}
+
+/// Unmount a filesystem via `SYS_FS_UMOUNT`.
+///
+/// `flags` (force/lazy) are accepted for command-line compatibility but the
+/// kernel performs a plain unmount; force/lazy semantics are not yet wired.
+#[cfg(target_arch = "x86_64")]
+fn do_umount(target: &str, flags: u64) -> Result<(), String> {
+    if flags & (MNT_FORCE | MNT_DETACH) != 0 {
+        eprintln!("umount: warning: force/lazy unmount not supported; performing a normal unmount");
+    }
+
+    let tgt = target.as_bytes();
+    // SAFETY: `tgt` stays live across the call; the kernel validates the
+    // pointer+length before reading user memory.
+    let ret = unsafe {
+        syscall6(SYS_FS_UMOUNT, tgt.as_ptr() as u64, tgt.len() as u64, 0, 0, 0, 0)
+    };
+
+    if ret < 0 {
+        return Err(format!("umount: {} (code {ret})", kernel_errstr(ret)));
+    }
+    Ok(())
+}
+
+/// Host build fallback: the native mount syscall cannot run off-target.
+#[cfg(not(target_arch = "x86_64"))]
 fn do_mount(_source: &str, _target: &str, _fstype: &str, _flags: u64, _data: &str) -> Result<(), String> {
-    enosys("mount")
+    Err("mount: native syscall unavailable on this host architecture".to_string())
 }
 
-/// Unmount a filesystem.
-///
-/// **Currently fails with ENOSYS-equivalent.** See the DESIGN GAP block
-/// above for why the previous implementation was removed.
+/// Host build fallback: the native umount syscall cannot run off-target.
+#[cfg(not(target_arch = "x86_64"))]
 fn do_umount(_target: &str, _flags: u64) -> Result<(), String> {
-    enosys("umount")
+    Err("umount: native syscall unavailable on this host architecture".to_string())
 }
 
 // ============================================================================
@@ -447,22 +586,30 @@ fn main() {
 mod tests {
     use super::*;
 
-    // Confirm mount/umount fail safely instead of firing the destructive
-    // SYS_FS_TRASH_RESTORE / SYS_FS_TRASH_EMPTY syscalls that the old code
-    // collided with. See the DESIGN GAP block near the top of this file.
+    // mount/umount now issue the real SYS_FS_MOUNT / SYS_FS_UMOUNT syscalls
+    // (652/653). On the build host the native syscall path is compiled out,
+    // so do_mount/do_umount return the off-target fallback error; we exercise
+    // the pure decode/validation helpers instead.
 
     #[test]
-    fn test_do_mount_returns_enosys() {
-        let err = do_mount("/dev/sda1", "/mnt", "ext4", 0, "").unwrap_err();
-        assert!(err.contains("mount"), "got: {err}");
-        assert!(err.contains("not implemented"), "got: {err}");
+    fn test_canonical_fstype_known() {
+        assert_eq!(canonical_fstype("ext4"), Some("ext4"));
+        assert_eq!(canonical_fstype("ramfs"), Some("tmpfs"));
+        assert_eq!(canonical_fstype("fat32"), Some("vfat"));
+        assert_eq!(canonical_fstype("procfs"), Some("proc"));
     }
 
     #[test]
-    fn test_do_umount_returns_enosys() {
-        let err = do_umount("/mnt", 0).unwrap_err();
-        assert!(err.contains("umount"), "got: {err}");
-        assert!(err.contains("not implemented"), "got: {err}");
+    fn test_canonical_fstype_auto_is_none() {
+        assert_eq!(canonical_fstype("auto"), None);
+        assert_eq!(canonical_fstype("xfs"), None);
+    }
+
+    #[test]
+    fn test_kernel_errstr_known_codes() {
+        assert!(kernel_errstr(-400).contains("permission"));
+        assert!(kernel_errstr(-602).contains("busy"));
+        assert!(kernel_errstr(-2).contains("not supported"));
     }
 
     #[test]

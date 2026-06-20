@@ -4569,6 +4569,73 @@ pub fn self_test() -> KernelResult<()> {
     Ok(())
 }
 
+/// Mount/unmount roundtrip self-test.
+///
+/// Exercises the same backend calls that the `SYS_FS_MOUNT` / `SYS_FS_UMOUNT`
+/// handlers dispatch to: it mounts a fresh in-memory filesystem (the "tmpfs"
+/// fstype) at a scratch mount point, writes and reads a file through it,
+/// confirms the root filesystem cannot be unmounted, then unmounts and
+/// verifies the mount is gone.  Runs on any root (in-memory or disk-backed),
+/// so it is called unconditionally during boot.
+pub fn mount_self_test() -> KernelResult<()> {
+    use crate::serial_println;
+
+    serial_println!("[vfs] Running mount/unmount self-test...");
+
+    // A scratch mount point that boot setup never uses (boot mounts ext4 at
+    // /mnt, so avoid that path entirely).
+    let mp = "/_mount_selftest";
+
+    // Refuse to clobber a stale mount from a previous run.
+    if Vfs::mounts().iter().any(|(p, _)| p == mp) {
+        serial_println!("[vfs]   {} already mounted — unmounting stale entry", mp);
+        let _ = Vfs::unmount(mp);
+    }
+
+    // Mount a fresh in-memory filesystem (same call as fstype "tmpfs").
+    crate::fs::memfs::mount(mp)?;
+    if !Vfs::mounts().iter().any(|(p, _)| p == mp) {
+        serial_println!("[vfs]   FAIL: {} not present after mount", mp);
+        let _ = Vfs::unmount(mp);
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[vfs]   mount tmpfs at {}: OK", mp);
+
+    // Write and read back through the new mount.
+    let test_file = "/_mount_selftest/_probe";
+    Vfs::write_file(test_file, b"mounted fs works")?;
+    let back = Vfs::read_file(test_file)?;
+    if back.as_slice() != b"mounted fs works" {
+        serial_println!("[vfs]   FAIL: read-back through {} mismatch", mp);
+        let _ = Vfs::remove(test_file);
+        let _ = Vfs::unmount(mp);
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[vfs]   write/read through {}: OK", mp);
+    let _ = Vfs::remove(test_file);
+
+    // Root must never be unmountable (the guard the handler relies on).
+    match Vfs::unmount("/") {
+        Err(_) => serial_println!("[vfs]   unmount('/') refused: OK"),
+        Ok(()) => {
+            serial_println!("[vfs]   FAIL: unmount('/') should be refused");
+            let _ = Vfs::unmount(mp);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Unmount the scratch mount and verify it is gone.
+    Vfs::unmount(mp)?;
+    if Vfs::mounts().iter().any(|(p, _)| p == mp) {
+        serial_println!("[vfs]   FAIL: {} still present after unmount", mp);
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[vfs]   unmount {}: OK", mp);
+
+    serial_println!("[vfs] Mount/unmount self-test PASSED");
+    Ok(())
+}
+
 /// Clean up globstar test directory tree.
 fn cleanup_glob_test() -> KernelResult<()> {
     let _ = Vfs::remove("/tmp/_glob_test/sub/deep/e.rs");

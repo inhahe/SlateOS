@@ -1984,6 +1984,34 @@ pub const SYS_FS_SEEK_DATA: u64 = 650;
 /// Returns: offset of next hole, or EOF if no holes.
 pub const SYS_FS_SEEK_HOLE: u64 = 651;
 
+/// Mount a filesystem at a target path.
+///
+/// `arg0`: pointer to source/device string (may be empty for pseudo-filesystems).
+/// `arg1`: source string length (bytes).
+/// `arg2`: pointer to target mount-point path string.
+/// `arg3`: target path length (bytes).
+/// `arg4`: pointer to filesystem-type string (e.g. "ext4", "tmpfs", "vfat").
+/// `arg5`: filesystem-type string length (bytes).
+///
+/// Root-only (requires mount authority). All six argument slots are
+/// consumed by the three string pairs, so mount flags/options are
+/// deferred to a future versioned extension syscall.
+///
+/// Returns: 0 on success, negative error code on failure.
+pub const SYS_FS_MOUNT: u64 = 652;
+
+/// Unmount the filesystem mounted at a target path.
+///
+/// `arg0`: pointer to target mount-point path string.
+/// `arg1`: target path length (bytes).
+///
+/// Root-only (requires mount authority). Refuses to unmount the root
+/// filesystem and refuses if sub-mounts exist beneath the target
+/// (returns DeviceBusy).
+///
+/// Returns: 0 on success, negative error code on failure.
+pub const SYS_FS_UMOUNT: u64 = 653;
+
 /// Open a file and return a handle.
 ///
 /// `arg0`: pointer to path string.

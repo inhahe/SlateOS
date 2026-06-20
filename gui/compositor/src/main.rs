@@ -334,6 +334,14 @@ pub struct Window {
     /// compositor blits these pixels into the client area instead of replaying
     /// `render_tree`; the client renders directly into shared memory.
     pub buffer: Option<SharedBuffer>,
+    /// Whether the window is in true fullscreen mode: it owns the entire
+    /// display with no decorations. Distinct from `maximized` (which keeps the
+    /// title bar/borders and respects panel reservations). Fullscreen is the
+    /// state that enables direct-scanout bypass for games/video.
+    pub fullscreen: bool,
+    /// Geometry saved before entering fullscreen (for restore). Kept separate
+    /// from `restore_rect` so fullscreen and maximize don't clobber each other.
+    pub fs_restore_rect: Option<Rect>,
     /// Position and size before maximizing (for restore).
     pub restore_rect: Option<Rect>,
     /// Whether the window needs to be redrawn.
@@ -359,6 +367,8 @@ impl Window {
             client_pid,
             render_tree: RenderTree::new(),
             buffer: None,
+            fullscreen: false,
+            fs_restore_rect: None,
             restore_rect: None,
             dirty: true,
         }
@@ -764,6 +774,8 @@ pub struct FrameStats {
     pub frames_composited: u64,
     /// Frames dropped (compose took longer than frame interval).
     pub dropped_frames: u64,
+    /// Frames presented via fullscreen direct-scanout bypass (no compositing).
+    pub bypass_frames: u64,
     /// Target frame interval based on display refresh rate.
     pub target_interval: Duration,
     /// Timestamp of the last frame start.
@@ -777,6 +789,7 @@ impl FrameStats {
             last_frame_time_us: 0,
             frames_composited: 0,
             dropped_frames: 0,
+            bypass_frames: 0,
             target_interval,
             last_frame_start: None,
         }
@@ -849,6 +862,8 @@ pub enum CompositorRequest {
     Minimize { window_id: WindowId },
     /// Maximize a window.
     Maximize { window_id: WindowId },
+    /// Enter or leave fullscreen (enables direct-scanout bypass for games).
+    SetFullscreen { window_id: WindowId, enable: bool },
     /// Restore a window from minimized/maximized state.
     Restore { window_id: WindowId },
     /// Set the cursor shape for a window.
@@ -1757,6 +1772,20 @@ impl Default for DecorationTheme {
 // Compositor
 // ---------------------------------------------------------------------------
 
+/// How the most recently presented frame was produced.
+///
+/// In the [`Direct`](Scanout::Direct) case the displayed pixels come straight
+/// from a fullscreen client's shared buffer — the compositor never touched the
+/// framebuffer for that frame (true zero-copy direct scanout). Otherwise the
+/// frame was composited normally into the framebuffer's front buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scanout {
+    /// Frame composited into the framebuffer.
+    Composited,
+    /// Frame scanned out directly from the named window's shared buffer.
+    Direct(WindowId),
+}
+
 /// The main compositor state machine.
 pub struct Compositor {
     /// All managed windows (ordered by creation, z_order field determines draw order).
@@ -1789,6 +1818,8 @@ pub struct Compositor {
     pending_notifications: VecDeque<EventNotification>,
     /// Whether a full recomposite is needed (e.g., after display resize).
     full_recomposite: bool,
+    /// How the last presented frame was produced (composited vs direct scanout).
+    scanout: Scanout,
 }
 
 impl Compositor {
@@ -1820,6 +1851,7 @@ impl Compositor {
             theme: DecorationTheme::default(),
             pending_notifications: VecDeque::new(),
             full_recomposite: true,
+            scanout: Scanout::Composited,
         })
     }
 
@@ -2029,6 +2061,133 @@ impl Compositor {
         self.full_recomposite = true;
 
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Fullscreen / direct-scanout bypass
+    // -----------------------------------------------------------------------
+
+    /// Enter or leave true fullscreen for a window.
+    ///
+    /// Entering saves the window's geometry, removes decorations, and resizes
+    /// the client area to cover the entire display. Leaving restores the saved
+    /// geometry. A fullscreen window with an opaque, display-sized shared
+    /// buffer is eligible for direct-scanout bypass (see [`compose_frame`]).
+    ///
+    /// [`compose_frame`]: Compositor::compose_frame
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] if the window does not exist.
+    pub fn set_fullscreen(
+        &mut self,
+        window_id: WindowId,
+        enable: bool,
+    ) -> CompositorResult<()> {
+        self.damage_window(window_id);
+
+        let fb_w = self.framebuffer.width;
+        let fb_h = self.framebuffer.height;
+
+        let resized = {
+            let window = self
+                .window_mut(window_id)
+                .ok_or(CompositorError::WindowNotFound(window_id))?;
+
+            if enable {
+                if !window.fullscreen {
+                    window.fs_restore_rect =
+                        Some(Rect::new(window.x, window.y, window.width, window.height));
+                }
+                window.fullscreen = true;
+                window.x = 0;
+                window.y = 0;
+                window.width = fb_w;
+                window.height = fb_h;
+                window.dirty = true;
+                Some((fb_w, fb_h))
+            } else if window.fullscreen {
+                window.fullscreen = false;
+                let restored = window.fs_restore_rect.take();
+                if let Some(r) = restored {
+                    window.x = r.x;
+                    window.y = r.y;
+                    window.width = r.width;
+                    window.height = r.height;
+                }
+                window.dirty = true;
+                restored.map(|r| (r.width, r.height))
+            } else {
+                None
+            }
+        };
+
+        self.damage_window(window_id);
+        self.full_recomposite = true;
+
+        if let Some((w, h)) = resized {
+            self.pending_notifications
+                .push_back(EventNotification::WindowResized {
+                    window_id,
+                    width: w,
+                    height: h,
+                });
+        }
+
+        Ok(())
+    }
+
+    /// Whether a window is currently in fullscreen mode.
+    #[must_use]
+    pub fn is_fullscreen(&self, window_id: WindowId) -> bool {
+        self.window_ref(window_id).is_some_and(|w| w.fullscreen)
+    }
+
+    /// Determine whether the current frame can bypass compositing via direct
+    /// scanout, returning the window whose shared buffer should be scanned out.
+    ///
+    /// All conditions must hold: the topmost visible window is fullscreen and
+    /// fully opaque, covers the entire framebuffer, has an attached shared
+    /// buffer whose dimensions exactly match the display, and nothing visible
+    /// sits above it in the z-order. When eligible, the compositor presents the
+    /// client's buffer pixels directly — no per-frame blit, no occluded windows
+    /// drawn. A buffer smaller/larger than the display is rejected (a partial
+    /// buffer would leave the rest of the screen stale), preserving correctness.
+    fn direct_scanout_window(&self) -> Option<WindowId> {
+        // Topmost visible window in z-order (z_stack top == last).
+        let &top = self
+            .z_stack
+            .iter()
+            .rev()
+            .find(|&&id| self.window_ref(id).is_some_and(|w| w.visible && !w.minimized))?;
+
+        let win = self.window_ref(top)?;
+        if !win.fullscreen || win.opacity < 1.0 {
+            return None;
+        }
+        // Must cover the whole framebuffer.
+        if win.x > 0 || win.y > 0 {
+            return None;
+        }
+        let covers_w = win
+            .x
+            .saturating_add(win.width as i32) as i64
+            >= self.framebuffer.width as i64;
+        let covers_h = win
+            .y
+            .saturating_add(win.height as i32) as i64
+            >= self.framebuffer.height as i64;
+        if !covers_w || !covers_h {
+            return None;
+        }
+        // The attached buffer must match the display exactly for a valid,
+        // fully-covering scanout.
+        let buf = win.buffer.as_ref()?;
+        if buf.width() == self.framebuffer.width && buf.height() == self.framebuffer.height {
+            Some(top)
+        } else {
+            None
+        }
     }
 
     /// Set focus to a specific window.
@@ -2533,6 +2692,29 @@ impl Compositor {
 
         self.frame_stats.begin_frame();
 
+        // Fullscreen direct-scanout bypass: if the topmost window owns the whole
+        // display with an opaque, display-sized shared buffer, present its
+        // pixels straight from shared memory and skip compositing entirely —
+        // no framebuffer clear, no per-pixel blit, no occluded windows drawn,
+        // no buffer swap. The presented pixels come directly from the client
+        // buffer (see `present_buffer`). This is the path games/video use.
+        if let Some(wid) = self.direct_scanout_window() {
+            self.scanout = Scanout::Direct(wid);
+            // The compositor "consumed" the buffer for this frame; flag it for a
+            // wl_buffer.release-style notification so the client may reuse it.
+            if let Some(win) = self.windows.iter_mut().find(|w| w.id == wid)
+                && let Some(buf) = win.buffer.as_mut()
+            {
+                buf.mark_released();
+            }
+            self.full_recomposite = false;
+            self.damage.clear();
+            self.frame_stats.bypass_frames = self.frame_stats.bypass_frames.saturating_add(1);
+            self.frame_stats.end_frame();
+            return true;
+        }
+        self.scanout = Scanout::Composited;
+
         if self.full_recomposite {
             // Full recomposite: clear and redraw everything.
             self.framebuffer.clear(self.theme.desktop_background);
@@ -2597,29 +2779,41 @@ impl Compositor {
                     win.title.clone(),
                     win.render_tree.commands.clone(),
                     win.buffer.is_some(),
+                    win.fullscreen,
                 )
             }
             _ => return,
         };
 
-        let (win_x, win_y, win_width, win_height, opacity, focused, title, commands, has_buffer) =
-            win_data;
+        let (
+            win_x,
+            win_y,
+            win_width,
+            win_height,
+            opacity,
+            focused,
+            title,
+            commands,
+            has_buffer,
+            fullscreen,
+        ) = win_data;
 
-        // 1. Draw window shadow.
-        self.render_shadow(win_x, win_y, win_width, win_height, opacity);
+        // Fullscreen windows have no decorations — they own the whole display.
+        if !fullscreen {
+            // 1. Draw window shadow.
+            self.render_shadow(win_x, win_y, win_width, win_height, opacity);
 
-        // 2. Draw window border.
-        let border_color = if focused {
-            self.theme.border_focused
-        } else {
-            self.theme.border_unfocused
-        };
-        self.render_border(win_x, win_y, win_width, win_height, border_color, opacity);
+            // 2. Draw window border.
+            let border_color = if focused {
+                self.theme.border_focused
+            } else {
+                self.theme.border_unfocused
+            };
+            self.render_border(win_x, win_y, win_width, win_height, border_color, opacity);
 
-        // 3. Draw title bar.
-        self.render_title_bar(
-            win_x, win_y, win_width, focused, &title, opacity,
-        );
+            // 3. Draw title bar.
+            self.render_title_bar(win_x, win_y, win_width, focused, &title, opacity);
+        }
 
         if has_buffer {
             // Shared-buffer (DMA-BUF) path: blit the client's pixels directly.
@@ -2922,6 +3116,14 @@ impl Compositor {
                     },
                 }
             }
+            CompositorRequest::SetFullscreen { window_id, enable } => {
+                match self.set_fullscreen(window_id, enable) {
+                    Ok(()) => CompositorResponse::Ok,
+                    Err(e) => CompositorResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
             CompositorRequest::Restore { window_id } => {
                 match self.restore_window(window_id) {
                     Ok(()) => CompositorResponse::Ok,
@@ -2998,9 +3200,41 @@ impl Compositor {
         self.cursor_shape
     }
 
-    /// Get a reference to the front buffer for display output.
+    /// Get a reference to the framebuffer's front buffer (the composited
+    /// surface). Note: when the last frame was a direct-scanout bypass this is
+    /// *stale* — use [`present_pixels`](Compositor::present_pixels) for the
+    /// pixels actually being displayed.
     pub fn front_buffer(&self) -> &[u32] {
         self.framebuffer.front_buffer()
+    }
+
+    /// Get the pixels actually being presented to the display this frame.
+    ///
+    /// For a composited frame this is the framebuffer front buffer; for a
+    /// fullscreen direct-scanout bypass it is the client's shared-buffer pixels
+    /// referenced directly (zero copy). Falls back to the front buffer if the
+    /// scanned-out window/buffer vanished between compose and present.
+    #[must_use]
+    pub fn present_pixels(&self) -> &[u32] {
+        if let Scanout::Direct(wid) = self.scanout
+            && let Some(win) = self.window_ref(wid)
+            && let Some(buf) = win.buffer.as_ref()
+        {
+            return buf.pixels();
+        }
+        self.framebuffer.front_buffer()
+    }
+
+    /// How the last presented frame was produced.
+    #[must_use]
+    pub fn scanout(&self) -> Scanout {
+        self.scanout
+    }
+
+    /// Whether the last presented frame used direct-scanout bypass.
+    #[must_use]
+    pub fn is_scanout_bypassed(&self) -> bool {
+        matches!(self.scanout, Scanout::Direct(_))
     }
 
     /// Get the number of managed windows.
@@ -3655,6 +3889,106 @@ mod tests {
         // After compositing, the buffer is released exactly once.
         assert_eq!(comp.take_released_buffer_handles(), vec![0xABCD]);
         assert!(comp.take_released_buffer_handles().is_empty());
+    }
+
+    #[test]
+    fn test_fullscreen_sets_geometry_and_clears() {
+        let mut comp = Compositor::new(400, 300, 60).unwrap();
+        let id = comp.create_window("Game".to_string(), 200, 150, 1);
+        assert!(!comp.is_fullscreen(id));
+
+        assert!(comp.set_fullscreen(id, true).is_ok());
+        assert!(comp.is_fullscreen(id));
+        {
+            let win = comp.window_ref(id).unwrap();
+            assert_eq!((win.x, win.y), (0, 0));
+            assert_eq!((win.width, win.height), (400, 300));
+            assert!(win.fullscreen);
+        }
+
+        // Leaving fullscreen restores the original client geometry.
+        assert!(comp.set_fullscreen(id, false).is_ok());
+        assert!(!comp.is_fullscreen(id));
+        let win = comp.window_ref(id).unwrap();
+        assert_eq!((win.width, win.height), (200, 150));
+    }
+
+    #[test]
+    fn test_direct_scanout_bypass_presents_buffer() {
+        let mut comp = Compositor::new(64, 48, 60).unwrap();
+        let id = comp.create_window("Game".to_string(), 64, 48, 1);
+        assert!(comp.set_fullscreen(id, true).is_ok());
+
+        // A display-sized opaque buffer makes the window scanout-eligible.
+        let color = 0xFF_AB_CD_EFu32;
+        let bytes = solid_buffer_bytes(64, 48, color);
+        assert!(comp
+            .attach_buffer(id, 9, 64, 48, 64 * 4, BufferFormat::Argb8888, &bytes)
+            .is_ok());
+
+        assert!(comp.compose_frame());
+        // Frame should have bypassed compositing entirely.
+        assert!(comp.is_scanout_bypassed());
+        assert_eq!(comp.scanout(), Scanout::Direct(id));
+        assert_eq!(comp.frame_stats.bypass_frames, 1);
+
+        // Presented pixels come straight from the client buffer (zero copy).
+        let present = comp.present_pixels();
+        assert_eq!(present.len(), 64 * 48);
+        assert_eq!(present[0], color);
+        assert_eq!(present[64 * 48 - 1], color);
+
+        // The buffer is released exactly once for reuse.
+        assert_eq!(comp.take_released_buffer_handles(), vec![9]);
+    }
+
+    #[test]
+    fn test_no_bypass_when_buffer_smaller_than_display() {
+        let mut comp = Compositor::new(64, 48, 60).unwrap();
+        let id = comp.create_window("Game".to_string(), 64, 48, 1);
+        assert!(comp.set_fullscreen(id, true).is_ok());
+
+        // Buffer smaller than the display must NOT bypass (would leave the rest
+        // of the screen stale); the compositor falls back to compositing.
+        let bytes = solid_buffer_bytes(32, 24, 0xFF112233);
+        assert!(comp
+            .attach_buffer(id, 1, 32, 24, 32 * 4, BufferFormat::Argb8888, &bytes)
+            .is_ok());
+
+        assert!(comp.compose_frame());
+        assert!(!comp.is_scanout_bypassed());
+        assert_eq!(comp.scanout(), Scanout::Composited);
+        // Composited path presents the framebuffer front buffer.
+        assert_eq!(comp.present_pixels().len(), 64 * 48);
+    }
+
+    #[test]
+    fn test_no_bypass_when_not_fullscreen() {
+        let mut comp = Compositor::new(64, 48, 60).unwrap();
+        let id = comp.create_window("Win".to_string(), 64, 48, 1);
+        // Display-sized buffer but the window is NOT fullscreen → no bypass.
+        let bytes = solid_buffer_bytes(64, 48, 0xFF445566);
+        assert!(comp
+            .attach_buffer(id, 1, 64, 48, 64 * 4, BufferFormat::Argb8888, &bytes)
+            .is_ok());
+        assert!(comp.compose_frame());
+        assert!(!comp.is_scanout_bypassed());
+    }
+
+    #[test]
+    fn test_no_bypass_when_translucent() {
+        let mut comp = Compositor::new(64, 48, 60).unwrap();
+        let id = comp.create_window("Game".to_string(), 64, 48, 1);
+        assert!(comp.set_fullscreen(id, true).is_ok());
+        comp.set_opacity(id, 0.5).ok();
+        let bytes = solid_buffer_bytes(64, 48, 0xFF778899);
+        assert!(comp
+            .attach_buffer(id, 1, 64, 48, 64 * 4, BufferFormat::Argb8888, &bytes)
+            .is_ok());
+        assert!(comp.compose_frame());
+        // A translucent fullscreen window must blend with what's beneath, so it
+        // cannot be scanned out directly.
+        assert!(!comp.is_scanout_bypassed());
     }
 
     #[test]

@@ -164,6 +164,7 @@ mod termsession;
 mod thermal;
 mod timekeeping;
 mod tlb;
+mod tty;
 mod udriver;
 mod unicode;
 mod userns;
@@ -3578,6 +3579,10 @@ extern "C" fn kernel_main() -> ! {
 
     // Console VT100/ANSI escape sequence self-test.
     console::self_test();
+
+    // TTY/termios layer self-test (depends on the console being up so that
+    // TIOCGWINSZ can report live dimensions).
+    tty::self_test();
 
     // Terminal session multiplexer init + self-test.
     termsession::init();

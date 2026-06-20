@@ -8070,6 +8070,93 @@ pub mod ioctl_cmd {
     /// (Apache, dovecot, OpenSSH, Redis tests, and most BSD-style
     /// network frameworks).
     pub const FIONBIO: u32 = 0x5421;
+
+    /// `TCGETS` — read the terminal's `struct termios` into `*arg`.
+    /// `tcgetattr(3)` and `isatty(3)` both issue this; a console fd
+    /// answers it, a non-tty fd returns `ENOTTY`.
+    pub const TCGETS: u32 = 0x5401;
+    /// `TCSETS` — set the terminal's `termios` from `*arg`, immediately.
+    pub const TCSETS: u32 = 0x5402;
+    /// `TCSETSW` — like `TCSETS` but wait for queued output to drain
+    /// first.  We have no output queue, so it behaves as `TCSETS`.
+    pub const TCSETSW: u32 = 0x5403;
+    /// `TCSETSF` — like `TCSETSW` but also flush pending input.  We have
+    /// no kernel-side input queue yet, so it behaves as `TCSETS`.
+    pub const TCSETSF: u32 = 0x5404;
+    /// `TIOCGWINSZ` — read the terminal window size into `*arg`
+    /// (`struct winsize`).
+    pub const TIOCGWINSZ: u32 = 0x5413;
+    /// `TIOCSWINSZ` — set the terminal window size from `*arg`.
+    pub const TIOCSWINSZ: u32 = 0x5414;
+}
+
+/// Handle the terminal-control ioctls on a console (tty) fd.
+///
+/// The caller (`sys_ioctl`) has already verified the fd is a `Console`-kind
+/// handle.  `arg` is the userspace pointer to the `struct termios`
+/// (`TCGETS`/`TCSETS*`) or `struct winsize` (`TIOCGWINSZ`/`TIOCSWINSZ`).
+/// `TCSETSW`/`TCSETSF` behave as `TCSETS` because we have no kernel-side
+/// output/input queue to drain or flush yet.
+fn console_terminal_ioctl(request: u32, arg: u64) -> SyscallResult {
+    use crate::tty;
+    match request {
+        ioctl_cmd::TCGETS => {
+            if arg == 0 {
+                return linux_err(errno::EFAULT);
+            }
+            let bytes = tty::get_termios().to_bytes();
+            // SAFETY: copy_to_user validates the user range is mapped and
+            // writable and does the STAC/CLAC SMAP dance; `bytes` is a live
+            // kernel buffer of exactly `bytes.len()` bytes.
+            match unsafe { crate::mm::user::copy_to_user(bytes.as_ptr(), arg, bytes.len()) } {
+                Ok(()) => SyscallResult::ok(0),
+                Err(e) => linux_err(linux_errno_for(e)),
+            }
+        }
+        ioctl_cmd::TCSETS | ioctl_cmd::TCSETSW | ioctl_cmd::TCSETSF => {
+            if arg == 0 {
+                return linux_err(errno::EFAULT);
+            }
+            let mut bytes = [0u8; tty::TERMIOS_BYTES];
+            // SAFETY: copy_from_user validates the user range is mapped and
+            // readable and does the SMAP dance; `bytes` is a live kernel
+            // buffer of exactly `bytes.len()` bytes.
+            if let Err(e) =
+                unsafe { crate::mm::user::copy_from_user(arg, bytes.as_mut_ptr(), bytes.len()) }
+            {
+                return linux_err(linux_errno_for(e));
+            }
+            tty::set_termios(tty::Termios::from_bytes(&bytes));
+            SyscallResult::ok(0)
+        }
+        ioctl_cmd::TIOCGWINSZ => {
+            if arg == 0 {
+                return linux_err(errno::EFAULT);
+            }
+            let bytes = tty::get_winsize().to_bytes();
+            // SAFETY: see TCGETS above; `bytes` is a live 8-byte kernel buffer.
+            match unsafe { crate::mm::user::copy_to_user(bytes.as_ptr(), arg, bytes.len()) } {
+                Ok(()) => SyscallResult::ok(0),
+                Err(e) => linux_err(linux_errno_for(e)),
+            }
+        }
+        ioctl_cmd::TIOCSWINSZ => {
+            if arg == 0 {
+                return linux_err(errno::EFAULT);
+            }
+            let mut bytes = [0u8; tty::WINSIZE_BYTES];
+            // SAFETY: see TCSETS above; `bytes` is a live 8-byte kernel buffer.
+            if let Err(e) =
+                unsafe { crate::mm::user::copy_from_user(arg, bytes.as_mut_ptr(), bytes.len()) }
+            {
+                return linux_err(linux_errno_for(e));
+            }
+            tty::set_winsize(tty::WinSize::from_bytes(&bytes));
+            SyscallResult::ok(0)
+        }
+        // Unreachable: sys_ioctl only routes the six terminal requests here.
+        _ => linux_err(errno::ENOTTY),
+    }
 }
 
 /// `ioctl(fd, request, arg)` — device/driver-specific control.
@@ -8080,13 +8167,16 @@ pub mod ioctl_cmd {
 /// Every operation has its own semantics; there's no generic
 /// implementation.
 ///
-/// We have no terminal devices, no Linux-style device files, and no
-/// fd table that maps to ioctl-aware drivers yet.  The semantically
-/// correct response for *every* driver-specific ioctl on a non-special
-/// fd is `-ENOTTY` ("inappropriate ioctl for device" — the historical
-/// name for "this fd isn't a tty and your op only makes sense on a
-/// tty").  That's also what Linux returns for ioctls on regular files
-/// and most non-tty fds.
+/// The system console *is* a terminal: a `Console`-kind fd answers the
+/// terminal-control ioctls (`TCGETS`/`TCSETS`/`TCSETSW`/`TCSETSF`,
+/// `TIOCGWINSZ`/`TIOCSWINSZ`) via [`console_terminal_ioctl`], so
+/// `isatty(3)`/`tcgetattr(3)`/`tcsetattr(3)` work on it.  For any other
+/// fd, those same requests return `-ENOTTY` ("inappropriate ioctl for
+/// device" — the historical name for "this fd isn't a tty and your op
+/// only makes sense on a tty"), which is exactly what `isatty(3)` needs
+/// to answer "no".  Other driver-specific ioctls route by handle kind
+/// (ALSA/DRM) and otherwise fall through to `-ENOTTY`, matching Linux's
+/// behaviour for regular files and most non-tty fds.
 ///
 /// Returning `-ENOTTY` instead of `-ENOSYS` matters: `isatty(3)` is
 /// defined as `ioctl(fd, TCGETS, &tio) != -1`, so programs probing
@@ -8145,6 +8235,24 @@ fn sys_ioctl(args: &SyscallArgs) -> SyscallResult {
                 Ok(()) => SyscallResult::ok(0),
                 Err(e) => linux_err(linux_errno_for(e)),
             }
+        }
+        ioctl_cmd::TCGETS
+        | ioctl_cmd::TCSETS
+        | ioctl_cmd::TCSETSW
+        | ioctl_cmd::TCSETSF
+        | ioctl_cmd::TIOCGWINSZ
+        | ioctl_cmd::TIOCSWINSZ => {
+            // Terminal-control ioctls only apply to a tty (the console).
+            // A non-console fd that exists returns ENOTTY (which is what
+            // isatty(3) wants for "not a terminal"); a missing fd is EBADF.
+            let entry = match pcb::linux_fd_lookup(pid, fd) {
+                Some(e) => e,
+                None => return linux_err(errno::EBADF),
+            };
+            if entry.kind != crate::proc::linux_fd::HandleKind::Console {
+                return linux_err(errno::ENOTTY);
+            }
+            console_terminal_ioctl(request, args.arg2)
         }
         ioctl_cmd::FIONBIO => {
             // Toggle O_NONBLOCK on the fd.  arg is a pointer to int
@@ -53708,13 +53816,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     //     returned ENOTTY unconditionally, but that masked an
     //     ABI gap (FIOCLEX / FIONCLEX did not work) and is no
     //     longer the right answer.
-    //   - With a real fd that exists but isn't a tty, an unknown
-    //     request still returns ENOTTY — verified via the
-    //     batch-95 synthetic-process test below.
+    //   - With a real fd that exists but isn't a tty (e.g. a regular
+    //     file or pipe), the terminal ioctls return ENOTTY — only
+    //     HandleKind::Console answers them.
     //   - The right answer here still matters for isatty(3), which
-    //     is `ioctl(fd, TCGETS, &tio) != -1`: the synthetic-process
-    //     path covers TCGETS-on-stdin and confirms ENOTTY, so
-    //     isatty() still gets "0 with errno=ENOTTY".
+    //     is `ioctl(fd, TCGETS, &tio) != -1`: a Console fd now
+    //     answers TCGETS successfully (see console_terminal_ioctl),
+    //     so isatty() returns "yes" for the system console while
+    //     non-console fds still get "0 with errno=ENOTTY".  The
+    //     kernel-context case below still returns EBADF because
+    //     caller_pid() is None before the Console-kind check runs.
     {
         // TCGETS request code 0x5401 — kernel context: EBADF.
         let a = SyscallArgs { arg0: 1, arg1: 0x5401, arg2: 0, arg3: 0,

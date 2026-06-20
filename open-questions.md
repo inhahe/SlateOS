@@ -92,10 +92,64 @@ native toolchain (would need a marker under A/D).
 
 ---
 
-No further open questions remain beyond Q9. All earlier deferred operator
+## Q10 — Which video codec backs the fullscreen capture fallback?
+
+**Status:** OPEN
+
+**Question.** The remote-desktop "video-encoded capture fallback for fullscreen
+games/video" (roadmap §4.5) handles surfaces the draw-command stream cannot:
+DMA-BUF / buffer-backed windows (games, video players) have raw pixels, not
+vector `RenderCommand`s, so they currently stream as empty command lists. To
+forward them efficiently at high resolution/refresh you need real *inter-frame*
+video compression — an intra-only codec (QOI/PNG/RLE per frame) cannot meet the
+4K/high-fps bandwidth budget, so picking the codec is a genuine, costly-to-
+reverse decision (it dictates a library port and/or a hardware-encoder driver).
+This gates the §4.5 video fallback and the related §4.x compositor GPU/video
+items, but **not** all forward progress.
+
+**Options.**
+
+- **A — H.264 via a software encoder port (x264).** *Pro:* universally
+  supported by every RDP/VNC/browser client; mature; best quality-per-bitrate at
+  this complexity. *Con:* patent/licensing encumbrance (MPEG-LA pool) —
+  problematic for a from-scratch OS that elsewhere avoids encumbered formats;
+  x264 is GPL (licensing friction for bundling).
+- **B — VP9 (libvpx) or AV1 (rav1e/SVT-AV1), royalty-free.** *Pro:* no patent
+  royalties; AV1 has rav1e (Rust-native, fits the codebase). *Con:* software
+  AV1/VP9 encode is CPU-heavy (rav1e realtime is marginal at 4K); fewer
+  lightweight clients decode AV1; bigger port.
+- **C — Hardware-encoded only (VAAPI/NVENC-equivalent via the GPU driver).**
+  *Pro:* the only realistic path to 4K/high-fps without burning the CPU; matches
+  how real remote-desktop/streaming stacks work. *Con:* hard-blocked on a GPU
+  driver with an encode engine (AMDGPU/i915 port, roadmap §4.x) — not available
+  yet, so nothing ships near-term.
+- **D — Defer the whole fallback until a GPU encode path exists.** *Pro:* avoids
+  committing to a software-codec port that hardware encode would later obsolete.
+  *Con:* leaves fullscreen game/video remoting unsupported indefinitely.
+
+**Claude's recommendation.** Lean **C long-term, D near-term**: the proper home
+for this is hardware encode via the GPU driver, so defer the heavy codec port
+until the AMDGPU/i915 encode engine is up rather than sink time into a software
+encoder that hardware will supersede. If a software fallback is wanted *before*
+GPU encode lands, prefer **B/AV1 (rav1e)** for the royalty-free + Rust-native
+fit, accepting it's CPU-bound and realtime-marginal at 4K. **In the meantime**
+Claude is not building a stub encoder (that would be a band-aid); the
+draw-command stream already covers the flat-shaded-desktop case, and Claude is
+picking unblocked work elsewhere.
+
+**Where it bites.** New code would live in `gui/compositor` (fullscreen pixel
+capture from the scanout/DMA-BUF path + frame pacing + an `Encoder` trait) and a
+new encoder crate; the IPC would extend `CompositorRequest`/`CompositorResponse`
+alongside the existing `StreamStart`/`StreamCapture`/`StreamStop`. The capture
+substrate is codec-agnostic, but the encoder backend choice (and whether to
+build a software one at all now) is what's blocked here.
+
+---
+
+No further open questions remain beyond Q10. All earlier deferred operator
 decisions (Q1–Q8) have been resolved — see the "Recently resolved" list below
 and `design-decisions.md` for full rationale. New decisions that genuinely need
-the operator should be appended above this line as `## Q10 …`.
+the operator should be appended above this line as `## Q11 …`.
 
 ---
 

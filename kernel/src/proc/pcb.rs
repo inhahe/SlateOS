@@ -3637,11 +3637,43 @@ pub fn jc_report_any_child(
     want_continued: bool,
     consume: bool,
 ) -> KernelResult<Option<(ProcessId, JobControlEvent)>> {
+    jc_report_matching(parent_pid, None, want_stopped, want_continued, consume)
+}
+
+/// Like [`jc_report_any_child`], but restricted to children whose process
+/// group is `pgid`. Backs `wait4(-pgid)` / `waitid(P_PGID, pgid)` job-
+/// control reporting: only stop/continue events of group members are
+/// considered, and `NoChildProcess` (→ ECHILD) fires when the caller has
+/// no child in that group at all.
+pub fn jc_report_group(
+    parent_pid: ProcessId,
+    pgid: ProcessId,
+    want_stopped: bool,
+    want_continued: bool,
+    consume: bool,
+) -> KernelResult<Option<(ProcessId, JobControlEvent)>> {
+    jc_report_matching(parent_pid, Some(pgid), want_stopped, want_continued, consume)
+}
+
+/// Shared body of [`jc_report_any_child`] / [`jc_report_group`]. When
+/// `pgid_filter` is `Some(g)`, only children with `pgid == g` are eligible
+/// (both for the "has any matching child" ECHILD gate and for the event
+/// scan); `None` considers every child.
+fn jc_report_matching(
+    parent_pid: ProcessId,
+    pgid_filter: Option<ProcessId>,
+    want_stopped: bool,
+    want_continued: bool,
+    consume: bool,
+) -> KernelResult<Option<(ProcessId, JobControlEvent)>> {
     let mut table = PROCESS_TABLE.lock();
     let mut has_child = false;
     let mut found: Option<ProcessId> = None;
     for proc in table.values() {
-        if proc.parent == parent_pid && proc.pid != parent_pid {
+        if proc.parent == parent_pid
+            && proc.pid != parent_pid
+            && pgid_filter.is_none_or(|g| proc.pgid == g)
+        {
             has_child = true;
             if jc_event_matches(proc.jc_report, want_stopped, want_continued) {
                 found = Some(proc.pid);
@@ -3851,6 +3883,29 @@ pub fn try_reap(
 pub fn try_reap_any(
     parent_pid: ProcessId,
 ) -> KernelResult<Option<(ProcessId, ExitInfo)>> {
+    reap_any_matching(parent_pid, None)
+}
+
+/// Like [`try_reap_any`], but restricted to children whose process group
+/// is `pgid`. Backs `wait4(-pgid)` / `waitid(P_PGID, pgid)`: reaps the
+/// lowest-PID zombie among the caller's children that belong to group
+/// `pgid`, and returns `NoChildProcess` (→ ECHILD) when the caller has no
+/// child in that group at all.
+pub fn try_reap_group(
+    parent_pid: ProcessId,
+    pgid: ProcessId,
+) -> KernelResult<Option<(ProcessId, ExitInfo)>> {
+    reap_any_matching(parent_pid, Some(pgid))
+}
+
+/// Shared body of [`try_reap_any`] / [`try_reap_group`]. When
+/// `pgid_filter` is `Some(g)`, only children with `pgid == g` count
+/// toward the ECHILD gate and are eligible to be reaped; `None` reaps any
+/// child.
+fn reap_any_matching(
+    parent_pid: ProcessId,
+    pgid_filter: Option<ProcessId>,
+) -> KernelResult<Option<(ProcessId, ExitInfo)>> {
     #[allow(clippy::type_complexity)]
     let reaped: Option<(
         ProcessId,
@@ -3869,7 +3924,10 @@ pub fn try_reap_any(
         let mut has_child = false;
         let mut zombie_child: Option<ProcessId> = None;
         for proc in table.values() {
-            if proc.parent == parent_pid && proc.pid != parent_pid {
+            if proc.parent == parent_pid
+                && proc.pid != parent_pid
+                && pgid_filter.is_none_or(|g| proc.pgid == g)
+            {
                 has_child = true;
                 if proc.state == ProcessState::Zombie {
                     zombie_child = Some(proc.pid);
@@ -3989,10 +4047,35 @@ pub fn peek_exit(
 pub fn peek_exit_any(
     parent_pid: ProcessId,
 ) -> KernelResult<Option<(ProcessId, ExitInfo, u32)>> {
+    peek_exit_matching(parent_pid, None)
+}
+
+/// Like [`peek_exit_any`], but restricted to children whose process group
+/// is `pgid`. Backs `waitid(P_PGID, pgid, WNOWAIT)`: peeks the lowest-PID
+/// zombie among the caller's children that belong to group `pgid`, and
+/// returns `NoChildProcess` (→ ECHILD) when the caller has no child in that
+/// group at all.
+pub fn peek_exit_group(
+    parent_pid: ProcessId,
+    pgid: ProcessId,
+) -> KernelResult<Option<(ProcessId, ExitInfo, u32)>> {
+    peek_exit_matching(parent_pid, Some(pgid))
+}
+
+/// Shared body of [`peek_exit_any`] / [`peek_exit_group`]. When
+/// `pgid_filter` is `Some(g)`, only children with `pgid == g` count toward
+/// the ECHILD gate and are eligible to be peeked; `None` peeks any child.
+fn peek_exit_matching(
+    parent_pid: ProcessId,
+    pgid_filter: Option<ProcessId>,
+) -> KernelResult<Option<(ProcessId, ExitInfo, u32)>> {
     let table = PROCESS_TABLE.lock();
     let mut has_child = false;
     for proc in table.values() {
-        if proc.parent == parent_pid && proc.pid != parent_pid {
+        if proc.parent == parent_pid
+            && proc.pid != parent_pid
+            && pgid_filter.is_none_or(|g| proc.pgid == g)
+        {
             has_child = true;
             if proc.state == ProcessState::Zombie {
                 let info = ExitInfo {

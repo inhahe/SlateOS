@@ -39825,9 +39825,11 @@ struct WaitidFound {
 /// One non-blocking pass of `waitid`'s child-selection logic.
 ///
 /// `target` is `Some(pid)` for `P_PID`/`P_PIDFD` (a specific child) or
-/// `None` for `P_ALL`/`P_PGID` (any child — we do not model process
-/// groups, so `P_PGID` waits on any child, the same simplification
-/// `wait4(pid <= 0)` makes).  Returns:
+/// `None` for `P_ALL`/`P_PGID` (any child).  For `P_PGID`, `pgid_filter`
+/// is `Some(g)` and only children whose process group is `g` are eligible
+/// (both for the ECHILD gate and the transition scan); `P_ALL` passes
+/// `None` (any child).  `pgid_filter` is only consulted on the any-child
+/// (`target == None`) path.  Returns:
 ///   * `Ok(Some(found))` — a matching transition (consumed unless
 ///     `nowait`); caller encodes the `siginfo` and returns success.
 ///   * `Ok(None)` — eligible children exist but none have a matching
@@ -39842,6 +39844,7 @@ struct WaitidFound {
 fn waitid_scan(
     parent_pid: crate::proc::pcb::ProcessId,
     target: Option<u64>,
+    pgid_filter: Option<u64>,
     want_exited: bool,
     want_stopped: bool,
     want_continued: bool,
@@ -39889,7 +39892,13 @@ fn waitid_scan(
         }
         None => {
             if want_exited {
-                match pcb::peek_exit_any(parent_pid) {
+                // P_PGID restricts the exit scan to group members; P_ALL
+                // (pgid_filter == None) considers any child.
+                let peek = match pgid_filter {
+                    Some(g) => pcb::peek_exit_group(parent_pid, g),
+                    None => pcb::peek_exit_any(parent_pid),
+                };
+                match peek {
                     Ok(Some((cpid, info, uid))) => {
                         if !nowait {
                             pcb::try_reap(parent_pid, cpid)?;
@@ -39915,9 +39924,15 @@ fn waitid_scan(
                 }
             }
             if want_jc {
-                if let Some((cpid, ev)) = pcb::jc_report_any_child(
-                    parent_pid, want_stopped, want_continued, !nowait,
-                )? {
+                let jc = match pgid_filter {
+                    Some(g) => pcb::jc_report_group(
+                        parent_pid, g, want_stopped, want_continued, !nowait,
+                    ),
+                    None => pcb::jc_report_any_child(
+                        parent_pid, want_stopped, want_continued, !nowait,
+                    ),
+                };
+                if let Some((cpid, ev)) = jc? {
                     let uid = pcb::process_uid(cpid).unwrap_or(0);
                     let (code, status) = waitid_si_from_jc(&ev);
                     return Ok(Some(WaitidFound {
@@ -40006,7 +40021,7 @@ fn test_waitid_scan() -> crate::error::KernelResult<()> {
     pcb::remove_thread(child, 7000, pcb::ThreadExitAccounting::default())?;
 
     // WNOWAIT (any-child) finds the zombie but must NOT reap it.
-    match waitid_scan(parent, None, true, false, false, true)? {
+    match waitid_scan(parent, None, None, true, false, false, true)? {
         Some(f)
             if f.si_pid == child
                 && f.si_code == CLD_EXITED
@@ -40027,7 +40042,7 @@ fn test_waitid_scan() -> crate::error::KernelResult<()> {
     }
 
     // Real reap (specific PID, consume): reports then destroys the child.
-    match waitid_scan(parent, Some(child), true, false, false, false)? {
+    match waitid_scan(parent, Some(child), None, true, false, false, false)? {
         Some(f) if f.si_pid == child && f.si_code == CLD_EXITED && f.si_status == 42 => {}
         _ => {
             serial_println!("[syscall/linux]   FAIL: waitid_scan reap exit report");
@@ -40038,7 +40053,7 @@ fn test_waitid_scan() -> crate::error::KernelResult<()> {
     }
     // The child is gone now → specific scan is NoSuchProcess (→ ECHILD).
     if !matches!(
-        waitid_scan(parent, Some(child), true, false, false, false),
+        waitid_scan(parent, Some(child), None, true, false, false, false),
         Err(KernelError::NoSuchProcess)
     ) {
         serial_println!("[syscall/linux]   FAIL: reaped child not NoSuchProcess");
@@ -40047,7 +40062,7 @@ fn test_waitid_scan() -> crate::error::KernelResult<()> {
     }
     // No children left → any-child scan is NoChildProcess (→ ECHILD).
     if !matches!(
-        waitid_scan(parent, None, true, false, false, false),
+        waitid_scan(parent, None, None, true, false, false, false),
         Err(KernelError::NoChildProcess)
     ) {
         serial_println!("[syscall/linux]   FAIL: childless any-scan not NoChildProcess");
@@ -40059,7 +40074,7 @@ fn test_waitid_scan() -> crate::error::KernelResult<()> {
     let child2 = pcb::create("waitid-child2", parent);
     pcb::set_running(child2)?;
     pcb::record_jc_stopped(child2, 19)?; // SIGSTOP
-    match waitid_scan(parent, None, false, true, false, false)? {
+    match waitid_scan(parent, None, None, false, true, false, false)? {
         Some(f) if f.si_pid == child2 && f.si_code == CLD_STOPPED && f.si_status == 19 => {}
         _ => {
             serial_println!("[syscall/linux]   FAIL: waitid_scan stop report");
@@ -40069,14 +40084,14 @@ fn test_waitid_scan() -> crate::error::KernelResult<()> {
         }
     }
     // Consumed: a second WSTOPPED scan no longer reports it.
-    if waitid_scan(parent, None, false, true, false, false)?.is_some() {
+    if waitid_scan(parent, None, None, false, true, false, false)?.is_some() {
         serial_println!("[syscall/linux]   FAIL: stop report not consumed");
         pcb::destroy(child2);
         pcb::destroy(parent);
         return Err(KernelError::InternalError);
     }
     pcb::record_jc_continued(child2)?;
-    match waitid_scan(parent, Some(child2), false, false, true, false)? {
+    match waitid_scan(parent, Some(child2), None, false, false, true, false)? {
         Some(f) if f.si_pid == child2 && f.si_code == CLD_CONTINUED && f.si_status == 18 => {}
         _ => {
             serial_println!("[syscall/linux]   FAIL: waitid_scan continue report");
@@ -40087,6 +40102,63 @@ fn test_waitid_scan() -> crate::error::KernelResult<()> {
     }
     pcb::destroy(child2);
     pcb::destroy(parent);
+
+    // --- P_PGID group filtering (pgid_filter) ---
+    // Build a parent whose two children share a session (forked, so they
+    // inherit gp's sid+pgid), then move both into a new group `ca` and
+    // verify a group-filtered scan only sees that group's child.  setpgid
+    // requires the target to share the caller's session and the
+    // destination group to already exist in that session — fork (not
+    // create) is what gives the children gp's session.
+    let gp = pcb::create("waitid-gparent", 0);
+    pcb::set_running(gp)?;
+    let ca = pcb::fork_create(gp, 0, alloc::vec::Vec::new(), alloc::vec::Vec::new())?;
+    pcb::set_running(ca)?;
+    let cb = pcb::fork_create(gp, 0, alloc::vec::Vec::new(), alloc::vec::Vec::new())?;
+    pcb::set_running(cb)?;
+    // Helper to tear the group fixture down on any failure path.
+    let drop_group = || {
+        pcb::destroy(ca);
+        pcb::destroy(cb);
+        pcb::destroy(gp);
+    };
+    // Step 1: ca creates its own group (pgid == ca).
+    if let Err(e) = pcb::set_pgid(gp, ca, ca) {
+        serial_println!("[syscall/linux]   FAIL: set_pgid(ca -> ca) {:?}", e);
+        drop_group();
+        return Err(KernelError::InternalError);
+    }
+    // Step 2: cb joins ca's group, so both children are in group `ca`.
+    if let Err(e) = pcb::set_pgid(gp, cb, ca) {
+        serial_println!("[syscall/linux]   FAIL: set_pgid(cb -> ca) {:?}", e);
+        drop_group();
+        return Err(KernelError::InternalError);
+    }
+    // Make cb a zombie with code 7; ca stays running.
+    pcb::set_exit_code(cb, 7)?;
+    pcb::add_thread(cb, 7100)?;
+    pcb::remove_thread(cb, 7100, pcb::ThreadExitAccounting::default())?;
+    // A scan filtered to group `gp` (gp's own group, which now has no child
+    // members — both children moved to group `ca`) must report
+    // NoChildProcess (→ ECHILD).
+    if !matches!(
+        waitid_scan(gp, None, Some(gp), true, false, false, true),
+        Err(KernelError::NoChildProcess)
+    ) {
+        serial_println!("[syscall/linux]   FAIL: P_PGID empty-group not ECHILD");
+        drop_group();
+        return Err(KernelError::InternalError);
+    }
+    // A scan filtered to group `ca` finds cb's zombie (WNOWAIT: no reap).
+    match waitid_scan(gp, None, Some(ca), true, false, false, true)? {
+        Some(f) if f.si_pid == cb && f.si_code == CLD_EXITED && f.si_status == 7 => {}
+        _ => {
+            serial_println!("[syscall/linux]   FAIL: P_PGID group scan missed cb");
+            drop_group();
+            return Err(KernelError::InternalError);
+        }
+    }
+    drop_group();
 
     // --- pure encoder branches ---
     // Killed by signal: exit_code = 128 + 9 (SIGKILL) → CLD_KILLED, sig 9.
@@ -40216,8 +40288,11 @@ fn sys_waitid(args: &SyscallArgs) -> SyscallResult {
     //
     // `target` becomes `Some(pid)` for the specific-child idtypes
     // (P_PID, P_PIDFD) and `None` for the any-child idtypes (P_ALL,
-    // P_PGID).  We do not model process groups, so P_PGID waits on any
-    // child — the same simplification `wait4(pid <= 0)` makes.
+    // P_PGID).  For P_PGID, `pgid_filter` additionally restricts the
+    // any-child scan to members of the named process group (computed
+    // below, after the per-arm upid gate).
+    let parent_pid = caller_pid().unwrap_or(0);
+    let mut pgid_filter: Option<u64> = None;
     let target: Option<u64> = match idtype {
         0 => None, // P_ALL: no upid constraint, any child.
         1 => {
@@ -40231,7 +40306,18 @@ fn sys_waitid(args: &SyscallArgs) -> SyscallResult {
             if upid < 0 {
                 return linux_err(errno::EINVAL);
             }
-            // P_PGID: process groups unmodelled → wait on any child.
+            // P_PGID: restrict to the named process group.  upid == 0
+            // means the *caller's* process group (Linux task_pgrp of
+            // current); resolve it via the caller's pgid record.  In
+            // kernel-context self-tests the caller (pid 0) has no group
+            // record, so this falls back to wait-any (None) — the same
+            // answer the old unconditional any-child path produced.
+            pgid_filter = if upid == 0 {
+                crate::proc::pcb::get_pgid(parent_pid)
+            } else {
+                #[allow(clippy::cast_sign_loss)]
+                Some(upid as u64)
+            };
             None
         }
         3 => {
@@ -40283,7 +40369,7 @@ fn sys_waitid(args: &SyscallArgs) -> SyscallResult {
     let nohang = options & WNOHANG != 0;
     let nowait = options & WNOWAIT != 0;
 
-    let parent_pid = caller_pid().unwrap_or(0);
+    // `parent_pid` was resolved above (before the per-arm P_PGID gate).
     let task_id = crate::sched::current_task_id();
 
     // Map a scan error to the observable wait errno.  No eligible child
@@ -40300,7 +40386,8 @@ fn sys_waitid(args: &SyscallArgs) -> SyscallResult {
 
     loop {
         match waitid_scan(
-            parent_pid, target, want_exited, want_stopped, want_continued, nowait,
+            parent_pid, target, pgid_filter, want_exited, want_stopped, want_continued,
+            nowait,
         ) {
             Ok(Some(found)) => {
                 write_waitid_siginfo(infop, &found);
@@ -40341,7 +40428,8 @@ fn sys_waitid(args: &SyscallArgs) -> SyscallResult {
             }
         }
         match waitid_scan(
-            parent_pid, target, want_exited, want_stopped, want_continued, nowait,
+            parent_pid, target, pgid_filter, want_exited, want_stopped, want_continued,
+            nowait,
         ) {
             Ok(Some(found)) => {
                 if target.is_none() {
@@ -43105,6 +43193,24 @@ fn sys_wait4(args: &SyscallArgs) -> SyscallResult {
     let want_stopped = (options & WUNTRACED) != 0;
     let want_continued = (options & WCONTINUED) != 0;
 
+    // Resolve the process-group filter for the wait-any (pid <= 0) path:
+    //   pid == -1 : wait for ANY child (no group restriction).
+    //   pid == 0  : any child in the *caller's* process group.
+    //   pid <  -1 : any child in process group `-pid`.
+    // (pid == INT_MIN already returned ESRCH above.) In kernel-context
+    // self-tests the caller (pid 0) has no group record, so pid==0 falls
+    // back to wait-any — the same answer the old unconditional wait-any
+    // path produced.
+    let pgid_filter: Option<u64> = if pid_arg == -1 {
+        None
+    } else if pid_arg == 0 {
+        pcb::get_pgid(parent_pid)
+    } else if pid_arg < -1 {
+        Some(pid_arg.unsigned_abs())
+    } else {
+        None // pid_arg > 0 handled by the specific-pid branch below
+    };
+
     // Specific-pid vs any-child path mirrors sys_process_wait.  Each loop
     // breaks with the child PID and an already-encoded wstatus word, since a
     // zombie exit and a job-control stop/continue report encode differently.
@@ -43201,8 +43307,14 @@ fn sys_wait4(args: &SyscallArgs) -> SyscallResult {
                 pcb::clear_wait_any_task(parent_pid, task_id);
                 return linux_err(linux_errno_for(e));
             }
-            // Zombie exit of any child? (reaps)
-            match pcb::try_reap_any(parent_pid) {
+            // Zombie exit of any child? (reaps)  When a process-group
+            // filter is active (pid == 0 or pid < -1) only children whose
+            // pgid matches are eligible; otherwise any child qualifies.
+            let reap_result = match pgid_filter {
+                Some(g) => pcb::try_reap_group(parent_pid, g),
+                None => pcb::try_reap_any(parent_pid),
+            };
+            match reap_result {
                 Ok(Some((cpid, info))) => {
                     pcb::clear_wait_any_task(parent_pid, task_id);
                     break (cpid, encode_linux_wstatus(&info));
@@ -43215,9 +43327,15 @@ fn sys_wait4(args: &SyscallArgs) -> SyscallResult {
             }
             // Stop/continue of any child? (does not reap)
             if want_stopped || want_continued {
-                match pcb::jc_report_any_child(
-                    parent_pid, want_stopped, want_continued, true,
-                ) {
+                let jc_result = match pgid_filter {
+                    Some(g) => pcb::jc_report_group(
+                        parent_pid, g, want_stopped, want_continued, true,
+                    ),
+                    None => pcb::jc_report_any_child(
+                        parent_pid, want_stopped, want_continued, true,
+                    ),
+                };
+                match jc_result {
                     Ok(Some((cpid, ev))) => {
                         pcb::clear_wait_any_task(parent_pid, task_id);
                         break (cpid, encode_jc_wstatus(&ev));

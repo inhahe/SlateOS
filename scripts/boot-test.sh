@@ -177,12 +177,40 @@ for candidate in \
     fi
 done
 
+# Stage the kernel.  A strip failure (e.g. the staged image is locked by a
+# stray QEMU still holding the disk open → "Permission denied") MUST NOT be
+# ignored: if it is, the boot test silently re-runs the previously-staged
+# (stale) kernel and reports misleading results.  So we check the exit code,
+# fall back to a plain copy, and abort the whole run if staging can't update
+# the image.
+STAGED_KERNEL="$ESP_DIR/boot/kernel"
+stage_ok=0
 if [ -n "$LLVM_STRIP" ]; then
     echo "Stripping kernel binary with $LLVM_STRIP..."
-    "$LLVM_STRIP" "$KERNEL_BIN" -o "$ESP_DIR/boot/kernel"
-else
-    echo "WARNING: No strip tool found, copying unstripped kernel."
-    cp "$KERNEL_BIN" "$ESP_DIR/boot/kernel"
+    if "$LLVM_STRIP" "$KERNEL_BIN" -o "$STAGED_KERNEL"; then
+        stage_ok=1
+    else
+        echo "WARNING: strip failed; falling back to an unstripped copy." >&2
+    fi
+fi
+if [ "$stage_ok" -eq 0 ]; then
+    if cp "$KERNEL_BIN" "$STAGED_KERNEL"; then
+        stage_ok=1
+    fi
+fi
+if [ "$stage_ok" -eq 0 ]; then
+    echo "ERROR: could not stage kernel to $STAGED_KERNEL." >&2
+    echo "       The image is likely locked by a stray qemu-system-x86_64" >&2
+    echo "       process holding the disk open.  Kill it and re-run." >&2
+    exit 1
+fi
+# Guard against a staged image that predates this build: it must be newer
+# than the freshly-built kernel binary we just compiled.
+if [ "$STAGED_KERNEL" -ot "$KERNEL_BIN" ]; then
+    echo "ERROR: staged kernel is older than the build output — staging did" >&2
+    echo "       not take effect (stale image).  Aborting to avoid a" >&2
+    echo "       misleading boot test." >&2
+    exit 1
 fi
 
 cp "$PROJECT_ROOT/limine.conf" "$ESP_DIR/limine.conf"

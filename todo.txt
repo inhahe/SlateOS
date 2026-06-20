@@ -9452,9 +9452,20 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##          UPDATE 2026-06-20: process-group model now EXISTS (pcb pgid/sid,
 ##          setpgid/getpgid/getpgrp/getsid/setsid, fork inheritance,
 ##          kill(-pgid) via pcb::pids_in_group).  kill(-pgid, SIG) RESOLVED.
-##          STILL DEFERRED (Increment B): wait4/waitid with negative pid /
-##          P_PGID must match by pgid instead of waiting on any child —
-##          use pcb::pids_in_group / pcb::get_pgid to filter candidates.
+##          UPDATE 2026-06-20 (Increment B): RESOLVED.  wait4(pid<=0) and
+##          waitid(P_PGID) now match by process group instead of waiting on
+##          any child.  pcb gained filter-aware cores
+##          (reap_any_matching/jc_report_matching/peek_exit_matching, each
+##          taking Option<pgid>) exposed as try_reap_group / jc_report_group /
+##          peek_exit_group wrappers; sys_wait4 computes a pgid_filter
+##          (None for -1, caller's pgid for 0, |pid| for <-1) and routes the
+##          wait-any loop through the group variants; sys_waitid resolves a
+##          pgid_filter for P_PGID (caller's group when upid==0, else upid)
+##          and threads it through waitid_scan.  ECHILD fires when the caller
+##          has no child in the named group at all.  Tested: test_waitid_scan
+##          P_PGID case (two forked children moved into a shared group;
+##          empty-group scan → NoChildProcess, group scan finds the member).
+##          Build + clippy clean; boot test PASSED (BOOT_OK).
 ##      DEFERRED (Increment C — console job control, see known-issues TD30):
 ##          Ctrl-Z/Ctrl-C sending SIGTSTP/SIGINT to the foreground process
 ##          GROUP (needs a foreground_pgid on the tty + TIOCSPGRP/TIOCGPGRP);

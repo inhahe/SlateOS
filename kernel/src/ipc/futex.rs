@@ -2563,12 +2563,12 @@ pub fn futex_cmp_requeue_pi(
 /// 1. `futex_wait` with non-matching value (returns immediately).
 /// 2. `futex_wake` with no waiters (returns 0).
 /// 3. Blocking wait + wake via spawned task.
-/// 3b. `futex_waitv` multi-key value-mismatch fast path (no block).  The
-///     blocking multi-key outcomes (timeout / woken-by-index) need the
-///     hrtimer and live in [`self_test_timeout`].
-/// 4. Priority inheritance: high-prio task boosts low-prio lock holder.
-/// 5. Robust dead-owner protocol (pure bit logic + OWNER_DIED relock).
-/// 6. PI owner-death handoff: a blocked `FUTEX_LOCK_PI` waiter inherits a
+/// 4. `futex_waitv` multi-key value-mismatch fast path (no block).  The
+///    blocking multi-key outcomes (timeout / woken-by-index) need the
+///    hrtimer and live in [`self_test_timeout`].
+/// 5. Priority inheritance: high-prio task boosts low-prio lock holder.
+/// 6. Robust dead-owner protocol (pure bit logic + OWNER_DIED relock).
+/// 7. PI owner-death handoff: a blocked `FUTEX_LOCK_PI` waiter inherits a
 ///    dead owner's mutex instead of hanging.
 pub fn self_test() -> KernelResult<()> {
     serial_println!("[futex] Running futex self-test...");

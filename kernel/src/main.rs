@@ -1842,6 +1842,18 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path Z Part 38: separate compilation — `tcc -c` emits two relocatable ELF
+    // objects (a defines slate_add, b's main calls it across the TU boundary),
+    // then `tcc -o prog a.o b.o` links both + crt + glibc into one dynamic exe,
+    // resolving the cross-TU reference at link time, and the binary runs in ring
+    // 3. Exercises object emission + tcc-as-linker over multiple inputs.
+    if let Err(e) = proc::spawn::self_test_linux_real_glibc_cc_separate() {
+        serial_println!(
+            "WARNING: Path-Z separate-compilation C compiler (tcc) self-test failed: {:?}",
+            e
+        );
+    }
+
     // madvise(MADV_DONTNEED) reclaim test: faults in an anonymous range,
     // reclaims it, and verifies the frames are freed, the VMA persists, and a
     // re-fault zero-fills (Linux anonymous DONTNEED contract).  Needs a live

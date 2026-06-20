@@ -10801,13 +10801,18 @@ sc3(1,1,(long)m,16);sc3(60,0,0,0);}\n";
 /// No-ops cleanly (returns `Ok`) if the glibc support set is absent so the
 /// test is a silent skip on a rootfs that wasn't built with hosted-compile
 /// support.
-fn run_hosted_cc_case(label: &str, hosted_src: &[u8], expect_out: &[u8]) -> KernelResult<()> {
-    const EXPECT_EXIT: i32 = 0;
-
+/// Stage the shared tcc + glibc support set from the `/mnt` rootfs into the VFS
+/// root at the exact absolute paths tcc opens (verified via `tcc -vv`).  Shared
+/// by every Path-Z hosted-compile self-test.
+///
+/// Returns `Ok(true)` when the whole set is staged, `Ok(false)` when a
+/// prerequisite is missing or a copy fails — in which case the caller no-ops,
+/// matching the best-effort rootfs pattern (the image may be built without the
+/// toolchain).
+fn stage_hosted_cc_support() -> KernelResult<bool> {
     // (src in /mnt rootfs, dst in VFS) staging pairs.  ld + libc + libm + tcc
     // are shared with the other Path-Z tests; the crt objects, libc.so script,
-    // libc_nonshared.a and libtcc1.a are the hosted-compile additions.  Each
-    // dst is the exact absolute path tcc opens (verified via `tcc -vv`).
+    // libc_nonshared.a and libtcc1.a are the hosted-compile additions.
     const STAGE: &[(&str, &str)] = &[
         (
             "/mnt/lib64/ld-linux-x86-64.so.2",
@@ -10847,13 +10852,6 @@ fn run_hosted_cc_case(label: &str, hosted_src: &[u8], expect_out: &[u8]) -> Kern
             "/tmp/tccinstall/lib/tcc/libtcc1.a",
         ),
     ];
-    const DST_TCC: &str = "/bin/tcc";
-    const SRC_PATH: &str = "/hosted-prog.c";
-    const OBJ_PATH: &str = "/hosted-prog";
-    const OUT_PATH: &str = "/hosted-out.txt";
-
-    const COMPILE_MAX_YIELDS: usize = 4_194_304;
-    const RUN_MAX_YIELDS: usize = 524_288;
 
     // The hosted compile needs the whole support set; if tcc itself or any
     // support file is missing, no-op (matches the rootfs best-effort pattern).
@@ -10861,13 +10859,8 @@ fn run_hosted_cc_case(label: &str, hosted_src: &[u8], expect_out: &[u8]) -> Kern
         || !crate::fs::Vfs::exists("/mnt/usr/lib/x86_64-linux-gnu/crt1.o")
         || !crate::fs::Vfs::exists("/mnt/tmp/tccinstall/lib/tcc/libtcc1.a")
     {
-        return Ok(());
+        return Ok(false);
     }
-
-    serial_println!(
-        "[spawn] Running REAL C compiler (tcc, HOSTED glibc link, {}, ring 3, Path Z) test...",
-        label
-    );
 
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
@@ -10882,33 +10875,31 @@ fn run_hosted_cc_case(label: &str, hosted_src: &[u8], expect_out: &[u8]) -> Kern
                         "[spawn]   hosted cc: SKIP (staging {} -> {} failed: {:?})",
                         src, dst, e
                     );
-                    return Ok(());
+                    return Ok(false);
                 }
             }
             Err(e) => {
                 serial_println!("[spawn]   hosted cc: SKIP (reading {} failed: {:?})", src, e);
-                return Ok(());
+                return Ok(false);
             }
         }
     }
+    Ok(true)
+}
 
-    if let Err(e) = crate::fs::Vfs::write_file(SRC_PATH, hosted_src) {
-        serial_println!("[spawn]   hosted cc: SKIP (writing {} failed: {:?})", SRC_PATH, e);
-        return Ok(());
-    }
-    let _ = crate::fs::Vfs::remove(OBJ_PATH);
-    let _ = crate::fs::Vfs::remove(OUT_PATH);
+/// Spawn the staged image `tcc` with `argv`, wait for it to exit, and return its
+/// exit code.  `tcc_elf` is the already-read `/bin/tcc` binary.  `label` tags
+/// diagnostics.  Returns `Err` on spawn failure or if tcc fails to exit within
+/// the compile budget (a hang).
+fn spawn_reap_tcc(
+    tcc_elf: &[u8],
+    argv: &[&[u8]],
+    label: &str,
+) -> KernelResult<Option<i32>> {
+    // tcc's compile/link loop is the heaviest userspace work in these tests, so
+    // it gets the largest yield budget; an exhausted budget is treated as a hang.
+    const COMPILE_MAX_YIELDS: usize = 4_194_304;
 
-    let tcc_elf = match crate::fs::Vfs::read_file(DST_TCC) {
-        Ok(b) => b,
-        Err(e) => {
-            serial_println!("[spawn]   hosted cc: SKIP (re-read {} failed: {:?})", DST_TCC, e);
-            return Ok(());
-        }
-    };
-
-    // --- step 1: run tcc to compile + glibc-link /hosted-prog.c -------------
-    let cc_argv: &[&[u8]] = &[b"tcc", b"-o", b"/hosted-prog", b"/hosted-prog.c"];
     let cc_envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C"];
     let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
     let cc_options = SpawnOptions {
@@ -10917,111 +10908,100 @@ fn run_hosted_cc_case(label: &str, hosted_src: &[u8], expect_out: &[u8]) -> Kern
         priority: DEFAULT_PRIORITY,
         capabilities: &caps,
         fd_map: &[],
-        argv: cc_argv,
+        argv,
         envp: cc_envp,
-        exe_path: Some(DST_TCC.as_bytes()),
+        exe_path: Some(b"/bin/tcc"),
     };
 
-    let cc_result = match spawn_process(&tcc_elf, &cc_options) {
+    let cc_result = match spawn_process(tcc_elf, &cc_options) {
         Ok(r) => r,
         Err(e) => {
-            serial_println!("[spawn]   FAIL: hosted cc — tcc spawn returned {:?}", e);
+            serial_println!("[spawn]   FAIL: hosted cc ({}) — tcc spawn returned {:?}", label, e);
             return Err(e);
         }
     };
 
-    let mut cc_reaped = false;
+    let mut reaped = false;
     for _ in 0..COMPILE_MAX_YIELDS {
         if pcb::state(cc_result.pid) == Some(pcb::ProcessState::Zombie) {
-            cc_reaped = true;
+            reaped = true;
             break;
         }
         crate::sched::yield_now();
     }
 
-    let cc_state = pcb::state(cc_result.pid);
-    let cc_exit = pcb::exit_code(cc_result.pid);
+    let state = pcb::state(cc_result.pid);
+    let exit = pcb::exit_code(cc_result.pid);
     thread::on_thread_exit(cc_result.task_id);
     pcb::destroy(cc_result.pid);
 
-    if !cc_reaped || cc_state != Some(pcb::ProcessState::Zombie) {
+    if !reaped || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
-            "[spawn]   FAIL: hosted cc — tcc did not exit within {} yields (state={:?}); tcc \
+            "[spawn]   FAIL: hosted cc ({}) — tcc did not exit within {} yields (state={:?}); tcc \
              startup or its compile/link loop likely hung",
-            COMPILE_MAX_YIELDS, cc_state
+            label, COMPILE_MAX_YIELDS, state
         );
-        let _ = crate::fs::Vfs::remove(SRC_PATH);
         return Err(KernelError::InternalError);
     }
+    Ok(exit)
+}
 
-    if cc_exit != Some(EXPECT_EXIT) {
+/// Confirm `obj` is an ELF that carries a `PT_INTERP` — i.e. a *dynamically
+/// linked* executable, the whole point of the hosted rung (vs the freestanding
+/// case's bare static ELF).  `path`/`label` tag diagnostics.
+fn assert_dynamic_elf(obj: &[u8], path: &str, label: &str) -> KernelResult<()> {
+    if obj.len() < 4 || obj.get(..4) != Some(b"\x7fELF".as_slice()) {
         serial_println!(
-            "[spawn]   FAIL: hosted cc — tcc exit code={:?}, expected {} (non-zero means tcc hit a \
-             compile/link error — e.g. a crt object or libc.so script it could not open/parse)",
-            cc_exit, EXPECT_EXIT
+            "[spawn]   FAIL: hosted cc ({}) — {} is not an ELF ({} bytes, first 4 = {:?})",
+            label, path, obj.len(), obj.get(..4)
         );
-        let _ = crate::fs::Vfs::remove(SRC_PATH);
         return Err(KernelError::InternalError);
     }
-
-    let obj = match crate::fs::Vfs::read_file(OBJ_PATH) {
-        Ok(b) => b,
-        Err(e) => {
-            serial_println!(
-                "[spawn]   FAIL: hosted cc — tcc exited 0 but {} is unreadable: {:?}",
-                OBJ_PATH, e
-            );
-            let _ = crate::fs::Vfs::remove(SRC_PATH);
-            return Err(KernelError::InternalError);
-        }
-    };
-    if obj.len() < 4 || &obj[..4] != b"\x7fELF" {
-        serial_println!(
-            "[spawn]   FAIL: hosted cc — {} is not an ELF ({} bytes, first 4 = {:?})",
-            OBJ_PATH, obj.len(), obj.get(..4)
-        );
-        let _ = crate::fs::Vfs::remove(SRC_PATH);
-        return Err(KernelError::InternalError);
-    }
-    // The whole point of the hosted rung: the output must be *dynamically
-    // linked* (carry a PT_INTERP), unlike the freestanding case's bare static
-    // ELF.  Parse it and confirm an interpreter is present.
-    match elf::ElfFile::parse(&obj) {
+    match elf::ElfFile::parse(obj) {
         Ok(ef) => match ef.interp_path() {
-            Some(interp) => serial_println!(
-                "[spawn]   hosted cc — tcc produced a {}-byte dynamic ELF (PT_INTERP={:?})",
-                obj.len(),
-                core::str::from_utf8(interp).unwrap_or("<non-utf8>")
-            ),
+            Some(interp) => {
+                serial_println!(
+                    "[spawn]   hosted cc ({}) — {} is a {}-byte dynamic ELF (PT_INTERP={:?})",
+                    label, path, obj.len(),
+                    core::str::from_utf8(interp).unwrap_or("<non-utf8>")
+                );
+                Ok(())
+            }
             None => {
                 serial_println!(
-                    "[spawn]   FAIL: hosted cc — {} has no PT_INTERP; expected a dynamically-linked \
-                     ELF (the hosted compile should link against glibc + ld-linux)",
-                    OBJ_PATH
+                    "[spawn]   FAIL: hosted cc ({}) — {} has no PT_INTERP; expected a \
+                     dynamically-linked ELF (the hosted compile should link against glibc + ld-linux)",
+                    label, path
                 );
-                let _ = crate::fs::Vfs::remove(SRC_PATH);
-                let _ = crate::fs::Vfs::remove(OBJ_PATH);
-                return Err(KernelError::InternalError);
+                Err(KernelError::InternalError)
             }
         },
         Err(e) => {
             serial_println!(
-                "[spawn]   FAIL: hosted cc — output ELF {} failed to parse: {:?}",
-                OBJ_PATH, e
+                "[spawn]   FAIL: hosted cc ({}) — output ELF {} failed to parse: {:?}",
+                label, path, e
             );
-            let _ = crate::fs::Vfs::remove(SRC_PATH);
-            let _ = crate::fs::Vfs::remove(OBJ_PATH);
-            return Err(KernelError::InternalError);
+            Err(KernelError::InternalError)
         }
     }
+}
 
-    // --- step 2: run the freshly-built dynamic binary ----------------------
-    // It carries a PT_INTERP, so the normal auto-detecting spawn_process picks
-    // the Linux ABI (giving it a Linux fd table) and loads ld-linux for it.
+/// Spawn a freshly-built dynamic binary `obj` (loaded from `prog_path`), redirect
+/// its fd 1 to `out_path` before it runs, wait for exit, and return
+/// `(exit_code, captured_bytes)`.  Because `obj` carries a `PT_INTERP`, the
+/// auto-detecting `spawn_process` selects the Linux ABI and loads ld-linux.
+fn run_dynamic_capture(
+    obj: &[u8],
+    prog_path: &str,
+    out_path: &str,
+    label: &str,
+) -> KernelResult<(Option<i32>, alloc::vec::Vec<u8>)> {
+    const RUN_MAX_YIELDS: usize = 524_288;
     use crate::fs::handle;
     use crate::proc::linux_fd::{FdEntry, O_WRONLY};
 
-    let run_argv: &[&[u8]] = &[b"/hosted-prog"];
+    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    let run_argv: &[&[u8]] = &[prog_path.as_bytes()];
     let run_envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C"];
     let run_options = SpawnOptions {
         name: "spawn-test-hosted-run",
@@ -11031,35 +11011,33 @@ fn run_hosted_cc_case(label: &str, hosted_src: &[u8], expect_out: &[u8]) -> Kern
         fd_map: &[],
         argv: run_argv,
         envp: run_envp,
-        exe_path: Some(OBJ_PATH.as_bytes()),
+        exe_path: Some(prog_path.as_bytes()),
     };
 
     let capture_handle = match handle::open(
-        OUT_PATH,
+        out_path,
         handle::OpenFlags::READ
             .union(handle::OpenFlags::WRITE)
             .union(handle::OpenFlags::CREATE),
     ) {
         Ok(h) => h,
         Err(e) => {
-            serial_println!("[spawn]   hosted cc: SKIP (capture-file open failed: {:?})", e);
-            let _ = crate::fs::Vfs::remove(SRC_PATH);
-            let _ = crate::fs::Vfs::remove(OBJ_PATH);
-            return Ok(());
+            serial_println!(
+                "[spawn]   FAIL: hosted cc ({}) — capture-file {} open failed: {:?}",
+                label, out_path, e
+            );
+            return Err(e);
         }
     };
 
-    let run_result = match spawn_process(&obj, &run_options) {
+    let run_result = match spawn_process(obj, &run_options) {
         Ok(r) => r,
         Err(e) => {
             let _ = handle::close(capture_handle);
             serial_println!(
-                "[spawn]   FAIL: hosted cc — spawning the freshly-built {} returned {:?}",
-                OBJ_PATH, e
+                "[spawn]   FAIL: hosted cc ({}) — spawning the freshly-built {} returned {:?}",
+                label, prog_path, e
             );
-            let _ = crate::fs::Vfs::remove(SRC_PATH);
-            let _ = crate::fs::Vfs::remove(OBJ_PATH);
-            let _ = crate::fs::Vfs::remove(OUT_PATH);
             return Err(e);
         }
     };
@@ -11073,69 +11051,149 @@ fn run_hosted_cc_case(label: &str, hosted_src: &[u8], expect_out: &[u8]) -> Kern
         thread::on_thread_exit(run_result.task_id);
         pcb::destroy(run_result.pid);
         serial_println!(
-            "[spawn]   FAIL: hosted cc — redirecting the compiled program's fd 1 failed: {:?}",
-            e
+            "[spawn]   FAIL: hosted cc ({}) — redirecting the compiled program's fd 1 failed: {:?}",
+            label, e
         );
-        let _ = crate::fs::Vfs::remove(SRC_PATH);
-        let _ = crate::fs::Vfs::remove(OBJ_PATH);
-        let _ = crate::fs::Vfs::remove(OUT_PATH);
         return Err(KernelError::InternalError);
     }
 
-    let mut run_reaped = false;
+    let mut reaped = false;
     for _ in 0..RUN_MAX_YIELDS {
         if pcb::state(run_result.pid) == Some(pcb::ProcessState::Zombie) {
-            run_reaped = true;
+            reaped = true;
             break;
         }
         crate::sched::yield_now();
     }
 
-    let run_state = pcb::state(run_result.pid);
-    let run_exit = pcb::exit_code(run_result.pid);
-    let out = crate::fs::Vfs::read_file(OUT_PATH);
+    let state = pcb::state(run_result.pid);
+    let exit = pcb::exit_code(run_result.pid);
+    let out = crate::fs::Vfs::read_file(out_path);
 
     thread::on_thread_exit(run_result.task_id);
     pcb::destroy(run_result.pid);
-    let _ = crate::fs::Vfs::remove(SRC_PATH);
-    let _ = crate::fs::Vfs::remove(OBJ_PATH);
-    let _ = crate::fs::Vfs::remove(OUT_PATH);
 
-    if !run_reaped || run_state != Some(pcb::ProcessState::Zombie) {
+    if !reaped || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
-            "[spawn]   FAIL: hosted cc — the compiled program did not exit within {} yields \
+            "[spawn]   FAIL: hosted cc ({}) — the compiled program did not exit within {} yields \
              (state={:?}); ld.so startup or libc init for the freshly-built binary likely hung",
-            RUN_MAX_YIELDS, run_state
+            label, RUN_MAX_YIELDS, state
         );
         return Err(KernelError::InternalError);
     }
 
     match out {
-        Ok(bytes) if bytes.as_slice() == expect_out => {
-            serial_println!(
-                "[spawn]   REAL C compiler HOSTED ({}) (ring 3: tcc compiled+glibc-linked C into a \
-                 {}-byte dynamic ELF, ld.so loaded that binary + libc, it ran the {} libc path and \
-                 the exit-time stdio flush wrote {} bytes == expected, exit={:?}): OK",
-                label, obj.len(), label, bytes.len(), run_exit
-            );
-            Ok(())
-        }
-        Ok(bytes) => {
-            serial_println!(
-                "[spawn]   FAIL: hosted cc ({}) — {} holds {} bytes {:?}, expected {} bytes {:?} \
-                 (compiled program exit={:?})",
-                label, OUT_PATH, bytes.len(), bytes.as_slice(), expect_out.len(), expect_out, run_exit
-            );
-            Err(KernelError::InternalError)
-        }
+        Ok(bytes) => Ok((exit, bytes)),
         Err(e) => {
             serial_println!(
-                "[spawn]   FAIL: hosted cc — reading the compiled program's output {} back failed: \
-                 {:?} (exit={:?})",
-                OUT_PATH, e, run_exit
+                "[spawn]   FAIL: hosted cc ({}) — reading the compiled program's output {} back \
+                 failed: {:?} (exit={:?})",
+                label, out_path, e, exit
             );
             Err(KernelError::InternalError)
         }
+    }
+}
+
+fn run_hosted_cc_case(label: &str, hosted_src: &[u8], expect_out: &[u8]) -> KernelResult<()> {
+    const EXPECT_EXIT: i32 = 0;
+    const SRC_PATH: &str = "/hosted-prog.c";
+    const OBJ_PATH: &str = "/hosted-prog";
+    const OUT_PATH: &str = "/hosted-out.txt";
+
+    match stage_hosted_cc_support() {
+        Ok(true) => {}
+        Ok(false) => return Ok(()),
+        Err(e) => return Err(e),
+    }
+
+    serial_println!(
+        "[spawn] Running REAL C compiler (tcc, HOSTED glibc link, {}, ring 3, Path Z) test...",
+        label
+    );
+
+    if let Err(e) = crate::fs::Vfs::write_file(SRC_PATH, hosted_src) {
+        serial_println!("[spawn]   hosted cc: SKIP (writing {} failed: {:?})", SRC_PATH, e);
+        return Ok(());
+    }
+    let _ = crate::fs::Vfs::remove(OBJ_PATH);
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+
+    let tcc_elf = match crate::fs::Vfs::read_file("/bin/tcc") {
+        Ok(b) => b,
+        Err(e) => {
+            serial_println!("[spawn]   hosted cc: SKIP (re-read /bin/tcc failed: {:?})", e);
+            let _ = crate::fs::Vfs::remove(SRC_PATH);
+            return Ok(());
+        }
+    };
+
+    // --- step 1: run tcc to compile + glibc-link /hosted-prog.c -------------
+    let cc_argv: &[&[u8]] = &[b"tcc", b"-o", b"/hosted-prog", b"/hosted-prog.c"];
+    let cc_exit = match spawn_reap_tcc(&tcc_elf, cc_argv, label) {
+        Ok(x) => x,
+        Err(e) => {
+            let _ = crate::fs::Vfs::remove(SRC_PATH);
+            return Err(e);
+        }
+    };
+    if cc_exit != Some(EXPECT_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: hosted cc ({}) — tcc exit code={:?}, expected {} (non-zero means tcc \
+             hit a compile/link error — e.g. a crt object or libc.so script it could not \
+             open/parse)",
+            label, cc_exit, EXPECT_EXIT
+        );
+        let _ = crate::fs::Vfs::remove(SRC_PATH);
+        return Err(KernelError::InternalError);
+    }
+
+    let obj = match crate::fs::Vfs::read_file(OBJ_PATH) {
+        Ok(b) => b,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: hosted cc ({}) — tcc exited 0 but {} is unreadable: {:?}",
+                label, OBJ_PATH, e
+            );
+            let _ = crate::fs::Vfs::remove(SRC_PATH);
+            return Err(KernelError::InternalError);
+        }
+    };
+    if let Err(e) = assert_dynamic_elf(&obj, OBJ_PATH, label) {
+        let _ = crate::fs::Vfs::remove(SRC_PATH);
+        let _ = crate::fs::Vfs::remove(OBJ_PATH);
+        return Err(e);
+    }
+
+    // --- step 2: run the freshly-built dynamic binary ----------------------
+    let (run_exit, out) = match run_dynamic_capture(&obj, OBJ_PATH, OUT_PATH, label) {
+        Ok(t) => t,
+        Err(e) => {
+            let _ = crate::fs::Vfs::remove(SRC_PATH);
+            let _ = crate::fs::Vfs::remove(OBJ_PATH);
+            let _ = crate::fs::Vfs::remove(OUT_PATH);
+            return Err(e);
+        }
+    };
+    let _ = crate::fs::Vfs::remove(SRC_PATH);
+    let _ = crate::fs::Vfs::remove(OBJ_PATH);
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+
+    if out.as_slice() == expect_out {
+        serial_println!(
+            "[spawn]   REAL C compiler HOSTED ({}) (ring 3: tcc compiled+glibc-linked C into a \
+             {}-byte dynamic ELF, ld.so loaded that binary + libc, it ran the {} libc path and \
+             the exit-time stdio flush wrote {} bytes == expected, exit={:?}): OK",
+            label, obj.len(), label, out.len(), run_exit
+        );
+        Ok(())
+    } else {
+        serial_println!(
+            "[spawn]   FAIL: hosted cc ({}) — {} holds {} bytes {:?}, expected {} bytes {:?} \
+             (compiled program exit={:?})",
+            label, OUT_PATH, out.len(), out.as_slice(), expect_out.len(), expect_out, run_exit
+        );
+        Err(KernelError::InternalError)
     }
 }
 
@@ -11177,6 +11235,249 @@ int main(void){\n\
   return 0;\n\
 }\n";
     run_hosted_cc_case("printf/malloc", HOSTED_SRC, b"SLATE-1234\n")
+}
+
+/// Path Z Part 38 — separate compilation (`tcc -c` objects + multi-object link).
+///
+/// Strengthens Parts 36/37, which each compiled+linked a *single* source in one
+/// `tcc` invocation.  This rung exercises the multi-step flow:
+///   1. `tcc -c /sep-a.c -o /sep-a.o`  — compile-only: emit a relocatable ELF
+///      object for translation unit A (defines `slate_add`).
+///   2. verify `/sep-a.o` is an ELF object (proves `-c` produced a real object,
+///      not an executable).
+///   3. `tcc -c /sep-b.c -o /sep-b.o`  — compile-only TU B (`main`, which calls
+///      `slate_add` across the TU boundary).
+///   4. `tcc -o /sep-prog /sep-a.o /sep-b.o` — tcc-as-linker combines the two
+///      relocatables + crt + glibc into one dynamic executable, resolving the
+///      cross-TU `slate_add` reference at link time.
+///   5. run `/sep-prog` with fd 1 redirected to a file and confirm the
+///      exit-time stdio flush emitted `SLATE-SEP-42\n`.
+///
+/// This requires tcc's object emission (`-c`) AND tcc-as-linker combining
+/// multiple relocatable inputs — strictly more than the single-file rungs.
+pub fn self_test_linux_real_glibc_cc_separate() -> KernelResult<()> {
+    const EXPECT_EXIT: i32 = 0;
+    const A_SRC: &[u8] = b"/* TU A: defines a function used by main in TU B */\n\
+int slate_add(int a, int b){ return a + b; }\n";
+    const B_SRC: &[u8] = b"/* TU B: main, calls across the TU boundary into TU A */\n\
+extern int printf(const char *fmt, ...);\n\
+extern int slate_add(int a, int b);\n\
+int main(void){\n\
+  int r = slate_add(40, 2);\n\
+  printf(\"SLATE-SEP-%d\\n\", r);\n\
+  return 0;\n\
+}\n";
+    const A_C: &str = "/sep-a.c";
+    const B_C: &str = "/sep-b.c";
+    const A_O: &str = "/sep-a.o";
+    const B_O: &str = "/sep-b.o";
+    const PROG: &str = "/sep-prog";
+    const OUT: &str = "/sep-out.txt";
+    const LABEL: &str = "separate-compilation";
+
+    match stage_hosted_cc_support() {
+        Ok(true) => {}
+        Ok(false) => return Ok(()),
+        Err(e) => return Err(e),
+    }
+
+    serial_println!(
+        "[spawn] Running REAL C compiler (tcc, SEPARATE compilation, ring 3, Path Z) test..."
+    );
+
+    // Cleanup helper: remove every artifact we may have created.  Used on every
+    // exit path so a failed run does not leave stale files for the next test.
+    fn cleanup() {
+        for p in ["/sep-a.c", "/sep-b.c", "/sep-a.o", "/sep-b.o", "/sep-prog", "/sep-out.txt"] {
+            let _ = crate::fs::Vfs::remove(p);
+        }
+    }
+    cleanup();
+
+    if let Err(e) = crate::fs::Vfs::write_file(A_C, A_SRC) {
+        serial_println!("[spawn]   sep cc: SKIP (writing {} failed: {:?})", A_C, e);
+        cleanup();
+        return Ok(());
+    }
+    if let Err(e) = crate::fs::Vfs::write_file(B_C, B_SRC) {
+        serial_println!("[spawn]   sep cc: SKIP (writing {} failed: {:?})", B_C, e);
+        cleanup();
+        return Ok(());
+    }
+
+    let tcc_elf = match crate::fs::Vfs::read_file("/bin/tcc") {
+        Ok(b) => b,
+        Err(e) => {
+            serial_println!("[spawn]   sep cc: SKIP (re-read /bin/tcc failed: {:?})", e);
+            cleanup();
+            return Ok(());
+        }
+    };
+
+    // --- step 1: tcc -c /sep-a.c -o /sep-a.o (compile-only TU A) -----------
+    let a_argv: &[&[u8]] = &[b"tcc", b"-c", b"/sep-a.c", b"-o", b"/sep-a.o"];
+    let a_exit = match spawn_reap_tcc(&tcc_elf, a_argv, LABEL) {
+        Ok(x) => x,
+        Err(e) => {
+            cleanup();
+            return Err(e);
+        }
+    };
+    if a_exit != Some(EXPECT_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: sep cc — `tcc -c {}` exit={:?}, expected {}",
+            A_C, a_exit, EXPECT_EXIT
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+    // Verify /sep-a.o is a real ELF *object* (ET_REL), not an executable: this
+    // is the whole point of `-c`.  We check the ELF magic + e_type == ET_REL(1).
+    let a_obj = match crate::fs::Vfs::read_file(A_O) {
+        Ok(b) => b,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: sep cc — {} unreadable after compile: {:?}", A_O, e);
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+    };
+    if let Err(e) = assert_relocatable_elf(&a_obj, A_O, LABEL) {
+        cleanup();
+        return Err(e);
+    }
+
+    // --- step 2: tcc -c /sep-b.c -o /sep-b.o (compile-only TU B) -----------
+    let b_argv: &[&[u8]] = &[b"tcc", b"-c", b"/sep-b.c", b"-o", b"/sep-b.o"];
+    let b_exit = match spawn_reap_tcc(&tcc_elf, b_argv, LABEL) {
+        Ok(x) => x,
+        Err(e) => {
+            cleanup();
+            return Err(e);
+        }
+    };
+    if b_exit != Some(EXPECT_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: sep cc — `tcc -c {}` exit={:?}, expected {}",
+            B_C, b_exit, EXPECT_EXIT
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+    let b_obj = match crate::fs::Vfs::read_file(B_O) {
+        Ok(b) => b,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: sep cc — {} unreadable after compile: {:?}", B_O, e);
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+    };
+    if let Err(e) = assert_relocatable_elf(&b_obj, B_O, LABEL) {
+        cleanup();
+        return Err(e);
+    }
+
+    // --- step 3: tcc -o /sep-prog /sep-a.o /sep-b.o (link both objects) ----
+    let link_argv: &[&[u8]] = &[b"tcc", b"-o", b"/sep-prog", b"/sep-a.o", b"/sep-b.o"];
+    let link_exit = match spawn_reap_tcc(&tcc_elf, link_argv, LABEL) {
+        Ok(x) => x,
+        Err(e) => {
+            cleanup();
+            return Err(e);
+        }
+    };
+    if link_exit != Some(EXPECT_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: sep cc — `tcc -o {} {} {}` exit={:?}, expected {} (link of two \
+             relocatables + crt + glibc failed — e.g. an unresolved cross-TU symbol)",
+            PROG, A_O, B_O, link_exit, EXPECT_EXIT
+        );
+        cleanup();
+        return Err(KernelError::InternalError);
+    }
+    let prog = match crate::fs::Vfs::read_file(PROG) {
+        Ok(b) => b,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: sep cc — link exited 0 but {} is unreadable: {:?}",
+                PROG, e
+            );
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+    };
+    if let Err(e) = assert_dynamic_elf(&prog, PROG, LABEL) {
+        cleanup();
+        return Err(e);
+    }
+
+    // --- step 4: run the freshly-linked dynamic binary --------------------
+    let (run_exit, out) = match run_dynamic_capture(&prog, PROG, OUT, LABEL) {
+        Ok(t) => t,
+        Err(e) => {
+            cleanup();
+            return Err(e);
+        }
+    };
+    cleanup();
+
+    if out.as_slice() == b"SLATE-SEP-42\n" && run_exit == Some(EXPECT_EXIT) {
+        serial_println!(
+            "[spawn]   REAL C compiler SEPARATE compilation (ring 3: tcc emitted two relocatable \
+             objects via -c, linked them + crt + glibc into a {}-byte dynamic ELF resolving the \
+             cross-TU slate_add reference, ld.so ran it, exit-time flush wrote {} bytes == \
+             expected, exit={:?}): OK",
+            prog.len(), out.len(), run_exit
+        );
+        Ok(())
+    } else {
+        serial_println!(
+            "[spawn]   FAIL: sep cc — {} holds {} bytes {:?} (exit={:?}), expected \
+             {:?} with exit={}",
+            OUT, out.len(), out.as_slice(), run_exit, b"SLATE-SEP-42\n", EXPECT_EXIT
+        );
+        Err(KernelError::InternalError)
+    }
+}
+
+/// Confirm `obj` is a *relocatable* ELF object (`ET_REL`, e_type == 1) — the
+/// product of `tcc -c`.  Distinct from [`assert_dynamic_elf`], which checks for
+/// a `PT_INTERP`-carrying executable.  Verifies the 4-byte magic, that the file
+/// is large enough to hold the ELF header, and that `e_type` (the 2-byte LE
+/// field at offset 16) is `ET_REL`.
+fn assert_relocatable_elf(obj: &[u8], path: &str, label: &str) -> KernelResult<()> {
+    // ELF header: e_type is a 2-byte little-endian field at offset 0x10.
+    const E_TYPE_OFF: usize = 16;
+    const ET_REL: u16 = 1;
+    if obj.len() < E_TYPE_OFF + 2 || obj.get(..4) != Some(b"\x7fELF".as_slice()) {
+        serial_println!(
+            "[spawn]   FAIL: sep cc ({}) — {} is not an ELF ({} bytes, first 4 = {:?})",
+            label, path, obj.len(), obj.get(..4)
+        );
+        return Err(KernelError::InternalError);
+    }
+    // SAFETY-free: bounds already checked above, so these gets cannot be None.
+    let lo = match obj.get(E_TYPE_OFF) {
+        Some(&b) => u16::from(b),
+        None => return Err(KernelError::InternalError),
+    };
+    let hi = match obj.get(E_TYPE_OFF + 1) {
+        Some(&b) => u16::from(b),
+        None => return Err(KernelError::InternalError),
+    };
+    let e_type = lo | (hi << 8);
+    if e_type != ET_REL {
+        serial_println!(
+            "[spawn]   FAIL: sep cc ({}) — {} has e_type={} (expected ET_REL={}); `tcc -c` should \
+             emit a relocatable object, not an executable/shared object",
+            label, path, e_type, ET_REL
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   sep cc ({}) — {} is a {}-byte relocatable ELF object (ET_REL)",
+        label, path, obj.len()
+    );
+    Ok(())
 }
 
 /// Test 1: Spawn a process from a valid ELF binary.

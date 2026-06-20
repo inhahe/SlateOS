@@ -9449,9 +9449,18 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      DEFERRED (needs process groups): waitid(P_PGID, pgid) currently waits
 ##          on ANY child rather than the named group (no process-group model
 ##          yet) — same gap as kill(-pgid).  Revisit with process groups.
-##      DEFERRED (needs process groups): kill(-pgid, SIG) group routing;
-##          Ctrl-Z sending SIGTSTP to the foreground process GROUP;
+##          UPDATE 2026-06-20: process-group model now EXISTS (pcb pgid/sid,
+##          setpgid/getpgid/getpgrp/getsid/setsid, fork inheritance,
+##          kill(-pgid) via pcb::pids_in_group).  kill(-pgid, SIG) RESOLVED.
+##          STILL DEFERRED (Increment B): wait4/waitid with negative pid /
+##          P_PGID must match by pgid instead of waiting on any child —
+##          use pcb::pids_in_group / pcb::get_pgid to filter candidates.
+##      DEFERRED (Increment C — console job control, see known-issues TD30):
+##          Ctrl-Z/Ctrl-C sending SIGTSTP/SIGINT to the foreground process
+##          GROUP (needs a foreground_pgid on the tty + TIOCSPGRP/TIOCGPGRP);
 ##          orphaned-process-group SIGHUP/SIGCONT on session leader exit.
+##          The pgrp infrastructure to deliver to now exists; what's missing
+##          is the console's notion of *which* pgrp is in the foreground.
 ##
 ## TESTING:
 ##   - linux::self_test() at boot exercises: errno mapping (16 KernelError

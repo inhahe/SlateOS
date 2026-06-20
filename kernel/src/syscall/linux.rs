@@ -7538,16 +7538,21 @@ fn kill_common_value(args: &SyscallArgs, si_code: i32, value: u64) -> SyscallRes
     //              truncated pid_i32 so kill(0x1_0000_0001, sig)
     //              behaves like kill(1, sig), matching Linux's
     //              find_vpid on the post-ABI pid_t value.
-    //   pid <= 0 : broadcast / pgrp targets.  We do not model
-    //              process groups; the resolved target set is
-    //              always empty in our model, so ESRCH is the
-    //              Linux-correct answer (it matches "no such
-    //              group" for pid<-1 and "no permitted targets"
-    //              for pid==-1, and is the safer default for
-    //              pid==0 since we have no caller pgrp either).
-    //              This is a known limitation, tracked in todo.txt.
-    //              Crucially this must come *before* sig validation.
-    if pid_i32 <= 0 {
+    //   pid == 0 : send to every process in the *caller's* process
+    //              group.
+    //   pid < -1 : send to every process in group `-pid`.
+    //   pid == -1: broadcast to all processes (except init). We do
+    //              not implement broadcast yet — ESRCH is returned,
+    //              tracked in todo.txt.
+    //
+    // For the group cases we resolve the membership first (ESRCH if
+    // empty), validate sig, then deliver to each member best-effort.
+    // Crucially the empty-set ESRCH must come *before* sig validation.
+    if pid_i32 == 0 || pid_i32 < -1 {
+        return kill_process_group(args, si_code, value, pid_i32, sig);
+    }
+    if pid_i32 == -1 {
+        // Broadcast not yet modelled.
         return linux_err(errno::ESRCH);
     }
     #[allow(clippy::cast_sign_loss)]
@@ -7632,6 +7637,86 @@ fn kill_common_value(args: &SyscallArgs, si_code: i32, value: u64) -> SyscallRes
         arg5: args.arg5,
     };
     linux_from_native(handlers::sys_signal_send_with_info(&send_args, si_code, value))
+}
+
+/// Deliver a signal to every live process in a process group, for the
+/// `kill(2)` group targets: `pid == 0` (the caller's own group) and
+/// `pid < -1` (the explicit group `-pid`).
+///
+/// Linux semantics (`kill_pgrp_info`):
+/// - Resolve the group's live membership first; an empty group is
+///   `-ESRCH`, returned *before* signal-number validation.
+/// - Validate the signal (`[0, 64]`, else `-EINVAL`).
+/// - `sig == 0` is an existence probe: succeed if the group is non-empty.
+/// - Otherwise deliver to each member; succeed (`0`) if at least one
+///   delivery succeeded, else surface the last error.
+fn kill_process_group(
+    args: &SyscallArgs,
+    si_code: i32,
+    value: u64,
+    pid_i32: i32,
+    sig: i32,
+) -> SyscallResult {
+    use crate::proc::{pcb, thread};
+
+    // Resolve the target group ID.
+    let task_id = crate::sched::current_task_id();
+    let caller = thread::owner_process(task_id).unwrap_or(0);
+    let pgid: u64 = if pid_i32 == 0 {
+        // The caller's own process group. In kernel self-test context
+        // (no owning process) there is no group → empty set → ESRCH.
+        match pcb::get_pgid(caller) {
+            Some(g) => g,
+            None => return linux_err(errno::ESRCH),
+        }
+    } else {
+        // pid < -1: the group is -pid. Widen to i64 before taking the
+        // magnitude so even i32::MIN is representable, then drop the sign.
+        i64::from(pid_i32).unsigned_abs()
+    };
+
+    // Gate: resolve membership before validating sig.
+    let members = pcb::pids_in_group(pgid);
+    if members.is_empty() {
+        return linux_err(errno::ESRCH);
+    }
+
+    // Gate: validate sig now (post-resolution).
+    if !(0..=64).contains(&sig) {
+        return linux_err(errno::EINVAL);
+    }
+    if sig == 0 {
+        // Existence probe: the group exists and is non-empty.
+        return SyscallResult::ok(0);
+    }
+
+    // Deliver to each member best-effort.
+    #[allow(clippy::cast_sign_loss)]
+    let sig_u = sig as u64;
+    let mut any_ok = false;
+    let mut last_err: i64 = -i64::from(errno::ESRCH);
+    for target in members {
+        let send_args = SyscallArgs {
+            arg0: target,
+            arg1: sig_u,
+            arg2: args.arg2,
+            arg3: args.arg3,
+            arg4: args.arg4,
+            arg5: args.arg5,
+        };
+        let r =
+            linux_from_native(handlers::sys_signal_send_with_info(&send_args, si_code, value));
+        if r.value >= 0 {
+            any_ok = true;
+        } else {
+            last_err = r.value;
+        }
+    }
+    if any_ok {
+        SyscallResult::ok(0)
+    } else {
+        SyscallResult { value: last_err, value2: 0 }
+    }
 }
 
 /// `rt_sigpending(set, sigsetsize)` — report the pending-signal mask
@@ -13082,8 +13167,12 @@ fn sys_times(args: &SyscallArgs) -> SyscallResult {
 /// Never fails; returns 1 if there's no caller (boot-context probe).
 fn sys_getpgrp(_args: &SyscallArgs) -> SyscallResult {
     let pid = caller_pid().unwrap_or(1);
+    // getpgrp() == getpgid(0): the caller's own process group. Fall back
+    // to the pid itself if the process has no group record (kernel
+    // self-test context with no owning process).
+    let pgid = crate::proc::pcb::get_pgid(pid).unwrap_or(pid);
     #[allow(clippy::cast_possible_wrap)]
-    SyscallResult::ok(pid as i64)
+    SyscallResult::ok(pgid as i64)
 }
 
 /// `getpgid(pid)` — return the process-group ID of `pid` (or self if
@@ -13120,16 +13209,19 @@ fn sys_getpgid(args: &SyscallArgs) -> SyscallResult {
             None => return linux_err(errno::ESRCH),
         }
     };
+    // Report the stored process-group ID. Fall back to the pid itself
+    // when there is no group record (kernel self-test context).
+    let pgid = crate::proc::pcb::get_pgid(target).unwrap_or(target);
     #[allow(clippy::cast_possible_wrap)]
-    SyscallResult::ok(target as i64)
+    SyscallResult::ok(pgid as i64)
 }
 
 /// `setpgid(pid, pgid)` — set the process group of `pid` to `pgid`.
 ///
-/// We have no process groups; the call is functionally a silent
-/// no-op, but the *gate surface* must match Linux exactly so
-/// programs that probe their own permissions (login shells, job-
-/// control wrappers, sandbox launchers) get truthful answers.
+/// Backed by real process-group state ([`crate::proc::pcb::set_pgid`]):
+/// the target is actually moved into the named group, so subsequent
+/// `kill(-pgid)`, `wait4(-pgid)`, and terminal job control observe the
+/// membership.
 ///
 /// Linux's gate order (kernel/sys.c::SYSCALL_DEFINE2(setpgid, ...)):
 ///   1. `pid == 0` → use the caller's pid.
@@ -13138,21 +13230,9 @@ fn sys_getpgid(args: &SyscallArgs) -> SyscallResult {
 ///   4. `find_task_by_vpid(pid)` → -ESRCH if no such task.
 ///   5. permission / session / leader checks → EPERM / EACCES.
 ///
-/// Pre-batch (359) we ran only step 3, so:
-///   - setpgid(NONEXISTENT_PID, 0) → ok(0) where Linux returns
-///     -ESRCH.  Programs that detect "did my child still exist
-///     when I tried to put it in its own pgrp?" by checking
-///     setpgid's return code got silent corruption.
-///   - args.arg0 was never truncated; setpgid(0x1_0000_0001, 0)
-///     would have looked up pcb::state(0x1_0000_0001) which is
-///     guaranteed None — but we never did the lookup, so it
-///     returned ok(0).
-///
-/// Limitation: programs that fork a worker pool and then move all
-/// workers into a common pgrp for collective signalling still
-/// won't see the effect — `kill(-pgid)` ESRCHs because we treat
-/// every process as its own group.  Tracked alongside process-
-/// group infrastructure in todo.txt.
+/// Steps 1–4 are handled here; step 5 (existence, child-of-caller,
+/// session-leader, same-session, group-in-session) is enforced
+/// atomically under the process-table lock by `pcb::set_pgid`.
 fn sys_setpgid(args: &SyscallArgs) -> SyscallResult {
     // Linux signature: `SYSCALL_DEFINE2(setpgid, pid_t, pid, pid_t, pgid)`.
     // Both args truncate to int on the x86_64 ABI; we mirror that
@@ -13220,15 +13300,28 @@ fn sys_setpgid(args: &SyscallArgs) -> SyscallResult {
         }
     }
 
-    // We don't model process groups; the actual "set the pgid"
-    // step is a silent no-op.  Returning 0 with all gates passed.
-    SyscallResult::ok(0)
+    // Step 5: perform the move under the process-table lock, enforcing
+    // the child-of-caller / session-leader / same-session / group-in-
+    // session rules. In kernel self-test context (no caller and a
+    // self-referential pid==0) `resolved_pid` is 0 and there is nothing
+    // to move — succeed silently as the other Linux-ABI calls do.
+    if resolved_pid == 0 {
+        return SyscallResult::ok(0);
+    }
+    #[allow(clippy::cast_sign_loss)]
+    let target_u = resolved_pid as u64;
+    #[allow(clippy::cast_sign_loss)]
+    let pgid_u = resolved_pgid as u64;
+    let caller = caller_pid().unwrap_or(target_u);
+    match crate::proc::pcb::set_pgid(caller, target_u, pgid_u) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(crate::error::KernelError::NoSuchProcess) => linux_err(errno::ESRCH),
+        Err(crate::error::KernelError::PermissionDenied) => linux_err(errno::EPERM),
+        Err(_) => linux_err(errno::EPERM),
+    }
 }
 
 /// `getsid(pid)` — return the session ID of `pid` (or self if 0).
-///
-/// We have no sessions; return the target PID as a stand-in (every
-/// process is in its own session of which it is the leader).
 fn sys_getsid(args: &SyscallArgs) -> SyscallResult {
     // Linux signature: `SYSCALL_DEFINE1(getsid, pid_t, pid)`.  Same
     // `int` truncation as sys_getpgid; see that function's comment for
@@ -13248,20 +13341,34 @@ fn sys_getsid(args: &SyscallArgs) -> SyscallResult {
             None => return linux_err(errno::ESRCH),
         }
     };
+    // Report the stored session ID; fall back to the pid in self-test
+    // context with no group/session record.
+    let sid = crate::proc::pcb::get_sid(target).unwrap_or(target);
     #[allow(clippy::cast_possible_wrap)]
-    SyscallResult::ok(target as i64)
+    SyscallResult::ok(sid as i64)
 }
 
 /// `setsid()` — create a new session with the calling process as
 /// leader.
 ///
-/// We have no sessions, so this is a silent success that returns the
-/// caller's PID (Linux's success contract: "new session ID, which
-/// equals the new pgid, which equals the caller's pid").
+/// Sets `sid = pgid = pid` for the caller. Fails with EPERM if the
+/// caller is already a process-group leader (Linux semantics: a group
+/// leader cannot start a new session). Returns the new session ID
+/// (= the caller's pid) on success.
 fn sys_setsid(_args: &SyscallArgs) -> SyscallResult {
-    let pid = caller_pid().unwrap_or(1);
-    #[allow(clippy::cast_possible_wrap)]
-    SyscallResult::ok(pid as i64)
+    let pid = match caller_pid() {
+        Some(p) => p,
+        // Kernel self-test context: no owning process to make a leader.
+        // Report the conventional success value (pid 1) without touching
+        // any process record.
+        None => return SyscallResult::ok(1),
+    };
+    match crate::proc::pcb::setsid(pid) {
+        #[allow(clippy::cast_possible_wrap)]
+        Ok(sid) => SyscallResult::ok(sid as i64),
+        Err(crate::error::KernelError::PermissionDenied) => linux_err(errno::EPERM),
+        Err(_) => linux_err(errno::EPERM),
+    }
 }
 
 /// `getpriority(which, who)` — return the nice value of a process,
@@ -59047,13 +59154,29 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     //       not the raw u64.
     {
         use crate::proc::pcb;
-        let live_pid = pcb::create("setpgid-live-test", 0);
+        // `live_pid` must be a *non-session-leader* for probe (b) to
+        // legitimately return 0: under real process-group semantics
+        // `setpgid` on a session leader returns EPERM. A directly
+        // `create()`d process is its own session leader (sid==pid), so
+        // we fork one from a parent — the child inherits the parent's
+        // session and is therefore not a leader, exactly like a real
+        // shell job that calls `setpgid(0, 0)` to start its own group.
+        let live_parent = pcb::create("setpgid-live-parent", 0);
+        let live_pid = match pcb::fork_create(live_parent, 0, alloc::vec::Vec::new(), alloc::vec::Vec::new()) {
+            Ok(p) => p,
+            Err(e) => {
+                serial_println!("[syscall/linux]   FAIL: setpgid fork_create {:?}", e);
+                pcb::destroy(live_parent);
+                return Err(KernelError::InternalError);
+            }
+        };
         if live_pid > i32::MAX as u64 {
             serial_println!(
                 "[syscall/linux]   FAIL: setpgid live_pid too large ({})",
                 live_pid
             );
             pcb::destroy(live_pid);
+            pcb::destroy(live_parent);
             return Err(KernelError::InternalError);
         }
         let dead_pid = pcb::create("setpgid-dead-test", 0);
@@ -59063,6 +59186,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 dead_pid
             );
             pcb::destroy(live_pid);
+            pcb::destroy(live_parent);
             pcb::destroy(dead_pid);
             return Err(KernelError::InternalError);
         }
@@ -59077,9 +59201,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 "[syscall/linux]   FAIL: setpgid(dead, 0) want ESRCH got {}", v
             );
             pcb::destroy(live_pid);
+            pcb::destroy(live_parent);
             return Err(KernelError::InternalError);
         }
-        // (b) setpgid(live_pid, 0) → 0.
+        // (b) setpgid(live_pid, 0) → 0. live_pid is a forked non-leader,
+        //     so it may start its own group (the common shell idiom).
         let a = SyscallArgs { arg0: live_pid, arg1: 0,
             arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
         let v = dispatch_linux(nr::SETPGID, &a).value;
@@ -59088,6 +59214,21 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 "[syscall/linux]   FAIL: setpgid(live, 0) want 0 got {}", v
             );
             pcb::destroy(live_pid);
+            pcb::destroy(live_parent);
+            return Err(KernelError::InternalError);
+        }
+        // (b2) setpgid(live_parent, 0) → EPERM: live_parent is a session
+        //      leader (created standalone), and a session leader's pgid
+        //      is fixed under real semantics.
+        let a = SyscallArgs { arg0: live_parent, arg1: 0,
+            arg2: 0, arg3: 0, arg4: 0, arg5: 0 };
+        let v = dispatch_linux(nr::SETPGID, &a).value;
+        if v != -i64::from(errno::EPERM) {
+            serial_println!(
+                "[syscall/linux]   FAIL: setpgid(session-leader, 0) want EPERM got {}", v
+            );
+            pcb::destroy(live_pid);
+            pcb::destroy(live_parent);
             return Err(KernelError::InternalError);
         }
         // (c) setpgid(dead_pid, -1) → EINVAL (pgid<0 wins).
@@ -59101,6 +59242,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 "[syscall/linux]   FAIL: setpgid(dead, -1) want EINVAL got {}", v
             );
             pcb::destroy(live_pid);
+            pcb::destroy(live_parent);
             return Err(KernelError::InternalError);
         }
         // (d) setpgid(0x1_0000_0000 | live_pid, 0) → 0.
@@ -59113,9 +59255,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 "[syscall/linux]   FAIL: setpgid(0x1_0000_0000|live, 0) want 0 got {}", v
             );
             pcb::destroy(live_pid);
+            pcb::destroy(live_parent);
             return Err(KernelError::InternalError);
         }
         pcb::destroy(live_pid);
+        pcb::destroy(live_parent);
         serial_println!(
             "[syscall/linux]   setpgid existence + gate order: OK"
         );

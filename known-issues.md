@@ -1732,6 +1732,15 @@ wakes on either a byte or the deadline. Both are follow-ups to the
 2026-06-20 line-discipline increment, which deliberately shipped line
 buffering + canonical editing + `VMIN` first.
 
+**Progress (2026-06-20):** the *process-group infrastructure* that gap (1)
+depends on now exists — real `pgid`/`sid` fields on the PCB, working
+`setpgid`/`getpgid`/`getpgrp`/`getsid`/`setsid`, fork inheritance, and
+`kill(-pgid)` group delivery (`pcb::pids_in_group`). So there is now a
+correct *set* of processes to signal; what remains for gap (1) is the
+console side: a `foreground_pgid` on the tty, `TIOCSPGRP`/`TIOCGPGRP`,
+and routing `LineStep::Signal(sig)` to that pgrp (plus `-EINTR` on the
+blocked reader). Gap (2) (`VTIME`) is unchanged.
+
 **Severity:** low — interactive `^C` and raw-mode read timeouts are the
 only affected behaviours; line-oriented reads (the common shell/REPL
 case) and `VMIN`-based raw reads work.

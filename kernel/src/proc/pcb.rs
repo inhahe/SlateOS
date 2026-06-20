@@ -327,6 +327,18 @@ pub struct Process {
     pub state: ProcessState,
     /// Parent process ID (0 = kernel-spawned).
     pub parent: ProcessId,
+    /// POSIX process-group ID. A process is a group leader when
+    /// `pgid == pid`. On `create()` a fresh process leads its own
+    /// group (`pgid = pid`); `fork()` inherits the parent's `pgid`;
+    /// `setpgid()`/`setsid()` change it. Used by `kill(-pgid)`,
+    /// `wait4()` with a negative pid, and terminal job control.
+    pub pgid: ProcessId,
+    /// POSIX session ID. A process is a session leader when
+    /// `sid == pid`. `setsid()` makes the caller a new session +
+    /// group leader (`sid = pgid = pid`); `fork()` inherits the
+    /// parent's `sid`. A `setpgid()` may only move a process between
+    /// groups within the *same* session.
+    pub sid: ProcessId,
     /// Thread IDs belonging to this process.
     pub threads: Vec<TaskId>,
     /// Per-process capability table.
@@ -1221,11 +1233,19 @@ pub const LINUX_DEFAULT_TIMER_SLACK_NS: u64 = 50_000;
 impl Process {
     /// Create a new process (internal — use `create()` below).
     fn new(name: String, parent: ProcessId) -> Self {
+        let pid = alloc_pid();
         Self {
-            pid: alloc_pid(),
+            pid,
             name,
             state: ProcessState::Creating,
             parent,
+            // A freshly-created (non-forked) process leads its own
+            // process group and session: pgid = sid = pid. This matches
+            // the kernel's first process (init) and any directly-spawned
+            // service. Forked children override this by inheriting the
+            // parent's pgid/sid in `fork_create`.
+            pgid: pid,
+            sid: pid,
             threads: Vec::new(),
             cap_table: CapTable::new(),
             exit_code: None,
@@ -1530,6 +1550,8 @@ pub fn fork_create(
         proc_envp,
         exe_path,
         mmap_commit_policy,
+        parent_pgid,
+        parent_sid,
     ) = {
         let parent = table.get(&parent_pid).ok_or(KernelError::NoSuchProcess)?;
         let cloned_fd_table = parent.linux_fd_table.as_ref().map(|t| {
@@ -1604,6 +1626,11 @@ pub fn fork_create(
             // The child runs the same image, so it honours the same
             // per-program commit policy until it execs.
             parent.mmap_commit_policy,
+            // POSIX: a forked child inherits the parent's process group
+            // and session verbatim. It is NOT a group/session leader of
+            // its own (unless it later calls setpgid/setsid).
+            parent.pgid,
+            parent.sid,
         )
     };
 
@@ -1657,6 +1684,9 @@ pub fn fork_create(
         name,
         state: ProcessState::Creating,
         parent: parent_pid,
+        // POSIX: fork inherits the parent's process group and session.
+        pgid: parent_pgid,
+        sid: parent_sid,
         threads: Vec::new(),
         cap_table,
         exit_code: None,
@@ -2440,6 +2470,144 @@ pub fn set_personality(pid: ProcessId, new: u32) -> Option<u32> {
     let old = proc.linux_personality;
     proc.linux_personality = new;
     Some(old)
+}
+
+// ---------------------------------------------------------------------------
+// Process groups and sessions (POSIX job control)
+// ---------------------------------------------------------------------------
+
+/// Read the process-group ID of `pid`, or `None` if it doesn't exist.
+#[must_use]
+pub fn get_pgid(pid: ProcessId) -> Option<ProcessId> {
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.pgid)
+}
+
+/// Read the session ID of `pid`, or `None` if it doesn't exist.
+#[must_use]
+pub fn get_sid(pid: ProcessId) -> Option<ProcessId> {
+    PROCESS_TABLE.lock().get(&pid).map(|p| p.sid)
+}
+
+/// `setpgid(target, pgid)` core: move `target` into process group `pgid`,
+/// enforcing the POSIX/Linux permission and session rules.
+///
+/// `caller` is the process making the request (the authority for the
+/// "must be the caller or a child of the caller" check). `target` and
+/// `pgid` are the already-resolved (non-zero) values — the syscall layer
+/// is responsible for the `pid == 0 → caller` and `pgid == 0 → target`
+/// substitutions and the `pgid < 0 → EINVAL` gate before calling this.
+///
+/// Rules enforced (mirroring `kernel/sys.c::setpgid`):
+/// 1. `target` must exist (else [`KernelError::NoSuchProcess`] = ESRCH).
+/// 2. `target` must be `caller` or a child of `caller` (else ESRCH).
+/// 3. `target` must not be a session leader (else
+///    [`KernelError::PermissionDenied`] = EPERM).
+/// 4. `caller` and `target` must be in the same session (EPERM).
+/// 5. The destination group must already exist within `target`'s session,
+///    *unless* `pgid == target` (which creates a brand-new group led by
+///    the target). Otherwise EPERM.
+///
+/// # Errors
+/// Returns ESRCH / EPERM per the rules above.
+pub fn set_pgid(
+    caller: ProcessId,
+    target: ProcessId,
+    pgid: ProcessId,
+) -> KernelResult<()> {
+    let mut table = PROCESS_TABLE.lock();
+
+    // Rule 1: target must exist.
+    let (target_sid, target_parent, target_pid) = {
+        let p = table.get(&target).ok_or(KernelError::NoSuchProcess)?;
+        (p.sid, p.parent, p.pid)
+    };
+
+    // Rule 2: target must be the caller or a child of the caller.
+    if target != caller && target_parent != caller {
+        return Err(KernelError::NoSuchProcess);
+    }
+
+    // Rule 3: a session leader's pgid is fixed.
+    if target_sid == target_pid {
+        return Err(KernelError::PermissionDenied);
+    }
+
+    // Rule 4: caller must share the target's session (caller can only
+    // move a child within the caller's own session). Trivially true when
+    // target == caller.
+    if target != caller {
+        let caller_sid = table.get(&caller).map(|p| p.sid);
+        if caller_sid != Some(target_sid) {
+            return Err(KernelError::PermissionDenied);
+        }
+    }
+
+    // Rule 5: the destination group must already exist in the target's
+    // session, unless we are creating a new group led by the target.
+    if pgid != target {
+        let mut found_in_session = false;
+        for p in table.values() {
+            if p.pgid == pgid {
+                if p.sid != target_sid {
+                    // Group exists but in a different session.
+                    return Err(KernelError::PermissionDenied);
+                }
+                found_in_session = true;
+                break;
+            }
+        }
+        if !found_in_session {
+            // No such group anywhere → can't join it.
+            return Err(KernelError::PermissionDenied);
+        }
+    }
+
+    // All checks passed — perform the move.
+    if let Some(p) = table.get_mut(&target) {
+        p.pgid = pgid;
+    }
+    Ok(())
+}
+
+/// `setsid()` core: make `pid` a new session and process-group leader.
+///
+/// On success sets `sid = pgid = pid` and returns the new session ID
+/// (`pid`). Fails with [`KernelError::PermissionDenied`] (EPERM) if `pid`
+/// is already a process-group leader (`pgid == pid`), matching Linux —
+/// a group leader cannot create a new session because the new session's
+/// ID would collide with the existing group's ID.
+///
+/// # Errors
+/// - [`KernelError::NoSuchProcess`] if `pid` doesn't exist.
+/// - [`KernelError::PermissionDenied`] if `pid` already leads a group.
+pub fn setsid(pid: ProcessId) -> KernelResult<ProcessId> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+    // A process that already leads a process group cannot start a new
+    // session (Linux: `if (group_leader->signal->leader) return -EPERM`
+    // is approximated by the pgid==pid group-leader check, since for a
+    // single-threaded model a group leader is the only one that would
+    // collide).
+    if proc.pgid == pid {
+        return Err(KernelError::PermissionDenied);
+    }
+    proc.sid = pid;
+    proc.pgid = pid;
+    Ok(pid)
+}
+
+/// Collect the PIDs of all live (non-zombie, non-exited) processes in
+/// process group `pgid`. Used by `kill(-pgid)` and `wait4(-pgid)`.
+///
+/// Returns an empty vector if no live process is in the group.
+#[must_use]
+pub fn pids_in_group(pgid: ProcessId) -> Vec<ProcessId> {
+    let table = PROCESS_TABLE.lock();
+    table
+        .values()
+        .filter(|p| p.pgid == pgid && p.state != ProcessState::Zombie)
+        .map(|p| p.pid)
+        .collect()
 }
 
 /// Read the per-mm `membarrier(2)` registration READY bitmask for `pid`.
@@ -5987,6 +6155,7 @@ pub fn self_test() -> KernelResult<()> {
     test_cpu_time_accounting()?;
     test_io_accounting()?;
     test_job_control_state()?;
+    test_process_groups()?;
     test_mmap_commit_policy()?;
     test_reserve_unmapped_area()?;
     test_reset_linux_state_for_exec()?;
@@ -6445,6 +6614,114 @@ fn test_job_control_state() -> KernelResult<()> {
     destroy(parent);
 
     serial_println!("[proc]   job-control state model: OK");
+    Ok(())
+}
+
+/// Test: process-group and session model (POSIX job control).
+///
+/// Verifies that a freshly-created process leads its own group/session,
+/// that `fork_create` inherits the parent's pgid/sid, that `set_pgid`
+/// enforces the ESRCH / session-leader / child-of-caller / group-in-
+/// session rules and actually moves the target, that `setsid` makes a
+/// non-leader a new session/group leader (and EPERMs a group leader),
+/// and that `pids_in_group` reflects membership for `kill(-pgid)`.
+fn test_process_groups() -> KernelResult<()> {
+    // Helper to bail out cleanly.
+    fn fail(msg: &str, pids: &[ProcessId]) -> KernelResult<()> {
+        serial_println!("[proc]   FAIL: process-groups: {}", msg);
+        for &p in pids {
+            destroy(p);
+        }
+        Err(KernelError::InternalError)
+    }
+
+    // A fresh process leads its own group and session.
+    let parent = create("pg-parent", 0);
+    set_running(parent)?;
+    if get_pgid(parent) != Some(parent) || get_sid(parent) != Some(parent) {
+        return fail("fresh process not its own group/session leader", &[parent]);
+    }
+
+    // Fork: the child inherits the parent's pgid and sid verbatim and is
+    // NOT a leader of its own.
+    let child = fork_create(parent, 0, Vec::new(), Vec::new())?;
+    set_running(child)?;
+    if get_pgid(child) != Some(parent) || get_sid(child) != Some(parent) {
+        return fail("fork did not inherit parent pgid/sid", &[parent, child]);
+    }
+
+    // The inherited group now has two live members.
+    let members = pids_in_group(parent);
+    if members.len() != 2 || !members.contains(&parent) || !members.contains(&child) {
+        return fail("pids_in_group missing fork members", &[parent, child]);
+    }
+
+    // setpgid: move the child into a brand-new group it leads. The caller
+    // is the parent (the child's parent), the child is not a session
+    // leader (sid==parent), and pgid==child creates a new group.
+    set_pgid(parent, child, child)?;
+    if get_pgid(child) != Some(child) {
+        return fail("set_pgid did not move child into new group", &[parent, child]);
+    }
+    // The parent's group lost the child; the child's new group has it.
+    if pids_in_group(parent) != alloc::vec![parent] {
+        return fail("child still in parent group after move", &[parent, child]);
+    }
+    if pids_in_group(child) != alloc::vec![child] {
+        return fail("child not in its own new group", &[parent, child]);
+    }
+
+    // setpgid error: a session leader's pgid is fixed. `parent` is its own
+    // session leader (sid==pid) → EPERM.
+    if set_pgid(parent, parent, child) != Err(KernelError::PermissionDenied) {
+        return fail("moving a session leader should EPERM", &[parent, child]);
+    }
+
+    // setpgid error: target must exist → ESRCH.
+    if set_pgid(parent, 9_999_999, 9_999_999) != Err(KernelError::NoSuchProcess) {
+        return fail("set_pgid on unknown pid should ESRCH", &[parent, child]);
+    }
+
+    // setpgid error: target must be the caller or a child of the caller.
+    // An unrelated process (parent 0) is neither → ESRCH.
+    let stranger = create("pg-stranger", 0);
+    set_running(stranger)?;
+    if set_pgid(parent, stranger, stranger) != Err(KernelError::NoSuchProcess) {
+        return fail("set_pgid on non-child should ESRCH", &[parent, child, stranger]);
+    }
+
+    // setpgid error: cannot join a group that doesn't exist in the
+    // session. Move the child to a group id that no live process holds.
+    if set_pgid(parent, child, 7_654_321) != Err(KernelError::PermissionDenied) {
+        return fail("joining a nonexistent group should EPERM", &[parent, child, stranger]);
+    }
+
+    // setsid: fork a second child (inherits parent's group → NOT a group
+    // leader since pgid==parent != its pid), so it may start a session.
+    let child2 = fork_create(parent, 0, Vec::new(), Vec::new())?;
+    set_running(child2)?;
+    let new_sid = setsid(child2)?;
+    if new_sid != child2
+        || get_sid(child2) != Some(child2)
+        || get_pgid(child2) != Some(child2)
+    {
+        return fail("setsid did not make child2 a session/group leader",
+            &[parent, child, stranger, child2]);
+    }
+
+    // setsid error: a group leader cannot start a new session. `child` was
+    // made a group leader (pgid==child) above → EPERM.
+    if setsid(child) != Err(KernelError::PermissionDenied) {
+        return fail("setsid on a group leader should EPERM",
+            &[parent, child, stranger, child2]);
+    }
+
+    destroy(child2);
+    destroy(stranger);
+    destroy(child);
+    destroy(parent);
+
+    serial_println!("[proc]   process-group/session model: OK");
     Ok(())
 }
 
